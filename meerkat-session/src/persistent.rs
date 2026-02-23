@@ -439,7 +439,10 @@ mod tests {
         checkpointer.checkpoint(&session).await;
 
         let loaded = store.load(session.id()).await.unwrap();
-        assert!(loaded.is_some(), "session should be persisted after checkpoint");
+        assert!(
+            loaded.is_some(),
+            "session should be persisted after checkpoint"
+        );
         let loaded = loaded.unwrap();
         assert_eq!(loaded.id(), session.id());
         assert_eq!(loaded.messages().len(), session.messages().len());

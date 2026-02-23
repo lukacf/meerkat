@@ -180,6 +180,35 @@ pub trait AgentSessionStore: Send + Sync {
     async fn load(&self, id: &str) -> Result<Option<Session>, AgentError>;
 }
 
+/// Runtime policy for inlining peer lifecycle updates into session context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InlinePeerNotificationPolicy {
+    /// Always inline batched peer lifecycle updates.
+    Always,
+    /// Never inline batched peer lifecycle updates.
+    Never,
+    /// Inline only when post-drain peer count is at or below this threshold.
+    AtMost(usize),
+}
+
+/// Default inline threshold when no explicit value is configured.
+pub const DEFAULT_MAX_INLINE_PEER_NOTIFICATIONS: usize = 50;
+
+impl InlinePeerNotificationPolicy {
+    /// Resolve policy from transport/build-layer config representation.
+    ///
+    /// Returns the parsed policy and the invalid raw value (if any).
+    pub fn from_raw(raw: Option<i32>) -> (Self, Option<i32>) {
+        match raw {
+            None => (Self::AtMost(DEFAULT_MAX_INLINE_PEER_NOTIFICATIONS), None),
+            Some(-1) => (Self::Always, None),
+            Some(0) => (Self::Never, None),
+            Some(v) if v > 0 => (Self::AtMost(v as usize), None),
+            Some(v) => (Self::AtMost(DEFAULT_MAX_INLINE_PEER_NOTIFICATIONS), Some(v)),
+        }
+    }
+}
+
 /// Trait for comms runtime that can be used with the agent
 #[async_trait]
 pub trait CommsRuntime: Send + Sync {
@@ -231,6 +260,13 @@ pub trait CommsRuntime: Send + Sync {
     /// List peers visible to this runtime.
     async fn peers(&self) -> Vec<PeerDirectoryEntry> {
         Vec::new()
+    }
+
+    /// Count peers visible to this runtime.
+    ///
+    /// Implementations can override this to avoid materializing a full peer list.
+    async fn peer_count(&self) -> usize {
+        self.peers().await.len()
     }
 
     /// Send a command and open a scoped stream in one call.
@@ -357,12 +393,8 @@ where
     /// Comms intents that should be silently injected into the session
     /// without triggering an LLM turn. Matched against `InteractionContent::Request.intent`.
     pub(crate) silent_comms_intents: Vec<String>,
-    /// Maximum peer-count threshold for inline peer lifecycle context injection.
-    ///
-    /// - `0`: never inline peer lifecycle notifications
-    /// - `-1`: always inline peer lifecycle notifications
-    /// - `>0`: inline only when post-drain peer count is <= threshold
-    pub(crate) max_inline_peer_notifications: i32,
+    /// Runtime policy for inline peer lifecycle context injection.
+    pub(crate) inline_peer_notification_policy: InlinePeerNotificationPolicy,
     /// Whether peer lifecycle updates are currently suppressed due to threshold policy.
     /// Used to inject suppression notice only on transition into suppressed mode.
     pub(crate) peer_notification_suppression_active: bool,
@@ -374,7 +406,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::CommsRuntime;
+    use super::{
+        CommsRuntime, DEFAULT_MAX_INLINE_PEER_NOTIFICATIONS, InlinePeerNotificationPolicy,
+    };
     use crate::comms::{SendError, TrustedPeerSpec};
     use async_trait::async_trait;
     use std::sync::Arc;
@@ -418,5 +452,35 @@ mod tests {
         let result =
             <NoopCommsRuntime as CommsRuntime>::remove_trusted_peer(&runtime, "ed25519:test").await;
         assert!(matches!(result, Err(SendError::Unsupported(_))));
+    }
+
+    #[test]
+    fn test_inline_peer_notification_policy_from_raw() {
+        assert_eq!(
+            InlinePeerNotificationPolicy::from_raw(None),
+            (
+                InlinePeerNotificationPolicy::AtMost(DEFAULT_MAX_INLINE_PEER_NOTIFICATIONS),
+                None
+            )
+        );
+        assert_eq!(
+            InlinePeerNotificationPolicy::from_raw(Some(-1)),
+            (InlinePeerNotificationPolicy::Always, None)
+        );
+        assert_eq!(
+            InlinePeerNotificationPolicy::from_raw(Some(0)),
+            (InlinePeerNotificationPolicy::Never, None)
+        );
+        assert_eq!(
+            InlinePeerNotificationPolicy::from_raw(Some(25)),
+            (InlinePeerNotificationPolicy::AtMost(25), None)
+        );
+        assert_eq!(
+            InlinePeerNotificationPolicy::from_raw(Some(-42)),
+            (
+                InlinePeerNotificationPolicy::AtMost(DEFAULT_MAX_INLINE_PEER_NOTIFICATIONS),
+                Some(-42)
+            )
+        );
     }
 }

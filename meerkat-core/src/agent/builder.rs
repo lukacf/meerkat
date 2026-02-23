@@ -14,7 +14,10 @@ use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use super::{Agent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, CommsRuntime};
+use super::{
+    Agent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, CommsRuntime,
+    InlinePeerNotificationPolicy,
+};
 
 /// Builder for creating an Agent
 #[derive(Default)]
@@ -217,7 +220,17 @@ impl AgentBuilder {
             skill_engine: self.skill_engine,
             pending_skill_references: None,
             silent_comms_intents: self.silent_comms_intents,
-            max_inline_peer_notifications: self.max_inline_peer_notifications.unwrap_or(50),
+            inline_peer_notification_policy: {
+                let (policy, invalid) =
+                    InlinePeerNotificationPolicy::from_raw(self.max_inline_peer_notifications);
+                if let Some(value) = invalid {
+                    tracing::warn!(
+                        max_inline_peer_notifications = value,
+                        "invalid max_inline_peer_notifications value; using default threshold"
+                    );
+                }
+                policy
+            },
             peer_notification_suppression_active: false,
             checkpointer: self.checkpointer,
             event_tap: self

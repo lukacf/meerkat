@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use meerkat_core::ScopedAgentEvent;
 use meerkat_core::agent::{AgentToolDispatcher, CommsRuntime as CoreCommsRuntime};
 use meerkat_core::comms::{CommsCommand, SendError, SendReceipt, TrustedPeerSpec};
 use meerkat_core::error::ToolError;
@@ -7,7 +8,6 @@ use meerkat_core::service::{
     CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService, SessionSummary,
     SessionUsage, SessionView, StartTurnRequest,
 };
-use meerkat_core::ScopedAgentEvent;
 use meerkat_core::types::{RunResult, SessionId, ToolCallView, ToolDef, ToolResult, Usage};
 use meerkat_mob::{
     FlowId, MeerkatId, MobBackendKind, MobBuilder, MobDefinition, MobError, MobHandle, MobId,
@@ -822,10 +822,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 );
                 let member_ref = self
                     .state
-                    .mob_spawn_spec(
-                        &MobId::from(args.mob_id),
-                        spec,
-                    )
+                    .mob_spawn_spec(&MobId::from(args.mob_id), spec)
                     .await
                     .map_err(|e| map_mob_err(call, e))?;
                 encode(

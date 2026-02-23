@@ -207,9 +207,7 @@ impl MethodRouter {
             #[cfg(feature = "comms")]
             "comms/stream_close" => self.handle_comms_stream_close(id, params).await,
             // M12: event/push removed. Use comms/send instead.
-            "skills/list" => {
-                handlers::skills::handle_list(id, &self.skill_runtime).await
-            }
+            "skills/list" => handlers::skills::handle_list(id, &self.skill_runtime).await,
             "skills/inspect" => {
                 handlers::skills::handle_inspect(id, params, &self.skill_runtime).await
             }

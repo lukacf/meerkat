@@ -1116,8 +1116,7 @@ mod tests {
         assert_eq!(json["is_active"], true);
         assert!(json.get("shadowed_by").is_none());
 
-        let decoded: SkillIntrospectionEntry =
-            serde_json::from_value(json).expect("deserialize");
+        let decoded: SkillIntrospectionEntry = serde_json::from_value(json).expect("deserialize");
         assert_eq!(decoded.descriptor.id.0, "extraction/email");
         assert!(decoded.is_active);
         assert!(decoded.shadowed_by.is_none());
@@ -1142,8 +1141,7 @@ mod tests {
         assert_eq!(json["shadowed_by"], "project");
         assert_eq!(json["is_active"], false);
 
-        let decoded: SkillIntrospectionEntry =
-            serde_json::from_value(json).expect("deserialize");
+        let decoded: SkillIntrospectionEntry = serde_json::from_value(json).expect("deserialize");
         assert!(!decoded.is_active);
         assert_eq!(decoded.shadowed_by.as_deref(), Some("project"));
     }

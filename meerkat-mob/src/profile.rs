@@ -79,6 +79,7 @@ pub struct Profile {
     /// - `0`: never inline peer lifecycle notifications
     /// - `-1`: always inline peer lifecycle notifications
     /// - `>0`: inline only when post-drain peer count is <= threshold
+    /// - `<-1`: invalid
     #[serde(default)]
     pub max_inline_peer_notifications: Option<i32>,
 }

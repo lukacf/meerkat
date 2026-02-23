@@ -2458,11 +2458,17 @@ async fn test_mob_management_tools_dispatch_to_handle() {
         .await
         .expect("spawn_many_meerkats tool");
     assert!(
-        handle.get_meerkat(&MeerkatId::from("w-many-1")).await.is_some(),
+        handle
+            .get_meerkat(&MeerkatId::from("w-many-1"))
+            .await
+            .is_some(),
         "spawn_many_meerkats should create first roster entry"
     );
     assert!(
-        handle.get_meerkat(&MeerkatId::from("w-many-2")).await.is_some(),
+        handle
+            .get_meerkat(&MeerkatId::from("w-many-2"))
+            .await
+            .is_some(),
         "spawn_many_meerkats should create second roster entry"
     );
 
@@ -3877,7 +3883,10 @@ async fn test_retire_archive_failure_is_not_silent() {
 
     // Retire succeeds despite archive failure (best-effort cleanup).
     let result = handle.retire(MeerkatId::from("w-1")).await;
-    assert!(result.is_ok(), "retire should succeed despite archive failure");
+    assert!(
+        result.is_ok(),
+        "retire should succeed despite archive failure"
+    );
 
     // Member is removed from roster unconditionally.
     assert!(

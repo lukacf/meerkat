@@ -62,9 +62,8 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> RpcServer<R, W> {
     ) -> Self {
         let (notification_tx, notification_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         let notification_sink = NotificationSink::new(notification_tx);
-        let router =
-            MethodRouter::new(runtime, config_store, notification_sink)
-                .with_skill_runtime(skill_runtime);
+        let router = MethodRouter::new(runtime, config_store, notification_sink)
+            .with_skill_runtime(skill_runtime);
         let transport = JsonlTransport::new(reader, writer);
         let (response_tx, response_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         Self {

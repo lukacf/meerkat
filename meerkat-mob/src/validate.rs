@@ -51,6 +51,8 @@ pub enum DiagnosticCode {
     BranchJoinWithoutBranch,
     /// Definition uses a reserved flow-system identifier.
     ReservedSystemIdentifier,
+    /// Inline peer notification threshold is outside supported range.
+    InvalidInlinePeerNotificationThreshold,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -75,6 +77,9 @@ impl fmt::Display for DiagnosticCode {
             Self::BranchStepConflictingDeps => "branch_step_conflicting_deps",
             Self::BranchJoinWithoutBranch => "branch_join_without_branch",
             Self::ReservedSystemIdentifier => "reserved_system_identifier",
+            Self::InvalidInlinePeerNotificationThreshold => {
+                "invalid_inline_peer_notification_threshold"
+            }
         };
         f.write_str(s)
     }
@@ -180,6 +185,24 @@ pub fn validate_definition(def: &MobDefinition) -> Vec<Diagnostic> {
                     severity: DiagnosticSeverity::Error,
                 });
             }
+        }
+
+        if let Some(threshold) = profile.max_inline_peer_notifications
+            && threshold < -1
+        {
+            diagnostics.push(Diagnostic {
+                code: DiagnosticCode::InvalidInlinePeerNotificationThreshold,
+                message: format!(
+                    "profiles.{} max_inline_peer_notifications={} is invalid (allowed: -1, 0, or >0)",
+                    name.as_str(),
+                    threshold
+                ),
+                location: Some(format!(
+                    "profiles.{}.max_inline_peer_notifications",
+                    name.as_str()
+                )),
+                severity: DiagnosticSeverity::Error,
+            });
         }
     }
 
@@ -519,6 +542,24 @@ model = "claude-sonnet-4-5"
             diagnostics
                 .iter()
                 .any(|d| d.code == DiagnosticCode::MissingExternalBackendConfig)
+        );
+    }
+
+    #[test]
+    fn test_invalid_inline_peer_notification_threshold_is_rejected() {
+        let mut def = valid_definition();
+        def.profiles
+            .get_mut(&ProfileName::from("lead"))
+            .expect("lead profile")
+            .max_inline_peer_notifications = Some(-2);
+
+        let diagnostics = validate_definition(&def);
+        assert!(
+            diagnostics.iter().any(|d| {
+                d.code == DiagnosticCode::InvalidInlinePeerNotificationThreshold
+                    && d.location.as_deref() == Some("profiles.lead.max_inline_peer_notifications")
+            }),
+            "expected invalid inline threshold diagnostic"
         );
     }
 

@@ -42,12 +42,12 @@ pub use agent::{
     CommsRuntime, FilteredToolDispatcher, LlmStreamResult,
 };
 pub use budget::{Budget, BudgetLimits, BudgetPool};
+pub use checkpoint::SessionCheckpointer;
 pub use comms::{
     CommsCommand, EventStream, InputSource, InputStreamMode, PeerDirectoryEntry,
     PeerDirectorySource, PeerName, SendAndStreamError, SendError, SendReceipt, StreamError,
     StreamScope,
 };
-pub use checkpoint::SessionCheckpointer;
 pub use compact::{CompactionConfig, CompactionContext, CompactionResult, Compactor};
 pub use memory::{MemoryMetadata, MemoryResult, MemoryStore, MemoryStoreError};
 pub use peer_meta::PeerMeta;

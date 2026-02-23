@@ -482,6 +482,10 @@ impl CoreCommsRuntime for CommsRuntime {
         self.resolve_peer_directory().await
     }
 
+    async fn peer_count(&self) -> usize {
+        self.resolve_peer_count().await
+    }
+
     async fn drain_inbox_interactions(&self) -> Vec<meerkat_core::InboxInteraction> {
         let mut inbox = self.inbox.lock().await;
         let items = inbox.try_drain();
@@ -964,6 +968,51 @@ impl CommsRuntime {
         }
 
         peers.into_values().collect()
+    }
+
+    /// Resolve peer count without materializing full directory entries.
+    async fn resolve_peer_count(&self) -> usize {
+        let inproc_peers = InprocRegistry::global()
+            .peers_in_namespace(self.config.inproc_namespace.as_deref().unwrap_or(""));
+
+        let mut trusted_names = HashSet::new();
+        let mut trusted_pubkeys = HashSet::new();
+        let mut unique_count = 0usize;
+
+        {
+            let trusted = self.trusted_peers.read().await;
+            for peer in &trusted.peers {
+                if peer.name == self.config.name || peer.pubkey == self.public_key {
+                    continue;
+                }
+                trusted_names.insert(peer.name.clone());
+                trusted_pubkeys.insert(peer.pubkey);
+                if PeerName::new(peer.name.clone()).is_ok() {
+                    unique_count += 1;
+                }
+            }
+        }
+
+        if self.config.require_peer_auth {
+            return unique_count;
+        }
+
+        for inproc in &inproc_peers {
+            let name = match PeerName::new(inproc.name.clone()) {
+                Ok(name) => name,
+                Err(_) => continue,
+            };
+            let peer_name = name.as_str();
+            if peer_name == self.config.name || inproc.pubkey == self.public_key {
+                continue;
+            }
+            if trusted_names.contains(peer_name) || trusted_pubkeys.contains(&inproc.pubkey) {
+                continue;
+            }
+            unique_count += 1;
+        }
+
+        unique_count
     }
 
     /// Canonical send path uses trusted peers only.

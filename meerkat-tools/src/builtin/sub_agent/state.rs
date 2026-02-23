@@ -161,7 +161,10 @@ impl SubAgentToolState {
     /// Get current scoped streaming context.
     pub async fn scoped_stream(
         &self,
-    ) -> (Option<mpsc::Sender<ScopedAgentEvent>>, Vec<StreamScopeFrame>) {
+    ) -> (
+        Option<mpsc::Sender<ScopedAgentEvent>>,
+        Vec<StreamScopeFrame>,
+    ) {
         let tx = self.scoped_event_tx.read().await.clone();
         let path = self.scoped_event_path.read().await.clone();
         (tx, path)

@@ -14,8 +14,8 @@ use meerkat_client::{
 use meerkat_core::service::{CreateSessionRequest, SessionBuildOptions};
 use meerkat_core::{
     Agent, AgentBuilder, AgentEvent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
-    BudgetLimits, Config, HookRunOverrides, OutputSchema, Provider, Session, SessionMetadata,
-    SessionTooling, ScopedAgentEvent, StreamScopeFrame,
+    BudgetLimits, Config, HookRunOverrides, OutputSchema, Provider, ScopedAgentEvent, Session,
+    SessionMetadata, SessionTooling, StreamScopeFrame,
 };
 #[cfg(feature = "sub-agents")]
 use meerkat_core::{ConcurrencyLimits, SubAgentManager};
@@ -226,6 +226,7 @@ pub struct AgentBuildConfig {
     /// - `0`: never inline peer lifecycle notifications
     /// - `-1`: always inline peer lifecycle notifications
     /// - `>0`: inline only when post-drain peer count is <= threshold
+    /// - `<-1`: invalid
     pub max_inline_peer_notifications: Option<i32>,
 }
 
@@ -352,7 +353,8 @@ impl AgentBuildConfig {
         self.backend = build.backend.clone();
         self.config_generation = build.config_generation;
         self.checkpointer = build.checkpointer.clone();
-        self.silent_comms_intents.clone_from(&build.silent_comms_intents);
+        self.silent_comms_intents
+            .clone_from(&build.silent_comms_intents);
         self.max_inline_peer_notifications = build.max_inline_peer_notifications;
     }
 
@@ -1006,6 +1008,15 @@ impl AgentFactory {
         mut build_config: AgentBuildConfig,
         config: &Config,
     ) -> Result<DynAgent, BuildAgentError> {
+        if let Some(value) = build_config.max_inline_peer_notifications
+            && value < -1
+        {
+            return Err(BuildAgentError::Config(format!(
+                "max_inline_peer_notifications={} is invalid (allowed: -1, 0, or >0)",
+                value
+            )));
+        }
+
         // 1. Validate host_mode
         #[cfg(feature = "comms")]
         if build_config.host_mode && build_config.comms_name.is_none() {

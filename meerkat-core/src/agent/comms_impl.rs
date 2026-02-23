@@ -4,15 +4,18 @@ use crate::error::AgentError;
 use crate::event::AgentEvent;
 use crate::interaction::InteractionContent;
 use crate::types::{Message, RunResult, Usage, UserMessage};
-use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::mpsc;
 
-use crate::agent::{Agent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, CommsRuntime};
+use crate::agent::{
+    Agent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, CommsRuntime,
+    InlinePeerNotificationPolicy,
+};
 use crate::interaction::InboxInteraction;
 use crate::session::Session;
 
+/// Presentation cap for explicit peer names in one inline summary.
 const PEER_INLINE_NAME_LIMIT: usize = 10;
 const PEER_ADDED_INTENT: &str = "mob.peer_added";
 const PEER_RETIRED_INTENT: &str = "mob.peer_retired";
@@ -21,6 +24,16 @@ const PEER_RETIRED_INTENT: &str = "mob.peer_retired";
 enum PeerLifecycleState {
     Added,
     Retired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CommsInteractionClass {
+    PeerLifecycle {
+        peer: String,
+        state: PeerLifecycleState,
+    },
+    InlineSessionOnly,
+    Passthrough,
 }
 
 #[derive(Debug, Default)]
@@ -100,12 +113,16 @@ where
         let mut peer_lifecycle_batch = PeerLifecycleBatch::default();
 
         for interaction in interactions {
-            if let Some((peer, state)) = extract_peer_lifecycle_update(&interaction) {
-                peer_lifecycle_batch.observe(peer, state);
-                continue;
+            match classify_comms_interaction(&interaction, &self.silent_comms_intents) {
+                CommsInteractionClass::PeerLifecycle { peer, state } => {
+                    peer_lifecycle_batch.observe(peer, state);
+                }
+                CommsInteractionClass::InlineSessionOnly | CommsInteractionClass::Passthrough => {
+                    // Turn-boundary drain injects both inline-only and passthrough
+                    // interactions as context for the next LLM call.
+                    messages.push(interaction.rendered_text);
+                }
             }
-
-            messages.push(interaction.rendered_text);
         }
 
         if let Some(peer_update) = self
@@ -257,48 +274,37 @@ where
                 let mut had_session_injections = false;
 
                 for interaction in interactions {
-                    if let Some((peer, state)) = extract_peer_lifecycle_update(&interaction) {
-                        peer_lifecycle_batch.observe(peer, state);
-                        continue;
-                    }
+                    match classify_comms_interaction(&interaction, &self.silent_comms_intents) {
+                        CommsInteractionClass::PeerLifecycle { peer, state } => {
+                            peer_lifecycle_batch.observe(peer, state);
+                        }
+                        CommsInteractionClass::InlineSessionOnly => {
+                            inject_response_into_session(&mut self.session, &interaction);
+                            had_session_injections = true;
+                        }
+                        CommsInteractionClass::Passthrough => {
+                            let subscriber = comms.interaction_subscriber(&interaction.id);
 
-                    // Response interactions: inject into session, never run through LLM
-                    if matches!(&interaction.content, InteractionContent::Response { .. }) {
-                        inject_response_into_session(&mut self.session, &interaction);
-                        had_session_injections = true;
-                        continue;
-                    }
+                            if event_tx.is_some() && subscriber.is_some() {
+                                // Events mode: subscriber-bound interactions get individual
+                                // tap-scoped processing with terminal events.
+                                individual.push((interaction, subscriber));
+                            } else {
+                                // No events or no subscriber — consume subscriber to avoid
+                                // leaks, then classify by content type.
+                                drop(subscriber);
 
-                    // Silent intent check: matching requests are injected like
-                    // responses instead of being processed through the LLM.
-                    if let InteractionContent::Request { ref intent, .. } = interaction.content
-                        && self.silent_comms_intents.iter().any(|s| s == intent)
-                    {
-                        inject_response_into_session(&mut self.session, &interaction);
-                        had_session_injections = true;
-                        continue;
-                    }
-
-                    let subscriber = comms.interaction_subscriber(&interaction.id);
-
-                    if event_tx.is_some() && subscriber.is_some() {
-                        // Events mode: subscriber-bound interactions get individual
-                        // tap-scoped processing with terminal events.
-                        individual.push((interaction, subscriber));
-                    } else {
-                        // No events or no subscriber — consume subscriber to avoid
-                        // leaks, then classify by content type.
-                        drop(subscriber);
-
-                        match &interaction.content {
-                            InteractionContent::Message { .. } => {
-                                batched_texts.push(interaction.rendered_text);
-                            }
-                            InteractionContent::Request { .. } => {
-                                individual.push((interaction, None));
-                            }
-                            InteractionContent::Response { .. } => {
-                                unreachable!("handled above")
+                                match &interaction.content {
+                                    InteractionContent::Message { .. } => {
+                                        batched_texts.push(interaction.rendered_text);
+                                    }
+                                    InteractionContent::Request { .. } => {
+                                        individual.push((interaction, None));
+                                    }
+                                    InteractionContent::Response { .. } => {
+                                        unreachable!("passthrough excludes responses")
+                                    }
+                                }
                             }
                         }
                     }
@@ -318,9 +324,7 @@ where
                 // Responses bypass the LLM loop (no run call), so without
                 // this checkpoint they would only be persisted if a later
                 // request/message triggers its own checkpoint.
-                if had_session_injections
-                    && let Some(ref cp) = self.checkpointer
-                {
+                if had_session_injections && let Some(ref cp) = self.checkpointer {
                     cp.checkpoint(&self.session).await;
                 }
 
@@ -466,12 +470,34 @@ fn extract_peer_lifecycle_update(
 
     let peer = params
         .get("peer")
-        .and_then(Value::as_str)
+        .and_then(|value| value.as_str())
         .filter(|s| !s.is_empty())
         .unwrap_or(interaction.from.as_str())
         .to_string();
 
     Some((peer, state))
+}
+
+fn is_silent_request_intent(interaction: &InboxInteraction, silent_intents: &[String]) -> bool {
+    match &interaction.content {
+        InteractionContent::Request { intent, .. } => silent_intents.iter().any(|s| s == intent),
+        _ => false,
+    }
+}
+
+fn classify_comms_interaction(
+    interaction: &InboxInteraction,
+    silent_intents: &[String],
+) -> CommsInteractionClass {
+    if let Some((peer, state)) = extract_peer_lifecycle_update(interaction) {
+        return CommsInteractionClass::PeerLifecycle { peer, state };
+    }
+    if matches!(&interaction.content, InteractionContent::Response { .. })
+        || is_silent_request_intent(interaction, silent_intents)
+    {
+        return CommsInteractionClass::InlineSessionOnly;
+    }
+    CommsInteractionClass::Passthrough
 }
 
 fn render_named_list(mut names: Vec<String>) -> String {
@@ -533,13 +559,11 @@ where
             return None;
         }
 
-        let peer_count = comms.peers().await.len();
-        let threshold = self.max_inline_peer_notifications;
-        let suppress = match threshold {
-            -1 => false,
-            0 => true,
-            t if t < -1 => false,
-            t => peer_count > t as usize,
+        let peer_count = comms.peer_count().await;
+        let suppress = match self.inline_peer_notification_policy {
+            InlinePeerNotificationPolicy::Always => false,
+            InlinePeerNotificationPolicy::Never => true,
+            InlinePeerNotificationPolicy::AtMost(limit) => peer_count > limit,
         };
 
         if suppress {
@@ -553,8 +577,16 @@ where
             return None;
         }
 
+        let resumed = self.peer_notification_suppression_active;
         self.peer_notification_suppression_active = false;
-        render_peer_update_summary(batch)
+        let summary = render_peer_update_summary(batch)?;
+        if resumed {
+            return Some(format!(
+                "[PEER UPDATE] Peer updates resumed at current scale ({} peers).\n{}",
+                peer_count, summary
+            ));
+        }
+        Some(summary)
     }
 }
 
@@ -797,6 +829,7 @@ mod tests {
         batches: Mutex<Vec<Vec<crate::interaction::InboxInteraction>>>,
         notify: Arc<Notify>,
         peer_count: AtomicUsize,
+        peers_calls: AtomicUsize,
     }
 
     impl SequencedInteractionMockCommsRuntime {
@@ -805,7 +838,16 @@ mod tests {
                 batches: Mutex::new(batches),
                 notify: Arc::new(Notify::new()),
                 peer_count: AtomicUsize::new(peer_count),
+                peers_calls: AtomicUsize::new(0),
             }
+        }
+
+        fn set_peer_count(&self, peer_count: usize) {
+            self.peer_count.store(peer_count, Ordering::SeqCst);
+        }
+
+        fn peers_calls(&self) -> usize {
+            self.peers_calls.load(Ordering::SeqCst)
         }
     }
 
@@ -829,6 +871,7 @@ mod tests {
         }
 
         async fn peers(&self) -> Vec<PeerDirectoryEntry> {
+            self.peers_calls.fetch_add(1, Ordering::SeqCst);
             let count = self.peer_count.load(Ordering::SeqCst);
             (0..count)
                 .map(|idx| PeerDirectoryEntry {
@@ -841,6 +884,10 @@ mod tests {
                     meta: crate::peer_meta::PeerMeta::default(),
                 })
                 .collect()
+        }
+
+        async fn peer_count(&self) -> usize {
+            self.peer_count.load(Ordering::SeqCst)
         }
     }
 
@@ -989,6 +1036,51 @@ mod tests {
             content,
             rendered_text: rendered_text.to_string(),
         }
+    }
+
+    #[test]
+    fn test_classify_comms_interaction_peer_lifecycle() {
+        let interaction = make_interaction(
+            InteractionContent::Request {
+                intent: "mob.peer_added".into(),
+                params: serde_json::json!({"peer": "worker-1"}),
+            },
+            "peer add",
+        );
+        assert!(matches!(
+            classify_comms_interaction(&interaction, &[]),
+            CommsInteractionClass::PeerLifecycle { .. }
+        ));
+    }
+
+    #[test]
+    fn test_classify_comms_interaction_silent_request_is_inline_only() {
+        let interaction = make_interaction(
+            InteractionContent::Request {
+                intent: "mob.status.ping".into(),
+                params: serde_json::json!({}),
+            },
+            "status ping",
+        );
+        assert_eq!(
+            classify_comms_interaction(&interaction, &["mob.status.ping".to_string()]),
+            CommsInteractionClass::InlineSessionOnly
+        );
+    }
+
+    #[test]
+    fn test_classify_comms_interaction_non_silent_request_passthrough() {
+        let interaction = make_interaction(
+            InteractionContent::Request {
+                intent: "review.code".into(),
+                params: serde_json::json!({}),
+            },
+            "review request",
+        );
+        assert_eq!(
+            classify_comms_interaction(&interaction, &["mob.peer_added".to_string()]),
+            CommsInteractionClass::Passthrough
+        );
     }
 
     #[tokio::test]
@@ -1459,8 +1551,9 @@ mod tests {
                 "peer add 3",
             ),
         ];
-        let comms =
-            Arc::new(SyncInteractionMockCommsRuntime::with_interactions(interactions));
+        let comms = Arc::new(SyncInteractionMockCommsRuntime::with_interactions(
+            interactions,
+        ));
 
         let mut agent = AgentBuilder::new()
             .with_comms_runtime(comms as Arc<dyn CommsRuntime>)
@@ -1514,8 +1607,9 @@ mod tests {
                 "add b",
             ),
         ];
-        let comms =
-            Arc::new(SyncInteractionMockCommsRuntime::with_interactions(interactions));
+        let comms = Arc::new(SyncInteractionMockCommsRuntime::with_interactions(
+            interactions,
+        ));
 
         let mut agent = AgentBuilder::new()
             .with_comms_runtime(comms as Arc<dyn CommsRuntime>)
@@ -1567,7 +1661,7 @@ mod tests {
         ));
 
         let mut agent = AgentBuilder::new()
-            .with_comms_runtime(comms as Arc<dyn CommsRuntime>)
+            .with_comms_runtime(comms.clone() as Arc<dyn CommsRuntime>)
             .with_max_inline_peer_notifications(Some(20))
             .build(
                 Arc::new(MockLlmClient),
@@ -1592,6 +1686,61 @@ mod tests {
         assert_eq!(user_msgs.len(), 1, "suppression notice should emit once");
         assert!(user_msgs[0].contains("Peer updates suppressed"));
         assert!(user_msgs[0].contains("(100 peers)"));
+        assert_eq!(
+            comms.peers_calls(),
+            0,
+            "render path should use peer_count()"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_peer_lifecycle_suppression_lift_emits_resume_notice() {
+        let first_batch = vec![make_interaction(
+            InteractionContent::Request {
+                intent: "mob.peer_added".into(),
+                params: serde_json::json!({"peer": "worker-1"}),
+            },
+            "add worker-1",
+        )];
+        let second_batch = vec![make_interaction(
+            InteractionContent::Request {
+                intent: "mob.peer_added".into(),
+                params: serde_json::json!({"peer": "worker-2"}),
+            },
+            "add worker-2",
+        )];
+        let comms = Arc::new(SequencedInteractionMockCommsRuntime::new(
+            vec![first_batch, second_batch],
+            100,
+        ));
+
+        let mut agent = AgentBuilder::new()
+            .with_comms_runtime(comms.clone() as Arc<dyn CommsRuntime>)
+            .with_max_inline_peer_notifications(Some(20))
+            .build(
+                Arc::new(MockLlmClient),
+                Arc::new(MockToolDispatcher),
+                Arc::new(MockSessionStore),
+            )
+            .await;
+
+        assert!(agent.drain_comms_inbox().await);
+        comms.set_peer_count(5);
+        assert!(agent.drain_comms_inbox().await);
+
+        let user_msgs: Vec<_> = agent
+            .session
+            .messages()
+            .iter()
+            .filter_map(|m| match m {
+                Message::User(u) => Some(u.content.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(user_msgs.len(), 2);
+        assert!(user_msgs[0].contains("Peer updates suppressed"));
+        assert!(user_msgs[1].contains("Peer updates resumed"));
+        assert!(user_msgs[1].contains("1 peer connected"));
     }
 
     #[tokio::test]

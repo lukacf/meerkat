@@ -66,16 +66,13 @@ pub async fn build_agent_config(
     // always available. Skills are appended as extra_sections in
     // prompt assembly, which survives per-request system_prompt
     // overrides.
-    config.preload_skills = Some(vec![
-        meerkat_core::skills::SkillId::from("mob-communication"),
-    ]);
+    config.preload_skills = Some(vec![meerkat_core::skills::SkillId::from(
+        "mob-communication",
+    )]);
 
     // Silent comms intents: peer lifecycle notifications are injected
     // into context without triggering an LLM turn.
-    config.silent_comms_intents = vec![
-        "mob.peer_added".into(),
-        "mob.peer_retired".into(),
-    ];
+    config.silent_comms_intents = vec!["mob.peer_added".into(), "mob.peer_retired".into()];
     config.max_inline_peer_notifications = profile.max_inline_peer_notifications;
 
     // Map ToolConfig booleans to override flags
@@ -432,9 +429,7 @@ mod tests {
             .as_ref()
             .expect("preload_skills should be set");
         assert!(
-            preload
-                .iter()
-                .any(|id| id.0 == "mob-communication"),
+            preload.iter().any(|id| id.0 == "mob-communication"),
             "preload_skills should include mob-communication"
         );
     }

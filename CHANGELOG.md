@@ -9,46 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-#### CD Pipeline
-- Cross-platform release builds: Linux x86_64/ARM64, macOS ARM64, Windows x86_64 (#28)
-- GitHub Release publishing with checksums and artifact manifest
-- Registry publishing: 15 Rust crates → crates.io, Python SDK → PyPI, TypeScript SDK → npm
-- Registry dry-run mode via `gh workflow run release.yml -f registry_dry_run=true`
-- Recovery workflow for re-publishing after registry outage
-- SDK auto-download in Python/TypeScript clients for binary resolution
-- `make release-dry-run-smoke` for local release iteration
+#### Mobs (Multi-Agent Orchestration)
+- Introduced first-class mob runtime (`meerkat-mob`) for built-in multi-agent orchestration.
+- Added DAG-based flow engine with conditions, branching, fan-out/fan-in, and dependency-aware step execution.
+- Added full mob lifecycle operations (`create`, `spawn`, `wire`, `run_flow`, `retire`, `destroy`) with in-memory and redb-backed persistence.
+- Added parallel spawn provisioning/finalization paths to support large swarm initialization.
+- Added autonomous-host default runtime mode with supervision and escalation behavior.
+- Added dedicated mob MCP surface (`meerkat-mob-mcp`) and integrated mob tools into CLI run/resume workflows.
 
-#### Comms
-- `PeerMeta` for friendly agent names in peer discovery (#24)
+#### Skills v2.1
+- Added strict source-pinned skill identity model (`SkillKey`) and structured skill refs.
+- Enforced explicit model-mediated skill activation (`load_skill`) and removed legacy fuzzy fallback behavior.
+- Brought CLI and SDK parity for skills v2.1 references and diagnostics.
+
+#### Docs and Examples
+- Added comprehensive examples library (27 examples) covering providers, hooks, memory, comms, and mob coordination.
+- Added design philosophy reference and updated architecture summaries.
+- Rewrote README for clearer platform/surface positioning.
 
 ### Changed
-- `meerkat` facade crate defaults trimmed to providers-only (`anthropic`, `openai`, `gemini`) — storage, comms, mcp, sub-agents, and skills are now opt-in for library users; CLI and surface binaries explicitly enable what they need
-- Server surface crates (RPC, REST, MCP Server) now include all three providers — previously only `anthropic`
-- Server surfaces (REST, MCP Server, RPC) now use persistent session storage by default (#26)
-- RPC host-mode session turns spawn in background for non-blocking operation
-- `CLAUDE.md` expanded with comprehensive CI/CD pipeline documentation
+- Added config CLI CAS UX (`--expected-generation`) and generation-aware responses.
+- Added configurable compaction settings to config surface and runtime wiring.
+- Documented and tested config merge/override semantics across scalar/list/map fields.
+- Added deferred initial-turn policy support for session creation, used by mob spawns.
+- Added session-wide event stream API parity across services/surfaces.
+- TypeScript SDK package renamed from `@meerkat/sdk` to `@rkat/sdk`.
 
 ### Fixed
-
-#### Anthropic Adapter
-- **Stream missing Done event** when `message_stop` not received: `AnthropicDelta.delta_type` was a required field but Anthropic's `message_delta` sends `{"delta": {"stop_reason": "end_turn"}}` with no `type` — serde failed silently, losing the stop_reason. Fix: `#[serde(default)]` (#30)
-- Handle Anthropic streaming error events (`overloaded_error`, `rate_limit_error`) that were previously silently ignored (#30)
-
-#### OpenAI Adapter
-- **Duplicate tool-call and reasoning blocks** from redundant event processing: `response.completed` and `response.done` replayed items already received via streaming. Fix: per-ID dedup via `HashSet` tracking (#29)
-- **Reasoning replay failures**: strip reasoning items without `encrypted_content` — not safely replayable (#29)
-- Handle OpenAI streaming error events with error-code-specific `LlmError` mapping (`rate_limit_exceeded`, `server_error`, `invalid_request_error`) (#29)
-- HTTP connection errors mapped accurately (`is_timeout()` → `NetworkTimeout`, `is_connect()` → `ConnectionReset`) instead of blanket `NetworkTimeout` (#29)
-- `reasoning.done` handler rejects items with missing IDs instead of using `unwrap_or_default()` (#29)
-- Prevent double `Done` emission from `response.completed` + `response.done` (#29)
-
-#### Other
-- Strip orphaned OpenAI reasoning items from replay to prevent API rejection (#25)
-- Release hook runs from workspace root and executes only once per version
-- Crate publishing enabled with correct release hook path
-- SDK publish dry-runs clean up build artifacts and work without lockfile
-- SDK build artifacts (dist/, egg-info/) added to `.gitignore`
-- `npm ci` → `npm install` in Makefile and release workflow (no `package-lock.json` committed)
+- Fixed OpenAI streaming duplicate/replay edge cases and strengthened error mapping.
+- Fixed skills source fallback and identity resolution bugs across CLI/SDK surfaces.
+- Fixed multiple mob lifecycle correctness issues (ordering races, shutdown/startup sequencing, duplicate wire side-effects).
+- Stabilized host-mode and provider-agnostic integration tests.
+- Addressed workspace clippy blockers and CI/push gate regressions.
+- Fixed release tooling portability (`sed`-portable hook path) and lock-step contract/package version handling.
 
 ## [0.3.0] - 2026-02-14
 

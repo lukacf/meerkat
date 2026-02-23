@@ -83,6 +83,7 @@ async fn inner_test_rest_resume_metadata() {
         expose_paths: false,
         config_runtime,
         realm_lease: Arc::new(tokio::sync::Mutex::new(None)),
+        skill_runtime: None,
     };
 
     let app = router(state_run);
@@ -170,6 +171,7 @@ async fn inner_test_rest_resume_metadata() {
         expose_paths: false,
         config_runtime: config_runtime_resume,
         realm_lease: Arc::new(tokio::sync::Mutex::new(None)),
+        skill_runtime: None,
     };
 
     let app = router(state_resume);

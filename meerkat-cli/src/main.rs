@@ -4501,7 +4501,7 @@ mod tests {
                 assert!(enable_shell);
                 assert_eq!(max_duration.as_deref(), Some("5m"));
             }
-            _ => panic!("expected run command"),
+            _ => unreachable!("expected run command"),
         }
     }
 
@@ -4524,7 +4524,7 @@ mod tests {
                 assert!(stream);
                 assert!(matches!(stream_view, StreamView::Mux));
             }
-            _ => panic!("expected mob run-flow command"),
+            _ => unreachable!("expected mob run-flow command"),
         }
     }
 

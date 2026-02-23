@@ -31,6 +31,9 @@ meerkat-rpc = { path = "$ROOT/meerkat-rpc" }
 meerkat-rest = { path = "$ROOT/meerkat-rest" }
 meerkat-contracts = { path = "$ROOT/meerkat-contracts" }
 meerkat = { path = "$ROOT/meerkat" }
+meerkat-mob = { path = "$ROOT/meerkat-mob" }
+meerkat-mob-mcp = { path = "$ROOT/meerkat-mob-mcp" }
+rkat = { path = "$ROOT/meerkat-cli" }
 EOF
 
 LOG_DIR="$tmp_dir/logs"
@@ -52,6 +55,9 @@ PACKAGES=(
   meerkat-rpc
   meerkat-rest
   meerkat
+  meerkat-mob
+  meerkat-mob-mcp
+  rkat
 )
 
 run_publish() {

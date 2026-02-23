@@ -20,7 +20,11 @@ CARGO_VER=$(cargo metadata --manifest-path "$ROOT/Cargo.toml" \
     | jq -r '.packages[] | select(.name == "meerkat") | .version')
 
 PY_VER=$(python3 -c "
-import tomllib, pathlib
+import pathlib
+try:
+    import tomllib  # py311+
+except ModuleNotFoundError:
+    import tomli as tomllib  # py310 fallback
 d = tomllib.loads(pathlib.Path('$ROOT/sdks/python/pyproject.toml').read_text())
 print(d['project']['version'])
 ")

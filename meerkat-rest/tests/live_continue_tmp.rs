@@ -69,6 +69,7 @@ async fn integration_real_live_continue_hangs() {
         expose_paths: false,
         config_runtime,
         realm_lease: Arc::new(tokio::sync::Mutex::new(None)),
+        skill_runtime: None,
     };
 
     let app = router(state);

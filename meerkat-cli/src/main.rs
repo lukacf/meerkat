@@ -3614,7 +3614,10 @@ fn mob_registry_lock_path(scope: &RuntimeScope) -> PathBuf {
 }
 
 struct MobRegistryLock {
+    #[cfg(unix)]
     _lock: nix::fcntl::Flock<std::fs::File>,
+    #[cfg(not(unix))]
+    _lock: std::fs::File,
 }
 
 async fn acquire_mob_registry_lock(scope: &RuntimeScope) -> anyhow::Result<MobRegistryLock> {
@@ -3629,70 +3632,92 @@ async fn acquire_mob_registry_lock(scope: &RuntimeScope) -> anyhow::Result<MobRe
     }
 
     let lock_path = path.clone();
-    let lock_file = tokio::time::timeout(
-        Duration::from_secs(30),
-        tokio::task::spawn_blocking(
-            move || -> anyhow::Result<nix::fcntl::Flock<std::fs::File>> {
-                use std::io::{Seek, SeekFrom, Write};
 
-                let file = std::fs::OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .create(true)
-                    .truncate(false)
-                    .open(&lock_path)
-                    .map_err(|e| {
+    #[cfg(unix)]
+    let lock_file = {
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            tokio::task::spawn_blocking(
+                move || -> anyhow::Result<nix::fcntl::Flock<std::fs::File>> {
+                    use std::io::{Seek, SeekFrom, Write};
+
+                    let file = std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .create(true)
+                        .truncate(false)
+                        .open(&lock_path)
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "failed to open mob registry lock '{}': {e}",
+                                lock_path.display()
+                            )
+                        })?;
+
+                    let mut file =
+                        nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusive)
+                            .map_err(|(_file, e)| {
+                                anyhow::anyhow!(
+                                    "failed to acquire mob registry lock '{}': {e}",
+                                    lock_path.display()
+                                )
+                            })?;
+
+                    file.set_len(0).map_err(|e| {
                         anyhow::anyhow!(
-                            "failed to open mob registry lock '{}': {e}",
+                            "failed to reset mob registry lock '{}': {e}",
+                            lock_path.display()
+                        )
+                    })?;
+                    file.seek(SeekFrom::Start(0)).map_err(|e| {
+                        anyhow::anyhow!(
+                            "failed to seek mob registry lock '{}': {e}",
+                            lock_path.display()
+                        )
+                    })?;
+                    writeln!(file, "{}", std::process::id()).map_err(|e| {
+                        anyhow::anyhow!(
+                            "failed to write mob registry lock owner '{}': {e}",
+                            lock_path.display()
+                        )
+                    })?;
+                    file.flush().map_err(|e| {
+                        anyhow::anyhow!(
+                            "failed to flush mob registry lock '{}': {e}",
                             lock_path.display()
                         )
                     })?;
 
-                let mut file = nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusive)
-                    .map_err(|(_file, e)| {
-                    anyhow::anyhow!(
-                        "failed to acquire mob registry lock '{}': {e}",
-                        lock_path.display()
-                    )
-                })?;
-
-                file.set_len(0).map_err(|e| {
-                    anyhow::anyhow!(
-                        "failed to reset mob registry lock '{}': {e}",
-                        lock_path.display()
-                    )
-                })?;
-                file.seek(SeekFrom::Start(0)).map_err(|e| {
-                    anyhow::anyhow!(
-                        "failed to seek mob registry lock '{}': {e}",
-                        lock_path.display()
-                    )
-                })?;
-                writeln!(file, "{}", std::process::id()).map_err(|e| {
-                    anyhow::anyhow!(
-                        "failed to write mob registry lock owner '{}': {e}",
-                        lock_path.display()
-                    )
-                })?;
-                file.flush().map_err(|e| {
-                    anyhow::anyhow!(
-                        "failed to flush mob registry lock '{}': {e}",
-                        lock_path.display()
-                    )
-                })?;
-
-                Ok(file)
-            },
-        ),
-    )
-    .await
-    .map_err(|_| {
-        anyhow::anyhow!(
-            "timed out waiting for mob registry lock '{}'",
-            path.display()
+                    Ok(file)
+                },
+            ),
         )
-    })?
-    .map_err(|e| anyhow::anyhow!("mob registry lock task failed: {e}"))??;
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "timed out waiting for mob registry lock '{}'",
+                path.display()
+            )
+        })?
+        .map_err(|e| anyhow::anyhow!("mob registry lock task failed: {e}"))??
+    };
+
+    #[cfg(not(unix))]
+    let lock_file = {
+        // On Windows, use a simple open-for-write as a best-effort advisory lock.
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to open mob registry lock '{}': {e}",
+                    lock_path.display()
+                )
+            })?
+    };
 
     Ok(MobRegistryLock { _lock: lock_file })
 }

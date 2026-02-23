@@ -168,6 +168,60 @@ fn resolve_tooling_flags(enable_builtins: bool, enable_shell: bool) -> (bool, bo
     (enable_builtins || enable_shell, enable_shell)
 }
 
+/// Inject `run` as the default subcommand when the first positional argument
+/// is not a known subcommand. This lets users write `rkat "hello"` instead of
+/// `rkat run "hello"`.
+fn inject_default_run_subcommand(
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Vec<std::ffi::OsString> {
+    const SUBCOMMANDS: &[&str] = &[
+        "init",
+        "run",
+        "resume",
+        "sessions",
+        "realms",
+        "mcp",
+        "skills",
+        "mob",
+        "config",
+        "capabilities",
+        "help",
+    ];
+    // Global flags that consume the next argument as a value.
+    const FLAGS_WITH_VALUE: &[&str] = &[
+        "-r",
+        "--realm",
+        "--instance",
+        "--realm-backend",
+        "--state-root",
+        "--context-root",
+        "--user-config-root",
+    ];
+    let args: Vec<std::ffi::OsString> = args.into_iter().collect();
+    let mut i = 1; // skip binary name
+    while i < args.len() {
+        let arg_str = args[i].to_str().unwrap_or("");
+        if arg_str.starts_with('-') {
+            // Skip boolean flags; skip flag+value for flags that take a value.
+            if FLAGS_WITH_VALUE.contains(&arg_str) {
+                i += 2; // skip flag and its value
+            } else {
+                i += 1;
+            }
+        } else {
+            // First positional argument found.
+            if !SUBCOMMANDS.contains(&arg_str) {
+                let mut patched = args[..i].to_vec();
+                patched.push("run".into());
+                patched.extend_from_slice(&args[i..]);
+                return patched;
+            }
+            return args; // known subcommand, no injection needed
+        }
+    }
+    args
+}
+
 /// Read piped stdin content and prepend it to the prompt as context.
 ///
 /// When stdin is a terminal (interactive), returns the prompt unchanged.
@@ -236,6 +290,7 @@ async fn init_project_config() -> anyhow::Result<()> {
 #[derive(Parser)]
 #[command(name = "meerkat")]
 #[command(about = "Meerkat - Rust Agentic Interface Kit")]
+#[command(after_help = "Shorthand: `rkat \"prompt\"` is equivalent to `rkat run \"prompt\"`")]
 struct Cli {
     /// Explicit realm ID (opaque). Reuse to share state across surfaces.
     #[arg(long, short = 'r', global = true)]
@@ -832,7 +887,7 @@ async fn main() -> anyhow::Result<ExitCode> {
     // Initialize tracing
     tracing_subscriber::fmt::init();
 
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(inject_default_run_subcommand(std::env::args_os()));
 
     let cli_scope = resolve_runtime_scope(&cli)?;
 
@@ -4562,6 +4617,34 @@ mod tests {
             }
             _ => unreachable!("expected run command"),
         }
+    }
+
+    #[test]
+    fn test_inject_default_run_subcommand() {
+        // Bare prompt → inject "run"
+        let args = inject_default_run_subcommand(
+            ["rkat", "hello world"].map(Into::into),
+        );
+        assert_eq!(args, vec!["rkat", "run", "hello world"].into_iter().map(std::ffi::OsString::from).collect::<Vec<_>>());
+
+        // Global flags before prompt → inject "run" before prompt
+        let args = inject_default_run_subcommand(
+            ["rkat", "--realm", "test", "hello"].map(Into::into),
+        );
+        assert_eq!(args[3], std::ffi::OsString::from("run"), "should inject run before first positional");
+        assert_eq!(args[4], std::ffi::OsString::from("hello"), "prompt follows run");
+
+        // Explicit subcommand → no injection
+        let args = inject_default_run_subcommand(
+            ["rkat", "run", "hello"].map(Into::into),
+        );
+        assert_eq!(args, vec!["rkat", "run", "hello"].into_iter().map(std::ffi::OsString::from).collect::<Vec<_>>());
+
+        // Other subcommand → no injection
+        let args = inject_default_run_subcommand(
+            ["rkat", "init"].map(Into::into),
+        );
+        assert_eq!(args, vec!["rkat", "init"].into_iter().map(std::ffi::OsString::from).collect::<Vec<_>>());
     }
 
     #[test]

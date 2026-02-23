@@ -116,7 +116,8 @@ Do not conflate the two: mob tool availability is a surface behavior, backend is
 ### CLI
 
 ```bash
-rkat run "What is Rust?"
+rkat "What is Rust?"                     # "run" is the default subcommand
+rkat run "What is Rust?"                 # equivalent explicit form
 rkat --realm team-alpha run "Create a todo app" --enable-builtins --enable-shell --stream -v
 rkat --realm team-alpha resume sid_abc123 "Now add error handling"
 # Batch context: pipe finite content as context

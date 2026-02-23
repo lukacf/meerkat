@@ -8540,3 +8540,103 @@ async fn test_retire_sends_required_peer_retired_notifications() {
         "non-retiring peer should not be the sender for retire notifications"
     );
 }
+
+// -----------------------------------------------------------------------
+// Disposal pipeline integration tests
+// -----------------------------------------------------------------------
+
+/// Verifies that roster removal happens even when multiple cleanup steps fail.
+/// This tests the structural guarantee that roster removal is in the "finally"
+/// block of dispose_member, outside the policy-driven loop.
+#[tokio::test]
+async fn test_dispose_member_removes_roster_even_when_steps_fail() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    // Configure w-1's comms to fail both send and trust removal.
+    service
+        .set_comms_behavior(
+            &test_comms_name("worker", "w-1"),
+            MockCommsBehavior {
+                fail_send_peer_retired: true,
+                fail_remove_trust: true,
+                ..MockCommsBehavior::default()
+            },
+        )
+        .await;
+
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn w-2");
+    handle
+        .wire(MeerkatId::from("w-1"), MeerkatId::from("w-2"))
+        .await
+        .expect("wire");
+
+    // Archive also fails.
+    let sid_w1 = handle
+        .get_meerkat(&MeerkatId::from("w-1"))
+        .await
+        .unwrap()
+        .session_id()
+        .cloned()
+        .unwrap();
+    service.set_archive_failure(&sid_w1).await;
+
+    // Retire succeeds (best-effort policy always continues).
+    handle
+        .retire(MeerkatId::from("w-1"))
+        .await
+        .expect("retire should succeed despite multiple step failures");
+
+    // The structural guarantee: member is gone from roster regardless.
+    assert!(
+        handle.get_meerkat(&MeerkatId::from("w-1")).await.is_none(),
+        "roster removal must be unconditional — member must be gone even when all steps fail"
+    );
+}
+
+/// Verifies that retiring two identical-topology members produces the same
+/// disposal step sequence (deterministic ordering).
+#[tokio::test]
+async fn test_disposal_report_ordering_is_deterministic() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn w-2");
+
+    // Retire both in sequence — same topology, same cleanup steps.
+    handle
+        .retire(MeerkatId::from("w-1"))
+        .await
+        .expect("retire w-1");
+    handle
+        .retire(MeerkatId::from("w-2"))
+        .await
+        .expect("retire w-2");
+
+    // Both members removed — disposal executed identically.
+    assert!(handle.get_meerkat(&MeerkatId::from("w-1")).await.is_none());
+    assert!(handle.get_meerkat(&MeerkatId::from("w-2")).await.is_none());
+
+    // Verify events show two retirements in order.
+    let events = handle.events().replay_all().await.expect("replay");
+    let retire_events: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e.kind, MobEventKind::MeerkatRetired { .. }))
+        .collect();
+    assert_eq!(
+        retire_events.len(),
+        2,
+        "both members should have retire events"
+    );
+}

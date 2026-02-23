@@ -1,3 +1,6 @@
+use super::disposal::{
+    BulkBestEffort, DisposalContext, DisposalReport, DisposalStep, ErrorPolicy, WarnAndContinue,
+};
 use super::terminalization::{FlowTerminalizationAuthority, TerminalizationTarget};
 use super::transaction::LifecycleRollback;
 use super::*;
@@ -76,6 +79,23 @@ impl MobActor {
         let current = self.state();
         if !expected.contains(&current) {
             return Err(MobError::InvalidTransition { from: current, to });
+        }
+        Ok(())
+    }
+
+    /// Guard that the mob is in one of the `allowed` states.
+    ///
+    /// Unlike `expect_state`, this does not imply a state transition — it is
+    /// used by command handlers that operate *within* the current state
+    /// (retire, wire, external turn, etc.). The `to` parameter in the error
+    /// is set to the first allowed state as a hint; no actual transition occurs.
+    fn require_state(&self, allowed: &[MobState]) -> Result<(), MobError> {
+        let current = self.state();
+        if !allowed.contains(&current) {
+            return Err(MobError::InvalidTransition {
+                from: current,
+                to: allowed[0],
+            });
         }
         Ok(())
     }
@@ -544,7 +564,7 @@ impl MobActor {
                     reply_tx,
                 } => {
                     if let Err(error) = self
-                        .expect_state(&[MobState::Running, MobState::Creating], MobState::Running)
+                        .require_state(&[MobState::Running, MobState::Creating])
                     {
                         let _ = reply_tx.send(Err(error));
                         continue;
@@ -584,9 +604,8 @@ impl MobActor {
                     meerkat_id,
                     reply_tx,
                 } => {
-                    let result = match self.expect_state(
+                    let result = match self.require_state(
                         &[MobState::Running, MobState::Creating, MobState::Stopped],
-                        MobState::Running,
                     ) {
                         Ok(()) => self.handle_retire(meerkat_id).await,
                         Err(error) => Err(error),
@@ -594,9 +613,8 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::RetireAll { reply_tx } => {
-                    let result = match self.expect_state(
+                    let result = match self.require_state(
                         &[MobState::Running, MobState::Creating, MobState::Stopped],
-                        MobState::Running,
                     ) {
                         Ok(()) => self.retire_all_members("retire_all").await,
                         Err(error) => Err(error),
@@ -605,7 +623,7 @@ impl MobActor {
                 }
                 MobCommand::Wire { a, b, reply_tx } => {
                     let result = match self
-                        .expect_state(&[MobState::Running, MobState::Creating], MobState::Running)
+                        .require_state(&[MobState::Running, MobState::Creating])
                     {
                         Ok(()) => self.handle_wire(a, b).await,
                         Err(error) => Err(error),
@@ -614,7 +632,7 @@ impl MobActor {
                 }
                 MobCommand::Unwire { a, b, reply_tx } => {
                     let result = match self
-                        .expect_state(&[MobState::Running, MobState::Creating], MobState::Running)
+                        .require_state(&[MobState::Running, MobState::Creating])
                     {
                         Ok(()) => self.handle_unwire(a, b).await,
                         Err(error) => Err(error),
@@ -627,7 +645,7 @@ impl MobActor {
                     reply_tx,
                 } => {
                     let result = match self
-                        .expect_state(&[MobState::Running, MobState::Creating], MobState::Running)
+                        .require_state(&[MobState::Running, MobState::Creating])
                     {
                         Ok(()) => self.handle_external_turn(meerkat_id, message).await,
                         Err(error) => Err(error),
@@ -640,7 +658,7 @@ impl MobActor {
                     reply_tx,
                 } => {
                     let result = match self
-                        .expect_state(&[MobState::Running, MobState::Creating], MobState::Running)
+                        .require_state(&[MobState::Running, MobState::Creating])
                     {
                         Ok(()) => self.handle_internal_turn(meerkat_id, message).await,
                         Err(error) => Err(error),
@@ -653,7 +671,7 @@ impl MobActor {
                     scoped_event_tx,
                     reply_tx,
                 } => {
-                    let result = match self.expect_state(&[MobState::Running], MobState::Running) {
+                    let result = match self.require_state(&[MobState::Running]) {
                         Ok(()) => {
                             self.handle_run_flow(flow_id, activation_params, scoped_event_tx)
                                 .await
@@ -663,7 +681,7 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::CancelFlow { run_id, reply_tx } => {
-                    let result = match self.expect_state(&[MobState::Running], MobState::Running) {
+                    let result = match self.require_state(&[MobState::Running]) {
                         Ok(()) => self.handle_cancel_flow(run_id).await,
                         Err(error) => Err(error),
                     };
@@ -801,7 +819,7 @@ impl MobActor {
                     reply_tx,
                 } => {
                     let result = match self
-                        .expect_state(&[MobState::Running, MobState::Creating], MobState::Running)
+                        .require_state(&[MobState::Running, MobState::Creating])
                     {
                         Ok(()) => {
                             self.handle_task_create(subject, description, blocked_by)
@@ -818,7 +836,7 @@ impl MobActor {
                     reply_tx,
                 } => {
                     let result = match self
-                        .expect_state(&[MobState::Running, MobState::Creating], MobState::Running)
+                        .require_state(&[MobState::Running, MobState::Creating])
                     {
                         Ok(()) => self.handle_task_update(task_id, status, owner).await,
                         Err(error) => Err(error),
@@ -1081,7 +1099,7 @@ impl MobActor {
                 let reply = match result {
                     Ok(member_ref) => {
                         if let Err(error) = actor
-                            .expect_state(&[MobState::Running, MobState::Creating], MobState::Running)
+                            .require_state(&[MobState::Running, MobState::Creating])
                         {
                             if let Err(retire_error) = actor.provisioner.retire_member(&member_ref).await
                             {
@@ -1267,9 +1285,8 @@ impl MobActor {
 
     /// P1-T05: retire() removes a meerkat.
     ///
-    /// Mark-then-best-effort-cleanup: event first, mark Retiring, cleanup
-    /// (best-effort), then unconditional roster removal. Cleanup failures are
-    /// logged as warnings but never block roster convergence.
+    /// Mark-then-best-effort-cleanup: event first, mark Retiring, disposal
+    /// pipeline (policy-driven), then unconditional roster removal.
     async fn handle_retire(&self, meerkat_id: MeerkatId) -> Result<(), MobError> {
         self.handle_retire_inner(meerkat_id, false).await
     }
@@ -1308,134 +1325,198 @@ impl MobActor {
             roster.mark_retiring(&meerkat_id);
         }
 
-        // Best-effort cleanup (all steps log+skip on error).
-        self.cleanup_retiring_member(&meerkat_id, &entry, bulk)
-            .await;
+        // Snapshot context and run disposal pipeline.
+        let ctx = self.disposal_context_from_entry(&meerkat_id, &entry).await;
+        let mut policy: Box<dyn ErrorPolicy> = if bulk {
+            Box::new(BulkBestEffort)
+        } else {
+            Box::new(WarnAndContinue)
+        };
+        self.dispose_member(&ctx, policy.as_mut()).await;
 
         Ok(())
     }
 
-    /// Best-effort cleanup for a retiring member. Logs warnings on individual
-    /// step failures but always removes the member from the roster at the end.
-    ///
-    /// When `bulk` is true (called from `retire_all_members`), peer cleanup
-    /// warnings are logged at debug level since concurrent retires make
-    /// absent-peer and notification failures expected, not actionable.
-    async fn cleanup_retiring_member(
+    // -----------------------------------------------------------------------
+    // Disposal pipeline
+    // -----------------------------------------------------------------------
+
+    /// Snapshot member state for disposal from a roster entry.
+    async fn disposal_context_from_entry(
         &self,
         meerkat_id: &MeerkatId,
         entry: &RosterEntry,
-        bulk: bool,
-    ) {
-        // Stop host loop (best-effort).
-        if entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost
-            && let Err(error) = self
-                .stop_autonomous_host_loop_for_member(meerkat_id, &entry.member_ref)
-                .await
-        {
-            tracing::warn!(
-                mob_id = %self.definition.id,
-                meerkat_id = %meerkat_id,
-                error = %error,
-                "retire: failed to stop host loop (continuing)"
-            );
+    ) -> DisposalContext {
+        let retiring_comms = self.provisioner_comms(&entry.member_ref).await;
+        let retiring_key = retiring_comms.as_ref().and_then(|comms| comms.public_key());
+        DisposalContext {
+            meerkat_id: meerkat_id.clone(),
+            entry: entry.clone(),
+            retiring_comms,
+            retiring_key,
         }
+    }
 
-        // Peer cleanup (best-effort per peer).
-        if !entry.wired_to.is_empty() {
-            let retiring_comms = self.provisioner_comms(&entry.member_ref).await;
-            let retiring_key = retiring_comms.as_ref().and_then(|comms| comms.public_key());
+    /// Execute the disposal pipeline for a member.
+    ///
+    /// Runs policy-driven steps in order, then unconditionally removes the
+    /// member from the roster and prunes wire edge locks. The finally block
+    /// runs regardless of whether the policy aborted.
+    async fn dispose_member(
+        &self,
+        ctx: &DisposalContext,
+        policy: &mut dyn ErrorPolicy,
+    ) -> DisposalReport {
+        let mut report = DisposalReport::new();
 
-            for peer_id in &entry.wired_to {
-                // Skip absent peers (already retired).
-                let peer_entry = {
-                    let roster = self.roster.read().await;
-                    roster.get(peer_id).cloned()
-                };
-                let Some(peer_entry) = peer_entry else {
-                    tracing::debug!(
-                        mob_id = %self.definition.id,
-                        meerkat_id = %meerkat_id,
-                        peer_id = %peer_id,
-                        "retire: skipping absent peer"
-                    );
-                    continue;
-                };
-
-                // Notify peer about retirement (best-effort).
-                if let Some(retiring_comms) = &retiring_comms
-                    && let Err(error) = self
-                        .notify_peer_retired(peer_id, meerkat_id, entry, retiring_comms)
-                        .await
-                {
-                    if bulk {
-                        tracing::debug!(
-                            mob_id = %self.definition.id,
-                            meerkat_id = %meerkat_id,
-                            peer_id = %peer_id,
-                            error = %error,
-                            "retire(bulk): peer notification failed (expected during concurrent teardown)"
-                        );
+        for &step in &DisposalStep::ORDERED {
+            match self.execute_step(step, ctx).await {
+                Ok(()) => report.completed.push(step),
+                Err(error) => {
+                    if policy.on_step_error(step, &error, ctx) {
+                        report.skipped.push((step, error));
                     } else {
-                        tracing::warn!(
-                            mob_id = %self.definition.id,
-                            meerkat_id = %meerkat_id,
-                            peer_id = %peer_id,
-                            error = %error,
-                            "retire: failed to notify peer of retirement (continuing)"
-                        );
-                    }
-                }
-
-                // Remove trust (best-effort).
-                if let Some(retiring_key) = &retiring_key
-                    && let Some(peer_comms) =
-                        self.provisioner_comms(&peer_entry.member_ref).await
-                    && let Err(error) =
-                        peer_comms.remove_trusted_peer(retiring_key).await
-                {
-                    if bulk {
-                        tracing::debug!(
-                            mob_id = %self.definition.id,
-                            meerkat_id = %meerkat_id,
-                            peer_id = %peer_id,
-                            error = %error,
-                            "retire(bulk): trust removal failed (expected during concurrent teardown)"
-                        );
-                    } else {
-                        tracing::warn!(
-                            mob_id = %self.definition.id,
-                            meerkat_id = %meerkat_id,
-                            peer_id = %peer_id,
-                            error = %error,
-                            "retire: failed to remove trust from peer (continuing)"
-                        );
+                        report.aborted_at = Some((step, error));
+                        break;
                     }
                 }
             }
         }
 
-        // Archive session (best-effort).
-        if let Err(error) = self.provisioner.retire_member(&entry.member_ref).await
-            && !matches!(
+        // Finally: unconditional, outside policy control.
+        self.dispose_prune_wire_edge_locks(ctx).await;
+        self.dispose_remove_from_roster(ctx).await;
+        report.roster_removed = true;
+        report
+    }
+
+    /// Dispatch a disposal step. Exhaustive match ensures compiler forces new
+    /// arms when `DisposalStep` variants are added.
+    async fn execute_step(
+        &self,
+        step: DisposalStep,
+        ctx: &DisposalContext,
+    ) -> Result<(), MobError> {
+        match step {
+            DisposalStep::StopHostLoop => self.dispose_stop_host_loop(ctx).await,
+            DisposalStep::NotifyPeers => self.dispose_notify_peers(ctx).await,
+            DisposalStep::RemoveTrustEdges => self.dispose_remove_trust_edges(ctx).await,
+            DisposalStep::ArchiveSession => self.dispose_archive_session(ctx).await,
+        }
+    }
+
+    /// Stop the autonomous host loop if the member is in AutonomousHost mode.
+    async fn dispose_stop_host_loop(&self, ctx: &DisposalContext) -> Result<(), MobError> {
+        if ctx.entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost {
+            self.stop_autonomous_host_loop_for_member(&ctx.meerkat_id, &ctx.entry.member_ref)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Notify all wired peers that this member is retiring.
+    ///
+    /// Iterates the full `wired_to` set internally; skips absent peers.
+    /// Returns the first error encountered, if any.
+    async fn dispose_notify_peers(&self, ctx: &DisposalContext) -> Result<(), MobError> {
+        let Some(retiring_comms) = &ctx.retiring_comms else {
+            return Ok(());
+        };
+        let mut first_error: Option<MobError> = None;
+        for peer_id in &ctx.entry.wired_to {
+            // Skip absent peers (already retired).
+            let peer_present = {
+                let roster = self.roster.read().await;
+                roster.get(peer_id).is_some()
+            };
+            if !peer_present {
+                tracing::debug!(
+                    mob_id = %self.definition.id,
+                    meerkat_id = %ctx.meerkat_id,
+                    peer_id = %peer_id,
+                    "dispose_notify_peers: skipping absent peer"
+                );
+                continue;
+            }
+
+            if let Err(error) = self
+                .notify_peer_retired(peer_id, &ctx.meerkat_id, &ctx.entry, retiring_comms)
+                .await
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// Remove the retiring member's trust edges from all wired peers.
+    ///
+    /// Iterates the full `wired_to` set; skips absent peers and peers
+    /// missing comms.
+    async fn dispose_remove_trust_edges(&self, ctx: &DisposalContext) -> Result<(), MobError> {
+        let Some(retiring_key) = &ctx.retiring_key else {
+            return Ok(());
+        };
+        let mut first_error: Option<MobError> = None;
+        for peer_id in &ctx.entry.wired_to {
+            let peer_member_ref = {
+                let roster = self.roster.read().await;
+                roster.get(peer_id).map(|e| e.member_ref.clone())
+            };
+            let Some(peer_member_ref) = peer_member_ref else {
+                tracing::debug!(
+                    mob_id = %self.definition.id,
+                    meerkat_id = %ctx.meerkat_id,
+                    peer_id = %peer_id,
+                    "dispose_remove_trust_edges: skipping absent peer"
+                );
+                continue;
+            };
+            let Some(peer_comms) = self.provisioner_comms(&peer_member_ref).await else {
+                continue;
+            };
+            if let Err(error) = peer_comms.remove_trusted_peer(retiring_key).await
+                && first_error.is_none()
+            {
+                first_error = Some(error.into());
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// Archive the member's session. Treats NotFound as success.
+    pub(super) async fn dispose_archive_session(
+        &self,
+        ctx: &DisposalContext,
+    ) -> Result<(), MobError> {
+        if let Err(error) = self.provisioner.retire_member(&ctx.entry.member_ref).await {
+            if matches!(
                 error,
                 MobError::SessionError(meerkat_core::service::SessionError::NotFound { .. })
-            )
-        {
-            tracing::warn!(
-                mob_id = %self.definition.id,
-                meerkat_id = %meerkat_id,
-                error = %error,
-                "retire: session archive failed (continuing)"
-            );
+            ) {
+                return Ok(());
+            }
+            return Err(error);
         }
+        Ok(())
+    }
 
-        // Unconditional roster removal.
-        {
-            let mut roster = self.roster.write().await;
-            roster.remove(meerkat_id);
-        }
-        self.prune_wire_edge_locks_for_member(meerkat_id).await;
+    /// Prune wire edge locks for the member. Infallible.
+    async fn dispose_prune_wire_edge_locks(&self, ctx: &DisposalContext) {
+        self.prune_wire_edge_locks_for_member(&ctx.meerkat_id).await;
+    }
+
+    /// Remove the member from the roster. Infallible.
+    pub(super) async fn dispose_remove_from_roster(&self, ctx: &DisposalContext) {
+        let mut roster = self.roster.write().await;
+        roster.remove(&ctx.meerkat_id);
     }
 
     /// P1-T06: wire() establishes bidirectional trust.
@@ -2239,19 +2320,25 @@ impl MobActor {
             }
         }
 
-        if let Err(error) = self.provisioner.retire_member(member_ref).await
-            && !matches!(
-                error,
-                MobError::SessionError(meerkat_core::service::SessionError::NotFound { .. })
-            )
-        {
+        // Reuse disposal pipeline methods for session archive + roster removal.
+        let rollback_ctx = DisposalContext {
+            meerkat_id: meerkat_id.clone(),
+            entry: spawned_entry.clone().unwrap_or_else(|| RosterEntry {
+                meerkat_id: meerkat_id.clone(),
+                profile: profile_name.clone(),
+                member_ref: member_ref.clone(),
+                runtime_mode: crate::MobRuntimeMode::TurnDriven,
+                state: crate::roster::MemberState::Active,
+                wired_to: std::collections::BTreeSet::new(),
+            }),
+            retiring_comms: spawned_comms.clone(),
+            retiring_key: spawned_comms.as_ref().and_then(|c| c.public_key()),
+        };
+        if let Err(error) = self.dispose_archive_session(&rollback_ctx).await {
             return Err(rollback.fail(error).await);
         }
 
-        {
-            let mut roster = self.roster.write().await;
-            roster.remove(meerkat_id);
-        }
+        self.dispose_remove_from_roster(&rollback_ctx).await;
 
         Ok(())
     }

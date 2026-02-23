@@ -384,6 +384,8 @@ impl MeerkatMcpState {
             factory = factory.user_config_root(user_root);
         }
 
+        let skill_runtime = factory.build_skill_runtime(&config).await;
+
         let builder = FactoryAgentBuilder::new_with_config_store(factory, config, config_store);
         let service = PersistentSessionService::new(builder, 100, session_store);
 
@@ -394,7 +396,7 @@ impl MeerkatMcpState {
             instance_id: bootstrap.realm.instance_id,
             expose_paths,
             config_runtime,
-            skill_runtime: None,
+            skill_runtime,
             _realm_lease: Some(lease),
         })
     }

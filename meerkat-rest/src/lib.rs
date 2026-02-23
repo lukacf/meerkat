@@ -209,6 +209,8 @@ impl AppState {
             factory = factory.user_config_root(user_root);
         }
 
+        let skill_runtime = factory.build_skill_runtime(&config).await;
+
         let builder =
             FactoryAgentBuilder::new_with_config_store(factory, config, Arc::clone(&config_store));
         let session_service = Arc::new(PersistentSessionService::new(builder, 100, session_store));
@@ -234,7 +236,7 @@ impl AppState {
             expose_paths,
             config_runtime,
             realm_lease: Arc::new(tokio::sync::Mutex::new(Some(lease))),
-            skill_runtime: None,
+            skill_runtime,
         })
     }
 }

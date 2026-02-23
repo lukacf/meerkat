@@ -3207,11 +3207,12 @@ async fn handle_skills_command(
 ) -> anyhow::Result<()> {
     use meerkat_core::skills::{SkillFilter, SkillId};
 
-    // Build the skill runtime from config
-    let config = meerkat_core::Config::load().await.unwrap_or_default();
+    // Load config from the active realm (not global defaults)
+    let (config, realm_root) = load_config(scope).await?;
 
     let factory = {
-        let mut f = meerkat::AgentFactory::new(scope.locator.state_root.join("sessions"));
+        let mut f = meerkat::AgentFactory::new(realm_root.clone())
+            .runtime_root(realm_root);
         if let Some(ref root) = scope.context_root {
             f = f.context_root(root.clone());
         }
@@ -3221,10 +3222,7 @@ async fn handle_skills_command(
         f
     };
 
-    #[cfg(feature = "skills")]
     let skill_runtime = factory.build_skill_runtime(&config).await;
-    #[cfg(not(feature = "skills"))]
-    let skill_runtime: Option<std::sync::Arc<meerkat_core::skills::SkillRuntime>> = None;
 
     let skill_runtime = match skill_runtime {
         Some(rt) => rt,

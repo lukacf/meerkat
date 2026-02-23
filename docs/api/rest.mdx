@@ -59,6 +59,8 @@ If `--realm` is omitted, the server creates a new isolated opaque realm (`realm-
 | `GET` | `/sessions/{id}/events` | SSE stream for real-time updates |
 | `POST` | `/comms/send` | Push comms message into a session (comms feature) |
 | `GET` | `/comms/peers` | List discoverable peers (comms feature) |
+| `GET` | `/skills` | List skills with provenance |
+| `GET` | `/skills/{id}` | Inspect a skill's full content |
 | `GET` | `/health` | Liveness check |
 | `GET` | `/capabilities` | Runtime capabilities |
 | `GET` | `/config` | Read config |
@@ -504,6 +506,53 @@ Event types:
 | `skills_resolved` | Skills loaded for turn |
 | `skill_resolution_failed` | Skill resolution failed |
 | `done` | Emitted when the broadcast channel closes |
+
+### GET /skills
+
+List all skills with provenance information. Returns active and shadowed entries.
+
+```json Response
+{
+  "skills": [
+    {
+      "id": "task-workflow",
+      "name": "Task Workflow",
+      "description": "How to use task tools",
+      "scope": "builtin",
+      "source": "embedded",
+      "is_active": true
+    },
+    {
+      "id": "task-workflow",
+      "name": "Custom Task Workflow",
+      "description": "Override tasks",
+      "scope": "project",
+      "source": "company",
+      "is_active": false,
+      "shadowed_by": "embedded"
+    }
+  ]
+}
+```
+
+Returns `404` if skills are not enabled.
+
+### GET /skills/\{id\}
+
+Inspect a skill's full content by its ID.
+
+```json Response
+{
+  "id": "task-workflow",
+  "name": "Task Workflow",
+  "description": "How to use task tools",
+  "scope": "builtin",
+  "source": "embedded",
+  "body": "# Task Workflow\n\nUse task_create to..."
+}
+```
+
+Returns `404` if the skill is not found or skills are not enabled.
 
 ### GET /health
 

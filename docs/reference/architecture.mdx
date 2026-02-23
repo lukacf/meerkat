@@ -264,13 +264,14 @@ Canonical wire types and capability model shared across all surfaces:
 </Accordion>
 
 <Accordion title="meerkat-skills">
-Skill loading, resolution, and rendering:
+Skill loading, resolution, rendering, and introspection:
 
 - **DefaultSkillEngine**: resolves and renders skills from multiple sources
 - **Sources**: `FilesystemSkillSource`, `EmbeddedSkillSource`, `InMemorySkillSource`, `CompositeSkillSource`
 - **Frontmatter parsing**: YAML metadata with capability gating
 - **Rendering**: inventory section for system prompt, injection block for per-turn context
 - **Discovery tools**: `browse_skills` and `load_skill` (when builtins enabled)
+- **Introspection**: `list_all_with_provenance()` returns active + shadowed skills; `load_from_source()` bypasses first-wins resolution
 
 Feature-gated behind `skills`.
 </Accordion>

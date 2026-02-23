@@ -354,6 +354,9 @@ where
         Option<tokio::sync::mpsc::Sender<crate::event::ScopedAgentEvent>>,
     /// Base scope path for nested scoped event forwarding.
     pub(crate) default_scope_path: Vec<crate::event::StreamScopeFrame>,
+    /// Comms intents that should be silently injected into the session
+    /// without triggering an LLM turn. Matched against `InteractionContent::Request.intent`.
+    pub(crate) silent_comms_intents: Vec<String>,
     /// When true, the host loop owns the inbox drain cycle.
     /// `drain_comms_inbox()` becomes a no-op to avoid stealing
     /// interaction-scoped messages through the legacy path.

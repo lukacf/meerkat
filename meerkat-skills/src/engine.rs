@@ -5,8 +5,8 @@ use std::future::Future;
 
 use meerkat_core::skills::{
     ResolvedSkill, SkillArtifact, SkillArtifactContent, SkillCollection, SkillDescriptor,
-    SkillEngine, SkillError, SkillFilter, SkillId, SkillQuarantineDiagnostic, SkillSource,
-    SourceHealthSnapshot,
+    SkillDocument, SkillEngine, SkillError, SkillFilter, SkillId, SkillIntrospectionEntry,
+    SkillQuarantineDiagnostic, SkillSource, SourceHealthSnapshot,
 };
 
 use crate::renderer;
@@ -176,6 +176,41 @@ where
         async move {
             self.source
                 .invoke_function(id, function_name, arguments)
+                .await
+        }
+    }
+
+    fn list_all_with_provenance(
+        &self,
+        filter: &SkillFilter,
+    ) -> impl Future<Output = Result<Vec<SkillIntrospectionEntry>, SkillError>> + Send {
+        async move {
+            let entries = self.source.list_all_with_provenance(filter).await?;
+            // Apply capability filtering: only active entries with available capabilities
+            Ok(entries
+                .into_iter()
+                .filter(|e| {
+                    // Shadowed entries pass through without capability filtering
+                    // (they're inactive anyway).
+                    !e.is_active
+                        || e.descriptor
+                            .requires_capabilities
+                            .iter()
+                            .all(|cap| self.available_capabilities.contains(cap))
+                })
+                .collect())
+        }
+    }
+
+    fn load_from_source(
+        &self,
+        id: &SkillId,
+        source_name: Option<&str>,
+    ) -> impl Future<Output = Result<SkillDocument, SkillError>> + Send {
+        let source_name = source_name.map(ToString::to_string);
+        async move {
+            self.source
+                .load_from_source(id, source_name.as_deref())
                 .await
         }
     }

@@ -8,6 +8,14 @@ use meerkat_contracts::{
 use meerkat_core::{AgentEvent, Config};
 use tokio::sync::mpsc;
 
+#[cfg(feature = "skills")]
+use meerkat_core::skills::{
+    SkillDocument, SkillError, SkillFilter, SkillId, SkillIntrospectionEntry,
+    SkillRuntime,
+};
+#[cfg(feature = "skills")]
+use std::sync::Arc;
+
 /// Build a [`CapabilitiesResponse`] with status resolved against config.
 ///
 /// For each registered capability, calls its `status_resolver` (if provided)
@@ -56,6 +64,31 @@ pub fn resolve_host_mode(requested: bool) -> Result<bool, String> {
         }
         Ok(false)
     }
+}
+
+/// List all skills with provenance and shadow information.
+#[cfg(feature = "skills")]
+///
+/// Returns `None` if the skill runtime is not available.
+pub async fn list_skills_introspection(
+    skill_runtime: &Option<Arc<SkillRuntime>>,
+    filter: &SkillFilter,
+) -> Option<Result<Vec<SkillIntrospectionEntry>, SkillError>> {
+    let runtime = skill_runtime.as_ref()?;
+    Some(runtime.list_all_with_provenance(filter).await)
+}
+
+/// Load and inspect a skill by ID, optionally from a specific source.
+#[cfg(feature = "skills")]
+///
+/// Returns `None` if the skill runtime is not available.
+pub async fn inspect_skill(
+    skill_runtime: &Option<Arc<SkillRuntime>>,
+    id: &SkillId,
+    source_name: Option<&str>,
+) -> Option<Result<SkillDocument, SkillError>> {
+    let runtime = skill_runtime.as_ref()?;
+    Some(runtime.load_from_source(id, source_name).await)
 }
 
 /// Spawn a task that forwards agent events from a channel to a callback.

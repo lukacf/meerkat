@@ -192,6 +192,16 @@ where
                         continue;
                     }
 
+                    // Silent intent check: matching requests are injected like
+                    // responses instead of being processed through the LLM.
+                    if let InteractionContent::Request { ref intent, .. } = interaction.content
+                        && self.silent_comms_intents.iter().any(|s| s == intent)
+                    {
+                        inject_response_into_session(&mut self.session, &interaction);
+                        had_response_injections = true;
+                        continue;
+                    }
+
                     let subscriber = comms.interaction_subscriber(&interaction.id);
 
                     if event_tx.is_some() && subscriber.is_some() {
@@ -1080,6 +1090,80 @@ mod tests {
             "expected InteractionFailed on subscriber channel"
         );
         assert!(err.to_string().contains("forced failure"));
+    }
+
+    #[tokio::test]
+    async fn test_silent_intent_injected_not_run() {
+        let interaction = make_interaction(
+            InteractionContent::Request {
+                intent: "mob.peer_added".into(),
+                params: serde_json::json!({"peer": "worker-1"}),
+            },
+            "[mob.peer_added] worker-1 joined",
+        );
+
+        let comms = Arc::new(SyncInteractionMockCommsRuntime::with_interactions(vec![
+            interaction,
+        ]));
+
+        let mut agent = AgentBuilder::new()
+            .with_comms_runtime(comms.clone() as Arc<dyn CommsRuntime>)
+            .with_silent_comms_intents(vec!["mob.peer_added".into()])
+            .build(
+                Arc::new(MockLlmClient),
+                Arc::new(MockToolDispatcher),
+                Arc::new(MockSessionStore),
+            )
+            .await;
+
+        let result = agent.run_host_mode(String::new()).await.unwrap();
+
+        // Silent intent should have been injected into session as a user message
+        let user_msgs: Vec<_> = agent
+            .session
+            .messages()
+            .iter()
+            .filter(|m| matches!(m, Message::User(_)))
+            .collect();
+        assert_eq!(user_msgs.len(), 1);
+        match &user_msgs[0] {
+            Message::User(u) => assert!(u.content.contains("mob.peer_added")),
+            _ => unreachable!(),
+        }
+
+        // Result should be the empty initial (no LLM turn for silent intent)
+        assert_eq!(result.turns, 0);
+    }
+
+    #[tokio::test]
+    async fn test_non_silent_intent_processed_normally() {
+        let interaction = make_interaction(
+            InteractionContent::Request {
+                intent: "review.code".into(),
+                params: serde_json::json!({}),
+            },
+            "Please review this code",
+        );
+
+        let comms = Arc::new(SyncInteractionMockCommsRuntime::with_interactions(vec![
+            interaction,
+        ]));
+
+        let mut agent = AgentBuilder::new()
+            .with_comms_runtime(comms as Arc<dyn CommsRuntime>)
+            .with_silent_comms_intents(vec!["mob.peer_added".into()])
+            .build(
+                Arc::new(MockLlmClient),
+                Arc::new(MockToolDispatcher),
+                Arc::new(MockSessionStore),
+            )
+            .await;
+
+        let result = agent.run_host_mode(String::new()).await.unwrap();
+
+        // Non-silent intent should be processed through LLM
+        assert!(result.turns > 0);
+        assert_eq!(result.text, "Done");
     }
 
     #[tokio::test]

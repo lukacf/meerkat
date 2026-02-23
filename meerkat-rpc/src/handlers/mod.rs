@@ -12,6 +12,7 @@ pub mod config;
 pub mod event;
 pub mod initialize;
 pub mod session;
+pub mod skills;
 pub mod turn;
 
 use serde_json::value::RawValue;

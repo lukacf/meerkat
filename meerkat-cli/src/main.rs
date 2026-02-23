@@ -453,6 +453,12 @@ enum Commands {
         command: MobCommands,
     },
 
+    /// Skill introspection
+    Skills {
+        #[command(subcommand)]
+        command: SkillsCommands,
+    },
+
     /// Config management
     Config {
         #[command(subcommand)]
@@ -612,6 +618,27 @@ enum CliTransport {
     Http,
     /// Server-Sent Events (legacy)
     Sse,
+}
+
+#[derive(Subcommand)]
+enum SkillsCommands {
+    /// List available skills with provenance information
+    List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect a skill's full content
+    Inspect {
+        /// Skill ID (e.g. "extraction/email")
+        id: String,
+        /// Load from a specific source (bypasses first-wins resolution)
+        #[arg(long)]
+        source: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -953,6 +980,7 @@ async fn main() -> anyhow::Result<ExitCode> {
         },
         Commands::Realms { command } => handle_realm_command(command, &cli_scope).await,
         Commands::Mcp { command } => handle_mcp_command(command).await,
+        Commands::Skills { command } => handle_skills_command(command, &cli_scope).await,
         Commands::Mob { command } => handle_mob_command(command, &cli_scope).await,
         Commands::Config { command } => match command {
             ConfigCommands::Get {
@@ -2256,6 +2284,7 @@ async fn run_agent(
         backend: Some(manifest.backend.as_str().to_string()),
         config_generation: None,
         checkpointer: None,
+        silent_comms_intents: Vec::new(),
     };
 
     // Route through SessionService::create_session()
@@ -2630,6 +2659,7 @@ async fn resume_session_with_llm_override(
             .or_else(|| Some(manifest.backend.as_str().to_string())),
         config_generation: stored_metadata.as_ref().and_then(|m| m.config_generation),
         checkpointer: None,
+        silent_comms_intents: Vec::new(),
     };
 
     // Route through SessionService::create_session() with the resumed session
@@ -3168,6 +3198,120 @@ async fn find_session_matches(
             .then_with(|| a.realm_id.cmp(&b.realm_id))
     });
     Ok(matches)
+}
+
+/// Handle Skills subcommands
+async fn handle_skills_command(
+    command: SkillsCommands,
+    scope: &RuntimeScope,
+) -> anyhow::Result<()> {
+    use meerkat_core::skills::{SkillFilter, SkillId};
+
+    // Build the skill runtime from config
+    let config = meerkat_core::Config::load().await.unwrap_or_default();
+
+    let factory = {
+        let mut f = meerkat::AgentFactory::new(scope.locator.state_root.join("sessions"));
+        if let Some(ref root) = scope.context_root {
+            f = f.context_root(root.clone());
+        }
+        if let Some(ref root) = scope.user_config_root {
+            f = f.user_config_root(root.clone());
+        }
+        f
+    };
+
+    #[cfg(feature = "skills")]
+    let skill_runtime = factory.build_skill_runtime(&config).await;
+    #[cfg(not(feature = "skills"))]
+    let skill_runtime: Option<std::sync::Arc<meerkat_core::skills::SkillRuntime>> = None;
+
+    let skill_runtime = match skill_runtime {
+        Some(rt) => rt,
+        None => {
+            eprintln!("Skills are not enabled. Check your config.");
+            return Ok(());
+        }
+    };
+
+    match command {
+        SkillsCommands::List { json } => {
+            let entries = skill_runtime
+                .list_all_with_provenance(&SkillFilter::default())
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to list skills: {e}"))?;
+
+            if json {
+                let wire: Vec<meerkat_contracts::SkillEntry> = entries
+                    .iter()
+                    .map(|e| meerkat_contracts::SkillEntry {
+                        id: e.descriptor.id.0.clone(),
+                        name: e.descriptor.name.clone(),
+                        description: e.descriptor.description.clone(),
+                        scope: e.descriptor.scope.to_string(),
+                        source: e.descriptor.source_name.clone(),
+                        is_active: e.is_active,
+                        shadowed_by: e.shadowed_by.clone(),
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&wire)?);
+            } else {
+                // Fixed-width table: ID, SOURCE, SCOPE, STATUS
+                println!(
+                    "{:<40} {:<15} {:<10} STATUS",
+                    "ID", "SOURCE", "SCOPE"
+                );
+                println!("{}", "-".repeat(80));
+                for entry in &entries {
+                    let status = if entry.is_active {
+                        "active".to_string()
+                    } else {
+                        format!(
+                            "shadowed by {}",
+                            entry.shadowed_by.as_deref().unwrap_or("?")
+                        )
+                    };
+                    println!(
+                        "{:<40} {:<15} {:<10} {}",
+                        entry.descriptor.id.0,
+                        entry.descriptor.source_name,
+                        entry.descriptor.scope,
+                        status,
+                    );
+                }
+                println!("\n{} skill(s) total", entries.len());
+            }
+        }
+        SkillsCommands::Inspect { id, source, json } => {
+            let doc = skill_runtime
+                .load_from_source(&SkillId::from(id.as_str()), source.as_deref())
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to inspect skill: {e}"))?;
+
+            if json {
+                let wire = meerkat_contracts::SkillInspectResponse {
+                    id: doc.descriptor.id.0.clone(),
+                    name: doc.descriptor.name.clone(),
+                    description: doc.descriptor.description.clone(),
+                    scope: doc.descriptor.scope.to_string(),
+                    source: doc.descriptor.source_name.clone(),
+                    body: doc.body,
+                };
+                println!("{}", serde_json::to_string_pretty(&wire)?);
+            } else {
+                println!("ID:          {}", doc.descriptor.id);
+                println!("Name:        {}", doc.descriptor.name);
+                println!("Description: {}", doc.descriptor.description);
+                println!("Scope:       {}", doc.descriptor.scope);
+                if !doc.descriptor.source_name.is_empty() {
+                    println!("Source:      {}", doc.descriptor.source_name);
+                }
+                println!();
+                println!("{}", doc.body);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Handle MCP subcommands

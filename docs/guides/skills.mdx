@@ -266,6 +266,73 @@ Pass `preload_skills` to inject skills into the system prompt at session creatio
 
 See the [Python SDK](/sdks/python/reference#skills-parameters) and [TypeScript SDK](/sdks/typescript/reference#skills-parameters) for SDK wrappers.
 
+## Skill introspection
+
+Skill introspection lets you see all skills — including shadowed ones — with their provenance information. This is useful for debugging skill resolution, understanding which source provides which skills, and inspecting shadowed skills before overriding them.
+
+### Surfaces
+
+| Surface | Method | Description |
+|---------|--------|-------------|
+| CLI | `rkat skills list [--json]` | List all skills with provenance |
+| CLI | `rkat skills inspect <id> [--source <name>] [--json]` | Inspect a skill's full body |
+| RPC | `skills/list` | List skills with provenance |
+| RPC | `skills/inspect` | Inspect a skill by ID |
+| REST | `GET /skills` | List skills |
+| REST | `GET /skills/{id}` | Inspect a skill |
+| MCP | `meerkat_skills` tool (`action: "list"` / `"inspect"`) | List or inspect |
+| Rust SDK | `SkillRuntime::list_all_with_provenance()` | Programmatic access |
+| Rust SDK | `SkillRuntime::load_from_source()` | Load from specific source |
+
+### Shadowing
+
+When multiple sources provide a skill with the same ID, the first source wins (project > user > git > http > embedded). Introspection shows both the active skill and the shadowed entries:
+
+```json
+[
+  {
+    "id": "task-workflow",
+    "name": "Task Workflow",
+    "scope": "builtin",
+    "source": "embedded",
+    "is_active": true
+  },
+  {
+    "id": "task-workflow",
+    "name": "Custom Task Workflow",
+    "scope": "project",
+    "source": "company",
+    "is_active": false,
+    "shadowed_by": "embedded"
+  }
+]
+```
+
+Use `--source <name>` (CLI) or the `source` parameter (RPC/SDK) to load the body of a shadowed skill directly, bypassing first-wins resolution.
+
+### Rust SDK
+
+```rust
+use meerkat::{AgentFactory, SkillRuntime, SkillFilter};
+use meerkat_core::Config;
+
+let config = Config::load().await?;
+let factory = AgentFactory::new(store_path);
+
+// Build a SkillRuntime (requires "skills" feature)
+if let Some(runtime) = factory.build_skill_runtime(&config).await {
+    // List all skills with provenance
+    let entries = runtime.list_all_with_provenance(&SkillFilter::default()).await?;
+    for entry in &entries {
+        println!("{}: active={}, source={}", entry.descriptor.id, entry.is_active, entry.descriptor.source_name);
+    }
+
+    // Load a specific skill's body (bypassing first-wins)
+    let doc = runtime.load_from_source(&"task-workflow".into(), Some("company")).await?;
+    println!("{}", doc.body);
+}
+```
+
 ## Configuration
 
 Skills are configured via `SkillsConfig` (realm-scoped at runtime, with optional user/project layering when those files are present):

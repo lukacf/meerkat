@@ -3,7 +3,8 @@
 use crate::source::SourceNode;
 use meerkat_core::skills::{
     SkillArtifact, SkillArtifactContent, SkillDescriptor, SkillDocument, SkillError, SkillFilter,
-    SkillId, SkillQuarantineDiagnostic, SkillSource, SourceHealthSnapshot, SourceHealthState,
+    SkillId, SkillIntrospectionEntry, SkillQuarantineDiagnostic, SkillSource,
+    SourceHealthSnapshot, SourceHealthState,
 };
 use std::collections::HashMap;
 
@@ -166,6 +167,61 @@ impl SkillSource for CompositeSkillSource {
         }
         Err(SkillError::NotFound { id: id.clone() })
     }
+
+    async fn list_all_with_provenance(
+        &self,
+        filter: &SkillFilter,
+    ) -> Result<Vec<SkillIntrospectionEntry>, SkillError> {
+        // Track which source won each skill ID.
+        let mut first_source: HashMap<SkillId, String> = HashMap::new();
+        let mut result = Vec::new();
+
+        for named in &self.sources {
+            let descriptors = named.source.list(filter).await?;
+            for mut desc in descriptors {
+                if let Some(winning_source) = first_source.get(&desc.id) {
+                    // This skill is shadowed by a higher-precedence source.
+                    desc.source_name.clone_from(&named.name);
+                    result.push(SkillIntrospectionEntry {
+                        descriptor: desc,
+                        shadowed_by: Some(winning_source.clone()),
+                        is_active: false,
+                    });
+                } else {
+                    desc.source_name.clone_from(&named.name);
+                    first_source.insert(desc.id.clone(), named.name.clone());
+                    result.push(SkillIntrospectionEntry {
+                        descriptor: desc,
+                        shadowed_by: None,
+                        is_active: true,
+                    });
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    async fn load_from_source(
+        &self,
+        id: &SkillId,
+        source_name: Option<&str>,
+    ) -> Result<SkillDocument, SkillError> {
+        match source_name {
+            Some(name) => {
+                // Load from a specific named source, bypassing first-wins.
+                for named in &self.sources {
+                    if named.name == name {
+                        return named.source.load(id).await;
+                    }
+                }
+                Err(SkillError::NotFound { id: id.clone() })
+            }
+            None => {
+                // Normal first-wins resolution.
+                self.load(id).await
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -262,6 +318,109 @@ mod tests {
 
         let skills = composite.list(&SkillFilter::default()).await.unwrap();
         assert_eq!(skills.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_list_all_with_provenance_returns_active_and_shadowed() {
+        let source_a = InMemorySkillSource::new(vec![make_skill("shared/skill", "skill-a")]);
+        let source_b = InMemorySkillSource::new(vec![make_skill("shared/skill", "skill-b")]);
+
+        let composite = CompositeSkillSource::from_named(vec![
+            NamedSource {
+                name: "project".into(),
+                source: SourceNode::Memory(source_a),
+            },
+            NamedSource {
+                name: "company".into(),
+                source: SourceNode::Memory(source_b),
+            },
+        ]);
+
+        let entries = composite
+            .list_all_with_provenance(&SkillFilter::default())
+            .await
+            .unwrap();
+        assert_eq!(entries.len(), 2);
+
+        let active = entries.iter().find(|e| e.is_active).unwrap();
+        assert_eq!(active.descriptor.source_name, "project");
+        assert!(active.shadowed_by.is_none());
+
+        let shadowed = entries.iter().find(|e| !e.is_active).unwrap();
+        assert_eq!(shadowed.descriptor.source_name, "company");
+        assert_eq!(shadowed.shadowed_by.as_deref(), Some("project"));
+    }
+
+    #[tokio::test]
+    async fn test_list_all_with_provenance_non_overlapping_all_active() {
+        let source_a = InMemorySkillSource::new(vec![make_skill("a/skill-1", "skill-1")]);
+        let source_b = InMemorySkillSource::new(vec![make_skill("b/skill-2", "skill-2")]);
+
+        let composite = CompositeSkillSource::from_named(vec![
+            NamedSource {
+                name: "project".into(),
+                source: SourceNode::Memory(source_a),
+            },
+            NamedSource {
+                name: "company".into(),
+                source: SourceNode::Memory(source_b),
+            },
+        ]);
+
+        let entries = composite
+            .list_all_with_provenance(&SkillFilter::default())
+            .await
+            .unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|e| e.is_active));
+        assert!(entries.iter().all(|e| e.shadowed_by.is_none()));
+    }
+
+    #[tokio::test]
+    async fn test_load_from_source_bypasses_first_wins() {
+        let source_a = InMemorySkillSource::new(vec![make_skill("shared/skill", "skill-a")]);
+        let source_b = InMemorySkillSource::new(vec![make_skill("shared/skill", "skill-b")]);
+
+        let composite = CompositeSkillSource::from_named(vec![
+            NamedSource {
+                name: "project".into(),
+                source: SourceNode::Memory(source_a),
+            },
+            NamedSource {
+                name: "company".into(),
+                source: SourceNode::Memory(source_b),
+            },
+        ]);
+
+        // Normal load returns project (first wins)
+        let normal = composite
+            .load(&SkillId("shared/skill".into()))
+            .await
+            .unwrap();
+        assert_eq!(normal.descriptor.name, "skill-a");
+
+        // load_from_source can access the shadowed company source
+        let from_company = composite
+            .load_from_source(&SkillId("shared/skill".into()), Some("company"))
+            .await
+            .unwrap();
+        assert_eq!(from_company.descriptor.name, "skill-b");
+    }
+
+    #[tokio::test]
+    async fn test_load_from_source_none_uses_normal_resolution() {
+        let source_a = InMemorySkillSource::new(vec![make_skill("a/skill", "skill-a")]);
+
+        let composite = CompositeSkillSource::from_named(vec![NamedSource {
+            name: "project".into(),
+            source: SourceNode::Memory(source_a),
+        }]);
+
+        let doc = composite
+            .load_from_source(&SkillId("a/skill".into()), None)
+            .await
+            .unwrap();
+        assert_eq!(doc.descriptor.name, "skill-a");
     }
 
     #[tokio::test]

@@ -128,6 +128,7 @@ pub struct MethodRouter {
     runtime: Arc<SessionRuntime>,
     config_store: Arc<dyn ConfigStore>,
     notification_sink: NotificationSink,
+    skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
     #[cfg(feature = "comms")]
     active_streams: Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
 }
@@ -143,9 +144,19 @@ impl MethodRouter {
             runtime,
             config_store,
             notification_sink,
+            skill_runtime: None,
             #[cfg(feature = "comms")]
             active_streams: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Set the skill runtime for introspection methods.
+    pub fn with_skill_runtime(
+        mut self,
+        runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
+    ) -> Self {
+        self.skill_runtime = runtime;
+        self
     }
 
     /// Dispatch a request to the appropriate handler.
@@ -196,6 +207,12 @@ impl MethodRouter {
             #[cfg(feature = "comms")]
             "comms/stream_close" => self.handle_comms_stream_close(id, params).await,
             // M12: event/push removed. Use comms/send instead.
+            "skills/list" => {
+                handlers::skills::handle_list(id, &self.skill_runtime).await
+            }
+            "skills/inspect" => {
+                handlers::skills::handle_inspect(id, params, &self.skill_runtime).await
+            }
             "capabilities/get" => {
                 let config = self.config_store.get().await.unwrap_or_default();
                 handlers::capabilities::handle_get(id, &config)

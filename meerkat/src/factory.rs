@@ -217,6 +217,9 @@ pub struct AgentBuildConfig {
     pub config_generation: Option<u64>,
     /// Optional session checkpointer for host-mode persistence.
     pub checkpointer: Option<Arc<dyn meerkat_core::checkpoint::SessionCheckpointer>>,
+    /// Comms intents that should be silently injected into the session
+    /// without triggering an LLM turn.
+    pub silent_comms_intents: Vec<String>,
 }
 
 impl std::fmt::Debug for AgentBuildConfig {
@@ -289,6 +292,7 @@ impl AgentBuildConfig {
             backend: None,
             config_generation: None,
             checkpointer: None,
+            silent_comms_intents: Vec::new(),
         }
     }
 
@@ -336,6 +340,7 @@ impl AgentBuildConfig {
         self.backend = build.backend.clone();
         self.config_generation = build.config_generation;
         self.checkpointer = build.checkpointer.clone();
+        self.silent_comms_intents.clone_from(&build.silent_comms_intents);
     }
 
     /// Convert build options to the service transport representation.
@@ -367,6 +372,7 @@ impl AgentBuildConfig {
             backend: self.backend.clone(),
             config_generation: self.config_generation,
             checkpointer: self.checkpointer.clone(),
+            silent_comms_intents: self.silent_comms_intents.clone(),
         }
     }
 }
@@ -541,6 +547,60 @@ impl AgentFactory {
     pub fn comms(mut self, enabled: bool) -> Self {
         self.enable_comms = enabled;
         self
+    }
+
+    /// Build a `SkillRuntime` from the factory's skill configuration.
+    ///
+    /// Returns `None` if skills are disabled or no source is available.
+    #[cfg(feature = "skills")]
+    pub async fn build_skill_runtime(
+        &self,
+        config: &Config,
+    ) -> Option<Arc<meerkat_core::skills::SkillRuntime>> {
+        let skill_source: Option<Arc<meerkat_skills::CompositeSkillSource>> =
+            if self.skill_source.is_some() {
+                self.skill_source.clone()
+            } else if !config.skills.enabled {
+                None
+            } else {
+                let conventions_context_root = self
+                    .context_root
+                    .as_deref()
+                    .or(self.project_root.as_deref());
+                let conventions_user_root = self.user_config_root.as_deref();
+                let runtime_root = self
+                    .runtime_root
+                    .clone()
+                    .or_else(|| self.project_root.clone())
+                    .unwrap_or_else(|| self.store_path.clone());
+                match meerkat_skills::resolve_repositories_with_roots(
+                    &config.skills,
+                    conventions_context_root,
+                    conventions_user_root,
+                    Some(runtime_root.as_path()),
+                )
+                .await
+                {
+                    Ok(source) => source.map(Arc::new),
+                    Err(e) => {
+                        tracing::warn!("Failed to resolve skill repositories: {e}");
+                        None
+                    }
+                }
+            };
+
+        skill_source.map(|source| {
+            let available_caps: Vec<String> = meerkat_contracts::build_capabilities()
+                .into_iter()
+                .map(|c| c.id.to_string())
+                .collect();
+            let engine = Arc::new(
+                meerkat_skills::DefaultSkillEngine::new(source, available_caps)
+                    .with_inventory_threshold(config.skills.inventory_threshold)
+                    .with_max_injection_bytes(config.skills.max_injection_bytes),
+            );
+            Arc::new(meerkat_core::skills::SkillRuntime::new(engine))
+        })
     }
 
     /// Override the default session store.
@@ -1320,6 +1380,11 @@ impl AgentFactory {
         // 12f. Wire session checkpointer for host-mode persistence
         if let Some(cp) = build_config.checkpointer {
             builder = builder.with_checkpointer(cp);
+        }
+
+        // 12g. Wire silent comms intents
+        if !build_config.silent_comms_intents.is_empty() {
+            builder = builder.with_silent_comms_intents(build_config.silent_comms_intents);
         }
 
         // 13. Build agent

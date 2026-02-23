@@ -81,6 +81,7 @@ pub struct AppState {
     pub expose_paths: bool,
     pub config_runtime: Arc<meerkat_core::ConfigRuntime>,
     pub realm_lease: Arc<tokio::sync::Mutex<Option<meerkat_store::RealmLeaseGuard>>>,
+    pub skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
 }
 
 #[derive(Debug, Clone)]
@@ -233,6 +234,7 @@ impl AppState {
             expose_paths,
             config_runtime,
             realm_lease: Arc::new(tokio::sync::Mutex::new(Some(lease))),
+            skill_runtime: None,
         })
     }
 }
@@ -392,6 +394,8 @@ pub fn router(state: AppState) -> Router {
             get(get_config).put(set_config).patch(patch_config),
         )
         .route("/health", get(health_check))
+        .route("/skills", get(list_skills))
+        .route("/skills/{id}", get(inspect_skill))
         .route("/capabilities", get(get_capabilities))
         .with_state(state)
 }
@@ -636,6 +640,60 @@ async fn push_event(
             Err(ApiError::Gone("Session has been shut down".to_string()))
         }
     }
+}
+
+/// List skills with provenance information.
+async fn list_skills(
+    State(state): State<AppState>,
+) -> Result<Json<meerkat_contracts::SkillListResponse>, ApiError> {
+    let runtime = state
+        .skill_runtime
+        .as_ref()
+        .ok_or_else(|| ApiError::NotFound("skills not enabled".into()))?;
+
+    let entries = runtime
+        .list_all_with_provenance(&meerkat_core::skills::SkillFilter::default())
+        .await
+        .map_err(|e| ApiError::Internal(format!("skill list failed: {e}")))?;
+
+    let wire: Vec<meerkat_contracts::SkillEntry> = entries
+        .iter()
+        .map(|e| meerkat_contracts::SkillEntry {
+            id: e.descriptor.id.0.clone(),
+            name: e.descriptor.name.clone(),
+            description: e.descriptor.description.clone(),
+            scope: e.descriptor.scope.to_string(),
+            source: e.descriptor.source_name.clone(),
+            is_active: e.is_active,
+            shadowed_by: e.shadowed_by.clone(),
+        })
+        .collect();
+    Ok(Json(meerkat_contracts::SkillListResponse { skills: wire }))
+}
+
+/// Inspect a skill by ID.
+async fn inspect_skill(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<meerkat_contracts::SkillInspectResponse>, ApiError> {
+    let runtime = state
+        .skill_runtime
+        .as_ref()
+        .ok_or_else(|| ApiError::NotFound("skills not enabled".into()))?;
+
+    let doc = runtime
+        .load_from_source(&meerkat_core::skills::SkillId::from(id.as_str()), None)
+        .await
+        .map_err(|e| ApiError::NotFound(format!("skill inspect failed: {e}")))?;
+
+    Ok(Json(meerkat_contracts::SkillInspectResponse {
+        id: doc.descriptor.id.0.clone(),
+        name: doc.descriptor.name.clone(),
+        description: doc.descriptor.description.clone(),
+        scope: doc.descriptor.scope.to_string(),
+        source: doc.descriptor.source_name.clone(),
+        body: doc.body,
+    }))
 }
 
 /// Get runtime capabilities with status resolved against config.
@@ -926,6 +984,7 @@ async fn create_session(
         backend: Some(state.backend.clone()),
         config_generation: current_generation,
         checkpointer: None,
+        silent_comms_intents: Vec::new(),
     };
 
     let svc_req = SvcCreateSessionRequest {
@@ -1114,6 +1173,7 @@ async fn continue_session(
                     .or_else(|| Some(state.backend.clone())),
                 config_generation: current_generation,
                 checkpointer: None,
+                silent_comms_intents: Vec::new(),
             };
 
             let svc_req = SvcCreateSessionRequest {

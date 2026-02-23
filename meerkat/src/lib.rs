@@ -213,13 +213,19 @@ pub use meerkat_tools::{
 #[cfg(feature = "mcp")]
 pub use meerkat_mcp::{McpConnection, McpError, McpRouter, McpServerConfig};
 
+// Skill types re-exports
+pub use meerkat_core::skills::{
+    SkillCollection, SkillDescriptor, SkillDocument, SkillFilter, SkillId,
+    SkillIntrospectionEntry, SkillRuntime, SkillScope,
+};
+
 // Contracts re-exports
 pub use meerkat_contracts::{
     self as contracts, CapabilitiesResponse, CapabilityHint, CapabilityId, CapabilityRegistration,
     CapabilityScope, CapabilityStatus, CommsParams, ContractVersion, CoreCreateParams,
-    ErrorCategory, ErrorCode, HookParams, Protocol, SkillsParams, StructuredOutputParams,
-    WireError, WireEvent, WireRunResult, WireSessionInfo, WireSessionSummary, WireUsage,
-    build_capabilities,
+    ErrorCategory, ErrorCode, HookParams, Protocol, SkillEntry, SkillInspectResponse,
+    SkillListResponse, SkillsParams, StructuredOutputParams, WireError, WireEvent, WireRunResult,
+    WireSessionInfo, WireSessionSummary, WireUsage, build_capabilities,
 };
 
 // Surface infrastructure

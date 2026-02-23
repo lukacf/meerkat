@@ -11,7 +11,8 @@ pub mod protocol;
 
 use meerkat_core::skills::{
     SkillArtifact, SkillArtifactContent, SkillCollection, SkillDescriptor, SkillDocument,
-    SkillFilter, SkillId, SkillQuarantineDiagnostic, SkillSource, SourceHealthSnapshot,
+    SkillFilter, SkillId, SkillIntrospectionEntry, SkillQuarantineDiagnostic, SkillSource,
+    SourceHealthSnapshot,
 };
 
 pub use composite::{CompositeSkillSource, NamedSource};
@@ -146,6 +147,37 @@ impl SkillSource for SourceNode {
             #[cfg(any(feature = "skills-http", test))]
             Self::Http(source) => source.invoke_function(id, function_name, arguments).await,
             Self::External(source) => source.invoke_function(id, function_name, arguments).await,
+        }
+    }
+
+    async fn list_all_with_provenance(
+        &self,
+        filter: &SkillFilter,
+    ) -> Result<Vec<SkillIntrospectionEntry>, meerkat_core::skills::SkillError> {
+        match self {
+            Self::Embedded(source) => source.list_all_with_provenance(filter).await,
+            Self::Filesystem(source) => source.list_all_with_provenance(filter).await,
+            Self::Git(source) => source.list_all_with_provenance(filter).await,
+            Self::Memory(source) => source.list_all_with_provenance(filter).await,
+            #[cfg(any(feature = "skills-http", test))]
+            Self::Http(source) => source.list_all_with_provenance(filter).await,
+            Self::External(source) => source.list_all_with_provenance(filter).await,
+        }
+    }
+
+    async fn load_from_source(
+        &self,
+        id: &SkillId,
+        source_name: Option<&str>,
+    ) -> Result<SkillDocument, meerkat_core::skills::SkillError> {
+        match self {
+            Self::Embedded(source) => source.load_from_source(id, source_name).await,
+            Self::Filesystem(source) => source.load_from_source(id, source_name).await,
+            Self::Git(source) => source.load_from_source(id, source_name).await,
+            Self::Memory(source) => source.load_from_source(id, source_name).await,
+            #[cfg(any(feature = "skills-http", test))]
+            Self::Http(source) => source.load_from_source(id, source_name).await,
+            Self::External(source) => source.load_from_source(id, source_name).await,
         }
     }
 }

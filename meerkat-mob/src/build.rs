@@ -70,6 +70,13 @@ pub async fn build_agent_config(
         meerkat_core::skills::SkillId::from("mob-communication"),
     ]);
 
+    // Silent comms intents: peer lifecycle notifications are injected
+    // into context without triggering an LLM turn.
+    config.silent_comms_intents = vec![
+        "mob.peer_added".into(),
+        "mob.peer_retired".into(),
+    ];
+
     // Map ToolConfig booleans to override flags
     config.override_builtins = Some(profile.tools.builtins);
     config.override_shell = Some(profile.tools.shell);
@@ -426,6 +433,35 @@ mod tests {
                 .iter()
                 .any(|id| id.0 == "mob-communication"),
             "preload_skills should include mob-communication"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_agent_config_sets_silent_comms_intents() {
+        let def = sample_definition();
+        let lead = &def.profiles[&ProfileName::from("lead")];
+        let config = build_agent_config(
+            &def.id,
+            &ProfileName::from("lead"),
+            &MeerkatId::from("lead-1"),
+            lead,
+            &def,
+            None,
+        )
+        .await
+        .expect("build_agent_config");
+
+        assert!(
+            config
+                .silent_comms_intents
+                .contains(&"mob.peer_added".to_string()),
+            "silent_comms_intents should include mob.peer_added"
+        );
+        assert!(
+            config
+                .silent_comms_intents
+                .contains(&"mob.peer_retired".to_string()),
+            "silent_comms_intents should include mob.peer_retired"
         );
     }
 

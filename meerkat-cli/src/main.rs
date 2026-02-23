@@ -1,9 +1,9 @@
 //! meerkat-cli - Headless CLI for Meerkat
 
 mod mcp;
-mod stream_renderer;
 #[cfg(feature = "comms")]
 mod stdin_events;
+mod stream_renderer;
 
 use meerkat::{AgentFactory, EphemeralSessionService, FactoryAgentBuilder};
 use meerkat_contracts::{SessionLocator, SessionLocatorError, SkillsParams, format_session_ref};
@@ -2271,9 +2271,7 @@ async fn run_agent(
         external_tools,
         llm_client_override: None,
         scoped_event_tx: scoped_event_tx.clone(),
-        scoped_event_path: scoped_event_tx
-            .as_ref()
-            .map(|_| primary_scope_path.clone()),
+        scoped_event_path: scoped_event_tx.as_ref().map(|_| primary_scope_path.clone()),
         override_builtins: None,
         override_shell: None,
         override_subagents: None,
@@ -2285,6 +2283,7 @@ async fn run_agent(
         config_generation: None,
         checkpointer: None,
         silent_comms_intents: Vec::new(),
+        max_inline_peer_notifications: None,
     };
 
     // Route through SessionService::create_session()
@@ -2660,6 +2659,7 @@ async fn resume_session_with_llm_override(
         config_generation: stored_metadata.as_ref().and_then(|m| m.config_generation),
         checkpointer: None,
         silent_comms_intents: Vec::new(),
+        max_inline_peer_notifications: None,
     };
 
     // Route through SessionService::create_session() with the resumed session
@@ -3211,8 +3211,7 @@ async fn handle_skills_command(
     let (config, realm_root) = load_config(scope).await?;
 
     let factory = {
-        let mut f = meerkat::AgentFactory::new(realm_root.clone())
-            .runtime_root(realm_root);
+        let mut f = meerkat::AgentFactory::new(realm_root.clone()).runtime_root(realm_root);
         if let Some(ref root) = scope.context_root {
             f = f.context_root(root.clone());
         }
@@ -3255,10 +3254,7 @@ async fn handle_skills_command(
                 println!("{}", serde_json::to_string_pretty(&wire)?);
             } else {
                 // Fixed-width table: ID, SOURCE, SCOPE, STATUS
-                println!(
-                    "{:<40} {:<15} {:<10} STATUS",
-                    "ID", "SOURCE", "SCOPE"
-                );
+                println!("{:<40} {:<15} {:<10} STATUS", "ID", "SOURCE", "SCOPE");
                 println!("{}", "-".repeat(80));
                 for entry in &entries {
                     let status = if entry.is_active {
@@ -4486,17 +4482,7 @@ mod tests {
     #[test]
     fn test_run_short_flags_parse() {
         let cli = Cli::try_parse_from([
-            "rkat",
-            "run",
-            "hello",
-            "-s",
-            "-w",
-            "focus",
-            "-f",
-            "primary",
-            "-x",
-            "-d",
-            "5m",
+            "rkat", "run", "hello", "-s", "-w", "focus", "-f", "primary", "-x", "-d", "5m",
         ])
         .expect("short flags should parse");
 
@@ -4522,15 +4508,7 @@ mod tests {
     #[test]
     fn test_mob_run_flow_short_flags_parse() {
         let cli = Cli::try_parse_from([
-            "rkat",
-            "mob",
-            "run-flow",
-            "mob-1",
-            "--flow",
-            "f1",
-            "-s",
-            "-w",
-            "mux",
+            "rkat", "mob", "run-flow", "mob-1", "--flow", "f1", "-s", "-w", "mux",
         ])
         .expect("mob run-flow short flags should parse");
 
@@ -4538,7 +4516,9 @@ mod tests {
             Commands::Mob {
                 command:
                     MobCommands::RunFlow {
-                        stream, stream_view, ..
+                        stream,
+                        stream_view,
+                        ..
                     },
             } => {
                 assert!(stream);

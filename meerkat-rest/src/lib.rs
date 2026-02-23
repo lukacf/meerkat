@@ -987,6 +987,7 @@ async fn create_session(
         config_generation: current_generation,
         checkpointer: None,
         silent_comms_intents: Vec::new(),
+        max_inline_peer_notifications: None,
     };
 
     let svc_req = SvcCreateSessionRequest {
@@ -1176,6 +1177,7 @@ async fn continue_session(
                 config_generation: current_generation,
                 checkpointer: None,
                 silent_comms_intents: Vec::new(),
+                max_inline_peer_notifications: None,
             };
 
             let svc_req = SvcCreateSessionRequest {

@@ -14,8 +14,8 @@ use meerkat_client::{
 use meerkat_core::service::{CreateSessionRequest, SessionBuildOptions};
 use meerkat_core::{
     Agent, AgentBuilder, AgentEvent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
-    BudgetLimits, Config, HookRunOverrides, OutputSchema, Provider, Session, SessionMetadata,
-    SessionTooling, ScopedAgentEvent, StreamScopeFrame,
+    BudgetLimits, Config, HookRunOverrides, OutputSchema, Provider, ScopedAgentEvent, Session,
+    SessionMetadata, SessionTooling, StreamScopeFrame,
 };
 #[cfg(feature = "sub-agents")]
 use meerkat_core::{ConcurrencyLimits, SubAgentManager};
@@ -220,6 +220,14 @@ pub struct AgentBuildConfig {
     /// Comms intents that should be silently injected into the session
     /// without triggering an LLM turn.
     pub silent_comms_intents: Vec<String>,
+    /// Maximum peer-count threshold for inline peer lifecycle context injection.
+    ///
+    /// - `None`: use runtime default
+    /// - `0`: never inline peer lifecycle notifications
+    /// - `-1`: always inline peer lifecycle notifications
+    /// - `>0`: inline only when post-drain peer count is <= threshold
+    /// - `<-1`: invalid
+    pub max_inline_peer_notifications: Option<i32>,
 }
 
 impl std::fmt::Debug for AgentBuildConfig {
@@ -256,6 +264,10 @@ impl std::fmt::Debug for AgentBuildConfig {
             .field("instance_id", &self.instance_id)
             .field("backend", &self.backend)
             .field("config_generation", &self.config_generation)
+            .field(
+                "max_inline_peer_notifications",
+                &self.max_inline_peer_notifications,
+            )
             .finish()
     }
 }
@@ -293,6 +305,7 @@ impl AgentBuildConfig {
             config_generation: None,
             checkpointer: None,
             silent_comms_intents: Vec::new(),
+            max_inline_peer_notifications: None,
         }
     }
 
@@ -340,7 +353,9 @@ impl AgentBuildConfig {
         self.backend = build.backend.clone();
         self.config_generation = build.config_generation;
         self.checkpointer = build.checkpointer.clone();
-        self.silent_comms_intents.clone_from(&build.silent_comms_intents);
+        self.silent_comms_intents
+            .clone_from(&build.silent_comms_intents);
+        self.max_inline_peer_notifications = build.max_inline_peer_notifications;
     }
 
     /// Convert build options to the service transport representation.
@@ -373,6 +388,7 @@ impl AgentBuildConfig {
             config_generation: self.config_generation,
             checkpointer: self.checkpointer.clone(),
             silent_comms_intents: self.silent_comms_intents.clone(),
+            max_inline_peer_notifications: self.max_inline_peer_notifications,
         }
     }
 }
@@ -992,6 +1008,15 @@ impl AgentFactory {
         mut build_config: AgentBuildConfig,
         config: &Config,
     ) -> Result<DynAgent, BuildAgentError> {
+        if let Some(value) = build_config.max_inline_peer_notifications
+            && value < -1
+        {
+            return Err(BuildAgentError::Config(format!(
+                "max_inline_peer_notifications={} is invalid (allowed: -1, 0, or >0)",
+                value
+            )));
+        }
+
         // 1. Validate host_mode
         #[cfg(feature = "comms")]
         if build_config.host_mode && build_config.comms_name.is_none() {
@@ -1386,6 +1411,8 @@ impl AgentFactory {
         if !build_config.silent_comms_intents.is_empty() {
             builder = builder.with_silent_comms_intents(build_config.silent_comms_intents);
         }
+        builder =
+            builder.with_max_inline_peer_notifications(build_config.max_inline_peer_notifications);
 
         // 13. Build agent
         let mut agent = builder.build(llm_adapter, tools, store_adapter).await;

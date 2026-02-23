@@ -10,8 +10,7 @@ use tokio::sync::mpsc;
 
 #[cfg(feature = "skills")]
 use meerkat_core::skills::{
-    SkillDocument, SkillError, SkillFilter, SkillId, SkillIntrospectionEntry,
-    SkillRuntime,
+    SkillDocument, SkillError, SkillFilter, SkillId, SkillIntrospectionEntry, SkillRuntime,
 };
 #[cfg(feature = "skills")]
 use std::sync::Arc;

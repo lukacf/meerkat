@@ -132,6 +132,14 @@ pub struct SessionBuildOptions {
     /// Comms intents that should be silently injected into the session
     /// without triggering an LLM turn.
     pub silent_comms_intents: Vec<String>,
+    /// Maximum peer-count threshold for inline peer lifecycle context injection.
+    ///
+    /// - `None`: use runtime default
+    /// - `0`: never inline peer lifecycle notifications
+    /// - `-1`: always inline peer lifecycle notifications
+    /// - `>0`: inline only when post-drain peer count is <= threshold
+    /// - `<-1`: invalid
+    pub max_inline_peer_notifications: Option<i32>,
 }
 
 impl Default for SessionBuildOptions {
@@ -161,6 +169,7 @@ impl Default for SessionBuildOptions {
             config_generation: None,
             checkpointer: None,
             silent_comms_intents: Vec::new(),
+            max_inline_peer_notifications: None,
         }
     }
 }
@@ -192,6 +201,10 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("config_generation", &self.config_generation)
             .field("checkpointer", &self.checkpointer.is_some())
             .field("silent_comms_intents", &self.silent_comms_intents)
+            .field(
+                "max_inline_peer_notifications",
+                &self.max_inline_peer_notifications,
+            )
             .finish()
     }
 }

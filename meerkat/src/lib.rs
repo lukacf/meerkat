@@ -215,8 +215,8 @@ pub use meerkat_mcp::{McpConnection, McpError, McpRouter, McpServerConfig};
 
 // Skill types re-exports
 pub use meerkat_core::skills::{
-    SkillCollection, SkillDescriptor, SkillDocument, SkillFilter, SkillId,
-    SkillIntrospectionEntry, SkillRuntime, SkillScope,
+    SkillCollection, SkillDescriptor, SkillDocument, SkillFilter, SkillId, SkillIntrospectionEntry,
+    SkillRuntime, SkillScope,
 };
 
 // Contracts re-exports

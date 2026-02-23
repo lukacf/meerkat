@@ -480,6 +480,7 @@ path = "skills/reviewer.md"
                         external_addressable: true,
                         backend: None,
                         runtime_mode: crate::MobRuntimeMode::AutonomousHost,
+                        max_inline_peer_notifications: None,
                     },
                 );
                 m

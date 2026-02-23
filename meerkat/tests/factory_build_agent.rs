@@ -11,7 +11,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::stream;
-#[cfg(feature = "comms")]
 use meerkat::BuildAgentError;
 use meerkat::{AgentBuildConfig, AgentFactory, LlmDoneOutcome, LlmEvent, LlmRequest};
 use meerkat_client::LlmClient;
@@ -367,6 +366,34 @@ async fn build_agent_host_mode_without_comms_name_fails() {
         matches!(err, BuildAgentError::HostModeRequiresCommsName),
         "Should be HostModeRequiresCommsName, got: {:?}",
         err
+    );
+}
+
+#[tokio::test]
+async fn build_agent_rejects_invalid_inline_peer_notification_threshold() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp);
+    let config = Config::default();
+
+    let build_config = AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        max_inline_peer_notifications: Some(-2),
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+
+    let result = factory.build_agent(build_config, &config).await;
+    let err = match result {
+        Err(e) => e,
+        Ok(_) => panic!("Expected Config error for invalid threshold"),
+    };
+    assert!(
+        matches!(err, BuildAgentError::Config(_)),
+        "Should be Config error, got: {:?}",
+        err
+    );
+    assert!(
+        err.to_string()
+            .contains("max_inline_peer_notifications=-2 is invalid")
     );
 }
 

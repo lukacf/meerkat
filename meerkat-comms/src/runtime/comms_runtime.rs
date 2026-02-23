@@ -99,6 +99,14 @@ struct InteractionStream {
     registry: InteractionStreamRegistry,
 }
 
+struct ResolvedPeer {
+    name: PeerName,
+    peer_id: String,
+    address: String,
+    source: PeerDirectorySource,
+    meta: crate::PeerMeta,
+}
+
 impl InteractionStream {
     fn finish(&mut self) {
         if let Some(mut receiver) = self.receiver.take() {
@@ -480,6 +488,10 @@ impl CoreCommsRuntime for CommsRuntime {
 
     async fn peers(&self) -> Vec<PeerDirectoryEntry> {
         self.resolve_peer_directory().await
+    }
+
+    async fn peer_count(&self) -> usize {
+        self.resolve_peer_count().await
     }
 
     async fn drain_inbox_interactions(&self) -> Vec<meerkat_core::InboxInteraction> {
@@ -872,9 +884,32 @@ impl CommsRuntime {
             "peer_request".to_string(),
             "peer_response".to_string(),
         ];
+        let mut peers = Vec::new();
+        self.for_each_resolved_peer(|peer| {
+            peers.push(PeerDirectoryEntry {
+                name: peer.name,
+                peer_id: peer.peer_id,
+                address: peer.address,
+                source: peer.source,
+                sendable_kinds: sendable_kinds.clone(),
+                capabilities: serde_json::json!({}),
+                meta: peer.meta,
+            });
+        })
+        .await;
+        peers
+    }
 
-        let mut peers: std::collections::HashMap<String, PeerDirectoryEntry> =
-            std::collections::HashMap::new();
+    /// Resolve peer count using the same filtering/dedup rules as
+    /// `resolve_peer_directory`, without materializing directory entries.
+    async fn resolve_peer_count(&self) -> usize {
+        self.for_each_resolved_peer(|_| {}).await
+    }
+
+    async fn for_each_resolved_peer<F>(&self, mut on_peer: F) -> usize
+    where
+        F: FnMut(ResolvedPeer),
+    {
         let inproc_peers = InprocRegistry::global()
             .peers_in_namespace(self.config.inproc_namespace.as_deref().unwrap_or(""));
         let inproc_by_name: std::collections::HashMap<String, crate::identity::PubKey> =
@@ -884,6 +919,7 @@ impl CommsRuntime {
                 .collect();
         let mut trusted_names = HashSet::new();
         let mut trusted_pubkeys = HashSet::new();
+        let mut emitted = 0usize;
 
         {
             let trusted = self.trusted_peers.read().await;
@@ -912,58 +948,51 @@ impl CommsRuntime {
                         continue;
                     }
                 };
-                peers.insert(
-                    peer.name.clone(),
-                    PeerDirectoryEntry {
-                        name,
-                        peer_id: peer.pubkey.to_peer_id(),
-                        address: peer.addr.clone(),
-                        source,
-                        sendable_kinds: sendable_kinds.clone(),
-                        capabilities: serde_json::json!({}),
-                        meta: peer.meta.clone(),
-                    },
-                );
+                on_peer(ResolvedPeer {
+                    name,
+                    peer_id: peer.pubkey.to_peer_id(),
+                    address: peer.addr.clone(),
+                    source,
+                    meta: peer.meta.clone(),
+                });
+                emitted += 1;
             }
         }
 
-        if !self.config.require_peer_auth {
-            for inproc in &inproc_peers {
-                let name = match PeerName::new(inproc.name.clone()) {
-                    Ok(name) => name,
-                    Err(_) => {
-                        tracing::warn!(
-                            peer_name = %inproc.name,
-                            peer_id = %inproc.pubkey.to_peer_id(),
-                            "skipping invalid inproc peer name"
-                        );
-                        continue;
-                    }
-                };
-                let peer_name_str = name.as_string();
-                if trusted_names.contains(name.as_str()) || trusted_pubkeys.contains(&inproc.pubkey)
-                {
-                    continue;
-                }
-                if peer_name_str == self.config.name || inproc.pubkey == self.public_key {
-                    continue;
-                }
-                peers.insert(
-                    peer_name_str.clone(),
-                    PeerDirectoryEntry {
-                        name,
-                        peer_id: inproc.pubkey.to_peer_id(),
-                        address: format!("inproc://{peer_name_str}"),
-                        source: PeerDirectorySource::Inproc,
-                        sendable_kinds: sendable_kinds.clone(),
-                        capabilities: serde_json::json!({}),
-                        meta: inproc.meta.clone(),
-                    },
-                );
-            }
+        if self.config.require_peer_auth {
+            return emitted;
         }
 
-        peers.into_values().collect()
+        for inproc in &inproc_peers {
+            let name = match PeerName::new(inproc.name.clone()) {
+                Ok(name) => name,
+                Err(_) => {
+                    tracing::warn!(
+                        peer_name = %inproc.name,
+                        peer_id = %inproc.pubkey.to_peer_id(),
+                        "skipping invalid inproc peer name"
+                    );
+                    continue;
+                }
+            };
+            let peer_name_str = name.as_string();
+            if trusted_names.contains(name.as_str()) || trusted_pubkeys.contains(&inproc.pubkey) {
+                continue;
+            }
+            if peer_name_str == self.config.name || inproc.pubkey == self.public_key {
+                continue;
+            }
+            on_peer(ResolvedPeer {
+                name,
+                peer_id: inproc.pubkey.to_peer_id(),
+                address: format!("inproc://{peer_name_str}"),
+                source: PeerDirectorySource::Inproc,
+                meta: inproc.meta.clone(),
+            });
+            emitted += 1;
+        }
+
+        emitted
     }
 
     /// Canonical send path uses trusted peers only.

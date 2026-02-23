@@ -298,21 +298,45 @@ mod tests {
     fn test_disposal_step_ordering_invariants() {
         let steps = DisposalStep::ORDERED;
         // StopHostLoop must come before NotifyPeers
-        let stop_idx = steps.iter().position(|s| *s == DisposalStep::StopHostLoop).unwrap();
-        let notify_idx = steps.iter().position(|s| *s == DisposalStep::NotifyPeers).unwrap();
-        let trust_idx = steps.iter().position(|s| *s == DisposalStep::RemoveTrustEdges).unwrap();
-        let archive_idx = steps.iter().position(|s| *s == DisposalStep::ArchiveSession).unwrap();
+        let stop_idx = steps
+            .iter()
+            .position(|s| *s == DisposalStep::StopHostLoop)
+            .unwrap();
+        let notify_idx = steps
+            .iter()
+            .position(|s| *s == DisposalStep::NotifyPeers)
+            .unwrap();
+        let trust_idx = steps
+            .iter()
+            .position(|s| *s == DisposalStep::RemoveTrustEdges)
+            .unwrap();
+        let archive_idx = steps
+            .iter()
+            .position(|s| *s == DisposalStep::ArchiveSession)
+            .unwrap();
 
-        assert!(stop_idx < notify_idx, "StopHostLoop must precede NotifyPeers");
-        assert!(notify_idx < trust_idx, "NotifyPeers must precede RemoveTrustEdges");
-        assert!(trust_idx < archive_idx, "RemoveTrustEdges must precede ArchiveSession");
+        assert!(
+            stop_idx < notify_idx,
+            "StopHostLoop must precede NotifyPeers"
+        );
+        assert!(
+            notify_idx < trust_idx,
+            "NotifyPeers must precede RemoveTrustEdges"
+        );
+        assert!(
+            trust_idx < archive_idx,
+            "RemoveTrustEdges must precede ArchiveSession"
+        );
     }
 
     #[test]
     fn test_disposal_step_display() {
         assert_eq!(DisposalStep::StopHostLoop.to_string(), "StopHostLoop");
         assert_eq!(DisposalStep::NotifyPeers.to_string(), "NotifyPeers");
-        assert_eq!(DisposalStep::RemoveTrustEdges.to_string(), "RemoveTrustEdges");
+        assert_eq!(
+            DisposalStep::RemoveTrustEdges.to_string(),
+            "RemoveTrustEdges"
+        );
         assert_eq!(DisposalStep::ArchiveSession.to_string(), "ArchiveSession");
     }
 }

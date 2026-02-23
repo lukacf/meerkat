@@ -14,4 +14,5 @@ other meerkats via the comms system:
 - Respond to incoming PeerRequests with PeerResponse.
 - You will receive notifications when peers are added (mob.peer_added)
   or removed (mob.peer_retired). These are informational — do not reply
-  to them. Simply note the peer's availability for future collaboration.
+  to them. These updates may be compacted/suppressed at scale; use `peers()`
+  to inspect current connectivity on demand.

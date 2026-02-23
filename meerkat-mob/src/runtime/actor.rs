@@ -563,8 +563,7 @@ impl MobActor {
                     backend,
                     reply_tx,
                 } => {
-                    if let Err(error) = self
-                        .require_state(&[MobState::Running, MobState::Creating])
+                    if let Err(error) = self.require_state(&[MobState::Running, MobState::Creating])
                     {
                         let _ = reply_tx.send(Err(error));
                         continue;
@@ -604,26 +603,29 @@ impl MobActor {
                     meerkat_id,
                     reply_tx,
                 } => {
-                    let result = match self.require_state(
-                        &[MobState::Running, MobState::Creating, MobState::Stopped],
-                    ) {
+                    let result = match self.require_state(&[
+                        MobState::Running,
+                        MobState::Creating,
+                        MobState::Stopped,
+                    ]) {
                         Ok(()) => self.handle_retire(meerkat_id).await,
                         Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::RetireAll { reply_tx } => {
-                    let result = match self.require_state(
-                        &[MobState::Running, MobState::Creating, MobState::Stopped],
-                    ) {
+                    let result = match self.require_state(&[
+                        MobState::Running,
+                        MobState::Creating,
+                        MobState::Stopped,
+                    ]) {
                         Ok(()) => self.retire_all_members("retire_all").await,
                         Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::Wire { a, b, reply_tx } => {
-                    let result = match self
-                        .require_state(&[MobState::Running, MobState::Creating])
+                    let result = match self.require_state(&[MobState::Running, MobState::Creating])
                     {
                         Ok(()) => self.handle_wire(a, b).await,
                         Err(error) => Err(error),
@@ -631,8 +633,7 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::Unwire { a, b, reply_tx } => {
-                    let result = match self
-                        .require_state(&[MobState::Running, MobState::Creating])
+                    let result = match self.require_state(&[MobState::Running, MobState::Creating])
                     {
                         Ok(()) => self.handle_unwire(a, b).await,
                         Err(error) => Err(error),
@@ -644,8 +645,7 @@ impl MobActor {
                     message,
                     reply_tx,
                 } => {
-                    let result = match self
-                        .require_state(&[MobState::Running, MobState::Creating])
+                    let result = match self.require_state(&[MobState::Running, MobState::Creating])
                     {
                         Ok(()) => self.handle_external_turn(meerkat_id, message).await,
                         Err(error) => Err(error),
@@ -657,8 +657,7 @@ impl MobActor {
                     message,
                     reply_tx,
                 } => {
-                    let result = match self
-                        .require_state(&[MobState::Running, MobState::Creating])
+                    let result = match self.require_state(&[MobState::Running, MobState::Creating])
                     {
                         Ok(()) => self.handle_internal_turn(meerkat_id, message).await,
                         Err(error) => Err(error),
@@ -763,8 +762,11 @@ impl MobActor {
                                     );
                                 }
                                 Err(error)
-                            } else if let Err(error) = self.start_autonomous_host_loops_from_roster().await {
-                                if let Err(stop_error) = self.stop_all_autonomous_host_loops().await {
+                            } else if let Err(error) =
+                                self.start_autonomous_host_loops_from_roster().await
+                            {
+                                if let Err(stop_error) = self.stop_all_autonomous_host_loops().await
+                                {
                                     tracing::warn!(
                                         mob_id = %self.definition.id,
                                         error = %stop_error,
@@ -818,8 +820,7 @@ impl MobActor {
                     blocked_by,
                     reply_tx,
                 } => {
-                    let result = match self
-                        .require_state(&[MobState::Running, MobState::Creating])
+                    let result = match self.require_state(&[MobState::Running, MobState::Creating])
                     {
                         Ok(()) => {
                             self.handle_task_create(subject, description, blocked_by)
@@ -835,8 +836,7 @@ impl MobActor {
                     owner,
                     reply_tx,
                 } => {
-                    let result = match self
-                        .require_state(&[MobState::Running, MobState::Creating])
+                    let result = match self.require_state(&[MobState::Running, MobState::Creating])
                     {
                         Ok(()) => self.handle_task_update(task_id, status, owner).await,
                         Err(error) => Err(error),
@@ -1291,11 +1291,7 @@ impl MobActor {
         self.handle_retire_inner(meerkat_id, false).await
     }
 
-    async fn handle_retire_inner(
-        &self,
-        meerkat_id: MeerkatId,
-        bulk: bool,
-    ) -> Result<(), MobError> {
+    async fn handle_retire_inner(&self, meerkat_id: MeerkatId, bulk: bool) -> Result<(), MobError> {
         // Idempotent: already retired / never existed is success.
         let entry = {
             let roster = self.roster.read().await;

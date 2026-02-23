@@ -3,8 +3,8 @@
 use crate::source::SourceNode;
 use meerkat_core::skills::{
     SkillArtifact, SkillArtifactContent, SkillDescriptor, SkillDocument, SkillError, SkillFilter,
-    SkillId, SkillIntrospectionEntry, SkillQuarantineDiagnostic, SkillSource,
-    SourceHealthSnapshot, SourceHealthState,
+    SkillId, SkillIntrospectionEntry, SkillQuarantineDiagnostic, SkillSource, SourceHealthSnapshot,
+    SourceHealthState,
 };
 use std::collections::HashMap;
 

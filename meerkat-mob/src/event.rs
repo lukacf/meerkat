@@ -168,6 +168,7 @@ pub enum MobEventKindCompat {
         definition: MobDefinition,
     },
     MobCompleted,
+    MobReset,
     MeerkatSpawned {
         meerkat_id: MeerkatId,
         role: ProfileName,
@@ -317,6 +318,7 @@ impl TryFrom<MobEventCompat> for MobEvent {
                 MobEventKind::MobCreated { definition }
             }
             MobEventKindCompat::MobCompleted => MobEventKind::MobCompleted,
+            MobEventKindCompat::MobReset => MobEventKind::MobReset,
             MobEventKindCompat::MeerkatSpawned {
                 meerkat_id,
                 role,
@@ -479,6 +481,8 @@ pub enum MobEventKind {
     },
     /// Mob reached terminal completed state.
     MobCompleted,
+    /// Mob was reset to initial running state (all members retired, events cleared).
+    MobReset,
     /// A meerkat was spawned from a profile.
     MeerkatSpawned {
         /// Unique meerkat identifier.
@@ -657,6 +661,11 @@ mod tests {
     #[test]
     fn test_mob_completed_roundtrip() {
         roundtrip(&MobEventKind::MobCompleted);
+    }
+
+    #[test]
+    fn test_mob_reset_roundtrip() {
+        roundtrip(&MobEventKind::MobReset);
     }
 
     #[test]

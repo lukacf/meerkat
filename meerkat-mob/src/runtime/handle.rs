@@ -441,6 +441,21 @@ impl MobHandle {
             .map_err(|_| MobError::Internal("actor reply dropped".into()))?
     }
 
+    /// Wipe all runtime state and transition back to `Running`.
+    ///
+    /// Like `destroy()` but keeps the actor alive and transitions to `Running`
+    /// instead of `Destroyed`. The handle remains usable after reset.
+    pub async fn reset(&self) -> Result<(), MobError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(MobCommand::Reset { reply_tx })
+            .await
+            .map_err(|_| MobError::Internal("actor task dropped".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| MobError::Internal("actor reply dropped".into()))?
+    }
+
     /// Retire active meerkats and clear persisted mob storage.
     pub async fn destroy(&self) -> Result<(), MobError> {
         let (reply_tx, reply_rx) = oneshot::channel();

@@ -814,6 +814,19 @@ impl MobActor {
                     };
                     let _ = reply_tx.send(result);
                 }
+                MobCommand::Reset { reply_tx } => {
+                    let result = match self.state() {
+                        MobState::Running | MobState::Stopped | MobState::Completed => {
+                            self.fail_all_pending_spawns("mob is resetting").await;
+                            self.handle_reset().await
+                        }
+                        current => Err(MobError::InvalidTransition {
+                            from: current,
+                            to: MobState::Running,
+                        }),
+                    };
+                    let _ = reply_tx.send(result);
+                }
                 MobCommand::TaskCreate {
                     subject,
                     description,
@@ -1689,6 +1702,28 @@ impl MobActor {
         self.wire_edge_locks.lock().await.clear();
         self.state
             .store(MobState::Destroyed as u8, Ordering::Release);
+        Ok(())
+    }
+
+    async fn handle_reset(&mut self) -> Result<(), MobError> {
+        self.cancel_all_flow_tasks().await;
+        self.retire_all_members("reset").await?;
+        self.stop_mcp_servers().await?;
+        self.events.clear().await?;
+        self.cleanup_namespace().await?;
+        self.wire_edge_locks.lock().await.clear();
+        self.retired_event_index.write().await.clear();
+        self.task_board.write().await.clear();
+
+        self.events
+            .append(NewMobEvent {
+                mob_id: self.definition.id.clone(),
+                timestamp: None,
+                kind: MobEventKind::MobReset,
+            })
+            .await?;
+        self.state
+            .store(MobState::Running as u8, Ordering::Release);
         Ok(())
     }
 

@@ -128,6 +128,9 @@ pub(super) enum MobCommand {
     Destroy {
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+    Reset {
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
     TaskCreate {
         subject: String,
         description: String,

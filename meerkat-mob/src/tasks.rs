@@ -125,6 +125,11 @@ impl TaskBoard {
     pub fn is_empty(&self) -> bool {
         self.tasks.is_empty()
     }
+
+    /// Remove all tasks from the board.
+    pub fn clear(&mut self) {
+        self.tasks.clear();
+    }
 }
 
 #[cfg(test)]

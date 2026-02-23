@@ -43,7 +43,10 @@ rkat-rpc --realm team-alpha
 
 ```bash
 rkat run [OPTIONS] <PROMPT>
+rkat <PROMPT>                    # shorthand — "run" is the default subcommand
 ```
+
+When the first positional argument is not a known subcommand, `run` is implied. `rkat "hello"` is equivalent to `rkat run "hello"`.
 
 Frequently used options:
 

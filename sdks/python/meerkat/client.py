@@ -345,11 +345,44 @@ class MeerkatClient:
     async def get_config(self) -> dict[str, Any]:
         return await self._request("config/get", {})
 
-    async def set_config(self, config: dict[str, Any]) -> None:
-        await self._request("config/set", config)
+    async def set_config(
+        self,
+        config: dict[str, Any],
+        *,
+        expected_generation: int | None = None,
+    ) -> None:
+        params: dict[str, Any] = {"config": config}
+        if expected_generation is not None:
+            params["expected_generation"] = expected_generation
+        await self._request("config/set", params)
 
-    async def patch_config(self, patch: dict[str, Any]) -> dict[str, Any]:
-        return await self._request("config/patch", patch)
+    async def patch_config(
+        self,
+        patch: dict[str, Any],
+        *,
+        expected_generation: int | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"patch": patch}
+        if expected_generation is not None:
+            params["expected_generation"] = expected_generation
+        return await self._request("config/patch", params)
+
+    # -- Skills -------------------------------------------------------------
+
+    async def list_skills(self) -> list[dict[str, Any]]:
+        result = await self._request("skills/list", {})
+        return result.get("skills", [])
+
+    async def inspect_skill(
+        self,
+        skill_id: str,
+        *,
+        source: str | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"id": skill_id}
+        if source is not None:
+            params["source"] = source
+        return await self._request("skills/inspect", params)
 
     # -- Internal methods used by Session ----------------------------------
 

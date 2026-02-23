@@ -308,12 +308,44 @@ export class MeerkatClient {
     return this.request("config/get", {});
   }
 
-  async setConfig(config: Record<string, unknown>): Promise<void> {
-    await this.request("config/set", config);
+  async setConfig(
+    config: Record<string, unknown>,
+    options?: { expectedGeneration?: number },
+  ): Promise<void> {
+    const params: Record<string, unknown> = { config };
+    if (options?.expectedGeneration !== undefined) {
+      params.expected_generation = options.expectedGeneration;
+    }
+    await this.request("config/set", params);
   }
 
-  async patchConfig(patch: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return this.request("config/patch", patch);
+  async patchConfig(
+    patch: Record<string, unknown>,
+    options?: { expectedGeneration?: number },
+  ): Promise<Record<string, unknown>> {
+    const params: Record<string, unknown> = { patch };
+    if (options?.expectedGeneration !== undefined) {
+      params.expected_generation = options.expectedGeneration;
+    }
+    return this.request("config/patch", params);
+  }
+
+  // -- Skills ---------------------------------------------------------------
+
+  async listSkills(): Promise<Array<Record<string, unknown>>> {
+    const result = await this.request("skills/list", {});
+    return (result.skills as Array<Record<string, unknown>>) ?? [];
+  }
+
+  async inspectSkill(
+    id: string,
+    options?: { source?: string },
+  ): Promise<Record<string, unknown>> {
+    const params: Record<string, unknown> = { id };
+    if (options?.source !== undefined) {
+      params.source = options.source;
+    }
+    return this.request("skills/inspect", params);
   }
 
   // -- Internal methods used by Session -----------------------------------

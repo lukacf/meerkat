@@ -110,6 +110,10 @@ impl MobMcpState {
         self.handle_for(mob_id).await?.complete().await
     }
 
+    pub async fn mob_reset(&self, mob_id: &MobId) -> Result<(), MobError> {
+        self.handle_for(mob_id).await?.reset().await
+    }
+
     pub async fn mob_destroy(&self, mob_id: &MobId) -> Result<(), MobError> {
         let mut mobs = self.mobs.write().await;
         let managed = mobs
@@ -508,6 +512,11 @@ impl MobMcpDispatcher {
                 json!({"type":"object","properties":{"mob_id":{"type":"string"}},"required":["mob_id"]}),
             ),
             tool(
+                "mob_reset",
+                &format!("Reset a mob to initial running state (wipe members, events, tasks). {COMMON}"),
+                json!({"type":"object","properties":{"mob_id":{"type":"string"}},"required":["mob_id"]}),
+            ),
+            tool(
                 "mob_destroy",
                 &format!("Destroy a mob and remove it from registry/state. {COMMON}"),
                 json!({"type":"object","properties":{"mob_id":{"type":"string"}},"required":["mob_id"]}),
@@ -795,6 +804,16 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
                 self.state
                     .mob_complete(&MobId::from(args.mob_id))
+                    .await
+                    .map_err(|e| map_mob_err(call, e))?;
+                encode(call, json!({"ok": true}))
+            }
+            "mob_reset" => {
+                let args: MobIdArgs = call
+                    .parse_args()
+                    .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+                self.state
+                    .mob_reset(&MobId::from(args.mob_id))
                     .await
                     .map_err(|e| map_mob_err(call, e))?;
                 encode(call, json!({"ok": true}))
@@ -1382,11 +1401,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dispatcher_exposes_18_tools() {
+    async fn test_dispatcher_exposes_19_tools() {
         let svc = Arc::new(MockSessionSvc::new());
         let state = Arc::new(MobMcpState::new(svc));
         let d = MobMcpDispatcher::new(state);
-        assert_eq!(d.tools().len(), 18);
+        assert_eq!(d.tools().len(), 19);
     }
 
     fn flow_enabled_definition() -> MobDefinition {

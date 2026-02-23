@@ -825,10 +825,8 @@ impl AgentFactory {
         external: Option<Arc<dyn AgentToolDispatcher>>,
         session_id: Option<String>,
         #[allow(unused_variables)] skill_engine: Option<Arc<meerkat_core::skills::SkillRuntime>>,
-        #[allow(unused_variables)] sub_agent_scoped_event_tx: Option<
-            mpsc::Sender<ScopedAgentEvent>,
-        >,
-        #[allow(unused_variables)] sub_agent_scope_path: Option<Vec<StreamScopeFrame>>,
+        _sub_agent_scoped_event_tx: Option<mpsc::Sender<ScopedAgentEvent>>,
+        _sub_agent_scope_path: Option<Vec<StreamScopeFrame>>,
         #[cfg(all(feature = "sub-agents", feature = "comms"))] sub_agent_comms: Option<
             SubAgentCommsWiring,
         >,
@@ -978,8 +976,8 @@ impl AgentFactory {
             ));
             state
                 .set_scoped_stream(
-                    sub_agent_scoped_event_tx.clone(),
-                    sub_agent_scope_path.clone().unwrap_or_default(),
+                    _sub_agent_scoped_event_tx.clone(),
+                    _sub_agent_scope_path.clone().unwrap_or_default(),
                 )
                 .await;
 

@@ -134,6 +134,50 @@ impl MobEventStore for RedbMobEventStore {
         .await
     }
 
+    async fn append_batch(
+        &self,
+        batch: Vec<NewMobEvent>,
+    ) -> Result<Vec<MobEvent>, MobError> {
+        let db = self.db.clone();
+        run_redb_task(move || {
+            let write_txn = db.begin_write().map_err(storage_error)?;
+            let mut results = Vec::with_capacity(batch.len());
+            {
+                let mut meta = write_txn
+                    .open_table(EVENT_META_TABLE)
+                    .map_err(storage_error)?;
+                let mut table = write_txn.open_table(EVENTS_TABLE).map_err(storage_error)?;
+
+                let mut cursor = meta
+                    .get(EVENT_CURSOR_KEY)
+                    .map_err(storage_error)?
+                    .map(|value| value.value())
+                    .unwrap_or(1);
+
+                for event in batch {
+                    let stored = MobEvent {
+                        cursor,
+                        timestamp: event.timestamp.unwrap_or_else(Utc::now),
+                        mob_id: event.mob_id,
+                        kind: event.kind,
+                    };
+                    let encoded = encode_json(&stored)?;
+                    table
+                        .insert(cursor, encoded.as_slice())
+                        .map_err(storage_error)?;
+                    results.push(stored);
+                    cursor = cursor.saturating_add(1);
+                }
+
+                meta.insert(EVENT_CURSOR_KEY, cursor)
+                    .map_err(storage_error)?;
+            }
+            write_txn.commit().map_err(storage_error)?;
+            Ok(results)
+        })
+        .await
+    }
+
     async fn poll(&self, after_cursor: u64, limit: usize) -> Result<Vec<MobEvent>, MobError> {
         let db = self.db.clone();
         run_redb_task(move || {

@@ -1304,14 +1304,14 @@ impl MobActor {
     /// Mark-then-best-effort-cleanup: event first, mark Retiring, disposal
     /// pipeline (policy-driven), then unconditional roster removal.
     async fn handle_retire(&self, meerkat_id: MeerkatId) -> Result<(), MobError> {
-        self.handle_retire_inner(meerkat_id, false).await
+        self.handle_retire_inner(&meerkat_id, false).await
     }
 
-    async fn handle_retire_inner(&self, meerkat_id: MeerkatId, bulk: bool) -> Result<(), MobError> {
+    async fn handle_retire_inner(&self, meerkat_id: &MeerkatId, bulk: bool) -> Result<(), MobError> {
         // Idempotent: already retired / never existed is success.
         let entry = {
             let roster = self.roster.read().await;
-            let Some(entry) = roster.get(&meerkat_id).cloned() else {
+            let Some(entry) = roster.get(meerkat_id).cloned() else {
                 tracing::warn!(
                     mob_id = %self.definition.id,
                     meerkat_id = %meerkat_id,
@@ -1324,21 +1324,21 @@ impl MobActor {
 
         // Append retire event (event-first for crash recovery).
         let retire_event_already_present = self
-            .retire_event_exists(&meerkat_id, &entry.member_ref)
+            .retire_event_exists(meerkat_id, &entry.member_ref)
             .await?;
         if !retire_event_already_present {
-            self.append_retire_event(&meerkat_id, &entry.profile, &entry.member_ref)
+            self.append_retire_event(meerkat_id, &entry.profile, &entry.member_ref)
                 .await?;
         }
 
         // Mark as Retiring (blocks re-spawn with same ID).
         {
             let mut roster = self.roster.write().await;
-            roster.mark_retiring(&meerkat_id);
+            roster.mark_retiring(meerkat_id);
         }
 
         // Snapshot context and run disposal pipeline.
-        let ctx = self.disposal_context_from_entry(&meerkat_id, &entry).await;
+        let ctx = self.disposal_context_from_entry(meerkat_id, &entry).await;
         let mut policy: Box<dyn ErrorPolicy> = if bulk {
             Box::new(BulkBestEffort)
         } else {
@@ -1708,6 +1708,15 @@ impl MobActor {
         Ok(())
     }
 
+    /// Cancel checkpointers and transition to Stopped. Used by `handle_reset`
+    /// error paths after destructive steps have already been taken.
+    async fn fail_reset_to_stopped(&self, error: MobError) -> MobError {
+        self.provisioner.cancel_all_checkpointers().await;
+        self.state
+            .store(MobState::Stopped as u8, Ordering::Release);
+        error
+    }
+
     async fn handle_reset(&mut self) -> Result<(), MobError> {
         let was_stopped = self.state() == MobState::Stopped;
         self.cancel_all_flow_tasks().await;
@@ -1727,47 +1736,36 @@ impl MobActor {
             return Err(error);
         }
         if let Err(error) = self.stop_mcp_servers().await {
-            // Members already retired — fail-closed to Stopped.
-            self.provisioner.cancel_all_checkpointers().await;
-            self.state
-                .store(MobState::Stopped as u8, Ordering::Release);
-            return Err(error);
+            // Members already retired -- fail-closed to Stopped.
+            return Err(self.fail_reset_to_stopped(error).await);
         }
 
         // --- Event rewrite phase: append new epoch markers. ---
         // Append-only epoch model: MobCreated (for resume) + MobReset (epoch
         // marker). Projections (roster, task board) clear on MobReset; resume
-        // uses the last MobCreated. No clear() needed — crash-safe.
+        // uses the last MobCreated. No clear() needed -- crash-safe.
+        // Batch append ensures both events land atomically.
         let mob_id = self.definition.id.clone();
-        let created_result = self
-            .events
-            .append(NewMobEvent {
-                mob_id: mob_id.clone(),
-                timestamp: None,
-                kind: MobEventKind::MobCreated {
-                    definition: (*self.definition).clone(),
-                },
-            })
-            .await;
-        if let Err(error) = created_result {
-            self.provisioner.cancel_all_checkpointers().await;
-            self.state
-                .store(MobState::Stopped as u8, Ordering::Release);
-            return Err(error);
-        }
         if let Err(error) = self
             .events
-            .append(NewMobEvent {
-                mob_id,
-                timestamp: None,
-                kind: MobEventKind::MobReset,
-            })
+            .append_batch(vec![
+                NewMobEvent {
+                    mob_id: mob_id.clone(),
+                    timestamp: None,
+                    // Clone needed: MobCreated stores owned definition for serialization.
+                    kind: MobEventKind::MobCreated {
+                        definition: (*self.definition).clone(),
+                    },
+                },
+                NewMobEvent {
+                    mob_id,
+                    timestamp: None,
+                    kind: MobEventKind::MobReset,
+                },
+            ])
             .await
         {
-            self.provisioner.cancel_all_checkpointers().await;
-            self.state
-                .store(MobState::Stopped as u8, Ordering::Release);
-            return Err(error);
+            return Err(self.fail_reset_to_stopped(error).await);
         }
 
         // Clear in-memory projections. Don't call cleanup_namespace() — it
@@ -1786,10 +1784,7 @@ impl MobActor {
                     "reset cleanup failed while stopping mcp servers"
                 );
             }
-            self.provisioner.cancel_all_checkpointers().await;
-            self.state
-                .store(MobState::Stopped as u8, Ordering::Release);
-            return Err(error);
+            return Err(self.fail_reset_to_stopped(error).await);
         }
 
         self.state
@@ -1851,7 +1846,7 @@ impl MobActor {
     }
 
     async fn retire_one(&self, id: MeerkatId) -> Result<(), (MeerkatId, MobError)> {
-        self.handle_retire_inner(id.clone(), true)
+        self.handle_retire_inner(&id, true)
             .await
             .map_err(|error| (id, error))
     }

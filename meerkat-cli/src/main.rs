@@ -168,6 +168,28 @@ fn resolve_tooling_flags(enable_builtins: bool, enable_shell: bool) -> (bool, bo
     (enable_builtins || enable_shell, enable_shell)
 }
 
+/// Read piped stdin content and prepend it to the prompt as context.
+///
+/// When stdin is a terminal (interactive), returns the prompt unchanged.
+/// When stdin is piped (e.g. `cat file.txt | rkat run "summarize"`),
+/// reads all of stdin and prepends it as a fenced context block.
+fn maybe_prepend_stdin_context(prompt: String) -> String {
+    use std::io::IsTerminal;
+    if std::io::stdin().is_terminal() {
+        return prompt;
+    }
+    let mut stdin_content = String::new();
+    if let Err(e) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut stdin_content) {
+        eprintln!("Warning: failed to read stdin: {e}");
+        return prompt;
+    }
+    let stdin_content = stdin_content.trim();
+    if stdin_content.is_empty() {
+        return prompt;
+    }
+    format!("<stdin>\n{stdin_content}\n</stdin>\n\n{prompt}")
+}
+
 async fn init_project_config() -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let rkat_dir = cwd.join(".rkat");
@@ -865,6 +887,13 @@ async fn main() -> anyhow::Result<ExitCode> {
                 peer_meta,
             };
 
+            // Skip stdin context injection when --stdin is set (host-mode event
+            // streaming reads stdin later via spawn_stdin_reader).
+            let prompt = if stdin {
+                prompt
+            } else {
+                maybe_prepend_stdin_context(prompt)
+            };
             handle_run_command(
                 prompt,
                 model,
@@ -924,6 +953,7 @@ async fn main() -> anyhow::Result<ExitCode> {
             enable_mob,
             verbose,
         } => {
+            let prompt = maybe_prepend_stdin_context(prompt);
             handle_run_command(
                 prompt,
                 model,

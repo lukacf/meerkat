@@ -40,6 +40,7 @@ Core commands:
 
 ```bash
 rkat run <PROMPT> [OPTIONS]
+cat file.txt | rkat run "Analyze this"   # stdin piped as context
 rkat resume <SESSION-ID> <PROMPT>
 rkat sessions list [--limit N]
 rkat sessions show <ID>

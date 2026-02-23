@@ -1,13 +1,13 @@
 """Generated wire types for Meerkat SDK.
 
-Contract version: 0.3.4
+Contract version: 0.4.0
 """
 
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 
-CONTRACT_VERSION = "0.3.4"
+CONTRACT_VERSION = "0.4.0"
 
 
 @dataclass

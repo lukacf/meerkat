@@ -17,7 +17,7 @@ pub struct MobHandle {
     pub(super) definition: Arc<MobDefinition>,
     pub(super) state: Arc<AtomicU8>,
     pub(super) events: Arc<dyn MobEventStore>,
-    pub(super) mcp_running: Arc<RwLock<BTreeMap<String, bool>>>,
+    pub(super) mcp_servers: Arc<tokio::sync::Mutex<BTreeMap<String, actor::McpServerEntry>>>,
     pub(super) flow_streams:
         Arc<tokio::sync::Mutex<BTreeMap<RunId, mpsc::Sender<meerkat_core::ScopedAgentEvent>>>>,
 }
@@ -132,7 +132,12 @@ impl MobHandle {
 
     /// Snapshot of MCP server lifecycle state tracked by this runtime.
     pub async fn mcp_server_states(&self) -> BTreeMap<String, bool> {
-        self.mcp_running.read().await.clone()
+        self.mcp_servers
+            .lock()
+            .await
+            .iter()
+            .map(|(name, entry)| (name.clone(), entry.running))
+            .collect()
     }
 
     /// Start a flow run and return its run ID.

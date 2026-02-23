@@ -24,8 +24,7 @@ struct RuntimeWiring {
     roster: Arc<RwLock<Roster>>,
     task_board: Arc<RwLock<TaskBoard>>,
     state: Arc<AtomicU8>,
-    mcp_running: Arc<RwLock<BTreeMap<String, bool>>>,
-    mcp_processes: Arc<tokio::sync::Mutex<BTreeMap<String, Child>>>,
+    mcp_servers: Arc<tokio::sync::Mutex<BTreeMap<String, actor::McpServerEntry>>>,
     command_tx: mpsc::Sender<MobCommand>,
     command_rx: mpsc::Receiver<MobCommand>,
 }
@@ -270,22 +269,27 @@ impl MobBuilder {
         let roster_state = Arc::new(RwLock::new(Roster::new()));
         let task_board_state = Arc::new(RwLock::new(TaskBoard::default()));
         let state = Arc::new(AtomicU8::new(resumed_state as u8));
-        let mcp_servers_running = false;
-        let mcp_running = Arc::new(RwLock::new(
+        let mcp_servers = Arc::new(tokio::sync::Mutex::new(
             definition
                 .mcp_servers
                 .keys()
-                .map(|name| (name.clone(), mcp_servers_running))
+                .map(|name| {
+                    (
+                        name.clone(),
+                        actor::McpServerEntry {
+                            process: None,
+                            running: false,
+                        },
+                    )
+                })
                 .collect::<BTreeMap<_, _>>(),
         ));
-        let mcp_processes = Arc::new(tokio::sync::Mutex::new(BTreeMap::new()));
         let (command_tx, command_rx) = mpsc::channel(64);
         let wiring = RuntimeWiring {
             roster: roster_state.clone(),
             task_board: task_board_state.clone(),
             state: state.clone(),
-            mcp_running: mcp_running.clone(),
-            mcp_processes: mcp_processes.clone(),
+            mcp_servers: mcp_servers.clone(),
             command_tx: command_tx.clone(),
             command_rx,
         };
@@ -296,7 +300,7 @@ impl MobBuilder {
             definition: definition.clone(),
             state: state.clone(),
             events: storage.events.clone(),
-            mcp_running: mcp_running.clone(),
+            mcp_servers: mcp_servers.clone(),
             flow_streams: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
         };
 
@@ -532,22 +536,27 @@ impl MobBuilder {
         let roster = Arc::new(RwLock::new(initial_roster));
         let task_board = Arc::new(RwLock::new(initial_task_board));
         let state = Arc::new(AtomicU8::new(initial_state as u8));
-        let mcp_servers_running = false;
-        let mcp_running = Arc::new(RwLock::new(
+        let mcp_servers = Arc::new(tokio::sync::Mutex::new(
             definition
                 .mcp_servers
                 .keys()
-                .map(|name| (name.clone(), mcp_servers_running))
+                .map(|name| {
+                    (
+                        name.clone(),
+                        actor::McpServerEntry {
+                            process: None,
+                            running: false,
+                        },
+                    )
+                })
                 .collect::<BTreeMap<_, _>>(),
         ));
-        let mcp_processes = Arc::new(tokio::sync::Mutex::new(BTreeMap::new()));
         let (command_tx, command_rx) = mpsc::channel(64);
         let wiring = RuntimeWiring {
             roster,
             task_board,
             state,
-            mcp_running,
-            mcp_processes,
+            mcp_servers,
             command_tx,
             command_rx,
         };
@@ -576,8 +585,7 @@ impl MobBuilder {
             roster,
             task_board,
             state,
-            mcp_running,
-            mcp_processes,
+            mcp_servers,
             command_tx,
             command_rx,
         } = wiring;
@@ -588,7 +596,7 @@ impl MobBuilder {
             definition: definition.clone(),
             state: state.clone(),
             events: events.clone(),
-            mcp_running: mcp_running.clone(),
+            mcp_servers: mcp_servers.clone(),
             flow_streams: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
         };
         let external_backend = definition.backend.external.clone();
@@ -625,8 +633,7 @@ impl MobBuilder {
             run_tasks: BTreeMap::new(),
             run_cancel_tokens: BTreeMap::new(),
             flow_streams: handle.flow_streams.clone(),
-            mcp_running,
-            mcp_processes,
+            mcp_servers,
             command_tx,
             tool_bundles,
             default_llm_client,
@@ -636,7 +643,8 @@ impl MobBuilder {
             pending_spawns: BTreeMap::new(),
             pending_spawn_ids: HashSet::new(),
             pending_spawn_tasks: BTreeMap::new(),
-            wire_edge_locks: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
+            edge_locks: Arc::new(super::edge_locks::EdgeLockRegistry::new()),
+            lifecycle_tasks: tokio::task::JoinSet::new(),
         };
         tokio::spawn(actor.run(command_rx));
 

@@ -134,10 +134,7 @@ impl MobEventStore for RedbMobEventStore {
         .await
     }
 
-    async fn append_batch(
-        &self,
-        batch: Vec<NewMobEvent>,
-    ) -> Result<Vec<MobEvent>, MobError> {
+    async fn append_batch(&self, batch: Vec<NewMobEvent>) -> Result<Vec<MobEvent>, MobError> {
         let db = self.db.clone();
         run_redb_task(move || {
             let write_txn = db.begin_write().map_err(storage_error)?;

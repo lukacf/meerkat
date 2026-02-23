@@ -1049,10 +1049,7 @@ impl MobEventStore for FaultInjectedMobEventStore {
         Ok(self.events.read().await.clone())
     }
 
-    async fn append_batch(
-        &self,
-        events: Vec<NewMobEvent>,
-    ) -> Result<Vec<MobEvent>, MobError> {
+    async fn append_batch(&self, events: Vec<NewMobEvent>) -> Result<Vec<MobEvent>, MobError> {
         let mut results = Vec::with_capacity(events.len());
         for event in events {
             results.push(self.append(event).await?);
@@ -1123,10 +1120,7 @@ impl MobEventStore for CompatFixtureEventStore {
             .collect()
     }
 
-    async fn append_batch(
-        &self,
-        events: Vec<NewMobEvent>,
-    ) -> Result<Vec<MobEvent>, MobError> {
+    async fn append_batch(&self, events: Vec<NewMobEvent>) -> Result<Vec<MobEvent>, MobError> {
         let mut results = Vec::with_capacity(events.len());
         for event in events {
             results.push(self.append(event).await?);
@@ -8840,4 +8834,46 @@ async fn test_reset_failure_from_stopped_stays_stopped() {
         MobState::Stopped,
         "failed reset from Stopped must remain Stopped"
     );
+}
+
+#[tokio::test]
+async fn test_shutdown_does_not_stall_on_stuck_lifecycle_notification() {
+    // Create a definition with a TurnDriven orchestrator so lifecycle
+    // notifications go through start_turn (which we can delay).
+    let mut def = sample_definition();
+    if let Some(profile) = def.profiles.get_mut(&ProfileName::from("lead")) {
+        profile.runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    }
+
+    let service = Arc::new(MockSessionService::new());
+    let storage = MobStorage::in_memory();
+    let handle = MobBuilder::new(def, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+
+    // Spawn the orchestrator so the notification path is active.
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+
+    // Make start_turn hang for 10 minutes — simulates a stuck backend.
+    service.set_start_turn_delay_ms(600_000);
+
+    // Stop the mob. This fires a lifecycle notification that will hang
+    // in start_turn due to the delay. The notification is spawned onto
+    // the JoinSet, so stop itself returns immediately.
+    handle.stop().await.expect("stop");
+
+    // Shutdown must complete quickly despite the stuck notification task.
+    // abort_all cancels in-flight tasks instead of awaiting them.
+    let shutdown_result = tokio::time::timeout(Duration::from_secs(5), handle.shutdown()).await;
+
+    assert!(
+        shutdown_result.is_ok(),
+        "shutdown must not stall on stuck lifecycle notification tasks"
+    );
+    shutdown_result.unwrap().expect("shutdown should succeed");
 }

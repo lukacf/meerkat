@@ -40,6 +40,23 @@ impl MobEventStore for InMemoryMobEventStore {
         Ok(stored)
     }
 
+    async fn append_batch(&self, batch: Vec<NewMobEvent>) -> Result<Vec<MobEvent>, MobError> {
+        let mut events = self.events.write().await;
+        let mut results = Vec::with_capacity(batch.len());
+        for event in batch {
+            let cursor = events.last().map_or(1, |existing| existing.cursor + 1);
+            let stored = MobEvent {
+                cursor,
+                timestamp: event.timestamp.unwrap_or_else(Utc::now),
+                mob_id: event.mob_id,
+                kind: event.kind,
+            };
+            events.push(stored.clone());
+            results.push(stored);
+        }
+        Ok(results)
+    }
+
     async fn poll(&self, after_cursor: u64, limit: usize) -> Result<Vec<MobEvent>, MobError> {
         let events = self.events.read().await;
         Ok(events

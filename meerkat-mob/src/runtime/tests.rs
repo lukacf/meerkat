@@ -8869,11 +8869,7 @@ async fn test_shutdown_does_not_stall_on_stuck_lifecycle_notification() {
 
     // Shutdown must complete quickly despite the stuck notification task.
     // abort_all cancels in-flight tasks instead of awaiting them.
-    let shutdown_result = tokio::time::timeout(
-        Duration::from_secs(5),
-        handle.shutdown(),
-    )
-    .await;
+    let shutdown_result = tokio::time::timeout(Duration::from_secs(5), handle.shutdown()).await;
 
     assert!(
         shutdown_result.is_ok(),

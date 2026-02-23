@@ -3873,15 +3873,14 @@ async fn test_retire_archive_failure_is_not_silent() {
         .expect("spawn w-1");
     service.set_archive_failure(&session_id).await;
 
+    // Retire succeeds despite archive failure (best-effort cleanup).
     let result = handle.retire(MeerkatId::from("w-1")).await;
-    assert!(
-        matches!(result, Err(MobError::SessionError(SessionError::Store(_)))),
-        "retire should surface archive failures"
-    );
+    assert!(result.is_ok(), "retire should succeed despite archive failure");
 
+    // Member is removed from roster unconditionally.
     assert!(
-        handle.get_meerkat(&MeerkatId::from("w-1")).await.is_some(),
-        "failed retire must not remove roster entry"
+        handle.get_meerkat(&MeerkatId::from("w-1")).await.is_none(),
+        "retire must remove roster entry even when archive fails"
     );
     let events = handle.events().replay_all().await.expect("replay");
     assert!(
@@ -3918,15 +3917,17 @@ async fn test_retire_trust_removal_failure_is_not_silent() {
         .await
         .expect("wire");
 
+    // Retire succeeds despite trust-removal failure (best-effort cleanup).
     let result = handle.retire(MeerkatId::from("w-1")).await;
     assert!(
-        matches!(result, Err(MobError::CommsError(_))),
-        "retire should surface trust-removal failures"
+        result.is_ok(),
+        "retire should succeed despite trust-removal failure"
     );
 
+    // Member is removed from roster unconditionally.
     assert!(
-        handle.get_meerkat(&MeerkatId::from("w-1")).await.is_some(),
-        "failed retire must not remove roster entry"
+        handle.get_meerkat(&MeerkatId::from("w-1")).await.is_none(),
+        "retire must remove roster entry even when trust removal fails"
     );
     let events = handle.events().replay_all().await.expect("replay");
     assert!(
@@ -5217,13 +5218,14 @@ async fn test_fault_injected_lifecycle_operations_preserve_transactional_invaria
         "unwire rollback should restore comms trust edges on failure"
     );
 
-    // Retire rollback invariants.
+    // Retire best-effort cleanup invariants: retire succeeds and removes
+    // roster entry even when archive is fault-injected.
     let (retire_handle, retire_service) = create_test_mob(sample_definition()).await;
     let sid_r1 = retire_handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("r-1"), None)
         .await
         .expect("spawn r-1");
-    let sid_r2 = retire_handle
+    let _sid_r2 = retire_handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("r-2"), None)
         .await
         .expect("spawn r-2");
@@ -5232,33 +5234,24 @@ async fn test_fault_injected_lifecycle_operations_preserve_transactional_invaria
         .await
         .expect("wire");
     retire_service.set_archive_failure(&sid_r1).await;
-    let retire_err = retire_handle
+    retire_handle
         .retire(MeerkatId::from("r-1"))
         .await
-        .expect_err("retire should fail when archive is fault-injected");
+        .expect("retire should succeed despite archive failure (best-effort cleanup)");
     assert!(
-        matches!(retire_err, MobError::SessionError(_)),
-        "retire archive fault should surface as session error"
+        retire_handle
+            .get_meerkat(&MeerkatId::from("r-1"))
+            .await
+            .is_none(),
+        "retire must remove roster entry even when archive fails"
     );
-    let r1 = retire_handle
-        .get_meerkat(&MeerkatId::from("r-1"))
-        .await
-        .expect("r-1 remains for retry");
     let r2 = retire_handle
         .get_meerkat(&MeerkatId::from("r-2"))
         .await
-        .expect("r-2 remains for retry");
+        .expect("r-2 should remain");
     assert!(
-        r1.wired_to.contains(&MeerkatId::from("r-2"))
-            && r2.wired_to.contains(&MeerkatId::from("r-1")),
-        "retire rollback should keep roster wiring coherent when archive fails"
-    );
-    assert!(
-        retire_service
-            .trusted_peer_names(&sid_r2)
-            .await
-            .contains(&test_comms_name("worker", "r-1")),
-        "retire rollback should restore removed trust when operation aborts"
+        !r2.wired_to.contains(&MeerkatId::from("r-1")),
+        "roster.remove should clean r-1 from r-2's wired_to set"
     );
 }
 

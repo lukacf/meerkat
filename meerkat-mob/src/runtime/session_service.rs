@@ -41,6 +41,18 @@ pub trait MobSessionService: SessionService {
     async fn session_belongs_to_mob(&self, _session_id: &SessionId, _mob_id: &MobId) -> bool {
         false
     }
+
+    /// Cancel all active checkpointer gates.
+    ///
+    /// After this call in-flight saves complete but subsequent checkpoint
+    /// calls on any session are no-ops. Call during `stop()` to prevent
+    /// checkpoint writes from racing with external cleanup.
+    async fn cancel_all_checkpointers(&self) {}
+
+    /// Re-enable checkpointer gates cancelled by [`cancel_all_checkpointers`].
+    ///
+    /// Call during `resume()` to restore periodic persistence.
+    async fn rearm_all_checkpointers(&self) {}
 }
 
 #[async_trait::async_trait]
@@ -108,5 +120,13 @@ where
         // No storage-level ownership contract is enforced here.
         // Callers should provide a wrapper service with explicit mob ownership checks.
         false
+    }
+
+    async fn cancel_all_checkpointers(&self) {
+        meerkat_session::PersistentSessionService::<B>::cancel_all_checkpointers(self).await;
+    }
+
+    async fn rearm_all_checkpointers(&self) {
+        meerkat_session::PersistentSessionService::<B>::rearm_all_checkpointers(self).await;
     }
 }

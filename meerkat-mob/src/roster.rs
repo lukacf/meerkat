@@ -10,6 +10,17 @@ use meerkat_core::types::SessionId;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Lifecycle state for a roster member.
+///
+/// `Retiring` is runtime-only — event projection never produces it
+/// (`MeerkatSpawned` creates `Active`; `MeerkatRetired` removes entirely).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum MemberState {
+    #[default]
+    Active,
+    Retiring,
+}
+
 /// A single meerkat entry in the roster.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RosterEntry {
@@ -22,6 +33,9 @@ pub struct RosterEntry {
     /// Runtime mode for this member.
     #[serde(default)]
     pub runtime_mode: MobRuntimeMode,
+    /// Lifecycle state (Active or Retiring).
+    #[serde(default)]
+    pub state: MemberState,
     /// Set of peer meerkat IDs this meerkat is wired to.
     pub wired_to: BTreeSet<MeerkatId>,
 }
@@ -95,6 +109,7 @@ impl Roster {
                     profile,
                     member_ref,
                     runtime_mode,
+                    state: MemberState::default(),
                     wired_to: BTreeSet::new(),
                 },
             )
@@ -163,14 +178,30 @@ impl Roster {
         false
     }
 
-    /// List all roster entries.
+    /// List active roster entries (excludes `Retiring`).
     pub fn list(&self) -> impl Iterator<Item = &RosterEntry> {
+        self.entries
+            .values()
+            .filter(|e| e.state == MemberState::Active)
+    }
+
+    /// List all roster entries including `Retiring` members.
+    pub fn list_all(&self) -> impl Iterator<Item = &RosterEntry> {
         self.entries.values()
     }
 
-    /// Find all meerkats with a given profile name.
+    /// List only `Retiring` members.
+    pub fn list_retiring(&self) -> impl Iterator<Item = &RosterEntry> {
+        self.entries
+            .values()
+            .filter(|e| e.state == MemberState::Retiring)
+    }
+
+    /// Find active meerkats with a given profile name.
     pub fn by_profile(&self, profile: &ProfileName) -> impl Iterator<Item = &RosterEntry> {
-        self.entries.values().filter(move |e| e.profile == *profile)
+        self.entries
+            .values()
+            .filter(move |e| e.profile == *profile && e.state == MemberState::Active)
     }
 
     /// Get the set of peer meerkat IDs wired to a given meerkat.
@@ -178,14 +209,32 @@ impl Roster {
         self.entries.get(meerkat_id).map(|e| &e.wired_to)
     }
 
-    /// Number of meerkats in the roster.
+    /// Number of active meerkats in the roster.
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.entries
+            .values()
+            .filter(|e| e.state == MemberState::Active)
+            .count()
     }
 
-    /// Whether the roster is empty.
+    /// Whether the roster has no active meerkats.
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        !self
+            .entries
+            .values()
+            .any(|e| e.state == MemberState::Active)
+    }
+
+    /// Mark a member as `Retiring`. Returns `true` if the member was found and
+    /// transitioned (i.e. it was `Active`); `false` otherwise.
+    pub fn mark_retiring(&mut self, meerkat_id: &MeerkatId) -> bool {
+        if let Some(entry) = self.entries.get_mut(meerkat_id)
+            && entry.state == MemberState::Active
+        {
+            entry.state = MemberState::Retiring;
+            return true;
+        }
+        false
     }
 }
 
@@ -514,6 +563,7 @@ mod tests {
             profile: ProfileName::from("worker"),
             member_ref: MemberRef::from_session_id(session_id()),
             runtime_mode: MobRuntimeMode::AutonomousHost,
+            state: MemberState::default(),
             wired_to: {
                 let mut s = BTreeSet::new();
                 s.insert(MeerkatId::from("peer-1"));
@@ -524,5 +574,184 @@ mod tests {
         let parsed: RosterEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.meerkat_id, entry.meerkat_id);
         assert_eq!(parsed.wired_to.len(), 1);
+    }
+
+    #[test]
+    fn test_mark_retiring() {
+        let mut roster = Roster::new();
+        roster.add(
+            MeerkatId::from("a"),
+            ProfileName::from("worker"),
+            MobRuntimeMode::AutonomousHost,
+            MemberRef::from_session_id(session_id()),
+        );
+        assert!(roster.mark_retiring(&MeerkatId::from("a")));
+        // Second call returns false (already Retiring)
+        assert!(!roster.mark_retiring(&MeerkatId::from("a")));
+        // Nonexistent returns false
+        assert!(!roster.mark_retiring(&MeerkatId::from("nope")));
+    }
+
+    #[test]
+    fn test_list_excludes_retiring() {
+        let mut roster = Roster::new();
+        roster.add(
+            MeerkatId::from("a"),
+            ProfileName::from("worker"),
+            MobRuntimeMode::AutonomousHost,
+            MemberRef::from_session_id(session_id()),
+        );
+        roster.add(
+            MeerkatId::from("b"),
+            ProfileName::from("worker"),
+            MobRuntimeMode::AutonomousHost,
+            MemberRef::from_session_id(session_id()),
+        );
+        roster.mark_retiring(&MeerkatId::from("a"));
+
+        let active: Vec<_> = roster.list().collect();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].meerkat_id, MeerkatId::from("b"));
+    }
+
+    #[test]
+    fn test_list_all_includes_retiring() {
+        let mut roster = Roster::new();
+        roster.add(
+            MeerkatId::from("a"),
+            ProfileName::from("worker"),
+            MobRuntimeMode::AutonomousHost,
+            MemberRef::from_session_id(session_id()),
+        );
+        roster.add(
+            MeerkatId::from("b"),
+            ProfileName::from("worker"),
+            MobRuntimeMode::AutonomousHost,
+            MemberRef::from_session_id(session_id()),
+        );
+        roster.mark_retiring(&MeerkatId::from("a"));
+
+        let all: Vec<_> = roster.list_all().collect();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn test_list_retiring_only() {
+        let mut roster = Roster::new();
+        roster.add(
+            MeerkatId::from("a"),
+            ProfileName::from("worker"),
+            MobRuntimeMode::AutonomousHost,
+            MemberRef::from_session_id(session_id()),
+        );
+        roster.add(
+            MeerkatId::from("b"),
+            ProfileName::from("worker"),
+            MobRuntimeMode::AutonomousHost,
+            MemberRef::from_session_id(session_id()),
+        );
+        roster.mark_retiring(&MeerkatId::from("a"));
+
+        let retiring: Vec<_> = roster.list_retiring().collect();
+        assert_eq!(retiring.len(), 1);
+        assert_eq!(retiring[0].meerkat_id, MeerkatId::from("a"));
+    }
+
+    #[test]
+    fn test_len_and_is_empty_count_active_only() {
+        let mut roster = Roster::new();
+        assert!(roster.is_empty());
+        assert_eq!(roster.len(), 0);
+
+        roster.add(
+            MeerkatId::from("a"),
+            ProfileName::from("worker"),
+            MobRuntimeMode::AutonomousHost,
+            MemberRef::from_session_id(session_id()),
+        );
+        assert_eq!(roster.len(), 1);
+        assert!(!roster.is_empty());
+
+        roster.mark_retiring(&MeerkatId::from("a"));
+        assert_eq!(roster.len(), 0);
+        assert!(roster.is_empty());
+    }
+
+    #[test]
+    fn test_by_profile_excludes_retiring() {
+        let mut roster = Roster::new();
+        roster.add(
+            MeerkatId::from("w1"),
+            ProfileName::from("worker"),
+            MobRuntimeMode::AutonomousHost,
+            MemberRef::from_session_id(session_id()),
+        );
+        roster.add(
+            MeerkatId::from("w2"),
+            ProfileName::from("worker"),
+            MobRuntimeMode::AutonomousHost,
+            MemberRef::from_session_id(session_id()),
+        );
+        roster.mark_retiring(&MeerkatId::from("w1"));
+
+        let workers: Vec<_> = roster.by_profile(&ProfileName::from("worker")).collect();
+        assert_eq!(workers.len(), 1);
+        assert_eq!(workers[0].meerkat_id, MeerkatId::from("w2"));
+    }
+
+    #[test]
+    fn test_get_returns_retiring() {
+        let mut roster = Roster::new();
+        roster.add(
+            MeerkatId::from("a"),
+            ProfileName::from("worker"),
+            MobRuntimeMode::AutonomousHost,
+            MemberRef::from_session_id(session_id()),
+        );
+        roster.mark_retiring(&MeerkatId::from("a"));
+
+        let entry = roster.get(&MeerkatId::from("a"));
+        assert!(entry.is_some());
+        assert_eq!(entry.unwrap().state, MemberState::Retiring);
+    }
+
+    #[test]
+    fn test_serde_roundtrip_with_state_field() {
+        let entry = RosterEntry {
+            meerkat_id: MeerkatId::from("test"),
+            profile: ProfileName::from("worker"),
+            member_ref: MemberRef::from_session_id(session_id()),
+            runtime_mode: MobRuntimeMode::AutonomousHost,
+            state: MemberState::Active,
+            wired_to: BTreeSet::new(),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let parsed: RosterEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.state, MemberState::Active);
+    }
+
+    #[test]
+    fn test_serde_roundtrip_missing_state_defaults_to_active() {
+        // Simulate old serialized data without the state field
+        let json = r#"{"meerkat_id":"old","profile":"worker","member_ref":{"kind":"session","session_id":"00000000-0000-0000-0000-000000000001"},"runtime_mode":"autonomous_host","wired_to":[]}"#;
+        let parsed: RosterEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.state, MemberState::Active);
+    }
+
+    #[test]
+    fn test_project_never_produces_retiring() {
+        let sid = session_id();
+        let events = vec![make_event(
+            1,
+            MobEventKind::MeerkatSpawned {
+                meerkat_id: MeerkatId::from("a"),
+                role: ProfileName::from("worker"),
+                runtime_mode: MobRuntimeMode::AutonomousHost,
+                member_ref: MemberRef::from_session_id(sid),
+            },
+        )];
+        let roster = Roster::project(&events);
+        let entry = roster.get(&MeerkatId::from("a")).unwrap();
+        assert_eq!(entry.state, MemberState::Active);
     }
 }

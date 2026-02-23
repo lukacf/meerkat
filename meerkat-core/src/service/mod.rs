@@ -98,6 +98,7 @@ pub struct CreateSessionRequest {
 }
 
 /// Optional build-time options used by factory-backed session builders.
+#[derive(Clone)]
 pub struct SessionBuildOptions {
     pub provider: Option<Provider>,
     pub output_schema: Option<OutputSchema>,

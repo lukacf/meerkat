@@ -584,10 +584,21 @@ impl MobActor {
                     meerkat_id,
                     reply_tx,
                 } => {
-                    let result = match self
-                        .expect_state(&[MobState::Running, MobState::Creating], MobState::Running)
-                    {
+                    let result = match self.expect_state(
+                        &[MobState::Running, MobState::Creating, MobState::Stopped],
+                        MobState::Running,
+                    ) {
                         Ok(()) => self.handle_retire(meerkat_id).await,
+                        Err(error) => Err(error),
+                    };
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::RetireAll { reply_tx } => {
+                    let result = match self.expect_state(
+                        &[MobState::Running, MobState::Creating, MobState::Stopped],
+                        MobState::Running,
+                    ) {
+                        Ok(()) => self.retire_all_members("retire_all").await,
                         Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);
@@ -682,6 +693,10 @@ impl MobActor {
                                 self.definition.id
                             ))
                             .await;
+                            // Cancel checkpointer gates before stopping host loops so
+                            // in-flight saves that complete after the loop stops don't
+                            // race with subsequent external cleanup (e.g. DML deletes).
+                            self.provisioner.cancel_all_checkpointers().await;
                             let mut stop_result: Result<(), MobError> = Ok(());
                             let (loop_result, mcp_result) = tokio::join!(
                                 self.stop_all_autonomous_host_loops(),
@@ -719,6 +734,8 @@ impl MobActor {
                 MobCommand::ResumeLifecycle { reply_tx } => {
                     let result = match self.expect_state(&[MobState::Stopped], MobState::Running) {
                         Ok(()) => {
+                            // Re-enable checkpointers cancelled during stop.
+                            self.provisioner.rearm_all_checkpointers().await;
                             if let Err(error) = self.start_mcp_servers().await {
                                 if let Err(stop_error) = self.stop_mcp_servers().await {
                                     tracing::warn!(
@@ -1250,11 +1267,18 @@ impl MobActor {
 
     /// P1-T05: retire() removes a meerkat.
     ///
-    /// Append retire event -> notify wired peers -> remove trust -> archive session -> update roster.
-    ///
-    /// Event-first ordering ensures append failures remain retryable without
-    /// committing side effects that cannot be replay-projected.
+    /// Mark-then-best-effort-cleanup: event first, mark Retiring, cleanup
+    /// (best-effort), then unconditional roster removal. Cleanup failures are
+    /// logged as warnings but never block roster convergence.
     async fn handle_retire(&self, meerkat_id: MeerkatId) -> Result<(), MobError> {
+        self.handle_retire_inner(meerkat_id, false).await
+    }
+
+    async fn handle_retire_inner(
+        &self,
+        meerkat_id: MeerkatId,
+        bulk: bool,
+    ) -> Result<(), MobError> {
         // Idempotent: already retired / never existed is success.
         let entry = {
             let roster = self.roster.read().await;
@@ -1269,6 +1293,7 @@ impl MobActor {
             entry
         };
 
+        // Append retire event (event-first for crash recovery).
         let retire_event_already_present = self
             .retire_event_exists(&meerkat_id, &entry.member_ref)
             .await?;
@@ -1276,160 +1301,141 @@ impl MobActor {
             self.append_retire_event(&meerkat_id, &entry.profile, &entry.member_ref)
                 .await?;
         }
-        if entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost {
-            self.stop_autonomous_host_loop_for_member(&meerkat_id, &entry.member_ref)
-                .await?;
+
+        // Mark as Retiring (blocks re-spawn with same ID).
+        {
+            let mut roster = self.roster.write().await;
+            roster.mark_retiring(&meerkat_id);
         }
 
-        // Notify wired peers and remove trust.
+        // Best-effort cleanup (all steps log+skip on error).
+        self.cleanup_retiring_member(&meerkat_id, &entry, bulk)
+            .await;
+
+        Ok(())
+    }
+
+    /// Best-effort cleanup for a retiring member. Logs warnings on individual
+    /// step failures but always removes the member from the roster at the end.
+    ///
+    /// When `bulk` is true (called from `retire_all_members`), peer cleanup
+    /// warnings are logged at debug level since concurrent retires make
+    /// absent-peer and notification failures expected, not actionable.
+    async fn cleanup_retiring_member(
+        &self,
+        meerkat_id: &MeerkatId,
+        entry: &RosterEntry,
+        bulk: bool,
+    ) {
+        // Stop host loop (best-effort).
+        if entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost
+            && let Err(error) = self
+                .stop_autonomous_host_loop_for_member(meerkat_id, &entry.member_ref)
+                .await
+        {
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                meerkat_id = %meerkat_id,
+                error = %error,
+                "retire: failed to stop host loop (continuing)"
+            );
+        }
+
+        // Peer cleanup (best-effort per peer).
         if !entry.wired_to.is_empty() {
             let retiring_comms = self.provisioner_comms(&entry.member_ref).await;
             let retiring_key = retiring_comms.as_ref().and_then(|comms| comms.public_key());
 
-            // If a retire event already exists, this can be a retry path after a
-            // prior partial cleanup. Missing comms in that case should not block
-            // roster convergence.
-            let Some(retiring_comms) = retiring_comms else {
-                if !retire_event_already_present {
-                    return Err(MobError::WiringError(format!(
-                        "retire requires comms runtime for '{meerkat_id}'"
-                    )));
-                }
-                if let Err(error) = self.provisioner.retire_member(&entry.member_ref).await
-                    && !matches!(
-                        error,
-                        MobError::SessionError(
-                            meerkat_core::service::SessionError::NotFound { .. }
-                        )
-                    )
-                {
-                    return Err(error);
-                }
-                let mut roster = self.roster.write().await;
-                roster.remove(&meerkat_id);
-                return Ok(());
-            };
-            let Some(retiring_key) = retiring_key else {
-                if !retire_event_already_present {
-                    return Err(MobError::WiringError(format!(
-                        "retire requires public key for '{meerkat_id}'"
-                    )));
-                }
-                if let Err(error) = self.provisioner.retire_member(&entry.member_ref).await
-                    && !matches!(
-                        error,
-                        MobError::SessionError(
-                            meerkat_core::service::SessionError::NotFound { .. }
-                        )
-                    )
-                {
-                    return Err(error);
-                }
-                let mut roster = self.roster.write().await;
-                roster.remove(&meerkat_id);
-                return Ok(());
-            };
-            let retiring_comms_name = self.comms_name_for(&entry);
-            let retiring_spec = self
-                .provisioner
-                .trusted_peer_spec(&entry.member_ref, &retiring_comms_name, &retiring_key)
-                .await?;
-            let mut rollback = LifecycleRollback::new("retire");
-
-            // Notify wired peers about retirement (required for successful retire).
             for peer_id in &entry.wired_to {
-                let peer_comms_name = {
-                    let roster = self.roster.read().await;
-                    roster
-                        .get(peer_id)
-                        .map(|peer_entry| self.comms_name_for(peer_entry))
-                        .ok_or_else(|| {
-                            MobError::WiringError(format!(
-                                "retire requires roster entry for wired peer '{peer_id}'"
-                            ))
-                        })?
-                };
-                self.notify_peer_retired(peer_id, &meerkat_id, &entry, &retiring_comms)
-                    .await?;
-                rollback.defer(
-                    format!("compensating mob.peer_added '{meerkat_id}' -> '{peer_id}'"),
-                    {
-                        let retiring_comms = retiring_comms.clone();
-                        let peer_comms_name = peer_comms_name.clone();
-                        let entry = entry.clone();
-                        let meerkat_id = meerkat_id.clone();
-                        move || async move {
-                            self.notify_peer_added(
-                                &retiring_comms,
-                                &peer_comms_name,
-                                &meerkat_id,
-                                &entry,
-                            )
-                            .await
-                        }
-                    },
-                );
-            }
-
-            // Remove trust from wired peers
-            for peer_meerkat_id in &entry.wired_to {
+                // Skip absent peers (already retired).
                 let peer_entry = {
                     let roster = self.roster.read().await;
-                    roster.get(peer_meerkat_id).cloned().ok_or_else(|| {
-                        MobError::WiringError(format!(
-                            "retire cannot remove trust for '{meerkat_id}': peer '{peer_meerkat_id}' missing from roster"
-                        ))
-                    })?
+                    roster.get(peer_id).cloned()
                 };
-                let peer_comms = self
-                    .provisioner_comms(&peer_entry.member_ref)
-                    .await
-                    .ok_or_else(|| {
-                        MobError::WiringError(format!(
-                            "retire cannot remove trust for '{meerkat_id}': comms runtime missing for peer '{peer_meerkat_id}'"
-                        ))
-                    })?;
-                if let Err(error) = peer_comms.remove_trusted_peer(&retiring_key).await {
-                    return Err(rollback.fail(error.into()).await);
-                }
-                rollback.defer(
-                    format!("restore trust '{peer_meerkat_id}' -> '{meerkat_id}'"),
-                    {
-                        let peer_comms = peer_comms.clone();
-                        let retiring_spec = retiring_spec.clone();
-                        move || async move {
-                            peer_comms.add_trusted_peer(retiring_spec).await?;
-                            Ok(())
-                        }
-                    },
-                );
-            }
+                let Some(peer_entry) = peer_entry else {
+                    tracing::debug!(
+                        mob_id = %self.definition.id,
+                        meerkat_id = %meerkat_id,
+                        peer_id = %peer_id,
+                        "retire: skipping absent peer"
+                    );
+                    continue;
+                };
 
-            if let Err(error) = self.provisioner.retire_member(&entry.member_ref).await
-                && !matches!(
-                    error,
-                    MobError::SessionError(meerkat_core::service::SessionError::NotFound { .. })
-                )
-            {
-                return Err(rollback.fail(error).await);
+                // Notify peer about retirement (best-effort).
+                if let Some(retiring_comms) = &retiring_comms
+                    && let Err(error) = self
+                        .notify_peer_retired(peer_id, meerkat_id, entry, retiring_comms)
+                        .await
+                {
+                    if bulk {
+                        tracing::debug!(
+                            mob_id = %self.definition.id,
+                            meerkat_id = %meerkat_id,
+                            peer_id = %peer_id,
+                            error = %error,
+                            "retire(bulk): peer notification failed (expected during concurrent teardown)"
+                        );
+                    } else {
+                        tracing::warn!(
+                            mob_id = %self.definition.id,
+                            meerkat_id = %meerkat_id,
+                            peer_id = %peer_id,
+                            error = %error,
+                            "retire: failed to notify peer of retirement (continuing)"
+                        );
+                    }
+                }
+
+                // Remove trust (best-effort).
+                if let Some(retiring_key) = &retiring_key
+                    && let Some(peer_comms) =
+                        self.provisioner_comms(&peer_entry.member_ref).await
+                    && let Err(error) =
+                        peer_comms.remove_trusted_peer(retiring_key).await
+                {
+                    if bulk {
+                        tracing::debug!(
+                            mob_id = %self.definition.id,
+                            meerkat_id = %meerkat_id,
+                            peer_id = %peer_id,
+                            error = %error,
+                            "retire(bulk): trust removal failed (expected during concurrent teardown)"
+                        );
+                    } else {
+                        tracing::warn!(
+                            mob_id = %self.definition.id,
+                            meerkat_id = %meerkat_id,
+                            peer_id = %peer_id,
+                            error = %error,
+                            "retire: failed to remove trust from peer (continuing)"
+                        );
+                    }
+                }
             }
-        } else if let Err(error) = self.provisioner.retire_member(&entry.member_ref).await
+        }
+
+        // Archive session (best-effort).
+        if let Err(error) = self.provisioner.retire_member(&entry.member_ref).await
             && !matches!(
                 error,
                 MobError::SessionError(meerkat_core::service::SessionError::NotFound { .. })
             )
         {
-            return Err(error);
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                meerkat_id = %meerkat_id,
+                error = %error,
+                "retire: session archive failed (continuing)"
+            );
         }
 
-        // Update roster
+        // Unconditional roster removal.
         {
             let mut roster = self.roster.write().await;
-            roster.remove(&meerkat_id);
+            roster.remove(meerkat_id);
         }
-        self.prune_wire_edge_locks_for_member(&meerkat_id).await;
-
-        Ok(())
+        self.prune_wire_edge_locks_for_member(meerkat_id).await;
     }
 
     /// P1-T06: wire() establishes bidirectional trust.
@@ -1580,16 +1586,7 @@ impl MobActor {
         self.cancel_all_flow_tasks().await;
         self.notify_orchestrator_lifecycle(format!("Mob '{}' is completing.", self.definition.id))
             .await;
-        let ids = {
-            let roster = self.roster.read().await;
-            roster
-                .list()
-                .map(|entry| entry.meerkat_id.clone())
-                .collect::<Vec<_>>()
-        };
-        for id in ids {
-            self.handle_retire(id).await?;
-        }
+        self.retire_all_members("complete").await?;
         self.stop_mcp_servers().await?;
 
         self.events
@@ -1608,16 +1605,7 @@ impl MobActor {
         self.cancel_all_flow_tasks().await;
         self.notify_orchestrator_lifecycle(format!("Mob '{}' is destroying.", self.definition.id))
             .await;
-        let ids = {
-            let roster = self.roster.read().await;
-            roster
-                .list()
-                .map(|entry| entry.meerkat_id.clone())
-                .collect::<Vec<_>>()
-        };
-        for id in ids {
-            self.handle_retire(id).await?;
-        }
+        self.retire_all_members("destroy").await?;
         self.stop_mcp_servers().await?;
         self.events.clear().await?;
         self.cleanup_namespace().await?;
@@ -1625,6 +1613,65 @@ impl MobActor {
         self.state
             .store(MobState::Destroyed as u8, Ordering::Release);
         Ok(())
+    }
+
+    /// Retire all roster members in parallel (sliding window of
+    /// `MAX_PARALLEL_HOST_LOOP_OPS`). handle_retire only returns Err on
+    /// event-append failures (pre-cleanup); cleanup errors are best-effort.
+    /// If any member fails to retire the operation is aborted — the caller
+    /// can retry since already-retired members are idempotent.
+    async fn retire_all_members(&self, context: &str) -> Result<(), MobError> {
+        let ids = {
+            let roster = self.roster.read().await;
+            roster
+                .list_all()
+                .map(|entry| entry.meerkat_id.clone())
+                .collect::<Vec<_>>()
+        };
+        if ids.is_empty() {
+            return Ok(());
+        }
+
+        let mut remaining = ids.into_iter();
+        let mut in_flight = FuturesUnordered::new();
+        let mut retire_failures: Vec<String> = Vec::new();
+
+        for _ in 0..MAX_PARALLEL_HOST_LOOP_OPS {
+            let Some(id) = remaining.next() else {
+                break;
+            };
+            in_flight.push(self.retire_one(id, true));
+        }
+
+        while let Some(result) = in_flight.next().await {
+            if let Err((id, error)) = result {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    meerkat_id = %id,
+                    error = %error,
+                    "{context}: retire failed for member"
+                );
+                retire_failures.push(format!("{id}: {error}"));
+            }
+            if let Some(id) = remaining.next() {
+                in_flight.push(self.retire_one(id, true));
+            }
+        }
+
+        if !retire_failures.is_empty() {
+            return Err(MobError::Internal(format!(
+                "{context} aborted: {} member(s) could not be retired: {}",
+                retire_failures.len(),
+                retire_failures.join("; ")
+            )));
+        }
+        Ok(())
+    }
+
+    async fn retire_one(&self, id: MeerkatId, bulk: bool) -> Result<(), (MeerkatId, MobError)> {
+        self.handle_retire_inner(id.clone(), bulk)
+            .await
+            .map_err(|error| (id, error))
     }
 
     async fn handle_task_create(

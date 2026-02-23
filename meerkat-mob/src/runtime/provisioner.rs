@@ -34,6 +34,13 @@ pub trait MobProvisioner: Send + Sync {
         fallback_name: &str,
         fallback_peer_id: &str,
     ) -> Result<TrustedPeerSpec, MobError>;
+
+    /// Cancel all active checkpointer gates so in-flight saves complete but
+    /// subsequent checkpoints are no-ops. Call during mob stop.
+    async fn cancel_all_checkpointers(&self) {}
+
+    /// Re-enable checkpointer gates after a prior cancel. Call during mob resume.
+    async fn rearm_all_checkpointers(&self) {}
 }
 
 pub struct SubagentBackend {
@@ -141,6 +148,14 @@ impl MobProvisioner for SubagentBackend {
         fallback_peer_id: &str,
     ) -> Result<TrustedPeerSpec, MobError> {
         Self::trusted_peer_spec(fallback_name, fallback_peer_id)
+    }
+
+    async fn cancel_all_checkpointers(&self) {
+        self.session_service.cancel_all_checkpointers().await;
+    }
+
+    async fn rearm_all_checkpointers(&self) {
+        self.session_service.rearm_all_checkpointers().await;
     }
 }
 
@@ -346,5 +361,13 @@ impl MobProvisioner for MultiBackendProvisioner {
                     .map_err(|error| MobError::WiringError(format!("invalid peer spec: {error}")))
             }
         }
+    }
+
+    async fn cancel_all_checkpointers(&self) {
+        self.subagent.cancel_all_checkpointers().await;
+    }
+
+    async fn rearm_all_checkpointers(&self) {
+        self.subagent.rearm_all_checkpointers().await;
     }
 }

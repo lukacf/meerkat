@@ -199,7 +199,7 @@ impl MobMcpState {
     ) -> Result<Vec<meerkat_mob::RosterEntry>, MobError> {
         self.handle_for(mob_id)
             .await?
-            .list_meerkats()
+            .list_all_meerkats()
             .await
             .pipe(Ok)
     }

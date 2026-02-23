@@ -99,9 +99,23 @@ impl MobHandle {
         self.roster.read().await.clone()
     }
 
-    /// List all meerkats in the roster.
+    /// List active (operational) meerkats in the roster.
+    ///
+    /// Excludes members in `Retiring` state. Used by flow target selection,
+    /// supervisor escalation, and other paths that assume operational members.
+    /// For full roster visibility including retiring members, use
+    /// [`list_all_meerkats`](Self::list_all_meerkats).
     pub async fn list_meerkats(&self) -> Vec<RosterEntry> {
         self.roster.read().await.list().cloned().collect()
+    }
+
+    /// List all meerkats including those in `Retiring` state.
+    ///
+    /// The `state` field on each [`RosterEntry`] distinguishes `Active` from
+    /// `Retiring`. Use this for observability and membership inspection where
+    /// in-flight retires should be visible.
+    pub async fn list_all_meerkats(&self) -> Vec<RosterEntry> {
+        self.roster.read().await.list_all().cloned().collect()
     }
 
     /// Get a specific meerkat entry.
@@ -308,6 +322,18 @@ impl MobHandle {
                 meerkat_id,
                 reply_tx,
             })
+            .await
+            .map_err(|_| MobError::Internal("actor task dropped".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| MobError::Internal("actor reply dropped".into()))?
+    }
+
+    /// Retire all roster members concurrently in a single actor command.
+    pub async fn retire_all(&self) -> Result<(), MobError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(MobCommand::RetireAll { reply_tx })
             .await
             .map_err(|_| MobError::Internal("actor task dropped".into()))?;
         reply_rx

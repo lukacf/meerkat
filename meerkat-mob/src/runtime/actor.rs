@@ -1707,6 +1707,10 @@ impl MobActor {
 
     async fn handle_reset(&mut self) -> Result<(), MobError> {
         self.cancel_all_flow_tasks().await;
+        // Rearm checkpointers if resetting from Stopped (stop cancels them).
+        if self.state() == MobState::Stopped {
+            self.provisioner.rearm_all_checkpointers().await;
+        }
         self.retire_all_members("reset").await?;
         self.stop_mcp_servers().await?;
         self.events.clear().await?;
@@ -1722,6 +1726,18 @@ impl MobActor {
                 kind: MobEventKind::MobReset,
             })
             .await?;
+
+        // Restart MCP servers before declaring Running.
+        if let Err(error) = self.start_mcp_servers().await {
+            // Best-effort: log and continue — callers can retry MCP-dependent
+            // operations or inspect mcp_server_states().
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                error = %error,
+                "reset: failed to restart MCP servers"
+            );
+        }
+
         self.state
             .store(MobState::Running as u8, Ordering::Release);
         Ok(())
@@ -1752,7 +1768,7 @@ impl MobActor {
             let Some(id) = remaining.next() else {
                 break;
             };
-            in_flight.push(self.retire_one(id, true));
+            in_flight.push(self.retire_one(id));
         }
 
         while let Some(result) = in_flight.next().await {
@@ -1766,7 +1782,7 @@ impl MobActor {
                 retire_failures.push(format!("{id}: {error}"));
             }
             if let Some(id) = remaining.next() {
-                in_flight.push(self.retire_one(id, true));
+                in_flight.push(self.retire_one(id));
             }
         }
 
@@ -1780,8 +1796,8 @@ impl MobActor {
         Ok(())
     }
 
-    async fn retire_one(&self, id: MeerkatId, bulk: bool) -> Result<(), (MeerkatId, MobError)> {
-        self.handle_retire_inner(id.clone(), bulk)
+    async fn retire_one(&self, id: MeerkatId) -> Result<(), (MeerkatId, MobError)> {
+        self.handle_retire_inner(id.clone(), true)
             .await
             .map_err(|error| (id, error))
     }

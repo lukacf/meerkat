@@ -178,6 +178,8 @@ fn inject_default_run_subcommand(
         "init",
         "run",
         "resume",
+        "continue",
+        "c",
         "sessions",
         "realms",
         "mcp",
@@ -480,9 +482,9 @@ enum Commands {
         stdin: bool,
     },
 
-    /// Resume a previous session
+    /// Resume a previous session (supports full UUID, short prefix, `last`, `~N`)
     Resume {
-        /// Session ID to resume
+        /// Session ID, short prefix, or alias (last, ~1, ~2, ...)
         session_id: String,
 
         /// The prompt to continue with
@@ -506,6 +508,17 @@ enum Commands {
         skill_references: Vec<String>,
 
         /// Verbose output: show each turn, tool calls, and results as they happen
+        #[arg(long, short = 'v')]
+        verbose: bool,
+    },
+
+    /// Continue the most recent session (shortcut for `resume last`)
+    #[command(name = "continue", alias = "c")]
+    Continue {
+        /// The prompt to continue with
+        prompt: String,
+
+        /// Verbose output
         #[arg(long, short = 'v')]
         verbose: bool,
     },
@@ -1057,6 +1070,18 @@ async fn main() -> anyhow::Result<ExitCode> {
                 overrides,
                 skill_refs,
                 skill_references,
+                &cli_scope,
+                verbose,
+            )
+            .await
+        }
+        Commands::Continue { prompt, verbose } => {
+            resume_session(
+                "last",
+                &prompt,
+                HookRunOverrides::default(),
+                Vec::new(),
+                Vec::new(),
                 &cli_scope,
                 verbose,
             )
@@ -2189,6 +2214,93 @@ fn resolve_scoped_session_id(input: &str, scope: &RuntimeScope) -> anyhow::Resul
     })
 }
 
+/// Resolve a session identifier that may be a full UUID, a short prefix,
+/// or a relative alias (`last`, `~N`).
+async fn resolve_flexible_session_id(
+    input: &str,
+    scope: &RuntimeScope,
+    config: &Config,
+) -> anyhow::Result<SessionId> {
+    // Try relative aliases first.
+    let offset = match input {
+        "last" | "~" | "~0" => Some(0usize),
+        s if s.starts_with('~') => {
+            let n = s[1..].parse::<usize>().map_err(|_| {
+                anyhow::anyhow!("Invalid relative offset '{input}': expected ~N where N is a number")
+            })?;
+            Some(n)
+        }
+        _ => None,
+    };
+
+    if let Some(offset) = offset {
+        let service = build_cli_persistent_service(scope, config.clone()).await?;
+        let sessions = service
+            .list(SessionQuery {
+                limit: Some(offset + 1),
+                offset: None,
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to list sessions: {e}"))?;
+        return sessions
+            .get(offset)
+            .map(|s| s.session_id.clone())
+            .ok_or_else(|| {
+                if offset == 0 {
+                    anyhow::anyhow!("No sessions found in this realm")
+                } else {
+                    anyhow::anyhow!(
+                        "Only {} sessions exist; ~{} is out of range",
+                        sessions.len(),
+                        offset
+                    )
+                }
+            });
+    }
+
+    // Try exact/locator resolution first. Preserve the error for actionable
+    // diagnostics (e.g. realm mismatch guidance).
+    let locator_err = match resolve_scoped_session_id(input, scope) {
+        Ok(sid) => return Ok(sid),
+        Err(e) => e,
+    };
+
+    // Only fall through to prefix matching for inputs that look like a bare
+    // prefix (no colon = not a realm-scoped locator).
+    if input.contains(':') {
+        return Err(locator_err);
+    }
+
+    // Try short prefix match against all sessions (no limit).
+    let service = build_cli_persistent_service(scope, config.clone()).await?;
+    let sessions = service
+        .list(SessionQuery {
+            limit: None,
+            offset: None,
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to list sessions: {e}"))?;
+
+    let matches: Vec<_> = sessions
+        .iter()
+        .filter(|s| s.session_id.to_string().starts_with(input))
+        .collect();
+
+    match matches.len() {
+        0 => Err(anyhow::anyhow!("No session matching '{input}'")),
+        1 => Ok(matches[0].session_id.clone()),
+        n => Err(anyhow::anyhow!(
+            "Ambiguous prefix '{input}': matches {n} sessions. Use a longer prefix."
+        )),
+    }
+}
+
+/// Format a short 8-character session ID prefix for display.
+fn short_session_id(sid: &SessionId) -> String {
+    let s = sid.to_string();
+    s[..8.min(s.len())].to_string()
+}
+
 fn canonical_skill_keys(
     config: &Config,
     skill_refs: Vec<SkillRef>,
@@ -2537,9 +2649,8 @@ async fn run_agent(
                 println!("{}", result.text);
             }
             eprintln!(
-                "\n[Session: {} | Ref: {} | Turns: {} | Tokens: {} in / {} out]",
-                result.session_id,
-                format_session_ref(&scope.locator.realm_id, &result.session_id),
+                "\n[Session: {} | Turns: {} | Tokens: {} in / {} out]",
+                short_session_id(&result.session_id),
                 result.turns,
                 result.usage.input_tokens,
                 result.usage.output_tokens
@@ -2616,12 +2727,12 @@ async fn resume_session_with_llm_override(
     };
     log_stage("begin");
 
-    // Parse session locator (<session_id> or <realm_id>:<session_id>).
-    log_stage("resolve_scoped_session_id");
-    let session_id = resolve_scoped_session_id(session_id, scope)?;
-
     log_stage("load_config");
     let (config, _config_base_dir) = load_config(scope).await?;
+
+    // Resolve session identifier (full UUID, short prefix, or relative alias).
+    log_stage("resolve_session_id");
+    let session_id = resolve_flexible_session_id(session_id, scope, &config).await?;
     let canonical_skill_refs = canonical_skill_keys(&config, skill_refs, skill_references)?;
     log_stage("build_cli_persistent_service");
     let loader_service = build_cli_persistent_service(scope, config.clone()).await?;

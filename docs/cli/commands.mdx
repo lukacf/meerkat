@@ -139,11 +139,23 @@ Comms options:
 
 ```bash
 rkat resume <SESSION_ID> <PROMPT>
+rkat resume last "continue where we left off"   # most recent session
+rkat resume ~2 "go back to this one"             # 2nd most recent
+rkat resume 019c8b99 "keep going"                # short prefix match
 ```
 
-Resumes a session from the active realm.
+Session identifiers accept full UUIDs, short prefixes (git-style, fails on ambiguity), or relative aliases (`last`/`~`/`~N`). All scoped to the active realm.
 
 Like `run`, `resume` composes the mob tool surface when `--enable-mob` (`-M`) is passed.
+
+## continue
+
+```bash
+rkat continue <PROMPT>
+rkat c "keep going"                              # alias
+```
+
+Shortcut for `rkat resume last <PROMPT>`. Resumes the most recent session in the active realm.
 
 ## mob
 

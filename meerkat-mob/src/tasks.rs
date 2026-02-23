@@ -102,6 +102,9 @@ impl TaskBoard {
                     );
                 }
             }
+            MobEventKind::MobReset => {
+                self.tasks.clear();
+            }
             _ => {}
         }
     }

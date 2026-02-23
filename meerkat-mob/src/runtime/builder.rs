@@ -208,8 +208,11 @@ impl MobBuilder {
         }
         let all_events = storage.events.replay_all().await?;
 
+        // Use the last MobCreated event — reset appends a fresh MobCreated
+        // to start a new epoch, so the latest one reflects the current definition.
         let definition = all_events
             .iter()
+            .rev()
             .find_map(|event| match &event.kind {
                 MobEventKind::MobCreated { definition } => Some(definition.clone()),
                 _ => None,
@@ -247,7 +250,13 @@ impl MobBuilder {
             .collect();
         let mut roster = Roster::project(&mob_events);
         let task_board = TaskBoard::project(&mob_events);
-        let resumed_state = if mob_events
+        // Determine resumed state from events in the current epoch (after the
+        // last MobReset, or all events if no reset has occurred).
+        let epoch_start = mob_events
+            .iter()
+            .rposition(|event| matches!(event.kind, MobEventKind::MobReset))
+            .map_or(0, |pos| pos + 1);
+        let resumed_state = if mob_events[epoch_start..]
             .iter()
             .any(|event| matches!(event.kind, MobEventKind::MobCompleted))
         {

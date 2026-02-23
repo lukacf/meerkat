@@ -89,6 +89,9 @@ impl Roster {
             MobEventKind::PeersUnwired { a, b } => {
                 self.unwire(a, b);
             }
+            MobEventKind::MobReset => {
+                self.entries.clear();
+            }
             _ => {}
         }
     }

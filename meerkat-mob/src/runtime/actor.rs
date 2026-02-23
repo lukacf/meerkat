@@ -741,6 +741,9 @@ impl MobActor {
                             }
                             if stop_result.is_ok() {
                                 self.state.store(MobState::Stopped as u8, Ordering::Release);
+                            } else {
+                                // Restore checkpointer state — mob stays Running.
+                                self.provisioner.rearm_all_checkpointers().await;
                             }
                             stop_result
                         }
@@ -810,6 +813,19 @@ impl MobActor {
                         current => Err(MobError::InvalidTransition {
                             from: current,
                             to: MobState::Destroyed,
+                        }),
+                    };
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::Reset { reply_tx } => {
+                    let result = match self.state() {
+                        MobState::Running | MobState::Stopped | MobState::Completed => {
+                            self.fail_all_pending_spawns("mob is resetting").await;
+                            self.handle_reset().await
+                        }
+                        current => Err(MobError::InvalidTransition {
+                            from: current,
+                            to: MobState::Running,
                         }),
                     };
                     let _ = reply_tx.send(result);
@@ -1692,6 +1708,95 @@ impl MobActor {
         Ok(())
     }
 
+    async fn handle_reset(&mut self) -> Result<(), MobError> {
+        let was_stopped = self.state() == MobState::Stopped;
+        self.cancel_all_flow_tasks().await;
+
+        // Rearm checkpointers temporarily so retire can checkpoint if needed.
+        if was_stopped {
+            self.provisioner.rearm_all_checkpointers().await;
+        }
+
+        // --- Destructive phase: retire members and stop MCP servers. ---
+        // After this point the mob is effectively stopped regardless of what
+        // the prior state field says.
+        if let Err(error) = self.retire_all_members("reset").await {
+            if was_stopped {
+                self.provisioner.cancel_all_checkpointers().await;
+            }
+            return Err(error);
+        }
+        if let Err(error) = self.stop_mcp_servers().await {
+            // Members already retired — fail-closed to Stopped.
+            self.provisioner.cancel_all_checkpointers().await;
+            self.state
+                .store(MobState::Stopped as u8, Ordering::Release);
+            return Err(error);
+        }
+
+        // --- Event rewrite phase: append new epoch markers. ---
+        // Append-only epoch model: MobCreated (for resume) + MobReset (epoch
+        // marker). Projections (roster, task board) clear on MobReset; resume
+        // uses the last MobCreated. No clear() needed — crash-safe.
+        let mob_id = self.definition.id.clone();
+        let created_result = self
+            .events
+            .append(NewMobEvent {
+                mob_id: mob_id.clone(),
+                timestamp: None,
+                kind: MobEventKind::MobCreated {
+                    definition: (*self.definition).clone(),
+                },
+            })
+            .await;
+        if let Err(error) = created_result {
+            self.provisioner.cancel_all_checkpointers().await;
+            self.state
+                .store(MobState::Stopped as u8, Ordering::Release);
+            return Err(error);
+        }
+        if let Err(error) = self
+            .events
+            .append(NewMobEvent {
+                mob_id,
+                timestamp: None,
+                kind: MobEventKind::MobReset,
+            })
+            .await
+        {
+            self.provisioner.cancel_all_checkpointers().await;
+            self.state
+                .store(MobState::Stopped as u8, Ordering::Release);
+            return Err(error);
+        }
+
+        // Clear in-memory projections. Don't call cleanup_namespace() — it
+        // wipes mcp_running keys which start_mcp_servers needs to track state.
+        // stop_mcp_servers already cleared mcp_processes and set running=false.
+        self.wire_edge_locks.lock().await.clear();
+        self.retired_event_index.write().await.clear();
+        self.task_board.write().await.clear();
+
+        // --- Restart phase: bring MCP servers back up. ---
+        if let Err(error) = self.start_mcp_servers().await {
+            if let Err(stop_error) = self.stop_mcp_servers().await {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    error = %stop_error,
+                    "reset cleanup failed while stopping mcp servers"
+                );
+            }
+            self.provisioner.cancel_all_checkpointers().await;
+            self.state
+                .store(MobState::Stopped as u8, Ordering::Release);
+            return Err(error);
+        }
+
+        self.state
+            .store(MobState::Running as u8, Ordering::Release);
+        Ok(())
+    }
+
     /// Retire all roster members in parallel (sliding window of
     /// `MAX_PARALLEL_HOST_LOOP_OPS`). handle_retire only returns Err on
     /// event-append failures (pre-cleanup); cleanup errors are best-effort.
@@ -1717,7 +1822,7 @@ impl MobActor {
             let Some(id) = remaining.next() else {
                 break;
             };
-            in_flight.push(self.retire_one(id, true));
+            in_flight.push(self.retire_one(id));
         }
 
         while let Some(result) = in_flight.next().await {
@@ -1731,7 +1836,7 @@ impl MobActor {
                 retire_failures.push(format!("{id}: {error}"));
             }
             if let Some(id) = remaining.next() {
-                in_flight.push(self.retire_one(id, true));
+                in_flight.push(self.retire_one(id));
             }
         }
 
@@ -1745,8 +1850,8 @@ impl MobActor {
         Ok(())
     }
 
-    async fn retire_one(&self, id: MeerkatId, bulk: bool) -> Result<(), (MeerkatId, MobError)> {
-        self.handle_retire_inner(id.clone(), bulk)
+    async fn retire_one(&self, id: MeerkatId) -> Result<(), (MeerkatId, MobError)> {
+        self.handle_retire_inner(id.clone(), true)
             .await
             .map_err(|error| (id, error))
     }

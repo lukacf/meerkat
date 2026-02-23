@@ -989,6 +989,7 @@ impl FaultInjectedMobEventStore {
         match kind {
             MobEventKind::MobCreated { .. } => "MobCreated",
             MobEventKind::MobCompleted => "MobCompleted",
+            MobEventKind::MobReset => "MobReset",
             MobEventKind::MeerkatSpawned { .. } => "MeerkatSpawned",
             MobEventKind::MeerkatRetired { .. } => "MeerkatRetired",
             MobEventKind::PeersWired { .. } => "PeersWired",
@@ -8649,5 +8650,172 @@ async fn test_disposal_report_ordering_is_deterministic() {
         retire_events.len(),
         2,
         "both members should have retire events"
+    );
+}
+
+// -----------------------------------------------------------------------
+// MobHandle::reset()
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_reset_clears_roster_events_and_returns_to_running() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+
+    handle.reset().await.expect("reset");
+    assert_eq!(handle.status(), MobState::Running);
+    assert!(
+        handle.list_meerkats().await.is_empty(),
+        "reset should retire all members"
+    );
+
+    let events = handle.events().replay_all().await.expect("replay");
+    // Append-only: old epoch events remain, new epoch ends with
+    // MobCreated + MobReset.
+    let len = events.len();
+    assert!(len >= 2, "should have at least MobCreated + MobReset");
+    assert!(
+        matches!(events[len - 2].kind, MobEventKind::MobCreated { .. }),
+        "penultimate event should be MobCreated (required for resume)"
+    );
+    assert!(
+        matches!(events[len - 1].kind, MobEventKind::MobReset),
+        "last event should be MobReset"
+    );
+
+    // Roster projection after full replay should be empty (MobReset clears it).
+    let roster = crate::roster::Roster::project(&events);
+    assert!(
+        roster.list().next().is_none(),
+        "roster projection should be empty after reset epoch"
+    );
+}
+
+#[tokio::test]
+async fn test_reset_allows_spawn_after_reset() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+
+    handle.reset().await.expect("reset");
+
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn after reset should succeed");
+    assert_eq!(handle.list_meerkats().await.len(), 1);
+}
+
+#[tokio::test]
+async fn test_reset_from_stopped_state() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    handle.stop().await.expect("stop");
+    assert_eq!(handle.status(), MobState::Stopped);
+
+    handle.reset().await.expect("reset from stopped");
+    assert_eq!(handle.status(), MobState::Running);
+}
+
+#[tokio::test]
+async fn test_reset_from_completed_state() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    handle.complete().await.expect("complete");
+    assert_eq!(handle.status(), MobState::Completed);
+
+    handle.reset().await.expect("reset from completed");
+    assert_eq!(handle.status(), MobState::Running);
+}
+
+#[tokio::test]
+async fn test_reset_rejects_from_destroyed() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    handle.destroy().await.expect("destroy");
+    assert_eq!(handle.status(), MobState::Destroyed);
+
+    let result = handle.reset().await;
+    assert!(
+        matches!(result, Err(MobError::InvalidTransition { .. })),
+        "reset from Destroyed should fail with InvalidTransition"
+    );
+}
+
+#[tokio::test]
+async fn test_reset_clears_task_board() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    handle
+        .task_create("Task A".into(), "do a".into(), vec![])
+        .await
+        .expect("create task a");
+    handle
+        .task_create("Task B".into(), "do b".into(), vec![])
+        .await
+        .expect("create task b");
+    assert_eq!(handle.task_list().await.unwrap().len(), 2);
+
+    handle.reset().await.expect("reset");
+    assert!(
+        handle.task_list().await.unwrap().is_empty(),
+        "reset should clear the task board"
+    );
+}
+
+#[tokio::test]
+async fn test_reset_append_failure_transitions_to_stopped() {
+    let events = Arc::new(FaultInjectedMobEventStore::new());
+    let (handle, _service) = create_test_mob_with_events(sample_definition(), events.clone()).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+    assert_eq!(handle.status(), MobState::Running);
+
+    // Fail the MobReset append — MobCreated append succeeds but reset
+    // should still report failure. After destructive steps (retire/stop),
+    // fail-closed to Stopped.
+    events.fail_appends_for("MobReset").await;
+
+    let result = handle.reset().await;
+    assert!(
+        matches!(result, Err(MobError::Internal(_))),
+        "reset should surface append failure"
+    );
+    assert_eq!(
+        handle.status(),
+        MobState::Stopped,
+        "failed reset after destructive steps must transition to Stopped"
+    );
+
+    // The event log should still contain a MobCreated event so resume works.
+    let all_events = events.replay_all().await.expect("replay");
+    assert!(
+        all_events
+            .iter()
+            .any(|e| matches!(e.kind, MobEventKind::MobCreated { .. })),
+        "MobCreated must survive a failed reset"
+    );
+}
+
+#[tokio::test]
+async fn test_reset_failure_from_stopped_stays_stopped() {
+    let events = Arc::new(FaultInjectedMobEventStore::new());
+    let (handle, _service) = create_test_mob_with_events(sample_definition(), events.clone()).await;
+
+    handle.stop().await.expect("stop");
+    assert_eq!(handle.status(), MobState::Stopped);
+
+    // Fail the MobCreated append to trigger reset failure from Stopped.
+    events.fail_appends_for("MobCreated").await;
+    let result = handle.reset().await;
+    assert!(result.is_err(), "reset should fail");
+
+    assert_eq!(
+        handle.status(),
+        MobState::Stopped,
+        "failed reset from Stopped must remain Stopped"
     );
 }

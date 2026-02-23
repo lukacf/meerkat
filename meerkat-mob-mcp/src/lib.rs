@@ -168,11 +168,7 @@ impl MobMcpState {
         mob_id: &MobId,
         specs: Vec<SpawnMemberSpec>,
     ) -> Result<Vec<Result<meerkat_mob::MemberRef, MobError>>, MobError> {
-        Ok(self
-            .handle_for(mob_id)
-            .await?
-            .spawn_many(specs)
-            .await)
+        Ok(self.handle_for(mob_id).await?.spawn_many(specs).await)
     }
 
     pub async fn mob_retire(&self, mob_id: &MobId, meerkat_id: MeerkatId) -> Result<(), MobError> {
@@ -758,11 +754,31 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
                 let mob_id = MobId::from(args.mob_id);
                 match args.action.as_str() {
-                    "stop" => self.state.mob_stop(&mob_id).await.map_err(|e| map_mob_err(call, e))?,
-                    "resume" => self.state.mob_resume(&mob_id).await.map_err(|e| map_mob_err(call, e))?,
-                    "reset" => self.state.mob_reset(&mob_id).await.map_err(|e| map_mob_err(call, e))?,
-                    "complete" => self.state.mob_complete(&mob_id).await.map_err(|e| map_mob_err(call, e))?,
-                    "destroy" => self.state.mob_destroy(&mob_id).await.map_err(|e| map_mob_err(call, e))?,
+                    "stop" => self
+                        .state
+                        .mob_stop(&mob_id)
+                        .await
+                        .map_err(|e| map_mob_err(call, e))?,
+                    "resume" => self
+                        .state
+                        .mob_resume(&mob_id)
+                        .await
+                        .map_err(|e| map_mob_err(call, e))?,
+                    "reset" => self
+                        .state
+                        .mob_reset(&mob_id)
+                        .await
+                        .map_err(|e| map_mob_err(call, e))?,
+                    "complete" => self
+                        .state
+                        .mob_complete(&mob_id)
+                        .await
+                        .map_err(|e| map_mob_err(call, e))?,
+                    "destroy" => self
+                        .state
+                        .mob_destroy(&mob_id)
+                        .await
+                        .map_err(|e| map_mob_err(call, e))?,
                     other => {
                         return Err(ToolError::invalid_arguments(
                             call.name,
@@ -910,8 +926,16 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 let a = MeerkatId::from(args.a);
                 let b = MeerkatId::from(args.b);
                 match args.action.as_str() {
-                    "wire" => self.state.mob_wire(&mob_id, a, b).await.map_err(|e| map_mob_err(call, e))?,
-                    "unwire" => self.state.mob_unwire(&mob_id, a, b).await.map_err(|e| map_mob_err(call, e))?,
+                    "wire" => self
+                        .state
+                        .mob_wire(&mob_id, a, b)
+                        .await
+                        .map_err(|e| map_mob_err(call, e))?,
+                    "unwire" => self
+                        .state
+                        .mob_unwire(&mob_id, a, b)
+                        .await
+                        .map_err(|e| map_mob_err(call, e))?,
                     other => {
                         return Err(ToolError::invalid_arguments(
                             call.name,
@@ -1472,7 +1496,12 @@ timeout_ms = 1000
             json!({"mob_id": mob_id, "meerkat_id":"w2"}),
         )
         .await;
-        call_tool(&d, "mob_lifecycle", json!({"mob_id": mob_id, "action":"complete"})).await;
+        call_tool(
+            &d,
+            "mob_lifecycle",
+            json!({"mob_id": mob_id, "action":"complete"}),
+        )
+        .await;
         let events = call_tool(
             &d,
             "mob_events",
@@ -1490,7 +1519,12 @@ timeout_ms = 1000
             events.iter().any(|e| e["kind"]["type"] == "mob_completed"),
             "expected structural events to include mob_completed"
         );
-        call_tool(&d, "mob_lifecycle", json!({"mob_id": mob_id, "action":"destroy"})).await;
+        call_tool(
+            &d,
+            "mob_lifecycle",
+            json!({"mob_id": mob_id, "action":"destroy"}),
+        )
+        .await;
         let listed = call_tool(&d, "mob_list", json!({})).await;
         assert!(listed["mobs"].as_array().unwrap().is_empty());
     }
@@ -1529,8 +1563,18 @@ timeout_ms = 1000
             json!({"mob_id": mob_id, "a":"w1", "b":"w2", "action":"wire"}),
         )
         .await;
-        call_tool(&d, "mob_lifecycle", json!({"mob_id": mob_id, "action":"stop"})).await;
-        call_tool(&d, "mob_lifecycle", json!({"mob_id": mob_id, "action":"resume"})).await;
+        call_tool(
+            &d,
+            "mob_lifecycle",
+            json!({"mob_id": mob_id, "action":"stop"}),
+        )
+        .await;
+        call_tool(
+            &d,
+            "mob_lifecycle",
+            json!({"mob_id": mob_id, "action":"resume"}),
+        )
+        .await;
         let members = call_tool(&d, "meerkat_list", json!({"mob_id": mob_id})).await;
         assert_eq!(members["members"].as_array().unwrap().len(), 3); // lead + 2 workers
         call_tool(

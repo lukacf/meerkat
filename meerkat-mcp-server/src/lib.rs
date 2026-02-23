@@ -967,7 +967,7 @@ async fn handle_meerkat_run(
         override_shell: Some(input.enable_builtins && enable_shell),
         override_subagents: None,
         override_memory: None,
-            override_mob: None,
+        override_mob: None,
         preload_skills: None,
         realm_id: Some(state.realm_id.clone()),
         instance_id: state.instance_id.clone(),
@@ -1047,6 +1047,9 @@ async fn handle_meerkat_resume(
                 .as_ref()
                 .is_some_and(|meta| meta.tooling.shell)
         });
+    let enable_mob = stored_metadata
+        .as_ref()
+        .is_some_and(|meta| meta.tooling.mob);
     let host_mode_requested =
         input.host_mode || stored_metadata.as_ref().is_some_and(|meta| meta.host_mode);
     let host_mode = resolve_host_mode(host_mode_requested)?;
@@ -1113,7 +1116,7 @@ async fn handle_meerkat_resume(
         override_shell: Some(enable_builtins && enable_shell),
         override_subagents: None,
         override_memory: None,
-            override_mob: None,
+        override_mob: Some(enable_mob),
         preload_skills: None,
         peer_meta: input
             .peer_meta

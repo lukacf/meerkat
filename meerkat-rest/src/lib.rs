@@ -1159,7 +1159,7 @@ async fn continue_session(
                 override_shell: Some(tooling.shell),
                 override_subagents: Some(tooling.subagents),
                 override_memory: None,
-                override_mob: None,
+                override_mob: Some(tooling.mob),
                 preload_skills: None,
                 peer_meta: req
                     .peer_meta

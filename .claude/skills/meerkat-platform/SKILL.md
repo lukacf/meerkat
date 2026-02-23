@@ -220,6 +220,16 @@ Real-time events include `text_delta`, tool lifecycle events, hook events, and t
 
 Skill loading is runtime-root aware. Workspace realms use project `.rkat/skills`; non-workspace realms use realm runtime roots.
 
+**Skill introspection** surfaces are available on all surfaces:
+
+- CLI: `rkat skills list [--json]`, `rkat skills inspect <id> [--source <name>] [--json]`
+- RPC: `skills/list`, `skills/inspect`
+- REST: `GET /skills`, `GET /skills/{id}`
+- MCP: `meerkat_skills` tool (`action: "list"` / `"inspect"`)
+- Rust SDK: `SkillRuntime::list_all_with_provenance()`, `SkillRuntime::load_from_source()`
+
+Introspection returns both active and shadowed skills with their source provenance, enabling debugging of skill resolution order.
+
 ### Hooks
 
 Hook config is realm-aware, with compatibility layering from user/project hook files when available.
@@ -231,6 +241,8 @@ Sub-agents inherit realm context. With comms enabled, parent/child inproc commun
 ### Inter-agent comms
 
 Comms supports `inproc`, TCP, and UDS. Inproc registry is namespace-segmented; Meerkat uses realm namespace for isolation.
+
+**Silent comms intents**: `AgentBuildConfig.silent_comms_intents` configures request intents that are injected into session context without triggering an LLM turn. Mob meerkats default to `["mob.peer_added", "mob.peer_retired"]`.
 
 ### Memory
 

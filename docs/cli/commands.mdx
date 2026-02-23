@@ -20,6 +20,7 @@ rkat [--realm <id>] [--instance <id>] [--realm-backend <redb|jsonl>] <command> .
 | `sessions list/show/delete` | Inspect or remove sessions in active realm |
 | `config get/set/patch` | Read or mutate realm config |
 | `mcp ...` | Manage MCP server config |
+| `skills ...` | Inspect available skills |
 | `mob ...` | Manage mob lifecycle directly from CLI |
 | `capabilities` | Show resolved runtime capabilities |
 
@@ -200,6 +201,34 @@ Pass `--realm` when you want deterministic shared state with other surfaces or p
 ```bash
 rkat-rpc --realm team-alpha
 ```
+
+## skills
+
+```bash
+rkat skills list [--json]
+rkat skills inspect <ID> [--source <SOURCE>] [--json]
+```
+
+List available skills with provenance (source, scope, shadow status) or inspect a skill's full content.
+
+```bash
+# List all skills in table format
+rkat skills list
+
+# List as JSON
+rkat skills list --json
+
+# Inspect a specific skill
+rkat skills inspect task-workflow
+
+# Inspect a shadowed skill from a specific source
+rkat skills inspect task-workflow --source company
+
+# Inspect as JSON
+rkat skills inspect extraction/email --json
+```
+
+The `list` output shows a fixed-width table with ID, SOURCE, SCOPE, and STATUS columns. Shadowed skills show which source has precedence.
 
 ## mcp
 

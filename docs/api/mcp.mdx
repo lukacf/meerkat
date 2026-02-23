@@ -34,6 +34,7 @@ The `meerkat-mcp-server` crate exposes Meerkat as MCP tools that other clients c
 | `meerkat_resume` | Continue a session or provide tool results |
 | `meerkat_config` | Get or update server config |
 | `meerkat_capabilities` | Query runtime capabilities |
+| `meerkat_skills` | List or inspect available skills |
 
 <Note>
 Mob capability for MCP session tools is provided by composing
@@ -585,3 +586,56 @@ Possible `status` values:
 | `DisabledByPolicy` | `{"DisabledByPolicy": {"description": "..."}}` | Compiled in but disabled |
 | `NotCompiled` | `{"NotCompiled": {"feature": "..."}}` | Feature flag absent |
 | `NotSupportedByProtocol` | `{"NotSupportedByProtocol": {"reason": "..."}}` | Protocol does not support it |
+
+### meerkat_skills
+
+List or inspect available skills with provenance information.
+
+<CodeGroup>
+```json List all skills
+{ "action": "list" }
+```
+
+```json Inspect a specific skill
+{
+  "action": "inspect",
+  "skill_id": "task-workflow"
+}
+```
+
+```json List response
+{
+  "skills": [
+    {
+      "id": "task-workflow",
+      "name": "Task Workflow",
+      "description": "How to use task tools",
+      "scope": "builtin",
+      "source": "embedded",
+      "is_active": true
+    }
+  ]
+}
+```
+
+```json Inspect response
+{
+  "id": "task-workflow",
+  "name": "Task Workflow",
+  "description": "How to use task tools",
+  "scope": "builtin",
+  "source": "embedded",
+  "body": "# Task Workflow\n\nUse task_create to..."
+}
+```
+</CodeGroup>
+
+<ParamField body="action" type="string" required>
+  `"list"` to list all skills, `"inspect"` to inspect a specific skill.
+</ParamField>
+
+<ParamField body="skill_id" type="string">
+  Skill ID to inspect (required when `action` is `"inspect"`).
+</ParamField>
+
+The list response includes both active and shadowed skills. Shadowed skills have `is_active: false` and a `shadowed_by` field indicating which source has precedence.

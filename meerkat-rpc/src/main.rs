@@ -144,6 +144,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         factory = factory.user_config_root(user_root);
     }
 
+    let skill_runtime = factory.build_skill_runtime(&config).await;
+
     let config_runtime = Arc::new(ConfigRuntime::new(
         Arc::clone(&config_store),
         realm_paths.root.join("config_state.json"),
@@ -171,7 +173,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "rkat-rpc",
     )
     .await?;
-    let serve_result = meerkat_rpc::serve_stdio(runtime, config_store).await;
+    let serve_result =
+        meerkat_rpc::serve_stdio_with_skill_runtime(runtime, config_store, skill_runtime).await;
     lease.shutdown().await;
     serve_result?;
 

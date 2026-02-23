@@ -17,7 +17,7 @@ name = "rkat-rpc"
 path = "src/main.rs"
 
 [dependencies]
-meerkat = { workspace = true, features = ["anthropic", "openai", "gemini", "jsonl-store", "session-store", "memory-store"] }
+meerkat = { workspace = true, features = ["anthropic", "openai", "gemini", "jsonl-store", "session-store", "memory-store", "skills"] }
 meerkat-core = { workspace = true }
 meerkat-contracts = { workspace = true }
 meerkat-client = { workspace = true }

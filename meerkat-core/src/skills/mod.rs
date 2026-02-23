@@ -563,6 +563,27 @@ pub fn apply_filter(skills: &[SkillDescriptor], filter: &SkillFilter) -> Vec<Ski
 // Errors
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Introspection
+// ---------------------------------------------------------------------------
+
+/// Entry for skill introspection — includes provenance and shadow status.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillIntrospectionEntry {
+    /// The skill descriptor (flattened for ergonomics).
+    #[serde(flatten)]
+    pub descriptor: SkillDescriptor,
+    /// If this skill is shadowed, the name of the higher-precedence source.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shadowed_by: Option<String>,
+    /// Whether this skill is active (not shadowed).
+    pub is_active: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
 /// Errors from skill operations.
 #[derive(Debug, thiserror::Error)]
 pub enum SkillError {
@@ -701,6 +722,37 @@ pub trait SkillSource: Send + Sync {
         let _ = arguments;
         async move { Err(SkillError::NotFound { id: missing }) }
     }
+
+    /// List all skills with provenance information (active + shadowed).
+    ///
+    /// Default implementation wraps `list()` results as all active.
+    fn list_all_with_provenance(
+        &self,
+        filter: &SkillFilter,
+    ) -> impl Future<Output = Result<Vec<SkillIntrospectionEntry>, SkillError>> + Send {
+        async {
+            let skills = self.list(filter).await?;
+            Ok(skills
+                .into_iter()
+                .map(|descriptor| SkillIntrospectionEntry {
+                    descriptor,
+                    shadowed_by: None,
+                    is_active: true,
+                })
+                .collect())
+        }
+    }
+
+    /// Load a skill from a specific named source, bypassing first-wins resolution.
+    ///
+    /// Default implementation ignores `source_name` and delegates to `load()`.
+    fn load_from_source(
+        &self,
+        id: &SkillId,
+        _source_name: Option<&str>,
+    ) -> impl Future<Output = Result<SkillDocument, SkillError>> + Send {
+        async move { self.load(id).await }
+    }
 }
 
 #[allow(clippy::manual_async_fn)]
@@ -758,6 +810,22 @@ where
     ) -> impl Future<Output = Result<serde_json::Value, SkillError>> + Send {
         async move { (**self).invoke_function(id, function_name, arguments).await }
     }
+
+    fn list_all_with_provenance(
+        &self,
+        filter: &SkillFilter,
+    ) -> impl Future<Output = Result<Vec<SkillIntrospectionEntry>, SkillError>> + Send {
+        async move { (**self).list_all_with_provenance(filter).await }
+    }
+
+    fn load_from_source(
+        &self,
+        id: &SkillId,
+        source_name: Option<&str>,
+    ) -> impl Future<Output = Result<SkillDocument, SkillError>> + Send {
+        let source_name = source_name.map(ToString::to_string);
+        async move { (**self).load_from_source(id, source_name.as_deref()).await }
+    }
 }
 
 /// Engine that manages skill resolution and rendering.
@@ -810,6 +878,39 @@ pub trait SkillEngine: Send + Sync {
         function_name: &str,
         arguments: serde_json::Value,
     ) -> impl Future<Output = Result<serde_json::Value, SkillError>> + Send;
+
+    /// List all skills with provenance and shadow information.
+    ///
+    /// Default implementation wraps `list_skills()` results as all active.
+    fn list_all_with_provenance(
+        &self,
+        filter: &SkillFilter,
+    ) -> impl Future<Output = Result<Vec<SkillIntrospectionEntry>, SkillError>> + Send {
+        async {
+            let skills = self.list_skills(filter).await?;
+            Ok(skills
+                .into_iter()
+                .map(|descriptor| SkillIntrospectionEntry {
+                    descriptor,
+                    shadowed_by: None,
+                    is_active: true,
+                })
+                .collect())
+        }
+    }
+
+    /// Load a skill from a specific named source, bypassing first-wins resolution.
+    ///
+    /// Default implementation ignores `source_name` and delegates to `resolve_and_render()`.
+    fn load_from_source(
+        &self,
+        id: &SkillId,
+        _source_name: Option<&str>,
+    ) -> impl Future<Output = Result<SkillDocument, SkillError>> + Send {
+        let _ = _source_name;
+        let missing = id.clone();
+        async move { Err(SkillError::NotFound { id: missing }) }
+    }
 }
 
 type OwnedSkillFuture<T> = Pin<Box<dyn Future<Output = Result<T, SkillError>> + Send + 'static>>;
@@ -825,6 +926,10 @@ type ReadArtifactFn =
     dyn Fn(SkillId, String) -> OwnedSkillFuture<SkillArtifactContent> + Send + Sync;
 type InvokeFunctionFn =
     dyn Fn(SkillId, String, serde_json::Value) -> OwnedSkillFuture<serde_json::Value> + Send + Sync;
+type ListAllWithProvenanceFn =
+    dyn Fn(SkillFilter) -> OwnedSkillFuture<Vec<SkillIntrospectionEntry>> + Send + Sync;
+type LoadFromSourceFn =
+    dyn Fn(SkillId, Option<String>) -> OwnedSkillFuture<SkillDocument> + Send + Sync;
 
 #[derive(Clone)]
 pub struct SkillRuntime {
@@ -837,6 +942,8 @@ pub struct SkillRuntime {
     list_artifacts_fn: Arc<ListArtifactsFn>,
     read_artifact_fn: Arc<ReadArtifactFn>,
     invoke_function_fn: Arc<InvokeFunctionFn>,
+    list_all_with_provenance_fn: Arc<ListAllWithProvenanceFn>,
+    load_from_source_fn: Arc<LoadFromSourceFn>,
 }
 
 impl SkillRuntime {
@@ -852,7 +959,9 @@ impl SkillRuntime {
         let health_engine = Arc::clone(&engine);
         let list_artifacts_engine = Arc::clone(&engine);
         let read_artifact_engine = Arc::clone(&engine);
-        let invoke_function_engine = engine;
+        let invoke_function_engine = Arc::clone(&engine);
+        let provenance_engine = Arc::clone(&engine);
+        let load_from_source_engine = engine;
 
         Self {
             inventory_fn: Arc::new(move || {
@@ -895,6 +1004,14 @@ impl SkillRuntime {
                     )
                 },
             ),
+            list_all_with_provenance_fn: Arc::new(move |filter: SkillFilter| {
+                let engine = Arc::clone(&provenance_engine);
+                Box::pin(async move { engine.list_all_with_provenance(&filter).await })
+            }),
+            load_from_source_fn: Arc::new(move |id: SkillId, source_name: Option<String>| {
+                let engine = Arc::clone(&load_from_source_engine);
+                Box::pin(async move { engine.load_from_source(&id, source_name.as_deref()).await })
+            }),
         }
     }
 
@@ -950,6 +1067,21 @@ impl SkillRuntime {
     ) -> Result<serde_json::Value, SkillError> {
         (self.invoke_function_fn)(id.clone(), function_name.to_string(), arguments).await
     }
+
+    pub async fn list_all_with_provenance(
+        &self,
+        filter: &SkillFilter,
+    ) -> Result<Vec<SkillIntrospectionEntry>, SkillError> {
+        (self.list_all_with_provenance_fn)(filter.clone()).await
+    }
+
+    pub async fn load_from_source(
+        &self,
+        id: &SkillId,
+        source_name: Option<&str>,
+    ) -> Result<SkillDocument, SkillError> {
+        (self.load_from_source_fn)(id.clone(), source_name.map(ToString::to_string)).await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -960,6 +1092,61 @@ impl SkillRuntime {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+
+    // --- SkillIntrospectionEntry ---
+
+    #[test]
+    fn test_skill_introspection_entry_serde_roundtrip() {
+        let entry = SkillIntrospectionEntry {
+            descriptor: SkillDescriptor {
+                id: SkillId("extraction/email".into()),
+                name: "email".into(),
+                description: "Extract emails".into(),
+                scope: SkillScope::Builtin,
+                source_name: "embedded".into(),
+                ..Default::default()
+            },
+            shadowed_by: None,
+            is_active: true,
+        };
+
+        let json = serde_json::to_value(&entry).expect("serialize");
+        // Descriptor fields are flattened
+        assert_eq!(json["name"], "email");
+        assert_eq!(json["is_active"], true);
+        assert!(json.get("shadowed_by").is_none());
+
+        let decoded: SkillIntrospectionEntry =
+            serde_json::from_value(json).expect("deserialize");
+        assert_eq!(decoded.descriptor.id.0, "extraction/email");
+        assert!(decoded.is_active);
+        assert!(decoded.shadowed_by.is_none());
+    }
+
+    #[test]
+    fn test_skill_introspection_entry_shadowed_roundtrip() {
+        let entry = SkillIntrospectionEntry {
+            descriptor: SkillDescriptor {
+                id: SkillId("shared/skill".into()),
+                name: "skill".into(),
+                description: "A skill".into(),
+                scope: SkillScope::Project,
+                source_name: "company".into(),
+                ..Default::default()
+            },
+            shadowed_by: Some("project".into()),
+            is_active: false,
+        };
+
+        let json = serde_json::to_value(&entry).expect("serialize");
+        assert_eq!(json["shadowed_by"], "project");
+        assert_eq!(json["is_active"], false);
+
+        let decoded: SkillIntrospectionEntry =
+            serde_json::from_value(json).expect("deserialize");
+        assert!(!decoded.is_active);
+        assert_eq!(decoded.shadowed_by.as_deref(), Some("project"));
+    }
 
     // --- SkillId ---
 

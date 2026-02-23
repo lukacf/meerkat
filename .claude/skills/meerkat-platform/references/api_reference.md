@@ -44,6 +44,8 @@ rkat resume <SESSION-ID> <PROMPT>
 rkat sessions list [--limit N]
 rkat sessions show <ID>
 rkat sessions delete <ID>
+rkat skills list [--json]
+rkat skills inspect <ID> [--source <SOURCE>] [--json]
 rkat mob prefabs|create|list|status|spawn|retire|wire|unwire|turn|stop|resume|complete|flows|run-flow|flow-status|destroy
 rkat config get|set|patch ...
 rkat-rpc
@@ -96,6 +98,8 @@ Core endpoints:
 - `GET /sessions/{id}`
 - `POST /sessions/{id}/event`
 - `GET /sessions/{id}/events`
+- `GET /skills` — list skills with provenance
+- `GET /skills/{id}` — inspect a skill's full body
 - `GET /health`
 - `GET /capabilities`
 - `GET|PUT|PATCH /config`
@@ -150,6 +154,8 @@ Core methods:
 - `config/get`
 - `config/set`
 - `config/patch`
+- `skills/list` — list skills with provenance (active + shadowed)
+- `skills/inspect` — inspect a skill's full body by ID
 - `capabilities/get`
 - `comms/send` (feature-gated)
 - `comms/peers` (feature-gated)
@@ -181,6 +187,7 @@ Tools exposed:
 - `meerkat_resume`
 - `meerkat_config`
 - `meerkat_capabilities`
+- `meerkat_skills` — list (`action: "list"`) or inspect (`action: "inspect"`, `skill_id: "..."`) skills
 
 `meerkat_config` input:
 
@@ -289,12 +296,27 @@ let mut agent = factory.build_agent(build, &config).await?;
 
 `AgentBuildConfig`/session metadata carry `realm_id`, `instance_id`, `backend`, and `config_generation`.
 
+`AgentBuildConfig` also carries:
+- `silent_comms_intents: Vec<String>` — intents injected silently (no LLM turn)
+- `preload_skills: Option<Vec<SkillId>>` — skills to inject at session creation
+
+Skill introspection (standalone, no session required):
+
+```rust
+if let Some(runtime) = factory.build_skill_runtime(&config).await {
+    let entries = runtime.list_all_with_provenance(&SkillFilter::default()).await?;
+    let doc = runtime.load_from_source(&"task-workflow".into(), Some("company")).await?;
+}
+```
+
 ---
 
 ## Comms, hooks, skills, sub-agents
 
 - Inproc comms is namespace-scoped; realm namespace isolates peer discovery/sends.
+- **Silent comms intents**: `AgentBuildConfig.silent_comms_intents` suppresses LLM turns for informational intents. Mob meerkats default to `["mob.peer_added", "mob.peer_retired"]`.
 - Hooks and skills resolve from runtime root. Workspace-default CLI realms preserve project ergonomics.
+- **Skill introspection**: `SkillRuntime::list_all_with_provenance()` returns active + shadowed skills; `load_from_source()` bypasses first-wins.
 - Sub-agents with comms enabled inherit parent realm namespace for inproc communication.
 
 ---

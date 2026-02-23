@@ -51,6 +51,43 @@
     "type": "object"
   },
   "SkillsParams": {
+    "$defs": {
+      "SkillKey": {
+        "description": "Canonical runtime identity for a skill.",
+        "properties": {
+          "skill_name": {
+            "$ref": "#/$defs/SkillName"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "skill_name"
+        ],
+        "type": "object"
+      },
+      "SkillName": {
+        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "type": "string"
+      },
+      "SkillRef": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "$ref": "#/$defs/SkillKey"
+          }
+        ],
+        "description": "Boundary compatibility reference: legacy string or structured key."
+      },
+      "SourceUuid": {
+        "description": "Canonical source identifier.",
+        "type": "string"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Skills parameters for session/turn requests.\n\n`preload_skills`: Pre-load these skills at session creation.\n`None` or empty = inventory-only mode (no pre-loading).\n`Some([])` is normalized to `None` to prevent silent misconfiguration.\n\n`skill_references`: Skill IDs to resolve and inject for this turn.\n`None` or empty = no per-turn skill injection.",
     "properties": {
@@ -66,6 +103,16 @@
       "skill_references": {
         "items": {
           "type": "string"
+        },
+        "type": [
+          "array",
+          "null"
+        ]
+      },
+      "skill_refs": {
+        "description": "Structured refs for Skills V2.1. Supports legacy strings via `SkillRef::Legacy`.",
+        "items": {
+          "$ref": "#/$defs/SkillRef"
         },
         "type": [
           "array",

@@ -33,6 +33,7 @@ pub struct AgentBuilder {
     pub(super) memory_store: Option<Arc<dyn crate::memory::MemoryStore>>,
     pub(super) skill_engine: Option<Arc<crate::skills::SkillRuntime>>,
     pub(super) checkpointer: Option<Arc<dyn crate::checkpoint::SessionCheckpointer>>,
+    pub(super) silent_comms_intents: Vec<String>,
     pub(super) event_tap: Option<crate::event_tap::EventTap>,
     pub(super) default_event_tx: Option<mpsc::Sender<crate::event::AgentEvent>>,
     pub(super) default_scoped_event_tx: Option<mpsc::Sender<crate::event::ScopedAgentEvent>>,
@@ -57,6 +58,7 @@ impl AgentBuilder {
             memory_store: None,
             skill_engine: None,
             checkpointer: None,
+            silent_comms_intents: Vec::new(),
             event_tap: None,
             default_event_tx: None,
             default_scoped_event_tx: None,
@@ -212,6 +214,7 @@ impl AgentBuilder {
             memory_store: self.memory_store,
             skill_engine: self.skill_engine,
             pending_skill_references: None,
+            silent_comms_intents: self.silent_comms_intents,
             checkpointer: self.checkpointer,
             event_tap: self
                 .event_tap
@@ -229,6 +232,13 @@ impl AgentBuilder {
         cp: Arc<dyn crate::checkpoint::SessionCheckpointer>,
     ) -> Self {
         self.checkpointer = Some(cp);
+        self
+    }
+
+    /// Set comms intents that should be silently injected into the session
+    /// without triggering an LLM turn.
+    pub fn with_silent_comms_intents(mut self, intents: Vec<String>) -> Self {
+        self.silent_comms_intents = intents;
         self
     }
 

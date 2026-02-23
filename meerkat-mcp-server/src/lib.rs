@@ -300,6 +300,7 @@ pub struct MeerkatMcpState {
     instance_id: Option<String>,
     expose_paths: bool,
     config_runtime: Arc<meerkat_core::ConfigRuntime>,
+    skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
     _realm_lease: Option<meerkat_store::RealmLeaseGuard>,
 }
 
@@ -383,6 +384,8 @@ impl MeerkatMcpState {
             factory = factory.user_config_root(user_root);
         }
 
+        let skill_runtime = factory.build_skill_runtime(&config).await;
+
         let builder = FactoryAgentBuilder::new_with_config_store(factory, config, config_store);
         let service = PersistentSessionService::new(builder, 100, session_store);
 
@@ -393,6 +396,7 @@ impl MeerkatMcpState {
             instance_id: bootstrap.realm.instance_id,
             expose_paths,
             config_runtime,
+            skill_runtime,
             _realm_lease: Some(lease),
         })
     }
@@ -452,6 +456,7 @@ impl MeerkatMcpState {
             instance_id: bootstrap.realm.instance_id,
             expose_paths: false,
             config_runtime,
+            skill_runtime: None,
             _realm_lease: None,
         }
     }
@@ -652,6 +657,25 @@ pub fn tools_list() -> Vec<Value> {
                 "required": []
             }
         }),
+        json!({
+            "name": "meerkat_skills",
+            "description": "List or inspect available skills. Use action 'list' to see all skills, or 'inspect' with a skill_id to see its full content.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["list", "inspect"],
+                        "description": "Action to perform: 'list' all skills or 'inspect' a specific skill"
+                    },
+                    "skill_id": {
+                        "type": "string",
+                        "description": "Skill ID to inspect (required when action is 'inspect')"
+                    }
+                },
+                "required": ["action"]
+            }
+        }),
     ]
 }
 
@@ -694,9 +718,68 @@ pub async fn handle_tools_call_with_notifier(
         "meerkat_capabilities" => handle_meerkat_capabilities(state)
             .await
             .map_err(ToolCallError::internal),
+        "meerkat_skills" => {
+            let input: serde_json::Value = arguments.clone();
+            handle_meerkat_skills(state, input)
+                .await
+                .map_err(ToolCallError::internal)
+        }
         _ => Err(ToolCallError::method_not_found(format!(
             "Unknown tool: {tool_name}"
         ))),
+    }
+}
+
+async fn handle_meerkat_skills(state: &MeerkatMcpState, input: Value) -> Result<Value, String> {
+    let runtime = state
+        .skill_runtime
+        .as_ref()
+        .ok_or_else(|| "skills not enabled".to_string())?;
+
+    let action = input["action"]
+        .as_str()
+        .ok_or_else(|| "missing 'action' field".to_string())?;
+
+    match action {
+        "list" => {
+            let entries = runtime
+                .list_all_with_provenance(&meerkat_core::skills::SkillFilter::default())
+                .await
+                .map_err(|e| format!("skill list failed: {e}"))?;
+            let wire: Vec<meerkat_contracts::SkillEntry> = entries
+                .iter()
+                .map(|e| meerkat_contracts::SkillEntry {
+                    id: e.descriptor.id.0.clone(),
+                    name: e.descriptor.name.clone(),
+                    description: e.descriptor.description.clone(),
+                    scope: e.descriptor.scope.to_string(),
+                    source: e.descriptor.source_name.clone(),
+                    is_active: e.is_active,
+                    shadowed_by: e.shadowed_by.clone(),
+                })
+                .collect();
+            serde_json::to_value(meerkat_contracts::SkillListResponse { skills: wire })
+                .map_err(|e| format!("serialization failed: {e}"))
+        }
+        "inspect" => {
+            let skill_id = input["skill_id"]
+                .as_str()
+                .ok_or_else(|| "missing 'skill_id' for inspect action".to_string())?;
+            let doc = runtime
+                .load_from_source(&meerkat_core::skills::SkillId::from(skill_id), None)
+                .await
+                .map_err(|e| format!("skill inspect failed: {e}"))?;
+            serde_json::to_value(meerkat_contracts::SkillInspectResponse {
+                id: doc.descriptor.id.0.clone(),
+                name: doc.descriptor.name.clone(),
+                description: doc.descriptor.description.clone(),
+                scope: doc.descriptor.scope.to_string(),
+                source: doc.descriptor.source_name.clone(),
+                body: doc.body,
+            })
+            .map_err(|e| format!("serialization failed: {e}"))
+        }
+        _ => Err(format!("unknown action: {action}")),
     }
 }
 
@@ -890,6 +973,7 @@ async fn handle_meerkat_run(
         backend: Some(state.backend.clone()),
         config_generation: current_generation,
         checkpointer: None,
+        silent_comms_intents: Vec::new(),
     };
 
     let req = CreateSessionRequest {
@@ -1046,6 +1130,7 @@ async fn handle_meerkat_resume(
             .or_else(|| Some(state.backend.clone())),
         config_generation: current_generation,
         checkpointer: None,
+        silent_comms_intents: Vec::new(),
     };
 
     // Try start_turn on the live session first (it may still be alive
@@ -1264,7 +1349,7 @@ mod tests {
     #[test]
     fn test_tools_list_schema() {
         let tools = tools_list();
-        assert_eq!(tools.len(), 4);
+        assert_eq!(tools.len(), 5);
 
         let run_tool = &tools[0];
         assert_eq!(run_tool["name"], "meerkat_run");

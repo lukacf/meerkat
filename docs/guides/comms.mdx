@@ -592,6 +592,26 @@ Incoming messages are formatted as text for the LLM:
 - **Request**: `[COMMS REQUEST from <peer> (id: <uuid>)]\nIntent: <intent>\nParams: <json>\n\nTo respond, use send with kind=peer_response, peer="<peer>", request_id="<uuid>"`
 - **Response**: `[COMMS RESPONSE from <peer> (to request: <uuid>)]\nStatus: <status>\nResult: <json>`
 
+## Silent comms intents
+
+Some comms intents are informational and should not trigger an LLM turn. For example, `mob.peer_added` and `mob.peer_retired` notifications tell the agent about peer lifecycle changes but don't require a response.
+
+Silent comms intents are configured via `AgentBuildConfig.silent_comms_intents`. When a `Request` arrives whose `intent` matches a silent intent, it is injected into the session context (like a response) instead of being processed through the LLM. This avoids wasting an LLM turn on a notification that the prompt already says to ignore.
+
+```rust
+let mut config = AgentBuildConfig::new("claude-sonnet-4-5");
+config.silent_comms_intents = vec![
+    "mob.peer_added".into(),
+    "mob.peer_retired".into(),
+];
+```
+
+Mob meerkats have `mob.peer_added` and `mob.peer_retired` configured as silent intents by default.
+
+<Note>
+Silent intents are only checked in the host-mode classification phase. Non-matching intents are processed normally through the LLM.
+</Note>
+
 ## External event ingestion
 
 External systems can push plain-text events into a running agent's inbox without Ed25519 authentication. Events are drained at turn boundaries (or continuously in host mode) and injected as user messages.

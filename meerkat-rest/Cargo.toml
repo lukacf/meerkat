@@ -27,7 +27,7 @@ path = "tests/live_continue_tmp.rs"
 required-features = ["integration-real-tests"]
 
 [dependencies]
-meerkat = { workspace = true, features = ["anthropic", "openai", "gemini", "jsonl-store", "session-store", "memory-store"] }
+meerkat = { workspace = true, features = ["anthropic", "openai", "gemini", "jsonl-store", "session-store", "memory-store", "skills"] }
 meerkat-core = { workspace = true }
 meerkat-contracts = { workspace = true }
 meerkat-client = { workspace = true }

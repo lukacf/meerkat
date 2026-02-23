@@ -49,9 +49,22 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> RpcServer<R, W> {
         runtime: Arc<SessionRuntime>,
         config_store: Arc<dyn ConfigStore>,
     ) -> Self {
+        Self::new_with_skill_runtime(reader, writer, runtime, config_store, None)
+    }
+
+    /// Create a new RPC server with an optional skill runtime for introspection.
+    pub fn new_with_skill_runtime(
+        reader: R,
+        writer: W,
+        runtime: Arc<SessionRuntime>,
+        config_store: Arc<dyn ConfigStore>,
+        skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
+    ) -> Self {
         let (notification_tx, notification_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         let notification_sink = NotificationSink::new(notification_tx);
-        let router = MethodRouter::new(runtime, config_store, notification_sink);
+        let router =
+            MethodRouter::new(runtime, config_store, notification_sink)
+                .with_skill_runtime(skill_runtime);
         let transport = JsonlTransport::new(reader, writer);
         let (response_tx, response_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         Self {
@@ -128,9 +141,19 @@ pub async fn serve_stdio(
     runtime: Arc<SessionRuntime>,
     config_store: Arc<dyn ConfigStore>,
 ) -> Result<(), ServerError> {
+    serve_stdio_with_skill_runtime(runtime, config_store, None).await
+}
+
+/// Start the RPC server on stdin/stdout with an optional skill runtime.
+pub async fn serve_stdio_with_skill_runtime(
+    runtime: Arc<SessionRuntime>,
+    config_store: Arc<dyn ConfigStore>,
+    skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
+) -> Result<(), ServerError> {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
     let reader = BufReader::new(stdin);
-    let mut server = RpcServer::new(reader, stdout, runtime, config_store);
+    let mut server =
+        RpcServer::new_with_skill_runtime(reader, stdout, runtime, config_store, skill_runtime);
     server.run().await
 }

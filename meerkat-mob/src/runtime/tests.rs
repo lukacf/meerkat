@@ -1049,6 +1049,17 @@ impl MobEventStore for FaultInjectedMobEventStore {
         Ok(self.events.read().await.clone())
     }
 
+    async fn append_batch(
+        &self,
+        events: Vec<NewMobEvent>,
+    ) -> Result<Vec<MobEvent>, MobError> {
+        let mut results = Vec::with_capacity(events.len());
+        for event in events {
+            results.push(self.append(event).await?);
+        }
+        Ok(results)
+    }
+
     async fn clear(&self) -> Result<(), MobError> {
         self.events.write().await.clear();
         Ok(())
@@ -1110,6 +1121,17 @@ impl MobEventStore for CompatFixtureEventStore {
                 })
             })
             .collect()
+    }
+
+    async fn append_batch(
+        &self,
+        events: Vec<NewMobEvent>,
+    ) -> Result<Vec<MobEvent>, MobError> {
+        let mut results = Vec::with_capacity(events.len());
+        for event in events {
+            results.push(self.append(event).await?);
+        }
+        Ok(results)
     }
 
     async fn clear(&self) -> Result<(), MobError> {

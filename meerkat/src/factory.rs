@@ -797,7 +797,8 @@ impl AgentFactory {
         shell_config: Option<ShellConfig>,
         external: Option<Arc<dyn AgentToolDispatcher>>,
         session_id: Option<String>,
-        #[allow(unused_variables)] skill_engine: Option<Arc<meerkat_core::skills::SkillRuntime>>,
+        #[cfg_attr(not(feature = "skills"), allow(unused_variables))]
+        skill_engine: Option<Arc<meerkat_core::skills::SkillRuntime>>,
     ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
         self.build_builtin_dispatcher_with_skills_internal(
             store,
@@ -824,9 +825,12 @@ impl AgentFactory {
         shell_config: Option<ShellConfig>,
         external: Option<Arc<dyn AgentToolDispatcher>>,
         session_id: Option<String>,
-        #[allow(unused_variables)] skill_engine: Option<Arc<meerkat_core::skills::SkillRuntime>>,
-        _sub_agent_scoped_event_tx: Option<mpsc::Sender<ScopedAgentEvent>>,
-        _sub_agent_scope_path: Option<Vec<StreamScopeFrame>>,
+        #[cfg_attr(not(feature = "skills"), allow(unused_variables))]
+        skill_engine: Option<Arc<meerkat_core::skills::SkillRuntime>>,
+        #[cfg_attr(not(feature = "sub-agents"), allow(unused_variables))]
+        sub_agent_scoped_event_tx: Option<mpsc::Sender<ScopedAgentEvent>>,
+        #[cfg_attr(not(feature = "sub-agents"), allow(unused_variables))]
+        sub_agent_scope_path: Option<Vec<StreamScopeFrame>>,
         #[cfg(all(feature = "sub-agents", feature = "comms"))] sub_agent_comms: Option<
             SubAgentCommsWiring,
         >,
@@ -976,8 +980,8 @@ impl AgentFactory {
             ));
             state
                 .set_scoped_stream(
-                    _sub_agent_scoped_event_tx.clone(),
-                    _sub_agent_scope_path.clone().unwrap_or_default(),
+                    sub_agent_scoped_event_tx.clone(),
+                    sub_agent_scope_path.clone().unwrap_or_default(),
                 )
                 .await;
 

@@ -1710,11 +1710,10 @@ impl MobActor {
 
     /// Cancel checkpointers and transition to Stopped. Used by `handle_reset`
     /// error paths after destructive steps have already been taken.
-    async fn fail_reset_to_stopped(&self, error: MobError) -> MobError {
+    async fn fail_reset_to_stopped(&self) {
         self.provisioner.cancel_all_checkpointers().await;
         self.state
             .store(MobState::Stopped as u8, Ordering::Release);
-        error
     }
 
     async fn handle_reset(&mut self) -> Result<(), MobError> {
@@ -1737,7 +1736,8 @@ impl MobActor {
         }
         if let Err(error) = self.stop_mcp_servers().await {
             // Members already retired -- fail-closed to Stopped.
-            return Err(self.fail_reset_to_stopped(error).await);
+            self.fail_reset_to_stopped().await;
+            return Err(error);
         }
 
         // --- Event rewrite phase: append new epoch markers. ---
@@ -1752,9 +1752,8 @@ impl MobActor {
                 NewMobEvent {
                     mob_id: mob_id.clone(),
                     timestamp: None,
-                    // Clone needed: MobCreated stores owned definition for serialization.
                     kind: MobEventKind::MobCreated {
-                        definition: (*self.definition).clone(),
+                        definition: self.definition.as_ref().clone(),
                     },
                 },
                 NewMobEvent {
@@ -1765,7 +1764,8 @@ impl MobActor {
             ])
             .await
         {
-            return Err(self.fail_reset_to_stopped(error).await);
+            self.fail_reset_to_stopped().await;
+            return Err(error);
         }
 
         // Clear in-memory projections. Don't call cleanup_namespace() — it
@@ -1784,7 +1784,8 @@ impl MobActor {
                     "reset cleanup failed while stopping mcp servers"
                 );
             }
-            return Err(self.fail_reset_to_stopped(error).await);
+            self.fail_reset_to_stopped().await;
+            return Err(error);
         }
 
         self.state

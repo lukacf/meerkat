@@ -20,15 +20,12 @@ pub trait MobEventStore: Send + Sync {
     /// Append a new event to the store.
     async fn append(&self, event: NewMobEvent) -> Result<MobEvent, MobError>;
 
-    /// Append multiple events atomically. Default implementation calls
-    /// `append` sequentially; implementations may override for true atomicity.
-    async fn append_batch(&self, events: Vec<NewMobEvent>) -> Result<Vec<MobEvent>, MobError> {
-        let mut results = Vec::with_capacity(events.len());
-        for event in events {
-            results.push(self.append(event).await?);
-        }
-        Ok(results)
-    }
+    /// Append multiple events atomically.
+    ///
+    /// Implementations must ensure all-or-nothing semantics: either every
+    /// event is persisted or none are. No default implementation is provided
+    /// to force implementors to consider atomicity.
+    async fn append_batch(&self, events: Vec<NewMobEvent>) -> Result<Vec<MobEvent>, MobError>;
 
     /// Poll for events after a given cursor, up to a limit.
     async fn poll(&self, after_cursor: u64, limit: usize) -> Result<Vec<MobEvent>, MobError>;

@@ -196,15 +196,13 @@ pub const DEFAULT_MAX_INLINE_PEER_NOTIFICATIONS: usize = 50;
 
 impl InlinePeerNotificationPolicy {
     /// Resolve policy from transport/build-layer config representation.
-    ///
-    /// Returns the parsed policy and the invalid raw value (if any).
-    pub fn from_raw(raw: Option<i32>) -> (Self, Option<i32>) {
+    pub fn try_from_raw(raw: Option<i32>) -> Result<Self, i32> {
         match raw {
-            None => (Self::AtMost(DEFAULT_MAX_INLINE_PEER_NOTIFICATIONS), None),
-            Some(-1) => (Self::Always, None),
-            Some(0) => (Self::Never, None),
-            Some(v) if v > 0 => (Self::AtMost(v as usize), None),
-            Some(v) => (Self::AtMost(DEFAULT_MAX_INLINE_PEER_NOTIFICATIONS), Some(v)),
+            None => Ok(Self::AtMost(DEFAULT_MAX_INLINE_PEER_NOTIFICATIONS)),
+            Some(-1) => Ok(Self::Always),
+            Some(0) => Ok(Self::Never),
+            Some(v) if v > 0 => Ok(Self::AtMost(v as usize)),
+            Some(v) => Err(v),
         }
     }
 }
@@ -457,30 +455,26 @@ mod tests {
     #[test]
     fn test_inline_peer_notification_policy_from_raw() {
         assert_eq!(
-            InlinePeerNotificationPolicy::from_raw(None),
-            (
-                InlinePeerNotificationPolicy::AtMost(DEFAULT_MAX_INLINE_PEER_NOTIFICATIONS),
-                None
-            )
+            InlinePeerNotificationPolicy::try_from_raw(None),
+            Ok(InlinePeerNotificationPolicy::AtMost(
+                DEFAULT_MAX_INLINE_PEER_NOTIFICATIONS
+            ))
         );
         assert_eq!(
-            InlinePeerNotificationPolicy::from_raw(Some(-1)),
-            (InlinePeerNotificationPolicy::Always, None)
+            InlinePeerNotificationPolicy::try_from_raw(Some(-1)),
+            Ok(InlinePeerNotificationPolicy::Always)
         );
         assert_eq!(
-            InlinePeerNotificationPolicy::from_raw(Some(0)),
-            (InlinePeerNotificationPolicy::Never, None)
+            InlinePeerNotificationPolicy::try_from_raw(Some(0)),
+            Ok(InlinePeerNotificationPolicy::Never)
         );
         assert_eq!(
-            InlinePeerNotificationPolicy::from_raw(Some(25)),
-            (InlinePeerNotificationPolicy::AtMost(25), None)
+            InlinePeerNotificationPolicy::try_from_raw(Some(25)),
+            Ok(InlinePeerNotificationPolicy::AtMost(25))
         );
         assert_eq!(
-            InlinePeerNotificationPolicy::from_raw(Some(-42)),
-            (
-                InlinePeerNotificationPolicy::AtMost(DEFAULT_MAX_INLINE_PEER_NOTIFICATIONS),
-                Some(-42)
-            )
+            InlinePeerNotificationPolicy::try_from_raw(Some(-42)),
+            Err(-42)
         );
     }
 }

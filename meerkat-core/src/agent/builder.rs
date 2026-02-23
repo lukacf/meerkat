@@ -221,15 +221,19 @@ impl AgentBuilder {
             pending_skill_references: None,
             silent_comms_intents: self.silent_comms_intents,
             inline_peer_notification_policy: {
-                let (policy, invalid) =
-                    InlinePeerNotificationPolicy::from_raw(self.max_inline_peer_notifications);
-                if let Some(value) = invalid {
-                    tracing::warn!(
-                        max_inline_peer_notifications = value,
-                        "invalid max_inline_peer_notifications value; using default threshold"
-                    );
+                match InlinePeerNotificationPolicy::try_from_raw(self.max_inline_peer_notifications)
+                {
+                    Ok(policy) => policy,
+                    Err(value) => {
+                        tracing::warn!(
+                            max_inline_peer_notifications = value,
+                            "invalid max_inline_peer_notifications value; using default threshold"
+                        );
+                        InlinePeerNotificationPolicy::AtMost(
+                            crate::agent::DEFAULT_MAX_INLINE_PEER_NOTIFICATIONS,
+                        )
+                    }
                 }
-                policy
             },
             peer_notification_suppression_active: false,
             checkpointer: self.checkpointer,

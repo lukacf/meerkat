@@ -511,7 +511,7 @@ fn render_named_list(mut names: Vec<String>) -> String {
         .into_iter()
         .take(PEER_INLINE_NAME_LIMIT)
         .collect::<Vec<_>>();
-    format!("{}, (+{} more)", displayed.join(", "), extra)
+    format!("{} (+{} more)", displayed.join(", "), extra)
 }
 
 fn render_peer_update_summary(batch: &PeerLifecycleBatch) -> Option<String> {

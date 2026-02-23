@@ -202,6 +202,8 @@ pub struct AgentBuildConfig {
     /// Per-build override for factory-level `enable_memory`.
     /// When `Some`, takes precedence over `AgentFactory::enable_memory`.
     pub override_memory: Option<bool>,
+    /// Per-build override for factory-level `enable_mob`.
+    pub override_mob: Option<bool>,
     /// Skills to pre-load at build time (full body injected into system prompt).
     /// `None` = metadata-only inventory (agent discovers and loads via tools).
     /// `Some(ids)` = pre-load these skills into the system prompt.
@@ -260,6 +262,7 @@ impl std::fmt::Debug for AgentBuildConfig {
             .field("override_shell", &self.override_shell)
             .field("override_subagents", &self.override_subagents)
             .field("override_memory", &self.override_memory)
+            .field("override_mob", &self.override_mob)
             .field("realm_id", &self.realm_id)
             .field("instance_id", &self.instance_id)
             .field("backend", &self.backend)
@@ -298,6 +301,7 @@ impl AgentBuildConfig {
             override_shell: None,
             override_subagents: None,
             override_memory: None,
+            override_mob: None,
             preload_skills: None,
             realm_id: None,
             instance_id: None,
@@ -347,6 +351,7 @@ impl AgentBuildConfig {
         self.override_shell = build.override_shell;
         self.override_subagents = build.override_subagents;
         self.override_memory = build.override_memory;
+        self.override_mob = build.override_mob;
         self.preload_skills = build.preload_skills.clone();
         self.realm_id = build.realm_id.clone();
         self.instance_id = build.instance_id.clone();
@@ -381,6 +386,7 @@ impl AgentBuildConfig {
             override_shell: self.override_shell,
             override_subagents: self.override_subagents,
             override_memory: self.override_memory,
+            override_mob: self.override_mob,
             preload_skills: self.preload_skills.clone(),
             realm_id: self.realm_id.clone(),
             instance_id: self.instance_id.clone(),
@@ -451,6 +457,7 @@ pub struct AgentFactory {
     #[cfg(feature = "comms")]
     pub enable_comms: bool,
     pub enable_memory: bool,
+    pub enable_mob: bool,
     /// Optional skill source override. When set, bypasses config-driven
     /// repository resolution. For SDK users who wire sources programmatically.
     #[cfg(feature = "skills")]
@@ -471,7 +478,8 @@ impl std::fmt::Debug for AgentFactory {
             .field("enable_builtins", &self.enable_builtins)
             .field("enable_shell", &self.enable_shell)
             .field("enable_subagents", &self.enable_subagents)
-            .field("enable_memory", &self.enable_memory);
+            .field("enable_memory", &self.enable_memory)
+            .field("enable_mob", &self.enable_mob);
         #[cfg(feature = "comms")]
         d.field("enable_comms", &self.enable_comms);
         #[cfg(feature = "skills")]
@@ -496,6 +504,7 @@ impl AgentFactory {
             #[cfg(feature = "comms")]
             enable_comms: false,
             enable_memory: false,
+            enable_mob: false,
             #[cfg(feature = "skills")]
             skill_source: None,
             custom_store: None,
@@ -555,6 +564,12 @@ impl AgentFactory {
     /// Enable or disable semantic memory (memory_search tool + compaction indexing).
     pub fn memory(mut self, enabled: bool) -> Self {
         self.enable_memory = enabled;
+        self
+    }
+
+    /// Enable or disable mob (multi-agent orchestration) tools.
+    pub fn mob(mut self, enabled: bool) -> Self {
+        self.enable_mob = enabled;
         self
     }
 
@@ -1433,6 +1448,7 @@ impl AgentFactory {
                 shell: effective_shell,
                 comms: comms_enabled,
                 subagents: effective_subagents,
+                mob: build_config.override_mob.unwrap_or(self.enable_mob),
                 active_skills: active_skill_ids,
             },
             host_mode: build_config.host_mode,

@@ -99,27 +99,27 @@ impl MobHandle {
         self.roster.read().await.clone()
     }
 
-    /// List active (operational) meerkats in the roster.
+    /// List active (operational) members in the roster.
     ///
     /// Excludes members in `Retiring` state. Used by flow target selection,
     /// supervisor escalation, and other paths that assume operational members.
     /// For full roster visibility including retiring members, use
-    /// [`list_all_meerkats`](Self::list_all_meerkats).
-    pub async fn list_meerkats(&self) -> Vec<RosterEntry> {
+    /// [`list_all_members`](Self::list_all_members).
+    pub async fn list_members(&self) -> Vec<RosterEntry> {
         self.roster.read().await.list().cloned().collect()
     }
 
-    /// List all meerkats including those in `Retiring` state.
+    /// List all members including those in `Retiring` state.
     ///
     /// The `state` field on each [`RosterEntry`] distinguishes `Active` from
     /// `Retiring`. Use this for observability and membership inspection where
     /// in-flight retires should be visible.
-    pub async fn list_all_meerkats(&self) -> Vec<RosterEntry> {
+    pub async fn list_all_members(&self) -> Vec<RosterEntry> {
         self.roster.read().await.list_all().cloned().collect()
     }
 
-    /// Get a specific meerkat entry.
-    pub async fn get_meerkat(&self, meerkat_id: &MeerkatId) -> Option<RosterEntry> {
+    /// Get a specific member entry.
+    pub async fn get_member(&self, meerkat_id: &MeerkatId) -> Option<RosterEntry> {
         self.roster.read().await.get(meerkat_id).cloned()
     }
 
@@ -200,43 +200,31 @@ impl MobHandle {
         self.definition.flows.keys().cloned().collect()
     }
 
-    /// Spawn a new meerkat from a profile and return its member reference.
-    pub async fn spawn_member_ref(
+    /// Spawn a new member from a profile and return its member reference.
+    pub async fn spawn(
         &self,
         profile_name: ProfileName,
         meerkat_id: MeerkatId,
         initial_message: Option<String>,
     ) -> Result<MemberRef, MobError> {
-        self.spawn_member_ref_with_runtime_mode_and_backend(
-            profile_name,
-            meerkat_id,
-            initial_message,
-            None,
-            None,
-        )
-        .await
+        self.spawn_with_options(profile_name, meerkat_id, initial_message, None, None)
+            .await
     }
 
-    /// Spawn a new meerkat from a profile with explicit backend override.
-    pub async fn spawn_member_ref_with_backend(
+    /// Spawn a new member from a profile with explicit backend override.
+    pub async fn spawn_with_backend(
         &self,
         profile_name: ProfileName,
         meerkat_id: MeerkatId,
         initial_message: Option<String>,
         backend: Option<MobBackendKind>,
     ) -> Result<MemberRef, MobError> {
-        self.spawn_member_ref_with_runtime_mode_and_backend(
-            profile_name,
-            meerkat_id,
-            initial_message,
-            None,
-            backend,
-        )
-        .await
+        self.spawn_with_options(profile_name, meerkat_id, initial_message, None, backend)
+            .await
     }
 
-    /// Spawn a new meerkat from a profile with explicit runtime mode/backend overrides.
-    pub async fn spawn_member_ref_with_runtime_mode_and_backend(
+    /// Spawn a new member from a profile with explicit runtime mode/backend overrides.
+    pub async fn spawn_with_options(
         &self,
         profile_name: ProfileName,
         meerkat_id: MeerkatId,
@@ -261,34 +249,15 @@ impl MobHandle {
             .map_err(|_| MobError::Internal("actor reply dropped".into()))?
     }
 
-    /// Spawn a new meerkat from a profile.
-    ///
-    /// Compatibility API: returns the bridged session ID for session-backed members.
-    pub async fn spawn(
-        &self,
-        profile_name: ProfileName,
-        meerkat_id: MeerkatId,
-        initial_message: Option<String>,
-    ) -> Result<SessionId, MobError> {
-        let member_ref = self
-            .spawn_member_ref(profile_name, meerkat_id, initial_message)
-            .await?;
-        member_ref.session_id().cloned().ok_or_else(|| {
-            MobError::Internal(format!(
-                "spawned member has no session bridge; use spawn_member_ref() instead: {member_ref:?}"
-            ))
-        })
-    }
-
     /// Spawn multiple members in parallel.
     ///
     /// Results preserve input order.
-    pub async fn spawn_many_member_refs(
+    pub async fn spawn_many(
         &self,
         specs: Vec<SpawnMemberSpec>,
     ) -> Vec<Result<MemberRef, MobError>> {
         futures::future::join_all(specs.into_iter().map(|spec| {
-            self.spawn_member_ref_with_runtime_mode_and_backend(
+            self.spawn_with_options(
                 spec.profile_name,
                 spec.meerkat_id,
                 spec.initial_message,
@@ -299,27 +268,7 @@ impl MobHandle {
         .await
     }
 
-    /// Compatibility batch API: returns session IDs for session-backed members.
-    pub async fn spawn_many(
-        &self,
-        specs: Vec<SpawnMemberSpec>,
-    ) -> Vec<Result<SessionId, MobError>> {
-        self.spawn_many_member_refs(specs)
-            .await
-            .into_iter()
-            .map(|result| {
-                result.and_then(|member_ref| {
-                    member_ref.session_id().cloned().ok_or_else(|| {
-                        MobError::Internal(format!(
-                            "spawned member has no session bridge; use spawn_many_member_refs() instead: {member_ref:?}"
-                        ))
-                    })
-                })
-            })
-            .collect()
-    }
-
-    /// Retire a meerkat, archiving its session and removing trust.
+    /// Retire a member, archiving its session and removing trust.
     pub async fn retire(&self, meerkat_id: MeerkatId) -> Result<(), MobError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
@@ -346,7 +295,7 @@ impl MobHandle {
             .map_err(|_| MobError::Internal("actor reply dropped".into()))?
     }
 
-    /// Wire two meerkats together (bidirectional trust).
+    /// Wire two members together (bidirectional trust).
     pub async fn wire(&self, a: MeerkatId, b: MeerkatId) -> Result<(), MobError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
@@ -358,7 +307,7 @@ impl MobHandle {
             .map_err(|_| MobError::Internal("actor reply dropped".into()))?
     }
 
-    /// Unwire two meerkats (remove bidirectional trust).
+    /// Unwire two members (remove bidirectional trust).
     pub async fn unwire(&self, a: MeerkatId, b: MeerkatId) -> Result<(), MobError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
@@ -370,8 +319,8 @@ impl MobHandle {
             .map_err(|_| MobError::Internal("actor reply dropped".into()))?
     }
 
-    /// Send an external turn to a meerkat (enforces external_addressable).
-    pub async fn external_turn(
+    /// Send a message to a member (enforces external_addressable).
+    pub async fn send_message(
         &self,
         meerkat_id: MeerkatId,
         message: String,
@@ -390,7 +339,7 @@ impl MobHandle {
             .map_err(|_| MobError::Internal("actor reply dropped".into()))?
     }
 
-    /// Send an internal turn to a meerkat (no external_addressable check).
+    /// Send an internal turn to a member (no external_addressable check).
     pub async fn internal_turn(
         &self,
         meerkat_id: MeerkatId,
@@ -434,7 +383,7 @@ impl MobHandle {
             .map_err(|_| MobError::Internal("actor reply dropped".into()))?
     }
 
-    /// Archive all meerkats, emit MobCompleted, and transition to Completed.
+    /// Archive all members, emit MobCompleted, and transition to Completed.
     pub async fn complete(&self) -> Result<(), MobError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
@@ -461,7 +410,7 @@ impl MobHandle {
             .map_err(|_| MobError::Internal("actor reply dropped".into()))?
     }
 
-    /// Retire active meerkats and clear persisted mob storage.
+    /// Retire active members and clear persisted mob storage.
     pub async fn destroy(&self) -> Result<(), MobError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx

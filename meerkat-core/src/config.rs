@@ -1226,6 +1226,8 @@ pub struct ToolsConfig {
     pub comms_enabled: bool,
     /// Sub-agent tools enabled
     pub subagents_enabled: bool,
+    /// Mob (multi-agent orchestration) tools enabled
+    pub mob_enabled: bool,
 }
 
 impl Default for ToolsConfig {
@@ -1239,6 +1241,7 @@ impl Default for ToolsConfig {
             shell_enabled: false,
             comms_enabled: false,
             subagents_enabled: false,
+            mob_enabled: false,
         }
     }
 }

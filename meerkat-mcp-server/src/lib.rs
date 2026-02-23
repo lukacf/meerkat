@@ -967,6 +967,7 @@ async fn handle_meerkat_run(
         override_shell: Some(input.enable_builtins && enable_shell),
         override_subagents: None,
         override_memory: None,
+            override_mob: None,
         preload_skills: None,
         realm_id: Some(state.realm_id.clone()),
         instance_id: state.instance_id.clone(),
@@ -1112,6 +1113,7 @@ async fn handle_meerkat_resume(
         override_shell: Some(enable_builtins && enable_shell),
         override_subagents: None,
         override_memory: None,
+            override_mob: None,
         preload_skills: None,
         peer_meta: input
             .peer_meta

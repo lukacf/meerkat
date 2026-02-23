@@ -122,6 +122,7 @@ pub struct SessionBuildOptions {
     pub override_shell: Option<bool>,
     pub override_subagents: Option<bool>,
     pub override_memory: Option<bool>,
+    pub override_mob: Option<bool>,
     pub preload_skills: Option<Vec<crate::skills::SkillId>>,
     pub realm_id: Option<String>,
     pub instance_id: Option<String>,
@@ -162,6 +163,7 @@ impl Default for SessionBuildOptions {
             override_shell: None,
             override_subagents: None,
             override_memory: None,
+            override_mob: None,
             preload_skills: None,
             realm_id: None,
             instance_id: None,
@@ -194,6 +196,7 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("override_shell", &self.override_shell)
             .field("override_subagents", &self.override_subagents)
             .field("override_memory", &self.override_memory)
+            .field("override_mob", &self.override_mob)
             .field("preload_skills", &self.preload_skills)
             .field("realm_id", &self.realm_id)
             .field("instance_id", &self.instance_id)

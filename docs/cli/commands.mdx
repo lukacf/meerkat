@@ -48,7 +48,6 @@ rkat run [OPTIONS] <PROMPT>
 Frequently used options:
 
 - `--model <MODEL>`
-- `-m <MODEL>` (short for `--model`)
 - `--provider <anthropic|openai|gemini>`
 - `--stream`
 - `-s` (short for `--stream`)
@@ -66,6 +65,8 @@ Frequently used options:
 - `-b` (short for `--enable-builtins`)
 - `--enable-shell` (implies `--enable-builtins`)
 - `-x` (short for `--enable-shell`)
+- `--enable-mob`
+- `-M` (short for `--enable-mob`; opt-in mob tools, default: disabled)
 - `--no-subagents`
 - `-N` (short for `--no-subagents`)
 - `--hooks-override-json <JSON>`
@@ -88,8 +89,8 @@ Tooling convenience:
 
 - `--enable-shell` now implies `--enable-builtins`; you can use `-x` alone for common shell-enabled runs.
 
-`run` composes the mob tool surface (backed by `meerkat-mob-mcp`) into the agent tool list (`mob_create`, `mob_list`, `mob_status`, `mob_spawn`, `mob_retire`, `mob_wire`, `mob_unwire`, `mob_external_turn`, `mob_events`, `mob_list_meerkats`, `mob_stop`, `mob_resume`, `mob_complete`, `mob_reset`, `mob_destroy`).
-These are available even when built-ins are disabled.
+When `--enable-mob` (`-M`) is passed, `run` composes the consolidated mob tool surface (backed by `meerkat-mob-mcp`) into the agent tool list (`mob_create`, `mob_list`, `mob_lifecycle`, `meerkat_spawn`, `meerkat_retire`, `meerkat_wire`, `meerkat_message`, `meerkat_list`, `mob_events`, `mob_run_flow`, `mob_flow_status`, `mob_cancel_flow`).
+Mob tools are opt-in and disabled by default. When enabled, they are available even when built-ins are disabled.
 
 For mob workflows, this tool path is the primary CLI UX:
 
@@ -115,7 +116,7 @@ rkat resume <SESSION_ID> <PROMPT>
 
 Resumes a session from the active realm.
 
-Like `run`, `resume` composes the `mob_*` tool surface.
+Like `run`, `resume` composes the mob tool surface when `--enable-mob` (`-M`) is passed.
 
 ## mob
 
@@ -129,10 +130,8 @@ rkat mob spawn <MOB_ID> <PROFILE> <MEERKAT_ID>
 rkat mob retire <MOB_ID> <MEERKAT_ID>
 rkat mob wire <MOB_ID> <A> <B>
 rkat mob unwire <MOB_ID> <A> <B>
-rkat mob turn <MOB_ID> <MEERKAT_ID> <MESSAGE>
-rkat mob stop <MOB_ID>
-rkat mob resume <MOB_ID>
-rkat mob complete <MOB_ID>
+rkat mob message <MOB_ID> <MEERKAT_ID> <MESSAGE>
+rkat mob lifecycle <MOB_ID> <stop|resume|complete|reset>
 rkat mob flows <MOB_ID>
 rkat mob run-flow <MOB_ID> --flow <FLOW_ID> [--params <JSON_OBJECT>] [--stream|-s] [--stream-view|-w <primary|mux|focus>] [--stream-focus|-f <scope_id>]
 rkat mob flow-status <MOB_ID> <RUN_ID>

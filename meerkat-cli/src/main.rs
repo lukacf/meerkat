@@ -380,6 +380,10 @@ enum Commands {
         #[arg(long, short = 'N')]
         no_subagents: bool,
 
+        /// Enable mob (multi-agent orchestration) tools.
+        #[arg(long, short = 'M')]
+        enable_mob: bool,
+
         // === Output verbosity ===
         /// Verbose output: show each turn, tool calls, and results as they happen
         #[arg(long, short = 'v')]
@@ -841,6 +845,7 @@ async fn main() -> anyhow::Result<ExitCode> {
             enable_builtins,
             enable_shell,
             no_subagents,
+            enable_mob,
             verbose,
             host,
             stdin,
@@ -884,6 +889,7 @@ async fn main() -> anyhow::Result<ExitCode> {
                 enable_builtins,
                 enable_shell,
                 no_subagents,
+                enable_mob,
                 verbose,
                 host,
                 stdin,
@@ -915,6 +921,7 @@ async fn main() -> anyhow::Result<ExitCode> {
             enable_builtins,
             enable_shell,
             no_subagents,
+            enable_mob,
             verbose,
         } => {
             handle_run_command(
@@ -941,6 +948,7 @@ async fn main() -> anyhow::Result<ExitCode> {
                 enable_builtins,
                 enable_shell,
                 no_subagents,
+                enable_mob,
                 verbose,
                 false, // host_mode
                 false, // stdin_events
@@ -1045,6 +1053,7 @@ async fn handle_run_command(
     enable_builtins: bool,
     enable_shell: bool,
     no_subagents: bool,
+    enable_mob: bool,
     verbose: bool,
     host: bool,
     stdin: bool,
@@ -1108,6 +1117,7 @@ async fn handle_run_command(
                 enable_builtins,
                 enable_shell,
                 !no_subagents,
+                enable_mob,
                 verbose,
                 host,
                 stdin,
@@ -2138,6 +2148,7 @@ async fn run_agent(
     enable_builtins: bool,
     enable_shell: bool,
     enable_subagents: bool,
+    enable_mob: bool,
     verbose: bool,
     host_mode: bool,
     stdin_events: bool,
@@ -2149,6 +2160,7 @@ async fn run_agent(
     scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
     let host_mode = resolve_host_mode(host_mode)?;
+    let effective_mob = enable_mob || config.tools.mob_enabled;
     let canonical_skill_refs = canonical_skill_keys(config, skill_refs, skill_references)?;
     let session = Session::new();
     let primary_scope_path = vec![StreamScopeFrame::Primary {
@@ -2254,8 +2266,12 @@ async fn run_agent(
 
     let run_mob_service: Arc<dyn meerkat_mob::MobSessionService> =
         Arc::new(MobCliSessionService::new(mob_persistent));
-    let mut run_mob_tools = prepare_run_mob_tools(scope, run_mob_service).await?;
-    let mob_external_tools = Some(run_mob_tools.dispatcher());
+    let mut run_mob_tools = if effective_mob {
+        Some(prepare_run_mob_tools(scope, run_mob_service).await?)
+    } else {
+        None
+    };
+    let mob_external_tools = run_mob_tools.as_ref().map(|ctx| ctx.dispatcher());
     let external_tools = compose_external_tool_dispatchers(mob_external_tools, mcp_external_tools)?;
 
     let build = SessionBuildOptions {
@@ -2276,6 +2292,7 @@ async fn run_agent(
         override_shell: None,
         override_subagents: None,
         override_memory: None,
+        override_mob: Some(effective_mob),
         preload_skills: None,
         realm_id: Some(scope.locator.realm_id.clone()),
         instance_id: scope.instance_id.clone(),
@@ -2375,7 +2392,9 @@ async fn run_agent(
     // This drops runtime-held event senders so the receiver can close cleanly.
     service.shutdown().await;
     shutdown_mcp(&mcp_adapter).await;
-    run_mob_tools.persist(scope).await?;
+    if let Some(ref mut mob_ctx) = run_mob_tools {
+        mob_ctx.persist(scope).await?;
+    }
 
     // Ensure the primary->scoped bridge is drained before final stream completion checks.
     if let Some(task) = primary_to_scoped_bridge_task {
@@ -2539,6 +2558,7 @@ async fn resume_session_with_llm_override(
             shell: config.tools.shell_enabled,
             comms: config.tools.comms_enabled,
             subagents: config.tools.subagents_enabled,
+            mob: config.tools.mob_enabled,
             active_skills: None,
         });
     let host_mode_requested = stored_metadata
@@ -2614,8 +2634,12 @@ async fn resume_session_with_llm_override(
     log_stage("compose_external_tool_dispatchers");
     let run_mob_service: Arc<dyn meerkat_mob::MobSessionService> =
         Arc::new(MobCliSessionService::new(mob_persistent));
-    let mut run_mob_tools = prepare_run_mob_tools(scope, run_mob_service).await?;
-    let mob_external_tools = Some(run_mob_tools.dispatcher());
+    let mut run_mob_tools = if tooling.mob {
+        Some(prepare_run_mob_tools(scope, run_mob_service).await?)
+    } else {
+        None
+    };
+    let mob_external_tools = run_mob_tools.as_ref().map(|ctx| ctx.dispatcher());
     let external_tools = compose_external_tool_dispatchers(mob_external_tools, mcp_external_tools)?;
 
     let (event_tx, event_task) = if verbose {
@@ -2642,6 +2666,7 @@ async fn resume_session_with_llm_override(
         override_shell: None,
         override_subagents: None,
         override_memory: None,
+        override_mob: Some(tooling.mob),
         preload_skills: None,
         peer_meta: stored_metadata.as_ref().and_then(|m| m.peer_meta.clone()),
         realm_id: stored_metadata
@@ -2688,7 +2713,9 @@ async fn resume_session_with_llm_override(
     log_stage("shutdown_mcp");
     shutdown_mcp(&mcp_adapter).await;
     log_stage("persist_mob_registry");
-    run_mob_tools.persist(scope).await?;
+    if let Some(ref mut mob_ctx) = run_mob_tools {
+        mob_ctx.persist(scope).await?;
+    }
     if let Some(task) = event_task {
         let _ = task.await;
     }
@@ -3880,7 +3907,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             message,
         } => {
             state
-                .mob_external_turn(
+                .mob_send_message(
                     &meerkat_mob::MobId::from(mob_id.clone()),
                     meerkat_mob::MeerkatId::from(meerkat_id),
                     message,
@@ -4482,7 +4509,7 @@ mod tests {
     #[test]
     fn test_run_short_flags_parse() {
         let cli = Cli::try_parse_from([
-            "rkat", "run", "hello", "-s", "-w", "focus", "-f", "primary", "-x", "-d", "5m",
+            "rkat", "run", "hello", "-s", "-w", "focus", "-f", "primary", "-x", "-d", "5m", "-M",
         ])
         .expect("short flags should parse");
 
@@ -4493,6 +4520,7 @@ mod tests {
                 stream_focus,
                 enable_shell,
                 max_duration,
+                enable_mob,
                 ..
             } => {
                 assert!(stream);
@@ -4500,6 +4528,7 @@ mod tests {
                 assert_eq!(stream_focus.as_deref(), Some("primary"));
                 assert!(enable_shell);
                 assert_eq!(max_duration.as_deref(), Some("5m"));
+                assert!(enable_mob);
             }
             _ => unreachable!("expected run command"),
         }
@@ -4561,8 +4590,8 @@ mod tests {
         let names: std::collections::BTreeSet<String> =
             composed.tools().iter().map(|t| t.name.clone()).collect();
         assert!(names.contains("mob_create"));
-        assert!(names.contains("mob_spawn"));
-        assert!(names.contains("mob_external_turn"));
+        assert!(names.contains("meerkat_spawn"));
+        assert!(names.contains("meerkat_message"));
     }
 
     #[tokio::test]
@@ -4647,7 +4676,7 @@ mod tests {
 
         assert!(names.contains("mob_create"));
         assert!(names.contains("mob_list"));
-        assert!(names.contains("mob_spawn"));
+        assert!(names.contains("meerkat_spawn"));
 
         let system_prompt = captured_system_prompt
             .lock()
@@ -4704,12 +4733,10 @@ mod tests {
         call_tool_json(
             &dispatcher_a,
             "t-spawn-a",
-            "mob_spawn",
+            "meerkat_spawn",
             serde_json::json!({
                 "mob_id": mob_id,
-                "profile": "lead",
-                "meerkat_id": "lead-1",
-                "runtime_mode": "turn_driven"
+                "specs": [{"profile": "lead", "meerkat_id": "lead-1", "runtime_mode": "turn_driven"}]
             }),
         )
         .await;
@@ -4731,7 +4758,7 @@ mod tests {
         let status = call_tool_json(
             &dispatcher_b,
             "t-status",
-            "mob_status",
+            "mob_list",
             serde_json::json!({"mob_id": mob_id}),
         )
         .await;
@@ -4739,12 +4766,10 @@ mod tests {
         call_tool_json(
             &dispatcher_b,
             "t-spawn-b",
-            "mob_spawn",
+            "meerkat_spawn",
             serde_json::json!({
                 "mob_id": created["mob_id"].as_str().expect("mob id"),
-                "profile": "worker",
-                "meerkat_id": "worker-1",
-                "runtime_mode": "turn_driven"
+                "specs": [{"profile": "worker", "meerkat_id": "worker-1", "runtime_mode": "turn_driven"}]
             }),
         )
         .await;
@@ -4778,12 +4803,10 @@ mod tests {
         call_tool_json(
             &dispatcher,
             "t-spawn-turn",
-            "mob_spawn",
+            "meerkat_spawn",
             serde_json::json!({
                 "mob_id": mob_id,
-                "profile": "lead",
-                "meerkat_id": "lead-turn",
-                "runtime_mode": "turn_driven"
+                "specs": [{"profile": "lead", "meerkat_id": "lead-turn", "runtime_mode": "turn_driven"}]
             }),
         )
         .await;
@@ -4791,11 +4814,11 @@ mod tests {
         let listed = call_tool_json(
             &dispatcher,
             "t-list-runtime",
-            "mob_list_meerkats",
+            "meerkat_list",
             serde_json::json!({"mob_id": mob_id}),
         )
         .await;
-        let members = listed["meerkats"].as_array().cloned().unwrap_or_default();
+        let members = listed["members"].as_array().cloned().unwrap_or_default();
         let lead_mode = members
             .iter()
             .find(|m| m["meerkat_id"] == "lead-turn")
@@ -4830,8 +4853,8 @@ mod tests {
         call_tool_json(
             &dispatcher,
             "t-destroy",
-            "mob_destroy",
-            serde_json::json!({"mob_id": mob_id}),
+            "mob_lifecycle",
+            serde_json::json!({"mob_id": mob_id, "action": "destroy"}),
         )
         .await;
         ctx.persist(&scope)
@@ -4869,6 +4892,7 @@ mod tests {
                     shell: false,
                     comms: false,
                     subagents: true,
+                    mob: true,
                     active_skills: None,
                 },
                 host_mode: false,

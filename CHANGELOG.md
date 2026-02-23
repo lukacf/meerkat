@@ -12,10 +12,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 #### Mobs (Multi-Agent Orchestration)
 - Introduced first-class mob runtime (`meerkat-mob`) for built-in multi-agent orchestration.
 - Added DAG-based flow engine with conditions, branching, fan-out/fan-in, and dependency-aware step execution.
-- Added full mob lifecycle operations (`create`, `spawn`, `wire`, `run_flow`, `retire`, `destroy`) with in-memory and redb-backed persistence.
+- Added full mob lifecycle operations with in-memory and redb-backed persistence.
 - Added parallel spawn provisioning/finalization paths to support large swarm initialization.
 - Added autonomous-host default runtime mode with supervision and escalation behavior.
 - Added dedicated mob MCP surface (`meerkat-mob-mcp`) and integrated mob tools into CLI run/resume workflows.
+- **Consolidated mob tool surface from 19 → 12 tools** with clear mob-level (`mob_*`) and member-level (`meerkat_*`) taxonomy.
+- **Gated mob tools behind opt-in `--enable-mob` / `-M` flag** (default: disabled). Mob tools no longer pollute regular agent sessions.
+- Mob enablement persists in session metadata for deterministic resume.
+
+#### CLI UX
+- **Stdin pipe support**: `cat file.txt | rkat run "Summarize"` reads piped input as context. Supports chaining: `cat data | rkat run "Extract" | rkat run "Analyze"`.
+- **Live event streaming**: `tail -f app.log | rkat run --host --stdin "Monitor"` reads stdin line-by-line as events (infinite pipes).
+- **Default `run` subcommand**: `rkat "hello"` is equivalent to `rkat run "hello"`.
+- **Compact session references**: `rkat resume last`, `rkat resume ~2`, `rkat resume 019c8b99` (short prefix, git-style).
+- **`continue` command**: `rkat continue "keep going"` (alias: `rkat c`) resumes the most recent session.
+- Session output shows compact 8-char ID instead of full UUID.
+
+#### MobHandle SDK Renames
+- `external_turn` → `send_message`, `list_meerkats` → `list_members`, `get_meerkat` → `get_member`.
+- `spawn_member_ref*` → `spawn` / `spawn_with_backend` / `spawn_with_options`.
+- `spawn_many_member_refs` → `spawn_many`. `spawn()` now returns `MemberRef` (old `SessionId` compat path removed).
 
 #### Skills v2.1
 - Added strict source-pinned skill identity model (`SkillKey`) and structured skill refs.
@@ -34,6 +50,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Added deferred initial-turn policy support for session creation, used by mob spawns.
 - Added session-wide event stream API parity across services/surfaces.
 - TypeScript SDK package renamed from `@meerkat/sdk` to `@rkat/sdk`.
+- Release pipeline now publishes all 18 Rust crates (added `meerkat-mob`, `meerkat-mob-mcp`, `rkat`).
 
 ### Fixed
 - Fixed OpenAI streaming duplicate/replay edge cases and strengthened error mapping.

@@ -2226,7 +2226,9 @@ async fn resolve_flexible_session_id(
         "last" | "~" | "~0" => Some(0usize),
         s if s.starts_with('~') => {
             let n = s[1..].parse::<usize>().map_err(|_| {
-                anyhow::anyhow!("Invalid relative offset '{input}': expected ~N where N is a number")
+                anyhow::anyhow!(
+                    "Invalid relative offset '{input}': expected ~N where N is a number"
+                )
             })?;
             Some(n)
         }
@@ -4733,29 +4735,48 @@ mod tests {
     #[test]
     fn test_inject_default_run_subcommand() {
         // Bare prompt → inject "run"
-        let args = inject_default_run_subcommand(
-            ["rkat", "hello world"].map(Into::into),
+        let args = inject_default_run_subcommand(["rkat", "hello world"].map(Into::into));
+        assert_eq!(
+            args,
+            vec!["rkat", "run", "hello world"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
         );
-        assert_eq!(args, vec!["rkat", "run", "hello world"].into_iter().map(std::ffi::OsString::from).collect::<Vec<_>>());
 
         // Global flags before prompt → inject "run" before prompt
-        let args = inject_default_run_subcommand(
-            ["rkat", "--realm", "test", "hello"].map(Into::into),
+        let args =
+            inject_default_run_subcommand(["rkat", "--realm", "test", "hello"].map(Into::into));
+        assert_eq!(
+            args[3],
+            std::ffi::OsString::from("run"),
+            "should inject run before first positional"
         );
-        assert_eq!(args[3], std::ffi::OsString::from("run"), "should inject run before first positional");
-        assert_eq!(args[4], std::ffi::OsString::from("hello"), "prompt follows run");
+        assert_eq!(
+            args[4],
+            std::ffi::OsString::from("hello"),
+            "prompt follows run"
+        );
 
         // Explicit subcommand → no injection
-        let args = inject_default_run_subcommand(
-            ["rkat", "run", "hello"].map(Into::into),
+        let args = inject_default_run_subcommand(["rkat", "run", "hello"].map(Into::into));
+        assert_eq!(
+            args,
+            vec!["rkat", "run", "hello"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
         );
-        assert_eq!(args, vec!["rkat", "run", "hello"].into_iter().map(std::ffi::OsString::from).collect::<Vec<_>>());
 
         // Other subcommand → no injection
-        let args = inject_default_run_subcommand(
-            ["rkat", "init"].map(Into::into),
+        let args = inject_default_run_subcommand(["rkat", "init"].map(Into::into));
+        assert_eq!(
+            args,
+            vec!["rkat", "init"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
         );
-        assert_eq!(args, vec!["rkat", "init"].into_iter().map(std::ffi::OsString::from).collect::<Vec<_>>());
     }
 
     #[test]

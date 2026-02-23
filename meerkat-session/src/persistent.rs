@@ -35,9 +35,15 @@ struct CheckpointerGate {
 ///
 /// Used by host-mode agents to persist the session after each interaction
 /// without going through `SessionService::start_turn()`.
+///
+/// Tracks the message count from the last successful save so that
+/// back-to-back checkpoints of an unchanged session are skipped.
+/// This avoids redundant writes — particularly the first checkpoint
+/// after `create_session` (which already calls `persist_full_session`).
 struct StoreCheckpointer {
     store: Arc<dyn SessionStore>,
     gate: Arc<CheckpointerGate>,
+    last_saved_len: std::sync::atomic::AtomicUsize,
 }
 
 #[async_trait]
@@ -47,8 +53,18 @@ impl meerkat_core::checkpoint::SessionCheckpointer for StoreCheckpointer {
         if *guard {
             return;
         }
+        let current_len = session.messages().len();
+        let prev_len = self
+            .last_saved_len
+            .load(std::sync::atomic::Ordering::Acquire);
+        if current_len == prev_len {
+            return;
+        }
         if let Err(e) = self.store.save(session).await {
             tracing::warn!("Host-mode checkpoint failed: {e}");
+        } else {
+            self.last_saved_len
+                .store(current_len, std::sync::atomic::Ordering::Release);
         }
         drop(guard);
     }
@@ -93,13 +109,13 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         let gate = Arc::new(CheckpointerGate {
             cancelled: Mutex::new(false),
         });
-        let checkpointer: Arc<dyn meerkat_core::checkpoint::SessionCheckpointer> =
-            Arc::new(StoreCheckpointer {
-                store: Arc::clone(&self.store),
-                gate: Arc::clone(&gate),
-            });
+        let checkpointer = Arc::new(StoreCheckpointer {
+            store: Arc::clone(&self.store),
+            gate: Arc::clone(&gate),
+            last_saved_len: std::sync::atomic::AtomicUsize::new(0),
+        });
         let build = req.build.get_or_insert_with(Default::default);
-        build.checkpointer = Some(checkpointer);
+        build.checkpointer = Some(checkpointer.clone());
 
         let result = self.inner.create_session(req).await?;
 
@@ -111,8 +127,13 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
                 .insert(result.session_id.clone(), gate);
         }
 
-        // Persist the full session snapshot (messages + metadata) after first turn.
-        self.persist_full_session(&result.session_id).await?;
+        // Persist the full session snapshot (messages + metadata) after first
+        // turn and seed the checkpointer so the next host-mode checkpoint is
+        // skipped if the session hasn't changed since this save.
+        let saved_len = self.persist_full_session(&result.session_id).await?;
+        checkpointer
+            .last_saved_len
+            .store(saved_len, std::sync::atomic::Ordering::Release);
 
         Ok(result)
     }
@@ -125,7 +146,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         let result = self.inner.start_turn(id, req).await?;
 
         // Persist full session snapshot after turn.
-        self.persist_full_session(id).await?;
+        let _ = self.persist_full_session(id).await?;
 
         Ok(result)
     }
@@ -284,6 +305,33 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.inner.shutdown().await;
     }
 
+    /// Cancel all active checkpointer gates.
+    ///
+    /// After this call, in-flight checkpoints that are past the gate check
+    /// will complete their current save, but subsequent checkpoint calls on
+    /// any session will be no-ops. Use this during `stop()` to prevent
+    /// checkpoint writes from racing with external cleanup operations.
+    pub async fn cancel_all_checkpointers(&self) {
+        let gates = self.checkpointer_gates.lock().await;
+        for gate in gates.values() {
+            let mut cancelled = gate.cancelled.lock().await;
+            *cancelled = true;
+        }
+    }
+
+    /// Re-enable checkpointer gates for all tracked sessions.
+    ///
+    /// Call this during `resume()` after `cancel_all_checkpointers()` was
+    /// used during stop. Gates that were removed by `archive()` are not
+    /// affected.
+    pub async fn rearm_all_checkpointers(&self) {
+        let gates = self.checkpointer_gates.lock().await;
+        for gate in gates.values() {
+            let mut cancelled = gate.cancelled.lock().await;
+            *cancelled = false;
+        }
+    }
+
     /// Subscribe to session-wide events from the live inner service.
     pub async fn subscribe_session_events(
         &self,
@@ -305,15 +353,18 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
     /// Export the full session from the live task and persist it to the store.
     ///
-    /// This saves the complete session including all messages, metadata, and
-    /// usage — not just a lightweight summary.
-    async fn persist_full_session(&self, id: &SessionId) -> Result<(), SessionError> {
+    /// Returns the saved message count so callers can seed a checkpointer's
+    /// `last_saved_len` without a second export round-trip.
+    async fn persist_full_session(&self, id: &SessionId) -> Result<usize, SessionError> {
         let session = self.inner.export_session(id).await?;
+        let message_count = session.messages().len();
 
         self.store
             .save(&session)
             .await
-            .map_err(|e| SessionError::Store(Box::new(e)))
+            .map_err(|e| SessionError::Store(Box::new(e)))?;
+
+        Ok(message_count)
     }
 }
 
@@ -374,6 +425,7 @@ mod tests {
         let checkpointer = super::StoreCheckpointer {
             store: Arc::clone(&store),
             gate,
+            last_saved_len: std::sync::atomic::AtomicUsize::new(0),
         };
 
         let mut session = Session::new();
@@ -404,11 +456,17 @@ mod tests {
         let checkpointer = super::StoreCheckpointer {
             store: Arc::clone(&store),
             gate: Arc::clone(&gate),
+            last_saved_len: std::sync::atomic::AtomicUsize::new(0),
         };
 
-        let session = Session::new();
+        let mut session = Session::new();
+        session.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage {
+                content: "hello".to_string(),
+            },
+        ));
 
-        // First checkpoint should persist
+        // First checkpoint should persist (message count changed)
         checkpointer.checkpoint(&session).await;
         assert!(store.load(session.id()).await.unwrap().is_some());
 
@@ -420,10 +478,63 @@ mod tests {
         }
 
         // Checkpoint after cancellation should be a no-op
+        session.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage {
+                content: "world".to_string(),
+            },
+        ));
         checkpointer.checkpoint(&session).await;
         assert!(
             store.load(session.id()).await.unwrap().is_none(),
             "cancelled checkpointer should not write session back"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_store_checkpointer_skips_unchanged_session() {
+        use meerkat_core::checkpoint::SessionCheckpointer;
+
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let gate = Arc::new(super::CheckpointerGate {
+            cancelled: tokio::sync::Mutex::new(false),
+        });
+        let checkpointer = super::StoreCheckpointer {
+            store: Arc::clone(&store),
+            gate,
+            last_saved_len: std::sync::atomic::AtomicUsize::new(0),
+        };
+
+        let mut session = Session::new();
+        session.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage {
+                content: "hello".to_string(),
+            },
+        ));
+
+        // First checkpoint saves (message count changed from 0 -> 1)
+        checkpointer.checkpoint(&session).await;
+        assert!(store.load(session.id()).await.unwrap().is_some());
+
+        // Delete from store to detect whether the next checkpoint writes
+        store.delete(session.id()).await.unwrap();
+
+        // Second checkpoint with same session is skipped (count still 1)
+        checkpointer.checkpoint(&session).await;
+        assert!(
+            store.load(session.id()).await.unwrap().is_none(),
+            "unchanged session should not be re-saved"
+        );
+
+        // Add a message and checkpoint again — should save
+        session.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage {
+                content: "world".to_string(),
+            },
+        ));
+        checkpointer.checkpoint(&session).await;
+        assert!(
+            store.load(session.id()).await.unwrap().is_some(),
+            "changed session should be saved"
         );
     }
 

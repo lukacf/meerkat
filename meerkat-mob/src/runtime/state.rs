@@ -72,6 +72,9 @@ pub(super) enum MobCommand {
         meerkat_id: MeerkatId,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+    RetireAll {
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
     Wire {
         a: MeerkatId,
         b: MeerkatId,

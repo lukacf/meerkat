@@ -625,6 +625,7 @@ mod tests {
                         external_addressable: false,
                         backend: None,
                         runtime_mode: MobRuntimeMode::AutonomousHost,
+                        max_inline_peer_notifications: None,
                     },
                 );
                 m

@@ -2285,6 +2285,7 @@ async fn run_agent(
         config_generation: None,
         checkpointer: None,
         silent_comms_intents: Vec::new(),
+        max_inline_peer_notifications: None,
     };
 
     // Route through SessionService::create_session()
@@ -2660,6 +2661,7 @@ async fn resume_session_with_llm_override(
         config_generation: stored_metadata.as_ref().and_then(|m| m.config_generation),
         checkpointer: None,
         silent_comms_intents: Vec::new(),
+        max_inline_peer_notifications: None,
     };
 
     // Route through SessionService::create_session() with the resumed session

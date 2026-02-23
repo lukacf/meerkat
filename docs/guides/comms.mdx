@@ -612,6 +612,17 @@ Mob meerkats have `mob.peer_added` and `mob.peer_retired` configured as silent i
 Silent intents are only checked in the host-mode classification phase. Non-matching intents are processed normally through the LLM.
 </Note>
 
+Peer lifecycle notifications (`mob.peer_added`, `mob.peer_retired`) are compacted per inbox drain cycle into a single `[PEER UPDATE]` session entry. This compaction is presentation-only: the underlying comms request stream remains one event per peer change.
+
+You can also control whether these peer lifecycle updates are inlined by peer-count threshold using `max_inline_peer_notifications`:
+
+- `None` (default): use runtime default (`50`)
+- `0`: never inline peer lifecycle updates
+- `-1`: always inline
+- `>0`: inline only when current peer count is less than or equal to the threshold
+
+When suppressed above threshold, the agent receives a one-time notice and should use `peers()` on demand.
+
 ## External event ingestion
 
 External systems can push plain-text events into a running agent's inbox without Ed25519 authentication. Events are drained at turn boundaries (or continuously in host mode) and injected as user messages.

@@ -4,12 +4,60 @@ use crate::error::AgentError;
 use crate::event::AgentEvent;
 use crate::interaction::InteractionContent;
 use crate::types::{Message, RunResult, Usage, UserMessage};
+use serde_json::Value;
+use std::collections::BTreeMap;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::mpsc;
 
 use crate::agent::{Agent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, CommsRuntime};
 use crate::interaction::InboxInteraction;
 use crate::session::Session;
+
+const PEER_INLINE_NAME_LIMIT: usize = 10;
+const PEER_ADDED_INTENT: &str = "mob.peer_added";
+const PEER_RETIRED_INTENT: &str = "mob.peer_retired";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PeerLifecycleState {
+    Added,
+    Retired,
+}
+
+#[derive(Debug, Default)]
+struct PeerLifecycleBatch {
+    by_peer: BTreeMap<String, PeerLifecycleState>,
+}
+
+impl PeerLifecycleBatch {
+    fn observe(&mut self, peer: String, next: PeerLifecycleState) {
+        match self.by_peer.get(&peer).copied() {
+            Some(prev) if prev != next => {
+                // Net opposite transitions within the same drain cycle.
+                self.by_peer.remove(&peer);
+            }
+            Some(_) => {}
+            None => {
+                self.by_peer.insert(peer, next);
+            }
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.by_peer.is_empty()
+    }
+
+    fn split_lists(&self) -> (Vec<String>, Vec<String>) {
+        let mut added = Vec::new();
+        let mut retired = Vec::new();
+        for (peer, state) in &self.by_peer {
+            match state {
+                PeerLifecycleState::Added => added.push(peer.clone()),
+                PeerLifecycleState::Retired => retired.push(peer.clone()),
+            }
+        }
+        (added, retired)
+    }
+}
 
 impl<C, T, S> Agent<C, T, S>
 where
@@ -43,7 +91,30 @@ where
             None => return false,
         };
 
-        let messages = comms.drain_messages().await;
+        let interactions = comms.drain_inbox_interactions().await;
+        if interactions.is_empty() {
+            return false;
+        }
+
+        let mut messages = Vec::new();
+        let mut peer_lifecycle_batch = PeerLifecycleBatch::default();
+
+        for interaction in interactions {
+            if let Some((peer, state)) = extract_peer_lifecycle_update(&interaction) {
+                peer_lifecycle_batch.observe(peer, state);
+                continue;
+            }
+
+            messages.push(interaction.rendered_text);
+        }
+
+        if let Some(peer_update) = self
+            .render_peer_lifecycle_update(&comms, &peer_lifecycle_batch)
+            .await
+        {
+            messages.push(peer_update);
+        }
+
         if messages.is_empty() {
             return false;
         }
@@ -182,13 +253,19 @@ where
                 let mut batched_texts = Vec::new();
                 let mut individual: Vec<(InboxInteraction, Option<mpsc::Sender<AgentEvent>>)> =
                     Vec::new();
-                let mut had_response_injections = false;
+                let mut peer_lifecycle_batch = PeerLifecycleBatch::default();
+                let mut had_session_injections = false;
 
                 for interaction in interactions {
+                    if let Some((peer, state)) = extract_peer_lifecycle_update(&interaction) {
+                        peer_lifecycle_batch.observe(peer, state);
+                        continue;
+                    }
+
                     // Response interactions: inject into session, never run through LLM
                     if matches!(&interaction.content, InteractionContent::Response { .. }) {
                         inject_response_into_session(&mut self.session, &interaction);
-                        had_response_injections = true;
+                        had_session_injections = true;
                         continue;
                     }
 
@@ -198,7 +275,7 @@ where
                         && self.silent_comms_intents.iter().any(|s| s == intent)
                     {
                         inject_response_into_session(&mut self.session, &interaction);
-                        had_response_injections = true;
+                        had_session_injections = true;
                         continue;
                     }
 
@@ -227,11 +304,21 @@ where
                     }
                 }
 
-                // Checkpoint after response injections mutate session state.
+                if let Some(peer_update) = self
+                    .render_peer_lifecycle_update(&comms, &peer_lifecycle_batch)
+                    .await
+                {
+                    self.session.push(Message::User(UserMessage {
+                        content: peer_update,
+                    }));
+                    had_session_injections = true;
+                }
+
+                // Checkpoint after inline session injections mutate session state.
                 // Responses bypass the LLM loop (no run call), so without
                 // this checkpoint they would only be persisted if a later
                 // request/message triggers its own checkpoint.
-                if had_response_injections
+                if had_session_injections
                     && let Some(ref cp) = self.checkpointer
                 {
                     cp.checkpoint(&self.session).await;
@@ -363,6 +450,114 @@ fn inject_response_into_session(session: &mut Session, interaction: &InboxIntera
     }));
 }
 
+fn extract_peer_lifecycle_update(
+    interaction: &InboxInteraction,
+) -> Option<(String, PeerLifecycleState)> {
+    let (intent, params) = match &interaction.content {
+        InteractionContent::Request { intent, params } => (intent.as_str(), params),
+        _ => return None,
+    };
+
+    let state = match intent {
+        PEER_ADDED_INTENT => PeerLifecycleState::Added,
+        PEER_RETIRED_INTENT => PeerLifecycleState::Retired,
+        _ => return None,
+    };
+
+    let peer = params
+        .get("peer")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(interaction.from.as_str())
+        .to_string();
+
+    Some((peer, state))
+}
+
+fn render_named_list(mut names: Vec<String>) -> String {
+    names.sort();
+    if names.len() <= PEER_INLINE_NAME_LIMIT {
+        return names.join(", ");
+    }
+
+    let extra = names.len() - PEER_INLINE_NAME_LIMIT;
+    let displayed = names
+        .into_iter()
+        .take(PEER_INLINE_NAME_LIMIT)
+        .collect::<Vec<_>>();
+    format!("{}, (+{} more)", displayed.join(", "), extra)
+}
+
+fn render_peer_update_summary(batch: &PeerLifecycleBatch) -> Option<String> {
+    if batch.is_empty() {
+        return None;
+    }
+
+    let (added, retired) = batch.split_lists();
+    let mut parts = Vec::new();
+
+    if !added.is_empty() {
+        let plural = if added.len() == 1 { "" } else { "s" };
+        parts.push(format!(
+            "{} peer{} connected: {}",
+            added.len(),
+            plural,
+            render_named_list(added)
+        ));
+    }
+    if !retired.is_empty() {
+        let plural = if retired.len() == 1 { "" } else { "s" };
+        parts.push(format!(
+            "{} peer{} retired: {}",
+            retired.len(),
+            plural,
+            render_named_list(retired)
+        ));
+    }
+
+    Some(format!("[PEER UPDATE] {}", parts.join("; ")))
+}
+
+impl<C, T, S> Agent<C, T, S>
+where
+    C: AgentLlmClient + ?Sized + 'static,
+    T: AgentToolDispatcher + ?Sized + 'static,
+    S: AgentSessionStore + ?Sized + 'static,
+{
+    async fn render_peer_lifecycle_update(
+        &mut self,
+        comms: &std::sync::Arc<dyn CommsRuntime>,
+        batch: &PeerLifecycleBatch,
+    ) -> Option<String> {
+        if batch.is_empty() {
+            return None;
+        }
+
+        let peer_count = comms.peers().await.len();
+        let threshold = self.max_inline_peer_notifications;
+        let suppress = match threshold {
+            -1 => false,
+            0 => true,
+            t if t < -1 => false,
+            t => peer_count > t as usize,
+        };
+
+        if suppress {
+            if !self.peer_notification_suppression_active {
+                self.peer_notification_suppression_active = true;
+                return Some(format!(
+                    "[PEER UPDATE] Peer updates suppressed at current scale ({} peers). Use peers() to inspect peers.",
+                    peer_count
+                ));
+            }
+            return None;
+        }
+
+        self.peer_notification_suppression_active = false;
+        render_peer_update_summary(batch)
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -370,6 +565,7 @@ mod tests {
     use crate::agent::{
         AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, LlmStreamResult,
     };
+    use crate::comms::{PeerDirectoryEntry, PeerDirectorySource, PeerName};
     use crate::error::{AgentError, LlmFailureReason};
     use crate::session::Session;
     use crate::types::{AssistantBlock, StopReason, ToolCallView, ToolDef, ToolResult};
@@ -523,6 +719,7 @@ mod tests {
         notify: Arc<Notify>,
         dismiss: std::sync::atomic::AtomicBool,
         had_interactions: std::sync::atomic::AtomicBool,
+        peer_count: AtomicUsize,
     }
 
     impl SyncInteractionMockCommsRuntime {
@@ -533,6 +730,7 @@ mod tests {
                 notify: Arc::new(Notify::new()),
                 dismiss: std::sync::atomic::AtomicBool::new(false),
                 had_interactions: std::sync::atomic::AtomicBool::new(false),
+                peer_count: AtomicUsize::new(0),
             }
         }
 
@@ -576,6 +774,73 @@ mod tests {
 
         fn dismiss_received(&self) -> bool {
             self.dismiss.load(Ordering::SeqCst)
+        }
+
+        async fn peers(&self) -> Vec<PeerDirectoryEntry> {
+            let count = self.peer_count.load(Ordering::SeqCst);
+            (0..count)
+                .map(|idx| PeerDirectoryEntry {
+                    name: PeerName::new(format!("peer-{idx}")).expect("valid peer name"),
+                    peer_id: format!("ed25519:peer-{idx}"),
+                    address: format!("inproc://peer-{idx}"),
+                    source: PeerDirectorySource::Inproc,
+                    sendable_kinds: vec!["message".to_string(), "request".to_string()],
+                    capabilities: serde_json::json!({}),
+                    meta: crate::peer_meta::PeerMeta::default(),
+                })
+                .collect()
+        }
+    }
+
+    // Sequenced interactions runtime for non-host drain path tests.
+    struct SequencedInteractionMockCommsRuntime {
+        batches: Mutex<Vec<Vec<crate::interaction::InboxInteraction>>>,
+        notify: Arc<Notify>,
+        peer_count: AtomicUsize,
+    }
+
+    impl SequencedInteractionMockCommsRuntime {
+        fn new(batches: Vec<Vec<crate::interaction::InboxInteraction>>, peer_count: usize) -> Self {
+            Self {
+                batches: Mutex::new(batches),
+                notify: Arc::new(Notify::new()),
+                peer_count: AtomicUsize::new(peer_count),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl CommsRuntime for SequencedInteractionMockCommsRuntime {
+        async fn drain_messages(&self) -> Vec<String> {
+            vec![]
+        }
+
+        fn inbox_notify(&self) -> Arc<Notify> {
+            self.notify.clone()
+        }
+
+        async fn drain_inbox_interactions(&self) -> Vec<crate::interaction::InboxInteraction> {
+            let mut batches = self.batches.lock().await;
+            if batches.is_empty() {
+                Vec::new()
+            } else {
+                batches.remove(0)
+            }
+        }
+
+        async fn peers(&self) -> Vec<PeerDirectoryEntry> {
+            let count = self.peer_count.load(Ordering::SeqCst);
+            (0..count)
+                .map(|idx| PeerDirectoryEntry {
+                    name: PeerName::new(format!("peer-{idx}")).expect("valid peer name"),
+                    peer_id: format!("ed25519:peer-{idx}"),
+                    address: format!("inproc://peer-{idx}"),
+                    source: PeerDirectorySource::Inproc,
+                    sendable_kinds: vec!["message".to_string(), "request".to_string()],
+                    capabilities: serde_json::json!({}),
+                    meta: crate::peer_meta::PeerMeta::default(),
+                })
+                .collect()
         }
     }
 
@@ -1127,7 +1392,10 @@ mod tests {
             .collect();
         assert_eq!(user_msgs.len(), 1);
         match &user_msgs[0] {
-            Message::User(u) => assert!(u.content.contains("mob.peer_added")),
+            Message::User(u) => {
+                assert!(u.content.contains("[PEER UPDATE]"));
+                assert!(u.content.contains("worker-1"));
+            }
             _ => unreachable!(),
         }
 
@@ -1164,6 +1432,213 @@ mod tests {
         // Non-silent intent should be processed through LLM
         assert!(result.turns > 0);
         assert_eq!(result.text, "Done");
+    }
+
+    #[tokio::test]
+    async fn test_peer_lifecycle_batching_in_host_mode_collapses_to_one_entry() {
+        let interactions = vec![
+            make_interaction(
+                InteractionContent::Request {
+                    intent: "mob.peer_added".into(),
+                    params: serde_json::json!({"peer": "worker-1"}),
+                },
+                "peer add 1",
+            ),
+            make_interaction(
+                InteractionContent::Request {
+                    intent: "mob.peer_added".into(),
+                    params: serde_json::json!({"peer": "worker-2"}),
+                },
+                "peer add 2",
+            ),
+            make_interaction(
+                InteractionContent::Request {
+                    intent: "mob.peer_added".into(),
+                    params: serde_json::json!({"peer": "worker-3"}),
+                },
+                "peer add 3",
+            ),
+        ];
+        let comms =
+            Arc::new(SyncInteractionMockCommsRuntime::with_interactions(interactions));
+
+        let mut agent = AgentBuilder::new()
+            .with_comms_runtime(comms as Arc<dyn CommsRuntime>)
+            .build(
+                Arc::new(MockLlmClient),
+                Arc::new(MockToolDispatcher),
+                Arc::new(MockSessionStore),
+            )
+            .await;
+
+        let result = agent.run_host_mode(String::new()).await.unwrap();
+        assert_eq!(result.turns, 0);
+
+        let user_msgs: Vec<_> = agent
+            .session
+            .messages()
+            .iter()
+            .filter(|m| matches!(m, Message::User(_)))
+            .collect();
+        assert_eq!(user_msgs.len(), 1);
+        let text = match &user_msgs[0] {
+            Message::User(u) => u.content.as_str(),
+            _ => unreachable!(),
+        };
+        assert!(text.contains("[PEER UPDATE]"));
+        assert!(text.contains("3 peers connected"));
+    }
+
+    #[tokio::test]
+    async fn test_peer_lifecycle_net_out_cancels_opposites() {
+        let interactions = vec![
+            make_interaction(
+                InteractionContent::Request {
+                    intent: "mob.peer_added".into(),
+                    params: serde_json::json!({"peer": "worker-a"}),
+                },
+                "add a",
+            ),
+            make_interaction(
+                InteractionContent::Request {
+                    intent: "mob.peer_retired".into(),
+                    params: serde_json::json!({"peer": "worker-a"}),
+                },
+                "retire a",
+            ),
+            make_interaction(
+                InteractionContent::Request {
+                    intent: "mob.peer_added".into(),
+                    params: serde_json::json!({"peer": "worker-b"}),
+                },
+                "add b",
+            ),
+        ];
+        let comms =
+            Arc::new(SyncInteractionMockCommsRuntime::with_interactions(interactions));
+
+        let mut agent = AgentBuilder::new()
+            .with_comms_runtime(comms as Arc<dyn CommsRuntime>)
+            .build(
+                Arc::new(MockLlmClient),
+                Arc::new(MockToolDispatcher),
+                Arc::new(MockSessionStore),
+            )
+            .await;
+
+        let result = agent.run_host_mode(String::new()).await.unwrap();
+        assert_eq!(result.turns, 0);
+
+        let user_msgs: Vec<_> = agent
+            .session
+            .messages()
+            .iter()
+            .filter(|m| matches!(m, Message::User(_)))
+            .collect();
+        assert_eq!(user_msgs.len(), 1);
+        let text = match &user_msgs[0] {
+            Message::User(u) => u.content.as_str(),
+            _ => unreachable!(),
+        };
+        assert!(text.contains("1 peer connected"));
+        assert!(text.contains("worker-b"));
+        assert!(!text.contains("worker-a"));
+    }
+
+    #[tokio::test]
+    async fn test_peer_lifecycle_suppression_threshold_emits_one_time_notice() {
+        let first_batch = vec![make_interaction(
+            InteractionContent::Request {
+                intent: "mob.peer_added".into(),
+                params: serde_json::json!({"peer": "worker-1"}),
+            },
+            "add worker-1",
+        )];
+        let second_batch = vec![make_interaction(
+            InteractionContent::Request {
+                intent: "mob.peer_added".into(),
+                params: serde_json::json!({"peer": "worker-2"}),
+            },
+            "add worker-2",
+        )];
+        let comms = Arc::new(SequencedInteractionMockCommsRuntime::new(
+            vec![first_batch, second_batch],
+            100,
+        ));
+
+        let mut agent = AgentBuilder::new()
+            .with_comms_runtime(comms as Arc<dyn CommsRuntime>)
+            .with_max_inline_peer_notifications(Some(20))
+            .build(
+                Arc::new(MockLlmClient),
+                Arc::new(MockToolDispatcher),
+                Arc::new(MockSessionStore),
+            )
+            .await;
+
+        assert!(agent.drain_comms_inbox().await);
+        assert!(!agent.drain_comms_inbox().await);
+
+        let user_msgs: Vec<_> = agent
+            .session
+            .messages()
+            .iter()
+            .filter_map(|m| match m {
+                Message::User(u) => Some(u.content.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(user_msgs.len(), 1, "suppression notice should emit once");
+        assert!(user_msgs[0].contains("Peer updates suppressed"));
+        assert!(user_msgs[0].contains("(100 peers)"));
+    }
+
+    #[tokio::test]
+    async fn test_drain_comms_inbox_batches_peer_lifecycle_into_single_entry() {
+        let interactions = vec![
+            make_interaction(
+                InteractionContent::Request {
+                    intent: "mob.peer_added".into(),
+                    params: serde_json::json!({"peer": "worker-1"}),
+                },
+                "add worker-1",
+            ),
+            make_interaction(
+                InteractionContent::Request {
+                    intent: "mob.peer_added".into(),
+                    params: serde_json::json!({"peer": "worker-2"}),
+                },
+                "add worker-2",
+            ),
+        ];
+        let comms = Arc::new(SequencedInteractionMockCommsRuntime::new(
+            vec![interactions],
+            2,
+        ));
+        let mut agent = AgentBuilder::new()
+            .with_comms_runtime(comms as Arc<dyn CommsRuntime>)
+            .build(
+                Arc::new(MockLlmClient),
+                Arc::new(MockToolDispatcher),
+                Arc::new(MockSessionStore),
+            )
+            .await;
+
+        assert!(agent.drain_comms_inbox().await);
+
+        let user_msgs: Vec<_> = agent
+            .session
+            .messages()
+            .iter()
+            .filter_map(|m| match m {
+                Message::User(u) => Some(u.content.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(user_msgs.len(), 1);
+        assert!(user_msgs[0].contains("[PEER UPDATE]"));
+        assert!(user_msgs[0].contains("2 peers connected"));
     }
 
     #[tokio::test]

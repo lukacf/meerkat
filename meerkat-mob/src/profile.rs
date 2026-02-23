@@ -73,6 +73,14 @@ pub struct Profile {
     /// Defaults to autonomous host-mode behavior when omitted.
     #[serde(default)]
     pub runtime_mode: MobRuntimeMode,
+    /// Maximum peer-count threshold for inline peer lifecycle context injection.
+    ///
+    /// - `None`: use runtime default
+    /// - `0`: never inline peer lifecycle notifications
+    /// - `-1`: always inline peer lifecycle notifications
+    /// - `>0`: inline only when post-drain peer count is <= threshold
+    #[serde(default)]
+    pub max_inline_peer_notifications: Option<i32>,
 }
 
 #[cfg(test)]
@@ -132,6 +140,7 @@ mod tests {
             external_addressable: true,
             backend: None,
             runtime_mode: MobRuntimeMode::AutonomousHost,
+            max_inline_peer_notifications: None,
         };
         let json = serde_json::to_string(&profile).unwrap();
         let parsed: Profile = serde_json::from_str(&json).unwrap();
@@ -157,6 +166,7 @@ mod tests {
             external_addressable: false,
             backend: Some(MobBackendKind::External),
             runtime_mode: MobRuntimeMode::TurnDriven,
+            max_inline_peer_notifications: Some(20),
         };
         let toml_str = toml::to_string(&profile).unwrap();
         let parsed: Profile = toml::from_str(&toml_str).unwrap();
@@ -189,5 +199,26 @@ model = "claude-sonnet-4-5"
         assert!(!profile.external_addressable);
         assert_eq!(profile.backend, None);
         assert_eq!(profile.runtime_mode, MobRuntimeMode::AutonomousHost);
+        assert_eq!(profile.max_inline_peer_notifications, None);
+    }
+
+    #[test]
+    fn test_profile_toml_parses_zero_inline_threshold() {
+        let toml_str = r#"
+model = "claude-sonnet-4-5"
+max_inline_peer_notifications = 0
+"#;
+        let profile: Profile = toml::from_str(toml_str).unwrap();
+        assert_eq!(profile.max_inline_peer_notifications, Some(0));
+    }
+
+    #[test]
+    fn test_profile_toml_parses_always_inline_threshold() {
+        let toml_str = r#"
+model = "claude-sonnet-4-5"
+max_inline_peer_notifications = -1
+"#;
+        let profile: Profile = toml::from_str(toml_str).unwrap();
+        assert_eq!(profile.max_inline_peer_notifications, Some(-1));
     }
 }

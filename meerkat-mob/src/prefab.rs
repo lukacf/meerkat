@@ -67,6 +67,7 @@ impl Prefab {
                 external_addressable: true,
                 backend: None,
                 runtime_mode: crate::MobRuntimeMode::AutonomousHost,
+                max_inline_peer_notifications: None,
             },
         );
         profiles.insert(
@@ -85,6 +86,7 @@ impl Prefab {
                 external_addressable: false,
                 backend: None,
                 runtime_mode: crate::MobRuntimeMode::AutonomousHost,
+                max_inline_peer_notifications: None,
             },
         );
 

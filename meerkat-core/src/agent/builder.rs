@@ -34,6 +34,7 @@ pub struct AgentBuilder {
     pub(super) skill_engine: Option<Arc<crate::skills::SkillRuntime>>,
     pub(super) checkpointer: Option<Arc<dyn crate::checkpoint::SessionCheckpointer>>,
     pub(super) silent_comms_intents: Vec<String>,
+    pub(super) max_inline_peer_notifications: Option<i32>,
     pub(super) event_tap: Option<crate::event_tap::EventTap>,
     pub(super) default_event_tx: Option<mpsc::Sender<crate::event::AgentEvent>>,
     pub(super) default_scoped_event_tx: Option<mpsc::Sender<crate::event::ScopedAgentEvent>>,
@@ -59,6 +60,7 @@ impl AgentBuilder {
             skill_engine: None,
             checkpointer: None,
             silent_comms_intents: Vec::new(),
+            max_inline_peer_notifications: None,
             event_tap: None,
             default_event_tx: None,
             default_scoped_event_tx: None,
@@ -215,6 +217,8 @@ impl AgentBuilder {
             skill_engine: self.skill_engine,
             pending_skill_references: None,
             silent_comms_intents: self.silent_comms_intents,
+            max_inline_peer_notifications: self.max_inline_peer_notifications.unwrap_or(50),
+            peer_notification_suppression_active: false,
             checkpointer: self.checkpointer,
             event_tap: self
                 .event_tap
@@ -239,6 +243,12 @@ impl AgentBuilder {
     /// without triggering an LLM turn.
     pub fn with_silent_comms_intents(mut self, intents: Vec<String>) -> Self {
         self.silent_comms_intents = intents;
+        self
+    }
+
+    /// Set max peer-count threshold for inline peer lifecycle notification injection.
+    pub fn with_max_inline_peer_notifications(mut self, threshold: Option<i32>) -> Self {
+        self.max_inline_peer_notifications = threshold;
         self
     }
 

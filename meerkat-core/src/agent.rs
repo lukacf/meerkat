@@ -357,6 +357,15 @@ where
     /// Comms intents that should be silently injected into the session
     /// without triggering an LLM turn. Matched against `InteractionContent::Request.intent`.
     pub(crate) silent_comms_intents: Vec<String>,
+    /// Maximum peer-count threshold for inline peer lifecycle context injection.
+    ///
+    /// - `0`: never inline peer lifecycle notifications
+    /// - `-1`: always inline peer lifecycle notifications
+    /// - `>0`: inline only when post-drain peer count is <= threshold
+    pub(crate) max_inline_peer_notifications: i32,
+    /// Whether peer lifecycle updates are currently suppressed due to threshold policy.
+    /// Used to inject suppression notice only on transition into suppressed mode.
+    pub(crate) peer_notification_suppression_active: bool,
     /// When true, the host loop owns the inbox drain cycle.
     /// `drain_comms_inbox()` becomes a no-op to avoid stealing
     /// interaction-scoped messages through the legacy path.

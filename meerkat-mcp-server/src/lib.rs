@@ -974,6 +974,7 @@ async fn handle_meerkat_run(
         config_generation: current_generation,
         checkpointer: None,
         silent_comms_intents: Vec::new(),
+        max_inline_peer_notifications: None,
     };
 
     let req = CreateSessionRequest {
@@ -1131,6 +1132,7 @@ async fn handle_meerkat_resume(
         config_generation: current_generation,
         checkpointer: None,
         silent_comms_intents: Vec::new(),
+        max_inline_peer_notifications: None,
     };
 
     // Try start_turn on the live session first (it may still be alive

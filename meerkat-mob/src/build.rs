@@ -76,6 +76,7 @@ pub async fn build_agent_config(
         "mob.peer_added".into(),
         "mob.peer_retired".into(),
     ];
+    config.max_inline_peer_notifications = profile.max_inline_peer_notifications;
 
     // Map ToolConfig booleans to override flags
     config.override_builtins = Some(profile.tools.builtins);
@@ -179,6 +180,7 @@ mod tests {
                 external_addressable: true,
                 backend: None,
                 runtime_mode: crate::MobRuntimeMode::AutonomousHost,
+                max_inline_peer_notifications: None,
             },
         );
         profiles.insert(
@@ -200,6 +202,7 @@ mod tests {
                 external_addressable: false,
                 backend: None,
                 runtime_mode: crate::MobRuntimeMode::AutonomousHost,
+                max_inline_peer_notifications: None,
             },
         );
 
@@ -463,6 +466,30 @@ mod tests {
                 .contains(&"mob.peer_retired".to_string()),
             "silent_comms_intents should include mob.peer_retired"
         );
+        assert_eq!(config.max_inline_peer_notifications, None);
+    }
+
+    #[tokio::test]
+    async fn test_build_agent_config_propagates_max_inline_peer_notifications() {
+        let mut def = sample_definition();
+        let lead_key = ProfileName::from("lead");
+        def.profiles
+            .get_mut(&lead_key)
+            .expect("lead profile")
+            .max_inline_peer_notifications = Some(15);
+        let lead = &def.profiles[&lead_key];
+        let config = build_agent_config(
+            &def.id,
+            &lead_key,
+            &MeerkatId::from("lead-1"),
+            lead,
+            &def,
+            None,
+        )
+        .await
+        .expect("build_agent_config");
+
+        assert_eq!(config.max_inline_peer_notifications, Some(15));
     }
 
     #[tokio::test]

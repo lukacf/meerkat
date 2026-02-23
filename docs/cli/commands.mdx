@@ -89,6 +89,30 @@ Tooling convenience:
 
 - `--enable-shell` now implies `--enable-builtins`; you can use `-x` alone for common shell-enabled runs.
 
+Stdin has two modes depending on whether you want batch context or live streaming:
+
+**Batch context** — when stdin is not a terminal (and `--stdin` is not set), `rkat run` reads all of stdin and prepends it to the prompt as context wrapped in `<stdin>` tags. The pipe must be finite (EOF-terminated):
+
+```bash
+cat document.txt | rkat run "Summarize this"
+git diff | rkat run "Review these changes"
+curl -s https://example.com/api | rkat run "Parse the response"
+```
+
+Batch pipes can be chained — each `rkat run` reads stdin context and writes its response to stdout:
+
+```bash
+cat data.csv | rkat run "Extract all entities" | rkat run "Write a short story involving these entities"
+```
+
+**Live event streaming** — `--host --stdin` keeps the agent alive and reads stdin line-by-line as external events (newline-delimited JSON or plain text). The pipe can be infinite:
+
+```bash
+tail -f app.log | rkat run --host --stdin "Monitor incidents and alert on anomalies"
+```
+
+When `--stdin` is set, batch context injection is skipped so stdin remains available for the event reader.
+
 When `--enable-mob` (`-M`) is passed, `run` composes the consolidated mob tool surface (backed by `meerkat-mob-mcp`) into the agent tool list (`mob_create`, `mob_list`, `mob_lifecycle`, `meerkat_spawn`, `meerkat_retire`, `meerkat_wire`, `meerkat_message`, `meerkat_list`, `mob_events`, `mob_run_flow`, `mob_flow_status`, `mob_cancel_flow`).
 Mob tools are opt-in and disabled by default. When enabled, they are available even when built-ins are disabled.
 

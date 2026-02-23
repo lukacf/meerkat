@@ -119,6 +119,13 @@ Do not conflate the two: mob tool availability is a surface behavior, backend is
 rkat run "What is Rust?"
 rkat --realm team-alpha run "Create a todo app" --enable-builtins --enable-shell --stream -v
 rkat --realm team-alpha resume sid_abc123 "Now add error handling"
+# Batch context: pipe finite content as context
+cat document.txt | rkat run "Summarize this document"
+git diff | rkat run "Review these changes" --enable-builtins
+# Chained pipes: each rkat reads stdin, writes response to stdout
+cat data.csv | rkat run "Extract entities" | rkat run "Write a story about them"
+# Live streaming: --host --stdin reads stdin line-by-line as events
+tail -f app.log | rkat run --host --stdin "Monitor and alert on anomalies"
 rkat mob prefabs
 rkat mob create --prefab coding_swarm
 rkat mob list

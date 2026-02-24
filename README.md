@@ -41,7 +41,7 @@ The library comes first; surfaces come second. The CLI, REST API, JSON-RPC serve
 | **Surfaces** | CLI, REST, JSON-RPC, MCP server, Rust/Python/TS SDKs | CLI + SDK |
 | **Agent infra** | Hooks, skills, semantic memory across sessions | File-based context |
 | **Multi-agent** | Sub-agents, peer-to-peer comms, mob orchestration | Single agent |
-| **Portable deployment** | Signed `.mobpack` artifacts + browser web bundles (`mob web build`) | No equivalent portable team artifact flow |
+| **Deployment** | Signed `.mobpack` deploy/embed/compile plus WASM web bundles (`mob web build`) | No equivalent portable team artifact or WASM team-runtime flow |
 | **Deployment** | Single 5MB binary, <10ms startup, ~20MB RAM | Runtime + dependencies |
 
 Those tools excel at interactive development with rich terminal UIs. Meerkat is for automated pipelines, embedded agents, multi-agent systems, and anywhere you need programmatic control over the agent lifecycle.

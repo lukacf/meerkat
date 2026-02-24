@@ -39,6 +39,9 @@ icon: "wrench"
 | `enable_subagents` | `.subagents(bool)` | `false` | All sub-agent tools (requires `sub-agents` feature) |
 | `enable_memory` | `.memory(bool)` | `false` | `memory_search` (requires `memory-store-session` feature) |
 | `enable_comms` | `.comms(bool)` | `false` | All comms tools (requires `comms` feature) |
+| `enable_mob` | `.mob(bool)` | `false` | Mob orchestration tools (`mob_*`, `meerkat_*`) |
+
+`AgentFactory` is the only place tool categories are composed. `AgentBuilder` (in `meerkat-core`) has no dependency on `meerkat-tools` and does not auto-register any tools — it takes a pre-built dispatcher. See [AgentBuilder vs AgentFactory](/rust/advanced#agentbuilder-vs-agentfactory).
 
 **Source:** `meerkat/src/factory.rs` -- `AgentFactory` struct and builder methods.
 </Accordion>
@@ -52,6 +55,7 @@ Each `AgentBuildConfig` can override factory-level flags for a single agent buil
 | `override_shell` | `Option<bool>` | Takes precedence over `enable_shell` when `Some` |
 | `override_subagents` | `Option<bool>` | Takes precedence over `enable_subagents` when `Some` |
 | `override_memory` | `Option<bool>` | Takes precedence over `enable_memory` when `Some` |
+| `override_mob` | `Option<bool>` | Takes precedence over `enable_mob` when `Some` |
 
 All default to `None` (use factory-level setting).
 

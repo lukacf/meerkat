@@ -18,6 +18,8 @@ members = [
     "meerkat-contracts",
     "meerkat-skills",
     "meerkat-mob",
+    "meerkat-mob-pack",
+    "meerkat-web-runtime",
     "meerkat-mob-mcp",
     "test-fixtures/mcp-test-server",
     "tests/integration",
@@ -118,6 +120,7 @@ meerkat-memory = { version = "0.4.0", path = "meerkat-memory", default-features 
 meerkat-contracts = { version = "0.4.0", path = "meerkat-contracts", default-features = false }
 meerkat-skills = { version = "0.4.0", path = "meerkat-skills" }
 meerkat-mob = { version = "0.4.0", path = "meerkat-mob" }
+meerkat-mob-pack = { version = "0.4.0", path = "meerkat-mob-pack" }
 meerkat-mob-mcp = { version = "0.4.0", path = "meerkat-mob-mcp" }
 
 

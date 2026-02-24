@@ -1,6 +1,6 @@
 # Meerkat Examples Library
 
-27 fully functional examples covering every Meerkat surface and feature,
+30 fully functional examples covering every Meerkat surface and feature,
 from "Hello World" to production multi-agent systems.
 
 ## Quick Start
@@ -75,6 +75,9 @@ For runnable Rust examples, see `meerkat/examples/` (e.g., `cargo run -p meerkat
 | 025 | [full-stack-agent-rs](025-full-stack-agent-rs/) | Rust | Reference architecture with all features combined |
 | 026 | [skills-v21-invoke-py](026-skills-v21-invoke-py/) | Python | Invoke a specific skill with canonical `SkillKey` refs |
 | 027 | [skills-v21-invoke-ts](027-skills-v21-invoke-ts/) | TypeScript | Use `session.invokeSkill()` with canonical `SkillKey` refs |
+| 028 | [mobpack-release-triage-sh](028-mobpack-release-triage-sh/) | Shell | Build/sign/validate/deploy portable `.mobpack` artifact |
+| 029 | [web-incident-war-room-sh](029-web-incident-war-room-sh/) | Shell | Build browser-deployable incident-response mob bundle |
+| 030 | [web-dashboard-copilot-sh](030-web-dashboard-copilot-sh/) | Shell | Build embeddable web assistant for ops dashboards |
 
 ## Examples by Feature
 
@@ -92,7 +95,9 @@ For runnable Rust examples, see `meerkat/examples/` (e.g., `cargo run -p meerkat
 | **Semantic Memory** | 014 |
 | **Persistence** | 015 |
 | **Sub-Agents** | 016 |
-| **Mobs** | 017, 018, 019 |
+| **Mobs** | 017, 018, 019, 028, 029, 030 |
+| **Mobpack** | 028, 029, 030 |
+| **WASM Web Build** | 029, 030 |
 | **Comms** | 020, 024 |
 | **Host Mode** | 024 |
 | **Multi-Provider** | 021 |
@@ -107,7 +112,7 @@ For runnable Rust examples, see `meerkat/examples/` (e.g., `cargo run -p meerkat
 | **Rust SDK** | 001, 005, 006, 009, 011-020, 024, 025 |
 | **Python SDK** | 002, 007, 021, 022, 026 |
 | **TypeScript SDK** | 003, 008, 023, 027 |
-| **CLI (Shell)** | 004, 010 |
+| **CLI (Shell)** | 004, 010, 028, 029, 030 |
 
 ## Prerequisites
 

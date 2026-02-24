@@ -51,6 +51,7 @@ For detailed mob behavior across all surfaces, load: `references/mobs.md`.
 - RPC/REST/MCP server/Python SDK/TypeScript SDK expose mob capability via the same dispatcher composition model (`SessionBuildOptions.external_tools`) in host integrations.
 - Member runtime default is `autonomous_host` when `runtime_mode` is omitted; `turn_driven` is explicit opt-in for controlled dispatch paths.
 - Spawned mob members use deferred initial turn semantics; mob actor lifecycle starts autonomous loops explicitly after spawn registration.
+- Portable mob artifacts are available through mobpack (`rkat mob pack/deploy/inspect/validate`) and browser deployment (`rkat mob web build`).
 
 ### Mob lifecycle (standard/default usage)
 
@@ -76,6 +77,27 @@ rkat mob turn <mob_id> <meerkat_id> <message>
 rkat mob stop|resume|complete <mob_id>
 rkat mob destroy <mob_id>
 ```
+
+### Mobpack + web build quick paths
+
+```bash
+# Build portable artifact
+rkat mob pack ./mobs/release-triage -o ./dist/release-triage.mobpack --sign ./keys/release.key
+rkat mob inspect ./dist/release-triage.mobpack
+rkat mob validate ./dist/release-triage.mobpack
+
+# Deploy with trust policy
+rkat mob deploy ./dist/release-triage.mobpack "triage latest regressions" --trust-policy strict
+
+# Browser bundle
+cargo install wasm-pack
+rkat mob web build ./dist/release-triage.mobpack -o ./dist/release-triage-web
+```
+
+Web build env overrides:
+
+- `RKAT_WASM_PACK_BIN`: explicit wasm-pack binary path
+- `RKAT_WEB_RUNTIME_CRATE_DIR`: explicit web runtime crate directory for build
 
 Mob flows are optional and layered on top of this lifecycle.
 

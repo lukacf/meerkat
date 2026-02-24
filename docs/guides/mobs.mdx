@@ -12,6 +12,7 @@ icon: "users"
 |---|---|---|
 | CLI `run` / `resume` | Tool-driven (`mob_*` tools) | Primary CLI mob UX |
 | CLI `rkat mob ...` | Direct command lifecycle control | Secondary operational surface |
+| CLI `rkat mob pack/deploy/web build` | Portable artifact workflows (`.mobpack`, browser bundles) | Distribution + reproducible deployment |
 | Rust SDK (`meerkat-mob`) | Native runtime APIs (`MobBuilder`, `MobHandle`) | Full control; recommended for embedded systems |
 | MCP server (`rkat-mcp`) | `meerkat_run` / `meerkat_resume` session tools | Mob tools available via `meerkat-mob-mcp` composition |
 | REST (`rkat-rest`) | Session endpoints (`/sessions`, `/sessions/{id}/messages`) | Mob tools available via `meerkat-mob-mcp` composition |
@@ -266,6 +267,70 @@ rkat mob spawn team-mob worker worker-1 --runtime-mode turn_driven
 rkat mob wire team-mob lead-1 worker-1
 rkat mob status team-mob
 ```
+
+## Portable mob deployment (mobpack)
+
+Mobpacks let you freeze a working mob as a single artifact, then deploy it consistently across environments.
+
+### Build + inspect + validate
+
+```bash
+rkat mob pack ./mobs/release-triage -o ./dist/release-triage.mobpack --sign ./keys/release.key
+rkat mob inspect ./dist/release-triage.mobpack
+rkat mob validate ./dist/release-triage.mobpack
+```
+
+### Deploy in strict trust mode
+
+```bash
+export RKAT_TRUST_POLICY=strict
+rkat mob deploy ./dist/release-triage.mobpack "triage the top 5 open production regressions"
+```
+
+### Deploy as RPC service
+
+```bash
+rkat mob deploy ./dist/release-triage.mobpack "boot service" --surface rpc
+```
+
+## Browser deployment (WASM web build)
+
+`rkat mob web build` compiles a browser-deployable bundle from `.mobpack`.
+
+### Prereqs
+
+```bash
+cargo install wasm-pack
+export PATH="$HOME/.cargo/bin:$PATH"
+```
+
+### Build
+
+```bash
+rkat mob web build ./dist/release-triage.mobpack -o ./dist/release-triage-web
+```
+
+Output includes:
+
+- `index.html`
+- `runtime.js`
+- `runtime_bg.wasm`
+- `mobpack.bin`
+- `manifest.web.toml` (derived)
+
+### Cool web pattern 1: In-browser incident war room
+
+1. Build `ops-war-room.mobpack` with lead + triage + comms profiles.
+2. Run `rkat mob web build`.
+3. Host the output behind your internal auth gateway.
+4. Open from a browser during incidents so responders get a zero-install multi-agent workspace.
+
+### Cool web pattern 2: Embedded release assistant in internal dashboard
+
+1. Build `release-assistant.mobpack`.
+2. Compile web bundle.
+3. Embed bundle route in your release dashboard app.
+4. Use it as a context-aware co-pilot for changelog synthesis, rollout checklist generation, and regression triage in the same UI.
 
 ### REST
 

@@ -1,0 +1,116 @@
+---
+title: "Mobpack and Web Deployment"
+description: "Portable multi-agent deployment with signed .mobpack artifacts and browser-target web bundles."
+icon: "package"
+---
+
+`mobpack` is the portable artifact for mobs. You build it once, then deploy consistently in CLI, service, or browser workflows.
+
+## What you get
+
+- Single-file artifact: `.mobpack`
+- Optional signing and trust verification
+- Deterministic `inspect` and `validate` boundaries
+- Direct deploy (`mob deploy`) and browser bundle target (`mob web build`)
+
+## Directory to artifact
+
+```bash
+rkat mob pack ./mobs/release-triage -o ./dist/release-triage.mobpack
+rkat mob inspect ./dist/release-triage.mobpack
+rkat mob validate ./dist/release-triage.mobpack
+```
+
+Expected source files:
+
+- `manifest.toml`
+- `definition.json`
+- optional `skills/`, `hooks/`, `mcp/`, `config/defaults.toml`
+
+## Signed packs and trust policy
+
+Sign at pack time:
+
+```bash
+rkat mob pack ./mobs/release-triage -o ./dist/release-triage.mobpack --sign ./keys/release.key
+```
+
+Deploy with strict trust:
+
+```bash
+rkat mob deploy ./dist/release-triage.mobpack "triage release regressions" --trust-policy strict
+```
+
+Trust policy resolution:
+
+1. CLI `--trust-policy`
+2. `RKAT_TRUST_POLICY`
+3. config `trust.policy`
+4. default `permissive`
+
+Strict mode rejects:
+
+- unsigned packs
+- unknown signers
+- invalid signatures
+- signer key mismatches
+
+## Deploy modes
+
+One-shot CLI run:
+
+```bash
+rkat mob deploy ./dist/release-triage.mobpack "triage latest incidents"
+```
+
+RPC service deployment:
+
+```bash
+rkat mob deploy ./dist/release-triage.mobpack "boot service" --surface rpc
+```
+
+## Browser target: `mob web build`
+
+Prerequisites:
+
+```bash
+cargo install wasm-pack
+export PATH="$HOME/.cargo/bin:$PATH"
+```
+
+Build:
+
+```bash
+rkat mob web build ./dist/release-triage.mobpack -o ./dist/release-triage-web
+```
+
+Output includes:
+
+- `index.html`
+- `runtime.js`
+- `runtime_bg.wasm`
+- `mobpack.bin`
+- `manifest.web.toml` (derived)
+
+Environment overrides:
+
+- `RKAT_WASM_PACK_BIN`: explicit wasm-pack binary
+- `RKAT_WEB_RUNTIME_CRATE_DIR`: explicit runtime crate directory for build
+
+## Cool web patterns
+
+### Incident war room
+
+Build `ops-war-room.mobpack`, publish web bundle behind internal auth, and let responders open a zero-install multi-agent workspace in-browser.
+
+### Embedded dashboard copilot
+
+Bundle `dashboard-copilot.mobpack` and embed it in your observability or release dashboard to summarize anomalies and propose mitigation steps in context.
+
+## Example library
+
+See runnable examples:
+
+- `examples/028-mobpack-release-triage-sh`
+- `examples/029-web-incident-war-room-sh`
+- `examples/030-web-dashboard-copilot-sh`

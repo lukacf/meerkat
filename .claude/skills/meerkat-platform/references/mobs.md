@@ -201,6 +201,7 @@ let build = SessionBuildOptions {
 |---|---|---|
 | CLI `run` / `resume` | `mob_*` tools in prompt-driven runs | Primary CLI mob UX |
 | CLI `rkat mob ...` | direct command lifecycle | Secondary explicit operational surface |
+| CLI `rkat mob pack/deploy/web build` | artifact and browser distribution | Portable deploy + web target |
 | RPC | session/turn methods | `mob_*` capability via composed `meerkat-mob-mcp` dispatcher |
 | REST | session HTTP endpoints | `mob_*` capability via composed `meerkat-mob-mcp` dispatcher |
 | MCP | `meerkat_*` session tools | `mob_*` capability via composed `meerkat-mob-mcp` dispatcher |
@@ -237,6 +238,23 @@ rkat mob create --definition mob.toml
 rkat mob spawn team-mob lead lead-1
 rkat mob wire team-mob lead-1 worker-1
 rkat mob status team-mob
+```
+
+### CLI artifact + web deployment
+
+```bash
+rkat mob pack ./mobs/release-triage -o ./dist/release-triage.mobpack --sign ./keys/release.key
+rkat mob inspect ./dist/release-triage.mobpack
+rkat mob validate ./dist/release-triage.mobpack
+rkat mob deploy ./dist/release-triage.mobpack "triage latest regressions" --trust-policy strict
+rkat mob web build ./dist/release-triage.mobpack -o ./dist/release-triage-web
+```
+
+Web build prerequisites:
+
+```bash
+cargo install wasm-pack
+export PATH="$HOME/.cargo/bin:$PATH"
 ```
 
 ### RPC

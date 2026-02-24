@@ -46,10 +46,10 @@
               "guides/memory",
               "guides/hooks",
               "guides/skills",
-              "guides/skills-v2-migration",
               "guides/sub-agents",
               "guides/comms",
-              "guides/mobs"
+              "guides/mobs",
+              "guides/mobpack"
             ]
           },
           {

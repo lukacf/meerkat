@@ -169,15 +169,20 @@ mod tests {
                 header.set_uid(0);
                 header.set_gid(0);
                 header.set_cksum();
-                builder
-                    .append_data(&mut header, path.as_str(), content.as_slice())
-                    .expect("append data");
+                let append_result =
+                    builder.append_data(&mut header, path.as_str(), content.as_slice());
+                assert!(append_result.is_ok(), "append data failed: {append_result:?}");
             }
-            builder.finish().expect("finish tar");
+            let finish_result = builder.finish();
+            assert!(finish_result.is_ok(), "finish tar failed: {finish_result:?}");
         }
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        std::io::Write::write_all(&mut encoder, &tar_bytes).expect("write gz");
-        encoder.finish().expect("finish gz")
+        let write_result = std::io::Write::write_all(&mut encoder, &tar_bytes);
+        assert!(write_result.is_ok(), "write gz failed: {write_result:?}");
+        match encoder.finish() {
+            Ok(bytes) => bytes,
+            Err(err) => unreachable!("finish gz failed: {err}"),
+        }
     }
 
     fn create_single_entry_archive(path: &str) -> Vec<u8> {
@@ -192,34 +197,47 @@ mod tests {
             header.set_uid(0);
             header.set_gid(0);
             header.set_cksum();
-            builder
-                .append_data(&mut header, path, b"x".as_slice())
-                .expect("append data");
-            builder.finish().expect("finish tar");
+            let append_result = builder.append_data(&mut header, path, b"x".as_slice());
+            assert!(append_result.is_ok(), "append data failed: {append_result:?}");
+            let finish_result = builder.finish();
+            assert!(finish_result.is_ok(), "finish tar failed: {finish_result:?}");
         }
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        std::io::Write::write_all(&mut encoder, &tar_bytes).expect("write gz");
-        encoder.finish().expect("finish gz")
+        let write_result = std::io::Write::write_all(&mut encoder, &tar_bytes);
+        assert!(write_result.is_ok(), "write gz failed: {write_result:?}");
+        match encoder.finish() {
+            Ok(bytes) => bytes,
+            Err(err) => unreachable!("finish gz failed: {err}"),
+        }
     }
 
     #[test]
     fn bootstrap_accepts_browser_safe_pack() {
         let archive = fixture_archive(false);
-        let out = bootstrap_impl(&archive, "hello").expect("bootstrap should pass");
+        let out = match bootstrap_impl(&archive, "hello") {
+            Ok(value) => value,
+            Err(err) => unreachable!("bootstrap should pass: {err}"),
+        };
         assert!(out.contains("bootstrapped:web-mob"));
     }
 
     #[test]
     fn bootstrap_rejects_forbidden_capability() {
         let archive = fixture_archive(true);
-        let err = bootstrap_impl(&archive, "hello").expect_err("should fail");
+        let err = match bootstrap_impl(&archive, "hello") {
+            Ok(value) => unreachable!("should fail, got: {value}"),
+            Err(err) => err,
+        };
         assert!(err.contains("forbidden capability 'shell'"));
     }
 
     #[test]
     fn extract_rejects_windows_absolute_paths() {
         let archive = create_single_entry_archive("C:/temp/evil.txt");
-        let err = extract_targz_safe(&archive).expect_err("windows absolute should fail");
+        let err = match extract_targz_safe(&archive) {
+            Ok(_) => unreachable!("windows absolute should fail"),
+            Err(err) => err,
+        };
         assert!(err.contains("absolute path"));
     }
 }

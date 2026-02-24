@@ -41,6 +41,7 @@ The library comes first; surfaces come second. The CLI, REST API, JSON-RPC serve
 | **Surfaces** | CLI, REST, JSON-RPC, MCP server, Rust/Python/TS SDKs | CLI + SDK |
 | **Agent infra** | Hooks, skills, semantic memory across sessions | File-based context |
 | **Multi-agent** | Sub-agents, peer-to-peer comms, mob orchestration | Single agent |
+| **Portable deployment** | Signed `.mobpack` artifacts + browser web bundles (`mob web build`) | No equivalent portable team artifact flow |
 | **Deployment** | Single 5MB binary, <10ms startup, ~20MB RAM | Runtime + dependencies |
 
 Those tools excel at interactive development with rich terminal UIs. Meerkat is for automated pipelines, embedded agents, multi-agent systems, and anywhere you need programmatic control over the agent lifecycle.
@@ -89,8 +90,7 @@ The agent loops autonomously -- calling tools, reading results, reasoning, calli
 
 **Hooks and skills.** Eight hook points (pre/post LLM, pre/post tool, turn boundary, run lifecycle) with observe, rewrite, and guardrail semantics. Skills are composable knowledge packs that inject context and capabilities.
 
-**Multi-agent.** Sub-agents with budget and tool isolation. Peer-to-peer inter-agent messaging with cryptographic identity. Mobs for orchestrating teams of agents with role-based coordination, shared task boards, and DAG-based flows.
-Portable mob artifacts (`.mobpack`) support reproducible deploys via CLI and browser-target web bundles.
+**Multi-agent.** Sub-agents with budget and tool isolation. Peer-to-peer inter-agent messaging with cryptographic identity. Mobs for orchestrating teams of agents with role-based coordination, shared task boards, and DAG-based flows. Portable mob artifacts (`.mobpack`) support reproducible deploys via CLI and browser-target web bundles.
 
 **Modularity.** Every subsystem is opt-in via Cargo features. Default: three providers and nothing else. Add `session-store`, `mcp`, `comms`, `skills`, or `sub-agents` as needed. Disabled features return typed errors, not panics. See the [capability matrix](https://docs.rkat.ai/reference/capability-matrix) for the full feature map.
 
@@ -262,6 +262,8 @@ cargo install wasm-pack
 export PATH="$HOME/.cargo/bin:$PATH"
 rkat mob web build ./dist/release-triage.mobpack -o ./dist/release-triage-web
 ```
+
+See full guide: [Mobpack and Web Deployment](https://docs.rkat.ai/guides/mobpack).
 
 ## Configuration
 

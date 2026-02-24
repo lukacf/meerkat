@@ -278,6 +278,11 @@ Type/parsing notes:
 
 ## Rust SDK
 
+**AgentFactory vs AgentBuilder**: `AgentFactory` (facade crate) is the opinionated composition layer that
+wires all tool categories (builtins, shell, sub-agents, comms, memory, mob, skills) into the dispatcher.
+`AgentBuilder` (meerkat-core) is lower-level — it takes pre-built components and has no tool opinions.
+All surfaces go through `AgentFactory`; direct `AgentBuilder` usage means manual dispatcher composition.
+
 Recommended realm-aware factory bootstrap:
 
 ```rust
@@ -291,7 +296,8 @@ let factory = AgentFactory::new(realm.root.clone())
     .runtime_root(realm.root)
     .builtins(true)
     .shell(true)
-    .subagents(true);
+    .subagents(true)
+    .mob(true);  // opt-in mob orchestration tools
 
 let build = AgentBuildConfig::new("claude-sonnet-4-5");
 let mut agent = factory.build_agent(build, &config).await?;

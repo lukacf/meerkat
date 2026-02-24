@@ -6,6 +6,14 @@ icon: "gears"
 
 Advanced Rust SDK usage for fine-grained control over agent construction, provider configuration, and sub-agent management.
 
+## AgentBuilder vs AgentFactory
+
+`AgentBuilder` (in `meerkat-core`) wires the agent loop primitives — LLM client, tool dispatcher, session store. It has no dependency on `meerkat-tools` and no opinions about which tools exist. It creates a `SubAgentManager` internally for concurrency tracking, but does **not** auto-register sub-agent tools (or any other tool category).
+
+`AgentFactory` (in the `meerkat` facade) is the opinionated composition layer. It knows about all tool categories (builtins, shell, sub-agents, comms, memory, mob, skills) and wires them into the dispatcher before passing it to `AgentBuilder`. All four surfaces (CLI, REST, RPC, MCP Server) go through `AgentFactory` — none call `AgentBuilder` directly.
+
+**Use `AgentFactory`** (via `build_ephemeral_service()` or `build_agent()`) unless you need full manual control over every component. Direct `AgentBuilder` usage means you're responsible for composing the tool dispatcher yourself.
+
 ## AgentBuilder
 
 <Note>

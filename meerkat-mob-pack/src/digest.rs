@@ -45,6 +45,11 @@ impl FromStr for MobpackDigest {
                 "digest must be 64 lowercase hex characters",
             ));
         }
+        if s.bytes().any(|byte| byte.is_ascii_uppercase()) {
+            return Err(ParseDigestError(
+                "digest must be 64 lowercase hex characters",
+            ));
+        }
         let bytes =
             hex::decode(s).map_err(|_| ParseDigestError("digest must be valid lowercase hex"))?;
         let array: [u8; 32] = bytes
@@ -130,14 +135,29 @@ pub fn canonical_digest(entries: &[CanonicalEntry]) -> MobpackDigest {
 }
 
 pub fn canonical_digest_from_map(files: &BTreeMap<String, Vec<u8>>) -> MobpackDigest {
-    let entries: Vec<CanonicalEntry> = files
+    let mut index: Vec<(String, [u8; 32], bool)> = files
         .iter()
-        .map(|(path, bytes)| CanonicalEntry {
-            path: path.clone(),
-            bytes: bytes.clone(),
+        .map(|(path, bytes)| {
+            (
+                normalize_path(path),
+                sha256_bytes(bytes),
+                normalize_executable_bit(path, bytes),
+            )
         })
+        .filter(|(path, _, _)| path != "signature.toml")
         .collect();
-    canonical_digest(&entries)
+    index.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut hasher = Sha256::new();
+    for (path, file_digest, executable_bit) in index {
+        hasher.update(path.as_bytes());
+        hasher.update([0]);
+        hasher.update(hex::encode(file_digest).as_bytes());
+        hasher.update([0]);
+        hasher.update([if executable_bit { b'1' } else { b'0' }]);
+        hasher.update([b'\n']);
+    }
+    MobpackDigest(hasher.finalize().into())
 }
 
 fn normalize_path(path: &str) -> String {
@@ -160,6 +180,18 @@ mod tests {
         let rendered = digest.to_string();
         let reparsed = MobpackDigest::from_str(&rendered).unwrap();
         assert_eq!(reparsed, digest);
+    }
+
+    #[test]
+    fn test_digest_rejects_uppercase_hex() {
+        let err = MobpackDigest::from_str(
+            "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB",
+        )
+        .expect_err("uppercase digest should be rejected");
+        assert_eq!(
+            err.to_string(),
+            "digest must be 64 lowercase hex characters"
+        );
     }
 
     #[test]

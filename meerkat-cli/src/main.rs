@@ -4676,11 +4676,7 @@ async fn run_wasm_pack_build(
     wasm_pack_bin: &str,
     wasm_out_dir: &std::path::Path,
 ) -> anyhow::Result<()> {
-    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(std::path::Path::to_path_buf)
-        .ok_or_else(|| anyhow::anyhow!("failed resolving workspace root"))?;
-    let runtime_crate = workspace_root.join("meerkat-web-runtime");
+    let runtime_crate = resolve_web_runtime_crate_dir().await?;
     let rustflags = match std::env::var("RUSTFLAGS") {
         Ok(existing) if !existing.trim().is_empty() => {
             format!(r#"{existing} --cfg getrandom_backend="wasm_js""#)
@@ -4689,7 +4685,7 @@ async fn run_wasm_pack_build(
     };
     let output = TokioCommand::new(wasm_pack_bin)
         .arg("build")
-        .arg(&runtime_crate)
+        .arg(&runtime_crate.path)
         .arg("--target")
         .arg("web")
         .arg("--out-dir")
@@ -4700,6 +4696,9 @@ async fn run_wasm_pack_build(
         .output()
         .await
         .map_err(|err| anyhow::anyhow!("failed invoking wasm-pack '{}': {err}", wasm_pack_bin))?;
+    if runtime_crate.cleanup_after_use {
+        let _ = tokio::fs::remove_dir_all(&runtime_crate.path).await;
+    }
     if !output.status.success() {
         return Err(anyhow::anyhow!(
             "wasm-pack build failed (exit {:?})\nstdout:\n{}\nstderr:\n{}",
@@ -4710,6 +4709,85 @@ async fn run_wasm_pack_build(
     }
     Ok(())
 }
+
+struct WebRuntimeCrateDir {
+    path: PathBuf,
+    cleanup_after_use: bool,
+}
+
+async fn resolve_web_runtime_crate_dir() -> anyhow::Result<WebRuntimeCrateDir> {
+    if let Ok(configured) = std::env::var("RKAT_WEB_RUNTIME_CRATE_DIR") {
+        let path = PathBuf::from(configured);
+        validate_web_runtime_crate_dir(&path)?;
+        return Ok(WebRuntimeCrateDir {
+            path,
+            cleanup_after_use: false,
+        });
+    }
+
+    if let Ok(current_exe) = std::env::current_exe() {
+        for ancestor in current_exe.ancestors() {
+            let candidate = ancestor.join("meerkat-web-runtime");
+            if validate_web_runtime_crate_dir(&candidate).is_ok() {
+                return Ok(WebRuntimeCrateDir {
+                    path: candidate,
+                    cleanup_after_use: false,
+                });
+            }
+        }
+    }
+
+    let path = write_embedded_web_runtime_crate().await?;
+    Ok(WebRuntimeCrateDir {
+        path,
+        cleanup_after_use: true,
+    })
+}
+
+fn validate_web_runtime_crate_dir(path: &std::path::Path) -> anyhow::Result<()> {
+    if !path.join("Cargo.toml").exists() {
+        return Err(anyhow::anyhow!(
+            "web runtime crate '{}' is missing Cargo.toml",
+            path.display()
+        ));
+    }
+    if !path.join("src").join("lib.rs").exists() {
+        return Err(anyhow::anyhow!(
+            "web runtime crate '{}' is missing src/lib.rs",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+async fn write_embedded_web_runtime_crate() -> anyhow::Result<PathBuf> {
+    let dir = std::env::temp_dir().join(format!(
+        "rkat-web-runtime-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let src_dir = dir.join("src");
+    tokio::fs::create_dir_all(&src_dir).await.map_err(|err| {
+        anyhow::anyhow!(
+            "failed creating embedded web runtime directory '{}': {err}",
+            src_dir.display()
+        )
+    })?;
+    tokio::fs::write(dir.join("Cargo.toml"), EMBEDDED_WEB_RUNTIME_CARGO_TOML)
+        .await
+        .map_err(|err| anyhow::anyhow!("failed writing embedded Cargo.toml: {err}"))?;
+    tokio::fs::write(src_dir.join("lib.rs"), EMBEDDED_WEB_RUNTIME_LIB_RS)
+        .await
+        .map_err(|err| anyhow::anyhow!("failed writing embedded lib.rs: {err}"))?;
+    Ok(dir)
+}
+
+const EMBEDDED_WEB_RUNTIME_CARGO_TOML: &str =
+    include_str!("web_runtime_template/Cargo.toml.template");
+const EMBEDDED_WEB_RUNTIME_LIB_RS: &str = include_str!("web_runtime_template/lib.rs.template");
 
 async fn finalize_web_bundle(
     staging_dir: &std::path::Path,
@@ -4773,15 +4851,14 @@ async fn finalize_web_bundle(
             )
         })?;
     }
-    tokio::fs::rename(staging_dir, output_dir)
-        .await
-        .map_err(|err| {
-            anyhow::anyhow!(
-                "failed promoting staged web output '{}' -> '{}': {err}",
-                staging_dir.display(),
-                output_dir.display()
-            )
-        })?;
+    if let Err(err) = tokio::fs::rename(staging_dir, output_dir).await {
+        let _ = tokio::fs::remove_dir_all(staging_dir).await;
+        return Err(anyhow::anyhow!(
+            "failed promoting staged web output '{}' -> '{}': {err}",
+            staging_dir.display(),
+            output_dir.display()
+        ));
+    }
     Ok(())
 }
 
@@ -4866,10 +4943,10 @@ async fn execute_mob_deploy_internal(
     let bytes = tokio::fs::read(pack)
         .await
         .map_err(|err| anyhow::anyhow!("failed reading pack '{}': {err}", pack.display()))?;
-    let archive = MobpackArchive::from_archive_bytes(&bytes)
-        .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
     let files =
         extract_targz_safe(&bytes).map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
+    let archive = MobpackArchive::from_extracted_files(&files)
+        .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
     let digest = compute_archive_digest(&bytes)
         .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
     let config_trust = read_config_trust_policy(scope)?;

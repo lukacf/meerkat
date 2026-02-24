@@ -41,7 +41,16 @@ pub fn load_trusted_signers(
         let project_text = std::fs::read_to_string(project_path)?;
         let project_store: TrustedSigners = toml::from_str(&project_text)
             .map_err(|err| PackValidationError::Archive(err.to_string()))?;
-        merged.signers.extend(project_store.signers);
+        for (signer_id, project_key) in project_store.signers {
+            if let Some(user_key) = merged.signers.get(&signer_id)
+                && user_key != &project_key
+            {
+                eprintln!(
+                    "warning: project trust store overrides signer '{signer_id}' from user trust store"
+                );
+            }
+            merged.signers.insert(signer_id, project_key);
+        }
     }
     Ok(merged)
 }
@@ -61,7 +70,8 @@ pub fn verify_pack_trust(
         return Ok(warnings);
     };
 
-    let signature_text = String::from_utf8_lossy(signature_bytes);
+    let signature_text = String::from_utf8(signature_bytes.clone())
+        .map_err(|err| PackValidationError::InvalidSignature(err.to_string()))?;
     let pack_signature: PackSignature = toml::from_str(&signature_text)
         .map_err(|err| PackValidationError::InvalidSignature(err.to_string()))?;
     if pack_signature.digest != digest {

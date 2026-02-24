@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MobpackManifest {
@@ -10,8 +10,8 @@ pub struct MobpackManifest {
     pub models: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub profiles: BTreeMap<String, ProfileSection>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub surfaces: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub surfaces: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,7 +74,7 @@ mod tests {
             }),
             models,
             profiles,
-            surfaces: vec!["cli".to_string(), "rpc".to_string()],
+            surfaces: BTreeSet::from(["cli".to_string(), "rpc".to_string()]),
         };
 
         let encoded = toml::to_string(&manifest).unwrap();

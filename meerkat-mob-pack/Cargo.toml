@@ -24,6 +24,7 @@ tar = "0.4"
 ed25519-dalek = { version = "2.0", features = ["rand_core"] }
 hex = "0.4"
 chrono = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -103,7 +103,8 @@ fn parse_manifest(
     let bytes = files
         .get("manifest.toml")
         .ok_or(PackValidationError::MissingManifest)?;
-    let manifest_text = String::from_utf8_lossy(bytes);
+    let manifest_text = String::from_utf8(bytes.clone())
+        .map_err(|err| PackValidationError::InvalidManifest(err.to_string()))?;
     toml::from_str(&manifest_text)
         .map_err(|err| PackValidationError::InvalidManifest(err.to_string()))
 }
@@ -131,7 +132,8 @@ fn ensure_no_trust_section(files: &BTreeMap<String, Vec<u8>>) -> Result<(), Pack
     let bytes = files
         .get("manifest.toml")
         .ok_or(PackValidationError::MissingManifest)?;
-    let manifest_text = String::from_utf8_lossy(bytes);
+    let manifest_text = String::from_utf8(bytes.clone())
+        .map_err(|err| PackValidationError::InvalidManifest(err.to_string()))?;
     let value: toml::Value = toml::from_str(&manifest_text)
         .map_err(|err| PackValidationError::InvalidManifest(err.to_string()))?;
     if value.get("trust").is_some() {
@@ -201,13 +203,23 @@ fn signer_id_from_path(path: &Path) -> String {
         .file_name()
         .and_then(|v| v.to_str())
         .map(ToOwned::to_owned)
-        .unwrap_or_else(|| "signer".to_string());
+        .unwrap_or_else(|| {
+            tracing::debug!(
+                signing_key = %path.display(),
+                "unable to derive signer_id from key filename; falling back to default"
+            );
+            "signer".to_string()
+        });
     if let Some(stem) = PathBuf::from(file_name)
         .file_stem()
         .and_then(|v| v.to_str())
     {
         return stem.to_string();
     }
+    tracing::debug!(
+        signing_key = %path.display(),
+        "unable to derive signer_id from key filename stem; falling back to default"
+    );
     "signer".to_string()
 }
 

@@ -171,10 +171,16 @@ mod tests {
                 header.set_cksum();
                 let append_result =
                     builder.append_data(&mut header, path.as_str(), content.as_slice());
-                assert!(append_result.is_ok(), "append data failed: {append_result:?}");
+                assert!(
+                    append_result.is_ok(),
+                    "append data failed: {append_result:?}"
+                );
             }
             let finish_result = builder.finish();
-            assert!(finish_result.is_ok(), "finish tar failed: {finish_result:?}");
+            assert!(
+                finish_result.is_ok(),
+                "finish tar failed: {finish_result:?}"
+            );
         }
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         let write_result = std::io::Write::write_all(&mut encoder, &tar_bytes);
@@ -198,9 +204,15 @@ mod tests {
             header.set_gid(0);
             header.set_cksum();
             let append_result = builder.append_data(&mut header, path, b"x".as_slice());
-            assert!(append_result.is_ok(), "append data failed: {append_result:?}");
+            assert!(
+                append_result.is_ok(),
+                "append data failed: {append_result:?}"
+            );
             let finish_result = builder.finish();
-            assert!(finish_result.is_ok(), "finish tar failed: {finish_result:?}");
+            assert!(
+                finish_result.is_ok(),
+                "finish tar failed: {finish_result:?}"
+            );
         }
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         let write_result = std::io::Write::write_all(&mut encoder, &tar_bytes);

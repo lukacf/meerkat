@@ -2,7 +2,7 @@ use super::*;
 use crate::definition::{
     BackendConfig, CollectionPolicy, ConditionExpr, DependencyMode, DispatchMode, FlowSpec,
     FlowStepSpec, LimitsSpec, MobDefinition, OrchestratorConfig, PolicyMode, RoleWiringRule,
-    TopologyRule, TopologySpec, WiringRules,
+    SkillSource, TopologyRule, TopologySpec, WiringRules,
 };
 use crate::event::MobEvent;
 use crate::profile::{Profile, ToolConfig};
@@ -1940,6 +1940,39 @@ async fn test_mob_builder_runs_with_shared_redb_storage_bundle() {
         .expect("run flow");
     let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
     assert_eq!(terminal.status, MobRunStatus::Completed);
+}
+
+#[tokio::test]
+async fn test_mob_builder_from_mobpack_creates_valid_mob() {
+    let mut definition = sample_definition();
+    definition.skills.insert(
+        "review".to_string(),
+        SkillSource::Path {
+            path: "skills/review.md".to_string(),
+        },
+    );
+
+    let packed_skills = BTreeMap::from([(
+        "skills/review.md".to_string(),
+        b"You are a reviewer.".to_vec(),
+    )]);
+    let session_service: Arc<dyn crate::runtime::MobSessionService> =
+        Arc::new(MockSessionService::new());
+    let storage = MobStorage::in_memory();
+
+    let handle = MobBuilder::from_mobpack(definition.clone(), packed_skills, storage)
+        .expect("from_mobpack should construct builder")
+        .with_session_service(session_service)
+        .allow_ephemeral_sessions(true)
+        .create()
+        .await
+        .expect("mob should create");
+
+    assert_eq!(handle.definition().id, definition.id);
+    match &handle.definition().skills["review"] {
+        SkillSource::Inline { content } => assert_eq!(content, "You are a reviewer."),
+        other => panic!("expected inlined skill, got {other:?}"),
+    }
 }
 
 #[tokio::test]

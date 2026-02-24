@@ -144,9 +144,16 @@ digest computation):
 [signature]
 signer_id = "team@example.com"
 public_key = "ed25519:<base64>"
-signature = "<base64 over mobpack_digest>"
+digest = "sha256:<hex>"                   # canonical mobpack_digest that was signed
+signature = "<base64 over digest bytes>"  # Ed25519 signature
 timestamp = "2026-02-24T12:00:00Z"
 ```
+
+The `digest` field stores the canonical content hash that was signed. Verifiers
+recompute the digest from archive content and compare it against this stored
+value before checking the Ed25519 signature. This makes tamper detection
+explicit: content mutation changes the recomputed digest, which no longer
+matches the signed digest.
 
 ### Trust Anchors
 
@@ -317,6 +324,23 @@ deployable browser artifact that is ready to run by URL.
 A WASMpack is a target-specific runtime projection of a mobpack, not a parallel
 ecosystem. It uses the same IR (mobpack) but compiles to a browser-deployable
 bundle.
+
+### Toolchain Prerequisites (Current Implementation)
+
+`rkat mob web build` shells out to `wasm-pack`. Install it before using the
+web build surface:
+
+```bash
+cargo install wasm-pack
+export PATH="$HOME/.cargo/bin:$PATH"
+wasm-pack --version
+```
+
+If `wasm-pack` is not on `PATH`, set an explicit binary path:
+
+```bash
+RKAT_WASM_PACK_BIN=/absolute/path/to/wasm-pack rkat mob web build release-triage.mobpack -o dist/release-triage-web
+```
 
 The web bundle's `manifest.web.toml` is a **derived build output**, not a
 source-of-truth. It is generated from `manifest.toml` + target-specific build

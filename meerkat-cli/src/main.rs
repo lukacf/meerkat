@@ -10,6 +10,7 @@ use meerkat_contracts::{SessionLocator, SessionLocatorError, SkillsParams, forma
 use meerkat_core::AgentToolDispatcher;
 #[cfg(feature = "comms")]
 use meerkat_core::CommsRuntimeMode;
+use meerkat_core::config::CliOverrides;
 use meerkat_core::service::{
     CreateSessionRequest, SessionBuildOptions, SessionQuery, SessionService,
 };
@@ -24,8 +25,16 @@ use meerkat_core::{
 #[cfg(feature = "mcp")]
 use meerkat_mcp::McpRouterAdapter;
 use meerkat_mob::{FlowId, MobDefinition, Prefab, ProfileName, RunId};
+use meerkat_mob_pack::archive::MobpackArchive;
+use meerkat_mob_pack::pack::{
+    compute_archive_digest, inspect_archive_bytes, pack_directory_with_excludes,
+    validate_archive_bytes,
+};
+use meerkat_mob_pack::targz::extract_targz_safe;
+use meerkat_mob_pack::trust::{TrustPolicy, load_trusted_signers, verify_pack_trust};
 use meerkat_store::SessionStore;
 use meerkat_tools::find_project_root;
+use tokio::io::{AsyncBufRead, AsyncWrite, BufReader};
 use tokio::sync::mpsc;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -42,6 +51,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
+use tokio::process::Command as TokioCommand;
 
 /// Exit codes as per DESIGN.md §12
 const EXIT_SUCCESS: u8 = 0;
@@ -805,6 +815,39 @@ enum McpCommands {
 
 #[derive(Subcommand)]
 enum MobCommands {
+    /// Pack a mob directory into a .mobpack archive.
+    Pack {
+        dir: PathBuf,
+        #[arg(short = 'o', long)]
+        output: PathBuf,
+        #[arg(long)]
+        sign: Option<PathBuf>,
+    },
+    /// Inspect a .mobpack archive.
+    Inspect { pack: PathBuf },
+    /// Validate a .mobpack archive.
+    Validate { pack: PathBuf },
+    /// Deploy a .mobpack archive with a prompt.
+    Deploy {
+        pack: PathBuf,
+        prompt: String,
+        /// Override model at deploy time.
+        #[arg(long, short = 'm')]
+        model: Option<String>,
+        /// Override maximum total tokens at deploy time.
+        #[arg(long)]
+        max_total_tokens: Option<u64>,
+        /// Override maximum duration at deploy time (e.g., "5m", "1h30m").
+        #[arg(long, short = 'd')]
+        max_duration: Option<String>,
+        /// Override maximum tool calls at deploy time.
+        #[arg(long)]
+        max_tool_calls: Option<usize>,
+        #[arg(long, value_enum)]
+        trust_policy: Option<TrustPolicyArg>,
+        #[arg(long, value_enum, default_value = "cli")]
+        surface: DeploySurfaceArg,
+    },
     /// List available prefab templates.
     Prefabs,
     /// Create a mob from --prefab or --definition.
@@ -873,6 +916,42 @@ enum MobCommands {
     FlowStatus { mob_id: String, run_id: String },
     /// Destroy a mob.
     Destroy { mob_id: String },
+    /// Web deployment commands.
+    Web {
+        #[command(subcommand)]
+        command: MobWebCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum MobWebCommands {
+    /// Build a browser-deployable WASM bundle from a .mobpack archive.
+    Build {
+        pack: PathBuf,
+        #[arg(short = 'o', long)]
+        output: PathBuf,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum TrustPolicyArg {
+    Permissive,
+    Strict,
+}
+
+impl From<TrustPolicyArg> for TrustPolicy {
+    fn from(value: TrustPolicyArg) -> Self {
+        match value {
+            TrustPolicyArg::Permissive => TrustPolicy::Permissive,
+            TrustPolicyArg::Strict => TrustPolicy::Strict,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum DeploySurfaceArg {
+    Cli,
+    Rpc,
 }
 
 /// CLI-side scope enum (maps to McpScope)
@@ -1936,12 +2015,10 @@ async fn shutdown_mcp(_adapter: &Option<Arc<McpRouterAdapter>>) {
 /// Mob-managed meerkats are created through the same in-process session service as
 /// the parent CLI agent. Host-mode behavior is backend-driven by mob runtime
 /// requests and must not be overridden here.
-#[cfg(test)]
 struct RunMobSessionService {
     inner: Arc<EphemeralSessionService<FactoryAgentBuilder>>,
 }
 
-#[cfg(test)]
 impl RunMobSessionService {
     fn new(inner: Arc<EphemeralSessionService<FactoryAgentBuilder>>) -> Self {
         Self { inner }
@@ -1949,7 +2026,6 @@ impl RunMobSessionService {
 }
 
 #[async_trait::async_trait]
-#[cfg(test)]
 impl SessionService for RunMobSessionService {
     async fn create_session(
         &self,
@@ -2039,7 +2115,6 @@ impl SessionService for RunMobSessionService {
 }
 
 #[async_trait::async_trait]
-#[cfg(test)]
 impl meerkat_mob::MobSessionService for RunMobSessionService {
     async fn comms_runtime(
         &self,
@@ -2196,6 +2271,32 @@ fn build_cli_service(
 ) -> EphemeralSessionService<FactoryAgentBuilder> {
     let builder = FactoryAgentBuilder::new(factory, config);
     EphemeralSessionService::new(builder, 64)
+}
+
+fn build_deploy_mob_session_service(
+    scope: &RuntimeScope,
+    config: Config,
+) -> Arc<dyn meerkat_mob::MobSessionService> {
+    let paths = meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id);
+    let project_root = scope.context_root.clone().unwrap_or_else(|| {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        find_project_root(&cwd).unwrap_or(cwd)
+    });
+    let mut factory = AgentFactory::new(paths.root.clone())
+        .runtime_root(paths.root)
+        .project_root(project_root)
+        .builtins(config.tools.builtins_enabled)
+        .shell(config.tools.shell_enabled)
+        .subagents(config.tools.subagents_enabled)
+        .memory(true);
+    if let Some(context_root) = scope.context_root.clone() {
+        factory = factory.context_root(context_root);
+    }
+    if let Some(user_root) = scope.user_config_root.clone() {
+        factory = factory.user_config_root(user_root);
+    }
+    let service = Arc::new(build_cli_service(factory, config));
+    Arc::new(RunMobSessionService::new(service))
 }
 
 fn session_err_to_anyhow(e: meerkat_core::service::SessionError) -> anyhow::Error {
@@ -3994,6 +4095,67 @@ async fn wait_for_terminal_flow_run(
 }
 
 async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyhow::Result<()> {
+    if let MobCommands::Pack { dir, output, sign } = &command {
+        println!("{}", execute_mob_pack(dir, output, sign.as_deref()).await?);
+        return Ok(());
+    }
+
+    if let MobCommands::Inspect { pack } = &command {
+        println!("{}", execute_mob_inspect(pack).await?);
+        return Ok(());
+    }
+
+    if let MobCommands::Validate { pack } = &command {
+        println!("{}", execute_mob_validate(pack).await?);
+        return Ok(());
+    }
+
+    if let MobCommands::Deploy {
+        pack,
+        prompt,
+        model,
+        max_total_tokens,
+        max_duration,
+        max_tool_calls,
+        trust_policy,
+        surface,
+    } = &command
+    {
+        let parsed_max_duration = max_duration
+            .as_ref()
+            .map(|raw| parse_duration(raw))
+            .transpose()
+            .map_err(|err| anyhow::anyhow!("invalid --max-duration value: {err}"))?;
+        let deploy_overrides = CliOverrides {
+            model: model.clone(),
+            max_tokens: *max_total_tokens,
+            max_duration: parsed_max_duration,
+            max_tool_calls: *max_tool_calls,
+            override_config: None,
+        };
+        println!(
+            "{}",
+            execute_mob_deploy(
+                scope,
+                pack,
+                prompt,
+                *trust_policy,
+                *surface,
+                deploy_overrides,
+            )
+            .await?
+        );
+        return Ok(());
+    }
+
+    if let MobCommands::Web {
+        command: MobWebCommands::Build { pack, output },
+    } = &command
+    {
+        println!("{}", execute_mob_web_build(pack, output).await?);
+        return Ok(());
+    }
+
     let _lock = acquire_mob_registry_lock(scope).await?;
     let (config, _) = load_config(scope).await?;
     let persistent = get_or_create_mob_persistent_service(scope, config).await?;
@@ -4261,10 +4423,765 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             save_mob_registry(scope, &registry).await?;
             Ok(())
         }
+        MobCommands::Pack { .. }
+        | MobCommands::Inspect { .. }
+        | MobCommands::Validate { .. }
+        | MobCommands::Deploy { .. }
+        | MobCommands::Web { .. } => {
+            unreachable!("pack/inspect/validate handled before runtime mob state initialization")
+        }
     };
 
     drop(state);
     result
+}
+
+fn format_inspect_output(info: &meerkat_mob_pack::pack::InspectResult) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("name\t{}\n", info.name));
+    out.push_str(&format!("version\t{}\n", info.version));
+    out.push_str(&format!("file_count\t{}\n", info.file_count));
+    out.push_str(&format!("digest\t{}\n", info.digest));
+    for file in &info.files {
+        out.push_str(&format!("file\t{file}\n"));
+    }
+    out
+}
+
+async fn execute_mob_pack(
+    dir: &std::path::Path,
+    output: &std::path::Path,
+    sign: Option<&std::path::Path>,
+) -> anyhow::Result<String> {
+    let result = pack_directory_with_excludes(dir, sign, &[output])
+        .map_err(|err| anyhow::anyhow!("mob pack failed: {err}"))?;
+    tokio::fs::write(output, &result.archive_bytes)
+        .await
+        .map_err(|err| anyhow::anyhow!("failed writing archive '{}': {err}", output.display()))?;
+    Ok(result.digest.to_string())
+}
+
+async fn execute_mob_inspect(pack: &std::path::Path) -> anyhow::Result<String> {
+    let bytes = tokio::fs::read(pack)
+        .await
+        .map_err(|err| anyhow::anyhow!("failed reading pack '{}': {err}", pack.display()))?;
+    let info = inspect_archive_bytes(&bytes)
+        .map_err(|err| anyhow::anyhow!("mob inspect failed: {err}"))?;
+    Ok(format_inspect_output(&info))
+}
+
+async fn execute_mob_validate(pack: &std::path::Path) -> anyhow::Result<String> {
+    let bytes = tokio::fs::read(pack)
+        .await
+        .map_err(|err| anyhow::anyhow!("failed reading pack '{}': {err}", pack.display()))?;
+    validate_archive_bytes(&bytes).map_err(|err| anyhow::anyhow!("mob validate failed: {err}"))?;
+    let digest = compute_archive_digest(&bytes)
+        .map_err(|err| anyhow::anyhow!("mob validate failed: {err}"))?;
+    Ok(format!("valid\t{digest}"))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WasmBuildTarget {
+    output_dir: PathBuf,
+}
+
+struct WebBuildInvocation {
+    wasm_pack_bin: String,
+}
+
+#[derive(serde::Serialize)]
+struct DerivedWebManifest {
+    mobpack: DerivedWebMobpack,
+    source: DerivedWebSource,
+    requires: DerivedWebRequires,
+    surfaces: Vec<String>,
+    web: DerivedWebRuntime,
+}
+
+#[derive(serde::Serialize)]
+struct DerivedWebMobpack {
+    name: String,
+    version: String,
+    description: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct DerivedWebSource {
+    digest: String,
+}
+
+#[derive(serde::Serialize)]
+struct DerivedWebRequires {
+    capabilities: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+struct DerivedWebRuntime {
+    profile: String,
+    forbid: Vec<String>,
+}
+
+async fn execute_mob_web_build(
+    pack: &std::path::Path,
+    output: &std::path::Path,
+) -> anyhow::Result<String> {
+    let invocation = WebBuildInvocation {
+        wasm_pack_bin: std::env::var("RKAT_WASM_PACK_BIN")
+            .unwrap_or_else(|_| "wasm-pack".to_string()),
+    };
+    execute_mob_web_build_internal(pack, output, invocation).await
+}
+
+async fn execute_mob_web_build_internal(
+    pack: &std::path::Path,
+    output: &std::path::Path,
+    invocation: WebBuildInvocation,
+) -> anyhow::Result<String> {
+    let pack_bytes = tokio::fs::read(pack)
+        .await
+        .map_err(|err| anyhow::anyhow!("failed reading pack '{}': {err}", pack.display()))?;
+    let archive = MobpackArchive::from_archive_bytes(&pack_bytes)
+        .map_err(|err| anyhow::anyhow!("mob web build failed: {err}"))?;
+    let digest = compute_archive_digest(&pack_bytes)
+        .map_err(|err| anyhow::anyhow!("mob web build failed: {err}"))?;
+    validate_web_forbidden_capabilities(&archive.manifest)
+        .map_err(|err| anyhow::anyhow!("mob web build failed: {err}"))?;
+    let manifest_web = derive_manifest_web_toml(&archive.manifest, &digest.to_string())
+        .map_err(|err| anyhow::anyhow!("mob web build failed: {err}"))?;
+
+    let target = WasmBuildTarget {
+        output_dir: output.to_path_buf(),
+    };
+    let parent = target
+        .output_dir
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    tokio::fs::create_dir_all(parent).await.map_err(|err| {
+        anyhow::anyhow!(
+            "failed creating web output parent '{}': {err}",
+            parent.display()
+        )
+    })?;
+    let staging = parent.join(format!(
+        ".mob-web-build-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    tokio::fs::create_dir_all(&staging).await.map_err(|err| {
+        anyhow::anyhow!(
+            "failed creating staging directory '{}': {err}",
+            staging.display()
+        )
+    })?;
+    let wasm_out_dir = staging.join("pkg");
+    tokio::fs::create_dir_all(&wasm_out_dir)
+        .await
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "failed creating wasm staging directory '{}': {err}",
+                wasm_out_dir.display()
+            )
+        })?;
+
+    if let Err(err) = run_wasm_pack_build(&invocation.wasm_pack_bin, &wasm_out_dir).await {
+        let _ = tokio::fs::remove_dir_all(&staging).await;
+        return Err(err);
+    }
+    if let Err(err) = finalize_web_bundle(
+        &staging,
+        &wasm_out_dir,
+        &pack_bytes,
+        manifest_web.as_bytes(),
+        &target.output_dir,
+    )
+    .await
+    {
+        let _ = tokio::fs::remove_dir_all(&staging).await;
+        return Err(err);
+    }
+
+    Ok(format!(
+        "built\toutput={}\tdigest={}\tartifacts=5",
+        target.output_dir.display(),
+        digest
+    ))
+}
+
+fn derive_manifest_web_toml(
+    manifest: &meerkat_mob_pack::manifest::MobpackManifest,
+    digest: &str,
+) -> anyhow::Result<String> {
+    let derived = DerivedWebManifest {
+        mobpack: DerivedWebMobpack {
+            name: manifest.mobpack.name.clone(),
+            version: manifest.mobpack.version.clone(),
+            description: manifest.mobpack.description.clone(),
+        },
+        source: DerivedWebSource {
+            digest: digest.to_string(),
+        },
+        requires: DerivedWebRequires {
+            capabilities: manifest
+                .requires
+                .as_ref()
+                .map(|requires| requires.capabilities.clone())
+                .unwrap_or_default(),
+        },
+        surfaces: vec!["web".to_string()],
+        web: DerivedWebRuntime {
+            profile: "browser-safe".to_string(),
+            forbid: forbidden_web_capabilities()
+                .iter()
+                .map(|capability| capability.to_string())
+                .collect(),
+        },
+    };
+    let mut out = String::from("# AUTO-GENERATED by rkat mob web build -- do not edit\n");
+    out.push_str(&format!(
+        "# Source: manifest.toml @ mobpack_digest={digest}\n\n"
+    ));
+    out.push_str(
+        &toml::to_string_pretty(&derived)
+            .map_err(|err| anyhow::anyhow!("failed encoding manifest.web.toml: {err}"))?,
+    );
+    Ok(out)
+}
+
+fn forbidden_web_capabilities() -> [&'static str; 3] {
+    ["shell", "mcp_stdio", "process_spawn"]
+}
+
+fn validate_web_forbidden_capabilities(
+    manifest: &meerkat_mob_pack::manifest::MobpackManifest,
+) -> anyhow::Result<()> {
+    let Some(requires) = manifest.requires.as_ref() else {
+        return Ok(());
+    };
+    let forbidden = forbidden_web_capabilities();
+    for capability in &requires.capabilities {
+        if forbidden.contains(&capability.as_str()) {
+            return Err(anyhow::anyhow!(
+                "forbidden capability '{}' is not allowed for web builds",
+                capability
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn run_wasm_pack_build(
+    wasm_pack_bin: &str,
+    wasm_out_dir: &std::path::Path,
+) -> anyhow::Result<()> {
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .ok_or_else(|| anyhow::anyhow!("failed resolving workspace root"))?;
+    let runtime_crate = workspace_root.join("meerkat-web-runtime");
+    let rustflags = match std::env::var("RUSTFLAGS") {
+        Ok(existing) if !existing.trim().is_empty() => {
+            format!(r#"{existing} --cfg getrandom_backend="wasm_js""#)
+        }
+        _ => r#"--cfg getrandom_backend="wasm_js""#.to_string(),
+    };
+    let output = TokioCommand::new(wasm_pack_bin)
+        .arg("build")
+        .arg(&runtime_crate)
+        .arg("--target")
+        .arg("web")
+        .arg("--out-dir")
+        .arg(wasm_out_dir)
+        .arg("--out-name")
+        .arg("runtime")
+        .env("RUSTFLAGS", rustflags)
+        .output()
+        .await
+        .map_err(|err| anyhow::anyhow!("failed invoking wasm-pack '{}': {err}", wasm_pack_bin))?;
+    if !output.status.success() {
+        return Err(anyhow::anyhow!(
+            "wasm-pack build failed (exit {:?})\nstdout:\n{}\nstderr:\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
+async fn finalize_web_bundle(
+    staging_dir: &std::path::Path,
+    wasm_out_dir: &std::path::Path,
+    pack_bytes: &[u8],
+    manifest_web_bytes: &[u8],
+    output_dir: &std::path::Path,
+) -> anyhow::Result<()> {
+    let runtime_js_source = wasm_out_dir.join("runtime.js");
+    let runtime_wasm_source = wasm_out_dir.join("runtime_bg.wasm");
+    let runtime_js = tokio::fs::read(&runtime_js_source).await.map_err(|err| {
+        anyhow::anyhow!(
+            "missing wasm artifact '{}': {err}",
+            runtime_js_source.display()
+        )
+    })?;
+    let runtime_wasm = tokio::fs::read(&runtime_wasm_source).await.map_err(|err| {
+        anyhow::anyhow!(
+            "missing wasm artifact '{}': {err}",
+            runtime_wasm_source.display()
+        )
+    })?;
+
+    tokio::fs::write(staging_dir.join("runtime.js"), runtime_js)
+        .await
+        .map_err(|err| anyhow::anyhow!("failed writing runtime.js: {err}"))?;
+    tokio::fs::write(staging_dir.join("runtime_bg.wasm"), runtime_wasm)
+        .await
+        .map_err(|err| anyhow::anyhow!("failed writing runtime_bg.wasm: {err}"))?;
+    tokio::fs::write(staging_dir.join("mobpack.bin"), pack_bytes)
+        .await
+        .map_err(|err| anyhow::anyhow!("failed writing mobpack.bin: {err}"))?;
+    tokio::fs::write(staging_dir.join("manifest.web.toml"), manifest_web_bytes)
+        .await
+        .map_err(|err| anyhow::anyhow!("failed writing manifest.web.toml: {err}"))?;
+    tokio::fs::write(staging_dir.join("index.html"), WEB_INDEX_HTML)
+        .await
+        .map_err(|err| anyhow::anyhow!("failed writing index.html: {err}"))?;
+
+    validate_web_artifact_set(staging_dir)?;
+
+    if output_dir.exists() {
+        let metadata = tokio::fs::symlink_metadata(output_dir)
+            .await
+            .map_err(|err| {
+                anyhow::anyhow!(
+                    "failed inspecting existing output path '{}': {err}",
+                    output_dir.display()
+                )
+            })?;
+        if metadata.is_file() {
+            return Err(anyhow::anyhow!(
+                "web output path '{}' is a file, expected directory",
+                output_dir.display()
+            ));
+        }
+        tokio::fs::remove_dir_all(output_dir).await.map_err(|err| {
+            anyhow::anyhow!(
+                "failed removing previous web output '{}': {err}",
+                output_dir.display()
+            )
+        })?;
+    }
+    tokio::fs::rename(staging_dir, output_dir)
+        .await
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "failed promoting staged web output '{}' -> '{}': {err}",
+                staging_dir.display(),
+                output_dir.display()
+            )
+        })?;
+    Ok(())
+}
+
+fn validate_web_artifact_set(dir: &std::path::Path) -> anyhow::Result<()> {
+    let required = [
+        "index.html",
+        "runtime.js",
+        "runtime_bg.wasm",
+        "mobpack.bin",
+        "manifest.web.toml",
+    ];
+    let mut missing = Vec::new();
+    for file in required {
+        if !dir.join(file).exists() {
+            missing.push(file);
+        }
+    }
+    if !missing.is_empty() {
+        return Err(anyhow::anyhow!(
+            "incomplete web artifact set: missing {}",
+            missing.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+const WEB_INDEX_HTML: &str = r#"<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Meerkat Mob Web Runtime</title>
+  </head>
+  <body>
+    <script type="module" src="./runtime.js"></script>
+  </body>
+</html>
+"#;
+
+async fn execute_mob_deploy(
+    scope: &RuntimeScope,
+    pack: &std::path::Path,
+    prompt: &str,
+    cli_trust_policy: Option<TrustPolicyArg>,
+    surface: DeploySurfaceArg,
+    cli_overrides: CliOverrides,
+) -> anyhow::Result<String> {
+    execute_mob_deploy_internal(
+        scope,
+        pack,
+        prompt,
+        DeployInvocation {
+            cli_trust_policy,
+            surface,
+            cli_overrides,
+            rpc_io: None,
+            config_observer: None,
+        },
+    )
+    .await
+}
+
+type RpcDeployIo = (
+    Box<dyn AsyncBufRead + Send + Unpin>,
+    Box<dyn AsyncWrite + Send + Unpin>,
+);
+type DeployConfigObserver = Arc<dyn Fn(&Config) + Send + Sync>;
+struct DeployInvocation {
+    cli_trust_policy: Option<TrustPolicyArg>,
+    surface: DeploySurfaceArg,
+    cli_overrides: CliOverrides,
+    rpc_io: Option<RpcDeployIo>,
+    config_observer: Option<DeployConfigObserver>,
+}
+
+async fn execute_mob_deploy_internal(
+    scope: &RuntimeScope,
+    pack: &std::path::Path,
+    prompt: &str,
+    invocation: DeployInvocation,
+) -> anyhow::Result<String> {
+    let bytes = tokio::fs::read(pack)
+        .await
+        .map_err(|err| anyhow::anyhow!("failed reading pack '{}': {err}", pack.display()))?;
+    let archive = MobpackArchive::from_archive_bytes(&bytes)
+        .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
+    let files =
+        extract_targz_safe(&bytes).map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
+    let digest = compute_archive_digest(&bytes)
+        .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
+    let config_trust = read_config_trust_policy(scope)?;
+    let trust_policy = resolve_trust_policy(
+        invocation.cli_trust_policy,
+        |key| std::env::var(key).ok(),
+        config_trust,
+    )?;
+    let trusted_signers = load_trusted_signers(
+        &user_trust_store_path(scope),
+        &project_trust_store_path(scope),
+    )
+    .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
+    let warnings = verify_pack_trust(&files, digest, trust_policy, &trusted_signers)
+        .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
+    validate_required_capabilities(&archive.manifest, &runtime_capabilities(invocation.surface))
+        .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
+    let effective_config = load_deploy_config_with_pack_defaults(
+        scope,
+        archive.config.get("config/defaults.toml"),
+        invocation.cli_overrides,
+    )?;
+    if let Some(observer) = invocation.config_observer.as_ref() {
+        observer(&effective_config);
+    }
+
+    let session_service = build_deploy_mob_session_service(scope, effective_config.clone());
+    let handle = meerkat_mob::MobBuilder::from_mobpack(
+        archive.definition.clone(),
+        archive.skills.clone(),
+        meerkat_mob::MobStorage::in_memory(),
+    )
+    .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?
+    .with_session_service(session_service)
+    .create()
+    .await
+    .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
+
+    if let Some(orchestrator) = &archive.definition.orchestrator {
+        let roster = handle.roster().await;
+        if let Some(entry) = roster.by_profile(&orchestrator.profile).next() {
+            handle
+                .send_message(entry.meerkat_id.clone(), prompt.to_string())
+                .await
+                .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
+        }
+    }
+
+    if matches!(invocation.surface, DeploySurfaceArg::Rpc) {
+        let (reader, writer): RpcDeployIo = invocation.rpc_io.unwrap_or_else(|| {
+            (
+                Box::new(BufReader::new(tokio::io::stdin())),
+                Box::new(tokio::io::stdout()),
+            )
+        });
+        run_rpc_surface(
+            scope,
+            effective_config,
+            Some(handle.mob_id().to_string()),
+            reader,
+            writer,
+        )
+        .await?;
+    }
+
+    let mut rendered = format!(
+        "deployed\tmob={}\tsurface={}\tprompt_bytes={}",
+        handle.mob_id(),
+        match invocation.surface {
+            DeploySurfaceArg::Cli => "cli",
+            DeploySurfaceArg::Rpc => "rpc",
+        },
+        prompt.len()
+    );
+    for warning in warnings {
+        rendered.push_str(&format!("\nwarning\t{warning}"));
+    }
+    Ok(rendered)
+}
+
+fn resolve_trust_policy<F>(
+    cli_policy: Option<TrustPolicyArg>,
+    mut env_lookup: F,
+    config_policy: Option<TrustPolicy>,
+) -> anyhow::Result<TrustPolicy>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    if let Some(policy) = cli_policy {
+        return Ok(policy.into());
+    }
+    if let Some(raw_env) = env_lookup("RKAT_TRUST_POLICY") {
+        return parse_trust_policy(raw_env.trim())
+            .ok_or_else(|| anyhow::anyhow!("invalid RKAT_TRUST_POLICY value '{}'", raw_env));
+    }
+    if let Some(policy) = config_policy {
+        return Ok(policy);
+    }
+    Ok(TrustPolicy::Permissive)
+}
+
+fn parse_trust_policy(raw: &str) -> Option<TrustPolicy> {
+    match raw.to_ascii_lowercase().as_str() {
+        "permissive" => Some(TrustPolicy::Permissive),
+        "strict" => Some(TrustPolicy::Strict),
+        _ => None,
+    }
+}
+
+fn read_config_trust_policy(scope: &RuntimeScope) -> anyhow::Result<Option<TrustPolicy>> {
+    let config_path =
+        meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id)
+            .config_path;
+    if !config_path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(&config_path).map_err(|err| {
+        anyhow::anyhow!("failed reading config '{}': {err}", config_path.display())
+    })?;
+    let value: toml::Value =
+        toml::from_str(&content).map_err(|err| anyhow::anyhow!("invalid config TOML: {err}"))?;
+    let Some(policy_raw) = value
+        .get("trust")
+        .and_then(|v| v.get("policy"))
+        .and_then(toml::Value::as_str)
+    else {
+        return Ok(None);
+    };
+    parse_trust_policy(policy_raw)
+        .ok_or_else(|| anyhow::anyhow!("invalid trust.policy value '{}'", policy_raw))
+        .map(Some)
+}
+
+fn load_deploy_config_with_pack_defaults(
+    scope: &RuntimeScope,
+    pack_defaults_toml: Option<&Vec<u8>>,
+    cli_overrides: CliOverrides,
+) -> anyhow::Result<Config> {
+    let mut config = Config::default();
+    if let Some(pack_defaults_toml) = pack_defaults_toml {
+        apply_toml_delta_layer(&mut config, pack_defaults_toml, "config/defaults.toml")?;
+    }
+
+    let config_path =
+        meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id)
+            .config_path;
+    if config_path.exists() {
+        let file_bytes = std::fs::read(&config_path).map_err(|err| {
+            anyhow::anyhow!("failed reading config '{}': {err}", config_path.display())
+        })?;
+        apply_toml_delta_layer(&mut config, &file_bytes, &config_path.display().to_string())?;
+    }
+    config
+        .apply_env_overrides()
+        .map_err(|err| anyhow::anyhow!("failed applying env overrides: {err}"))?;
+    config.apply_cli_overrides(cli_overrides);
+    Ok(config)
+}
+
+fn apply_toml_delta_layer(
+    config: &mut Config,
+    toml_bytes: &[u8],
+    source_label: &str,
+) -> anyhow::Result<()> {
+    let text = std::str::from_utf8(toml_bytes)
+        .map_err(|err| anyhow::anyhow!("invalid UTF-8 in {source_label}: {err}"))?;
+    config
+        .merge_toml_str(text)
+        .map_err(|err| anyhow::anyhow!("invalid TOML in {source_label}: {err}"))
+}
+
+fn user_trust_store_path(scope: &RuntimeScope) -> PathBuf {
+    scope
+        .user_config_root
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".rkat")
+        .join("trusted-signers.toml")
+}
+
+fn project_trust_store_path(scope: &RuntimeScope) -> PathBuf {
+    scope
+        .context_root
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".rkat")
+        .join("trusted-signers.toml")
+}
+
+fn runtime_capabilities(surface: DeploySurfaceArg) -> std::collections::BTreeSet<String> {
+    let mut caps = std::collections::BTreeSet::from([
+        "core".to_string(),
+        "skills".to_string(),
+        "hooks".to_string(),
+    ]);
+    #[cfg(feature = "comms")]
+    caps.insert("comms".to_string());
+    #[cfg(feature = "mcp")]
+    caps.insert("mcp".to_string());
+    if matches!(surface, DeploySurfaceArg::Rpc) {
+        caps.insert("rpc".to_string());
+    }
+    caps
+}
+
+fn validate_required_capabilities(
+    manifest: &meerkat_mob_pack::manifest::MobpackManifest,
+    runtime_caps: &std::collections::BTreeSet<String>,
+) -> Result<(), meerkat_mob_pack::validate::PackValidationError> {
+    if let Some(requires) = &manifest.requires {
+        for required in &requires.capabilities {
+            if !runtime_caps.contains(required) {
+                return Err(
+                    meerkat_mob_pack::validate::PackValidationError::CapabilityMismatch(
+                        required.clone(),
+                    ),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn run_rpc_surface<R, W>(
+    scope: &RuntimeScope,
+    config: Config,
+    deployed_mob_id: Option<String>,
+    reader: R,
+    writer: W,
+) -> anyhow::Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let (manifest, session_store) = create_session_store(scope).await?;
+    let paths = meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id);
+    let base_store: Arc<dyn ConfigStore> =
+        Arc::new(FileConfigStore::new(paths.config_path.clone()));
+    let tagged = meerkat_core::TaggedConfigStore::new(
+        base_store,
+        meerkat_core::ConfigStoreMetadata {
+            realm_id: Some(scope.locator.realm_id.clone()),
+            instance_id: scope.instance_id.clone(),
+            backend: Some(manifest.backend.as_str().to_string()),
+            resolved_paths: Some(meerkat_core::ConfigResolvedPaths {
+                root: paths.root.display().to_string(),
+                manifest_path: paths.manifest_path.display().to_string(),
+                config_path: paths.config_path.display().to_string(),
+                sessions_redb_path: paths.sessions_redb_path.display().to_string(),
+                sessions_jsonl_dir: paths.sessions_jsonl_dir.display().to_string(),
+            }),
+        },
+    );
+    let config_store: Arc<dyn ConfigStore> = Arc::new(tagged);
+
+    let project_root = scope.context_root.clone().unwrap_or_else(|| {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        find_project_root(&cwd).unwrap_or(cwd)
+    });
+    let mut factory = AgentFactory::new(realm_store_path(&manifest, scope))
+        .session_store(session_store.clone())
+        .runtime_root(paths.root.clone())
+        .project_root(project_root)
+        .builtins(config.tools.builtins_enabled)
+        .shell(config.tools.shell_enabled)
+        .subagents(config.tools.subagents_enabled)
+        .memory(true);
+    if let Some(context_root) = scope.context_root.clone() {
+        factory = factory.context_root(context_root);
+    }
+    if let Some(user_root) = scope.user_config_root.clone() {
+        factory = factory.user_config_root(user_root);
+    }
+
+    let skill_runtime = factory.build_skill_runtime(&config).await;
+    let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
+        Arc::clone(&config_store),
+        paths.root.join("config_state.json"),
+    ));
+    let mut runtime = meerkat_rpc::session_runtime::SessionRuntime::new_with_config_store(
+        factory,
+        config.clone(),
+        Arc::clone(&config_store),
+        64,
+        session_store,
+    );
+    let identity_registry =
+        meerkat_rpc::session_runtime::SessionRuntime::build_skill_identity_registry(&config)
+            .map_err(|err| anyhow::anyhow!("failed to build skill identity registry: {err}"))?;
+    runtime.set_skill_identity_registry(identity_registry);
+    runtime.set_realm_context(
+        Some(scope.locator.realm_id.clone()),
+        scope
+            .instance_id
+            .clone()
+            .or_else(|| deployed_mob_id.map(|mob_id| format!("mobpack:{mob_id}"))),
+        Some(manifest.backend.as_str().to_string()),
+    );
+    runtime.set_config_runtime(config_runtime);
+    let runtime = Arc::new(runtime);
+
+    let mut server = meerkat_rpc::server::RpcServer::new_with_skill_runtime(
+        reader,
+        writer,
+        runtime,
+        config_store,
+        skill_runtime,
+    );
+    server
+        .run()
+        .await
+        .map_err(|err| anyhow::anyhow!("rpc server failed: {err}"))
 }
 
 /// LLM Provider selection
@@ -4828,12 +5745,1370 @@ mod tests {
     }
 
     #[test]
+    fn test_cli_mob_pack_command_parses() {
+        let cli = Cli::try_parse_from([
+            "rkat",
+            "mob",
+            "pack",
+            "./example-mob",
+            "-o",
+            "./out.mobpack",
+            "--sign",
+            "./signing.key",
+        ])
+        .expect("mob pack command should parse");
+
+        match cli.command {
+            Commands::Mob {
+                command: MobCommands::Pack { dir, output, sign },
+            } => {
+                assert_eq!(dir, PathBuf::from("./example-mob"));
+                assert_eq!(output, PathBuf::from("./out.mobpack"));
+                assert_eq!(sign, Some(PathBuf::from("./signing.key")));
+            }
+            _ => unreachable!("expected mob pack command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_mob_deploy_command_parses() {
+        let cli = Cli::try_parse_from([
+            "rkat",
+            "mob",
+            "deploy",
+            "./fixture.mobpack",
+            "hello",
+            "--trust-policy",
+            "strict",
+        ])
+        .expect("mob deploy command should parse");
+
+        match cli.command {
+            Commands::Mob {
+                command:
+                    MobCommands::Deploy {
+                        pack,
+                        prompt,
+                        model,
+                        max_total_tokens,
+                        max_duration,
+                        max_tool_calls,
+                        trust_policy,
+                        surface,
+                    },
+            } => {
+                assert_eq!(pack, PathBuf::from("./fixture.mobpack"));
+                assert_eq!(prompt, "hello");
+                assert_eq!(model, None);
+                assert_eq!(max_total_tokens, None);
+                assert_eq!(max_duration, None);
+                assert_eq!(max_tool_calls, None);
+                assert_eq!(trust_policy, Some(TrustPolicyArg::Strict));
+                assert_eq!(surface, DeploySurfaceArg::Cli);
+            }
+            _ => unreachable!("expected mob deploy command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_mob_deploy_surface_flag_parses() {
+        let cli = Cli::try_parse_from([
+            "rkat",
+            "mob",
+            "deploy",
+            "./fixture.mobpack",
+            "hello",
+            "--surface",
+            "rpc",
+        ])
+        .expect("mob deploy --surface should parse");
+
+        match cli.command {
+            Commands::Mob {
+                command: MobCommands::Deploy { surface, .. },
+            } => {
+                assert_eq!(surface, DeploySurfaceArg::Rpc);
+            }
+            _ => unreachable!("expected mob deploy command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_mob_deploy_override_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "rkat",
+            "mob",
+            "deploy",
+            "./fixture.mobpack",
+            "hello",
+            "--model",
+            "gpt-5-mini",
+            "--max-total-tokens",
+            "9999",
+            "--max-duration",
+            "5m",
+            "--max-tool-calls",
+            "7",
+        ])
+        .expect("mob deploy overrides should parse");
+
+        match cli.command {
+            Commands::Mob {
+                command:
+                    MobCommands::Deploy {
+                        model,
+                        max_total_tokens,
+                        max_duration,
+                        max_tool_calls,
+                        ..
+                    },
+            } => {
+                assert_eq!(model.as_deref(), Some("gpt-5-mini"));
+                assert_eq!(max_total_tokens, Some(9999));
+                assert_eq!(max_duration.as_deref(), Some("5m"));
+                assert_eq!(max_tool_calls, Some(7));
+            }
+            _ => unreachable!("expected mob deploy command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_mob_web_build_command_parses() {
+        let cli = Cli::try_parse_from([
+            "rkat",
+            "mob",
+            "web",
+            "build",
+            "./fixture.mobpack",
+            "-o",
+            "./web-out",
+        ])
+        .expect("mob web build command should parse");
+
+        match cli.command {
+            Commands::Mob {
+                command:
+                    MobCommands::Web {
+                        command: MobWebCommands::Build { pack, output },
+                    },
+            } => {
+                assert_eq!(pack, PathBuf::from("./fixture.mobpack"));
+                assert_eq!(output, PathBuf::from("./web-out"));
+            }
+            _ => unreachable!("expected mob web build command"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mob_pack_command_wires_archive_writer_and_digest_output() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mob_dir = create_mobpack_fixture_dir(temp.path());
+        let output = temp.path().join("fixture.mobpack");
+
+        let digest = execute_mob_pack(&mob_dir, &output, None)
+            .await
+            .expect("mob pack command should succeed");
+
+        let archive_bytes = tokio::fs::read(&output)
+            .await
+            .expect("archive should be written");
+        assert!(
+            !archive_bytes.is_empty(),
+            "pack command should write a non-empty archive"
+        );
+        let recomputed = compute_archive_digest(&archive_bytes).expect("digest should compute");
+        assert_eq!(digest, recomputed.to_string());
+    }
+
+    #[tokio::test]
+    async fn test_mob_pack_output_inside_source_root_is_deterministic() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mob_dir = create_mobpack_fixture_dir(temp.path());
+        let output = mob_dir.join("out.mobpack");
+
+        let first_digest = execute_mob_pack(&mob_dir, &output, None)
+            .await
+            .expect("first pack should succeed");
+        let first_bytes = tokio::fs::read(&output).await.expect("first archive bytes");
+
+        let second_digest = execute_mob_pack(&mob_dir, &output, None)
+            .await
+            .expect("second pack should succeed");
+        let second_bytes = tokio::fs::read(&output)
+            .await
+            .expect("second archive bytes");
+
+        assert_eq!(first_digest, second_digest);
+        assert_eq!(first_bytes, second_bytes);
+    }
+
+    #[tokio::test]
+    async fn test_mob_inspect_output_includes_metadata_and_digest() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mob_dir = create_mobpack_fixture_dir(temp.path());
+        let output = temp.path().join("fixture.mobpack");
+        execute_mob_pack(&mob_dir, &output, None)
+            .await
+            .expect("pack before inspect");
+
+        let inspect_output = execute_mob_inspect(&output)
+            .await
+            .expect("mob inspect should succeed");
+        let archive_bytes = tokio::fs::read(&output).await.expect("read packed archive");
+        let digest = compute_archive_digest(&archive_bytes).expect("compute digest");
+
+        assert!(
+            inspect_output.contains("name\tfixture"),
+            "inspect should include manifest name"
+        );
+        assert!(
+            inspect_output.contains("version\t1.0.0"),
+            "inspect should include manifest version"
+        );
+        assert!(
+            inspect_output.contains("file_count\t"),
+            "inspect should include file count"
+        );
+        assert!(
+            inspect_output.contains(&format!("digest\t{digest}")),
+            "inspect should include computed digest"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mob_validate_success_and_failure_behaviors() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mob_dir = create_mobpack_fixture_dir(temp.path());
+        let valid_pack = temp.path().join("valid.mobpack");
+        execute_mob_pack(&mob_dir, &valid_pack, None)
+            .await
+            .expect("pack before validate");
+
+        let ok_output = execute_mob_validate(&valid_pack)
+            .await
+            .expect("validate should succeed");
+        assert!(
+            ok_output.starts_with("valid\t"),
+            "validate success should report digest"
+        );
+
+        let invalid_pack = temp.path().join("invalid.mobpack");
+        let invalid_bytes =
+            meerkat_mob_pack::targz::create_targz(&std::collections::BTreeMap::from([(
+                "manifest.toml".to_string(),
+                b"[mobpack]\nname = \"fixture\"\nversion = \"1.0.0\"\n".to_vec(),
+            )]))
+            .expect("create invalid archive");
+        tokio::fs::write(&invalid_pack, invalid_bytes)
+            .await
+            .expect("write invalid archive");
+
+        let err = execute_mob_validate(&invalid_pack)
+            .await
+            .expect_err("validate should fail when definition.json is missing");
+        assert!(
+            err.to_string().contains("definition.json is missing"),
+            "validate failure should mention missing definition: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mob_web_build_generates_required_artifacts() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mob_dir = create_mobpack_fixture_dir(temp.path());
+        let pack_out = temp.path().join("web-ok.mobpack");
+        execute_mob_pack(&mob_dir, &pack_out, None)
+            .await
+            .expect("pack should succeed");
+
+        let wasm_pack = write_fake_wasm_pack(temp.path(), false);
+        let out_dir = temp.path().join("web-out");
+        let output = execute_mob_web_build_internal(
+            &pack_out,
+            &out_dir,
+            WebBuildInvocation {
+                wasm_pack_bin: wasm_pack.display().to_string(),
+            },
+        )
+        .await
+        .expect("web build should succeed");
+
+        assert!(
+            output.contains("built\toutput="),
+            "web build should report success output: {output}"
+        );
+        for file in [
+            "index.html",
+            "runtime.js",
+            "runtime_bg.wasm",
+            "mobpack.bin",
+            "manifest.web.toml",
+        ] {
+            assert!(
+                out_dir.join(file).exists(),
+                "missing required web artifact {}",
+                file
+            );
+        }
+        let manifest_web =
+            std::fs::read_to_string(out_dir.join("manifest.web.toml")).expect("read manifest.web");
+        assert!(
+            manifest_web.contains("AUTO-GENERATED by rkat mob web build"),
+            "manifest.web.toml should be derived output"
+        );
+        assert!(
+            manifest_web.contains("forbid = ["),
+            "manifest.web.toml should capture forbidden capability policy"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mob_web_build_rejects_forbidden_capabilities() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mob_dir = temp.path().join("forbidden-mob");
+        std::fs::create_dir_all(mob_dir.join("skills")).expect("skills");
+        std::fs::write(
+            mob_dir.join("manifest.toml"),
+            r#"[mobpack]
+name = "forbidden"
+version = "1.0.0"
+
+[requires]
+capabilities = ["shell"]
+"#,
+        )
+        .expect("manifest");
+        std::fs::write(
+            mob_dir.join("definition.json"),
+            br#"{"id":"forbidden-mob"}"#,
+        )
+        .expect("def");
+        let pack_out = temp.path().join("forbidden.mobpack");
+        execute_mob_pack(&mob_dir, &pack_out, None)
+            .await
+            .expect("pack should succeed");
+
+        let wasm_pack = write_fake_wasm_pack(temp.path(), false);
+        let err = execute_mob_web_build_internal(
+            &pack_out,
+            &temp.path().join("web-out"),
+            WebBuildInvocation {
+                wasm_pack_bin: wasm_pack.display().to_string(),
+            },
+        )
+        .await
+        .expect_err("web build should reject forbidden capabilities");
+        assert!(
+            err.to_string()
+                .contains("forbidden capability 'shell' is not allowed for web builds"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mob_web_build_fails_on_incomplete_artifacts() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mob_dir = create_mobpack_fixture_dir(temp.path());
+        let pack_out = temp.path().join("web-fail.mobpack");
+        execute_mob_pack(&mob_dir, &pack_out, None)
+            .await
+            .expect("pack should succeed");
+
+        let wasm_pack = write_fake_wasm_pack(temp.path(), true);
+        let err = execute_mob_web_build_internal(
+            &pack_out,
+            &temp.path().join("web-out"),
+            WebBuildInvocation {
+                wasm_pack_bin: wasm_pack.display().to_string(),
+            },
+        )
+        .await
+        .expect_err("web build should reject incomplete artifact set");
+        assert!(
+            err.to_string().contains("missing wasm artifact"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_trust_policy_resolution_precedence() {
+        let from_cli = resolve_trust_policy(
+            Some(TrustPolicyArg::Strict),
+            |_| Some("permissive".to_string()),
+            Some(TrustPolicy::Permissive),
+        )
+        .expect("cli should win");
+        assert_eq!(from_cli, TrustPolicy::Strict);
+
+        let from_env = resolve_trust_policy(
+            None,
+            |_| Some("strict".to_string()),
+            Some(TrustPolicy::Permissive),
+        )
+        .expect("env should win when cli missing");
+        assert_eq!(from_env, TrustPolicy::Strict);
+
+        let from_config = resolve_trust_policy(None, |_| None, Some(TrustPolicy::Strict))
+            .expect("config should win when cli/env missing");
+        assert_eq!(from_config, TrustPolicy::Strict);
+
+        let from_default = resolve_trust_policy(None, |_| None, None).expect("default permissive");
+        assert_eq!(from_default, TrustPolicy::Permissive);
+    }
+
+    #[test]
+    fn test_pack_config_merges_with_runtime_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut scope = test_scope_with_context(temp.path().to_path_buf());
+        scope.user_config_root = Some(temp.path().to_path_buf());
+        let config_path =
+            meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id)
+                .config_path;
+        std::fs::create_dir_all(config_path.parent().expect("config parent"))
+            .expect("mkdir config");
+        std::fs::write(&config_path, "[agent]\nmax_tokens_per_turn = 1234\n")
+            .expect("write config");
+
+        let pack_defaults = br#"
+[agent]
+max_tokens_per_turn = 100
+
+[tools]
+mob_enabled = true
+"#
+        .to_vec();
+
+        let merged = load_deploy_config_with_pack_defaults(
+            &scope,
+            Some(&pack_defaults),
+            CliOverrides::default(),
+        )
+        .expect("pack defaults should merge");
+        assert_eq!(
+            merged.agent.max_tokens_per_turn, 1234,
+            "file config should override pack defaults"
+        );
+        assert!(
+            merged.tools.mob_enabled,
+            "pack defaults should apply when higher-priority layers omit field"
+        );
+    }
+
+    #[test]
+    fn test_pack_config_explicit_runtime_default_is_not_clobbered() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut scope = test_scope_with_context(temp.path().to_path_buf());
+        scope.user_config_root = Some(temp.path().to_path_buf());
+        let config_path =
+            meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id)
+                .config_path;
+        std::fs::create_dir_all(config_path.parent().expect("config parent"))
+            .expect("mkdir config");
+        std::fs::write(&config_path, "[tools]\nmob_enabled = false\n").expect("write config");
+
+        let pack_defaults = br#"
+[tools]
+mob_enabled = true
+"#
+        .to_vec();
+        let merged = load_deploy_config_with_pack_defaults(
+            &scope,
+            Some(&pack_defaults),
+            CliOverrides::default(),
+        )
+        .expect("merge should succeed");
+        assert!(
+            !merged.tools.mob_enabled,
+            "explicit file value equal to default should not be clobbered by pack defaults"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_deploy_rejects_missing_capability() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let scope = test_scope_with_context(temp.path().to_path_buf());
+        let mob_dir = temp.path().join("cap-mob");
+        std::fs::create_dir_all(mob_dir.join("skills")).expect("skills");
+        std::fs::write(
+            mob_dir.join("manifest.toml"),
+            r#"[mobpack]
+name = "cap"
+version = "1.0.0"
+
+[requires]
+capabilities = ["definitely_missing_capability"]
+"#,
+        )
+        .expect("manifest");
+        std::fs::write(mob_dir.join("definition.json"), br#"{"id":"cap-mob"}"#).expect("def");
+        std::fs::write(mob_dir.join("skills").join("review.md"), "# Review\n").expect("skill");
+        let pack_out = temp.path().join("cap.mobpack");
+        execute_mob_pack(&mob_dir, &pack_out, None)
+            .await
+            .expect("pack succeeds");
+
+        let err = execute_mob_deploy(
+            &scope,
+            &pack_out,
+            "hello",
+            None,
+            DeploySurfaceArg::Cli,
+            CliOverrides::default(),
+        )
+        .await
+        .expect_err("missing capability should reject deploy");
+        assert!(
+            err.to_string()
+                .contains("required capability missing: definitely_missing_capability"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_deploy_cli_success_runs_full_pipeline() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let scope = test_scope_with_context(temp.path().to_path_buf());
+        let mob_dir = create_mobpack_fixture_dir(temp.path());
+        let pack_out = temp.path().join("ok.mobpack");
+        execute_mob_pack(&mob_dir, &pack_out, None)
+            .await
+            .expect("pack succeeds");
+
+        let output = execute_mob_deploy(
+            &scope,
+            &pack_out,
+            "hello",
+            None,
+            DeploySurfaceArg::Cli,
+            CliOverrides::default(),
+        )
+        .await
+        .expect("deploy should succeed");
+        assert!(
+            output.contains("deployed\tmob="),
+            "unexpected output: {output}"
+        );
+        assert!(
+            output.contains("surface=cli"),
+            "unexpected output: {output}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_deploy_surfaces_missing_packed_skill_path_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let scope = test_scope_with_context(temp.path().to_path_buf());
+        let pack_out = temp.path().join("missing-skill.mobpack");
+        let archive_bytes = meerkat_mob_pack::targz::create_targz(&std::collections::BTreeMap::from([
+            (
+                "manifest.toml".to_string(),
+                b"[mobpack]\nname = \"fixture\"\nversion = \"1.0.0\"\n".to_vec(),
+            ),
+            (
+                "definition.json".to_string(),
+                br#"{"id":"fixture-mob","skills":{"review":{"source":"path","path":"skills/missing.md"}}}"#.to_vec(),
+            ),
+            ("skills/review.md".to_string(), b"# Review\n".to_vec()),
+        ]))
+        .expect("create archive");
+        tokio::fs::write(&pack_out, archive_bytes)
+            .await
+            .expect("write archive");
+
+        let err = execute_mob_deploy(
+            &scope,
+            &pack_out,
+            "hello",
+            None,
+            DeploySurfaceArg::Cli,
+            CliOverrides::default(),
+        )
+        .await
+        .expect_err("missing packed skill path should fail");
+        assert!(
+            err.to_string().contains(
+                "mobpack skill path 'skills/missing.md' for 'review' missing from archive"
+            ),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_deploy_surfaces_invalid_utf8_skill_bytes_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let scope = test_scope_with_context(temp.path().to_path_buf());
+        let pack_out = temp.path().join("invalid-utf8-skill.mobpack");
+        let archive_bytes = meerkat_mob_pack::targz::create_targz(&std::collections::BTreeMap::from([
+            (
+                "manifest.toml".to_string(),
+                b"[mobpack]\nname = \"fixture\"\nversion = \"1.0.0\"\n".to_vec(),
+            ),
+            (
+                "definition.json".to_string(),
+                br#"{"id":"fixture-mob","skills":{"review":{"source":"path","path":"skills/review.md"}}}"#.to_vec(),
+            ),
+            ("skills/review.md".to_string(), vec![0xff, 0xfe, 0xfd]),
+        ]))
+        .expect("create archive");
+        tokio::fs::write(&pack_out, archive_bytes)
+            .await
+            .expect("write archive");
+
+        let err = execute_mob_deploy(
+            &scope,
+            &pack_out,
+            "hello",
+            None,
+            DeploySurfaceArg::Cli,
+            CliOverrides::default(),
+        )
+        .await
+        .expect_err("invalid UTF-8 skill bytes should fail");
+        assert!(
+            err.to_string()
+                .contains("mobpack skill path 'skills/review.md' for 'review' is not valid UTF-8"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mob_deploy_rpc_surface_executes_deploy_path() {
+        use tokio::io::AsyncWriteExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut scope = test_scope_with_context(temp.path().to_path_buf());
+        scope.user_config_root = Some(temp.path().to_path_buf());
+        let mob_dir = create_mobpack_fixture_dir(temp.path());
+        let pack_out = temp.path().join("rpc.mobpack");
+        execute_mob_pack(&mob_dir, &pack_out, None)
+            .await
+            .expect("pack succeeds");
+
+        let (mut client_in, server_in) = tokio::io::duplex(1024);
+        let (server_out, _client_out) = tokio::io::duplex(1024);
+
+        let scope_for_deploy = scope.clone();
+        let pack_for_deploy = pack_out.clone();
+        let mut deploy_task = tokio::spawn(async move {
+            execute_mob_deploy_internal(
+                &scope_for_deploy,
+                &pack_for_deploy,
+                "hello",
+                DeployInvocation {
+                    cli_trust_policy: None,
+                    surface: DeploySurfaceArg::Rpc,
+                    cli_overrides: CliOverrides::default(),
+                    rpc_io: Some((Box::new(BufReader::new(server_in)), Box::new(server_out))),
+                    config_observer: None,
+                },
+            )
+            .await
+        });
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(120), &mut deploy_task)
+                .await
+                .is_err(),
+            "deploy rpc surface should stay alive waiting for requests"
+        );
+
+        client_in.shutdown().await.expect("shutdown input");
+        let output = deploy_task
+            .await
+            .expect("deploy task join")
+            .expect("deploy should exit after rpc input shutdown");
+        assert!(
+            output.contains("deployed\tmob="),
+            "unexpected output: {output}"
+        );
+        assert!(
+            output.contains("surface=rpc"),
+            "unexpected output: {output}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mob_deploy_strict_unsigned_rejects_at_cli_boundary() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut scope = test_scope_with_context(temp.path().to_path_buf());
+        scope.user_config_root = Some(temp.path().to_path_buf());
+        let mob_dir = create_mobpack_fixture_dir(temp.path());
+        let pack_out = temp.path().join("unsigned.mobpack");
+        execute_mob_pack(&mob_dir, &pack_out, None)
+            .await
+            .expect("pack succeeds");
+
+        let err = execute_mob_deploy(
+            &scope,
+            &pack_out,
+            "hello",
+            Some(TrustPolicyArg::Strict),
+            DeploySurfaceArg::Cli,
+            CliOverrides::default(),
+        )
+        .await
+        .expect_err("strict mode must reject unsigned pack");
+        assert!(
+            err.to_string()
+                .contains("unsigned pack rejected in strict trust mode"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mob_deploy_permissive_unsigned_warns_and_proceeds() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut scope = test_scope_with_context(temp.path().to_path_buf());
+        scope.user_config_root = Some(temp.path().to_path_buf());
+        let mob_dir = create_mobpack_fixture_dir(temp.path());
+        let pack_out = temp.path().join("unsigned.mobpack");
+        execute_mob_pack(&mob_dir, &pack_out, None)
+            .await
+            .expect("pack succeeds");
+
+        let output = execute_mob_deploy(
+            &scope,
+            &pack_out,
+            "hello",
+            Some(TrustPolicyArg::Permissive),
+            DeploySurfaceArg::Cli,
+            CliOverrides::default(),
+        )
+        .await
+        .expect("permissive mode should allow unsigned pack");
+        assert!(
+            output.contains("deployed\tmob="),
+            "unexpected output: {output}"
+        );
+        assert!(
+            output.contains("warning\tunsigned pack accepted in permissive mode"),
+            "unexpected output: {output}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mob_deploy_strict_signed_path_succeeds_with_trusted_signer() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut scope = test_scope_with_context(temp.path().to_path_buf());
+        scope.user_config_root = Some(temp.path().to_path_buf());
+        let mob_dir = create_mobpack_fixture_dir(temp.path());
+        let pack_out = temp.path().join("signed.mobpack");
+        let signing_key = temp.path().join("signing.key");
+        std::fs::write(
+            &signing_key,
+            "0707070707070707070707070707070707070707070707070707070707070707",
+        )
+        .expect("write signing key");
+        execute_mob_pack(&mob_dir, &pack_out, Some(&signing_key))
+            .await
+            .expect("signed pack succeeds");
+
+        let archive_bytes = tokio::fs::read(&pack_out).await.expect("read archive");
+        let files = extract_targz_safe(&archive_bytes).expect("extract archive");
+        let signature_text =
+            std::str::from_utf8(files.get("signature.toml").expect("signature.toml"))
+                .expect("utf8");
+        let signature_value: toml::Value = toml::from_str(signature_text).expect("parse signature");
+        let signer_id = signature_value
+            .get("signer_id")
+            .and_then(toml::Value::as_str)
+            .expect("signer_id");
+        let public_key = signature_value
+            .get("public_key")
+            .and_then(toml::Value::as_str)
+            .expect("public_key");
+
+        let trust_path = project_trust_store_path(&scope);
+        std::fs::create_dir_all(trust_path.parent().expect("trust parent")).expect("trust dir");
+        std::fs::write(
+            &trust_path,
+            format!("[signers]\n{} = \"{}\"\n", signer_id, public_key),
+        )
+        .expect("write trusted signers");
+
+        let output = execute_mob_deploy(
+            &scope,
+            &pack_out,
+            "hello",
+            Some(TrustPolicyArg::Strict),
+            DeploySurfaceArg::Cli,
+            CliOverrides::default(),
+        )
+        .await
+        .expect("strict trusted signed deploy should succeed");
+        assert!(
+            output.contains("deployed\tmob="),
+            "unexpected output: {output}"
+        );
+        assert!(
+            !output.contains("\nwarning\t"),
+            "strict trusted signed deploy should not warn: {output}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_e2e_pack_and_deploy() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut scope = test_scope_with_context(temp.path().to_path_buf());
+        scope.user_config_root = Some(temp.path().to_path_buf());
+        let mob_dir = create_mobpack_fixture_dir_with_skill_path(temp.path());
+        let pack_out = temp.path().join("e2e-pack-deploy.mobpack");
+
+        execute_mob_pack(&mob_dir, &pack_out, None)
+            .await
+            .expect("pack should succeed");
+
+        let output = execute_mob_deploy(
+            &scope,
+            &pack_out,
+            "hello",
+            None,
+            DeploySurfaceArg::Cli,
+            CliOverrides::default(),
+        )
+        .await
+        .expect("deploy should succeed");
+
+        assert!(
+            output.contains("deployed\tmob=fixture-mob-with-skill\tsurface=cli"),
+            "deploy should use packed definition id and complete CLI deploy path: {output}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_e2e_signed_deploy_strict() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut scope = test_scope_with_context(temp.path().to_path_buf());
+        scope.user_config_root = Some(temp.path().to_path_buf());
+        let mob_dir = create_mobpack_fixture_dir(temp.path());
+        let pack_out = temp.path().join("e2e-signed.mobpack");
+        let signing_key = temp.path().join("ci-signer.key");
+        std::fs::write(
+            &signing_key,
+            "0707070707070707070707070707070707070707070707070707070707070707",
+        )
+        .expect("write signing key");
+
+        execute_mob_pack(&mob_dir, &pack_out, Some(&signing_key))
+            .await
+            .expect("signed pack should succeed");
+
+        let archive_bytes = tokio::fs::read(&pack_out)
+            .await
+            .expect("read signed archive");
+        let files = extract_targz_safe(&archive_bytes).expect("extract archive");
+        let signature_toml = files
+            .get("signature.toml")
+            .expect("signature.toml should exist");
+        let signature_value: toml::Value =
+            toml::from_str(std::str::from_utf8(signature_toml).expect("utf8"))
+                .expect("parse signature");
+        let signer_id = signature_value
+            .get("signer_id")
+            .and_then(toml::Value::as_str)
+            .expect("signer id")
+            .to_string();
+        let public_key = signature_value
+            .get("public_key")
+            .and_then(toml::Value::as_str)
+            .expect("public key")
+            .to_string();
+
+        let trust_path = project_trust_store_path(&scope);
+        std::fs::create_dir_all(trust_path.parent().expect("trust parent")).expect("trust dir");
+        std::fs::write(
+            &trust_path,
+            format!("[signers]\n{} = \"{}\"\n", signer_id, public_key),
+        )
+        .expect("write trust store");
+
+        let output = execute_mob_deploy(
+            &scope,
+            &pack_out,
+            "hello",
+            Some(TrustPolicyArg::Strict),
+            DeploySurfaceArg::Cli,
+            CliOverrides::default(),
+        )
+        .await
+        .expect("strict signed deploy should succeed");
+
+        assert!(
+            output.contains("deployed\tmob="),
+            "unexpected output: {output}"
+        );
+        assert!(
+            !output.contains("\nwarning\t"),
+            "strict trusted signed deploy should not warn: {output}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_e2e_unsigned_strict_rejected() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut scope = test_scope_with_context(temp.path().to_path_buf());
+        scope.user_config_root = Some(temp.path().to_path_buf());
+        let mob_dir = create_mobpack_fixture_dir(temp.path());
+        let pack_out = temp.path().join("e2e-unsigned.mobpack");
+        execute_mob_pack(&mob_dir, &pack_out, None)
+            .await
+            .expect("pack should succeed");
+
+        let err = execute_mob_deploy(
+            &scope,
+            &pack_out,
+            "hello",
+            Some(TrustPolicyArg::Strict),
+            DeploySurfaceArg::Cli,
+            CliOverrides::default(),
+        )
+        .await
+        .expect_err("strict mode must reject unsigned pack");
+        assert!(
+            err.to_string()
+                .contains("unsigned pack rejected in strict trust mode"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_e2e_unknown_signer_strict_rejected() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut scope = test_scope_with_context(temp.path().to_path_buf());
+        scope.user_config_root = Some(temp.path().to_path_buf());
+        let mob_dir = create_mobpack_fixture_dir(temp.path());
+        let pack_out = temp.path().join("e2e-unknown-signer.mobpack");
+        let signing_key = temp.path().join("unknown.key");
+        std::fs::write(
+            &signing_key,
+            "0505050505050505050505050505050505050505050505050505050505050505",
+        )
+        .expect("write signing key");
+        execute_mob_pack(&mob_dir, &pack_out, Some(&signing_key))
+            .await
+            .expect("signed pack should succeed");
+
+        let err = execute_mob_deploy(
+            &scope,
+            &pack_out,
+            "hello",
+            Some(TrustPolicyArg::Strict),
+            DeploySurfaceArg::Cli,
+            CliOverrides::default(),
+        )
+        .await
+        .expect_err("strict mode must reject unknown signer");
+        assert!(
+            err.to_string().contains("unknown signer"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_e2e_tampered_content_strict_rejected() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut scope = test_scope_with_context(temp.path().to_path_buf());
+        scope.user_config_root = Some(temp.path().to_path_buf());
+        let mob_dir = create_mobpack_fixture_dir(temp.path());
+        let signed_pack = temp.path().join("e2e-tampered-source.mobpack");
+        let tampered_pack = temp.path().join("e2e-tampered.mobpack");
+        let signing_key = temp.path().join("trusted.key");
+        std::fs::write(
+            &signing_key,
+            "0404040404040404040404040404040404040404040404040404040404040404",
+        )
+        .expect("write signing key");
+        execute_mob_pack(&mob_dir, &signed_pack, Some(&signing_key))
+            .await
+            .expect("signed pack should succeed");
+
+        let signed_bytes = tokio::fs::read(&signed_pack)
+            .await
+            .expect("read signed pack");
+        let mut files = extract_targz_safe(&signed_bytes).expect("extract signed pack");
+        let signature_toml = files
+            .get("signature.toml")
+            .expect("signature.toml should exist")
+            .clone();
+        let signature_value: toml::Value =
+            toml::from_str(std::str::from_utf8(&signature_toml).expect("utf8"))
+                .expect("parse signature");
+        let signer_id = signature_value
+            .get("signer_id")
+            .and_then(toml::Value::as_str)
+            .expect("signer id")
+            .to_string();
+        let public_key = signature_value
+            .get("public_key")
+            .and_then(toml::Value::as_str)
+            .expect("public key")
+            .to_string();
+        files.insert("skills/review.md".to_string(), b"# tampered\n".to_vec());
+        let tampered_bytes =
+            meerkat_mob_pack::targz::create_targz(&files).expect("tampered archive");
+        tokio::fs::write(&tampered_pack, tampered_bytes)
+            .await
+            .expect("write tampered archive");
+
+        let trust_path = project_trust_store_path(&scope);
+        std::fs::create_dir_all(trust_path.parent().expect("trust parent")).expect("trust dir");
+        std::fs::write(
+            &trust_path,
+            format!("[signers]\n{} = \"{}\"\n", signer_id, public_key),
+        )
+        .expect("write trust store");
+
+        let err = execute_mob_deploy(
+            &scope,
+            &tampered_pack,
+            "hello",
+            Some(TrustPolicyArg::Strict),
+            DeploySurfaceArg::Cli,
+            CliOverrides::default(),
+        )
+        .await
+        .expect_err("strict mode must reject tampered content");
+        assert!(
+            err.to_string()
+                .contains("signature digest does not match archive content digest"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_e2e_bad_signature_permissive_rejected() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut scope = test_scope_with_context(temp.path().to_path_buf());
+        scope.user_config_root = Some(temp.path().to_path_buf());
+        let mob_dir = create_mobpack_fixture_dir(temp.path());
+        let signed_pack = temp.path().join("e2e-bad-signature-source.mobpack");
+        let bad_signature_pack = temp.path().join("e2e-bad-signature.mobpack");
+        let signing_key = temp.path().join("bad-signature.key");
+        std::fs::write(
+            &signing_key,
+            "0606060606060606060606060606060606060606060606060606060606060606",
+        )
+        .expect("write signing key");
+        execute_mob_pack(&mob_dir, &signed_pack, Some(&signing_key))
+            .await
+            .expect("signed pack should succeed");
+
+        let signed_bytes = tokio::fs::read(&signed_pack)
+            .await
+            .expect("read signed pack");
+        let mut files = extract_targz_safe(&signed_bytes).expect("extract signed pack");
+        let signature_toml = files
+            .get("signature.toml")
+            .expect("signature.toml should exist");
+        let mut signature_value: toml::Value =
+            toml::from_str(std::str::from_utf8(signature_toml).expect("utf8"))
+                .expect("parse signature");
+        let mut encoded_signature = signature_value
+            .get("signature")
+            .and_then(toml::Value::as_str)
+            .expect("signature")
+            .to_string();
+        let first = encoded_signature
+            .chars()
+            .next()
+            .expect("signature should not be empty");
+        let replacement = if first == '0' { '1' } else { '0' };
+        encoded_signature.replace_range(0..1, &replacement.to_string());
+        signature_value["signature"] = toml::Value::String(encoded_signature);
+        files.insert(
+            "signature.toml".to_string(),
+            toml::to_string(&signature_value)
+                .expect("serialize signature")
+                .into_bytes(),
+        );
+        let bad_sig_bytes =
+            meerkat_mob_pack::targz::create_targz(&files).expect("bad signature archive");
+        tokio::fs::write(&bad_signature_pack, bad_sig_bytes)
+            .await
+            .expect("write archive");
+
+        let err = execute_mob_deploy(
+            &scope,
+            &bad_signature_pack,
+            "hello",
+            Some(TrustPolicyArg::Permissive),
+            DeploySurfaceArg::Cli,
+            CliOverrides::default(),
+        )
+        .await
+        .expect_err("permissive mode must reject invalid signatures when present");
+        assert!(
+            err.to_string().contains("signature is invalid"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_e2e_inspect_output() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mob_dir = create_mobpack_fixture_dir(temp.path());
+        let output = temp.path().join("e2e-inspect.mobpack");
+        execute_mob_pack(&mob_dir, &output, None)
+            .await
+            .expect("pack should succeed");
+
+        let inspect_output = execute_mob_inspect(&output)
+            .await
+            .expect("inspect should succeed");
+        let archive_bytes = tokio::fs::read(&output).await.expect("read archive");
+        let digest = compute_archive_digest(&archive_bytes).expect("compute digest");
+
+        assert!(
+            inspect_output.contains("name\tfixture"),
+            "inspect output should include name: {inspect_output}"
+        );
+        assert!(
+            inspect_output.contains("version\t1.0.0"),
+            "inspect output should include version: {inspect_output}"
+        );
+        assert!(
+            inspect_output.contains(&format!("digest\t{digest}")),
+            "inspect output should include digest: {inspect_output}"
+        );
+        assert!(
+            inspect_output.contains("file\tskills/review.md"),
+            "inspect output should list packed files: {inspect_output}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_e2e_validate_missing_definition() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let invalid_pack = temp.path().join("missing-definition.mobpack");
+        let archive = meerkat_mob_pack::targz::create_targz(&std::collections::BTreeMap::from([(
+            "manifest.toml".to_string(),
+            b"[mobpack]\nname = \"fixture\"\nversion = \"1.0.0\"\n".to_vec(),
+        )]))
+        .expect("create archive");
+        tokio::fs::write(&invalid_pack, archive)
+            .await
+            .expect("write archive");
+
+        let err = execute_mob_validate(&invalid_pack)
+            .await
+            .expect_err("validate should reject missing definition");
+        assert!(
+            err.to_string().contains("definition.json is missing"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mob_deploy_pack_config_precedence_proof() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut scope = test_scope_with_context(temp.path().to_path_buf());
+        scope.user_config_root = Some(temp.path().to_path_buf());
+        let config_path =
+            meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id)
+                .config_path;
+        std::fs::create_dir_all(config_path.parent().expect("config parent"))
+            .expect("mkdir config");
+        std::fs::write(&config_path, "[tools]\nmob_enabled = false\n").expect("write config");
+
+        let mob_dir = create_mobpack_fixture_dir(temp.path());
+        std::fs::create_dir_all(mob_dir.join("config")).expect("config dir");
+        std::fs::write(
+            mob_dir.join("config").join("defaults.toml"),
+            "[tools]\nmob_enabled = true\n",
+        )
+        .expect("write pack defaults");
+        let pack_out = temp.path().join("config-proof.mobpack");
+        execute_mob_pack(&mob_dir, &pack_out, None)
+            .await
+            .expect("pack succeeds");
+
+        let observed = Arc::new(Mutex::new(None::<(bool, String)>));
+        let observer: Arc<dyn Fn(&Config) + Send + Sync> = Arc::new({
+            let observed = Arc::clone(&observed);
+            move |config: &Config| {
+                *observed.lock().expect("lock observed") =
+                    Some((config.tools.mob_enabled, config.agent.model.clone()));
+            }
+        });
+        let output = execute_mob_deploy_internal(
+            &scope,
+            &pack_out,
+            "hello",
+            DeployInvocation {
+                cli_trust_policy: None,
+                surface: DeploySurfaceArg::Cli,
+                cli_overrides: CliOverrides {
+                    model: Some("override-model-for-deploy".to_string()),
+                    max_tokens: None,
+                    max_duration: None,
+                    max_tool_calls: None,
+                    override_config: None,
+                },
+                rpc_io: None,
+                config_observer: Some(observer),
+            },
+        )
+        .await
+        .expect("deploy succeeds");
+
+        assert!(
+            output.contains("deployed\tmob="),
+            "unexpected output: {output}"
+        );
+        assert_eq!(
+            *observed.lock().expect("lock observed"),
+            Some((false, "override-model-for-deploy".to_string())),
+            "file config must override pack defaults and CLI overrides must still win at deploy boundary"
+        );
+    }
+
+    #[test]
     fn test_parse_provider_params_single() -> Result<(), Box<dyn std::error::Error>> {
         let params = vec!["reasoning_effort=high".to_string()];
         let result = parse_provider_params(&params)?;
         let json = result.ok_or("missing result")?;
         assert_eq!(json["reasoning_effort"], "high");
         Ok(())
+    }
+
+    fn create_mobpack_fixture_dir(base: &std::path::Path) -> PathBuf {
+        let mob_dir = base.join("fixture-mob");
+        std::fs::create_dir_all(mob_dir.join("skills")).expect("create skills dir");
+        std::fs::create_dir_all(mob_dir.join("hooks")).expect("create hooks dir");
+        std::fs::write(
+            mob_dir.join("manifest.toml"),
+            "[mobpack]\nname = \"fixture\"\nversion = \"1.0.0\"\n",
+        )
+        .expect("write manifest");
+        std::fs::write(
+            mob_dir.join("definition.json"),
+            br#"{
+  "id":"fixture-mob",
+  "orchestrator":{"profile":"lead"},
+  "profiles":{
+    "lead":{
+      "model":"claude-sonnet-4-5",
+      "skills":[],
+      "tools":{"comms":true},
+      "peer_description":"Lead",
+      "external_addressable":true
+    }
+  },
+  "skills":{}
+}"#,
+        )
+        .expect("write definition");
+        std::fs::write(mob_dir.join("skills").join("review.md"), "# Review\n")
+            .expect("write skill");
+        std::fs::write(
+            mob_dir.join("hooks").join("run.sh"),
+            "#!/bin/sh\necho run\n",
+        )
+        .expect("write hook");
+        mob_dir
+    }
+
+    #[cfg(unix)]
+    fn write_fake_wasm_pack(base: &std::path::Path, omit_wasm: bool) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let script = base.join(if omit_wasm {
+            "fake-wasm-pack-missing"
+        } else {
+            "fake-wasm-pack"
+        });
+        let body = if omit_wasm {
+            r#"#!/bin/sh
+set -eu
+out_dir=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--out-dir" ]; then
+    out_dir="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+mkdir -p "$out_dir"
+echo "export function bootstrap_mobpack() { return 'ok'; }" > "$out_dir/runtime.js"
+"#
+        } else {
+            r#"#!/bin/sh
+set -eu
+out_dir=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--out-dir" ]; then
+    out_dir="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+mkdir -p "$out_dir"
+echo "export function bootstrap_mobpack() { return 'ok'; }" > "$out_dir/runtime.js"
+printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
+"#
+        };
+        std::fs::write(&script, body).expect("write fake wasm-pack");
+        let mut perms = std::fs::metadata(&script).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).expect("chmod");
+        script
+    }
+
+    #[cfg(not(unix))]
+    fn write_fake_wasm_pack(base: &std::path::Path, omit_wasm: bool) -> PathBuf {
+        let script = base.join(if omit_wasm {
+            "fake-wasm-pack-missing.cmd"
+        } else {
+            "fake-wasm-pack.cmd"
+        });
+        let body = if omit_wasm {
+            "@echo off\r\nset out=\r\n:loop\r\nif \"%1\"==\"\" goto done\r\nif \"%1\"==\"--out-dir\" (set out=%2&shift&shift&goto loop)\r\nshift\r\ngoto loop\r\n:done\r\nif not exist \"%out%\" mkdir \"%out%\"\r\necho export function bootstrap_mobpack() { return 'ok'; } > \"%out%\\runtime.js\"\r\n"
+        } else {
+            "@echo off\r\nset out=\r\n:loop\r\nif \"%1\"==\"\" goto done\r\nif \"%1\"==\"--out-dir\" (set out=%2&shift&shift&goto loop)\r\nshift\r\ngoto loop\r\n:done\r\nif not exist \"%out%\" mkdir \"%out%\"\r\necho export function bootstrap_mobpack() { return 'ok'; } > \"%out%\\runtime.js\"\r\ncopy /Y NUL \"%out%\\runtime_bg.wasm\" >NUL\r\n"
+        };
+        std::fs::write(&script, body).expect("write fake wasm-pack");
+        script
+    }
+
+    fn create_mobpack_fixture_dir_with_skill_path(base: &std::path::Path) -> PathBuf {
+        let mob_dir = base.join("fixture-mob-with-skill");
+        std::fs::create_dir_all(mob_dir.join("skills")).expect("create skills dir");
+        std::fs::create_dir_all(mob_dir.join("hooks")).expect("create hooks dir");
+        std::fs::write(
+            mob_dir.join("manifest.toml"),
+            "[mobpack]\nname = \"fixture\"\nversion = \"1.0.0\"\n",
+        )
+        .expect("write manifest");
+        std::fs::write(
+            mob_dir.join("definition.json"),
+            br#"{
+  "id":"fixture-mob-with-skill",
+  "orchestrator":{"profile":"lead"},
+  "profiles":{
+    "lead":{
+      "model":"claude-sonnet-4-5",
+      "skills":["review"],
+      "tools":{"comms":true},
+      "peer_description":"Lead",
+      "external_addressable":true
+    }
+  },
+  "skills":{
+    "review":{"source":"path","path":"skills/review.md"}
+  }
+}"#,
+        )
+        .expect("write definition");
+        std::fs::write(mob_dir.join("skills").join("review.md"), "# Review\n")
+            .expect("write skill");
+        std::fs::write(
+            mob_dir.join("hooks").join("run.sh"),
+            "#!/bin/sh\necho run\n",
+        )
+        .expect("write hook");
+        mob_dir
     }
 
     #[test]

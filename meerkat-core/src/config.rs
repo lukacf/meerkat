@@ -208,12 +208,19 @@ impl Config {
     /// Merge configuration from a TOML file
     pub async fn merge_file(&mut self, path: &PathBuf) -> Result<(), ConfigError> {
         let content = tokio::fs::read_to_string(path).await?;
+        self.merge_toml_str(&content)
+    }
 
-        let file_config: Config = toml::from_str(&content).map_err(ConfigError::Parse)?;
-
+    /// Merge configuration from a TOML string.
+    pub fn merge_toml_str(&mut self, content: &str) -> Result<(), ConfigError> {
+        let file_config: Config = toml::from_str(content).map_err(ConfigError::Parse)?;
+        let tools_layer = file_config.tools.clone();
+        let retry_layer = file_config.retry.clone();
         // Merge (file values override defaults)
         self.merge(file_config);
-
+        let parsed: toml::Value = toml::from_str(content).map_err(ConfigError::Parse)?;
+        self.merge_tools_from_toml_presence(&parsed, &tools_layer);
+        self.merge_retry_from_toml_presence(&parsed, &retry_layer);
         Ok(())
     }
 
@@ -259,6 +266,8 @@ impl Config {
         if other.budget.max_tool_calls.is_some() {
             self.budget.max_tool_calls = other.budget.max_tool_calls;
         }
+        self.merge_retry(&other.retry);
+        self.merge_tools(&other.tools);
 
         // New schema fields (replace if non-default)
         if other.models != ModelDefaults::default() {
@@ -303,6 +312,104 @@ impl Config {
                 self.hooks.background_max_concurrency = other.hooks.background_max_concurrency;
             }
             self.hooks.entries.extend(other.hooks.entries);
+        }
+    }
+
+    fn merge_retry(&mut self, other: &RetryConfig) {
+        let defaults = RetryConfig::default();
+        if other.max_retries != defaults.max_retries {
+            self.retry.max_retries = other.max_retries;
+        }
+        if other.initial_delay != defaults.initial_delay {
+            self.retry.initial_delay = other.initial_delay;
+        }
+        if other.max_delay != defaults.max_delay {
+            self.retry.max_delay = other.max_delay;
+        }
+        if other.multiplier != defaults.multiplier {
+            self.retry.multiplier = other.multiplier;
+        }
+    }
+
+    fn merge_tools(&mut self, other: &ToolsConfig) {
+        let defaults = ToolsConfig::default();
+        if !other.mcp_servers.is_empty() {
+            self.tools.mcp_servers = other.mcp_servers.clone();
+        }
+        if other.default_timeout != defaults.default_timeout {
+            self.tools.default_timeout = other.default_timeout;
+        }
+        if other.tool_timeouts != defaults.tool_timeouts {
+            self.tools.tool_timeouts = other.tool_timeouts.clone();
+        }
+        if other.max_concurrent != defaults.max_concurrent {
+            self.tools.max_concurrent = other.max_concurrent;
+        }
+        if other.builtins_enabled != defaults.builtins_enabled {
+            self.tools.builtins_enabled = other.builtins_enabled;
+        }
+        if other.shell_enabled != defaults.shell_enabled {
+            self.tools.shell_enabled = other.shell_enabled;
+        }
+        if other.comms_enabled != defaults.comms_enabled {
+            self.tools.comms_enabled = other.comms_enabled;
+        }
+        if other.subagents_enabled != defaults.subagents_enabled {
+            self.tools.subagents_enabled = other.subagents_enabled;
+        }
+        if other.mob_enabled != defaults.mob_enabled {
+            self.tools.mob_enabled = other.mob_enabled;
+        }
+    }
+
+    fn merge_tools_from_toml_presence(&mut self, parsed: &toml::Value, layer: &ToolsConfig) {
+        let Some(tools) = parsed.get("tools").and_then(toml::Value::as_table) else {
+            return;
+        };
+        if tools.contains_key("mcp_servers") {
+            self.tools.mcp_servers = layer.mcp_servers.clone();
+        }
+        if tools.contains_key("default_timeout") {
+            self.tools.default_timeout = layer.default_timeout;
+        }
+        if tools.contains_key("tool_timeouts") {
+            self.tools.tool_timeouts = layer.tool_timeouts.clone();
+        }
+        if tools.contains_key("max_concurrent") {
+            self.tools.max_concurrent = layer.max_concurrent;
+        }
+        if tools.contains_key("builtins_enabled") {
+            self.tools.builtins_enabled = layer.builtins_enabled;
+        }
+        if tools.contains_key("shell_enabled") {
+            self.tools.shell_enabled = layer.shell_enabled;
+        }
+        if tools.contains_key("comms_enabled") {
+            self.tools.comms_enabled = layer.comms_enabled;
+        }
+        if tools.contains_key("subagents_enabled") {
+            self.tools.subagents_enabled = layer.subagents_enabled;
+        }
+        if tools.contains_key("mob_enabled") {
+            self.tools.mob_enabled = layer.mob_enabled;
+        }
+    }
+
+    fn merge_retry_from_toml_presence(&mut self, parsed: &toml::Value, layer: &RetryConfig) {
+        let Some(retry) = parsed.get("retry").and_then(toml::Value::as_table) else {
+            return;
+        };
+        if retry.contains_key("max_retries") {
+            self.retry.max_retries = layer.max_retries;
+        }
+        if retry.contains_key("initial_delay") {
+            self.retry.initial_delay = layer.initial_delay;
+        }
+        if retry.contains_key("max_delay") {
+            self.retry.max_delay = layer.max_delay;
+        }
+        if retry.contains_key("multiplier") {
+            self.retry.multiplier = layer.multiplier;
         }
     }
 
@@ -1716,6 +1823,60 @@ mod tests {
             Some("https://override.example")
         );
         assert!(!urls.contains_key("anthropic"));
+    }
+
+    #[test]
+    fn test_merge_toml_tools_omitted_fields_preserve_lower_layer() {
+        let mut config = Config::default();
+        config.tools.mob_enabled = true;
+        config.tools.shell_enabled = true;
+
+        config
+            .merge_toml_str(
+                r#"
+[tools]
+shell_enabled = false
+"#,
+            )
+            .expect("merge should succeed");
+
+        assert!(config.tools.mob_enabled);
+        assert!(!config.tools.shell_enabled);
+    }
+
+    #[test]
+    fn test_merge_toml_tools_explicit_default_overrides_lower_layer() {
+        let mut config = Config::default();
+        config.tools.mob_enabled = true;
+
+        config
+            .merge_toml_str(
+                r#"
+[tools]
+mob_enabled = false
+"#,
+            )
+            .expect("merge should succeed");
+
+        assert!(!config.tools.mob_enabled);
+    }
+
+    #[test]
+    fn test_merge_toml_retry_omitted_fields_preserve_lower_layer() {
+        let mut config = Config::default();
+        config.retry.max_retries = 9;
+
+        config
+            .merge_toml_str(
+                r#"
+[retry]
+initial_delay = "750ms"
+"#,
+            )
+            .expect("merge should succeed");
+
+        assert_eq!(config.retry.max_retries, 9);
+        assert_eq!(config.retry.initial_delay, Duration::from_millis(750));
     }
 
     #[test]

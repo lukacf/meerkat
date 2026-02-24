@@ -1,0 +1,32 @@
+[package]
+name = "meerkat-mob-pack"
+description = "Mobpack format types and validation primitives"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+meerkat-mob = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+sha2 = "0.10"
+flate2 = "1.0"
+tar = "0.4"
+ed25519-dalek = { version = "2.0", features = ["rand_core"] }
+hex = "0.4"
+chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

@@ -52,6 +52,15 @@ cargo install rkat
 export ANTHROPIC_API_KEY=sk-...
 ```
 
+If you use the WASM web build surface (`rkat mob web build`), install `wasm-pack`
+and ensure Cargo bin is on `PATH`:
+
+```bash
+cargo install wasm-pack
+export PATH="$HOME/.cargo/bin:$PATH"
+wasm-pack --version
+```
+
 **Run a one-off prompt** with any provider:
 
 ```bash

@@ -43,6 +43,35 @@ impl MobBuilder {
         }
     }
 
+    /// Create a builder from a mobpack definition + packed skill files.
+    ///
+    /// Any `SkillSource::Path` entries are resolved against `packed_skills` and
+    /// converted to inline sources for runtime execution.
+    pub fn from_mobpack(
+        mut definition: MobDefinition,
+        packed_skills: BTreeMap<String, Vec<u8>>,
+        storage: MobStorage,
+    ) -> Result<Self, MobError> {
+        for (skill_name, source) in &mut definition.skills {
+            if let crate::definition::SkillSource::Path { path } = source {
+                let bytes = packed_skills.get(path).ok_or_else(|| {
+                    MobError::Internal(format!(
+                        "mobpack skill path '{}' for '{}' missing from archive",
+                        path, skill_name
+                    ))
+                })?;
+                let content = String::from_utf8(bytes.clone()).map_err(|_| {
+                    MobError::Internal(format!(
+                        "mobpack skill path '{}' for '{}' is not valid UTF-8",
+                        path, skill_name
+                    ))
+                })?;
+                *source = crate::definition::SkillSource::Inline { content };
+            }
+        }
+        Ok(Self::new(definition, storage))
+    }
+
     /// Create a builder that resumes a mob from persisted events.
     pub fn for_resume(storage: MobStorage) -> Self {
         Self {

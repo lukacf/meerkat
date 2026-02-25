@@ -532,6 +532,31 @@ impl std::fmt::Debug for AgentFactory {
 }
 
 impl AgentFactory {
+    /// Create a minimal factory for environments without filesystem access (e.g. wasm32).
+    ///
+    /// All agent resources must be provided via `AgentBuildConfig` overrides
+    /// (`tool_dispatcher_override`, `session_store_override`, etc.).
+    /// Filesystem-dependent methods are not available.
+    pub fn minimal() -> Self {
+        Self {
+            store_path: PathBuf::new(),
+            runtime_root: None,
+            project_root: None,
+            context_root: None,
+            user_config_root: None,
+            enable_builtins: false,
+            enable_shell: false,
+            enable_subagents: false,
+            #[cfg(feature = "comms")]
+            enable_comms: false,
+            enable_memory: false,
+            enable_mob: false,
+            #[cfg(feature = "skills")]
+            skill_source: None,
+            custom_store: None,
+        }
+    }
+
     /// Create a new factory with the required session store path.
     pub fn new(store_path: impl Into<PathBuf>) -> Self {
         Self {

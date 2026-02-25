@@ -1,11 +1,8 @@
-//! Meerkat WASM runtime — real agent stack in the browser.
+//! Meerkat WASM runtime — a real meerkat surface in the browser.
 //!
-//! This is a full meerkat surface, same as CLI/RPC/REST/MCP.
-//! Uses the real agent loop from meerkat-core and real LLM providers
-//! from meerkat-client. reqwest uses browser fetch on wasm32.
-//!
-//! The runtime loads mobpacks, extracts skills for the system prompt,
-//! creates real Agent instances, and runs turns with streaming events.
+//! Routes through `AgentFactory::build_agent()` with override-first resource
+//! injection, same pipeline as CLI/RPC/REST/MCP. Uses real agent loop, real LLM
+//! providers (browser fetch), real comms (inproc), and real tool dispatch.
 
 #[cfg(target_arch = "wasm32")]
 pub mod tokio {
@@ -14,20 +11,18 @@ pub mod tokio {
 
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 
-use meerkat_client::adapter::LlmClientAdapter;
-use meerkat_client::types::LlmClient;
-use meerkat_core::{AgentBuilder, AgentSessionStore, AgentToolDispatcher};
+use meerkat::AgentBuildConfig;
+use meerkat_core::Config;
 
 // ═══════════════════════════════════════════════════════════
 // Constants
 // ═══════════════════════════════════════════════════════════
 
-const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 const MAX_SYSTEM_PROMPT_BYTES: usize = 100 * 1024;
 const FORBIDDEN_CAPABILITIES: &[&str] = &["shell", "mcp_stdio", "process_spawn"];
 const SKILL_SEPARATOR: &str = "\n\n---\n\n";
@@ -58,12 +53,12 @@ struct RequiresSection {
 }
 
 #[derive(Debug, Deserialize)]
-struct MobDefinition {
+struct MobDefinitionHeader {
     id: String,
 }
 
 // ═══════════════════════════════════════════════════════════
-// Session Config
+// Session Config (from JavaScript)
 // ═══════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,18 +72,21 @@ struct SessionConfig {
     max_tokens: u32,
     #[serde(default)]
     base_url: Option<String>,
+    /// Enable comms for this session (registers in InprocRegistry).
+    #[serde(default)]
+    comms_name: Option<String>,
+    /// Whether this session runs in host mode (enables comms tools).
+    #[serde(default)]
+    host_mode: bool,
 }
 
 fn default_max_tokens() -> u32 {
     4096
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum SessionStatus {
-    Idle,
-    Running,
-}
+// ═══════════════════════════════════════════════════════════
+// Event Model
+// ═══════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct Usage {
@@ -97,117 +95,21 @@ struct Usage {
 }
 
 // ═══════════════════════════════════════════════════════════
-// Event Model (mirrors AgentEvent)
-// ═══════════════════════════════════════════════════════════
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum RuntimeEvent {
-    RunStarted {
-        session_id: u32,
-        run_id: u64,
-        prompt: String,
-    },
-    TextDelta {
-        delta: String,
-    },
-    TextComplete {
-        content: String,
-    },
-    ToolCallRequested {
-        id: String,
-        name: String,
-    },
-    ToolResultReceived {
-        id: String,
-        name: String,
-        is_error: bool,
-    },
-    TurnCompleted {
-        run_id: u64,
-        usage: Usage,
-    },
-    RunCompleted {
-        session_id: u32,
-        run_id: u64,
-        result: String,
-        usage: Usage,
-    },
-    RunFailed {
-        session_id: u32,
-        run_id: u64,
-        error: String,
-        error_code: String,
-    },
-    SystemPromptTruncated {
-        original_bytes: usize,
-        truncated_to: usize,
-    },
-}
-
-// ═══════════════════════════════════════════════════════════
-// No-op Tool Dispatcher + Session Store (browser has no tools/persistence)
-// ═══════════════════════════════════════════════════════════
-
-struct NoOpTools;
-
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-impl AgentToolDispatcher for NoOpTools {
-    fn tools(&self) -> Arc<[Arc<meerkat_core::types::ToolDef>]> {
-        Arc::new([])
-    }
-    async fn dispatch(
-        &self,
-        call: meerkat_core::types::ToolCallView<'_>,
-    ) -> Result<meerkat_core::types::ToolResult, meerkat_core::error::ToolError> {
-        Err(meerkat_core::error::ToolError::NotFound {
-            name: call.name.to_string(),
-        })
-    }
-}
-
-struct NoOpStore;
-
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-impl AgentSessionStore for NoOpStore {
-    async fn save(
-        &self,
-        _session: &meerkat_core::session::Session,
-    ) -> Result<(), meerkat_core::error::AgentError> {
-        Ok(())
-    }
-    async fn load(
-        &self,
-        _id: &str,
-    ) -> Result<Option<meerkat_core::session::Session>, meerkat_core::error::AgentError> {
-        Ok(None)
-    }
-}
-
-// ═══════════════════════════════════════════════════════════
-// Runtime Session
+// Runtime Session (holds factory-built agent state)
 // ═══════════════════════════════════════════════════════════
 
 struct RuntimeSession {
     handle: u32,
     mob_id: String,
     model: String,
-    max_tokens: u32,
-    compiled_system_prompt: String,
-    skills: BTreeMap<String, String>,
-    /// The real meerkat LLM client adapter
-    client: Arc<LlmClientAdapter>,
-    events: VecDeque<RuntimeEvent>,
-    seq: u64,
-    run_counter: u64,
-    status: SessionStatus,
-    usage: Usage,
-    /// Accumulated text from last run
-    last_result: String,
-    /// Preserved session for multi-turn context (messages accumulate across start_turn calls)
+    /// The meerkat Config snapshot for this session's factory.
+    config: Config,
+    /// Pre-built AgentBuildConfig (with overrides set).
+    build_config_template: AgentBuildConfig,
+    /// Preserved session for multi-turn context.
     meerkat_session: Option<meerkat_core::session::Session>,
+    run_counter: u64,
+    usage: Usage,
 }
 
 #[derive(Default)]
@@ -245,7 +147,7 @@ fn err_str(code: &str, msg: impl std::fmt::Display) -> JsValue {
 #[derive(Debug)]
 struct ParsedMobpack {
     manifest: WebManifest,
-    definition: MobDefinition,
+    definition: MobDefinitionHeader,
     skills: BTreeMap<String, String>,
 }
 
@@ -263,7 +165,7 @@ fn parse_mobpack(bytes: &[u8]) -> Result<ParsedMobpack, String> {
     let manifest: WebManifest =
         toml::from_str(manifest_text).map_err(|e| format!("invalid manifest.toml: {e}"))?;
 
-    let definition: MobDefinition = serde_json::from_slice(
+    let definition: MobDefinitionHeader = serde_json::from_slice(
         files
             .get("definition.json")
             .ok_or_else(|| "definition.json is missing".to_string())?,
@@ -305,7 +207,7 @@ fn compile_system_prompt(
     mob_name: &str,
     skills: &BTreeMap<String, String>,
     user_system_prompt: Option<&str>,
-) -> (String, Option<RuntimeEvent>) {
+) -> String {
     let mut parts = Vec::new();
     parts.push(format!("# Mob: {mob_name} ({mob_id})"));
     for (name, content) in skills {
@@ -316,81 +218,14 @@ fn compile_system_prompt(
     }
     let joined = parts.join(SKILL_SEPARATOR);
     if joined.len() > MAX_SYSTEM_PROMPT_BYTES {
-        let safe_end = {
-            let mut i = MAX_SYSTEM_PROMPT_BYTES.min(joined.len());
-            while i > 0 && !joined.is_char_boundary(i) {
-                i -= 1;
-            }
-            i
-        };
-        let event = RuntimeEvent::SystemPromptTruncated {
-            original_bytes: joined.len(),
-            truncated_to: safe_end,
-        };
-        (joined[..safe_end].to_string(), Some(event))
-    } else {
-        (joined, None)
-    }
-}
-
-// ═══════════════════════════════════════════════════════════
-// Provider Resolution
-// ═══════════════════════════════════════════════════════════
-
-fn create_llm_client(
-    model: &str,
-    api_key: &str,
-    base_url: Option<&str>,
-) -> Result<Arc<dyn LlmClient>, String> {
-    if model.starts_with("claude") {
-        let mut builder = meerkat_client::anthropic::AnthropicClientBuilder::new(api_key.into());
-        if let Some(url) = base_url {
-            builder = builder.base_url(url.into());
+        let mut i = MAX_SYSTEM_PROMPT_BYTES.min(joined.len());
+        while i > 0 && !joined.is_char_boundary(i) {
+            i -= 1;
         }
-        let client = builder
-            .build()
-            .map_err(|e| format!("failed to create Anthropic client: {e}"))?;
-        Ok(Arc::new(client))
-    } else if model.starts_with("gpt") || model.starts_with("o1") || model.starts_with("o3") || model.starts_with("o4") || model.starts_with("chatgpt") {
-        let client = if let Some(url) = base_url {
-            meerkat_client::openai::OpenAiClient::new_with_base_url(api_key.into(), url.into())
-        } else {
-            meerkat_client::openai::OpenAiClient::new(api_key.into())
-        };
-        Ok(Arc::new(client))
+        joined[..i].to_string()
     } else {
-        let client = if let Some(url) = base_url {
-            meerkat_client::gemini::GeminiClient::new_with_base_url(api_key.into(), url.into())
-        } else {
-            meerkat_client::gemini::GeminiClient::new(api_key.into())
-        };
-        Ok(Arc::new(client))
+        joined
     }
-}
-
-// ═══════════════════════════════════════════════════════════
-// Registry Helpers
-// ═══════════════════════════════════════════════════════════
-
-fn with_session_mut<T>(
-    handle: u32,
-    f: impl FnOnce(&mut RuntimeSession) -> Result<T, String>,
-) -> Result<T, JsValue> {
-    REGISTRY
-        .with(|cell| {
-            let mut registry = cell.borrow_mut();
-            let session = registry
-                .sessions
-                .get_mut(&handle)
-                .ok_or_else(|| format!("unknown session handle: {handle}"))?;
-            f(session)
-        })
-        .map_err(|e| err_str("session_not_found", e))
-}
-
-fn push_event(session: &mut RuntimeSession, event: RuntimeEvent) {
-    session.seq = session.seq.saturating_add(1);
-    session.events.push_back(event);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -457,12 +292,77 @@ fn looks_like_windows_absolute(path: &str) -> bool {
 }
 
 // ═══════════════════════════════════════════════════════════
+// Provider Resolution
+// ═══════════════════════════════════════════════════════════
+
+fn create_llm_client(
+    model: &str,
+    api_key: &str,
+    base_url: Option<&str>,
+) -> Result<Arc<dyn meerkat_client::types::LlmClient>, String> {
+    if model.starts_with("claude") {
+        let mut builder = meerkat_client::anthropic::AnthropicClientBuilder::new(api_key.into());
+        if let Some(url) = base_url {
+            builder = builder.base_url(url.into());
+        }
+        let client = builder
+            .build()
+            .map_err(|e| format!("failed to create Anthropic client: {e}"))?;
+        Ok(Arc::new(client))
+    } else if model.starts_with("gpt")
+        || model.starts_with("o1")
+        || model.starts_with("o3")
+        || model.starts_with("o4")
+        || model.starts_with("chatgpt")
+    {
+        let client = if let Some(url) = base_url {
+            meerkat_client::openai::OpenAiClient::new_with_base_url(api_key.into(), url.into())
+        } else {
+            meerkat_client::openai::OpenAiClient::new(api_key.into())
+        };
+        Ok(Arc::new(client))
+    } else {
+        let client = if let Some(url) = base_url {
+            meerkat_client::gemini::GeminiClient::new_with_base_url(api_key.into(), url.into())
+        } else {
+            meerkat_client::gemini::GeminiClient::new(api_key.into())
+        };
+        Ok(Arc::new(client))
+    }
+}
+
+// ═══════════════════════════════════════════════════════════
+// WASM Tool Dispatcher
+// ═══════════════════════════════════════════════════════════
+
+#[cfg(target_arch = "wasm32")]
+fn build_wasm_tool_dispatcher() -> Result<Arc<dyn meerkat_core::AgentToolDispatcher>, String> {
+    let task_store: Arc<dyn meerkat_tools::builtin::TaskStore> =
+        Arc::new(meerkat_tools::builtin::MemoryTaskStore::new());
+    let config = meerkat_tools::builtin::BuiltinToolConfig::default();
+    let composite = meerkat_tools::builtin::CompositeDispatcher::new_wasm(
+        task_store, &config, None, None,
+    )
+    .map_err(|e| format!("failed to create tool dispatcher: {e}"))?;
+    Ok(Arc::new(composite))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn build_wasm_tool_dispatcher() -> Result<Arc<dyn meerkat_core::AgentToolDispatcher>, String> {
+    Ok(Arc::new(meerkat_tools::EmptyToolDispatcher))
+}
+
+// ═══════════════════════════════════════════════════════════
 // Exported WASM API
 // ═══════════════════════════════════════════════════════════
 
-/// Create a session from a mobpack + API key + model.
+/// Create a session from a mobpack + config.
 ///
-/// `config_json`: `{ "model": "claude-sonnet-4-5", "api_key": "sk-...", "max_tokens"?: N, "base_url"?: "..." }`
+/// Routes through `AgentFactory::build_agent()` with override-first
+/// resource injection — same pipeline as all other meerkat surfaces.
+///
+/// `config_json`: `{ "model": "...", "api_key": "sk-...", "max_tokens"?: N,
+///                    "comms_name"?: "...", "host_mode"?: true }`
 #[wasm_bindgen]
 pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<u32, JsValue> {
     let parsed = parse_mobpack(mobpack_bytes).map_err(|e| err_str("invalid_mobpack", e))?;
@@ -477,43 +377,56 @@ pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<u32, Js
         return Err(err_js("invalid_config", "api_key must not be empty"));
     }
 
-    let llm_client = create_llm_client(&config.model, api_key, config.base_url.as_deref())
-        .map_err(|e| err_str("provider_error", e))?;
-
-    let adapter = Arc::new(LlmClientAdapter::new(llm_client, config.model.clone()));
-
-    let (compiled_prompt, truncation_event) = compile_system_prompt(
+    // Compile system prompt from mobpack skills.
+    let system_prompt = compile_system_prompt(
         &parsed.definition.id,
         &parsed.manifest.mobpack.name,
         &parsed.skills,
         config.system_prompt.as_deref(),
     );
 
+    // Create LLM client.
+    let llm_client = create_llm_client(&config.model, api_key, config.base_url.as_deref())
+        .map_err(|e| err_str("provider_error", e))?;
+
+    // Build tool dispatcher (in-memory tasks, no shell).
+    let tools = build_wasm_tool_dispatcher().map_err(|e| err_str("tool_error", e))?;
+
+    // Build session store (in-memory).
+    let store: Arc<dyn meerkat_core::AgentSessionStore> = Arc::new(
+        meerkat_store::StoreAdapter::new(Arc::new(meerkat_store::MemoryStore::new())),
+    );
+
+    // Prepare AgentBuildConfig with all overrides set.
+    let mut build_config = AgentBuildConfig::new(&config.model);
+    build_config.system_prompt = Some(system_prompt);
+    build_config.max_tokens = Some(config.max_tokens);
+    build_config.tool_dispatcher_override = Some(tools);
+    build_config.session_store_override = Some(store);
+    build_config.llm_client_override = Some(llm_client);
+    if let Some(name) = config.comms_name.clone() {
+        build_config.comms_name = Some(name);
+        build_config.host_mode = config.host_mode;
+    }
+
+    // Create a minimal Config for the factory.
+    let meerkat_config = Config::default();
+
     let handle = REGISTRY.with(|cell| {
         let mut registry = cell.borrow_mut();
         let handle = registry.next_handle;
         registry.next_handle = registry.next_handle.saturating_add(1);
 
-        let mut session = RuntimeSession {
+        let session = RuntimeSession {
             handle,
             mob_id: parsed.definition.id,
-            model: config.model,
-            max_tokens: config.max_tokens,
-            compiled_system_prompt: compiled_prompt,
-            skills: parsed.skills,
-            client: adapter,
-            events: VecDeque::new(),
-            seq: 0,
-            run_counter: 0,
-            status: SessionStatus::Idle,
-            usage: Usage::default(),
-            last_result: String::new(),
+            model: config.model.clone(),
+            config: meerkat_config,
+            build_config_template: build_config,
             meerkat_session: None,
+            run_counter: 0,
+            usage: Usage::default(),
         };
-
-        if let Some(event) = truncation_event {
-            push_event(&mut session, event);
-        }
 
         registry.sessions.insert(handle, session);
         handle
@@ -522,134 +435,99 @@ pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<u32, Js
     Ok(handle)
 }
 
-/// Run a turn: send prompt through the REAL meerkat agent loop.
+/// Run a turn through the real meerkat agent loop via AgentFactory::build_agent().
 ///
-/// This creates an Agent via AgentBuilder, sets the system prompt from
-/// mobpack skills, and runs the agent loop which calls the LLM provider
-/// via reqwest (browser fetch on wasm32).
-///
-/// Returns JSON: `{ "run_id", "text", "usage", "session_id", "status" }`
+/// Returns JSON: `{ "text", "usage", "status", "session_id", "turns", "tool_calls" }`
 #[wasm_bindgen]
 pub async fn start_turn(
     handle: u32,
     prompt: &str,
     _options_json: &str,
 ) -> Result<JsValue, JsValue> {
-    // Extract what we need from the session (release borrow quickly)
-    let (client, system_prompt, max_tokens, run_id, prior_session) =
-        with_session_mut(handle, |session| {
-            if session.status == SessionStatus::Running {
-                return Err(format!("session {} is already running", session.handle));
-            }
-            session.status = SessionStatus::Running;
+    // Extract what we need from the session (release borrow quickly).
+    let (mut build_config, config, prior_session, run_id) = REGISTRY
+        .with(|cell| {
+            let mut registry = cell.borrow_mut();
+            let session = registry
+                .sessions
+                .get_mut(&handle)
+                .ok_or_else(|| format!("unknown session handle: {handle}"))?;
             session.run_counter = session.run_counter.saturating_add(1);
             let run_id = session.run_counter;
 
-            push_event(
-                session,
-                RuntimeEvent::RunStarted {
-                    session_id: session.handle,
-                    run_id,
-                    prompt: prompt.to_string(),
-                },
-            );
+            // Clone the template and take the prior session.
+            let mut bc = AgentBuildConfig::new(&session.model);
+            bc.system_prompt = session.build_config_template.system_prompt.clone();
+            bc.max_tokens = session.build_config_template.max_tokens;
+            bc.llm_client_override = session.build_config_template.llm_client_override.clone();
+            bc.comms_name = session.build_config_template.comms_name.clone();
+            bc.host_mode = session.build_config_template.host_mode;
 
-            Ok((
-                session.client.clone(),
-                session.compiled_system_prompt.clone(),
-                session.max_tokens,
-                run_id,
-                session.meerkat_session.take(),
-            ))
-        })?;
+            // Rebuild tools + store fresh each turn (they're cheap, avoids ownership issues).
+            bc.tool_dispatcher_override = session.build_config_template.tool_dispatcher_override.clone();
+            bc.session_store_override = session.build_config_template.session_store_override.clone();
 
-    // Build and run the agent (outside of RefCell borrow)
-    let tools: Arc<NoOpTools> = Arc::new(NoOpTools);
-    let store: Arc<NoOpStore> = Arc::new(NoOpStore);
+            // Resume from prior session if available.
+            bc.resume_session = session.meerkat_session.take();
 
-    let mut builder = AgentBuilder::new()
-        .system_prompt(system_prompt)
-        .max_tokens_per_turn(max_tokens);
+            Ok((bc, session.config.clone(), session.meerkat_session.take(), run_id))
+        })
+        .map_err(|e: String| err_str("session_not_found", e))?;
 
-    if let Some(prior) = prior_session {
-        builder = builder.resume_session(prior);
-    }
+    // Build the agent through AgentFactory::build_agent() — same pipeline as all surfaces.
+    let factory = meerkat::AgentFactory::minimal();
+    let mut agent = factory
+        .build_agent(build_config, &config)
+        .await
+        .map_err(|e| err_str("build_agent_error", e))?;
 
-    let mut agent = builder.build(client, tools, store).await;
-
+    // Run the turn.
     let run_result = agent.run(prompt.into()).await;
 
-    // Preserve the agent's session for future turns (multi-turn context)
+    // Preserve the agent's session for future turns.
     let agent_session = agent.session().clone();
 
-    // Record results back in session
     match run_result {
         Ok(result) => {
-            let result_json = with_session_mut(handle, |session| {
-                session.meerkat_session = Some(agent_session.clone());
-                let turn_usage = Usage {
-                    input_tokens: result.usage.input_tokens,
-                    output_tokens: result.usage.output_tokens,
-                };
-                session.usage.input_tokens = session
-                    .usage
-                    .input_tokens
-                    .saturating_add(turn_usage.input_tokens);
-                session.usage.output_tokens = session
-                    .usage
-                    .output_tokens
-                    .saturating_add(turn_usage.output_tokens);
-                session.last_result = result.text.clone();
+            REGISTRY.with(|cell| {
+                let mut registry = cell.borrow_mut();
+                if let Some(session) = registry.sessions.get_mut(&handle) {
+                    session.meerkat_session = Some(agent_session);
+                    session.usage.input_tokens = session
+                        .usage
+                        .input_tokens
+                        .saturating_add(result.usage.input_tokens);
+                    session.usage.output_tokens = session
+                        .usage
+                        .output_tokens
+                        .saturating_add(result.usage.output_tokens);
+                }
+            });
 
-                push_event(
-                    session,
-                    RuntimeEvent::TextComplete {
-                        content: result.text.clone(),
-                    },
-                );
-                push_event(
-                    session,
-                    RuntimeEvent::RunCompleted {
-                        session_id: session.handle,
-                        run_id,
-                        result: result.text.clone(),
-                        usage: turn_usage,
-                    },
-                );
-                session.status = SessionStatus::Idle;
-
-                Ok(serde_json::json!({
-                    "run_id": run_id,
-                    "text": result.text,
-                    "usage": { "input_tokens": result.usage.input_tokens, "output_tokens": result.usage.output_tokens },
-                    "session_id": session.handle,
-                    "status": "completed",
-                    "turns": result.turns,
-                    "tool_calls": result.tool_calls,
-                })
-                .to_string())
-            })?;
-
-            Ok(JsValue::from_str(&result_json))
+            let result_json = serde_json::json!({
+                "run_id": run_id,
+                "text": result.text,
+                "usage": {
+                    "input_tokens": result.usage.input_tokens,
+                    "output_tokens": result.usage.output_tokens,
+                },
+                "session_id": handle,
+                "status": "completed",
+                "turns": result.turns,
+                "tool_calls": result.tool_calls,
+            });
+            Ok(JsValue::from_str(&result_json.to_string()))
         }
         Err(err) => {
             let error_msg = format!("{err}");
-            with_session_mut(handle, |session| {
-                session.meerkat_session = Some(agent_session.clone());
-                push_event(
-                    session,
-                    RuntimeEvent::RunFailed {
-                        session_id: session.handle,
-                        run_id,
-                        error: error_msg.clone(),
-                        error_code: "agent_error".to_string(),
-                    },
-                );
-                session.status = SessionStatus::Idle;
-                Ok(())
-            })?;
+            REGISTRY.with(|cell| {
+                let mut registry = cell.borrow_mut();
+                if let Some(session) = registry.sessions.get_mut(&handle) {
+                    session.meerkat_session = Some(agent_session);
+                }
+            });
 
-            let result = serde_json::json!({
+            let result_json = serde_json::json!({
                 "run_id": run_id,
                 "text": "",
                 "usage": { "input_tokens": 0, "output_tokens": 0 },
@@ -657,21 +535,12 @@ pub async fn start_turn(
                 "status": "failed",
                 "error": error_msg,
             });
-            Ok(JsValue::from_str(&result.to_string()))
+            Ok(JsValue::from_str(&result_json.to_string()))
         }
     }
 }
 
-/// Drain and return all pending events.
-#[wasm_bindgen]
-pub fn poll_events(handle: u32) -> Result<String, JsValue> {
-    with_session_mut(handle, |session| {
-        let drained: Vec<RuntimeEvent> = session.events.drain(..).collect();
-        serde_json::to_string(&drained).map_err(|e| format!("failed encoding events: {e}"))
-    })
-}
-
-/// Get current session state metadata.
+/// Get current session state.
 #[wasm_bindgen]
 pub fn get_session_state(handle: u32) -> Result<String, JsValue> {
     REGISTRY
@@ -685,7 +554,6 @@ pub fn get_session_state(handle: u32) -> Result<String, JsValue> {
                 "session_id": session.handle,
                 "mob_id": session.mob_id,
                 "model": session.model,
-                "status": session.status,
                 "usage": session.usage,
                 "run_counter": session.run_counter,
             });
@@ -721,7 +589,7 @@ pub fn inspect_mobpack(mobpack_bytes: &[u8]) -> Result<String, JsValue> {
     serde_json::to_string(&result).map_err(|e| err_str("serialize_error", e))
 }
 
-/// Remove a session from the registry.
+/// Remove a session.
 #[wasm_bindgen]
 pub fn destroy_session(handle: u32) -> Result<(), JsValue> {
     REGISTRY.with(|cell| {
@@ -732,4 +600,12 @@ pub fn destroy_session(handle: u32) -> Result<(), JsValue> {
             .ok_or_else(|| err_js("session_not_found", &format!("unknown handle: {handle}")))?;
         Ok(())
     })
+}
+
+/// Drain and return all pending events (placeholder for future event streaming).
+#[wasm_bindgen]
+pub fn poll_events(_handle: u32) -> Result<String, JsValue> {
+    // Events will be populated once we wire AgentEvent streaming through
+    // the build_config event channel. For now, return empty array.
+    Ok("[]".to_string())
 }

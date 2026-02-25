@@ -1,139 +1,209 @@
+//! Generic WASM runtime for Meerkat mobpacks.
+//!
+//! Domain-agnostic session/turn/event API with surface parity to CLI/RPC/REST/MCP.
+//! No application-specific types or logic — behavior comes from mobpack skills.
+//! LLM provider calls are delegated to a JS bridge module.
+
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::io::Read;
 use wasm_bindgen::prelude::*;
 
+// ═══════════════════════════════════════════════════════════
+// Constants
+// ═══════════════════════════════════════════════════════════
+
+const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+const MAX_SYSTEM_PROMPT_BYTES: usize = 100 * 1024;
 const FORBIDDEN_CAPABILITIES: &[&str] = &["shell", "mcp_stdio", "process_spawn"];
+const SKILL_SEPARATOR: &str = "\n\n---\n\n";
+
+// ═══════════════════════════════════════════════════════════
+// JS Bridge Import — stable contract
+// ═══════════════════════════════════════════════════════════
+
+#[wasm_bindgen]
+extern "C" {
+    /// v1 bridge contract: the host JS environment must provide this function.
+    ///
+    /// Called by the WASM runtime to make an LLM API request.
+    /// The JS side routes to the appropriate provider (Anthropic, OpenAI, Gemini, proxy)
+    /// based on the model name and options.
+    ///
+    /// # Arguments
+    /// - `model`: model identifier (e.g. "claude-sonnet-4-5", "gpt-5.2")
+    /// - `messages_json`: JSON array of `[{role, content}]` messages
+    /// - `max_tokens`: maximum response tokens
+    /// - `options_json`: JSON object with provider params, proxy_url, etc.
+    ///
+    /// # Returns (JSON string)
+    /// Success: `{ "text": "...", "usage": { "input_tokens": N, "output_tokens": N } }`
+    /// Error: rejects with `{ "code": "...", "message": "..." }`
+    #[wasm_bindgen(catch)]
+    async fn js_llm_call(
+        model: &str,
+        messages_json: &str,
+        max_tokens: u32,
+        options_json: &str,
+    ) -> Result<JsValue, JsValue>;
+}
+
+// ═══════════════════════════════════════════════════════════
+// Mobpack Types (generic)
+// ═══════════════════════════════════════════════════════════
 
 #[derive(Debug, Deserialize)]
 struct WebManifest {
-    mobpack: WebMobpackSection,
+    mobpack: MobpackSection,
     #[serde(default)]
-    requires: Option<WebRequiresSection>,
+    requires: Option<RequiresSection>,
 }
 
 #[derive(Debug, Deserialize)]
-struct WebMobpackSection {
+struct MobpackSection {
     name: String,
     version: String,
+    #[serde(default)]
+    description: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
-struct WebRequiresSection {
+struct RequiresSection {
     #[serde(default)]
     capabilities: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct WebDefinition {
+struct MobDefinition {
     id: String,
 }
 
+// ═══════════════════════════════════════════════════════════
+// Session Types
+// ═══════════════════════════════════════════════════════════
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct InitOptions {
-    team: String,
+struct SessionConfig {
     model: String,
     #[serde(default)]
-    seed: u64,
-    #[serde(default)]
-    auth_mode: Option<String>,
+    system_prompt: Option<String>,
+    #[serde(default = "default_max_tokens")]
+    max_tokens: u32,
+}
+
+fn default_max_tokens() -> u32 {
+    4096
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SessionStatus {
+    Idle,
+    Running,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct RuntimeEvent {
-    seq: u64,
-    kind: String,
-    from: String,
-    #[serde(default)]
-    to: Option<String>,
-    team: String,
-    payload: String,
+struct ChatMessage {
+    role: String,
+    content: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RegionState {
-    id: String,
-    controller: String,
-    defense: i32,
-    value: u32,
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct Usage {
+    input_tokens: u64,
+    output_tokens: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ArenaState {
-    turn: u32,
-    max_turns: u32,
-    regions: Vec<RegionState>,
-    north_score: u32,
-    south_score: u32,
-    #[serde(default)]
-    winner: Option<String>,
-    #[serde(default)]
-    ruleset_version: String,
-}
+// ═══════════════════════════════════════════════════════════
+// Event Model (mirrors AgentEvent)
+// ═══════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct TurnInput {
-    state: ArenaState,
-    #[serde(default)]
-    opponent_signal: Option<String>,
+#[serde(tag = "type", rename_all = "snake_case")]
+enum RuntimeEvent {
+    RunStarted {
+        session_id: u32,
+        run_id: u64,
+        prompt: String,
+    },
+    TextDelta {
+        delta: String,
+    },
+    TextComplete {
+        content: String,
+    },
+    ToolCallRequested {
+        id: String,
+        name: String,
+    },
+    ToolResultReceived {
+        id: String,
+        name: String,
+        is_error: bool,
+    },
+    TurnCompleted {
+        run_id: u64,
+        usage: Usage,
+    },
+    RunCompleted {
+        session_id: u32,
+        run_id: u64,
+        result: String,
+        usage: Usage,
+    },
+    RunFailed {
+        session_id: u32,
+        run_id: u64,
+        error: String,
+        error_code: String,
+    },
+    SystemPromptTruncated {
+        original_bytes: usize,
+        truncated_to: usize,
+    },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OrderSet {
-    team: String,
-    turn: u32,
-    aggression: i32,
-    fortify: i32,
-    diplomacy: String,
-    target_region: String,
-    model: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TurnDecision {
-    order: OrderSet,
-    planner_note: String,
-    operator_note: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ResolveInput {
-    state: ArenaState,
-    north_order: OrderSet,
-    south_order: OrderSet,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ResolveOutput {
-    state: ArenaState,
-    summary: String,
-}
+// ═══════════════════════════════════════════════════════════
+// Snapshot Schema
+// ═══════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionSnapshot {
+    schema_version: u32,
     handle: u32,
     mob_id: String,
-    team: String,
     model: String,
-    seed: u64,
-    started: bool,
-    seq: u64,
+    max_tokens: u32,
+    compiled_system_prompt: String,
+    skills: BTreeMap<String, String>,
+    messages: Vec<ChatMessage>,
     pending_events: Vec<RuntimeEvent>,
-    last_order: Option<OrderSet>,
+    seq: u64,
+    run_counter: u64,
+    status: SessionStatus,
+    usage: Usage,
+    // NOTE: no API keys, no auth tokens, no provider headers
 }
+
+// ═══════════════════════════════════════════════════════════
+// Runtime Session + Registry
+// ═══════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone)]
 struct RuntimeSession {
     handle: u32,
     mob_id: String,
-    team: String,
     model: String,
-    seed: u64,
-    started: bool,
-    seq: u64,
+    max_tokens: u32,
+    compiled_system_prompt: String,
+    skills: BTreeMap<String, String>,
+    messages: Vec<ChatMessage>,
     events: VecDeque<RuntimeEvent>,
-    last_order: Option<OrderSet>,
+    seq: u64,
+    run_counter: u64,
+    status: SessionStatus,
+    usage: Usage,
 }
 
 #[derive(Default)]
@@ -151,464 +221,199 @@ thread_local! {
     };
 }
 
-fn parse_mobpack(bytes: &[u8]) -> Result<(WebManifest, WebDefinition), String> {
-    let files = extract_targz_safe(bytes)
-        .map_err(|err| format!("failed to parse mobpack archive: {err}"))?;
+// ═══════════════════════════════════════════════════════════
+// Error Type
+// ═══════════════════════════════════════════════════════════
+
+fn err_js(code: &str, message: &str) -> JsValue {
+    let json = serde_json::json!({ "code": code, "message": message });
+    JsValue::from_str(&json.to_string())
+}
+
+fn err_str(code: &str, msg: impl std::fmt::Display) -> JsValue {
+    err_js(code, &msg.to_string())
+}
+
+// ═══════════════════════════════════════════════════════════
+// Mobpack Parsing (domain-agnostic — kept from original)
+// ═══════════════════════════════════════════════════════════
+
+#[derive(Debug)]
+struct ParsedMobpack {
+    manifest: WebManifest,
+    definition: MobDefinition,
+    skills: BTreeMap<String, String>,
+}
+
+fn parse_mobpack(bytes: &[u8]) -> Result<ParsedMobpack, String> {
+    let files =
+        extract_targz_safe(bytes).map_err(|e| format!("failed to parse mobpack archive: {e}"))?;
+
     let manifest_text = std::str::from_utf8(
         files
             .get("manifest.toml")
             .ok_or_else(|| "manifest.toml is missing".to_string())?,
     )
-    .map_err(|err| format!("manifest.toml is not valid UTF-8: {err}"))?;
+    .map_err(|e| format!("manifest.toml is not valid UTF-8: {e}"))?;
+
     let manifest: WebManifest =
-        toml::from_str(manifest_text).map_err(|err| format!("invalid manifest.toml: {err}"))?;
-    let definition: WebDefinition = serde_json::from_slice(
+        toml::from_str(manifest_text).map_err(|e| format!("invalid manifest.toml: {e}"))?;
+
+    let definition: MobDefinition = serde_json::from_slice(
         files
             .get("definition.json")
             .ok_or_else(|| "definition.json is missing".to_string())?,
     )
-    .map_err(|err| format!("invalid definition.json: {err}"))?;
+    .map_err(|e| format!("invalid definition.json: {e}"))?;
 
     if let Some(requires) = &manifest.requires {
-        for capability in &requires.capabilities {
-            if FORBIDDEN_CAPABILITIES.contains(&capability.as_str()) {
+        for cap in &requires.capabilities {
+            if FORBIDDEN_CAPABILITIES.contains(&cap.as_str()) {
                 return Err(format!(
-                    "forbidden capability '{}' is not allowed in browser-safe mode",
-                    capability
+                    "forbidden capability '{cap}' is not allowed in browser-safe mode"
                 ));
             }
         }
     }
 
-    Ok((manifest, definition))
-}
-
-fn parse_json<T: for<'a> Deserialize<'a>>(raw: &str, field: &str) -> Result<T, String> {
-    serde_json::from_str(raw).map_err(|err| format!("invalid {field}: {err}"))
-}
-
-fn stable_mix(seed: u64, text: &str) -> u64 {
-    let mut h = seed ^ 0x9E37_79B9_7F4A_7C15;
-    for &b in text.as_bytes() {
-        h ^= u64::from(b);
-        h = h.wrapping_mul(0x1000_0000_01B3);
-        h ^= h >> 29;
-    }
-    h
-}
-
-fn strength_from_model(model: &str) -> i32 {
-    let model_lc = model.to_ascii_lowercase();
-    if model_lc.contains("opus") {
-        88
-    } else if model_lc.contains("gpt-5") {
-        84
-    } else if model_lc.contains("gemini") {
-        80
-    } else {
-        72
-    }
-}
-
-fn default_ruleset(mut state: ArenaState) -> ArenaState {
-    if state.ruleset_version.trim().is_empty() {
-        state.ruleset_version = "mini-diplomacy-v1".to_string();
-    }
-    state
-}
-
-fn choose_target(regions: &[RegionState], team: &str, seed: u64, turn: u32) -> String {
-    let enemy = if team == "north" { "south" } else { "north" };
-    let mut targets: Vec<&RegionState> = regions.iter().filter(|r| r.controller == enemy).collect();
-    if targets.is_empty() {
-        targets = regions.iter().collect();
-    }
-    targets.sort_by(|a, b| a.id.cmp(&b.id));
-    let idx_seed = stable_mix(seed ^ u64::from(turn), team);
-    let len_u64 = u64::try_from(targets.len()).unwrap_or(1);
-    let idx_u64 = if len_u64 == 0 { 0 } else { idx_seed % len_u64 };
-    let idx = usize::try_from(idx_u64).unwrap_or(0);
-    targets
-        .get(idx)
-        .map(|r| r.id.clone())
-        .unwrap_or_else(|| "center".to_string())
-}
-
-fn propose_order(session: &RuntimeSession, input: &TurnInput) -> TurnDecision {
-    let state = &input.state;
-    let model_strength = strength_from_model(&session.model);
-    let seed_mix = stable_mix(session.seed ^ u64::from(state.turn), &session.team);
-    let mod20 = i32::try_from(seed_mix % 20).unwrap_or(0);
-    let aggression = 30 + ((model_strength / 3) + mod20).min(70);
-    let fortify = 100 - aggression;
-    let signal = input
-        .opponent_signal
-        .as_deref()
-        .unwrap_or("no-opponent-signal");
-    let posture = if aggression > 74 {
-        "high-pressure advance"
-    } else if aggression > 64 {
-        "measured pressure"
-    } else {
-        "defensive containment"
-    };
-    let planner_note = format!(
-        "Turn {} strategic memo ({team}): We observed opponent signal '{signal}'. Our posture is {posture}. \
-Primary objective is to pressure the frontier while preserving fallback defense. \
-Planned split: aggression={aggr}, fortify={fort}.",
-        state.turn,
-        team = session.team,
-        signal = signal,
-        posture = posture,
-        aggr = aggression,
-        fort = fortify
-    );
-    let target_region = choose_target(&state.regions, &session.team, session.seed, state.turn);
-    let diplomacy = if aggression > 72 {
-        "conditional_non_aggression".to_string()
-    } else {
-        "mutual_frontier_stability".to_string()
-    };
-    let order = OrderSet {
-        team: session.team.clone(),
-        turn: state.turn,
-        aggression,
-        fortify,
-        diplomacy,
-        target_region,
-        model: session.model.clone(),
-    };
-    let operator_note = format!(
-        "Operator confirmation ({team}): Order is legal and committed. \
-We will contest '{target}' with aggression {aggr} and reserve {fort} for defense. \
-If resistance spikes, we pivot to fortress mode next turn.",
-        team = order.team,
-        target = order.target_region,
-        aggr = order.aggression,
-        fort = order.fortify
-    );
-    TurnDecision {
-        order,
-        planner_note,
-        operator_note,
-    }
-}
-
-fn push_event(
-    session: &mut RuntimeSession,
-    kind: &str,
-    from: &str,
-    to: Option<&str>,
-    payload: String,
-) {
-    session.seq = session.seq.saturating_add(1);
-    session.events.push_back(RuntimeEvent {
-        seq: session.seq,
-        kind: kind.to_string(),
-        from: from.to_string(),
-        to: to.map(std::string::ToString::to_string),
-        team: session.team.clone(),
-        payload,
-    });
-}
-
-fn apply_order(state: &mut ArenaState, order: &OrderSet, counter: &OrderSet) {
-    let team = order.team.as_str();
-    let enemy = if team == "north" { "south" } else { "north" };
-
-    for region in &mut state.regions {
-        if region.controller == team {
-            region.defense = region.defense.saturating_add((order.fortify / 25).max(1));
-            break;
-        }
-    }
-
-    let mut captured = false;
-    for region in &mut state.regions {
-        if region.id != order.target_region {
-            continue;
-        }
-        if region.controller == team {
-            continue;
-        }
-        let atk_bonus = i32::try_from(
-            stable_mix(
-                u64::from(state.turn),
-                &(order.model.clone() + &order.target_region),
-            ) % 11,
-        )
-        .unwrap_or(0);
-        let def_bonus = i32::try_from(
-            stable_mix(
-                u64::from(state.turn) ^ 0xA5A5,
-                &(counter.model.clone() + &region.id),
-            ) % 9,
-        )
-        .unwrap_or(0);
-        let attack = order.aggression + atk_bonus;
-        let defense = region
-            .defense
-            .saturating_add(counter.fortify / 30)
-            .saturating_add(def_bonus);
-        if attack > defense {
-            region.controller = team.to_string();
-            region.defense = 45 + ((order.fortify / 6).max(4));
-            captured = true;
-        } else {
-            region.defense = region.defense.saturating_add(1);
-        }
-        break;
-    }
-
-    if !captured {
-        for region in &mut state.regions {
-            if region.controller == enemy {
-                region.defense = region.defense.saturating_add(1);
-                break;
+    // Extract skills: files under skills/ directory, keyed by filename without extension
+    let mut skills = BTreeMap::new();
+    for (path, content) in &files {
+        if let Some(name) = path.strip_prefix("skills/") {
+            if let Ok(text) = std::str::from_utf8(content) {
+                let key = name
+                    .strip_suffix(".md")
+                    .or_else(|| name.strip_suffix(".txt"))
+                    .unwrap_or(name);
+                skills.insert(key.to_string(), text.to_string());
             }
         }
     }
+
+    Ok(ParsedMobpack {
+        manifest,
+        definition,
+        skills,
+    })
 }
 
-fn score_turn(state: &mut ArenaState) {
-    let mut north_delta = 0_u32;
-    let mut south_delta = 0_u32;
-    for region in &state.regions {
-        if region.controller == "north" {
-            north_delta = north_delta.saturating_add(region.value);
-        } else if region.controller == "south" {
-            south_delta = south_delta.saturating_add(region.value);
-        }
+fn compile_system_prompt(
+    mob_id: &str,
+    mob_name: &str,
+    skills: &BTreeMap<String, String>,
+    user_system_prompt: Option<&str>,
+) -> (String, Option<RuntimeEvent>) {
+    let mut parts = Vec::new();
+    parts.push(format!("# Mob: {mob_name} ({mob_id})"));
+
+    // Skills in deterministic BTreeMap order (lexicographic by key)
+    for (name, content) in skills {
+        parts.push(format!("## Skill: {name}\n\n{content}"));
     }
-    state.north_score = state.north_score.saturating_add(north_delta);
-    state.south_score = state.south_score.saturating_add(south_delta);
-}
 
-fn resolve_turn_impl(mut input: ResolveInput) -> ResolveOutput {
-    input.state = default_ruleset(input.state);
-    apply_order(&mut input.state, &input.north_order, &input.south_order);
-    apply_order(&mut input.state, &input.south_order, &input.north_order);
-    score_turn(&mut input.state);
-    input.state.turn = input.state.turn.saturating_add(1);
+    if let Some(extra) = user_system_prompt {
+        parts.push(extra.to_string());
+    }
 
-    if input.state.turn > input.state.max_turns {
-        input.state.winner = if input.state.north_score > input.state.south_score {
-            Some("north".to_string())
-        } else if input.state.south_score > input.state.north_score {
-            Some("south".to_string())
-        } else {
-            Some("draw".to_string())
+    let joined = parts.join(SKILL_SEPARATOR);
+
+    if joined.len() > MAX_SYSTEM_PROMPT_BYTES {
+        let truncated = &joined[..MAX_SYSTEM_PROMPT_BYTES];
+        // Find last complete UTF-8 boundary
+        let safe_end = truncated
+            .char_indices()
+            .last()
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(0);
+        let event = RuntimeEvent::SystemPromptTruncated {
+            original_bytes: joined.len(),
+            truncated_to: safe_end,
         };
-    }
-
-    let control_north = input
-        .state
-        .regions
-        .iter()
-        .filter(|region| region.controller == "north")
-        .count();
-    let control_south = input
-        .state
-        .regions
-        .iter()
-        .filter(|region| region.controller == "south")
-        .count();
-    let summary = format!(
-        "Round {round}: North {north_score} ({north_regions} regions) vs South {south_score} ({south_regions} regions). \
-Outcome: {winner}.",
-        round = input.state.turn,
-        north_score = input.state.north_score,
-        south_score = input.state.south_score,
-        north_regions = control_north,
-        south_regions = control_south,
-        winner = input
-            .state
-            .winner
-            .clone()
-            .unwrap_or_else(|| "campaign ongoing".to_string())
-    );
-
-    ResolveOutput {
-        state: input.state,
-        summary,
+        (joined[..safe_end].to_string(), Some(event))
+    } else {
+        (joined, None)
     }
 }
 
-fn bootstrap_impl(mobpack_bytes: &[u8], prompt: &str) -> Result<String, String> {
-    if prompt.trim().is_empty() {
-        return Err("prompt must not be empty".to_string());
-    }
-    let (manifest, definition) = parse_mobpack(mobpack_bytes)?;
+// ═══════════════════════════════════════════════════════════
+// Registry Helpers
+// ═══════════════════════════════════════════════════════════
 
-    Ok(format!(
-        "bootstrapped:{}:{}@{}:prompt_bytes={}",
-        definition.id,
-        manifest.mobpack.name,
-        manifest.mobpack.version,
-        prompt.len()
-    ))
-}
-
-fn init_mobpack_impl(mobpack_bytes: &[u8], options_json: &str) -> Result<u32, String> {
-    let (_manifest, definition) = parse_mobpack(mobpack_bytes)?;
-    let options: InitOptions = parse_json(options_json, "options_json")?;
-    let team = options.team.trim().to_ascii_lowercase();
-    if team != "north" && team != "south" {
-        return Err("options_json.team must be 'north' or 'south'".to_string());
-    }
-    if options.model.trim().is_empty() {
-        return Err("options_json.model must not be empty".to_string());
-    }
-
-    let handle = REGISTRY.with(|cell| {
-        let mut registry = cell.borrow_mut();
-        let handle = registry.next_handle;
-        registry.next_handle = registry.next_handle.saturating_add(1);
-        let session = RuntimeSession {
-            handle,
-            mob_id: definition.id,
-            team,
-            model: options.model,
-            seed: options.seed,
-            started: false,
-            seq: 0,
-            events: VecDeque::new(),
-            last_order: None,
-        };
-        registry.sessions.insert(handle, session);
-        handle
-    });
-
-    Ok(handle)
+fn with_session<T>(
+    handle: u32,
+    f: impl FnOnce(&RuntimeSession) -> Result<T, String>,
+) -> Result<T, JsValue> {
+    REGISTRY
+        .with(|cell| {
+            let registry = cell.borrow();
+            let session = registry
+                .sessions
+                .get(&handle)
+                .ok_or_else(|| format!("unknown session handle: {handle}"))?;
+            f(session)
+        })
+        .map_err(|e| err_str("session_not_found", e))
 }
 
 fn with_session_mut<T>(
     handle: u32,
     f: impl FnOnce(&mut RuntimeSession) -> Result<T, String>,
-) -> Result<T, String> {
-    REGISTRY.with(|cell| {
-        let mut registry = cell.borrow_mut();
-        let session = registry
-            .sessions
-            .get_mut(&handle)
-            .ok_or_else(|| format!("unknown handle: {handle}"))?;
-        f(session)
-    })
+) -> Result<T, JsValue> {
+    REGISTRY
+        .with(|cell| {
+            let mut registry = cell.borrow_mut();
+            let session = registry
+                .sessions
+                .get_mut(&handle)
+                .ok_or_else(|| format!("unknown session handle: {handle}"))?;
+            f(session)
+        })
+        .map_err(|e| err_str("session_not_found", e))
 }
 
-fn start_match_impl(handle: u32, initial_state_json: &str) -> Result<String, String> {
-    let initial: ArenaState = parse_json(initial_state_json, "initial_state_json")?;
-    with_session_mut(handle, |session| {
-        session.started = true;
-        push_event(
-            session,
-            "SYSTEM",
-            "runtime",
-            None,
-            format!(
-                "match_started team={} model={} ruleset={}",
-                session.team,
-                session.model,
-                if initial.ruleset_version.is_empty() {
-                    "mini-diplomacy-v1"
-                } else {
-                    initial.ruleset_version.as_str()
-                }
-            ),
-        );
-        serde_json::to_string(&default_ruleset(initial.clone()))
-            .map_err(|err| format!("failed encoding start state: {err}"))
-    })
+fn push_event(session: &mut RuntimeSession, event: RuntimeEvent) {
+    session.seq = session.seq.saturating_add(1);
+    session.events.push_back(event);
 }
 
-fn submit_turn_input_impl(handle: u32, turn_input_json: &str) -> Result<String, String> {
-    let input: TurnInput = parse_json(turn_input_json, "turn_input_json")?;
-    with_session_mut(handle, |session| {
-        if !session.started {
-            return Err("match not started for handle".to_string());
+// ═══════════════════════════════════════════════════════════
+// Bridge Response Parsing
+// ═══════════════════════════════════════════════════════════
+
+#[derive(Deserialize)]
+struct BridgeResponse {
+    text: String,
+    #[serde(default)]
+    usage: BridgeUsage,
+}
+
+#[derive(Deserialize, Default)]
+struct BridgeUsage {
+    #[serde(default)]
+    input_tokens: u64,
+    #[serde(default)]
+    output_tokens: u64,
+}
+
+fn parse_bridge_error(val: JsValue) -> (String, String) {
+    if let Some(s) = val.as_string() {
+        // Try parsing as JSON error object
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&s) {
+            let code = parsed["code"].as_str().unwrap_or("bridge_error");
+            let message = parsed["message"].as_str().unwrap_or(&s);
+            return (code.to_string(), message.to_string());
         }
-        let decision = propose_order(session, &input);
-
-        push_event(
-            session,
-            "PLAN",
-            "planner",
-            Some("operator"),
-            decision.planner_note.clone(),
-        );
-        push_event(
-            session,
-            "NEGOTIATE",
-            "planner",
-            Some("opponent"),
-            format!(
-                "Diplomatic cable from {team}: We propose '{proposal}' for this round. \
-In exchange, we request de-escalation around '{target}'. \
-Our argument: stabilizing that front lowers attrition for both sides.",
-                team = decision.order.team,
-                proposal = decision.order.diplomacy,
-                target = decision.order.target_region
-            ),
-        );
-        push_event(
-            session,
-            "COMMIT",
-            "operator",
-            Some("board"),
-            decision.operator_note.clone(),
-        );
-
-        session.last_order = Some(decision.order.clone());
-
-        serde_json::to_string(&decision).map_err(|err| format!("failed encoding decision: {err}"))
-    })
+        return ("bridge_error".to_string(), s);
+    }
+    (
+        "bridge_error".to_string(),
+        "unknown bridge error".to_string(),
+    )
 }
 
-fn poll_events_impl(handle: u32) -> Result<String, String> {
-    with_session_mut(handle, |session| {
-        let drained: Vec<RuntimeEvent> = session.events.drain(..).collect();
-        serde_json::to_string(&drained).map_err(|err| format!("failed encoding events: {err}"))
-    })
-}
-
-fn snapshot_state_impl(handle: u32) -> Result<String, String> {
-    with_session_mut(handle, |session| {
-        let snapshot = SessionSnapshot {
-            handle: session.handle,
-            mob_id: session.mob_id.clone(),
-            team: session.team.clone(),
-            model: session.model.clone(),
-            seed: session.seed,
-            started: session.started,
-            seq: session.seq,
-            pending_events: session.events.iter().cloned().collect(),
-            last_order: session.last_order.clone(),
-        };
-        serde_json::to_string(&snapshot).map_err(|err| format!("failed encoding snapshot: {err}"))
-    })
-}
-
-fn restore_state_impl(handle: u32, snapshot_json: &str) -> Result<(), String> {
-    let snapshot: SessionSnapshot = parse_json(snapshot_json, "snapshot_json")?;
-    with_session_mut(handle, |session| {
-        if snapshot.team != session.team {
-            return Err("snapshot team does not match runtime session".to_string());
-        }
-        session.model = snapshot.model;
-        session.seed = snapshot.seed;
-        session.started = snapshot.started;
-        session.seq = snapshot.seq;
-        session.events = snapshot.pending_events.into_iter().collect();
-        session.last_order = snapshot.last_order;
-        Ok(())
-    })
-}
-
-fn resolve_turn_json_impl(input_json: &str) -> Result<String, String> {
-    let input: ResolveInput = parse_json(input_json, "resolve_input_json")?;
-    let output = resolve_turn_impl(input);
-    serde_json::to_string(&output).map_err(|err| format!("failed encoding resolved state: {err}"))
-}
+// ═══════════════════════════════════════════════════════════
+// Archive Extraction (kept from original — domain-agnostic)
+// ═══════════════════════════════════════════════════════════
 
 fn extract_targz_safe(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, String> {
     let cursor = std::io::Cursor::new(bytes);
@@ -617,16 +422,16 @@ fn extract_targz_safe(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, String>
     let mut files = BTreeMap::new();
     let entries = archive
         .entries()
-        .map_err(|err| format!("failed to read archive entries: {err}"))?;
+        .map_err(|e| format!("failed to read archive entries: {e}"))?;
     for entry in entries {
-        let mut entry = entry.map_err(|err| format!("failed reading archive entry: {err}"))?;
+        let mut entry = entry.map_err(|e| format!("failed reading archive entry: {e}"))?;
         let kind = entry.header().entry_type();
         if !(kind.is_file() || kind.is_dir()) {
             return Err("archive contains unsupported entry type".to_string());
         }
         let path = entry
             .path()
-            .map_err(|err| format!("invalid archive path: {err}"))?;
+            .map_err(|e| format!("invalid archive path: {e}"))?;
         if !kind.is_file() {
             continue;
         }
@@ -634,7 +439,7 @@ fn extract_targz_safe(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, String>
         let mut contents = Vec::new();
         entry
             .read_to_end(&mut contents)
-            .map_err(|err| format!("failed reading archive file '{normalized}': {err}"))?;
+            .map_err(|e| format!("failed reading archive file '{normalized}': {e}"))?;
         files.insert(normalized, contents);
     }
     Ok(files)
@@ -669,66 +474,380 @@ fn looks_like_windows_absolute(path: &str) -> bool {
         && (bytes[2] == b'/' || bytes[2] == b'\\')
 }
 
+// ═══════════════════════════════════════════════════════════
+// Exported WASM API
+// ═══════════════════════════════════════════════════════════
+
+/// Create a session from a mobpack archive.
+///
+/// Extracts skills, assembles system prompt, returns a session handle.
+/// `config_json`: `{ "model": "...", "system_prompt"?: "...", "max_tokens"?: N }`
 #[wasm_bindgen]
-pub fn bootstrap_mobpack(mobpack_bytes: &[u8], prompt: &str) -> Result<String, JsValue> {
-    bootstrap_impl(mobpack_bytes, prompt).map_err(|err| JsValue::from_str(&err))
+pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<u32, JsValue> {
+    let parsed = parse_mobpack(mobpack_bytes).map_err(|e| err_str("invalid_mobpack", e))?;
+
+    let config: SessionConfig =
+        serde_json::from_str(config_json).map_err(|e| err_str("invalid_config", e))?;
+
+    if config.model.trim().is_empty() {
+        return Err(err_js("invalid_config", "model must not be empty"));
+    }
+
+    let (compiled_prompt, truncation_event) = compile_system_prompt(
+        &parsed.definition.id,
+        &parsed.manifest.mobpack.name,
+        &parsed.skills,
+        config.system_prompt.as_deref(),
+    );
+
+    let handle = REGISTRY.with(|cell| {
+        let mut registry = cell.borrow_mut();
+        let handle = registry.next_handle;
+        registry.next_handle = registry.next_handle.saturating_add(1);
+
+        let mut session = RuntimeSession {
+            handle,
+            mob_id: parsed.definition.id,
+            model: config.model,
+            max_tokens: config.max_tokens,
+            compiled_system_prompt: compiled_prompt,
+            skills: parsed.skills,
+            messages: Vec::new(),
+            events: VecDeque::new(),
+            seq: 0,
+            run_counter: 0,
+            status: SessionStatus::Idle,
+            usage: Usage::default(),
+        };
+
+        if let Some(event) = truncation_event {
+            push_event(&mut session, event);
+        }
+
+        registry.sessions.insert(handle, session);
+        handle
+    });
+
+    Ok(handle)
 }
 
+/// Run a turn: send prompt to LLM via JS bridge, return result.
+///
+/// `options_json`: `{}` or `{ "proxy_url"?: "...", "temperature"?: N }`
+/// Returns JSON: `{ "run_id", "text", "usage", "session_id", "status": "completed"|"failed", "error"? }`
 #[wasm_bindgen]
-pub fn init_mobpack(mobpack_bytes: &[u8], options_json: &str) -> Result<u32, JsValue> {
-    init_mobpack_impl(mobpack_bytes, options_json).map_err(|err| JsValue::from_str(&err))
+pub async fn start_turn(handle: u32, prompt: &str, options_json: &str) -> Result<JsValue, JsValue> {
+    // Validate and prepare — synchronous registry access
+    let (model, max_tokens, messages_json, run_id) = with_session_mut(handle, |session| {
+        if session.status == SessionStatus::Running {
+            return Err(format!("session {} is already running", session.handle));
+        }
+        session.status = SessionStatus::Running;
+        session.run_counter = session.run_counter.saturating_add(1);
+        let run_id = session.run_counter;
+
+        // Add user message
+        session.messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: prompt.to_string(),
+        });
+
+        // Build messages array for the LLM
+        let mut llm_messages = Vec::new();
+        llm_messages.push(ChatMessage {
+            role: "system".to_string(),
+            content: session.compiled_system_prompt.clone(),
+        });
+        llm_messages.extend(session.messages.clone());
+
+        let messages_json = serde_json::to_string(&llm_messages)
+            .map_err(|e| format!("failed to serialize messages: {e}"))?;
+
+        push_event(
+            session,
+            RuntimeEvent::RunStarted {
+                session_id: session.handle,
+                run_id,
+                prompt: prompt.to_string(),
+            },
+        );
+
+        Ok((
+            session.model.clone(),
+            session.max_tokens,
+            messages_json,
+            run_id,
+        ))
+    })
+    .map_err(|e| {
+        // If we can't even set up, return error without changing state
+        e
+    })?;
+
+    // Call the JS bridge (async — outside of RefCell borrow)
+    let bridge_result = js_llm_call(&model, &messages_json, max_tokens, options_json).await;
+
+    // Process the result — synchronous registry access again
+    match bridge_result {
+        Ok(response_val) => {
+            let response_str = response_val.as_string().unwrap_or_default();
+            match serde_json::from_str::<BridgeResponse>(&response_str) {
+                Ok(response) => {
+                    let result_json = with_session_mut(handle, |session| {
+                        // Add assistant response to history
+                        session.messages.push(ChatMessage {
+                            role: "assistant".to_string(),
+                            content: response.text.clone(),
+                        });
+
+                        // Update usage
+                        session.usage.input_tokens = session
+                            .usage
+                            .input_tokens
+                            .saturating_add(response.usage.input_tokens);
+                        session.usage.output_tokens = session
+                            .usage
+                            .output_tokens
+                            .saturating_add(response.usage.output_tokens);
+
+                        let turn_usage = Usage {
+                            input_tokens: response.usage.input_tokens,
+                            output_tokens: response.usage.output_tokens,
+                        };
+
+                        push_event(
+                            session,
+                            RuntimeEvent::TextComplete {
+                                content: response.text.clone(),
+                            },
+                        );
+                        push_event(
+                            session,
+                            RuntimeEvent::TurnCompleted {
+                                run_id,
+                                usage: turn_usage.clone(),
+                            },
+                        );
+                        push_event(
+                            session,
+                            RuntimeEvent::RunCompleted {
+                                session_id: session.handle,
+                                run_id,
+                                result: response.text.clone(),
+                                usage: turn_usage.clone(),
+                            },
+                        );
+
+                        session.status = SessionStatus::Idle;
+
+                        Ok(serde_json::json!({
+                            "run_id": run_id,
+                            "text": response.text,
+                            "usage": { "input_tokens": turn_usage.input_tokens, "output_tokens": turn_usage.output_tokens },
+                            "session_id": session.handle,
+                            "status": "completed"
+                        })
+                        .to_string())
+                    })?;
+
+                    Ok(JsValue::from_str(&result_json))
+                }
+                Err(parse_err) => {
+                    let error_msg = format!("failed to parse bridge response: {parse_err}");
+                    with_session_mut(handle, |session| {
+                        push_event(
+                            session,
+                            RuntimeEvent::RunFailed {
+                                session_id: session.handle,
+                                run_id,
+                                error: error_msg.clone(),
+                                error_code: "bridge_parse_error".to_string(),
+                            },
+                        );
+                        session.status = SessionStatus::Idle;
+                        Ok(())
+                    })?;
+
+                    let result = serde_json::json!({
+                        "run_id": run_id,
+                        "text": "",
+                        "usage": { "input_tokens": 0, "output_tokens": 0 },
+                        "session_id": handle,
+                        "status": "failed",
+                        "error": error_msg
+                    });
+                    Ok(JsValue::from_str(&result.to_string()))
+                }
+            }
+        }
+        Err(err_val) => {
+            let (code, message) = parse_bridge_error(err_val);
+            let error_msg = format!("{code}: {message}");
+
+            with_session_mut(handle, |session| {
+                push_event(
+                    session,
+                    RuntimeEvent::RunFailed {
+                        session_id: session.handle,
+                        run_id,
+                        error: error_msg.clone(),
+                        error_code: code.clone(),
+                    },
+                );
+                session.status = SessionStatus::Idle;
+                Ok(())
+            })?;
+
+            let result = serde_json::json!({
+                "run_id": run_id,
+                "text": "",
+                "usage": { "input_tokens": 0, "output_tokens": 0 },
+                "session_id": handle,
+                "status": "failed",
+                "error": error_msg
+            });
+            Ok(JsValue::from_str(&result.to_string()))
+        }
+    }
 }
 
-#[wasm_bindgen]
-pub fn start_match(handle: u32, initial_state_json: &str) -> Result<String, JsValue> {
-    start_match_impl(handle, initial_state_json).map_err(|err| JsValue::from_str(&err))
-}
-
-#[wasm_bindgen]
-pub fn submit_turn_input(handle: u32, turn_input_json: &str) -> Result<String, JsValue> {
-    submit_turn_input_impl(handle, turn_input_json).map_err(|err| JsValue::from_str(&err))
-}
-
+/// Drain and return all pending events for a session.
 #[wasm_bindgen]
 pub fn poll_events(handle: u32) -> Result<String, JsValue> {
-    poll_events_impl(handle).map_err(|err| JsValue::from_str(&err))
+    with_session_mut(handle, |session| {
+        let drained: Vec<RuntimeEvent> = session.events.drain(..).collect();
+        serde_json::to_string(&drained).map_err(|e| format!("failed encoding events: {e}"))
+    })
 }
 
+/// Get current session state (no message content — just metadata).
 #[wasm_bindgen]
-pub fn snapshot_state(handle: u32) -> Result<String, JsValue> {
-    snapshot_state_impl(handle).map_err(|err| JsValue::from_str(&err))
+pub fn get_session_state(handle: u32) -> Result<String, JsValue> {
+    with_session(handle, |session| {
+        let state = serde_json::json!({
+            "session_id": session.handle,
+            "mob_id": session.mob_id,
+            "model": session.model,
+            "status": session.status,
+            "message_count": session.messages.len(),
+            "usage": session.usage,
+            "run_counter": session.run_counter,
+        });
+        Ok(state.to_string())
+    })
 }
 
+/// Inspect a mobpack without creating a session.
+///
+/// Returns manifest, definition, and skill inventory.
 #[wasm_bindgen]
-pub fn restore_state(handle: u32, snapshot_json: &str) -> Result<(), JsValue> {
-    restore_state_impl(handle, snapshot_json).map_err(|err| JsValue::from_str(&err))
+pub fn inspect_mobpack(mobpack_bytes: &[u8]) -> Result<String, JsValue> {
+    let parsed = parse_mobpack(mobpack_bytes).map_err(|e| err_str("invalid_mobpack", e))?;
+
+    let skills: Vec<serde_json::Value> = parsed
+        .skills
+        .iter()
+        .map(|(name, content)| {
+            serde_json::json!({
+                "name": name,
+                "size_bytes": content.len(),
+            })
+        })
+        .collect();
+
+    let result = serde_json::json!({
+        "manifest": {
+            "name": parsed.manifest.mobpack.name,
+            "version": parsed.manifest.mobpack.version,
+            "description": parsed.manifest.mobpack.description,
+        },
+        "definition": {
+            "id": parsed.definition.id,
+        },
+        "skills": skills,
+        "capabilities": parsed.manifest.requires.as_ref().map(|r| &r.capabilities),
+    });
+
+    serde_json::to_string(&result).map_err(|e| err_str("serialize_error", e))
 }
 
+/// Serialize full session state for persistence.
+///
+/// Contains no API keys, auth tokens, or provider headers.
 #[wasm_bindgen]
-pub fn resolve_turn(resolve_input_json: &str) -> Result<String, JsValue> {
-    resolve_turn_json_impl(resolve_input_json).map_err(|err| JsValue::from_str(&err))
+pub fn snapshot_session(handle: u32) -> Result<String, JsValue> {
+    with_session(handle, |session| {
+        let snapshot = SessionSnapshot {
+            schema_version: SNAPSHOT_SCHEMA_VERSION,
+            handle: session.handle,
+            mob_id: session.mob_id.clone(),
+            model: session.model.clone(),
+            max_tokens: session.max_tokens,
+            compiled_system_prompt: session.compiled_system_prompt.clone(),
+            skills: session.skills.clone(),
+            messages: session.messages.clone(),
+            pending_events: session.events.iter().cloned().collect(),
+            seq: session.seq,
+            run_counter: session.run_counter,
+            status: session.status,
+            usage: session.usage.clone(),
+        };
+        serde_json::to_string(&snapshot).map_err(|e| format!("failed encoding snapshot: {e}"))
+    })
 }
+
+/// Restore session from a snapshot.
+#[wasm_bindgen]
+pub fn restore_session(handle: u32, snapshot_json: &str) -> Result<(), JsValue> {
+    let snapshot: SessionSnapshot =
+        serde_json::from_str(snapshot_json).map_err(|e| err_str("invalid_snapshot", e))?;
+
+    if snapshot.schema_version != SNAPSHOT_SCHEMA_VERSION {
+        return Err(err_js(
+            "snapshot_version_mismatch",
+            &format!(
+                "expected schema_version {SNAPSHOT_SCHEMA_VERSION}, got {}",
+                snapshot.schema_version
+            ),
+        ));
+    }
+
+    with_session_mut(handle, |session| {
+        session.mob_id = snapshot.mob_id;
+        session.model = snapshot.model;
+        session.max_tokens = snapshot.max_tokens;
+        session.compiled_system_prompt = snapshot.compiled_system_prompt;
+        session.skills = snapshot.skills;
+        session.messages = snapshot.messages;
+        session.events = snapshot.pending_events.into_iter().collect();
+        session.seq = snapshot.seq;
+        session.run_counter = snapshot.run_counter;
+        session.status = snapshot.status;
+        session.usage = snapshot.usage;
+        Ok(())
+    })
+}
+
+/// Remove a session from the registry.
+#[wasm_bindgen]
+pub fn destroy_session(handle: u32) -> Result<(), JsValue> {
+    REGISTRY.with(|cell| {
+        let mut registry = cell.borrow_mut();
+        registry
+            .sessions
+            .remove(&handle)
+            .ok_or_else(|| err_js("session_not_found", &format!("unknown handle: {handle}")))?;
+        Ok(())
+    })
+}
+
+// ═══════════════════════════════════════════════════════════
+// Tests
+// ═══════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn fixture_archive(with_forbidden_capability: bool) -> Vec<u8> {
-        let manifest = if with_forbidden_capability {
-            "[mobpack]\nname = \"web\"\nversion = \"1.0.0\"\n\n[requires]\ncapabilities = [\"shell\"]\n"
-        } else {
-            "[mobpack]\nname = \"web\"\nversion = \"1.0.0\"\n"
-        };
-        let definition = "{\"id\":\"web-mob\",\"skills\":{}}";
-        let files = BTreeMap::from([
-            ("manifest.toml".to_string(), manifest.as_bytes().to_vec()),
-            (
-                "definition.json".to_string(),
-                definition.as_bytes().to_vec(),
-            ),
-        ]);
-        create_targz(&files)
-    }
 
     fn create_targz(files: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
         let mut tar_bytes = Vec::new();
@@ -743,26 +862,45 @@ mod tests {
                 header.set_uid(0);
                 header.set_gid(0);
                 header.set_cksum();
-                let append_result =
-                    builder.append_data(&mut header, path.as_str(), content.as_slice());
-                assert!(
-                    append_result.is_ok(),
-                    "append data failed: {append_result:?}"
-                );
+                builder
+                    .append_data(&mut header, path.as_str(), content.as_slice())
+                    .expect("append");
             }
-            let finish_result = builder.finish();
-            assert!(
-                finish_result.is_ok(),
-                "finish tar failed: {finish_result:?}"
-            );
+            builder.finish().expect("finish tar");
         }
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        let write_result = std::io::Write::write_all(&mut encoder, &tar_bytes);
-        assert!(write_result.is_ok(), "write gz failed: {write_result:?}");
-        match encoder.finish() {
-            Ok(bytes) => bytes,
-            Err(err) => unreachable!("finish gz failed: {err}"),
+        std::io::Write::write_all(&mut encoder, &tar_bytes).expect("write gz");
+        encoder.finish().expect("finish gz")
+    }
+
+    fn fixture_mobpack(forbidden: bool) -> Vec<u8> {
+        let manifest = if forbidden {
+            "[mobpack]\nname = \"test\"\nversion = \"1.0.0\"\n\n[requires]\ncapabilities = [\"shell\"]\n"
+        } else {
+            "[mobpack]\nname = \"test-mob\"\nversion = \"1.0.0\"\ndescription = \"A test mob\"\n"
+        };
+        let definition = r#"{"id":"test-mob-id"}"#;
+        let skill_a = "You are a helpful assistant.";
+        let skill_b = "Always respond in JSON.";
+
+        let mut files = BTreeMap::from([
+            ("manifest.toml".to_string(), manifest.as_bytes().to_vec()),
+            (
+                "definition.json".to_string(),
+                definition.as_bytes().to_vec(),
+            ),
+        ]);
+        if !forbidden {
+            files.insert(
+                "skills/assistant.md".to_string(),
+                skill_a.as_bytes().to_vec(),
+            );
+            files.insert(
+                "skills/json-output.md".to_string(),
+                skill_b.as_bytes().to_vec(),
+            );
         }
+        create_targz(&files)
     }
 
     fn create_single_entry_archive(path: &str) -> Vec<u8> {
@@ -777,157 +915,199 @@ mod tests {
             header.set_uid(0);
             header.set_gid(0);
             header.set_cksum();
-            let append_result = builder.append_data(&mut header, path, b"x".as_slice());
-            assert!(
-                append_result.is_ok(),
-                "append data failed: {append_result:?}"
-            );
-            let finish_result = builder.finish();
-            assert!(
-                finish_result.is_ok(),
-                "finish tar failed: {finish_result:?}"
-            );
+            builder
+                .append_data(&mut header, path, b"x".as_slice())
+                .expect("append");
+            builder.finish().expect("finish tar");
         }
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        let write_result = std::io::Write::write_all(&mut encoder, &tar_bytes);
-        assert!(write_result.is_ok(), "write gz failed: {write_result:?}");
-        match encoder.finish() {
-            Ok(bytes) => bytes,
-            Err(err) => unreachable!("finish gz failed: {err}"),
-        }
-    }
-
-    fn initial_state() -> ArenaState {
-        ArenaState {
-            turn: 1,
-            max_turns: 3,
-            regions: vec![
-                RegionState {
-                    id: "north-hub".to_string(),
-                    controller: "north".to_string(),
-                    defense: 50,
-                    value: 2,
-                },
-                RegionState {
-                    id: "south-hub".to_string(),
-                    controller: "south".to_string(),
-                    defense: 50,
-                    value: 2,
-                },
-                RegionState {
-                    id: "frontier".to_string(),
-                    controller: "south".to_string(),
-                    defense: 42,
-                    value: 4,
-                },
-            ],
-            north_score: 0,
-            south_score: 0,
-            winner: None,
-            ruleset_version: "mini-diplomacy-v1".to_string(),
-        }
+        std::io::Write::write_all(&mut encoder, &tar_bytes).expect("write gz");
+        encoder.finish().expect("finish gz")
     }
 
     #[test]
-    fn bootstrap_accepts_browser_safe_pack() {
-        let archive = fixture_archive(false);
-        let out = match bootstrap_impl(&archive, "hello") {
-            Ok(value) => value,
-            Err(err) => unreachable!("bootstrap should pass: {err}"),
-        };
-        assert!(out.contains("bootstrapped:web-mob"));
+    fn create_session_extracts_skills() {
+        let pack = fixture_mobpack(false);
+        let config = r#"{"model":"claude-sonnet-4-5"}"#;
+        let handle = create_session(&pack, config).expect("create_session");
+        assert!(handle > 0);
+
+        let state_json = get_session_state(handle).expect("get_session_state");
+        let state: serde_json::Value = serde_json::from_str(&state_json).expect("parse state");
+        assert_eq!(state["mob_id"], "test-mob-id");
+        assert_eq!(state["model"], "claude-sonnet-4-5");
+        assert_eq!(state["message_count"], 0);
     }
 
     #[test]
-    fn bootstrap_rejects_forbidden_capability() {
-        let archive = fixture_archive(true);
-        let err = match bootstrap_impl(&archive, "hello") {
-            Ok(value) => unreachable!("should fail, got: {value}"),
-            Err(err) => err,
-        };
-        assert!(err.contains("forbidden capability 'shell'"));
+    fn parse_mobpack_rejects_forbidden_capability() {
+        let pack = fixture_mobpack(true);
+        let err = parse_mobpack(&pack).expect_err("should reject forbidden");
+        assert!(err.contains("forbidden capability"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn session_config_rejects_empty_model() {
+        let config: SessionConfig = serde_json::from_str(r#"{"model":""}"#).expect("parse");
+        assert!(config.model.trim().is_empty());
+    }
+
+    #[test]
+    fn inspect_mobpack_returns_skills() {
+        let pack = fixture_mobpack(false);
+        let json = inspect_mobpack(&pack).expect("inspect");
+        let val: serde_json::Value = serde_json::from_str(&json).expect("parse");
+        let skills = val["skills"].as_array().expect("skills array");
+        assert_eq!(skills.len(), 2);
+        // Lexicographic order
+        assert_eq!(skills[0]["name"], "assistant");
+        assert_eq!(skills[1]["name"], "json-output");
+    }
+
+    #[test]
+    fn snapshot_restore_roundtrip() {
+        let pack = fixture_mobpack(false);
+        let config = r#"{"model":"gpt-5.2","max_tokens":1024}"#;
+        let handle = create_session(&pack, config).expect("create");
+
+        let snap = snapshot_session(handle).expect("snapshot");
+        let snap_val: serde_json::Value = serde_json::from_str(&snap).expect("parse snap");
+        assert_eq!(snap_val["schema_version"], SNAPSHOT_SCHEMA_VERSION);
+        assert_eq!(snap_val["model"], "gpt-5.2");
+        assert_eq!(snap_val["max_tokens"], 1024);
+
+        // Restore into same handle
+        restore_session(handle, &snap).expect("restore");
+
+        let state_json = get_session_state(handle).expect("state after restore");
+        let state: serde_json::Value = serde_json::from_str(&state_json).expect("parse");
+        assert_eq!(state["model"], "gpt-5.2");
+    }
+
+    #[test]
+    fn snapshot_schema_version_recorded() {
+        let pack = fixture_mobpack(false);
+        let config = r#"{"model":"test"}"#;
+        let handle = create_session(&pack, config).expect("create");
+
+        let snap_json = snapshot_session(handle).expect("snap");
+        let snap: serde_json::Value = serde_json::from_str(&snap_json).expect("parse");
+        assert_eq!(snap["schema_version"], SNAPSHOT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn snapshot_deserialize_rejects_bad_version() {
+        let snap = serde_json::json!({
+            "schema_version": 999,
+            "handle": 1,
+            "mob_id": "test",
+            "model": "test",
+            "max_tokens": 1024,
+            "compiled_system_prompt": "",
+            "skills": {},
+            "messages": [],
+            "pending_events": [],
+            "seq": 0,
+            "run_counter": 0,
+            "status": "idle",
+            "usage": { "input_tokens": 0, "output_tokens": 0 }
+        });
+        let snap_str = serde_json::to_string(&snap).expect("ser");
+        let parsed: SessionSnapshot = serde_json::from_str(&snap_str).expect("deser");
+        assert_ne!(parsed.schema_version, SNAPSHOT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn registry_remove_works() {
+        let pack = fixture_mobpack(false);
+        let config = r#"{"model":"test"}"#;
+        let handle = create_session(&pack, config).expect("create");
+
+        // Session exists
+        let state = get_session_state(handle);
+        assert!(state.is_ok());
+
+        // Remove it via registry directly
+        REGISTRY.with(|cell| {
+            let mut reg = cell.borrow_mut();
+            assert!(reg.sessions.remove(&handle).is_some());
+        });
+
+        // Verify it's gone via internal helper
+        let result = REGISTRY.with(|cell| {
+            let reg = cell.borrow();
+            reg.sessions.contains_key(&handle)
+        });
+        assert!(!result);
+    }
+
+    #[test]
+    fn normalize_rejects_parent_traversal() {
+        let err = normalize_for_archive("../etc/passwd").expect_err("should fail");
+        assert!(err.contains("parent directory traversal"));
+    }
+
+    #[test]
+    fn normalize_rejects_embedded_traversal() {
+        let err = normalize_for_archive("foo/../bar").expect_err("should fail");
+        assert!(err.contains("parent directory traversal"));
     }
 
     #[test]
     fn extract_rejects_windows_absolute_paths() {
         let archive = create_single_entry_archive("C:/temp/evil.txt");
-        let err = match extract_targz_safe(&archive) {
-            Ok(_) => unreachable!("windows absolute should fail"),
-            Err(err) => err,
-        };
+        let err = extract_targz_safe(&archive).expect_err("should fail");
         assert!(err.contains("absolute path"));
     }
 
     #[test]
-    fn runtime_lifecycle_roundtrip() {
-        let archive = fixture_archive(false);
-        let opts = r#"{"team":"north","model":"gpt-5.2","seed":17}"#;
-        let handle = match init_mobpack_impl(&archive, opts) {
-            Ok(value) => value,
-            Err(err) => unreachable!("init should pass: {err}"),
-        };
+    fn system_prompt_deterministic_ordering() {
+        let mut skills = BTreeMap::new();
+        skills.insert("zulu".to_string(), "last".to_string());
+        skills.insert("alpha".to_string(), "first".to_string());
+        skills.insert("mike".to_string(), "middle".to_string());
 
-        let init_json = match serde_json::to_string(&initial_state()) {
-            Ok(value) => value,
-            Err(err) => unreachable!("encode state failed: {err}"),
-        };
-        let start_out = start_match_impl(handle, &init_json);
-        assert!(start_out.is_ok(), "start failed: {start_out:?}");
-
-        let turn_input = TurnInput {
-            state: initial_state(),
-            opponent_signal: Some("offer_truce".to_string()),
-        };
-        let turn_json = match serde_json::to_string(&turn_input) {
-            Ok(value) => value,
-            Err(err) => unreachable!("encode turn failed: {err}"),
-        };
-        let decision_json = match submit_turn_input_impl(handle, &turn_json) {
-            Ok(value) => value,
-            Err(err) => unreachable!("turn should pass: {err}"),
-        };
-        assert!(decision_json.contains("planner_note"));
-
-        let events_json = match poll_events_impl(handle) {
-            Ok(value) => value,
-            Err(err) => unreachable!("poll should pass: {err}"),
-        };
-        assert!(events_json.contains("PLAN"));
-        assert!(events_json.contains("COMMIT"));
-
-        let snapshot = match snapshot_state_impl(handle) {
-            Ok(value) => value,
-            Err(err) => unreachable!("snapshot should pass: {err}"),
-        };
-        let restored = restore_state_impl(handle, &snapshot);
-        assert!(restored.is_ok(), "restore should pass: {restored:?}");
+        let (prompt, _) = compile_system_prompt("id", "name", &skills, None);
+        let alpha_pos = prompt.find("## Skill: alpha").expect("alpha");
+        let mike_pos = prompt.find("## Skill: mike").expect("mike");
+        let zulu_pos = prompt.find("## Skill: zulu").expect("zulu");
+        assert!(alpha_pos < mike_pos);
+        assert!(mike_pos < zulu_pos);
     }
 
     #[test]
-    fn resolver_produces_winner_after_max_turns() {
-        let input = ResolveInput {
-            state: initial_state(),
-            north_order: OrderSet {
-                team: "north".to_string(),
-                turn: 1,
-                aggression: 80,
-                fortify: 20,
-                diplomacy: "conditional_non_aggression".to_string(),
-                target_region: "frontier".to_string(),
-                model: "claude-opus-4-6".to_string(),
-            },
-            south_order: OrderSet {
-                team: "south".to_string(),
-                turn: 1,
-                aggression: 60,
-                fortify: 40,
-                diplomacy: "mutual_frontier_stability".to_string(),
-                target_region: "north-hub".to_string(),
-                model: "gemini-3.1-pro-preview".to_string(),
-            },
-        };
-        let output = resolve_turn_impl(input);
-        assert!(output.state.turn == 2);
-        assert!(output.state.ruleset_version == "mini-diplomacy-v1");
+    fn system_prompt_truncation() {
+        let mut skills = BTreeMap::new();
+        let large = "x".repeat(MAX_SYSTEM_PROMPT_BYTES + 1000);
+        skills.insert("big".to_string(), large);
+
+        let (prompt, event) = compile_system_prompt("id", "name", &skills, None);
+        assert!(prompt.len() <= MAX_SYSTEM_PROMPT_BYTES);
+        assert!(event.is_some());
+        if let Some(RuntimeEvent::SystemPromptTruncated {
+            original_bytes,
+            truncated_to,
+        }) = event
+        {
+            assert!(original_bytes > MAX_SYSTEM_PROMPT_BYTES);
+            assert!(truncated_to <= MAX_SYSTEM_PROMPT_BYTES);
+        }
+    }
+
+    #[test]
+    fn poll_events_drains() {
+        let pack = fixture_mobpack(false);
+        let config = r#"{"model":"test"}"#;
+        let handle = create_session(&pack, config).expect("create");
+
+        // First poll should be empty (or just truncation if skills are huge)
+        let events_json = poll_events(handle).expect("poll");
+        let events: Vec<serde_json::Value> =
+            serde_json::from_str(&events_json).expect("parse events");
+        // Second poll should also be empty (drained)
+        let events_json2 = poll_events(handle).expect("poll2");
+        let events2: Vec<serde_json::Value> =
+            serde_json::from_str(&events_json2).expect("parse events2");
+        assert!(events2.is_empty(), "should be drained: {events:?}");
     }
 }

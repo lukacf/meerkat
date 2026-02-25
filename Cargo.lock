@@ -2858,11 +2858,13 @@ name = "meerkat-web-runtime"
 version = "0.4.0"
 dependencies = [
  "flate2",
+ "js-sys",
  "serde",
  "serde_json",
  "tar",
  "toml",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]

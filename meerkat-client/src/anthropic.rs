@@ -530,6 +530,12 @@ impl LlmClient for AnthropicClient {
                 req = req.header("anthropic-beta", betas.join(","));
             }
 
+            // On wasm32 (browser), Anthropic requires this header for CORS
+            #[cfg(target_arch = "wasm32")]
+            {
+                req = req.header("anthropic-dangerous-direct-browser-access", "true");
+            }
+
             let response = req
                 .json(&body)
                 .send()

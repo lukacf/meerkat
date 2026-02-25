@@ -13,7 +13,7 @@ pub struct MemoryMetadata {
     /// Turn number within the session.
     pub turn: Option<u32>,
     /// When the memory was indexed.
-    pub indexed_at: std::time::SystemTime,
+    pub indexed_at: crate::time_compat::SystemTime,
 }
 
 /// A memory search result.

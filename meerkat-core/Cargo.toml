@@ -35,6 +35,8 @@ tokio = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio_with_wasm = { workspace = true }
+js-sys = "0.3"
+web-time = { version = "1", features = ["serde"] }
 getrandom = { version = "0.3", features = ["wasm_js"] }
 uuid = { version = "1.11", features = ["v4", "v7", "serde", "js"] }
 

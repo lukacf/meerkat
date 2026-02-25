@@ -168,7 +168,7 @@ where
                                         let metadata = crate::memory::MemoryMetadata {
                                             session_id: session_id.clone(),
                                             turn: Some(turn_count),
-                                            indexed_at: std::time::SystemTime::now(),
+                                            indexed_at: crate::time_compat::SystemTime::now(),
                                         };
                                         if let Err(e) = store.index(&content, metadata).await {
                                             tracing::warn!(
@@ -477,7 +477,7 @@ where
                             .map(|tc| {
                                 let tools_ref = Arc::clone(&tools_ref);
                                 async move {
-                                    let start = std::time::Instant::now();
+                                    let start = crate::time_compat::Instant::now();
                                     let dispatch_result = tools_ref.dispatch(tc.as_view()).await;
                                     let duration_ms = start.elapsed().as_millis() as u64;
                                     (tc, dispatch_result, duration_ms)

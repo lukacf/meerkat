@@ -3,9 +3,9 @@
 //! Tracks and enforces resource limits (tokens, time, tool calls).
 
 use crate::error::AgentError;
+use crate::time_compat::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
 
 /// Resource limits for an agent run
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

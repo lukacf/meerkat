@@ -48,6 +48,7 @@ pub mod skills;
 pub mod skills_config;
 pub mod state;
 pub mod sub_agent;
+pub mod time_compat;
 pub mod turn_boundary;
 pub mod types;
 

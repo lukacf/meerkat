@@ -6,6 +6,7 @@
 pub mod transport;
 
 use crate::event::{AgentEvent, ScopedAgentEvent, StreamScopeFrame};
+use crate::time_compat::SystemTime;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use crate::types::{RunResult, SessionId, Usage};
@@ -16,7 +17,6 @@ use crate::{EventStream, StreamError};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::SystemTime;
 use tokio::sync::mpsc;
 
 /// Controls whether `create_session()` should execute an initial turn.

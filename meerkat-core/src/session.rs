@@ -11,10 +11,10 @@
 
 use crate::Provider;
 use crate::peer_meta::PeerMeta;
+use crate::time_compat::SystemTime;
 use crate::types::{Message, SessionId, Usage};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::sync::Arc;
-use std::time::SystemTime;
 
 /// Current session format version
 pub const SESSION_VERSION: u32 = 1;

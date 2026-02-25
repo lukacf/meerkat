@@ -189,7 +189,7 @@ where
 
         // Spawn the sub-agent in a background task
         tokio::spawn(async move {
-            let start = std::time::Instant::now();
+            let start = crate::time_compat::Instant::now();
 
             // Build sub-agent with filtered tools
             let mut sub_agent = AgentBuilder::new()
@@ -344,7 +344,7 @@ where
 
             // Spawn the branch in a background task
             tokio::spawn(async move {
-                let start = std::time::Instant::now();
+                let start = crate::time_compat::Instant::now();
 
                 // Build sub-agent for this branch with filtered tools
                 let mut sub_agent = AgentBuilder::new()

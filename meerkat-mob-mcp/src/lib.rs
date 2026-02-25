@@ -1,3 +1,8 @@
+#[cfg(target_arch = "wasm32")]
+mod tokio {
+    pub use tokio_with_wasm::alias::*;
+}
+
 use async_trait::async_trait;
 use meerkat_core::ScopedAgentEvent;
 use meerkat_core::agent::{AgentToolDispatcher, CommsRuntime as CoreCommsRuntime};
@@ -8,6 +13,7 @@ use meerkat_core::service::{
     CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService, SessionSummary,
     SessionUsage, SessionView, StartTurnRequest,
 };
+use meerkat_core::time_compat::{Instant, SystemTime};
 use meerkat_core::types::{RunResult, SessionId, ToolCallView, ToolDef, ToolResult, Usage};
 use meerkat_mob::{
     FlowId, MeerkatId, MobBackendKind, MobBuilder, MobDefinition, MobError, MobHandle, MobId,
@@ -18,7 +24,10 @@ use serde::Deserialize;
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap, HashSet, btree_map::Entry};
 use std::sync::Arc;
-use std::time::Instant;
+
+#[cfg(not(target_arch = "wasm32"))]
+use ::tokio::sync::{RwLock, mpsc};
+#[cfg(target_arch = "wasm32")]
 use tokio::sync::{RwLock, mpsc};
 
 #[derive(Clone)]
@@ -303,7 +312,8 @@ impl LocalCommsRuntime {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl CoreCommsRuntime for LocalCommsRuntime {
     fn public_key(&self) -> Option<String> {
         Some(self.key.clone())
@@ -348,7 +358,8 @@ impl LocalSessionService {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl SessionService for LocalSessionService {
     async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
         let sid = SessionId::new();
@@ -406,8 +417,8 @@ impl SessionService for LocalSessionService {
         Ok(SessionView {
             state: SessionInfo {
                 session_id: id.clone(),
-                created_at: std::time::SystemTime::now(),
-                updated_at: std::time::SystemTime::now(),
+                created_at: SystemTime::now(),
+                updated_at: SystemTime::now(),
                 message_count: 0,
                 is_active: false,
                 last_assistant_text: None,
@@ -427,8 +438,8 @@ impl SessionService for LocalSessionService {
             .keys()
             .map(|id| SessionSummary {
                 session_id: id.clone(),
-                created_at: std::time::SystemTime::now(),
-                updated_at: std::time::SystemTime::now(),
+                created_at: SystemTime::now(),
+                updated_at: SystemTime::now(),
                 message_count: 0,
                 total_tokens: 0,
                 is_active: false,
@@ -442,7 +453,8 @@ impl SessionService for LocalSessionService {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MobSessionService for LocalSessionService {
     async fn comms_runtime(&self, session_id: &SessionId) -> Option<Arc<dyn CoreCommsRuntime>> {
         self.sessions
@@ -683,7 +695,8 @@ fn default_limit() -> usize {
     100
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AgentToolDispatcher for MobMcpDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         self.tools.clone()

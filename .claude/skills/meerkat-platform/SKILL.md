@@ -99,6 +99,47 @@ Web build env overrides:
 - `RKAT_WASM_PACK_BIN`: explicit wasm-pack binary path
 - `RKAT_WEB_RUNTIME_CRATE_DIR`: explicit web runtime crate directory for build
 
+### WASM runtime capabilities (browser surface)
+
+The `meerkat-web-runtime` crate compiles the **real meerkat agent stack** to wasm32 — same agent loop, same providers, same streaming as CLI/RPC/REST. It is NOT a mock or simulation.
+
+**Architecture:**
+- `tokio_with_wasm` provides the async runtime (drop-in tokio replacement backed by JS event loop)
+- `reqwest` uses browser `fetch` on wasm32 (no custom JS bridge needed)
+- `web-time` replaces `std::time::{SystemTime, Instant}` (browser-safe via `Date.now()` / `performance.now()`)
+- `#[async_trait(?Send)]` on wasm32 (single-threaded, no `Send` requirement)
+- Anthropic CORS header (`anthropic-dangerous-direct-browser-access`) added automatically on wasm32
+
+**Fully available on wasm32:**
+- Agent loop (streaming, retries, error recovery, budget enforcement)
+- All three LLM providers (Anthropic, OpenAI, Gemini) via browser fetch
+- Session management (create, fork, push, serialize)
+- JSON schema validation (structured output extraction)
+- Event model (all AgentEvent variants)
+- MCP config types (McpServerConfig, McpTransportConfig)
+- Tool dispatcher trait, compactor trait, memory store trait
+- Comms runtime trait, sub-agent management
+- Skills types and resolution
+- Hook engine trait
+
+**Not available on wasm32 (inherent browser limitations):**
+- Filesystem config loading (Config::load, skills file loading) — use programmatic config
+- Default system prompt from AGENTS.md — set explicitly via AgentBuilder.system_prompt()
+- Stdio MCP servers — no process spawning in browser
+- MCP protocol client (rmcp crate) — blocked by rmcp's tokio/mio dependency; types available but connections not
+- Shell tool, process spawning
+- File-based session persistence — use in-memory or API-backed storage
+
+**API surface:**
+```
+create_session(mobpack_bytes, config_json) → handle
+start_turn(handle, prompt, options_json) → RunResult JSON  [async]
+poll_events(handle) → RuntimeEvent[] JSON
+get_session_state(handle) → session metadata JSON
+inspect_mobpack(mobpack_bytes) → manifest + skills JSON
+destroy_session(handle)
+```
+
 Mob flows are optional and layered on top of this lifecycle.
 
 ### Mob flows (DAG runtime)

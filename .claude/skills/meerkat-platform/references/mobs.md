@@ -257,6 +257,30 @@ cargo install wasm-pack
 export PATH="$HOME/.cargo/bin:$PATH"
 ```
 
+### WASM browser surface
+
+The web build produces a real meerkat surface — same agent loop, providers, and streaming as CLI/RPC/REST.
+
+**How it works:**
+- `meerkat-core` + `meerkat-client` compile to wasm32 via `tokio_with_wasm` (drop-in tokio replacement)
+- `reqwest` uses browser `fetch` on wasm32 — no custom JS bridge
+- `web-time` replaces `std::time` types (SystemTime, Instant) for browser compatibility
+- Anthropic CORS header added automatically on wasm32 targets
+
+**Available in browser:** agent loop, all LLM providers, sessions, JSON schema validation, budget enforcement, events, skills types, MCP config types, tool/compactor/memory traits.
+
+**Not available in browser:** filesystem config loading (programmatic config instead), stdio MCP servers (no processes), MCP protocol client (rmcp depends on tokio/mio — types work but connections blocked), shell tool, file-based persistence.
+
+**WASM API:**
+```
+create_session(mobpack_bytes, config_json) → handle
+start_turn(handle, prompt, options_json) → RunResult  [async]
+poll_events(handle) → RuntimeEvent[]
+get_session_state(handle) → metadata
+inspect_mobpack(mobpack_bytes) → manifest + skills
+destroy_session(handle)
+```
+
 ### RPC
 
 ```json

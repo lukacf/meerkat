@@ -7,13 +7,12 @@ use crate::BlockAssembler;
 use crate::error::LlmError;
 use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream};
 use async_trait::async_trait;
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 use meerkat_core::{AssistantBlock, Message, OutputSchema, ProviderMeta, StopReason, Usage};
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::value::RawValue;
 use std::collections::HashSet;
-use std::pin::Pin;
 
 /// Client for OpenAI Responses API
 pub struct OpenAiClient {

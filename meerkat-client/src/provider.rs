@@ -3,11 +3,9 @@
 use crate::error::LlmError;
 use crate::factory::{DefaultClientFactory, DefaultFactoryConfig, LlmClientFactory, LlmProvider};
 use crate::test_client::TestClient;
-use crate::types::{LlmClient, LlmEvent, LlmRequest, LlmStream};
+use crate::types::{LlmClient, LlmRequest, LlmStream};
 use async_trait::async_trait;
-use futures::Stream;
 use meerkat_core::Provider;
-use std::pin::Pin;
 use std::sync::Arc;
 
 /// Resolves providers, API keys, and client instances from shared rules.

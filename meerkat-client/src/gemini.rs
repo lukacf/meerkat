@@ -5,13 +5,12 @@
 use crate::error::LlmError;
 use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream};
 use async_trait::async_trait;
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 use meerkat_core::schema::{CompiledSchema, SchemaCompat, SchemaError, SchemaWarning};
 use meerkat_core::{Message, OutputSchema, Provider, StopReason, Usage};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::pin::Pin;
 
 /// Client for Google Gemini API
 pub struct GeminiClient {

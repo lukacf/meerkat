@@ -5,12 +5,11 @@
 use crate::error::LlmError;
 use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream};
 use async_trait::async_trait;
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{Message, OutputSchema, StopReason, Usage};
 use serde::Deserialize;
 use serde_json::Value;
-use std::pin::Pin;
 use std::time::Duration;
 
 /// Default connect timeout

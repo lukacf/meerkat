@@ -52,7 +52,8 @@ fn spawn_scoped_forwarder(
 }
 
 /// Minimal runner interface for an Agent.
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait AgentRunner: Send {
     async fn run(&mut self, prompt: String) -> Result<RunResult, AgentError>;
 

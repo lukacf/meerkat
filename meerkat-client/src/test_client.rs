@@ -31,7 +31,8 @@ impl Default for TestClient {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl LlmClient for TestClient {
     fn stream<'a>(&'a self, _request: &'a LlmRequest) -> LlmStream<'a> {
         let events = self.events.clone();

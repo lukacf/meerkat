@@ -643,7 +643,8 @@ mod tests {
         }
     }
 
-    #[async_trait]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl CommsRuntime for MockCommsRuntime {
         async fn drain_messages(&self) -> Vec<String> {
             self.drain_count.fetch_add(1, Ordering::SeqCst);
@@ -659,7 +660,8 @@ mod tests {
     // Mock LLM client that returns empty response
     struct MockLlmClient;
 
-    #[async_trait]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl AgentLlmClient for MockLlmClient {
         async fn stream_response(
             &self,
@@ -687,7 +689,8 @@ mod tests {
     // Mock LLM client that always fails.
     struct FailingLlmClient;
 
-    #[async_trait]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl AgentLlmClient for FailingLlmClient {
         async fn stream_response(
             &self,
@@ -712,7 +715,8 @@ mod tests {
     // Mock tool dispatcher with no tools
     struct MockToolDispatcher;
 
-    #[async_trait]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl AgentToolDispatcher for MockToolDispatcher {
         fn tools(&self) -> Arc<[Arc<ToolDef>]> {
             Arc::new([])
@@ -731,7 +735,8 @@ mod tests {
     // Mock session store
     struct MockSessionStore;
 
-    #[async_trait]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl AgentSessionStore for MockSessionStore {
         async fn save(&self, _session: &Session) -> Result<(), AgentError> {
             Ok(())
@@ -777,7 +782,8 @@ mod tests {
         }
     }
 
-    #[async_trait]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl CommsRuntime for SyncInteractionMockCommsRuntime {
         async fn drain_messages(&self) -> Vec<String> {
             vec![]
@@ -853,7 +859,8 @@ mod tests {
         }
     }
 
-    #[async_trait]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl CommsRuntime for SequencedInteractionMockCommsRuntime {
         async fn drain_messages(&self) -> Vec<String> {
             vec![]

@@ -286,7 +286,8 @@ impl SessionView {
 ///
 /// All surfaces delegate to this trait. Implementations control persistence,
 /// compaction, and event logging behavior.
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait SessionService: Send + Sync {
     /// Create a new session and run the first turn.
     async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError>;

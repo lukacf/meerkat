@@ -177,7 +177,8 @@ pub type LlmStream<'a> = Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> +
 ///
 /// Each provider implementation normalizes its streaming response
 /// to the common `LlmEvent` type, hiding provider-specific quirks.
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait LlmClient: Send + Sync {
     /// Stream a completion request
     ///

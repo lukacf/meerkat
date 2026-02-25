@@ -484,7 +484,8 @@ fn merge_usage(target: &mut Usage, update: &AnthropicUsage) {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl LlmClient for AnthropicClient {
     fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
         let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {

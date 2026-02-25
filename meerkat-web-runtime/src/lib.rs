@@ -3,6 +3,40 @@
 //! Routes through `AgentFactory::build_agent()` with override-first resource
 //! injection, same pipeline as CLI/RPC/REST/MCP. Uses real agent loop, real LLM
 //! providers (browser fetch), real comms (inproc), and real tool dispatch.
+//!
+//! ## Platform API
+//!
+//! ### Bootstrap
+//! - `init_runtime(mobpack_bytes, credentials_json)` — primary mobpack bootstrap
+//! - `init_runtime_from_config(config_json)` — bare-bones bootstrap without mobpack
+//!
+//! ### Session (direct agent loop, existing per-session approach)
+//! - `create_session(mobpack_bytes, config_json)` → handle
+//! - `start_turn(handle, prompt, options_json)` → JSON result
+//! - `get_session_state(handle)` → JSON
+//! - `destroy_session(handle)`
+//! - `inspect_mobpack(mobpack_bytes)` → JSON
+//! - `poll_events(handle)` → JSON
+//!
+//! ### Mob lifecycle (delegates to `MobMcpState`)
+//! - `mob_create(definition_json)` → mob_id
+//! - `mob_status(mob_id)` → JSON
+//! - `mob_list()` → JSON
+//! - `mob_lifecycle(mob_id, action)` — stop/resume/complete/destroy
+//! - `mob_events(mob_id, after_cursor, limit)` → JSON
+//! - `mob_spawn(mob_id, specs_json)` → JSON
+//! - `mob_retire(mob_id, meerkat_id)`
+//! - `mob_wire(mob_id, a, b)`
+//! - `mob_unwire(mob_id, a, b)`
+//! - `mob_list_members(mob_id)` → JSON
+//! - `mob_send_message(mob_id, meerkat_id, message)`
+//! - `mob_run_flow(mob_id, flow_id, params_json)` → run_id
+//! - `mob_flow_status(mob_id, run_id)` → JSON
+//! - `mob_cancel_flow(mob_id, run_id)`
+//!
+//! ### Comms (placeholder)
+//! - `comms_peers(session_id)` → JSON
+//! - `comms_send(session_id, params_json)` → JSON
 
 #[cfg(target_arch = "wasm32")]
 pub mod tokio {
@@ -18,6 +52,8 @@ use wasm_bindgen::prelude::*;
 
 use meerkat::AgentBuildConfig;
 use meerkat_core::Config;
+use meerkat_mob::{FlowId, MeerkatId, MobDefinition, MobId, RunId};
+use meerkat_mob_mcp::MobMcpState;
 
 // ═══════════════════════════════════════════════════════════
 // Constants
@@ -26,6 +62,7 @@ use meerkat_core::Config;
 const MAX_SYSTEM_PROMPT_BYTES: usize = 100 * 1024;
 const FORBIDDEN_CAPABILITIES: &[&str] = &["shell", "mcp_stdio", "process_spawn"];
 const SKILL_SEPARATOR: &str = "\n\n---\n\n";
+const MAX_SESSIONS: usize = 64;
 
 // ═══════════════════════════════════════════════════════════
 // Mobpack Types
@@ -85,6 +122,38 @@ fn default_max_tokens() -> u32 {
 }
 
 // ═══════════════════════════════════════════════════════════
+// Credentials / Config for init_runtime
+// ═══════════════════════════════════════════════════════════
+
+#[derive(Debug, Deserialize)]
+struct Credentials {
+    api_key: String,
+    #[serde(default = "default_model")]
+    model: Option<String>,
+    #[serde(default)]
+    base_url: Option<String>,
+}
+
+fn default_model() -> Option<String> {
+    Some("claude-sonnet-4-5".to_string())
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeConfig {
+    api_key: String,
+    #[serde(default = "default_model")]
+    model: Option<String>,
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default = "default_max_sessions")]
+    max_sessions: usize,
+}
+
+fn default_max_sessions() -> usize {
+    MAX_SESSIONS
+}
+
+// ═══════════════════════════════════════════════════════════
 // Event Model
 // ═══════════════════════════════════════════════════════════
 
@@ -128,6 +197,44 @@ thread_local! {
 }
 
 // ═══════════════════════════════════════════════════════════
+// RuntimeState — service-based infrastructure
+// ═══════════════════════════════════════════════════════════
+
+struct RuntimeState {
+    mob_state: Arc<MobMcpState>,
+    #[allow(dead_code)]
+    model: String,
+    #[allow(dead_code)]
+    api_key: String,
+    #[allow(dead_code)]
+    base_url: Option<String>,
+}
+
+thread_local! {
+    static RUNTIME_STATE: RefCell<Option<RuntimeState>> = const { RefCell::new(None) };
+}
+
+fn with_runtime_state<F, R>(f: F) -> Result<R, JsValue>
+where
+    F: FnOnce(&RuntimeState) -> Result<R, JsValue>,
+{
+    RUNTIME_STATE.with(|cell| {
+        let borrow = cell.borrow();
+        let state = borrow
+            .as_ref()
+            .ok_or_else(|| err_js("not_initialized", "runtime not initialized — call init_runtime or init_runtime_from_config first"))?;
+        f(state)
+    })
+}
+
+fn with_mob_state<F, R>(f: F) -> Result<R, JsValue>
+where
+    F: FnOnce(Arc<MobMcpState>) -> Result<R, JsValue>,
+{
+    with_runtime_state(|state| f(state.mob_state.clone()))
+}
+
+// ═══════════════════════════════════════════════════════════
 // Error helpers
 // ═══════════════════════════════════════════════════════════
 
@@ -138,6 +245,10 @@ fn err_js(code: &str, message: &str) -> JsValue {
 
 fn err_str(code: &str, msg: impl std::fmt::Display) -> JsValue {
     err_js(code, &msg.to_string())
+}
+
+fn err_mob(e: meerkat_mob::MobError) -> JsValue {
+    err_str("mob_error", e)
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -353,7 +464,115 @@ fn build_wasm_tool_dispatcher() -> Result<Arc<dyn meerkat_core::AgentToolDispatc
 }
 
 // ═══════════════════════════════════════════════════════════
-// Exported WASM API
+// Bootstrap: init_runtime
+// ═══════════════════════════════════════════════════════════
+
+/// Primary bootstrap: parse a mobpack and create service infrastructure.
+///
+/// `mobpack_bytes`: tar.gz mobpack archive.
+/// `credentials_json`: `{ "api_key": "sk-ant-...", "model"?: "claude-sonnet-4-5", "base_url"?: "..." }`
+///
+/// Stores an `EphemeralSessionService<FactoryAgentBuilder>` and a `MobMcpState`
+/// in a `thread_local! RuntimeState` for subsequent mob/comms calls.
+#[wasm_bindgen]
+pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsValue, JsValue> {
+    let _parsed = parse_mobpack(mobpack_bytes).map_err(|e| err_str("invalid_mobpack", e))?;
+    let creds: Credentials =
+        serde_json::from_str(credentials_json).map_err(|e| err_str("invalid_credentials", e))?;
+
+    if creds.api_key.is_empty() {
+        return Err(err_js("invalid_credentials", "api_key must not be empty"));
+    }
+
+    let model = creds.model.unwrap_or_else(|| "claude-sonnet-4-5".to_string());
+
+    // Create the service infrastructure.
+    let factory = meerkat::AgentFactory::minimal();
+    let mut config = Config::default();
+    config.agent.model.clone_from(&model);
+    let mut builder = meerkat::FactoryAgentBuilder::new(factory, config);
+
+    // Inject the default LLM client so all sessions built through the service
+    // use the provided credentials.
+    let llm_client = create_llm_client(&model, &creds.api_key, creds.base_url.as_deref())
+        .map_err(|e| err_str("provider_error", e))?;
+    builder.default_llm_client = Some(llm_client);
+
+    let service = Arc::new(meerkat::EphemeralSessionService::new(builder, MAX_SESSIONS));
+    let mob_state = Arc::new(MobMcpState::new(
+        service as Arc<dyn meerkat_mob::MobSessionService>,
+    ));
+
+    RUNTIME_STATE.with(|cell| {
+        *cell.borrow_mut() = Some(RuntimeState {
+            mob_state,
+            model: model.clone(),
+            api_key: creds.api_key.clone(),
+            base_url: creds.base_url.clone(),
+        });
+    });
+
+    let result = serde_json::json!({
+        "status": "initialized",
+        "model": model,
+    });
+    Ok(JsValue::from_str(&result.to_string()))
+}
+
+// ═══════════════════════════════════════════════════════════
+// Bootstrap: init_runtime_from_config
+// ═══════════════════════════════════════════════════════════
+
+/// Advanced bare-bones bootstrap without a mobpack.
+///
+/// `config_json`: `{ "api_key": "sk-ant-...", "model"?: "claude-sonnet-4-5", "max_sessions"?: 64 }`
+#[wasm_bindgen]
+pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
+    let rt_config: RuntimeConfig =
+        serde_json::from_str(config_json).map_err(|e| err_str("invalid_config", e))?;
+
+    if rt_config.api_key.is_empty() {
+        return Err(err_js("invalid_config", "api_key must not be empty"));
+    }
+
+    let model = rt_config
+        .model
+        .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
+    let max_sessions = rt_config.max_sessions;
+
+    let factory = meerkat::AgentFactory::minimal();
+    let mut config = Config::default();
+    config.agent.model.clone_from(&model);
+    let mut builder = meerkat::FactoryAgentBuilder::new(factory, config);
+
+    let llm_client = create_llm_client(&model, &rt_config.api_key, rt_config.base_url.as_deref())
+        .map_err(|e| err_str("provider_error", e))?;
+    builder.default_llm_client = Some(llm_client);
+
+    let service = Arc::new(meerkat::EphemeralSessionService::new(builder, max_sessions));
+    let mob_state = Arc::new(MobMcpState::new(
+        service as Arc<dyn meerkat_mob::MobSessionService>,
+    ));
+
+    RUNTIME_STATE.with(|cell| {
+        *cell.borrow_mut() = Some(RuntimeState {
+            mob_state,
+            model: model.clone(),
+            api_key: rt_config.api_key.clone(),
+            base_url: rt_config.base_url.clone(),
+        });
+    });
+
+    let result = serde_json::json!({
+        "status": "initialized",
+        "model": model,
+        "max_sessions": max_sessions,
+    });
+    Ok(JsValue::from_str(&result.to_string()))
+}
+
+// ═══════════════════════════════════════════════════════════
+// Exported WASM API — Session (existing per-session approach)
 // ═══════════════════════════════════════════════════════════
 
 /// Create a session from a mobpack + config.
@@ -445,7 +664,7 @@ pub async fn start_turn(
     _options_json: &str,
 ) -> Result<JsValue, JsValue> {
     // Extract what we need from the session (release borrow quickly).
-    let (mut build_config, config, prior_session, run_id) = REGISTRY
+    let (build_config, config, _prior_session, run_id) = REGISTRY
         .with(|cell| {
             let mut registry = cell.borrow_mut();
             let session = registry
@@ -608,4 +827,306 @@ pub fn poll_events(_handle: u32) -> Result<String, JsValue> {
     // Events will be populated once we wire AgentEvent streaming through
     // the build_config event channel. For now, return empty array.
     Ok("[]".to_string())
+}
+
+// ═══════════════════════════════════════════════════════════
+// Mob Lifecycle Exports (delegates to MobMcpState)
+// ═══════════════════════════════════════════════════════════
+
+/// Create a new mob from a definition JSON.
+///
+/// Returns the mob_id as a string.
+#[wasm_bindgen]
+pub async fn mob_create(definition_json: &str) -> Result<JsValue, JsValue> {
+    let definition: MobDefinition =
+        serde_json::from_str(definition_json).map_err(|e| err_str("invalid_definition", e))?;
+    let mob_state = with_mob_state(Ok)?;
+    let mob_id = mob_state
+        .mob_create_definition(definition)
+        .await
+        .map_err(err_mob)?;
+    Ok(JsValue::from_str(&mob_id.to_string()))
+}
+
+/// Get the status of a mob.
+///
+/// Returns JSON with the mob state.
+#[wasm_bindgen]
+pub async fn mob_status(mob_id: &str) -> Result<JsValue, JsValue> {
+    let mob_state = with_mob_state(Ok)?;
+    let id = MobId::from(mob_id);
+    let state = mob_state.mob_status(&id).await.map_err(err_mob)?;
+    let result = serde_json::json!({
+        "mob_id": mob_id,
+        "state": state.as_str(),
+    });
+    Ok(JsValue::from_str(&result.to_string()))
+}
+
+/// List all mobs.
+///
+/// Returns JSON array of `{ mob_id, state }`.
+#[wasm_bindgen]
+pub async fn mob_list() -> Result<JsValue, JsValue> {
+    let mob_state = with_mob_state(Ok)?;
+    let mobs = mob_state.mob_list().await;
+    let result: Vec<serde_json::Value> = mobs
+        .into_iter()
+        .map(|(id, state)| {
+            serde_json::json!({
+                "mob_id": id.to_string(),
+                "state": state.as_str(),
+            })
+        })
+        .collect();
+    let json = serde_json::to_string(&result).map_err(|e| err_str("serialize_error", e))?;
+    Ok(JsValue::from_str(&json))
+}
+
+/// Perform a lifecycle action on a mob.
+///
+/// `action`: one of "stop", "resume", "complete", "destroy".
+#[wasm_bindgen]
+pub async fn mob_lifecycle(mob_id: &str, action: &str) -> Result<(), JsValue> {
+    let mob_state = with_mob_state(Ok)?;
+    let id = MobId::from(mob_id);
+    match action {
+        "stop" => mob_state.mob_stop(&id).await.map_err(err_mob)?,
+        "resume" => mob_state.mob_resume(&id).await.map_err(err_mob)?,
+        "complete" => mob_state.mob_complete(&id).await.map_err(err_mob)?,
+        "destroy" => mob_state.mob_destroy(&id).await.map_err(err_mob)?,
+        _ => {
+            return Err(err_js(
+                "invalid_action",
+                &format!("unknown lifecycle action: {action} (expected stop/resume/complete/destroy)"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Fetch mob events.
+///
+/// Returns JSON array of mob events.
+#[wasm_bindgen]
+pub async fn mob_events(
+    mob_id: &str,
+    after_cursor: u64,
+    limit: u32,
+) -> Result<JsValue, JsValue> {
+    let mob_state = with_mob_state(Ok)?;
+    let id = MobId::from(mob_id);
+    let events = mob_state
+        .mob_events(&id, after_cursor, limit as usize)
+        .await
+        .map_err(err_mob)?;
+    let json = serde_json::to_string(&events).map_err(|e| err_str("serialize_error", e))?;
+    Ok(JsValue::from_str(&json))
+}
+
+/// Spawn one or more meerkats in a mob.
+///
+/// `specs_json`: JSON array of `{ "profile": "...", "meerkat_id": "...", "initial_message"?: "...",
+///                "runtime_mode"?: "autonomous_host"|"turn_driven", "backend"?: "subagent"|"external" }`
+///
+/// Returns JSON array of results per spec.
+#[wasm_bindgen]
+pub async fn mob_spawn(mob_id: &str, specs_json: &str) -> Result<JsValue, JsValue> {
+    let mob_state = with_mob_state(Ok)?;
+    let id = MobId::from(mob_id);
+    let specs: Vec<SpawnSpecInput> =
+        serde_json::from_str(specs_json).map_err(|e| err_str("invalid_specs", e))?;
+
+    let spawn_specs: Vec<meerkat_mob::SpawnMemberSpec> = specs
+        .into_iter()
+        .map(|s| meerkat_mob::SpawnMemberSpec {
+            profile_name: meerkat_mob::ProfileName::from(s.profile.as_str()),
+            meerkat_id: MeerkatId::from(s.meerkat_id.as_str()),
+            initial_message: s.initial_message,
+            runtime_mode: s.runtime_mode,
+            backend: s.backend,
+        })
+        .collect();
+
+    let results = mob_state
+        .mob_spawn_many(&id, spawn_specs)
+        .await
+        .map_err(err_mob)?;
+
+    let result_json: Vec<serde_json::Value> = results
+        .into_iter()
+        .map(|r| match r {
+            Ok(member_ref) => serde_json::json!({
+                "status": "ok",
+                "member_ref": serde_json::to_value(&member_ref).unwrap_or(serde_json::Value::Null),
+            }),
+            Err(e) => serde_json::json!({
+                "status": "error",
+                "error": e.to_string(),
+            }),
+        })
+        .collect();
+
+    let json = serde_json::to_string(&result_json).map_err(|e| err_str("serialize_error", e))?;
+    Ok(JsValue::from_str(&json))
+}
+
+#[derive(Debug, Deserialize)]
+struct SpawnSpecInput {
+    profile: String,
+    meerkat_id: String,
+    #[serde(default)]
+    initial_message: Option<String>,
+    #[serde(default)]
+    runtime_mode: Option<meerkat_mob::MobRuntimeMode>,
+    #[serde(default)]
+    backend: Option<meerkat_mob::MobBackendKind>,
+}
+
+/// Retire a meerkat from a mob.
+#[wasm_bindgen]
+pub async fn mob_retire(mob_id: &str, meerkat_id: &str) -> Result<(), JsValue> {
+    let mob_state = with_mob_state(Ok)?;
+    let id = MobId::from(mob_id);
+    let mid = MeerkatId::from(meerkat_id);
+    mob_state.mob_retire(&id, mid).await.map_err(err_mob)
+}
+
+/// Wire bidirectional trust between two meerkats.
+#[wasm_bindgen]
+pub async fn mob_wire(mob_id: &str, a: &str, b: &str) -> Result<(), JsValue> {
+    let mob_state = with_mob_state(Ok)?;
+    let id = MobId::from(mob_id);
+    mob_state
+        .mob_wire(&id, MeerkatId::from(a), MeerkatId::from(b))
+        .await
+        .map_err(err_mob)
+}
+
+/// Unwire bidirectional trust between two meerkats.
+#[wasm_bindgen]
+pub async fn mob_unwire(mob_id: &str, a: &str, b: &str) -> Result<(), JsValue> {
+    let mob_state = with_mob_state(Ok)?;
+    let id = MobId::from(mob_id);
+    mob_state
+        .mob_unwire(&id, MeerkatId::from(a), MeerkatId::from(b))
+        .await
+        .map_err(err_mob)
+}
+
+/// List all members in a mob.
+///
+/// Returns JSON array of roster entries.
+#[wasm_bindgen]
+pub async fn mob_list_members(mob_id: &str) -> Result<JsValue, JsValue> {
+    let mob_state = with_mob_state(Ok)?;
+    let id = MobId::from(mob_id);
+    let members = mob_state.mob_list_members(&id).await.map_err(err_mob)?;
+    let json = serde_json::to_string(&members).map_err(|e| err_str("serialize_error", e))?;
+    Ok(JsValue::from_str(&json))
+}
+
+/// Send an external message to a spawned meerkat.
+#[wasm_bindgen]
+pub async fn mob_send_message(
+    mob_id: &str,
+    meerkat_id: &str,
+    message: &str,
+) -> Result<(), JsValue> {
+    let mob_state = with_mob_state(Ok)?;
+    let id = MobId::from(mob_id);
+    let mid = MeerkatId::from(meerkat_id);
+    mob_state
+        .mob_send_message(&id, mid, message.to_string())
+        .await
+        .map_err(err_mob)
+}
+
+/// Start a configured flow run.
+///
+/// Returns the run_id as a string.
+#[wasm_bindgen]
+pub async fn mob_run_flow(
+    mob_id: &str,
+    flow_id: &str,
+    params_json: &str,
+) -> Result<JsValue, JsValue> {
+    let mob_state = with_mob_state(Ok)?;
+    let id = MobId::from(mob_id);
+    let fid = FlowId::from(flow_id);
+    let params: serde_json::Value = if params_json.is_empty() {
+        serde_json::Value::Object(serde_json::Map::new())
+    } else {
+        serde_json::from_str(params_json).map_err(|e| err_str("invalid_params", e))?
+    };
+    let run_id = mob_state
+        .mob_run_flow(&id, fid, params)
+        .await
+        .map_err(err_mob)?;
+    Ok(JsValue::from_str(&run_id.to_string()))
+}
+
+/// Read flow run status.
+///
+/// Returns JSON with run state and ledgers, or null if not found.
+#[wasm_bindgen]
+pub async fn mob_flow_status(mob_id: &str, run_id: &str) -> Result<JsValue, JsValue> {
+    let mob_state = with_mob_state(Ok)?;
+    let id = MobId::from(mob_id);
+    let rid: RunId = run_id
+        .parse()
+        .map_err(|e| err_str("invalid_run_id", format!("{e}")))?;
+    let status = mob_state
+        .mob_flow_status(&id, rid)
+        .await
+        .map_err(err_mob)?;
+    match status {
+        Some(run) => {
+            let json =
+                serde_json::to_string(&run).map_err(|e| err_str("serialize_error", e))?;
+            Ok(JsValue::from_str(&json))
+        }
+        None => Ok(JsValue::from_str("null")),
+    }
+}
+
+/// Cancel an in-flight flow run.
+#[wasm_bindgen]
+pub async fn mob_cancel_flow(mob_id: &str, run_id: &str) -> Result<(), JsValue> {
+    let mob_state = with_mob_state(Ok)?;
+    let id = MobId::from(mob_id);
+    let rid: RunId = run_id
+        .parse()
+        .map_err(|e| err_str("invalid_run_id", format!("{e}")))?;
+    mob_state.mob_cancel_flow(&id, rid).await.map_err(err_mob)
+}
+
+// ═══════════════════════════════════════════════════════════
+// Comms Exports (placeholder)
+// ═══════════════════════════════════════════════════════════
+
+/// List peers for a session (placeholder).
+///
+/// Returns JSON array. Currently returns empty array — will be wired
+/// when sessions route through SessionService.
+#[wasm_bindgen]
+pub async fn comms_peers(_session_id: &str) -> Result<JsValue, JsValue> {
+    // Placeholder: comms peer discovery will be wired when sessions
+    // go through the service-based path with comms runtime access.
+    Ok(JsValue::from_str("[]"))
+}
+
+/// Send a comms command for a session (placeholder).
+///
+/// Returns JSON result. Currently returns a stub — will be wired
+/// when sessions route through SessionService.
+#[wasm_bindgen]
+pub async fn comms_send(_session_id: &str, _params_json: &str) -> Result<JsValue, JsValue> {
+    // Placeholder: comms send will be wired when sessions
+    // go through the service-based path with comms runtime access.
+    let result = serde_json::json!({
+        "status": "not_implemented",
+        "message": "comms_send will be wired when sessions use SessionService",
+    });
+    Ok(JsValue::from_str(&result.to_string()))
 }

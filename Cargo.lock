@@ -2884,6 +2884,7 @@ dependencies = [
  "meerkat-core",
  "meerkat-hooks",
  "meerkat-mob",
+ "meerkat-mob-mcp",
  "meerkat-session",
  "meerkat-store",
  "meerkat-tools",

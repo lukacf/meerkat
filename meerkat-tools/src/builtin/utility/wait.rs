@@ -124,16 +124,14 @@ impl BuiltinTool for WaitTool {
                 }
             };
 
-            if interrupted {
-                if let Some(interrupt) = rx.borrow().as_ref() {
-                    let waited = start.elapsed().as_secs_f64();
-                    return Ok(json!({
-                        "waited_seconds": waited,
-                        "requested_seconds": seconds,
-                        "status": "interrupted",
-                        "reason": format!("Wait interrupted after {:.1}s: {}", waited, interrupt.reason)
-                    }));
-                }
+            if interrupted && let Some(interrupt) = rx.borrow().as_ref() {
+                let waited = start.elapsed().as_secs_f64();
+                return Ok(json!({
+                    "waited_seconds": waited,
+                    "requested_seconds": seconds,
+                    "status": "interrupted",
+                    "reason": format!("Wait interrupted after {:.1}s: {}", waited, interrupt.reason)
+                }));
             }
             // Completed normally (either sleep finished or channel closed without data)
             Ok(json!({

@@ -27,8 +27,6 @@ use crate::inproc::{InprocRegistry, InprocSendError};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::transport::codec::{EnvelopeFrame, TransportCodec};
 use crate::transport::{PeerAddr, TransportError};
-#[cfg(not(target_arch = "wasm32"))]
-use crate::transport::MAX_PAYLOAD_SIZE;
 use crate::trust::{TrustedPeer, TrustedPeers};
 use crate::types::{Envelope, MessageKind, Status};
 

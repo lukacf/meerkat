@@ -61,13 +61,13 @@ impl PeerAddr {
         if let Some(_path) = s.strip_prefix("uds://") {
             #[cfg(not(target_arch = "wasm32"))]
             {
-                return Ok(PeerAddr::Uds(PathBuf::from(_path)));
+                Ok(PeerAddr::Uds(PathBuf::from(_path)))
             }
             #[cfg(target_arch = "wasm32")]
             {
-                return Err(TransportError::InvalidAddress(
+                Err(TransportError::InvalidAddress(
                     "UDS transport is not available on wasm32".to_string(),
-                ));
+                ))
             }
         } else if let Some(addr_str) = s.strip_prefix("tcp://") {
             // Validate format: must have host:port structure

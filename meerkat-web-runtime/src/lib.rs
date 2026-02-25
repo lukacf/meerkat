@@ -861,7 +861,7 @@ pub async fn mob_create(definition_json: &str) -> Result<JsValue, JsValue> {
         .mob_create_definition(definition)
         .await
         .map_err(err_mob)?;
-    Ok(JsValue::from_str(&mob_id.to_string()))
+    Ok(JsValue::from_str(mob_id.as_ref()))
 }
 
 /// Get the status of a mob.

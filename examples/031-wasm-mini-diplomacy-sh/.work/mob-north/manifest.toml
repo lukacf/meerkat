@@ -1,0 +1,7 @@
+[mobpack]
+name = "mini-diplomacy-north"
+version = "1.0.0"
+description = "North faction diplomacy mob"
+
+[requires]
+capabilities = ["comms"]

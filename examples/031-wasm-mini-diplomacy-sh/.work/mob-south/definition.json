@@ -1,0 +1,21 @@
+{
+  "id":"mini-diplomacy-south",
+  "orchestrator":{"profile":"planner"},
+  "profiles":{
+    "planner":{
+      "model":"claude-sonnet-4-5",
+      "skills":["game-rules","planner"],
+      "tools":{"comms":true},
+      "peer_description":"Strategic planner",
+      "external_addressable":true
+    },
+    "operator":{
+      "model":"claude-sonnet-4-5",
+      "skills":["game-rules","operator"],
+      "tools":{"comms":true},
+      "peer_description":"Execution operator",
+      "external_addressable":true
+    }
+  },
+  "skills":{}
+}

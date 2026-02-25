@@ -280,13 +280,13 @@ fn parse_mobpack(bytes: &[u8]) -> Result<ParsedMobpack, String> {
     let mut skills = BTreeMap::new();
     for (path, content) in &files {
         if let Some(name) = path.strip_prefix("skills/") {
-            if let Ok(text) = std::str::from_utf8(content) {
-                let key = name
-                    .strip_suffix(".md")
-                    .or_else(|| name.strip_suffix(".txt"))
-                    .unwrap_or(name);
-                skills.insert(key.to_string(), text.to_string());
-            }
+            let text = std::str::from_utf8(content)
+                .map_err(|e| format!("skill file '{path}' is not valid UTF-8: {e}"))?;
+            let key = name
+                .strip_suffix(".md")
+                .or_else(|| name.strip_suffix(".txt"))
+                .unwrap_or(name);
+            skills.insert(key.to_string(), text.to_string());
         }
     }
 
@@ -318,13 +318,15 @@ fn compile_system_prompt(
     let joined = parts.join(SKILL_SEPARATOR);
 
     if joined.len() > MAX_SYSTEM_PROMPT_BYTES {
-        let truncated = &joined[..MAX_SYSTEM_PROMPT_BYTES];
-        // Find last complete UTF-8 boundary
-        let safe_end = truncated
-            .char_indices()
-            .last()
-            .map(|(i, c)| i + c.len_utf8())
-            .unwrap_or(0);
+        // Find the last complete UTF-8 char boundary at or before the limit.
+        // floor_char_boundary is safe — never panics on valid &str.
+        let safe_end = {
+            let mut i = MAX_SYSTEM_PROMPT_BYTES.min(joined.len());
+            while i > 0 && !joined.is_char_boundary(i) {
+                i -= 1;
+            }
+            i
+        };
         let event = RuntimeEvent::SystemPromptTruncated {
             original_bytes: joined.len(),
             truncated_to: safe_end,
@@ -578,10 +580,6 @@ pub async fn start_turn(handle: u32, prompt: &str, options_json: &str) -> Result
             messages_json,
             run_id,
         ))
-    })
-    .map_err(|e| {
-        // If we can't even set up, return error without changing state
-        e
     })?;
 
     // Call the JS bridge (async — outside of RefCell borrow)
@@ -590,7 +588,16 @@ pub async fn start_turn(handle: u32, prompt: &str, options_json: &str) -> Result
     // Process the result — synchronous registry access again
     match bridge_result {
         Ok(response_val) => {
-            let response_str = response_val.as_string().unwrap_or_default();
+            // Accept both string JSON and serialized JsValue from bridge
+            let response_str = if let Some(s) = response_val.as_string() {
+                s
+            } else {
+                // Try JSON.stringify for object values
+                js_sys::JSON::stringify(&response_val)
+                    .ok()
+                    .and_then(|v| v.as_string())
+                    .unwrap_or_default()
+            };
             match serde_json::from_str::<BridgeResponse>(&response_str) {
                 Ok(response) => {
                     let result_json = with_session_mut(handle, |session| {
@@ -846,6 +853,7 @@ pub fn destroy_session(handle: u32) -> Result<(), JsValue> {
 // ═══════════════════════════════════════════════════════════
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 

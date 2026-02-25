@@ -1,11 +1,11 @@
 use crate::error::MobError;
 use crate::ids::{MeerkatId, RunId, StepId};
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use async_trait::async_trait;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
-#[cfg(target_arch = "wasm32")]
-use crate::tokio;
 use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinHandle;
 

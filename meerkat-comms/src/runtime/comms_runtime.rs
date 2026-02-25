@@ -1,12 +1,12 @@
 //! CommsRuntime - Full lifecycle manager for agent-to-agent communication.
 
-#[cfg(target_arch = "wasm32")]
-use crate::tokio;
 #[cfg(not(target_arch = "wasm32"))]
 use super::comms_config::ResolvedCommsConfig;
 use crate::agent::types::{CommsContent, CommsMessage};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::handle_connection;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use crate::{InboxSender, InprocRegistry, Keypair, PubKey, Router, TrustedPeer, TrustedPeers};
 use async_trait::async_trait;
 use futures::Stream;
@@ -951,8 +951,8 @@ impl CommsRuntime {
     where
         F: FnMut(ResolvedPeer),
     {
-        let inproc_peers = InprocRegistry::global()
-            .peers_in_namespace(self.inproc_namespace().unwrap_or(""));
+        let inproc_peers =
+            InprocRegistry::global().peers_in_namespace(self.inproc_namespace().unwrap_or(""));
         let inproc_by_name: std::collections::HashMap<String, crate::identity::PubKey> =
             inproc_peers
                 .iter()
@@ -1189,10 +1189,8 @@ impl CommsRuntime {
 impl Drop for CommsRuntime {
     fn drop(&mut self) {
         self.shutdown();
-        InprocRegistry::global().unregister_in_namespace(
-            self.inproc_namespace().unwrap_or(""),
-            &self.public_key,
-        );
+        InprocRegistry::global()
+            .unregister_in_namespace(self.inproc_namespace().unwrap_or(""), &self.public_key);
     }
 }
 

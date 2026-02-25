@@ -7,10 +7,10 @@ use meerkat_core::time_compat::{Duration, Instant};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-#[cfg(not(target_arch = "wasm32"))]
-use tokio::sync::watch;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio::sync::watch;
+#[cfg(not(target_arch = "wasm32"))]
+use tokio::sync::watch;
 
 /// Maximum wait time in seconds (5 minutes)
 const MAX_WAIT_SECONDS: f64 = 300.0;
@@ -89,10 +89,10 @@ impl BuiltinTool for WaitTool {
     }
 
     async fn call(&self, args: Value) -> Result<Value, BuiltinToolError> {
-        #[cfg(not(target_arch = "wasm32"))]
-        use tokio::time::sleep;
         #[cfg(target_arch = "wasm32")]
         use crate::tokio::time::sleep;
+        #[cfg(not(target_arch = "wasm32"))]
+        use tokio::time::sleep;
 
         let args: WaitArgs = serde_json::from_value(args)
             .map_err(|e| BuiltinToolError::invalid_args(format!("Invalid arguments: {}", e)))?;

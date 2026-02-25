@@ -33,6 +33,7 @@ inventory::submit! {
 
 use chrono::Utc;
 use futures::StreamExt;
+use meerkat_core::time_compat::Duration;
 use meerkat_core::{
     HookCapability, HookDecision, HookEngine, HookEngineError, HookEntryConfig, HookExecutionMode,
     HookExecutionReport, HookFailurePolicy, HookId, HookInvocation, HookOutcome, HookPatch,
@@ -50,7 +51,6 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::process::Command;
 use tokio::sync::{Mutex, Semaphore};
-use meerkat_core::time_compat::Duration;
 use tokio::time::timeout;
 
 /// Response returned by runtime adapters.

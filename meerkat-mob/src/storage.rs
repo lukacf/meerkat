@@ -2,12 +2,12 @@
 //!
 //! Groups the event store with a session store for a mob's isolated storage.
 
+#[cfg(not(target_arch = "wasm32"))]
+use crate::store::RedbMobStores;
 use crate::store::{
     InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobSpecStore, MobEventStore, MobRunStore,
     MobSpecStore,
 };
-#[cfg(not(target_arch = "wasm32"))]
-use crate::store::RedbMobStores;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 use std::sync::Arc;

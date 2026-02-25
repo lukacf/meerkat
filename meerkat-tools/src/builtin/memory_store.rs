@@ -7,10 +7,10 @@ use super::store::TaskStore;
 use super::types::{NewTask, Task, TaskError, TaskId, TaskStatus, TaskUpdate};
 use async_trait::async_trait;
 
-#[cfg(not(target_arch = "wasm32"))]
-use tokio::sync::RwLock;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio::sync::RwLock;
+#[cfg(not(target_arch = "wasm32"))]
+use tokio::sync::RwLock;
 
 /// In-memory task store for testing
 ///

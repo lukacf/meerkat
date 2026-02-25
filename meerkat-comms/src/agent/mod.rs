@@ -16,6 +16,8 @@ pub use listener::{ListenerHandle, spawn_tcp_listener};
 pub use manager::{CommsManager, CommsManagerConfig};
 pub use types::{CommsContent, CommsMessage, CommsStatus, MessageIntent};
 
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use meerkat_core::budget::BudgetLimits;
 use meerkat_core::error::AgentError;
 use meerkat_core::retry::RetryPolicy;
@@ -23,8 +25,6 @@ use meerkat_core::session::Session;
 use meerkat_core::types::RunResult;
 use meerkat_core::{Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
 use std::sync::Arc;
-#[cfg(target_arch = "wasm32")]
-use crate::tokio;
 use tokio::sync::watch;
 
 /// Agent wrapper that integrates comms inbox.

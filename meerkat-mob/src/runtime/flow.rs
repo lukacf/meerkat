@@ -19,10 +19,10 @@ use crate::store::{MobEventStore, MobRunStore};
 use chrono::Utc;
 use futures::stream::{FuturesUnordered, StreamExt};
 use indexmap::IndexMap;
+use meerkat_core::time_compat::{Duration, Instant};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
-use meerkat_core::time_compat::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
@@ -960,16 +960,14 @@ async fn validate_schema_ref(
             #[cfg(target_arch = "wasm32")]
             return Err(MobError::SchemaValidation {
                 step_id: step_id.clone(),
-                message: format!(
-                    "file-based schema ref '{schema_ref}' is not supported on wasm32"
-                ),
+                message: format!("file-based schema ref '{schema_ref}' is not supported on wasm32"),
             });
             #[cfg(not(target_arch = "wasm32"))]
             {
-            serde_json::from_str(&raw).map_err(|error| MobError::SchemaValidation {
-                step_id: step_id.clone(),
-                message: format!("invalid schema JSON at '{schema_ref}': {error}"),
-            })?
+                serde_json::from_str(&raw).map_err(|error| MobError::SchemaValidation {
+                    step_id: step_id.clone(),
+                    message: format!("invalid schema JSON at '{schema_ref}': {error}"),
+                })?
             }
         }
     };

@@ -45,14 +45,14 @@ pub use builder::{BuiltinDispatcherConfig, ToolDispatcherBuilder, build_builtin_
 pub use builtin::CommsToolSurface;
 pub use builtin::{
     BuiltinTool, BuiltinToolConfig, BuiltinToolEntry, BuiltinToolError, CompositeDispatcher,
-    CompositeDispatcherError, EnforcedToolPolicy, MemoryTaskStore,
-    ResolvedToolPolicy, TaskStore, ToolMode, ToolPolicyLayer,
+    CompositeDispatcherError, EnforcedToolPolicy, MemoryTaskStore, ResolvedToolPolicy, TaskStore,
+    ToolMode, ToolPolicyLayer,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use builtin::{FileTaskStore, ensure_rkat_dir, ensure_rkat_dir_async, find_project_root};
-pub use dispatcher::{EmptyToolDispatcher, FilteredDispatcher};
 #[cfg(not(target_arch = "wasm32"))]
 pub use dispatcher::ToolDispatcher;
+pub use dispatcher::{EmptyToolDispatcher, FilteredDispatcher};
 pub use error::{DispatchError, ToolError, ToolValidationError};
 #[cfg(feature = "comms")]
 pub use meerkat_comms::agent::{

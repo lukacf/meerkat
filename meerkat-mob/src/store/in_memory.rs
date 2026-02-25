@@ -6,13 +6,13 @@ use crate::error::MobError;
 use crate::event::{MobEvent, NewMobEvent};
 use crate::ids::{FlowId, MobId, RunId, StepId};
 use crate::run::{FailureLedgerEntry, MobRun, MobRunStatus, StepLedgerEntry};
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-#[cfg(target_arch = "wasm32")]
-use crate::tokio;
 use tokio::sync::RwLock;
 
 /// In-memory event store for tests and ephemeral mobs.

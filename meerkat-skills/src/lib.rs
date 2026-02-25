@@ -22,9 +22,9 @@ pub use engine::DefaultSkillEngine;
 pub use registration::{SkillRegistration, collect_registered_skills};
 #[cfg(not(target_arch = "wasm32"))]
 pub use resolve::{resolve_repositories, resolve_repositories_with_roots};
-pub use source::{CompositeSkillSource, EmbeddedSkillSource, InMemorySkillSource, NamedSource};
 #[cfg(not(target_arch = "wasm32"))]
 pub use source::FilesystemSkillSource;
+pub use source::{CompositeSkillSource, EmbeddedSkillSource, InMemorySkillSource, NamedSource};
 
 // Capability registration
 inventory::submit! {

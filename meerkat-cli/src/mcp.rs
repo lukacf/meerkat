@@ -73,12 +73,7 @@ pub fn build_server_config(
         // Explicit stdio transport
         (Some(McpTransportKind::Stdio), _, false) => {
             let env_map = parse_env_vars(&env)?;
-            McpServerConfig::stdio(
-                name.clone(),
-                command[0].clone(),
-                command[1..].to_vec(),
-                env_map,
-            )
+            McpServerConfig::stdio(name, command[0].clone(), command[1..].to_vec(), env_map)
         }
         // Explicit stdio but no command
         (Some(McpTransportKind::Stdio), _, true) => {
@@ -89,12 +84,12 @@ pub fn build_server_config(
         // Explicit HTTP transport
         (Some(McpTransportKind::StreamableHttp), Some(url), _) => {
             let header_map = parse_headers(&headers)?;
-            McpServerConfig::streamable_http(name.clone(), url, header_map)
+            McpServerConfig::streamable_http(name, url, header_map)
         }
         // Explicit SSE transport
         (Some(McpTransportKind::Sse), Some(url), _) => {
             let header_map = parse_headers(&headers)?;
-            McpServerConfig::sse(name.clone(), url, header_map)
+            McpServerConfig::sse(name, url, header_map)
         }
         // HTTP/SSE without URL
         (Some(McpTransportKind::StreamableHttp | McpTransportKind::Sse), None, _) => {
@@ -105,17 +100,12 @@ pub fn build_server_config(
         // URL provided, no explicit transport - default to streamable-http
         (None, Some(url), _) => {
             let header_map = parse_headers(&headers)?;
-            McpServerConfig::streamable_http(name.clone(), url, header_map)
+            McpServerConfig::streamable_http(name, url, header_map)
         }
         // Command provided, no explicit transport - default to stdio
         (None, None, false) => {
             let env_map = parse_env_vars(&env)?;
-            McpServerConfig::stdio(
-                name.clone(),
-                command[0].clone(),
-                command[1..].to_vec(),
-                env_map,
-            )
+            McpServerConfig::stdio(name, command[0].clone(), command[1..].to_vec(), env_map)
         }
         // Nothing provided
         (None, None, true) => {

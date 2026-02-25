@@ -1,9 +1,7 @@
 //! Agent state machine internals.
 
 use crate::error::AgentError;
-use crate::event::{
-    AgentEvent, BudgetType, ToolConfigChangeOperation, ToolConfigChangedPayload,
-};
+use crate::event::{AgentEvent, BudgetType, ToolConfigChangeOperation, ToolConfigChangedPayload};
 use crate::hooks::{
     HookDecision, HookInvocation, HookLlmRequest, HookLlmResponse, HookPatch, HookPoint,
     HookToolCall, HookToolResult,
@@ -1543,14 +1541,20 @@ mod tests {
             .unwrap();
 
         let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
-        let result = agent.run_with_events("prompt".to_string(), tx).await.unwrap();
+        let result = agent
+            .run_with_events("prompt".to_string(), tx)
+            .await
+            .unwrap();
         assert_eq!(result.text, "done");
         assert_eq!(client.seen_tools(), vec![vec!["visible".to_string()]]);
 
         let mut saw_config_event = false;
         while let Ok(event) = rx.try_recv() {
             if let crate::event::AgentEvent::ToolConfigChanged { payload } = event {
-                assert_eq!(payload.operation, crate::event::ToolConfigChangeOperation::Reload);
+                assert_eq!(
+                    payload.operation,
+                    crate::event::ToolConfigChangeOperation::Reload
+                );
                 assert_eq!(payload.target, "tool_scope");
                 assert!(payload.status.contains("boundary_applied"));
                 saw_config_event = true;
@@ -1590,7 +1594,10 @@ mod tests {
         agent.tool_scope.inject_boundary_failure_once_for_test();
 
         let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
-        let result = agent.run_with_events("prompt".to_string(), tx).await.unwrap();
+        let result = agent
+            .run_with_events("prompt".to_string(), tx)
+            .await
+            .unwrap();
         assert_eq!(result.text, "done");
         assert_eq!(
             client.seen_tools(),
@@ -1652,7 +1659,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn builder_ignores_unknown_persisted_filter_tools() {
+    async fn builder_prunes_unknown_persisted_filter_tools() {
         let client = Arc::new(VisibilityRecordingLlmClient::new());
         let tools = Arc::new(FullToolDispatcher::new(&["visible", "secret"]));
         let mut session = crate::Session::new();
@@ -1677,10 +1684,7 @@ mod tests {
         let seen = client.seen_tools();
         assert_eq!(
             seen,
-            vec![
-                vec!["visible".to_string(), "secret".to_string()],
-                vec!["visible".to_string(), "secret".to_string()]
-            ]
+            vec![vec!["visible".to_string()], vec!["visible".to_string()]]
         );
     }
 }

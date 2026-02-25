@@ -267,6 +267,14 @@ impl AgentBuilder {
         {
             match serde_json::from_value::<ToolFilter>(raw_filter) {
                 Ok(filter) => {
+                    let mut filter = filter;
+                    let known_tool_names = agent
+                        .tools
+                        .tools()
+                        .iter()
+                        .map(|tool| tool.name.clone())
+                        .collect::<std::collections::HashSet<_>>();
+                    filter.prune_to_known(&known_tool_names);
                     if let Err(err) = agent.stage_external_tool_filter(filter) {
                         tracing::warn!(
                             error = %err,

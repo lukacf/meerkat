@@ -8,8 +8,8 @@ use meerkat_core::types::ToolDef;
 use meerkat_core::types::{ToolCallView, ToolResult};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 const DEFAULT_REMOVAL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -172,7 +172,8 @@ impl McpRouter {
     ///
     /// This only records intent. Removal lifecycle starts on `apply_staged`.
     pub fn stage_remove(&mut self, server_name: impl Into<String>) {
-        self.staged_ops.push(StagedRouterOp::Remove(server_name.into()));
+        self.staged_ops
+            .push(StagedRouterOp::Remove(server_name.into()));
     }
 
     /// Stage a server reload by server name (reuse existing config) or full config.
@@ -189,22 +190,21 @@ impl McpRouter {
             match op {
                 StagedRouterOp::Add(config) => {
                     let server_name = config.name.clone();
-                    let existed = self
-                        .servers
-                        .get(&server_name)
-                        .is_some_and(|entry| !matches!(entry.lifecycle, McpServerLifecycleState::Removed));
+                    let existed = self.servers.get(&server_name).is_some_and(|entry| {
+                        !matches!(entry.lifecycle, McpServerLifecycleState::Removed)
+                    });
                     self.install_active_server(config).await?;
 
                     if existed {
                         delta.reloaded_servers.push(server_name.clone());
-                        delta
-                            .lifecycle_actions
-                            .push(McpLifecycleAction::Reloaded { server: server_name });
+                        delta.lifecycle_actions.push(McpLifecycleAction::Reloaded {
+                            server: server_name,
+                        });
                     } else {
                         delta.added_servers.push(server_name.clone());
-                        delta
-                            .lifecycle_actions
-                            .push(McpLifecycleAction::Activated { server: server_name });
+                        delta.lifecycle_actions.push(McpLifecycleAction::Activated {
+                            server: server_name,
+                        });
                     }
                 }
                 StagedRouterOp::Remove(server_name) => {
@@ -238,9 +238,9 @@ impl McpRouter {
                     let server_name = config.name.clone();
                     self.install_active_server(config).await?;
                     delta.reloaded_servers.push(server_name.clone());
-                    delta
-                        .lifecycle_actions
-                        .push(McpLifecycleAction::Reloaded { server: server_name });
+                    delta.lifecycle_actions.push(McpLifecycleAction::Reloaded {
+                        server: server_name,
+                    });
                 }
             }
         }

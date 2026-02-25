@@ -30,7 +30,7 @@ impl ToolFilter {
         }
     }
 
-    fn prune_to_known(&mut self, known: &HashSet<String>) {
+    pub(crate) fn prune_to_known(&mut self, known: &HashSet<String>) {
         match self {
             Self::All => {}
             Self::Allow(names) | Self::Deny(names) => names.retain(|name| known.contains(name)),
@@ -50,6 +50,8 @@ pub struct ToolScopeRevision(pub u64);
 pub enum ToolScopeStageError {
     #[error("Unknown tool(s) in filter: {names:?}")]
     UnknownTools { names: Vec<String> },
+    #[error("Tool scope state lock poisoned")]
+    LockPoisoned,
 }
 
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
@@ -82,7 +84,7 @@ pub struct ComposedToolFilter {
 
 impl ComposedToolFilter {
     fn allows(&self, name: &str) -> bool {
-        let allowed = self.allow.as_ref().map_or(true, |set| set.contains(name));
+        let allowed = self.allow.as_ref().is_none_or(|set| set.contains(name));
         allowed && !self.deny.contains(name)
     }
 }
@@ -145,8 +147,14 @@ impl ToolScope {
 
     /// Returns the currently visible tools using base + active external filter composition.
     pub fn visible_tools(&self) -> Arc<[Arc<ToolDef>]> {
-        self.visible_tools_result()
-            .expect("tool scope lock poisoned while reading visibility")
+        match self.visible_tools_result() {
+            Ok(tools) => tools,
+            Err(_) => self
+                .state
+                .read()
+                .map(|state| Arc::clone(&state.base_tools))
+                .unwrap_or_else(|_| Vec::<Arc<ToolDef>>::new().into()),
+        }
     }
 
     /// Returns current visible tools, or an explicit error for boundary fail-safe handling.
@@ -210,8 +218,12 @@ impl ToolScope {
             .collect::<HashSet<_>>();
 
         let known_base_names = state.known_base_names.clone();
-        state.active_external_filter.prune_to_known(&known_base_names);
-        state.staged_external_filter.prune_to_known(&known_base_names);
+        state
+            .active_external_filter
+            .prune_to_known(&known_base_names);
+        state
+            .staged_external_filter
+            .prune_to_known(&known_base_names);
         if let Some(allow) = state.active_turn_allow.as_mut() {
             allow.retain(|name| known_base_names.contains(name));
         }
@@ -290,7 +302,10 @@ impl ToolScope {
     }
 
     fn compose_state_filters(state: &ToolScopeState) -> ComposedToolFilter {
-        let mut filters = vec![state.base_filter.clone(), state.active_external_filter.clone()];
+        let mut filters = vec![
+            state.base_filter.clone(),
+            state.active_external_filter.clone(),
+        ];
         if let Some(allow) = &state.active_turn_allow {
             filters.push(ToolFilter::Allow(allow.clone()));
         }
@@ -322,7 +337,7 @@ impl ToolScopeHandle {
         let mut state = self
             .state
             .write()
-            .expect("tool scope lock poisoned while staging filter");
+            .map_err(|_| ToolScopeStageError::LockPoisoned)?;
 
         validate_filter(&filter, &state.known_base_names)?;
 
@@ -332,11 +347,11 @@ impl ToolScopeHandle {
         Ok(revision)
     }
 
-    pub(crate) fn staged_revision(&self) -> ToolScopeRevision {
+    pub(crate) fn staged_revision(&self) -> Result<ToolScopeRevision, ToolScopeStageError> {
         self.state
             .read()
-            .expect("tool scope lock poisoned while reading revision")
-            .staged_revision
+            .map(|state| state.staged_revision)
+            .map_err(|_| ToolScopeStageError::LockPoisoned)
     }
 
     /// Set or clear an ephemeral per-turn overlay.
@@ -348,10 +363,13 @@ impl ToolScopeHandle {
         let mut state = self
             .state
             .write()
-            .expect("tool scope lock poisoned while setting turn overlay");
+            .map_err(|_| ToolScopeStageError::LockPoisoned)?;
 
         if let Some(allow_set) = &allow {
-            validate_filter(&ToolFilter::Allow(allow_set.clone()), &state.known_base_names)?;
+            validate_filter(
+                &ToolFilter::Allow(allow_set.clone()),
+                &state.known_base_names,
+            )?;
         }
         if !deny.is_empty() {
             validate_filter(&ToolFilter::Deny(deny.clone()), &state.known_base_names)?;
@@ -364,12 +382,10 @@ impl ToolScopeHandle {
 
     /// Clear ephemeral per-turn overlay.
     pub fn clear_turn_overlay(&self) {
-        let mut state = self
-            .state
-            .write()
-            .expect("tool scope lock poisoned while clearing turn overlay");
-        state.active_turn_allow = None;
-        state.active_turn_deny.clear();
+        if let Ok(mut state) = self.state.write() {
+            state.active_turn_allow = None;
+            state.active_turn_deny.clear();
+        }
     }
 }
 
@@ -435,7 +451,7 @@ mod tests {
             .unwrap();
 
         assert!(second > first);
-        assert_eq!(handle.staged_revision(), second);
+        assert_eq!(handle.staged_revision().unwrap(), second);
     }
 
     #[test]
@@ -531,7 +547,8 @@ mod tests {
         handle
             .stage_external_filter(ToolFilter::Deny(set(&["c"])))
             .unwrap();
-        scope.apply_staged(tools(&["a", "b", "c"]))
+        scope
+            .apply_staged(tools(&["a", "b", "c"]))
             .expect("initial apply should succeed");
         assert_eq!(
             scope

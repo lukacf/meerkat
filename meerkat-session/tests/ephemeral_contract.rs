@@ -20,7 +20,7 @@ use meerkat_core::{
 };
 use meerkat_session::ephemeral::SessionSnapshot;
 use meerkat_session::{EphemeralSessionService, SessionAgent, SessionAgentBuilder};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::mpsc;
@@ -863,10 +863,7 @@ async fn test_start_turn_returns_error_when_overlay_clear_fails() {
     let overlay_updates = Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut builder = MockAgentBuilder::with_overlay_clear_failure();
     builder.overlay_updates = overlay_updates.clone();
-    let service = Arc::new(EphemeralSessionService::new(
-        builder,
-        10,
-    ));
+    let service = Arc::new(EphemeralSessionService::new(builder, 10));
 
     let _ = service
         .create_session(create_req_deferred("Hello"))

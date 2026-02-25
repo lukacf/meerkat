@@ -1948,17 +1948,20 @@ impl OverlayProbeDispatcher {
         let tools: Vec<Arc<ToolDef>> = ["alpha", "beta"]
             .iter()
             .map(|name| {
+                let input_schema = serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                });
                 Arc::new(ToolDef {
                     name: (*name).to_string(),
                     description: format!("{name} tool"),
-                    input_schema: serde_json::json!({
-                        "type": "object",
-                        "properties": {}
-                    }),
+                    input_schema,
                 })
             })
             .collect();
-        Self { tools: tools.into() }
+        Self {
+            tools: tools.into(),
+        }
     }
 }
 
@@ -2006,7 +2009,8 @@ impl AgentLlmClient for OverlayProbeLlmClient {
     }
 }
 
-type OverlayProbeInnerAgent = Agent<OverlayProbeLlmClient, OverlayProbeDispatcher, OverlayProbeSessionStore>;
+type OverlayProbeInnerAgent =
+    Agent<OverlayProbeLlmClient, OverlayProbeDispatcher, OverlayProbeSessionStore>;
 
 struct OverlayProbeSessionAgent {
     agent: OverlayProbeInnerAgent,
@@ -3079,7 +3083,11 @@ async fn test_flow_step_tool_overlay_changes_runtime_visible_tools_and_restores_
         .lock()
         .expect("provider_visible_tools lock poisoned")
         .clone();
-    assert_eq!(seen.len(), 2, "expected one provider call for flow and one for baseline");
+    assert_eq!(
+        seen.len(),
+        2,
+        "expected one provider call for flow and one for baseline"
+    );
     assert_eq!(
         seen[0],
         vec!["alpha".to_string()],

@@ -37,7 +37,11 @@ pub async fn handle_add(
 
     #[cfg(feature = "mcp")]
     if let Err(err) = runtime
-        .mcp_stage_add(&session_id, params.server_name.clone(), params.server_config.clone())
+        .mcp_stage_add(
+            &session_id,
+            params.server_name.clone(),
+            params.server_config.clone(),
+        )
         .await
     {
         return RpcResponse::error(id, err.code, err.message);

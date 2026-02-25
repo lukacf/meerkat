@@ -9,9 +9,9 @@
 //! `SessionId`; the first `start_turn()` call for that ID materializes the
 //! session inside the service (which runs the first turn).
 
-use std::sync::{Arc, RwLock as StdRwLock};
 #[cfg(feature = "mcp")]
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock as StdRwLock};
 #[cfg(feature = "mcp")]
 use std::time::Duration;
 
@@ -24,11 +24,11 @@ use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{CreateSessionRequest, SessionError, SessionService, StartTurnRequest};
 use meerkat_core::skills::{SkillError, SourceIdentityRegistry};
 use meerkat_core::types::{RunResult, SessionId};
+#[cfg(feature = "mcp")]
+use meerkat_core::{AgentToolDispatcher, ToolGateway};
 use meerkat_core::{Config, ConfigStore, Session};
 #[cfg(feature = "mcp")]
 use meerkat_core::{ToolConfigChangeOperation, ToolConfigChangedPayload};
-#[cfg(feature = "mcp")]
-use meerkat_core::{AgentToolDispatcher, ToolGateway};
 use tokio::sync::{RwLock, mpsc};
 
 use crate::error;
@@ -292,12 +292,11 @@ impl SessionRuntime {
         event_tx: mpsc::Sender<AgentEvent>,
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
     ) -> Result<RunResult, RpcError> {
+        #[allow(unused_mut)]
+        let mut turn_prompt = prompt;
         #[cfg(feature = "mcp")]
-        let mut prompt = prompt;
-        #[cfg(feature = "mcp")]
-        self.apply_mcp_boundary(session_id, &event_tx, &mut prompt).await?;
-        #[cfg(not(feature = "mcp"))]
-        let prompt = prompt;
+        self.apply_mcp_boundary(session_id, &event_tx, &mut turn_prompt)
+            .await?;
 
         // Check if this is a pending (not-yet-materialized) session.
         let pending_config = {
@@ -330,7 +329,7 @@ impl SessionRuntime {
 
             let req = CreateSessionRequest {
                 model: build_config.model,
-                prompt,
+                prompt: turn_prompt,
                 system_prompt: build_config.system_prompt,
                 max_tokens: build_config.max_tokens,
                 event_tx: Some(event_tx),
@@ -351,7 +350,7 @@ impl SessionRuntime {
 
         // Normal turn on an existing session.
         let req = StartTurnRequest {
-            prompt,
+            prompt: turn_prompt,
             event_tx: Some(event_tx),
             host_mode: false,
             skill_references,
@@ -536,21 +535,19 @@ impl SessionRuntime {
             );
         }
 
-        let config: McpServerConfig = serde_json::from_value(server_config).map_err(|e| RpcError {
-            code: error::INVALID_PARAMS,
-            message: format!("invalid server_config: {e}"),
-            data: None,
-        })?;
-
-        let adapter = self.mcp_adapter_for_session(session_id).await?;
-        adapter
-            .stage_add(config)
-            .await
-            .map_err(|e| RpcError {
-                code: error::INTERNAL_ERROR,
-                message: e,
+        let config: McpServerConfig =
+            serde_json::from_value(server_config).map_err(|e| RpcError {
+                code: error::INVALID_PARAMS,
+                message: format!("invalid server_config: {e}"),
                 data: None,
             })?;
+
+        let adapter = self.mcp_adapter_for_session(session_id).await?;
+        adapter.stage_add(config).await.map_err(|e| RpcError {
+            code: error::INTERNAL_ERROR,
+            message: e,
+            data: None,
+        })?;
         Ok(())
     }
 
@@ -569,11 +566,14 @@ impl SessionRuntime {
             });
         }
         let adapter = self.mcp_adapter_for_session(session_id).await?;
-        adapter.stage_remove(server_name).await.map_err(|e| RpcError {
-            code: error::INTERNAL_ERROR,
-            message: e,
-            data: None,
-        })?;
+        adapter
+            .stage_remove(server_name)
+            .await
+            .map_err(|e| RpcError {
+                code: error::INTERNAL_ERROR,
+                message: e,
+                data: None,
+            })?;
         Ok(())
     }
 
@@ -619,13 +619,13 @@ impl SessionRuntime {
         let adapter = Arc::new(McpRouterAdapter::new(McpRouter::new()));
         let adapter_dispatcher: Arc<dyn AgentToolDispatcher> = adapter.clone();
         let combined = match build_config.external_tools.clone() {
-            Some(existing) => Arc::new(ToolGateway::new(existing, Some(adapter_dispatcher)).map_err(
-                |e| RpcError {
+            Some(existing) => Arc::new(
+                ToolGateway::new(existing, Some(adapter_dispatcher)).map_err(|e| RpcError {
                     code: error::INVALID_PARAMS,
                     message: format!("failed to compose external tools with MCP adapter: {e}"),
                     data: None,
-                },
-            )?),
+                })?,
+            ),
             None => adapter_dispatcher,
         };
         build_config.external_tools = Some(combined);
@@ -782,15 +782,21 @@ impl SessionRuntime {
     ) {
         for action in actions {
             let (operation, target, status) = match action {
-                McpLifecycleAction::Activated { server } => {
-                    (ToolConfigChangeOperation::Add, server, "applied".to_string())
-                }
-                McpLifecycleAction::Reloaded { server } => {
-                    (ToolConfigChangeOperation::Reload, server, "applied".to_string())
-                }
-                McpLifecycleAction::RemovingStarted { server } => {
-                    (ToolConfigChangeOperation::Remove, server, "draining".to_string())
-                }
+                McpLifecycleAction::Activated { server } => (
+                    ToolConfigChangeOperation::Add,
+                    server,
+                    "applied".to_string(),
+                ),
+                McpLifecycleAction::Reloaded { server } => (
+                    ToolConfigChangeOperation::Reload,
+                    server,
+                    "applied".to_string(),
+                ),
+                McpLifecycleAction::RemovingStarted { server } => (
+                    ToolConfigChangeOperation::Remove,
+                    server,
+                    "draining".to_string(),
+                ),
                 McpLifecycleAction::Removed { server, degraded } => (
                     ToolConfigChangeOperation::Remove,
                     server,
@@ -878,9 +884,9 @@ mod tests {
     use meerkat_core::skills_config::{
         SkillRepoTransport, SkillRepositoryConfig, SkillsConfig, SkillsIdentityConfig,
     };
-    use std::pin::Pin;
     #[cfg(feature = "mcp")]
     use std::path::PathBuf;
+    use std::pin::Pin;
     use std::sync::Arc;
 
     // -----------------------------------------------------------------------
@@ -1462,7 +1468,12 @@ mod tests {
 
         let (event_tx, mut event_rx) = mpsc::channel(128);
         runtime
-            .start_turn(&session_id, "turn after timeout".to_string(), event_tx, None)
+            .start_turn(
+                &session_id,
+                "turn after timeout".to_string(),
+                event_tx,
+                None,
+            )
             .await
             .expect("follow-up boundary");
         let second_turn_events = collect_tool_config_events(&mut event_rx);
@@ -1543,7 +1554,12 @@ mod tests {
 
         let (event_tx, mut event_rx) = mpsc::channel(128);
         runtime
-            .start_turn(&session_id, "turn apply staged add".to_string(), event_tx, None)
+            .start_turn(
+                &session_id,
+                "turn apply staged add".to_string(),
+                event_tx,
+                None,
+            )
             .await
             .expect("next boundary should apply staged add");
 
@@ -1620,9 +1636,17 @@ mod tests {
 
         let (event_tx, mut event_rx) = mpsc::channel(128);
         let result = runtime
-            .start_turn(&session_id, "turn failing apply".to_string(), event_tx, None)
+            .start_turn(
+                &session_id,
+                "turn failing apply".to_string(),
+                event_tx,
+                None,
+            )
             .await;
-        assert!(result.is_err(), "broken staged add should fail boundary apply");
+        assert!(
+            result.is_err(),
+            "broken staged add should fail boundary apply"
+        );
 
         let fail_turn_events = collect_tool_config_events(&mut event_rx);
         assert!(fail_turn_events.iter().any(|payload| {

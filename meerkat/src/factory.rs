@@ -1459,11 +1459,22 @@ impl AgentFactory {
         .await;
         #[cfg(target_arch = "wasm32")]
         let system_prompt = {
-            let mut prompt = per_request_prompt.unwrap_or_default();
+            // Precedence: per-request > config inline > default.
+            // No AGENTS.md or system_prompt_file on wasm32 (no filesystem).
+            let base = per_request_prompt
+                .or_else(|| config.agent.system_prompt.clone())
+                .unwrap_or_else(|| meerkat_core::prompt::DEFAULT_SYSTEM_PROMPT.to_string());
+            let mut prompt = base;
             for section in &extra_sections {
                 if !section.is_empty() {
                     prompt.push_str("\n\n");
                     prompt.push_str(section);
+                }
+            }
+            if let Some(ref config_tools) = config.agent.tool_instructions {
+                if !config_tools.is_empty() {
+                    prompt.push_str("\n\n");
+                    prompt.push_str(config_tools);
                 }
             }
             if !tool_usage_instructions.is_empty() {

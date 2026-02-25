@@ -121,6 +121,14 @@ where
                             }
                         }
                     }
+                    #[cfg(not(feature = "jsonschema"))]
+                    {
+                        tracing::warn!(
+                            "Structured output schema validation unavailable \
+                             (jsonschema feature disabled). Accepting parsed JSON without \
+                             schema validation."
+                        );
+                    }
                     // Success! Return with structured output
                     return Ok(RunResult {
                         text: self.session.last_assistant_text().unwrap_or_default(),

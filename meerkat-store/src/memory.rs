@@ -5,8 +5,9 @@ use async_trait::async_trait;
 use meerkat_core::{Session, SessionId, SessionMeta};
 use std::collections::HashMap;
 
+// Use crate-level tokio alias for consistency with other crates.
 #[cfg(target_arch = "wasm32")]
-use tokio_with_wasm::alias::sync::RwLock;
+use crate::tokio::sync::RwLock;
 #[cfg(not(target_arch = "wasm32"))]
 use ::tokio::sync::RwLock;
 

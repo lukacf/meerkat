@@ -673,6 +673,10 @@ pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<u32, Js
 /// Run a turn through the real meerkat agent loop via AgentFactory::build_agent().
 ///
 /// Returns JSON: `{ "text", "usage", "status", "session_id", "turns", "tool_calls" }`
+///
+/// Convention: always resolves (Ok). Check `status` field for "completed" vs "failed".
+/// Only rejects (Err) for infrastructure errors (session not found, build failure).
+/// Agent-level errors (LLM failure, timeout) resolve with `status: "failed"` + `error` field.
 #[wasm_bindgen]
 pub async fn start_turn(
     handle: u32,
@@ -680,7 +684,7 @@ pub async fn start_turn(
     _options_json: &str,
 ) -> Result<JsValue, JsValue> {
     // Extract what we need from the session (release borrow quickly).
-    let (build_config, config, _prior_session, run_id) = REGISTRY
+    let (build_config, config, run_id) = REGISTRY
         .with(|cell| {
             let mut registry = cell.borrow_mut();
             let session = registry
@@ -705,7 +709,7 @@ pub async fn start_turn(
             // Resume from prior session if available.
             bc.resume_session = session.meerkat_session.take();
 
-            Ok((bc, session.config.clone(), session.meerkat_session.take(), run_id))
+            Ok((bc, session.config.clone(), run_id))
         })
         .map_err(|e: String| err_str("session_not_found", e))?;
 
@@ -924,6 +928,9 @@ pub async fn mob_lifecycle(mob_id: &str, action: &str) -> Result<(), JsValue> {
 /// Fetch mob events.
 ///
 /// Returns JSON array of mob events.
+///
+/// Note: `after_cursor` is u32 at the JS boundary (wasm_bindgen limitation),
+/// internally widened to u64. Cursors beyond 4B are not supported via this export.
 #[wasm_bindgen]
 pub async fn mob_events(
     mob_id: &str,

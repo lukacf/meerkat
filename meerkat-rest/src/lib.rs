@@ -1218,7 +1218,7 @@ async fn continue_session(
     }
 }
 
-/// Stage a live MCP add operation for a session (placeholder contract surface).
+/// Validate live MCP add request and return explicit placeholder status.
 async fn mcp_add(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -1241,13 +1241,13 @@ async fn mcp_add(
         session_id: path_session_id.to_string(),
         operation: McpLiveOperation::Add,
         server_name: Some(req.server_name),
-        status: McpLiveOpStatus::Staged,
+        status: McpLiveOpStatus::Rejected,
         persisted: req.persisted,
         applied_at_turn: None,
     }))
 }
 
-/// Stage a live MCP remove operation for a session (placeholder contract surface).
+/// Validate live MCP remove request and return explicit placeholder status.
 async fn mcp_remove(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -1270,13 +1270,13 @@ async fn mcp_remove(
         session_id: path_session_id.to_string(),
         operation: McpLiveOperation::Remove,
         server_name: Some(req.server_name),
-        status: McpLiveOpStatus::Staged,
+        status: McpLiveOpStatus::Rejected,
         persisted: req.persisted,
         applied_at_turn: None,
     }))
 }
 
-/// Stage a live MCP reload operation for a session (placeholder contract surface).
+/// Validate live MCP reload request and return explicit placeholder status.
 async fn mcp_reload(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -1301,7 +1301,7 @@ async fn mcp_reload(
         session_id: path_session_id.to_string(),
         operation: McpLiveOperation::Reload,
         server_name: req.server_name,
-        status: McpLiveOpStatus::Staged,
+        status: McpLiveOpStatus::Rejected,
         persisted: req.persisted,
         applied_at_turn: None,
     }))
@@ -1730,7 +1730,7 @@ mod tests {
 
         assert_eq!(response.session_id, session_id);
         assert_eq!(response.operation, McpLiveOperation::Add);
-        assert_eq!(response.status, McpLiveOpStatus::Staged);
+        assert_eq!(response.status, McpLiveOpStatus::Rejected);
         assert!(response.persisted);
         assert!(response.applied_at_turn.is_none());
     }
@@ -1777,7 +1777,7 @@ mod tests {
         assert_eq!(response.session_id, session_id);
         assert_eq!(response.operation, McpLiveOperation::Remove);
         assert_eq!(response.server_name.as_deref(), Some("filesystem"));
-        assert_eq!(response.status, McpLiveOpStatus::Staged);
+        assert_eq!(response.status, McpLiveOpStatus::Rejected);
         assert!(!response.persisted);
         assert!(response.applied_at_turn.is_none());
     }
@@ -1802,7 +1802,7 @@ mod tests {
         assert_eq!(response.session_id, session_id);
         assert_eq!(response.operation, McpLiveOperation::Reload);
         assert_eq!(response.server_name.as_deref(), Some("filesystem"));
-        assert_eq!(response.status, McpLiveOpStatus::Staged);
+        assert_eq!(response.status, McpLiveOpStatus::Rejected);
         assert!(response.persisted);
         assert!(response.applied_at_turn.is_none());
     }

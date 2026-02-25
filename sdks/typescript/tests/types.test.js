@@ -246,7 +246,7 @@ describe("Typed Events", () => {
       assert.equal(event.payload.target, "filesystem");
       assert.equal(event.payload.status, "staged");
       assert.equal(event.payload.persisted, false);
-      assert.equal(event.payload.appliedAtTurn, 7);
+      assert.equal(event.payload.applied_at_turn, 7);
     }
   });
 
@@ -261,7 +261,7 @@ describe("Typed Events", () => {
       assert.equal(event.payload.target, "");
       assert.equal(event.payload.status, "");
       assert.equal(event.payload.persisted, false);
-      assert.equal(event.payload.appliedAtTurn, undefined);
+      assert.equal(event.payload.applied_at_turn, undefined);
     }
   });
 
@@ -278,7 +278,7 @@ describe("Typed Events", () => {
     });
     assert.equal(event.type, "tool_config_changed");
     if (event.type === "tool_config_changed") {
-      assert.equal(event.payload.appliedAtTurn, undefined);
+      assert.equal(event.payload.applied_at_turn, undefined);
     }
   });
 

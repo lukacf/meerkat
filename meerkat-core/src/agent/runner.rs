@@ -111,6 +111,11 @@ where
         }
         Ok(())
     }
+
+    #[cfg(test)]
+    pub(crate) fn inject_tool_scope_boundary_failure_once_for_test(&self) {
+        self.tool_scope.inject_boundary_failure_once_for_test();
+    }
 }
 
 impl<C, T, S> Agent<C, T, S>

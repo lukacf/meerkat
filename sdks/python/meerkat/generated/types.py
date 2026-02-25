@@ -73,32 +73,35 @@ class SkillsParams:
 
 @dataclass
 class McpAddParams:
-    """Request payload for mcp/add."""
-    session_id: str = ''
-    server_name: str = ''
-    server_config: Optional[dict] = None
+    """Request payload for `mcp/add`."""
     persisted: bool = False
+    server_config: Any = None
+    server_name: str = ''
+    session_id: str = ''
+
 
 @dataclass
 class McpRemoveParams:
-    """Request payload for mcp/remove."""
-    session_id: str = ''
-    server_name: str = ''
+    """Request payload for `mcp/remove`."""
     persisted: bool = False
+    server_name: str = ''
+    session_id: str = ''
+
 
 @dataclass
 class McpReloadParams:
-    """Request payload for mcp/reload."""
-    session_id: str = ''
-    server_name: Optional[str] = None
+    """Request payload for optional `mcp/reload`."""
     persisted: bool = False
+    server_name: Optional[str] = None
+    session_id: str = ''
+
 
 @dataclass
 class McpLiveOpResponse:
-    """Response payload for mcp/add|remove|reload."""
-    session_id: str = ''
-    operation: str = ''
-    server_name: Optional[str] = None
-    status: str = ''
-    persisted: bool = False
+    """Response payload for live MCP operations."""
     applied_at_turn: Optional[int] = None
+    operation: str = ''
+    persisted: bool = False
+    server_name: Optional[str] = None
+    session_id: str = ''
+    status: str = ''

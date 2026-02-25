@@ -318,7 +318,7 @@ export interface ToolConfigChangedPayload {
   readonly target: string;
   readonly status: string;
   readonly persisted: boolean;
-  readonly appliedAtTurn?: number;
+  readonly applied_at_turn?: number;
 }
 
 export interface ToolConfigChangedEvent {
@@ -544,7 +544,7 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
           target: String(payloadRaw.target ?? ""),
           status: String(payloadRaw.status ?? ""),
           persisted: typeof payloadRaw.persisted === "boolean" ? payloadRaw.persisted : false,
-          ...(appliedAtTurn != null ? { appliedAtTurn } : {}),
+          ...(appliedAtTurn != null ? { applied_at_turn: appliedAtTurn } : {}),
         },
       };
     }

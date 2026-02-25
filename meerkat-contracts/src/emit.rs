@@ -146,6 +146,29 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         serde_json::to_string_pretty(&rpc_methods)?,
     )?;
 
+    let mcp_live_op_response_schema = serde_json::json!({
+        "type": "object",
+        "required": ["session_id", "operation", "status", "persisted"],
+        "properties": {
+            "session_id": {"type": "string"},
+            "operation": {"type": "string", "enum": ["add", "remove", "reload"]},
+            "server_name": {"type": ["string", "null"]},
+            "status": {"type": "string"},
+            "persisted": {"type": "boolean"},
+            "applied_at_turn": {"type": ["integer", "null"], "minimum": 0},
+        }
+    });
+    let mcp_live_op_response = serde_json::json!({
+        "200": {
+            "description": "McpLiveOpResponse",
+            "content": {
+                "application/json": {
+                    "schema": mcp_live_op_response_schema
+                }
+            }
+        }
+    });
+
     // REST OpenAPI — stub endpoint listing, not a full OpenAPI spec.
     // No request/response body schemas included.
     let rest_openapi = serde_json::json!({
@@ -169,81 +192,21 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
                 "post": {
                     "summary": "Live MCP add",
                     "requestBody": {"contract": "McpAddParams"},
-                    "responses": {
-                        "200": {
-                            "description": "McpLiveOpResponse",
-                            "content": {
-                                "application/json": {
-                                    "schema": {
-                                        "type": "object",
-                                        "required": ["session_id", "operation", "status", "persisted"],
-                                        "properties": {
-                                            "session_id": {"type": "string"},
-                                            "operation": {"type": "string", "enum": ["add", "remove", "reload"]},
-                                            "server_name": {"type": ["string", "null"]},
-                                            "status": {"type": "string"},
-                                            "persisted": {"type": "boolean"},
-                                            "applied_at_turn": {"type": ["integer", "null"], "minimum": 0},
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    "responses": mcp_live_op_response
                 }
             },
             "/sessions/{id}/mcp/remove": {
                 "post": {
                     "summary": "Live MCP remove",
                     "requestBody": {"contract": "McpRemoveParams"},
-                    "responses": {
-                        "200": {
-                            "description": "McpLiveOpResponse",
-                            "content": {
-                                "application/json": {
-                                    "schema": {
-                                        "type": "object",
-                                        "required": ["session_id", "operation", "status", "persisted"],
-                                        "properties": {
-                                            "session_id": {"type": "string"},
-                                            "operation": {"type": "string", "enum": ["add", "remove", "reload"]},
-                                            "server_name": {"type": ["string", "null"]},
-                                            "status": {"type": "string"},
-                                            "persisted": {"type": "boolean"},
-                                            "applied_at_turn": {"type": ["integer", "null"], "minimum": 0},
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    "responses": mcp_live_op_response
                 }
             },
             "/sessions/{id}/mcp/reload": {
                 "post": {
                     "summary": "Live MCP reload (optional skeleton)",
                     "requestBody": {"contract": "McpReloadParams"},
-                    "responses": {
-                        "200": {
-                            "description": "McpLiveOpResponse",
-                            "content": {
-                                "application/json": {
-                                    "schema": {
-                                        "type": "object",
-                                        "required": ["session_id", "operation", "status", "persisted"],
-                                        "properties": {
-                                            "session_id": {"type": "string"},
-                                            "operation": {"type": "string", "enum": ["add", "remove", "reload"]},
-                                            "server_name": {"type": ["string", "null"]},
-                                            "status": {"type": "string"},
-                                            "persisted": {"type": "boolean"},
-                                            "applied_at_turn": {"type": ["integer", "null"], "minimum": 0},
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    "responses": mcp_live_op_response
                 }
             },
             "/health": {"get": {"summary": "Health check"}},

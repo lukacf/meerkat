@@ -9,6 +9,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 
 def load_schemas(artifacts_dir: Path) -> dict:
@@ -18,6 +19,85 @@ def load_schemas(artifacts_dir: Path) -> dict:
         with open(f) as fh:
             schemas[f.stem] = json.load(fh)
     return schemas
+
+
+def _resolve_schema_ref(root: dict[str, Any], ref: str) -> dict[str, Any]:
+    if not ref.startswith("#/$defs/"):
+        return {}
+    name = ref.removeprefix("#/$defs/")
+    defs = root.get("$defs", {})
+    return defs.get(name, {})
+
+
+def _python_type_from_schema(root: dict[str, Any], field_schema: Any) -> tuple[str, bool]:
+    """Return (python_type, optional)."""
+    if field_schema is True or field_schema is False:
+        return ("Any", True)
+    if not isinstance(field_schema, dict):
+        return ("Any", True)
+    if "$ref" in field_schema:
+        resolved = _resolve_schema_ref(root, str(field_schema["$ref"]))
+        return _python_type_from_schema(root, resolved)
+
+    schema_type = field_schema.get("type")
+    optional = False
+    if isinstance(schema_type, list):
+        optional = "null" in schema_type
+        non_null = [t for t in schema_type if t != "null"]
+        schema_type = non_null[0] if non_null else None
+
+    match schema_type:
+        case "string":
+            return ("str", optional)
+        case "boolean":
+            return ("bool", optional)
+        case "integer":
+            return ("int", optional)
+        case "number":
+            return ("float", optional)
+        case "array":
+            return ("list[Any]", optional)
+        case "object":
+            return ("dict[str, Any]", optional)
+        case _:
+            return ("Any", True or optional)
+
+
+def _typescript_type_from_schema(root: dict[str, Any], field_schema: Any) -> tuple[str, bool]:
+    """Return (typescript_type, optional)."""
+    if field_schema is True or field_schema is False:
+        return ("unknown", True)
+    if not isinstance(field_schema, dict):
+        return ("unknown", True)
+    if "$ref" in field_schema:
+        resolved = _resolve_schema_ref(root, str(field_schema["$ref"]))
+        return _typescript_type_from_schema(root, resolved)
+
+    schema_type = field_schema.get("type")
+    optional = False
+    if isinstance(schema_type, list):
+        optional = "null" in schema_type
+        non_null = [t for t in schema_type if t != "null"]
+        schema_type = non_null[0] if non_null else None
+
+    match schema_type:
+        case "string":
+            if "enum" in field_schema and isinstance(field_schema["enum"], list):
+                values = " | ".join([f'"{v}"' for v in field_schema["enum"]])
+                return (values, optional)
+            return ("string", optional)
+        case "boolean":
+            return ("boolean", optional)
+        case "integer":
+            return ("number", optional)
+        case "number":
+            return ("number", optional)
+        case "array":
+            return ("unknown[]", optional)
+        case "object":
+            return ("Record<string, unknown>", optional)
+        case _:
+            return ("unknown", True or optional)
 
 
 def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = True, has_skills: bool = True) -> None:
@@ -93,33 +173,31 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         types_content += "    skills_enabled: bool = False\n"
         types_content += "    skill_references: list = field(default_factory=list)\n\n"
 
-    types_content += "\n@dataclass\nclass McpAddParams:\n"
-    types_content += '    """Request payload for mcp/add."""\n'
-    types_content += "    session_id: str = ''\n"
-    types_content += "    server_name: str = ''\n"
-    types_content += "    server_config: Optional[dict] = None\n"
-    types_content += "    persisted: bool = False\n\n"
+    params_schema = schemas.get("params", {})
+    wire_schema = schemas.get("wire-types", {})
 
-    types_content += "@dataclass\nclass McpRemoveParams:\n"
-    types_content += '    """Request payload for mcp/remove."""\n'
-    types_content += "    session_id: str = ''\n"
-    types_content += "    server_name: str = ''\n"
-    types_content += "    persisted: bool = False\n\n"
+    def append_python_dataclass(name: str, root_schema: dict[str, Any], default_doc: str) -> None:
+        nonlocal types_content
+        schema = root_schema.get(name, {})
+        properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
+        required = set(schema.get("required", [])) if isinstance(schema, dict) else set()
+        doc = schema.get("description", default_doc) if isinstance(schema, dict) else default_doc
+        types_content += f"\n@dataclass\nclass {name}:\n"
+        types_content += f'    """{doc}"""\n'
+        for field_name, field_schema in properties.items():
+            field_type, is_optional_type = _python_type_from_schema(schema, field_schema)
+            is_required = field_name in required
+            annotation = field_type
+            if is_optional_type and not is_required:
+                annotation = f"Optional[{field_type}]"
+            default_value = "None" if (is_optional_type and not is_required) else ("False" if field_type == "bool" else ("''" if field_type == "str" else ("0" if field_type in {"int", "float"} else "None")))
+            types_content += f"    {field_name}: {annotation} = {default_value}\n"
+        types_content += "\n"
 
-    types_content += "@dataclass\nclass McpReloadParams:\n"
-    types_content += '    """Request payload for mcp/reload."""\n'
-    types_content += "    session_id: str = ''\n"
-    types_content += "    server_name: Optional[str] = None\n"
-    types_content += "    persisted: bool = False\n\n"
-
-    types_content += "@dataclass\nclass McpLiveOpResponse:\n"
-    types_content += '    """Response payload for mcp/add|remove|reload."""\n'
-    types_content += "    session_id: str = ''\n"
-    types_content += "    operation: str = ''\n"
-    types_content += "    server_name: Optional[str] = None\n"
-    types_content += "    status: str = ''\n"
-    types_content += "    persisted: bool = False\n"
-    types_content += "    applied_at_turn: Optional[int] = None\n\n"
+    append_python_dataclass("McpAddParams", params_schema, "Request payload for mcp/add.")
+    append_python_dataclass("McpRemoveParams", params_schema, "Request payload for mcp/remove.")
+    append_python_dataclass("McpReloadParams", params_schema, "Request payload for mcp/reload.")
+    append_python_dataclass("McpLiveOpResponse", wire_schema, "Response payload for mcp/add|remove|reload.")
 
     (output_dir / "types.py").write_text(types_content)
 
@@ -210,33 +288,25 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
         types_content += "  skill_references: string[];\n"
         types_content += "}\n"
 
-    types_content += "\nexport interface McpAddParams {\n"
-    types_content += "  session_id: string;\n"
-    types_content += "  server_name: string;\n"
-    types_content += "  server_config: Record<string, unknown>;\n"
-    types_content += "  persisted: boolean;\n"
-    types_content += "}\n"
+    params_schema = schemas.get("params", {})
+    wire_schema = schemas.get("wire-types", {})
 
-    types_content += "\nexport interface McpRemoveParams {\n"
-    types_content += "  session_id: string;\n"
-    types_content += "  server_name: string;\n"
-    types_content += "  persisted: boolean;\n"
-    types_content += "}\n"
+    def append_typescript_interface(name: str, root_schema: dict[str, Any]) -> None:
+        nonlocal types_content
+        schema = root_schema.get(name, {})
+        properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
+        required = set(schema.get("required", [])) if isinstance(schema, dict) else set()
+        types_content += f"\nexport interface {name} {{\n"
+        for field_name, field_schema in properties.items():
+            field_type, optional_by_type = _typescript_type_from_schema(schema, field_schema)
+            optional = "?" if (field_name not in required or optional_by_type) else ""
+            types_content += f"  {field_name}{optional}: {field_type};\n"
+        types_content += "}\n"
 
-    types_content += "\nexport interface McpReloadParams {\n"
-    types_content += "  session_id: string;\n"
-    types_content += "  server_name?: string;\n"
-    types_content += "  persisted: boolean;\n"
-    types_content += "}\n"
-
-    types_content += "\nexport interface McpLiveOpResponse {\n"
-    types_content += "  session_id: string;\n"
-    types_content += "  operation: \"add\" | \"remove\" | \"reload\";\n"
-    types_content += "  server_name?: string;\n"
-    types_content += "  status: string;\n"
-    types_content += "  persisted: boolean;\n"
-    types_content += "  applied_at_turn?: number;\n"
-    types_content += "}\n"
+    append_typescript_interface("McpAddParams", params_schema)
+    append_typescript_interface("McpRemoveParams", params_schema)
+    append_typescript_interface("McpReloadParams", params_schema)
+    append_typescript_interface("McpLiveOpResponse", wire_schema)
 
     (output_dir / "types.ts").write_text(types_content)
 

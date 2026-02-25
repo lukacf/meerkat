@@ -1591,7 +1591,7 @@ mod tests {
                 ["secret".to_string()].into_iter().collect(),
             ))
             .unwrap();
-        agent.tool_scope.inject_boundary_failure_once_for_test();
+        agent.inject_tool_scope_boundary_failure_once_for_test();
 
         let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
         let result = agent

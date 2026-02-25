@@ -360,7 +360,7 @@ where
     config: AgentConfig,
     client: Arc<C>,
     tools: Arc<T>,
-    pub(crate) tool_scope: ToolScope,
+    tool_scope: ToolScope,
     store: Arc<S>,
     session: Session,
     budget: Budget,

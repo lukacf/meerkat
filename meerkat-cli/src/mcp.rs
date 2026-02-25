@@ -10,6 +10,7 @@ use meerkat_core::mcp_config::{
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::sync::OnceLock;
 use toml_edit::{Array, DocumentMut, Item, Table};
 
 /// Truncate a string to max_chars, adding "..." if truncated (Unicode-safe)
@@ -216,8 +217,7 @@ async fn post_live_op<T: serde::Serialize>(
 ) -> anyhow::Result<McpLiveOpResponse> {
     let base = base_url.trim_end_matches('/');
     let url = format!("{base}/sessions/{session_id}/mcp/{op}");
-    let client = reqwest::Client::new();
-    let response = client.post(&url).json(payload).send().await?;
+    let response = live_http_client().post(&url).json(payload).send().await?;
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_else(|_| String::new());
@@ -227,6 +227,11 @@ async fn post_live_op<T: serde::Serialize>(
         .json::<McpLiveOpResponse>()
         .await
         .map_err(Into::into)
+}
+
+fn live_http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new)
 }
 
 /// Parse KEY=VALUE environment variables

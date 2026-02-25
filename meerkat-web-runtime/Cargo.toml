@@ -23,6 +23,15 @@ tar = "0.4"
 toml = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+meerkat-core = { workspace = true }
+meerkat-client = { workspace = true, features = ["anthropic", "openai", "gemini"] }
+async-trait = { workspace = true }
+futures = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio_with_wasm = { workspace = true }
+getrandom = { version = "0.3", features = ["wasm_js"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
 
 [lints]
 workspace = true

@@ -2861,11 +2861,18 @@ dependencies = [
 name = "meerkat-web-runtime"
 version = "0.4.0"
 dependencies = [
+ "async-trait",
  "flate2",
+ "futures",
+ "getrandom 0.3.4",
  "js-sys",
+ "meerkat-client",
+ "meerkat-core",
+ "reqwest",
  "serde",
  "serde_json",
  "tar",
+ "tokio_with_wasm",
  "toml",
  "wasm-bindgen",
  "wasm-bindgen-futures",

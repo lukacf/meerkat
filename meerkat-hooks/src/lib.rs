@@ -1,5 +1,11 @@
 //! Hook runtimes (in-process, command, HTTP) and deterministic default engine.
 
+// On wasm32, use tokio_with_wasm as a drop-in replacement for tokio.
+#[cfg(target_arch = "wasm32")]
+mod tokio {
+    pub use tokio_with_wasm::alias::*;
+}
+
 // Skill registration
 inventory::submit! {
     meerkat_skills::SkillRegistration {
@@ -39,10 +45,13 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::process::Command;
 use tokio::sync::{Mutex, Semaphore};
-use tokio::time::{Duration, timeout};
+use meerkat_core::time_compat::Duration;
+use tokio::time::timeout;
 
 /// Response returned by runtime adapters.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -81,7 +90,10 @@ fn default_http_method() -> String {
     "POST".to_string()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 type HandlerFuture = Pin<Box<dyn Future<Output = Result<RuntimeHookResponse, String>> + Send>>;
+#[cfg(target_arch = "wasm32")]
+type HandlerFuture = Pin<Box<dyn Future<Output = Result<RuntimeHookResponse, String>>>>;
 
 pub type InProcessHookHandler = Arc<dyn Fn(HookInvocation) -> HandlerFuture + Send + Sync>;
 
@@ -156,6 +168,7 @@ impl DefaultHookEngine {
         HookRevision(self.revision.fetch_add(1, Ordering::SeqCst))
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     async fn read_stream_limited<R>(
         mut stream: R,
         byte_limit: usize,
@@ -267,7 +280,7 @@ impl DefaultHookEngine {
         registration_index: usize,
         invocation: HookInvocation,
     ) -> HookOutcome {
-        let start = std::time::Instant::now();
+        let start = meerkat_core::time_compat::Instant::now();
         let timeout_ms = entry.timeout_ms.unwrap_or(self.config.default_timeout_ms);
         let policy = entry.effective_failure_policy();
 
@@ -425,6 +438,7 @@ impl DefaultHookEngine {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     async fn invoke_command_runtime(
         &self,
         entry: &HookEntryConfig,
@@ -544,6 +558,21 @@ impl DefaultHookEngine {
         })
     }
 
+    #[cfg(target_arch = "wasm32")]
+    async fn invoke_command_runtime(
+        &self,
+        entry: &HookEntryConfig,
+        _command: &str,
+        _args: &[String],
+        _env: &HashMap<String, String>,
+        _invocation: HookInvocation,
+    ) -> Result<RuntimeHookResponse, HookEngineError> {
+        Err(HookEngineError::ExecutionFailed {
+            hook_id: entry.id.clone(),
+            reason: "command hooks are not supported on wasm32".to_string(),
+        })
+    }
+
     async fn invoke_http_runtime(
         &self,
         entry: &HookEntryConfig,
@@ -632,7 +661,8 @@ impl DefaultHookEngine {
     }
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl HookEngine for DefaultHookEngine {
     fn matching_hooks(
         &self,

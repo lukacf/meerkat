@@ -7,6 +7,8 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use tokio::sync::RwLock;
 
 #[cfg(test)]

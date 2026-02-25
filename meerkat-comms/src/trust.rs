@@ -1,6 +1,7 @@
 //! Trust management for Meerkat comms.
 
 use std::io;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -105,6 +106,7 @@ impl TrustedPeers {
     }
 
     /// Load trusted peers from a JSON file, or return empty if not found.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn load_or_default(path: &Path) -> Result<Self, TrustError> {
         if !path.exists() {
             return Ok(Self::default());
@@ -115,6 +117,7 @@ impl TrustedPeers {
     }
 
     /// Load trusted peers from a JSON file.
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn load(path: &Path) -> Result<Self, TrustError> {
         let content = tokio::fs::read_to_string(path).await?;
         let peers = serde_json::from_str(&content)?;
@@ -122,6 +125,7 @@ impl TrustedPeers {
     }
 
     /// Save trusted peers to a JSON file.
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn save(&self, path: &Path) -> Result<(), TrustError> {
         let content = serde_json::to_string_pretty(self)?;
         tokio::fs::write(path, content).await?;

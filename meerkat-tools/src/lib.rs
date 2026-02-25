@@ -21,6 +21,13 @@
 //! let dispatcher = CompositeDispatcher::new(store, &BuiltinToolConfig::default(), None, None)?;
 //! ```
 
+// On wasm32, use tokio_with_wasm as a drop-in replacement for tokio.
+#[cfg(target_arch = "wasm32")]
+pub mod tokio {
+    pub use tokio_with_wasm::alias::*;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub mod builder;
 pub mod builtin;
 pub mod dispatcher;
@@ -28,20 +35,24 @@ pub mod error;
 pub mod registry;
 pub mod schema;
 
-#[cfg(feature = "comms")]
+#[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
 pub use builder::CommsDispatcherConfig;
-#[cfg(feature = "mcp")]
+#[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
 pub use builder::McpDispatcherConfig;
+#[cfg(not(target_arch = "wasm32"))]
 pub use builder::{BuiltinDispatcherConfig, ToolDispatcherBuilder, build_builtin_dispatcher};
 #[cfg(feature = "comms")]
 pub use builtin::CommsToolSurface;
 pub use builtin::{
     BuiltinTool, BuiltinToolConfig, BuiltinToolEntry, BuiltinToolError, CompositeDispatcher,
-    CompositeDispatcherError, EnforcedToolPolicy, FileTaskStore, MemoryTaskStore,
-    ResolvedToolPolicy, TaskStore, ToolMode, ToolPolicyLayer, ensure_rkat_dir,
-    ensure_rkat_dir_async, find_project_root,
+    CompositeDispatcherError, EnforcedToolPolicy, MemoryTaskStore,
+    ResolvedToolPolicy, TaskStore, ToolMode, ToolPolicyLayer,
 };
-pub use dispatcher::{EmptyToolDispatcher, FilteredDispatcher, ToolDispatcher};
+#[cfg(not(target_arch = "wasm32"))]
+pub use builtin::{FileTaskStore, ensure_rkat_dir, ensure_rkat_dir_async, find_project_root};
+pub use dispatcher::{EmptyToolDispatcher, FilteredDispatcher};
+#[cfg(not(target_arch = "wasm32"))]
+pub use dispatcher::ToolDispatcher;
 pub use error::{DispatchError, ToolError, ToolValidationError};
 #[cfg(feature = "comms")]
 pub use meerkat_comms::agent::{
@@ -70,6 +81,7 @@ inventory::submit! {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 inventory::submit! {
     meerkat_contracts::CapabilityRegistration {
         id: meerkat_contracts::CapabilityId::Shell,
@@ -89,7 +101,7 @@ inventory::submit! {
     }
 }
 
-#[cfg(feature = "sub-agents")]
+#[cfg(all(feature = "sub-agents", not(target_arch = "wasm32")))]
 inventory::submit! {
     meerkat_contracts::CapabilityRegistration {
         id: meerkat_contracts::CapabilityId::SubAgents,
@@ -114,6 +126,7 @@ inventory::submit! {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 inventory::submit! {
     meerkat_skills::SkillRegistration {
         id: "shell-patterns",
@@ -126,7 +139,7 @@ inventory::submit! {
     }
 }
 
-#[cfg(feature = "sub-agents")]
+#[cfg(all(feature = "sub-agents", not(target_arch = "wasm32")))]
 inventory::submit! {
     meerkat_skills::SkillRegistration {
         id: "sub-agent-orchestration",

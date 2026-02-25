@@ -38,7 +38,8 @@ fn canonical_key(id: &SkillId) -> Value {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl BuiltinTool for SkillInvokeFunctionTool {
     fn name(&self) -> &'static str {
         "skill_invoke_function"

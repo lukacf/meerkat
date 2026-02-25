@@ -6,6 +6,8 @@
 //! Includes a `Notify` mechanism to wake waiting tasks when new messages arrive.
 
 use std::sync::Arc;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use tokio::sync::{Notify, mpsc};
 
 use crate::types::InboxItem;

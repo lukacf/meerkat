@@ -3,7 +3,10 @@
 use super::datetime::DateTimeTool;
 use super::wait::{WaitInterrupt, WaitTool};
 use crate::builtin::BuiltinTool;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::watch;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio::sync::watch;
 
 /// A set of utility tools for general-purpose operations
 ///

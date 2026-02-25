@@ -1,6 +1,7 @@
 //! CommsAgent and related high-level agent integration.
 
 pub mod dispatcher;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod listener;
 pub mod manager;
 pub mod types;
@@ -10,6 +11,7 @@ pub use dispatcher::{
 };
 #[cfg(unix)]
 pub use listener::spawn_uds_listener;
+#[cfg(not(target_arch = "wasm32"))]
 pub use listener::{ListenerHandle, spawn_tcp_listener};
 pub use manager::{CommsManager, CommsManagerConfig};
 pub use types::{CommsContent, CommsMessage, CommsStatus, MessageIntent};
@@ -21,6 +23,8 @@ use meerkat_core::session::Session;
 use meerkat_core::types::RunResult;
 use meerkat_core::{Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
 use std::sync::Arc;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use tokio::sync::watch;
 
 /// Agent wrapper that integrates comms inbox.

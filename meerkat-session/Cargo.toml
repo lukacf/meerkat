@@ -15,10 +15,7 @@ categories.workspace = true
 [dependencies]
 meerkat-core = { workspace = true }
 meerkat-contracts = { workspace = true }
-meerkat-skills = { workspace = true }
-inventory = { workspace = true }
 async-trait = { workspace = true }
-tokio = { workspace = true }
 indexmap = "2"
 tracing = { workspace = true }
 serde = { workspace = true }
@@ -26,9 +23,17 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 futures = { workspace = true }
 
-# Optional dependencies (gated by features)
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true }
+meerkat-skills = { workspace = true }
+inventory = { workspace = true }
+
+# Optional dependencies (gated by features, not available on wasm32)
 meerkat-store = { workspace = true, optional = true }
 redb = { workspace = true, optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio_with_wasm = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

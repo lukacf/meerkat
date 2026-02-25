@@ -8,5 +8,7 @@ pub use comms_bootstrap::{
     CommsAdvertise, CommsBootstrap, CommsBootstrapError, CommsBootstrapMode, ParentCommsContext,
     PreparedComms,
 };
-pub use comms_config::{CoreCommsConfig, ResolvedCommsConfig};
+pub use comms_config::CoreCommsConfig;
+#[cfg(not(target_arch = "wasm32"))]
+pub use comms_config::ResolvedCommsConfig;
 pub use comms_runtime::{CommsRuntime, CommsRuntimeError};

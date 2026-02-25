@@ -3,7 +3,9 @@
 use crate::CommsConfig;
 use meerkat_core::CommsAuthMode;
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_arch = "wasm32"))]
 use std::net::SocketAddr;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
 
 /// Core configuration for agent-to-agent communication.
@@ -24,15 +26,20 @@ pub struct CoreCommsConfig {
     /// `inproc://` unless they explicitly share this value.
     pub inproc_namespace: Option<String>,
     /// Address for signed (Ed25519) agent-to-agent listener.
+    #[cfg(not(target_arch = "wasm32"))]
     pub listen_uds: Option<PathBuf>,
     /// Address for signed (Ed25519) agent-to-agent listener.
+    #[cfg(not(target_arch = "wasm32"))]
     pub listen_tcp: Option<SocketAddr>,
     /// Address for plain-text external event listener. Only active when `auth=Open`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub event_listen_tcp: Option<SocketAddr>,
     /// Path for plain-text external event listener (UDS). Only active when `auth=Open`.
     #[cfg(unix)]
     pub event_listen_uds: Option<PathBuf>,
+    #[cfg(not(target_arch = "wasm32"))]
     pub identity_dir: PathBuf,
+    #[cfg(not(target_arch = "wasm32"))]
     pub trusted_peers_path: PathBuf,
     pub ack_timeout_secs: u64,
     pub max_message_bytes: u32,
@@ -49,12 +56,17 @@ impl Default for CoreCommsConfig {
             enabled: false,
             name: "meerkat".to_string(),
             inproc_namespace: None,
+            #[cfg(not(target_arch = "wasm32"))]
             listen_uds: None,
+            #[cfg(not(target_arch = "wasm32"))]
             listen_tcp: None,
+            #[cfg(not(target_arch = "wasm32"))]
             event_listen_tcp: None,
             #[cfg(unix)]
             event_listen_uds: None,
+            #[cfg(not(target_arch = "wasm32"))]
             identity_dir: PathBuf::from(".rkat/identity"),
+            #[cfg(not(target_arch = "wasm32"))]
             trusted_peers_path: PathBuf::from(".rkat/trusted_peers.json"),
             ack_timeout_secs: 30,
             max_message_bytes: 1_048_576,
@@ -74,12 +86,14 @@ impl CoreCommsConfig {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn interpolate_path(&self, path: &Path) -> PathBuf {
         let path_str = path.to_string_lossy();
         let interpolated = path_str.replace("{name}", &self.name);
         PathBuf::from(interpolated)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn resolve_paths(&self, base_dir: &Path) -> ResolvedCommsConfig {
         let resolve = |path: &Path| -> PathBuf {
             let interpolated = self.interpolate_path(path);
@@ -113,6 +127,7 @@ impl CoreCommsConfig {
 }
 
 /// Resolved comms configuration with absolute paths.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedCommsConfig {
     pub enabled: bool,

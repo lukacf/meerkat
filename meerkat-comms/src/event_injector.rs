@@ -4,6 +4,8 @@ use crate::inbox::{InboxError, InboxSender};
 use crate::types::InboxItem;
 use meerkat_core::PlainEventSource;
 use meerkat_core::event_injector::{EventInjector, EventInjectorError};
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 
 /// Shared subscriber registry for interaction-scoped event streaming.
 ///

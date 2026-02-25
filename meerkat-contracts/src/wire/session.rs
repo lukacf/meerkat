@@ -25,12 +25,12 @@ impl From<SessionInfo> for WireSessionInfo {
             session_ref: None,
             created_at: info
                 .created_at
-                .duration_since(std::time::UNIX_EPOCH)
+                .duration_since(meerkat_core::time_compat::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
             updated_at: info
                 .updated_at
-                .duration_since(std::time::UNIX_EPOCH)
+                .duration_since(meerkat_core::time_compat::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
             message_count: info.message_count,
@@ -60,12 +60,12 @@ impl From<SessionSummary> for WireSessionSummary {
             session_ref: None,
             created_at: summary
                 .created_at
-                .duration_since(std::time::UNIX_EPOCH)
+                .duration_since(meerkat_core::time_compat::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
             updated_at: summary
                 .updated_at
-                .duration_since(std::time::UNIX_EPOCH)
+                .duration_since(meerkat_core::time_compat::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
             message_count: summary.message_count,

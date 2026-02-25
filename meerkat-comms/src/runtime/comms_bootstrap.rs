@@ -3,6 +3,7 @@
 use super::comms_config::CoreCommsConfig;
 use super::comms_runtime::CommsRuntime;
 use crate::{PubKey, TrustedPeer};
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 use thiserror::Error;
 
@@ -13,6 +14,7 @@ pub enum CommsBootstrapError {
 }
 
 pub enum CommsBootstrapMode {
+    #[cfg(not(target_arch = "wasm32"))]
     Standalone,
     ChildInproc,
 }
@@ -25,12 +27,14 @@ pub struct CommsAdvertise {
 
 pub struct CommsBootstrap {
     config: CoreCommsConfig,
+    #[cfg(not(target_arch = "wasm32"))]
     base_dir: PathBuf,
     mode: CommsBootstrapMode,
     parent_context: Option<ParentCommsContext>,
 }
 
 impl CommsBootstrap {
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn from_config(config: CoreCommsConfig, base_dir: PathBuf) -> Self {
         Self {
             config,
@@ -46,6 +50,7 @@ impl CommsBootstrap {
         config.inproc_namespace = parent_context.inproc_namespace.clone();
         Self {
             config,
+            #[cfg(not(target_arch = "wasm32"))]
             base_dir: parent_context.comms_base_dir.clone(),
             mode: CommsBootstrapMode::ChildInproc,
             parent_context: Some(parent_context),
@@ -54,6 +59,7 @@ impl CommsBootstrap {
 
     pub async fn prepare(self) -> Result<Option<PreparedComms>, CommsBootstrapError> {
         match self.mode {
+            #[cfg(not(target_arch = "wasm32"))]
             CommsBootstrapMode::Standalone => {
                 let resolved = self.config.resolve_paths(&self.base_dir);
                 let runtime = CommsRuntime::new(resolved)
@@ -108,6 +114,7 @@ pub struct ParentCommsContext {
     pub parent_name: String,
     pub parent_pubkey: [u8; 32],
     pub parent_addr: String,
+    #[cfg(not(target_arch = "wasm32"))]
     pub comms_base_dir: PathBuf,
     pub inproc_namespace: Option<String>,
 }

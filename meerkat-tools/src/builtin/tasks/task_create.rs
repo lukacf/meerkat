@@ -94,7 +94,8 @@ impl TaskCreateTool {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl BuiltinTool for TaskCreateTool {
     fn name(&self) -> &'static str {
         "task_create"

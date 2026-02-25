@@ -6,7 +6,11 @@
 use super::store::TaskStore;
 use super::types::{NewTask, Task, TaskError, TaskId, TaskStatus, TaskUpdate};
 use async_trait::async_trait;
+
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::RwLock;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio::sync::RwLock;
 
 /// In-memory task store for testing
 ///
@@ -73,7 +77,8 @@ impl Default for MemoryTaskStore {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl TaskStore for MemoryTaskStore {
     async fn list(&self) -> Result<Vec<Task>, TaskError> {
         let tasks = self.tasks.read().await;

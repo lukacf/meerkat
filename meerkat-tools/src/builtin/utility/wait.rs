@@ -3,10 +3,14 @@
 use crate::builtin::{BuiltinTool, BuiltinToolError};
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
+use meerkat_core::time_compat::{Duration, Instant};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::time::{Duration, Instant};
+
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::watch;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio::sync::watch;
 
 /// Maximum wait time in seconds (5 minutes)
 const MAX_WAIT_SECONDS: f64 = 300.0;
@@ -65,7 +69,8 @@ struct WaitArgs {
     seconds: f64,
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl BuiltinTool for WaitTool {
     fn name(&self) -> &'static str {
         "wait"
@@ -84,6 +89,11 @@ impl BuiltinTool for WaitTool {
     }
 
     async fn call(&self, args: Value) -> Result<Value, BuiltinToolError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        use tokio::time::sleep;
+        #[cfg(target_arch = "wasm32")]
+        use crate::tokio::time::sleep;
+
         let args: WaitArgs = serde_json::from_value(args)
             .map_err(|e| BuiltinToolError::invalid_args(format!("Invalid arguments: {}", e)))?;
 
@@ -98,18 +108,24 @@ impl BuiltinTool for WaitTool {
             // Mark the current value as seen - we only want to react to NEW interrupts
             // that arrive AFTER we start waiting, not stale ones from previous waits
             rx.borrow_and_update();
-            tokio::select! {
-                _ = tokio::time::sleep(duration) => {
-                    // Completed normally
-                    Ok(json!({
-                        "waited_seconds": seconds,
-                        "status": "complete"
-                    }))
+
+            // Use futures::future::select to avoid tokio::select! macro
+            // which requires the tokio crate to be directly named in Cargo.toml.
+            let interrupted = {
+                let sleep_fut = sleep(duration);
+                futures::pin_mut!(sleep_fut);
+
+                let changed_fut = rx.changed();
+                futures::pin_mut!(changed_fut);
+
+                match futures::future::select(sleep_fut, changed_fut).await {
+                    futures::future::Either::Left(_) => false,
+                    futures::future::Either::Right((result, _)) => result.is_ok(),
                 }
-            result = rx.changed() => {
-                if result.is_ok()
-                    && let Some(interrupt) = rx.borrow().as_ref()
-                {
+            };
+
+            if interrupted {
+                if let Some(interrupt) = rx.borrow().as_ref() {
                     let waited = start.elapsed().as_secs_f64();
                     return Ok(json!({
                         "waited_seconds": waited,
@@ -118,16 +134,15 @@ impl BuiltinTool for WaitTool {
                         "reason": format!("Wait interrupted after {:.1}s: {}", waited, interrupt.reason)
                     }));
                 }
-                // Channel closed or no interrupt data - complete normally
-                Ok(json!({
-                        "waited_seconds": seconds,
-                        "status": "complete"
-                    }))
-                }
             }
+            // Completed normally (either sleep finished or channel closed without data)
+            Ok(json!({
+                "waited_seconds": seconds,
+                "status": "complete"
+            }))
         } else {
             // No interrupt receiver - just sleep
-            tokio::time::sleep(duration).await;
+            sleep(duration).await;
             Ok(json!({
                 "waited_seconds": seconds,
                 "status": "complete"

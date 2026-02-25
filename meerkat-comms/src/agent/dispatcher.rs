@@ -9,6 +9,8 @@ use meerkat_core::error::ToolError;
 use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
 use serde_json::Value;
 use std::sync::Arc;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use tokio::sync::RwLock;
 
 /// Tool dispatcher that provides comms tools.
@@ -56,7 +58,8 @@ impl<T: AgentToolDispatcher> CommsToolDispatcher<T> {
 
 pub struct NoOpDispatcher;
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AgentToolDispatcher for NoOpDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         Arc::from([])
@@ -90,7 +93,8 @@ pub fn comms_tool_defs() -> Vec<Arc<ToolDef>> {
         .collect()
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl<T: AgentToolDispatcher + 'static> AgentToolDispatcher for CommsToolDispatcher<T> {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         Arc::clone(&self.tool_defs)
@@ -145,7 +149,8 @@ impl DynCommsToolDispatcher {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AgentToolDispatcher for DynCommsToolDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         Arc::clone(&self.tool_defs)

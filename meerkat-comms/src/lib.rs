@@ -2,20 +2,30 @@
 // meerkat-comms
 //! Inter-agent communication for Meerkat instances.
 
+// On wasm32, use tokio_with_wasm as a drop-in replacement for tokio.
+#[cfg(target_arch = "wasm32")]
+pub mod tokio {
+    pub use tokio_with_wasm::alias::*;
+}
+
 pub mod identity;
 pub mod inbox;
 pub mod inproc;
-pub mod io_task;
 pub mod peer_meta;
-pub mod router;
 pub mod transport;
 pub mod trust;
 pub mod types;
 
+// Network I/O modules — not available on wasm32
+#[cfg(not(target_arch = "wasm32"))]
+pub mod io_task;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod plain_listener;
+
 pub mod agent;
 pub mod event_injector;
 pub mod mcp;
-pub mod plain_listener;
+pub mod router;
 pub mod runtime;
 
 pub use agent::types::{DrainedMessage, PlainMessage, drain_inbox_item};
@@ -23,9 +33,11 @@ pub use event_injector::CommsEventInjector;
 pub use identity::{IdentityError, Keypair, PubKey, Signature};
 pub use inbox::{Inbox, InboxError, InboxSender};
 pub use inproc::{InprocPeerInfo, InprocRegistry, InprocSendError};
+#[cfg(not(target_arch = "wasm32"))]
 pub use io_task::{IoTaskError, handle_connection};
 pub use peer_meta::PeerMeta;
 pub use router::{CommsConfig, DEFAULT_MAX_MESSAGE_BYTES, Router, SendError};
+#[cfg(not(target_arch = "wasm32"))]
 pub use transport::codec::{EnvelopeFrame, TransportCodec};
 pub use transport::{PeerAddr, TransportError};
 pub use trust::{TrustError, TrustedPeer, TrustedPeers};
@@ -36,7 +48,9 @@ pub use runtime::comms_bootstrap::{
     CommsAdvertise, CommsBootstrap, CommsBootstrapError, CommsBootstrapMode, ParentCommsContext,
     PreparedComms,
 };
-pub use runtime::comms_config::{CoreCommsConfig, ResolvedCommsConfig};
+pub use runtime::comms_config::CoreCommsConfig;
+#[cfg(not(target_arch = "wasm32"))]
+pub use runtime::comms_config::ResolvedCommsConfig;
 pub use runtime::comms_runtime::{CommsRuntime, CommsRuntimeError};
 
 pub use agent::CommsAgent;

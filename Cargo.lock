@@ -2483,6 +2483,8 @@ dependencies = [
  "ciborium",
  "ed25519-dalek",
  "futures",
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
  "inventory",
  "meerkat-contracts",
  "meerkat-core",
@@ -2497,6 +2499,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
+ "tokio_with_wasm",
  "toml",
  "tracing",
  "uuid",
@@ -2560,6 +2563,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio_with_wasm",
  "tracing",
 ]
 
@@ -2782,6 +2786,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio_with_wasm",
  "tracing",
 ]
 
@@ -2803,6 +2808,7 @@ dependencies = [
  "strum",
  "tempfile",
  "tokio",
+ "tokio_with_wasm",
  "tracing",
  "urlencoding",
  "wiremock",
@@ -2821,6 +2827,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio_with_wasm",
  "toml",
  "tracing",
  "uuid",
@@ -2852,6 +2859,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio_with_wasm",
  "toml",
  "tracing",
  "uuid",

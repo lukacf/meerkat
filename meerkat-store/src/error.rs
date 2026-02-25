@@ -10,6 +10,7 @@ pub enum StoreError {
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("Database error: {0}")]
     Database(#[from] Box<redb::Error>),
 
@@ -19,15 +20,18 @@ pub enum StoreError {
     #[error("Session corrupted: {0}")]
     Corrupted(SessionId),
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("Task join error: {0}")]
     Join(#[from] tokio::task::JoinError),
 
     #[error("Internal error: {0}")]
     Internal(String),
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("timed out acquiring realm manifest lock for '{realm_id}'")]
     RealmManifestLockTimeout { realm_id: String },
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[error(
         "realm backend mismatch for '{realm_id}': requested '{requested}', existing '{existing}'"
     )]

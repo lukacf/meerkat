@@ -5,8 +5,10 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 WORK="$ROOT/.work"
 MOB_NORTH="$WORK/mob-north"
 MOB_SOUTH="$WORK/mob-south"
+MOB_EAST="$WORK/mob-east"
 PACK_NORTH="$WORK/north.mobpack"
 PACK_SOUTH="$WORK/south.mobpack"
+PACK_EAST="$WORK/east.mobpack"
 RUNTIME_OUT="$WORK/runtime"
 WEB_DIR="$ROOT/web"
 WEB_DIST="$WEB_DIR/dist"
@@ -20,7 +22,7 @@ else
   RKAT_BIN="${RKAT_BIN:-rkat}"
 fi
 
-mkdir -p "$WORK" "$MOB_NORTH/skills" "$MOB_SOUTH/skills"
+mkdir -p "$WORK" "$MOB_NORTH/skills" "$MOB_SOUTH/skills" "$MOB_EAST/skills"
 
 write_mob() {
   local dir="$1"
@@ -62,56 +64,81 @@ TOML
 JSON
 
   cat > "$dir/skills/game-rules.md" <<'MD'
-# Mini Diplomacy Rules
+# Mini Diplomacy — 3-Faction War
 
-You are playing mini-diplomacy-v1.
+You are a faction commander in a 3-faction territory control game.
 
-Round phases:
-1. Plan
-2. Negotiate
-3. Commit hidden order
-4. Resolve simultaneously
-5. Score update
+## Map
+12 territories divided among 3 factions (North, South, East).
+Each territory has: controller, defense (0-100), value (2-4 influence points).
 
-Constraints:
-- Never emit illegal actions.
-- Output strictly valid JSON.
-- Keep negotiation commitments explicit and traceable.
+## Turn Structure
+1. You receive the current game state (all territories, scores, diplomatic signals)
+2. You choose ONE enemy territory to target
+3. You set aggression (0-100) and fortify (100 - aggression)
+4. You send a diplomatic signal visible to ALL other factions
+5. All orders resolve simultaneously
+
+## Combat
+If your aggression > target's defense: you capture it (defense resets).
+Higher fortify strengthens your own territories.
+
+## Diplomacy
+With 3 factions, alliances matter. You can:
+- Propose alliances ("let's both attack East")
+- Backstab ("I said I'd help but I'm attacking you")
+- Signal intentions (truthful or deceptive)
+- Negotiate truces or joint operations
+
+## Victory
+After max_turns, faction with highest cumulative score wins.
+
+## Output Format
+Return ONLY valid JSON:
+```json
+{
+  "order": {
+    "aggression": <0-100>,
+    "fortify": <0-100, must equal 100-aggression>,
+    "target_region": "<exact region id>",
+    "diplomacy": "<your diplomatic signal to all factions>"
+  },
+  "reasoning": "<2-3 sentences explaining your strategy>"
+}
+```
 MD
 
   cat > "$dir/skills/planner.md" <<'MD'
 # Planner Role
 
-You optimize 2-3 turns ahead.
+You optimize 2-3 turns ahead. Consider:
+- Which faction is strongest? Can you ally against them?
+- Are diplomatic signals trustworthy? Track broken promises.
+- Region value: high-value targets are worth more risk.
+- Defense posture: don't overextend, protect your capital.
 
-Produce:
-- strategic intent
-- expected opponent branch
-- fallback branch
-- compact rationale
-
-Prioritize region value, defense posture, and deception risk.
+Produce compact strategic reasoning before your order.
 MD
 
   cat > "$dir/skills/operator.md" <<'MD'
 # Operator Role
 
-Translate strategy into legal current-turn actions.
+Validate your order before committing:
+- Target must be an enemy territory (not your own)
+- Aggression + fortify must equal exactly 100
+- Diplomatic signal should align with (or deliberately contradict) your strategy
 
-Checks before commit:
-- target exists
-- action remains legal
-- fortify/aggression budget is coherent
-
-Output a turn commit payload and execution status.
+Output the JSON order and a brief execution note.
 MD
 }
 
-write_mob "$MOB_NORTH" "mini-diplomacy-north" "North faction diplomacy mob"
-write_mob "$MOB_SOUTH" "mini-diplomacy-south" "South faction diplomacy mob"
+write_mob "$MOB_NORTH" "mini-diplomacy-north" "North faction — defend the highlands"
+write_mob "$MOB_SOUTH" "mini-diplomacy-south" "South faction — control the delta"
+write_mob "$MOB_EAST" "mini-diplomacy-east" "East faction — dominate the frontier"
 
 "$RKAT_BIN" mob pack "$MOB_NORTH" -o "$PACK_NORTH"
 "$RKAT_BIN" mob pack "$MOB_SOUTH" -o "$PACK_SOUTH"
+"$RKAT_BIN" mob pack "$MOB_EAST" -o "$PACK_EAST"
 "$RKAT_BIN" mob web build "$PACK_NORTH" -o "$RUNTIME_OUT"
 
 cd "$WEB_DIR"
@@ -122,6 +149,7 @@ cp "$RUNTIME_OUT/runtime.js" "$WEB_DIST/runtime.js"
 cp "$RUNTIME_OUT/runtime_bg.wasm" "$WEB_DIST/runtime_bg.wasm"
 cp "$PACK_NORTH" "$WEB_DIST/north.mobpack"
 cp "$PACK_SOUTH" "$WEB_DIST/south.mobpack"
+cp "$PACK_EAST" "$WEB_DIST/east.mobpack"
 cp "$RUNTIME_OUT/manifest.web.toml" "$WEB_DIST/manifest.web.toml"
 
 PORT="${PORT:-4173}"

@@ -31,6 +31,12 @@
 //! }
 //! ```
 
+// On wasm32, provide tokio alias backed by tokio_with_wasm.
+#[cfg(target_arch = "wasm32")]
+pub mod tokio {
+    pub use tokio_with_wasm::alias::*;
+}
+
 // Re-export core types
 pub use meerkat_core::{
     // Agent
@@ -194,10 +200,11 @@ pub use meerkat_store::JsonlStore;
 #[cfg(feature = "memory-store")]
 pub use meerkat_store::MemoryStore;
 
-#[cfg(feature = "session-store")]
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub use meerkat_store::RedbSessionStore;
 
 // Re-export tools
+#[cfg(not(target_arch = "wasm32"))]
 pub use meerkat_tools::{DispatchError, ToolDispatcher, ToolRegistry, ToolValidationError};
 
 // Re-export builtin tools infrastructure
@@ -205,9 +212,11 @@ pub use meerkat_tools::{DispatchError, ToolDispatcher, ToolRegistry, ToolValidat
 pub use meerkat_tools::CommsToolSurface;
 pub use meerkat_tools::{
     BuiltinTool, BuiltinToolConfig, BuiltinToolEntry, BuiltinToolError, CompositeDispatcher,
-    CompositeDispatcherError, EnforcedToolPolicy, FileTaskStore, MemoryTaskStore,
-    ResolvedToolPolicy, TaskStore, ToolMode, ToolPolicyLayer, ensure_rkat_dir, find_project_root,
+    CompositeDispatcherError, EnforcedToolPolicy, MemoryTaskStore,
+    ResolvedToolPolicy, TaskStore, ToolMode, ToolPolicyLayer,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use meerkat_tools::{FileTaskStore, ensure_rkat_dir, find_project_root};
 
 // Re-export MCP client
 #[cfg(feature = "mcp")]
@@ -231,14 +240,20 @@ pub use meerkat_contracts::{
 // Surface infrastructure
 pub mod surface;
 
-// Prompt assembly
+// Prompt assembly (filesystem-dependent: reads AGENTS.md, system_prompt_file)
+#[cfg(not(target_arch = "wasm32"))]
 mod prompt_assembly;
+#[cfg(not(target_arch = "wasm32"))]
 pub use prompt_assembly::assemble_system_prompt;
 
-// SDK module
+// SDK helpers (filesystem-dependent: .rkat dir, hook config files)
+#[cfg(not(target_arch = "wasm32"))]
 mod sdk;
+#[cfg(not(target_arch = "wasm32"))]
 pub use sdk::*;
+#[cfg(not(target_arch = "wasm32"))]
 mod sdk_config;
+#[cfg(not(target_arch = "wasm32"))]
 pub use sdk_config::SdkConfigStore;
 
 /// Prelude module for convenient imports

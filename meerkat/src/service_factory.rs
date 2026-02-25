@@ -11,11 +11,18 @@ use meerkat_core::comms::{
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{CreateSessionRequest, SessionError};
 use meerkat_core::types::{RunResult, SessionId};
-use meerkat_core::{Config, ConfigStore, Session};
+use meerkat_core::Config;
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_core::ConfigStore;
+use meerkat_core::Session;
 use meerkat_session::EphemeralSessionService;
 use meerkat_session::ephemeral::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
 use std::sync::Arc;
+
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::mpsc;
+#[cfg(target_arch = "wasm32")]
+use tokio_with_wasm::alias::sync::mpsc;
 
 use crate::{AgentBuildConfig, AgentFactory, DynAgent};
 use meerkat_client::LlmClient;
@@ -81,7 +88,8 @@ impl FactoryAgent {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl SessionAgent for FactoryAgent {
     async fn run_with_events(
         &mut self,
@@ -141,6 +149,7 @@ impl SessionAgent for FactoryAgent {
 pub struct FactoryAgentBuilder {
     factory: AgentFactory,
     config_snapshot: Config,
+    #[cfg(not(target_arch = "wasm32"))]
     config_store: Option<Arc<dyn ConfigStore>>,
     /// Optional default LLM client injected into all builds (for testing).
     pub default_llm_client: Option<Arc<dyn LlmClient>>,
@@ -152,6 +161,7 @@ impl FactoryAgentBuilder {
         Self {
             factory,
             config_snapshot: config,
+            #[cfg(not(target_arch = "wasm32"))]
             config_store: None,
             default_llm_client: None,
         }
@@ -160,6 +170,7 @@ impl FactoryAgentBuilder {
     /// Create a new builder that resolves config from a store on each build.
     ///
     /// If the store read fails, the builder falls back to `initial_config`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new_with_config_store(
         factory: AgentFactory,
         initial_config: Config,
@@ -174,6 +185,7 @@ impl FactoryAgentBuilder {
     }
 
     async fn resolve_config(&self) -> Config {
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(store) = &self.config_store {
             match store.get().await {
                 Ok(config) => return config,
@@ -196,7 +208,8 @@ impl FactoryAgentBuilder {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl SessionAgentBuilder for FactoryAgentBuilder {
     type Agent = FactoryAgent;
 
@@ -275,7 +288,8 @@ mod tests {
         }
     }
 
-    #[async_trait]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl LlmClient for MockLlmClient {
         fn stream<'a>(
             &'a self,

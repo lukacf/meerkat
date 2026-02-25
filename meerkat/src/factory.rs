@@ -31,21 +31,34 @@ use meerkat_store::MemoryStore;
 #[cfg(not(feature = "memory-store"))]
 use meerkat_store::SessionFilter;
 use meerkat_store::{SessionStore, StoreAdapter};
+#[cfg(not(target_arch = "wasm32"))]
 use meerkat_tools::EmptyToolDispatcher;
+#[cfg(not(target_arch = "wasm32"))]
 use meerkat_tools::builtin::shell::ShellConfig;
-#[cfg(feature = "sub-agents")]
+#[cfg(all(feature = "sub-agents", not(target_arch = "wasm32")))]
 use meerkat_tools::builtin::sub_agent::{SubAgentConfig, SubAgentToolSet, SubAgentToolState};
+#[cfg(not(target_arch = "wasm32"))]
 use meerkat_tools::builtin::{
-    BuiltinToolConfig, CompositeDispatcher, FileTaskStore, MemoryTaskStore, TaskStore,
+    BuiltinToolConfig, CompositeDispatcher, MemoryTaskStore, TaskStore,
     ToolPolicyLayer,
 };
-use meerkat_tools::{BuiltinDispatcherConfig, CompositeDispatcherError};
-#[cfg(any(not(feature = "memory-store"), feature = "sub-agents"))]
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_tools::builtin::FileTaskStore;
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_tools::BuiltinDispatcherConfig;
+use meerkat_tools::CompositeDispatcherError;
+#[cfg(all(any(not(feature = "memory-store"), feature = "sub-agents"), not(target_arch = "wasm32")))]
 use tokio::sync::RwLock;
+#[cfg(all(any(not(feature = "memory-store"), feature = "sub-agents"), target_arch = "wasm32"))]
+use tokio_with_wasm::alias::sync::RwLock;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::mpsc;
+#[cfg(target_arch = "wasm32")]
+use tokio_with_wasm::alias::sync::mpsc;
 
 #[cfg(feature = "comms")]
 use crate::compose_tools_with_comms;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::{create_default_hook_engine, resolve_layered_hooks_config};
 
 /// Ephemeral in-process store used when no storage backend feature is enabled.
@@ -66,7 +79,8 @@ impl EphemeralSessionStore {
 }
 
 #[cfg(not(feature = "memory-store"))]
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl SessionStore for EphemeralSessionStore {
     async fn save(&self, session: &Session) -> Result<(), meerkat_store::StoreError> {
         self.sessions
@@ -230,6 +244,26 @@ pub struct AgentBuildConfig {
     /// - `>0`: inline only when post-drain peer count is <= threshold
     /// - `<-1`: invalid
     pub max_inline_peer_notifications: Option<i32>,
+
+    // ── Resource overrides (platform-agnostic injection) ──
+    //
+    // When set, build_agent() uses the provided resource directly,
+    // skipping filesystem-based resolution. This enables wasm32 and
+    // embedded surfaces to inject pre-built resources programmatically.
+    //
+    // Precedence: override > factory field > config resolution > default
+
+    /// Pre-built tool dispatcher. Skips shell/file/project resolution.
+    pub tool_dispatcher_override: Option<Arc<dyn AgentToolDispatcher>>,
+
+    /// Pre-built session store. Skips feature-flag store creation.
+    pub session_store_override: Option<Arc<dyn AgentSessionStore>>,
+
+    /// Pre-built hook engine. Skips filesystem hook config resolution.
+    pub hook_engine_override: Option<Arc<dyn meerkat_core::HookEngine>>,
+
+    /// Pre-built skill engine. Skips filesystem/git repository resolution.
+    pub skill_engine_override: Option<Arc<meerkat_core::skills::SkillRuntime>>,
 }
 
 impl std::fmt::Debug for AgentBuildConfig {
@@ -271,6 +305,10 @@ impl std::fmt::Debug for AgentBuildConfig {
                 "max_inline_peer_notifications",
                 &self.max_inline_peer_notifications,
             )
+            .field("tool_dispatcher_override", &self.tool_dispatcher_override.is_some())
+            .field("session_store_override", &self.session_store_override.is_some())
+            .field("hook_engine_override", &self.hook_engine_override.is_some())
+            .field("skill_engine_override", &self.skill_engine_override.is_some())
             .finish()
     }
 }
@@ -310,6 +348,10 @@ impl AgentBuildConfig {
             checkpointer: None,
             silent_comms_intents: Vec::new(),
             max_inline_peer_notifications: None,
+            tool_dispatcher_override: None,
+            session_store_override: None,
+            hook_engine_override: None,
+            skill_engine_override: None,
         }
     }
 
@@ -773,6 +815,7 @@ impl AgentFactory {
     }
 
     /// Build a composite dispatcher so callers can register sub-agent tools.
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn build_composite_dispatcher(
         &self,
         store: Arc<dyn TaskStore>,
@@ -785,6 +828,7 @@ impl AgentFactory {
     }
 
     /// Build a shared builtin dispatcher using the provided config.
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn build_builtin_dispatcher(
         &self,
         store: Arc<dyn TaskStore>,
@@ -805,6 +849,7 @@ impl AgentFactory {
     }
 
     /// Build a shared builtin dispatcher, optionally including skill tools.
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn build_builtin_dispatcher_with_skills(
         &self,
         store: Arc<dyn TaskStore>,
@@ -833,6 +878,7 @@ impl AgentFactory {
 
     /// Internal dispatcher builder used by `build_agent` when extra sub-agent
     /// comms wiring is available from a live parent runtime.
+    #[cfg(not(target_arch = "wasm32"))]
     #[allow(clippy::too_many_arguments)]
     async fn build_builtin_dispatcher_with_skills_internal(
         &self,
@@ -1096,9 +1142,12 @@ impl AgentFactory {
             .or(self.project_root.as_deref());
         let conventions_user_root = self.user_config_root.as_deref();
 
-        // 6a. Build skill engine early so it can be passed to the tool dispatcher.
+        // 6a. Build skill engine (override > factory > config > filesystem).
         #[cfg(feature = "skills")]
-        let skill_engine: Option<Arc<meerkat_core::skills::SkillRuntime>> = {
+        let skill_engine: Option<Arc<meerkat_core::skills::SkillRuntime>> =
+            if let Some(engine) = build_config.skill_engine_override.take() {
+                Some(engine)
+            } else {
             let skill_source: Option<Arc<meerkat_skills::CompositeSkillSource>> =
                 if self.skill_source.is_some() {
                     self.skill_source.clone()
@@ -1133,7 +1182,7 @@ impl AgentFactory {
                 );
                 Arc::new(meerkat_core::skills::SkillRuntime::new(engine))
             })
-        };
+        };  // end else (filesystem resolution fallthrough)
         #[cfg(not(feature = "skills"))]
         let skill_engine: Option<Arc<meerkat_core::skills::SkillRuntime>> = None;
 
@@ -1191,23 +1240,39 @@ impl AgentFactory {
         };
 
         #[allow(unused_mut)]
-        let (mut tools, mut tool_usage_instructions) = self
-            .build_tool_dispatcher_for_agent_with_overrides(
-                config,
-                build_config.external_tools,
-                effective_builtins,
-                effective_shell,
-                effective_subagents,
-                skill_engine.clone(),
-                build_config.scoped_event_tx.clone(),
-                build_config.scoped_event_path.clone(),
-                #[cfg(all(feature = "sub-agents", feature = "comms"))]
-                sub_agent_comms,
-            )
-            .await?;
+        let (mut tools, mut tool_usage_instructions) =
+            if let Some(dispatcher) = build_config.tool_dispatcher_override.take() {
+                let usage = render_tool_usage_instructions(dispatcher.tools().as_ref());
+                (dispatcher, usage)
+            } else {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    self.build_tool_dispatcher_for_agent_with_overrides(
+                        config,
+                        build_config.external_tools,
+                        effective_builtins,
+                        effective_shell,
+                        effective_subagents,
+                        skill_engine.clone(),
+                        build_config.scoped_event_tx.clone(),
+                        build_config.scoped_event_path.clone(),
+                        #[cfg(all(feature = "sub-agents", feature = "comms"))]
+                        sub_agent_comms,
+                    )
+                    .await?
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    return Err(BuildAgentError::Config(
+                        "wasm32 requires tool_dispatcher_override in AgentBuildConfig".to_string(),
+                    ));
+                }
+            };
 
-        // 7. Create session store adapter
-        let store_adapter: Arc<dyn AgentSessionStore> = if let Some(store) = &self.custom_store {
+        // 7. Create session store adapter (override > factory > feature-flag default)
+        let store_adapter: Arc<dyn AgentSessionStore> = if let Some(store) = build_config.session_store_override.take() {
+            store
+        } else if let Some(store) = &self.custom_store {
             Arc::new(StoreAdapter::new(Arc::clone(store)))
         } else {
             #[cfg(feature = "jsonl-store")]
@@ -1243,11 +1308,23 @@ impl AgentFactory {
             tool_usage_instructions = composed.1;
         }
 
-        // 10. Resolve hooks
-        let layered_hooks =
-            resolve_layered_hooks_config(conventions_context_root, conventions_user_root, config)
+        // 10. Resolve hooks (override > filesystem layered config)
+        let hook_engine = if let Some(engine) = build_config.hook_engine_override.take() {
+            Some(engine)
+        } else {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let layered_hooks = resolve_layered_hooks_config(
+                    conventions_context_root,
+                    conventions_user_root,
+                    config,
+                )
                 .await;
-        let hook_engine = create_default_hook_engine(layered_hooks);
+                create_default_hook_engine(layered_hooks)
+            }
+            #[cfg(target_arch = "wasm32")]
+            { None }
+        };
 
         // 11. Generate skill inventory section using the engine created in step 6a
         #[cfg(feature = "skills")]
@@ -1319,6 +1396,7 @@ impl AgentFactory {
         for section in &preloaded_skill_sections {
             extra_sections.push(section.as_str());
         }
+        #[cfg(not(target_arch = "wasm32"))]
         let system_prompt = crate::assemble_system_prompt(
             config,
             per_request_prompt.as_deref(),
@@ -1327,6 +1405,21 @@ impl AgentFactory {
             &tool_usage_instructions,
         )
         .await;
+        #[cfg(target_arch = "wasm32")]
+        let system_prompt = {
+            let mut prompt = per_request_prompt.unwrap_or_default();
+            for section in &extra_sections {
+                if !section.is_empty() {
+                    prompt.push_str("\n\n");
+                    prompt.push_str(section);
+                }
+            }
+            if !tool_usage_instructions.is_empty() {
+                prompt.push_str("\n\n");
+                prompt.push_str(&tool_usage_instructions);
+            }
+            prompt
+        };
 
         // 12. Build AgentBuilder
         let budget_limits = build_config
@@ -1473,6 +1566,7 @@ impl AgentFactory {
     /// `effective_builtins`, `effective_shell`, and `effective_subagents` override
     /// the factory-level flags for this specific build. Delegates to
     /// [`Self::build_builtin_dispatcher`] for the full sub-agent wiring path.
+    #[cfg(not(target_arch = "wasm32"))]
     #[allow(clippy::too_many_arguments)]
     async fn build_tool_dispatcher_for_agent_with_overrides(
         &self,

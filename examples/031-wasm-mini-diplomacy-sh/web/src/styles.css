@@ -31,6 +31,16 @@ body {
   overflow: hidden;
 }
 
+/* Subtle radial vignette on the map background */
+.map-stage::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at 50% 45%, transparent 30%, rgba(4, 6, 12, 0.7) 100%);
+  pointer-events: none;
+  z-index: 1;
+}
+
 #app { height: 100vh; display: flex; flex-direction: column; }
 
 /* ── Score Strip ── */
@@ -54,11 +64,21 @@ body {
   font-weight: 700;
 }
 
-.faction .pts { font-size: 20px; }
+.faction .pts {
+  font-size: 20px;
+  min-width: 28px;
+  text-align: center;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 4px;
+  padding: 0 4px;
+}
 .faction .name { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
 .faction.north { color: var(--north-lt); }
+.faction.north .pts { background: rgba(59, 142, 214, 0.1); }
 .faction.south { color: var(--south-lt); }
+.faction.south .pts { background: rgba(214, 90, 59, 0.1); }
 .faction.east { color: var(--east-lt); }
+.faction.east .pts { background: rgba(45, 184, 122, 0.1); }
 
 .strip-center {
   display: flex;
@@ -120,12 +140,19 @@ body {
 .control-bar-wrap .s-fill { background: var(--south); transition: flex 0.8s ease; }
 .control-bar-wrap .e-fill { background: var(--east); transition: flex 0.8s ease; }
 
-/* ── Map Stage ── */
+/* ── Arena Layout (map + chat side by side) ── */
+
+.arena-layout {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
 
 .map-stage {
   flex: 1;
   position: relative;
   overflow: hidden;
+  min-width: 0;
 }
 
 .map-stage > svg {
@@ -135,14 +162,116 @@ body {
   height: 100%;
 }
 
-/* SVG territory styles */
-.hex-bg { transition: fill 0.7s ease; }
-.hex-border { fill: none; stroke-width: 2.5; transition: stroke 0.7s ease; }
-.hex-border.north { stroke: var(--north); }
-.hex-border.south { stroke: var(--south); }
-.hex-border.east { stroke: var(--east); }
+/* ── Chat Panel (Slack-like) ── */
 
-.territory:hover .hex-bg { filter: brightness(1.35); }
+.chat-panel {
+  width: 320px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+  background: rgba(8, 12, 20, 0.95);
+}
+
+.channel-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 6px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.ch-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  border-radius: 5px;
+  padding: 5px 8px;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--dim);
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s, color 0.15s;
+}
+.ch-btn:hover { background: rgba(100, 130, 170, 0.08); color: var(--text); }
+.ch-btn.active { background: rgba(100, 130, 170, 0.14); color: var(--text); font-weight: 600; }
+
+.unread-badge {
+  margin-left: auto;
+  background: var(--gold);
+  color: #000;
+  font-size: 9px;
+  font-weight: 700;
+  border-radius: 8px;
+  padding: 1px 5px;
+  min-width: 14px;
+  text-align: center;
+}
+
+.message-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.msg-header {
+  font-family: "Chakra Petch", sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.msg-feed {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.msg-feed::-webkit-scrollbar { width: 4px; }
+.msg-feed::-webkit-scrollbar-thumb { background: rgba(100,130,170,0.3); border-radius: 2px; }
+
+.chat-msg {
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
+  line-height: 1.45;
+  background: rgba(15, 22, 34, 0.6);
+  border-left: 3px solid var(--muted);
+}
+.chat-msg.north { border-left-color: var(--north); }
+.chat-msg.south { border-left-color: var(--south); }
+.chat-msg.east { border-left-color: var(--east); }
+
+.msg-meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 3px;
+}
+.msg-icon { font-size: 13px; }
+.msg-role { font-size: 10px; font-weight: 600; color: var(--text); text-transform: uppercase; letter-spacing: 0.04em; }
+.msg-turn { margin-left: auto; font-size: 9px; color: var(--muted); }
+.msg-body { color: var(--dim); }
+
+/* SVG territory styles */
+.hex-bg { transition: fill 0.7s ease, opacity 0.5s ease; }
+.hex-border { fill: none; stroke-width: 1.8; stroke-linejoin: round; transition: stroke 0.7s ease; }
+.hex-border.north { stroke: var(--north-lt); }
+.hex-border.south { stroke: var(--south-lt); }
+.hex-border.east { stroke: var(--east-lt); }
+
+.territory:hover .hex-bg { opacity: 0.95; }
+.territory:hover .hex-border { stroke-width: 2.5; }
 .territory { cursor: default; }
 
 .region-label {
@@ -162,16 +291,17 @@ body {
   pointer-events: none;
 }
 
-.edge-line { stroke: rgba(60, 80, 110, 0.1); stroke-width: 1; }
 .edge-front {
-  stroke: rgba(255, 200, 60, 0.25);
-  stroke-width: 2;
-  stroke-dasharray: 6 4;
-  animation: frontPulse 3s ease-in-out infinite;
+  stroke: rgba(255, 200, 60, 0.3);
+  stroke-width: 2.5;
+  stroke-dasharray: 5 3;
+  stroke-linecap: round;
+  animation: frontPulse 2.5s ease-in-out infinite;
+  filter: drop-shadow(0 0 3px rgba(255, 200, 60, 0.15));
 }
 @keyframes frontPulse {
-  0%, 100% { opacity: 0.2; }
-  50% { opacity: 0.6; }
+  0%, 100% { opacity: 0.25; }
+  50% { opacity: 0.7; }
 }
 
 /* Target ring */
@@ -186,18 +316,19 @@ body {
 @keyframes targetIn { to { opacity: 0.8; } }
 @keyframes targetSpin { to { stroke-dashoffset: -26; } }
 
-/* Capture flash */
+/* Capture flash — more dramatic with fill pulse */
 .captured-flash {
-  fill: none; stroke-width: 4; opacity: 0;
-  animation: capFlash 1s ease-out forwards;
+  stroke-width: 3; opacity: 0;
+  animation: capFlash 1.4s ease-out forwards;
 }
-.captured-flash.to-north { stroke: var(--north-lt); }
-.captured-flash.to-south { stroke: var(--south-lt); }
-.captured-flash.to-east { stroke: var(--east-lt); }
+.captured-flash.to-north { fill: var(--north); stroke: var(--north-lt); }
+.captured-flash.to-south { fill: var(--south); stroke: var(--south-lt); }
+.captured-flash.to-east { fill: var(--east); stroke: var(--east-lt); }
 @keyframes capFlash {
-  0% { opacity: 0; stroke-width: 6; }
-  20% { opacity: 1; }
-  100% { opacity: 0; stroke-width: 16; }
+  0% { opacity: 0; stroke-width: 4; fill-opacity: 0.4; }
+  15% { opacity: 1; fill-opacity: 0.35; }
+  40% { fill-opacity: 0; }
+  100% { opacity: 0; stroke-width: 18; fill-opacity: 0; }
 }
 
 /* ── Turn Banner ── */
@@ -234,83 +365,45 @@ body {
 .victory-overlay {
   position: absolute; inset: 0; z-index: 20;
   display: grid; place-items: center;
-  background: rgba(7, 11, 18, 0.82);
-  backdrop-filter: blur(10px);
+  background: radial-gradient(ellipse at center, rgba(7, 11, 18, 0.7) 0%, rgba(4, 6, 10, 0.92) 100%);
+  backdrop-filter: blur(12px);
   opacity: 0; pointer-events: none;
-  transition: opacity 0.6s ease;
+  transition: opacity 0.8s ease;
 }
 .victory-overlay.visible { opacity: 1; pointer-events: auto; }
 
-.victory-content { text-align: center; animation: vPop 0.7s ease; }
+.victory-content { text-align: center; animation: vPop 0.8s ease; }
 .victory-content h2 {
   font-family: "Chakra Petch", sans-serif;
   font-size: clamp(36px, 6vw, 56px);
-  font-weight: 700; letter-spacing: 0.08em; margin-bottom: 8px;
+  font-weight: 700; letter-spacing: 0.12em; margin-bottom: 8px;
 }
-.victory-content h2.north { color: var(--north-lt); }
-.victory-content h2.south { color: var(--south-lt); }
-.victory-content h2.east { color: var(--east-lt); }
-.victory-content h2.draw { color: var(--gold); }
+.victory-content h2.north { color: var(--north-lt); text-shadow: 0 0 40px var(--north), 0 0 80px rgba(59, 142, 214, 0.3); }
+.victory-content h2.south { color: var(--south-lt); text-shadow: 0 0 40px var(--south), 0 0 80px rgba(214, 90, 59, 0.3); }
+.victory-content h2.east { color: var(--east-lt); text-shadow: 0 0 40px var(--east), 0 0 80px rgba(45, 184, 122, 0.3); }
+.victory-content h2.draw { color: var(--gold); text-shadow: 0 0 40px rgba(232, 184, 74, 0.6); }
 .victory-content p { font-size: 15px; color: var(--dim); }
-.victory-content .final { margin-top: 10px; font-family: "Chakra Petch", sans-serif; font-size: 18px; color: var(--text); }
+.victory-content .final {
+  margin-top: 12px; font-family: "Chakra Petch", sans-serif; font-size: 18px; color: var(--text);
+  display: flex; gap: 20px; justify-content: center;
+}
+.victory-content .final .north { color: var(--north-lt); }
+.victory-content .final .south { color: var(--south-lt); }
+.victory-content .final .east { color: var(--east-lt); }
+.victory-narration {
+  font-style: italic; color: var(--dim); font-size: 14px; line-height: 1.6;
+  max-width: 500px; margin: 16px auto; padding: 12px 20px;
+  border-left: 2px solid var(--gold-dim);
+  background: rgba(232, 184, 74, 0.04);
+  border-radius: 0 6px 6px 0;
+}
 @keyframes vPop {
   0% { transform: scale(0.5); opacity: 0; }
   60% { transform: scale(1.06); }
   100% { transform: scale(1); opacity: 1; }
 }
 
-/* ── Floating Dispatch Panel ── */
-
-.dispatch-panel {
-  position: absolute; top: 12px; left: 12px;
-  width: 300px; max-height: calc(100% - 80px);
-  z-index: 10; background: var(--panel);
-  border: 1px solid var(--border); border-radius: 10px;
-  backdrop-filter: blur(8px);
-  display: flex; flex-direction: column; overflow: hidden;
-}
-
-.dispatch-panel.collapsed { width: 42px; }
-.dispatch-panel.collapsed .d-feed,
-.dispatch-panel.collapsed .d-title { display: none; }
-
-.d-head {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 6px 10px; border-bottom: 1px solid var(--border); flex-shrink: 0;
-}
-
-.d-title {
-  font-family: "Chakra Petch", sans-serif;
-  font-size: 11px; font-weight: 600;
-  text-transform: uppercase; letter-spacing: 0.06em; color: var(--dim);
-}
-
-.d-toggle {
-  background: none; border: none; color: var(--dim);
-  font-size: 14px; cursor: pointer; padding: 0 4px;
-}
-.d-toggle:hover { color: var(--text); transform: none; }
-
-.d-feed {
-  flex: 1; overflow-y: auto; padding: 6px;
-  display: flex; flex-direction: column; gap: 5px;
-}
-
-.d-feed::-webkit-scrollbar { width: 3px; }
-.d-feed::-webkit-scrollbar-thumb { background: rgba(100,130,170,0.3); border-radius: 2px; }
-
-.dispatch {
-  border-radius: 7px; border: 1px solid var(--border);
-  background: rgba(7, 11, 18, 0.6);
-  padding: 6px 8px; font-size: 11px; line-height: 1.4;
-  border-left: 3px solid transparent;
-}
-.dispatch.north { border-left-color: var(--north); }
-.dispatch.south { border-left-color: var(--south); }
-.dispatch.east { border-left-color: var(--east); }
-
-.dispatch .d-sender { font-weight: 600; font-size: 10px; color: var(--text); }
-.dispatch .d-body { color: var(--dim); margin-top: 3px; }
+/* (old dispatch panel removed — replaced by chat panel) */
 
 /* ── Floating Game Controls ── */
 
@@ -340,7 +433,7 @@ body {
 /* ── Settings Drawer ── */
 
 .settings-drawer {
-  position: absolute; top: 0; right: 0;
+  position: fixed; top: 0; right: 0;
   width: 300px; height: 100%; z-index: 30;
   background: rgba(10, 16, 26, 0.95);
   border-left: 1px solid var(--border);
@@ -388,6 +481,6 @@ body {
 }
 
 @media (max-width: 700px) {
-  .dispatch-panel { width: 200px; }
+  .chat-panel { width: 200px; }
   .faction .name { display: none; }
 }

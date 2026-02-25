@@ -206,6 +206,8 @@ struct RuntimeSession {
     usage: Usage,
     /// Accumulated text from last run
     last_result: String,
+    /// Preserved session for multi-turn context (messages accumulate across start_turn calls)
+    meerkat_session: Option<meerkat_core::session::Session>,
 }
 
 #[derive(Default)]
@@ -349,7 +351,7 @@ fn create_llm_client(
             .build()
             .map_err(|e| format!("failed to create Anthropic client: {e}"))?;
         Ok(Arc::new(client))
-    } else if model.starts_with("gpt") {
+    } else if model.starts_with("gpt") || model.starts_with("o1") || model.starts_with("o3") || model.starts_with("o4") || model.starts_with("chatgpt") {
         let client = if let Some(url) = base_url {
             meerkat_client::openai::OpenAiClient::new_with_base_url(api_key.into(), url.into())
         } else {
@@ -506,6 +508,7 @@ pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<u32, Js
             status: SessionStatus::Idle,
             usage: Usage::default(),
             last_result: String::new(),
+            meerkat_session: None,
         };
 
         if let Some(event) = truncation_event {
@@ -533,47 +536,57 @@ pub async fn start_turn(
     _options_json: &str,
 ) -> Result<JsValue, JsValue> {
     // Extract what we need from the session (release borrow quickly)
-    let (client, system_prompt, max_tokens, run_id) = with_session_mut(handle, |session| {
-        if session.status == SessionStatus::Running {
-            return Err(format!("session {} is already running", session.handle));
-        }
-        session.status = SessionStatus::Running;
-        session.run_counter = session.run_counter.saturating_add(1);
-        let run_id = session.run_counter;
+    let (client, system_prompt, max_tokens, run_id, prior_session) =
+        with_session_mut(handle, |session| {
+            if session.status == SessionStatus::Running {
+                return Err(format!("session {} is already running", session.handle));
+            }
+            session.status = SessionStatus::Running;
+            session.run_counter = session.run_counter.saturating_add(1);
+            let run_id = session.run_counter;
 
-        push_event(
-            session,
-            RuntimeEvent::RunStarted {
-                session_id: session.handle,
+            push_event(
+                session,
+                RuntimeEvent::RunStarted {
+                    session_id: session.handle,
+                    run_id,
+                    prompt: prompt.to_string(),
+                },
+            );
+
+            Ok((
+                session.client.clone(),
+                session.compiled_system_prompt.clone(),
+                session.max_tokens,
                 run_id,
-                prompt: prompt.to_string(),
-            },
-        );
-
-        Ok((
-            session.client.clone(),
-            session.compiled_system_prompt.clone(),
-            session.max_tokens,
-            run_id,
-        ))
-    })?;
+                session.meerkat_session.take(),
+            ))
+        })?;
 
     // Build and run the agent (outside of RefCell borrow)
     let tools: Arc<NoOpTools> = Arc::new(NoOpTools);
     let store: Arc<NoOpStore> = Arc::new(NoOpStore);
 
-    let mut agent = AgentBuilder::new()
+    let mut builder = AgentBuilder::new()
         .system_prompt(system_prompt)
-        .max_tokens_per_turn(max_tokens)
-        .build(client, tools, store)
-        .await;
+        .max_tokens_per_turn(max_tokens);
+
+    if let Some(prior) = prior_session {
+        builder = builder.resume_session(prior);
+    }
+
+    let mut agent = builder.build(client, tools, store).await;
 
     let run_result = agent.run(prompt.into()).await;
+
+    // Preserve the agent's session for future turns (multi-turn context)
+    let agent_session = agent.session().clone();
 
     // Record results back in session
     match run_result {
         Ok(result) => {
             let result_json = with_session_mut(handle, |session| {
+                session.meerkat_session = Some(agent_session.clone());
                 let turn_usage = Usage {
                     input_tokens: result.usage.input_tokens,
                     output_tokens: result.usage.output_tokens,
@@ -622,6 +635,7 @@ pub async fn start_turn(
         Err(err) => {
             let error_msg = format!("{err}");
             with_session_mut(handle, |session| {
+                session.meerkat_session = Some(agent_session.clone());
                 push_event(
                     session,
                     RuntimeEvent::RunFailed {

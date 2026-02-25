@@ -6,9 +6,11 @@ WORK="$ROOT/.work"
 MOB_NORTH="$WORK/mob-north"
 MOB_SOUTH="$WORK/mob-south"
 MOB_EAST="$WORK/mob-east"
+MOB_NARRATOR="$WORK/mob-narrator"
 PACK_NORTH="$WORK/north.mobpack"
 PACK_SOUTH="$WORK/south.mobpack"
 PACK_EAST="$WORK/east.mobpack"
+PACK_NARRATOR="$WORK/narrator.mobpack"
 RUNTIME_OUT="$WORK/runtime"
 WEB_DIR="$ROOT/web"
 WEB_DIST="$WEB_DIR/dist"
@@ -22,7 +24,7 @@ else
   RKAT_BIN="${RKAT_BIN:-rkat}"
 fi
 
-mkdir -p "$WORK" "$MOB_NORTH/skills" "$MOB_SOUTH/skills" "$MOB_EAST/skills"
+mkdir -p "$WORK" "$MOB_NORTH/skills" "$MOB_SOUTH/skills" "$MOB_EAST/skills" "$MOB_NARRATOR/skills"
 
 write_mob() {
   local dir="$1"
@@ -136,9 +138,54 @@ write_mob "$MOB_NORTH" "mini-diplomacy-north" "North faction — defend the high
 write_mob "$MOB_SOUTH" "mini-diplomacy-south" "South faction — control the delta"
 write_mob "$MOB_EAST" "mini-diplomacy-east" "East faction — dominate the frontier"
 
+# ── Narrator mobpack (separate — not a faction) ──
+cat > "$MOB_NARRATOR/manifest.toml" <<TOML
+[mobpack]
+name = "mini-diplomacy-narrator"
+version = "1.0.0"
+description = "War correspondent narrating the campaign"
+
+[requires]
+capabilities = ["comms"]
+TOML
+
+cat > "$MOB_NARRATOR/definition.json" <<JSON
+{
+  "id":"mini-diplomacy-narrator",
+  "orchestrator":{"profile":"narrator"},
+  "profiles":{
+    "narrator":{
+      "model":"claude-sonnet-4-5",
+      "skills":["narrator"],
+      "tools":{},
+      "peer_description":"War correspondent",
+      "external_addressable":true
+    }
+  },
+  "skills":{}
+}
+JSON
+
+cat > "$MOB_NARRATOR/skills/narrator.md" <<'MD'
+# War Correspondent
+
+You are a dramatic war correspondent covering a 3-faction territorial conflict.
+
+After each turn you receive a summary of what happened: which territories were attacked,
+which changed hands, what diplomatic signals were sent, and the current score.
+
+Write 2-3 sentences of vivid, dramatic narrative. Channel the style of a war dispatch
+or a fantasy chronicle. Name the factions (North, South, East) and describe the action
+with tension and flair. Reference specific territories and diplomatic betrayals when relevant.
+
+Keep it concise — this appears as a turn summary, not a novel. No JSON output needed,
+just the narrative text.
+MD
+
 "$RKAT_BIN" mob pack "$MOB_NORTH" -o "$PACK_NORTH"
 "$RKAT_BIN" mob pack "$MOB_SOUTH" -o "$PACK_SOUTH"
 "$RKAT_BIN" mob pack "$MOB_EAST" -o "$PACK_EAST"
+"$RKAT_BIN" mob pack "$MOB_NARRATOR" -o "$PACK_NARRATOR"
 "$RKAT_BIN" mob web build "$PACK_NORTH" -o "$RUNTIME_OUT"
 
 cd "$WEB_DIR"
@@ -150,6 +197,7 @@ cp "$RUNTIME_OUT/runtime_bg.wasm" "$WEB_DIST/runtime_bg.wasm"
 cp "$PACK_NORTH" "$WEB_DIST/north.mobpack"
 cp "$PACK_SOUTH" "$WEB_DIST/south.mobpack"
 cp "$PACK_EAST" "$WEB_DIST/east.mobpack"
+cp "$PACK_NARRATOR" "$WEB_DIST/narrator.mobpack"
 cp "$RUNTIME_OUT/manifest.web.toml" "$WEB_DIST/manifest.web.toml"
 
 PORT="${PORT:-4173}"

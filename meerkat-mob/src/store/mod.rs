@@ -1,9 +1,11 @@
 //! Mob store traits and implementations.
 
 mod in_memory;
+#[cfg(not(target_arch = "wasm32"))]
 mod redb;
 
 pub use in_memory::{InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobSpecStore};
+#[cfg(not(target_arch = "wasm32"))]
 pub use redb::{RedbMobEventStore, RedbMobRunStore, RedbMobSpecStore, RedbMobStores};
 
 use crate::definition::MobDefinition;
@@ -15,7 +17,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 /// Trait for persisting and querying mob events.
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait MobEventStore: Send + Sync {
     /// Append a new event to the store.
     async fn append(&self, event: NewMobEvent) -> Result<MobEvent, MobError>;
@@ -43,7 +46,8 @@ pub trait MobEventStore: Send + Sync {
 }
 
 /// Trait for persisting and querying flow runs.
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait MobRunStore: Send + Sync {
     async fn create_run(&self, run: MobRun) -> Result<(), MobError>;
     async fn get_run(&self, run_id: &RunId) -> Result<Option<MobRun>, MobError>;
@@ -82,7 +86,8 @@ pub trait MobRunStore: Send + Sync {
 }
 
 /// Trait for persisting and querying mob specs.
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait MobSpecStore: Send + Sync {
     /// Put a spec. Returns new revision.
     async fn put_spec(

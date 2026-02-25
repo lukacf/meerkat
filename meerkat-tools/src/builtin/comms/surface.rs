@@ -10,6 +10,8 @@ use meerkat_core::gateway::Availability;
 use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
 use serde_json::Value;
 use std::sync::Arc;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use tokio::sync::RwLock;
 
 /// Tool dispatcher that provides comms tools.
@@ -56,7 +58,8 @@ impl CommsToolSurface {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AgentToolDispatcher for CommsToolSurface {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         Arc::clone(&self.tool_defs)

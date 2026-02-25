@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use tokio::sync::Mutex;
 
 /// Type-safe striped lock registry for wire edge operations.

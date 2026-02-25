@@ -14,6 +14,8 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 #[derive(Clone)]
@@ -226,7 +228,8 @@ impl ActorFlowTurnExecutor {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl FlowTurnExecutor for ActorFlowTurnExecutor {
     async fn dispatch(
         &self,

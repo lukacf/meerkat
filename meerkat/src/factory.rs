@@ -56,7 +56,7 @@ use tokio::sync::mpsc;
 #[cfg(target_arch = "wasm32")]
 use tokio_with_wasm::alias::sync::mpsc;
 
-#[cfg(feature = "comms")]
+#[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
 use crate::compose_tools_with_comms;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::{create_default_hook_engine, resolve_layered_hooks_config};
@@ -636,30 +636,35 @@ impl AgentFactory {
             } else if !config.skills.enabled {
                 None
             } else {
-                let conventions_context_root = self
-                    .context_root
-                    .as_deref()
-                    .or(self.project_root.as_deref());
-                let conventions_user_root = self.user_config_root.as_deref();
-                let runtime_root = self
-                    .runtime_root
-                    .clone()
-                    .or_else(|| self.project_root.clone())
-                    .unwrap_or_else(|| self.store_path.clone());
-                match meerkat_skills::resolve_repositories_with_roots(
-                    &config.skills,
-                    conventions_context_root,
-                    conventions_user_root,
-                    Some(runtime_root.as_path()),
-                )
-                .await
+                #[cfg(not(target_arch = "wasm32"))]
                 {
-                    Ok(source) => source.map(Arc::new),
-                    Err(e) => {
-                        tracing::warn!("Failed to resolve skill repositories: {e}");
-                        None
+                    let conventions_context_root = self
+                        .context_root
+                        .as_deref()
+                        .or(self.project_root.as_deref());
+                    let conventions_user_root = self.user_config_root.as_deref();
+                    let runtime_root = self
+                        .runtime_root
+                        .clone()
+                        .or_else(|| self.project_root.clone())
+                        .unwrap_or_else(|| self.store_path.clone());
+                    match meerkat_skills::resolve_repositories_with_roots(
+                        &config.skills,
+                        conventions_context_root,
+                        conventions_user_root,
+                        Some(runtime_root.as_path()),
+                    )
+                    .await
+                    {
+                        Ok(source) => source.map(Arc::new),
+                        Err(e) => {
+                            tracing::warn!("Failed to resolve skill repositories: {e}");
+                            None
+                        }
                     }
                 }
+                #[cfg(target_arch = "wasm32")]
+                None
             };
 
         skill_source.map(|source| {
@@ -1154,20 +1159,25 @@ impl AgentFactory {
                 } else if !config.skills.enabled {
                     None
                 } else {
-                    match meerkat_skills::resolve_repositories_with_roots(
-                        &config.skills,
-                        conventions_context_root,
-                        conventions_user_root,
-                        Some(_realm_scope_root.as_path()),
-                    )
-                    .await
+                    #[cfg(not(target_arch = "wasm32"))]
                     {
-                        Ok(source) => source.map(Arc::new),
-                        Err(e) => {
-                            tracing::warn!("Failed to resolve skill repositories: {e}");
-                            None
+                        match meerkat_skills::resolve_repositories_with_roots(
+                            &config.skills,
+                            conventions_context_root,
+                            conventions_user_root,
+                            Some(_realm_scope_root.as_path()),
+                        )
+                        .await
+                        {
+                            Ok(source) => source.map(Arc::new),
+                            Err(e) => {
+                                tracing::warn!("Failed to resolve skill repositories: {e}");
+                                None
+                            }
                         }
                     }
+                    #[cfg(target_arch = "wasm32")]
+                    None
                 };
 
             skill_source.map(|source| {
@@ -1197,7 +1207,7 @@ impl AgentFactory {
             .unwrap_or(self.enable_subagents);
         // 6b. Create comms runtime (before tool wiring so sub-agent tools can
         // inherit parent comms context when auto-enabled).
-        #[cfg(feature = "comms")]
+        #[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
         let comms_runtime = if build_config.host_mode || build_config.comms_name.is_some() {
             let comms_name = build_config
                 .comms_name
@@ -1217,6 +1227,8 @@ impl AgentFactory {
         } else {
             None
         };
+        #[cfg(all(feature = "comms", target_arch = "wasm32"))]
+        let comms_runtime: Option<meerkat_comms::CommsRuntime> = None;
         #[cfg(not(feature = "comms"))]
         let _comms_runtime: Option<()> = None;
 
@@ -1298,7 +1310,7 @@ impl AgentFactory {
         };
 
         // 9. Compose tools with comms
-        #[cfg(feature = "comms")]
+        #[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
         if let Some(ref runtime) = comms_runtime {
             let composed = compose_tools_with_comms(tools, tool_usage_instructions, runtime)
                 .map_err(|e| {

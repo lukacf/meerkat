@@ -22,7 +22,7 @@ use indexmap::IndexMap;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use meerkat_core::time_compat::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
@@ -950,16 +950,27 @@ async fn validate_schema_ref(
     let schema = match serde_json::from_str::<Value>(schema_ref) {
         Ok(inline) => inline,
         Err(_) => {
+            #[cfg(not(target_arch = "wasm32"))]
             let raw = tokio::fs::read_to_string(schema_ref)
                 .await
                 .map_err(|error| MobError::SchemaValidation {
                     step_id: step_id.clone(),
                     message: format!("failed to read schema ref '{schema_ref}': {error}"),
                 })?;
+            #[cfg(target_arch = "wasm32")]
+            return Err(MobError::SchemaValidation {
+                step_id: step_id.clone(),
+                message: format!(
+                    "file-based schema ref '{schema_ref}' is not supported on wasm32"
+                ),
+            });
+            #[cfg(not(target_arch = "wasm32"))]
+            {
             serde_json::from_str(&raw).map_err(|error| MobError::SchemaValidation {
                 step_id: step_id.clone(),
                 message: format!("invalid schema JSON at '{schema_ref}': {error}"),
             })?
+            }
         }
     };
     let validator =

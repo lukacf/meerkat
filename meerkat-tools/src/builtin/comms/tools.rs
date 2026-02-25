@@ -7,6 +7,8 @@ use meerkat_comms::{Router, ToolContext, TrustedPeers, handle_tools_call, tools_
 use meerkat_core::ToolDef;
 use serde_json::Value;
 use std::sync::Arc;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use tokio::sync::RwLock;
 
 /// Shared state for all comms tools
@@ -53,7 +55,8 @@ impl SendTool {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl BuiltinTool for SendTool {
     fn name(&self) -> &'static str {
         "send"
@@ -85,7 +88,8 @@ impl PeersTool {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl BuiltinTool for PeersTool {
     fn name(&self) -> &'static str {
         "peers"

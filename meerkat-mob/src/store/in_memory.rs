@@ -11,6 +11,8 @@ use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use tokio::sync::RwLock;
 
 /// In-memory event store for tests and ephemeral mobs.
@@ -25,7 +27,8 @@ impl InMemoryMobEventStore {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MobEventStore for InMemoryMobEventStore {
     async fn append(&self, event: NewMobEvent) -> Result<MobEvent, MobError> {
         let mut events = self.events.write().await;
@@ -96,7 +99,8 @@ impl InMemoryMobRunStore {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MobRunStore for InMemoryMobRunStore {
     async fn create_run(&self, run: MobRun) -> Result<(), MobError> {
         let mut runs = self.runs.write().await;
@@ -238,7 +242,8 @@ impl InMemoryMobSpecStore {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MobSpecStore for InMemoryMobSpecStore {
     async fn put_spec(
         &self,

@@ -4,6 +4,8 @@ use async_trait::async_trait;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinHandle;
 
@@ -39,7 +41,8 @@ pub enum TimeoutDisposition {
     Canceled,
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait FlowTurnExecutor: Send + Sync {
     async fn dispatch(
         &self,

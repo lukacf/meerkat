@@ -5,6 +5,8 @@ use super::provision_guard::PendingProvision;
 use super::terminalization::{FlowTerminalizationAuthority, TerminalizationTarget};
 use super::transaction::LifecycleRollback;
 use super::*;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use futures::FutureExt;
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::collections::VecDeque;
@@ -16,6 +18,7 @@ const MAX_LIFECYCLE_NOTIFICATION_TASKS: usize = 16;
 
 /// Unified MCP server entry: process handle + running status behind a single lock.
 pub(super) struct McpServerEntry {
+    #[cfg(not(target_arch = "wasm32"))]
     pub process: Option<Child>,
     pub running: bool,
 }
@@ -193,12 +196,14 @@ impl MobActor {
 
     async fn stop_mcp_servers(&self) -> Result<(), MobError> {
         let mut servers = self.mcp_servers.lock().await;
+        #[cfg(not(target_arch = "wasm32"))]
         let mut first_error: Option<MobError> = None;
-        for (name, entry) in servers.iter_mut() {
+        for (_name, entry) in servers.iter_mut() {
+            #[cfg(not(target_arch = "wasm32"))]
             if let Some(child) = entry.process.as_mut() {
                 if let Err(error) = child.kill().await {
                     let mob_error =
-                        MobError::Internal(format!("failed to stop mcp server '{name}': {error}"));
+                        MobError::Internal(format!("failed to stop mcp server '{_name}': {error}"));
                     tracing::warn!(error = %mob_error, "mcp server kill failed");
                     if first_error.is_none() {
                         first_error = Some(mob_error);
@@ -206,7 +211,7 @@ impl MobActor {
                 }
                 if let Err(error) = child.wait().await {
                     let mob_error = MobError::Internal(format!(
-                        "failed waiting for mcp server '{name}' to exit: {error}"
+                        "failed waiting for mcp server '{_name}' to exit: {error}"
                     ));
                     tracing::warn!(error = %mob_error, "mcp server wait failed");
                     if first_error.is_none() {
@@ -214,9 +219,13 @@ impl MobActor {
                     }
                 }
             }
-            entry.process = None;
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                entry.process = None;
+            }
             entry.running = false;
         }
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(error) = first_error {
             return Err(error);
         }
@@ -229,31 +238,39 @@ impl MobActor {
             if cfg.command.is_empty() {
                 continue;
             }
-            if servers
-                .get(name)
-                .is_some_and(|entry| entry.process.is_some())
+            #[cfg(not(target_arch = "wasm32"))]
             {
-                continue;
+                if servers
+                    .get(name)
+                    .is_some_and(|entry| entry.process.is_some())
+                {
+                    continue;
+                }
+                let mut cmd = Command::new(&cfg.command[0]);
+                for arg in cfg.command.iter().skip(1) {
+                    cmd.arg(arg);
+                }
+                for (k, v) in &cfg.env {
+                    cmd.env(k, v);
+                }
+                let child = cmd.spawn().map_err(|error| {
+                    MobError::Internal(format!(
+                        "failed to start mcp server '{name}' command '{}': {error}",
+                        cfg.command.join(" ")
+                    ))
+                })?;
+                servers.insert(
+                    name.clone(),
+                    McpServerEntry {
+                        process: Some(child),
+                        running: true,
+                    },
+                );
             }
-            let mut cmd = Command::new(&cfg.command[0]);
-            for arg in cfg.command.iter().skip(1) {
-                cmd.arg(arg);
-            }
-            for (k, v) in &cfg.env {
-                cmd.env(k, v);
-            }
-            let child = cmd.spawn().map_err(|error| {
-                MobError::Internal(format!(
-                    "failed to start mcp server '{name}' command '{}': {error}",
-                    cfg.command.join(" ")
-                ))
-            })?;
+            #[cfg(target_arch = "wasm32")]
             servers.insert(
                 name.clone(),
-                McpServerEntry {
-                    process: Some(child),
-                    running: true,
-                },
+                McpServerEntry { running: true },
             );
         }
         // Mark any servers that were already in the map but had no command

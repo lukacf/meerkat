@@ -133,12 +133,19 @@ async fn assemble_system_prompt(
                     sections.push(content.clone());
                 }
                 SkillSource::Path { path } => {
-                    let content = tokio::fs::read_to_string(path).await.map_err(|error| {
-                        MobError::Internal(format!(
-                            "failed to read skill file '{path}' while building system prompt: {error}"
-                        ))
-                    })?;
-                    sections.push(content);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        let content = tokio::fs::read_to_string(path).await.map_err(|error| {
+                            MobError::Internal(format!(
+                                "failed to read skill file '{path}' while building system prompt: {error}"
+                            ))
+                        })?;
+                        sections.push(content);
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    return Err(MobError::Internal(format!(
+                        "file-based skill path '{path}' is not supported on wasm32"
+                    )));
                 }
             }
         }

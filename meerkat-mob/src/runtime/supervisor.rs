@@ -3,6 +3,8 @@ use super::handle::MobHandle;
 use crate::error::MobError;
 use crate::ids::{RunId, StepId};
 use crate::run::FlowRunConfig;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use std::time::Duration;
 
 const ESCALATION_TURN_TIMEOUT: Duration = Duration::from_secs(2);

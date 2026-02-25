@@ -2671,6 +2671,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
+ "tokio_with_wasm",
  "toml",
  "tracing",
  "uuid",

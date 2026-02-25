@@ -1,9 +1,7 @@
 import "./styles.css";
 
 type Team = "north" | "south";
-
 type ModelPreset = "claude-opus-4-6" | "gpt-5.2" | "gemini-3.1-pro-preview";
-
 type AuthMode = "browser_byok" | "proxy";
 
 interface RegionState {
@@ -79,8 +77,6 @@ interface RuntimeModule {
   start_match: (handle: number, initialStateJson: string) => string;
   submit_turn_input: (handle: number, turnInputJson: string) => string;
   poll_events: (handle: number) => string;
-  snapshot_state: (handle: number) => string;
-  restore_state: (handle: number, snapshotJson: string) => void;
   resolve_turn: (resolveInputJson: string) => string;
 }
 
@@ -106,78 +102,87 @@ if (!app) {
 app.innerHTML = `
   <div class="shell">
     <header class="hero">
-      <div class="hero-text">
-        <p class="kicker">Meerkat WASM Arena</p>
-        <h1>Mini Diplomacy Territory Control</h1>
-        <p class="subtitle">Two autonomous mobs negotiate, commit hidden orders, and clash in a deterministic board resolver.</p>
+      <div>
+        <p class="kicker">Meerkat Arena Protocol</p>
+        <h1>Mini Diplomacy: War Table</h1>
+        <p class="subtitle">Two reasoning mobs exchange diplomatic cables, argue strategy, and commit simultaneous orders.</p>
       </div>
-      <div class="hero-crests">
-        <img src="/assets/crest-north.svg" alt="North crest" />
-        <img src="/assets/crest-south.svg" alt="South crest" />
+      <div class="faction-crests">
+        <figure>
+          <img src="/assets/crest-north.svg" alt="North coalition" />
+          <figcaption>North Coalition</figcaption>
+        </figure>
+        <figure>
+          <img src="/assets/crest-south.svg" alt="South alliance" />
+          <figcaption>South Alliance</figcaption>
+        </figure>
       </div>
     </header>
 
-    <section class="controls card">
-      <div class="control-grid">
-        <label>North model
+    <section class="control-dock card">
+      <div class="selectors">
+        <label>North brain
           <select id="northModel">
             <option value="claude-opus-4-6">claude-opus-4-6</option>
             <option value="gpt-5.2">gpt-5.2</option>
             <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview</option>
           </select>
         </label>
-        <label>South model
+        <label>South brain
           <select id="southModel">
             <option value="gpt-5.2">gpt-5.2</option>
             <option value="claude-opus-4-6">claude-opus-4-6</option>
             <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview</option>
           </select>
         </label>
-        <label>Auth mode
+        <label>Auth route
           <select id="authMode">
             <option value="browser_byok">browser_byok</option>
             <option value="proxy">proxy</option>
           </select>
         </label>
-        <label>Tick speed
+        <label>Tempo
           <select id="speedMs">
-            <option value="1700">cinematic</option>
-            <option value="1000" selected>normal</option>
-            <option value="350">fast</option>
+            <option value="1700">dramatic</option>
+            <option value="950" selected>balanced</option>
+            <option value="350">blitz</option>
           </select>
         </label>
       </div>
-      <div class="button-row">
-        <button id="startBtn">Start Match</button>
+      <div class="actions">
+        <button id="startBtn" class="primary">Start Campaign</button>
         <button id="pauseBtn">Pause</button>
-        <button id="stepBtn">Step</button>
-        <button id="backBtn">Back</button>
-        <button id="nextBtn">Forward</button>
+        <button id="stepBtn">Single Turn</button>
+        <button id="backBtn">Replay ◀</button>
+        <button id="nextBtn">Replay ▶</button>
         <button id="exportBtn">Export Replay</button>
-        <label class="import-label">Import Replay
-          <input id="importInput" type="file" accept="application/json" />
-        </label>
+        <label class="import-wrap">Import Replay<input id="importInput" type="file" accept="application/json" /></label>
       </div>
       <p id="statusLine" class="status">Idle</p>
     </section>
 
-    <section class="layout">
+    <section class="arena-layout">
       <article class="board card">
-        <div class="board-header">
-          <h2>Board + Score</h2>
-          <span id="winnerBadge" class="badge">Winner: pending</span>
+        <div class="board-top">
+          <h2>Strategic Map</h2>
+          <span id="winnerBadge" class="winner">Winner: pending</span>
         </div>
         <div id="scoreStrip" class="score-strip"></div>
         <div id="regionGrid" class="region-grid"></div>
       </article>
 
+      <article class="debate card">
+        <h2>Diplomatic Exchange</h2>
+        <div id="diplomacyFeed" class="diplomacy-feed"></div>
+      </article>
+
       <article class="network card">
-        <h2>Mob Network</h2>
+        <h2>Command Network</h2>
         <div id="networkGraph"></div>
       </article>
 
-      <article class="chatter card">
-        <h2>Chatter Timeline</h2>
+      <article class="telemetry card">
+        <h2>War Log</h2>
         <div id="chatterFeed" class="chatter-feed"></div>
       </article>
     </section>
@@ -201,6 +206,7 @@ const scoreStrip = document.querySelector<HTMLDivElement>("#scoreStrip");
 const regionGrid = document.querySelector<HTMLDivElement>("#regionGrid");
 const networkGraph = document.querySelector<HTMLDivElement>("#networkGraph");
 const chatterFeed = document.querySelector<HTMLDivElement>("#chatterFeed");
+const diplomacyFeed = document.querySelector<HTMLDivElement>("#diplomacyFeed");
 
 if (
   !northModelSelect ||
@@ -219,7 +225,8 @@ if (
   !scoreStrip ||
   !regionGrid ||
   !networkGraph ||
-  !chatterFeed
+  !chatterFeed ||
+  !diplomacyFeed
 ) {
   throw new Error("UI controls not found");
 }
@@ -230,6 +237,14 @@ let frameCursor = -1;
 
 function setStatus(message: string): void {
   statusLine.textContent = message;
+}
+
+function parseJson<T>(raw: string): T {
+  return JSON.parse(raw) as T;
+}
+
+function formatWinner(state: ArenaState): string {
+  return state.winner ?? "pending";
 }
 
 function defaultState(): ArenaState {
@@ -256,14 +271,6 @@ function defaultState(): ArenaState {
   };
 }
 
-function parseJson<T>(raw: string): T {
-  return JSON.parse(raw) as T;
-}
-
-function formatWinner(state: ArenaState): string {
-  return state.winner ?? "pending";
-}
-
 function pushSyntheticEvent(events: RuntimeEvent[], team: Team, payload: string): void {
   events.push({
     seq: Date.now(),
@@ -275,59 +282,90 @@ function pushSyntheticEvent(events: RuntimeEvent[], team: Team, payload: string)
   });
 }
 
-function render(sessionState: MatchSession): void {
-  const state = sessionState.state;
+function addEdges(events: RuntimeEvent[], edges: Map<string, number>): void {
+  for (const event of events) {
+    const from = `${event.team}.${event.from}`;
+    const to = event.to === "board" ? "resolver.board" : `${event.team}.${event.to ?? "unknown"}`;
+    const key = `${from}->${to}`;
+    edges.set(key, (edges.get(key) ?? 0) + 1);
+  }
+}
+
+function renderBoard(state: ArenaState): void {
   winnerBadge.textContent = `Winner: ${formatWinner(state)}`;
   scoreStrip.innerHTML = `
-    <div class="score north">North: ${state.north_score}</div>
-    <div class="score meta">Turn ${state.turn}/${state.max_turns}</div>
-    <div class="score south">South: ${state.south_score}</div>
+    <div class="score north">North ${state.north_score}</div>
+    <div class="score turn">Turn ${state.turn}/${state.max_turns}</div>
+    <div class="score south">South ${state.south_score}</div>
   `;
 
   regionGrid.innerHTML = "";
-  for (const region of state.regions) {
-    const regionEl = document.createElement("div");
-    regionEl.className = `region ${region.controller}`;
-    regionEl.innerHTML = `
-      <h3>${region.id}</h3>
-      <p>control: ${region.controller}</p>
-      <p>defense: ${region.defense}</p>
-      <p>value: ${region.value}</p>
+  const regions = [...state.regions].sort((a, b) => b.value - a.value || a.id.localeCompare(b.id));
+  for (const region of regions) {
+    const el = document.createElement("article");
+    el.className = `region ${region.controller}`;
+    el.innerHTML = `
+      <h3>${region.id.replaceAll("-", " ")}</h3>
+      <p><strong>Held by:</strong> ${region.controller}</p>
+      <p><strong>Defense:</strong> ${region.defense}</p>
+      <p><strong>Influence:</strong> ${region.value}</p>
     `;
-    regionGrid.append(regionEl);
+    regionGrid.append(el);
   }
+}
 
-  const latest = sessionState.chatter.slice(-120).reverse();
-  chatterFeed.innerHTML = latest
+function renderDiplomacy(events: RuntimeEvent[]): void {
+  const negotiation = events.filter((event) => event.kind === "NEGOTIATE" || event.kind === "PLAN").slice(-14).reverse();
+  diplomacyFeed.innerHTML = negotiation
     .map((event) => {
-      const edgeKey = `${event.team}.${event.from}->${event.to ?? "unknown"}`;
-      return `<div class="event ${event.team}">
-        <span class="tag">${event.kind}</span>
-        <span class="edge">${edgeKey}</span>
+      const speaker = `${event.team.toUpperCase()} ${event.from}`;
+      return `<article class="speech ${event.team}">
+        <header>
+          <span class="speaker">${speaker}</span>
+          <span class="kind">${event.kind}</span>
+        </header>
         <p>${event.payload}</p>
-      </div>`;
+      </article>`;
     })
     .join("");
+}
 
+function renderTelemetry(events: RuntimeEvent[]): void {
+  chatterFeed.innerHTML = events
+    .slice(-80)
+    .reverse()
+    .map((event) => {
+      const actor = `${event.team}.${event.from}`;
+      const target = event.to ? `${event.team}.${event.to}` : "system";
+      return `<article class="log ${event.team}">
+        <header><span>${event.kind}</span><span>${actor} → ${target}</span></header>
+        <p>${event.payload}</p>
+      </article>`;
+    })
+    .join("");
+}
+
+function renderNetwork(edges: Map<string, number>): void {
   const nodes = [
-    { id: "north.planner", x: 90, y: 70 },
-    { id: "north.operator", x: 90, y: 190 },
-    { id: "resolver.board", x: 280, y: 130 },
-    { id: "south.planner", x: 470, y: 70 },
-    { id: "south.operator", x: 470, y: 190 }
+    { id: "north.planner", x: 90, y: 58 },
+    { id: "north.operator", x: 90, y: 184 },
+    { id: "resolver.board", x: 286, y: 121 },
+    { id: "south.planner", x: 482, y: 58 },
+    { id: "south.operator", x: 482, y: 184 }
   ];
 
   const edgeSvg: string[] = [];
-  for (const [key, weight] of sessionState.edges.entries()) {
+  for (const [key, weight] of edges.entries()) {
     const [from, to] = key.split("->");
     const src = nodes.find((node) => node.id === from);
     const dst = nodes.find((node) => node.id === to);
     if (!src || !dst) {
       continue;
     }
-    const w = Math.min(11, 1 + weight / 2);
+    const w = Math.min(8, 1 + Math.floor(weight / 3));
+    const alpha = Math.min(0.9, 0.2 + weight / 24);
     edgeSvg.push(
-      `<line x1="${src.x}" y1="${src.y}" x2="${dst.x}" y2="${dst.y}" stroke-width="${w}" class="edge-line" />`
+      `<line x1="${src.x}" y1="${src.y}" x2="${dst.x}" y2="${dst.y}" stroke-width="${w}" stroke="rgba(53,62,74,${alpha})" class="pulse" />`
     );
   }
 
@@ -335,18 +373,20 @@ function render(sessionState: MatchSession): void {
     .map((node) => {
       const label = node.id.replace(".", " ");
       return `<g>
-        <circle cx="${node.x}" cy="${node.y}" r="28" class="node-dot" />
+        <circle cx="${node.x}" cy="${node.y}" r="26" class="node-dot" />
         <text x="${node.x}" y="${node.y + 4}" text-anchor="middle">${label}</text>
       </g>`;
     })
     .join("");
 
-  networkGraph.innerHTML = `
-    <svg viewBox="0 0 560 260" role="img" aria-label="live network graph">
-      ${edgeSvg.join("\n")}
-      ${nodeSvg}
-    </svg>
-  `;
+  networkGraph.innerHTML = `<svg viewBox="0 0 572 242" role="img" aria-label="command network">${edgeSvg.join("\n")}${nodeSvg}</svg>`;
+}
+
+function render(match: MatchSession): void {
+  renderBoard(match.state);
+  renderDiplomacy(match.chatter);
+  renderTelemetry(match.chatter);
+  renderNetwork(match.edges);
 }
 
 async function loadRuntime(): Promise<RuntimeModule> {
@@ -365,17 +405,7 @@ async function loadMobpack(path: string): Promise<Uint8Array> {
   if (!response.ok) {
     throw new Error(`failed to fetch ${path}: ${response.status}`);
   }
-  const buffer = await response.arrayBuffer();
-  return new Uint8Array(buffer);
-}
-
-function addEdges(events: RuntimeEvent[], edges: Map<string, number>): void {
-  for (const event of events) {
-    const from = `${event.team}.${event.from}`;
-    const to = event.to === "board" ? "resolver.board" : `${event.team}.${event.to ?? "unknown"}`;
-    const key = `${from}->${to}`;
-    edges.set(key, (edges.get(key) ?? 0) + 1);
-  }
+  return new Uint8Array(await response.arrayBuffer());
 }
 
 async function tick(): Promise<void> {
@@ -384,23 +414,23 @@ async function tick(): Promise<void> {
   }
   if (session.state.winner) {
     session.running = false;
-    setStatus(`Match complete. Winner=${session.state.winner}`);
+    setStatus(`Campaign complete. Winner: ${session.state.winner}`);
     render(session);
     return;
   }
 
   try {
-    const northIn = JSON.stringify({
+    const northInput = JSON.stringify({
       state: session.state,
       opponent_signal: session.frames.at(-1)?.south.order.diplomacy ?? "opening"
     });
-    const southIn = JSON.stringify({
+    const southInput = JSON.stringify({
       state: session.state,
       opponent_signal: session.frames.at(-1)?.north.order.diplomacy ?? "opening"
     });
 
-    const northDecision = parseJson<TurnDecision>(runtime.submit_turn_input(session.northHandle, northIn));
-    const southDecision = parseJson<TurnDecision>(runtime.submit_turn_input(session.southHandle, southIn));
+    const northDecision = parseJson<TurnDecision>(runtime.submit_turn_input(session.northHandle, northInput));
+    const southDecision = parseJson<TurnDecision>(runtime.submit_turn_input(session.southHandle, southInput));
 
     const resolved = parseJson<ResolveOutput>(
       runtime.resolve_turn(
@@ -416,25 +446,23 @@ async function tick(): Promise<void> {
     const southEvents = parseJson<RuntimeEvent[]>(runtime.poll_events(session.southHandle));
     const events = [...northEvents, ...southEvents];
     pushSyntheticEvent(events, "north", resolved.summary);
+
     addEdges(events, session.edges);
     session.chatter.push(...events);
     session.state = resolved.state;
 
-    const frame: ReplayFrame = {
+    session.frames.push({
       turn: session.state.turn,
       state: JSON.parse(JSON.stringify(session.state)) as ArenaState,
       north: northDecision,
       south: southDecision,
       summary: resolved.summary,
       events
-    };
-    session.frames.push(frame);
+    });
     frameCursor = session.frames.length - 1;
 
     render(session);
-    setStatus(
-      `Turn ${session.state.turn - 1} resolved. North=${session.state.north_score} South=${session.state.south_score}`
-    );
+    setStatus(`Round ${session.state.turn - 1} resolved. ${resolved.summary}`);
 
     if (session.running && !session.state.winner) {
       window.setTimeout(() => {
@@ -443,24 +471,19 @@ async function tick(): Promise<void> {
     }
   } catch (error) {
     session.running = false;
-    const message = error instanceof Error ? error.message : String(error);
-    setStatus(`Runtime error: ${message}`);
+    setStatus(`Runtime error: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
 async function startMatch(): Promise<void> {
   try {
-    setStatus("Loading runtime and mobpacks...");
     const mod = await loadRuntime();
-    const [northPack, southPack] = await Promise.all([
-      loadMobpack("/north.mobpack"),
-      loadMobpack("/south.mobpack")
-    ]);
+    setStatus("Loading mobpacks...");
+    const [northPack, southPack] = await Promise.all([loadMobpack("/north.mobpack"), loadMobpack("/south.mobpack")]);
 
     const northModel = northModelSelect.value as ModelPreset;
     const southModel = southModelSelect.value as ModelPreset;
     const authMode = authModeSelect.value as AuthMode;
-    const speedMs = Number(speedSelect.value);
 
     const northHandle = mod.init_mobpack(
       northPack,
@@ -487,16 +510,16 @@ async function startMatch(): Promise<void> {
       chatter: [],
       edges: new Map<string, number>(),
       running: true,
-      speedMs
+      speedMs: Number(speedSelect.value)
     };
     frameCursor = -1;
 
+    pauseBtn.textContent = "Pause";
     render(session);
-    setStatus(`Match started (${northModel} vs ${southModel}; mode=${authMode})`);
+    setStatus(`Campaign started: ${northModel} vs ${southModel} (${authMode})`);
     await tick();
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    setStatus(`Failed to start match: ${message}`);
+    setStatus(`Failed to start campaign: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -513,10 +536,9 @@ function moveFrame(delta: number): void {
 
 function exportReplay(): void {
   if (!session || session.frames.length === 0) {
-    setStatus("No replay data to export yet.");
+    setStatus("No replay to export yet.");
     return;
   }
-
   const envelope: ReplayEnvelope = {
     version: "mini-diplomacy-replay-v1",
     created_at: new Date().toISOString(),
@@ -527,32 +549,28 @@ function exportReplay(): void {
     },
     frames: session.frames
   };
-
   const blob = new Blob([JSON.stringify(envelope, null, 2)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = "mini-diplomacy-replay.json";
-  anchor.click();
-  URL.revokeObjectURL(url);
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = "mini-diplomacy-replay.json";
+  link.click();
+  URL.revokeObjectURL(link.href);
   setStatus("Replay exported.");
 }
 
 async function importReplay(file: File): Promise<void> {
-  const text = await file.text();
-  const replay = parseJson<ReplayEnvelope>(text);
-  if (!replay.frames.length) {
-    throw new Error("Replay file has no frames");
+  const replay = parseJson<ReplayEnvelope>(await file.text());
+  if (replay.frames.length === 0) {
+    throw new Error("Replay has no frames");
   }
-
-  const lastFrame = replay.frames[replay.frames.length - 1];
+  const last = replay.frames[replay.frames.length - 1];
   session = {
     northHandle: 0,
     southHandle: 0,
     northModel: replay.config.north_model,
     southModel: replay.config.south_model,
     authMode: replay.config.auth_mode,
-    state: JSON.parse(JSON.stringify(lastFrame.state)) as ArenaState,
+    state: JSON.parse(JSON.stringify(last.state)) as ArenaState,
     frames: replay.frames,
     chatter: replay.frames.flatMap((frame) => frame.events),
     edges: new Map<string, number>(),
@@ -562,7 +580,7 @@ async function importReplay(file: File): Promise<void> {
   addEdges(session.chatter, session.edges);
   frameCursor = replay.frames.length - 1;
   render(session);
-  setStatus(`Replay imported (${replay.frames.length} frames).`);
+  setStatus(`Replay imported: ${replay.frames.length} frames.`);
 }
 
 startBtn.addEventListener("click", () => {
@@ -591,17 +609,9 @@ stepBtn.addEventListener("click", () => {
   void tick();
 });
 
-backBtn.addEventListener("click", () => {
-  moveFrame(-1);
-});
-
-nextBtn.addEventListener("click", () => {
-  moveFrame(1);
-});
-
-exportBtn.addEventListener("click", () => {
-  exportReplay();
-});
+backBtn.addEventListener("click", () => moveFrame(-1));
+nextBtn.addEventListener("click", () => moveFrame(1));
+exportBtn.addEventListener("click", () => exportReplay());
 
 importInput.addEventListener("change", (event) => {
   const file = (event.target as HTMLInputElement).files?.[0];
@@ -609,9 +619,8 @@ importInput.addEventListener("change", (event) => {
     return;
   }
   void importReplay(file).catch((error) => {
-    const message = error instanceof Error ? error.message : String(error);
-    setStatus(`Import failed: ${message}`);
+    setStatus(`Import failed: ${error instanceof Error ? error.message : String(error)}`);
   });
 });
 
-setStatus("Ready. Build runtime artifacts with ../examples.sh, then Start Match.");
+setStatus("Ready. Run ../examples.sh and launch campaign.");

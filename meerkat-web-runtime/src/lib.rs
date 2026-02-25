@@ -245,9 +245,23 @@ fn propose_order(session: &RuntimeSession, input: &TurnInput) -> TurnDecision {
         .opponent_signal
         .as_deref()
         .unwrap_or("no-opponent-signal");
+    let posture = if aggression > 74 {
+        "high-pressure advance"
+    } else if aggression > 64 {
+        "measured pressure"
+    } else {
+        "defensive containment"
+    };
     let planner_note = format!(
-        "Turn {} plan: pressure={}, fortify={}, signal={}.",
-        state.turn, aggression, fortify, signal
+        "Turn {} strategic memo ({team}): We observed opponent signal '{signal}'. Our posture is {posture}. \
+Primary objective is to pressure the frontier while preserving fallback defense. \
+Planned split: aggression={aggr}, fortify={fort}.",
+        state.turn,
+        team = session.team,
+        signal = signal,
+        posture = posture,
+        aggr = aggression,
+        fort = fortify
     );
     let target_region = choose_target(&state.regions, &session.team, session.seed, state.turn);
     let diplomacy = if aggression > 72 {
@@ -265,8 +279,13 @@ fn propose_order(session: &RuntimeSession, input: &TurnInput) -> TurnDecision {
         model: session.model.clone(),
     };
     let operator_note = format!(
-        "Committed legal order for {} targeting {} (aggr={}, fortify={}).",
-        order.team, order.target_region, order.aggression, order.fortify
+        "Operator confirmation ({team}): Order is legal and committed. \
+We will contest '{target}' with aggression {aggr} and reserve {fort} for defense. \
+If resistance spikes, we pivot to fortress mode next turn.",
+        team = order.team,
+        target = order.target_region,
+        aggr = order.aggression,
+        fort = order.fortify
     );
     TurnDecision {
         order,
@@ -382,16 +401,31 @@ fn resolve_turn_impl(mut input: ResolveInput) -> ResolveOutput {
         };
     }
 
+    let control_north = input
+        .state
+        .regions
+        .iter()
+        .filter(|region| region.controller == "north")
+        .count();
+    let control_south = input
+        .state
+        .regions
+        .iter()
+        .filter(|region| region.controller == "south")
+        .count();
     let summary = format!(
-        "turn={} north={} south={} winner={}",
-        input.state.turn,
-        input.state.north_score,
-        input.state.south_score,
-        input
+        "Round {round}: North {north_score} ({north_regions} regions) vs South {south_score} ({south_regions} regions). \
+Outcome: {winner}.",
+        round = input.state.turn,
+        north_score = input.state.north_score,
+        south_score = input.state.south_score,
+        north_regions = control_north,
+        south_regions = control_south,
+        winner = input
             .state
             .winner
             .clone()
-            .unwrap_or_else(|| "pending".to_string())
+            .unwrap_or_else(|| "campaign ongoing".to_string())
     );
 
     ResolveOutput {
@@ -508,8 +542,12 @@ fn submit_turn_input_impl(handle: u32, turn_input_json: &str) -> Result<String, 
             "planner",
             Some("opponent"),
             format!(
-                "proposal={} target={}",
-                decision.order.diplomacy, decision.order.target_region
+                "Diplomatic cable from {team}: We propose '{proposal}' for this round. \
+In exchange, we request de-escalation around '{target}'. \
+Our argument: stabilizing that front lowers attrition for both sides.",
+                team = decision.order.team,
+                proposal = decision.order.diplomacy,
+                target = decision.order.target_region
             ),
         );
         push_event(

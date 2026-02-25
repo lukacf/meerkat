@@ -6,6 +6,8 @@
 pub mod transport;
 
 use crate::event::{AgentEvent, ScopedAgentEvent, StreamScopeFrame};
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use crate::types::{RunResult, SessionId, Usage};
 use crate::{
     AgentToolDispatcher, BudgetLimits, HookRunOverrides, OutputSchema, PeerMeta, Provider, Session,

@@ -5,6 +5,8 @@
 
 use crate::compact::{CompactionContext, Compactor};
 use crate::event::AgentEvent;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use crate::types::{AssistantBlock, Message, Usage};
 use std::sync::Arc;
 use tokio::sync::mpsc;

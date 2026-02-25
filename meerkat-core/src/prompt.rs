@@ -13,6 +13,8 @@
 //! 1. System prompt (custom or default)
 //! 2. AGENTS.md content (if found), wrapped in a marker
 
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use std::path::{Path, PathBuf};
 
 /// Default system prompt for Meerkat agents

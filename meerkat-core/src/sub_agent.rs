@@ -9,6 +9,8 @@ use crate::ops::{
     SubAgentState, ToolAccessPolicy,
 };
 use crate::session::Session;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use crate::types::{Message, ToolDef};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;

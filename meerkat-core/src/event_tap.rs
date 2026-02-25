@@ -5,6 +5,8 @@
 //! subscriber per interaction.
 
 use crate::event::AgentEvent;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;

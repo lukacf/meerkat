@@ -3,6 +3,8 @@
 use crate::error::AgentError;
 use crate::event::AgentEvent;
 use crate::interaction::InteractionContent;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use crate::types::{Message, RunResult, Usage, UserMessage};
 use std::collections::BTreeMap;
 use std::sync::atomic::AtomicBool;

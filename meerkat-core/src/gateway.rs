@@ -30,6 +30,8 @@
 
 use crate::AgentToolDispatcher;
 use crate::error::ToolError;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use crate::types::{ToolCallView, ToolDef, ToolResult};
 use async_trait::async_trait;
 use std::collections::HashMap;

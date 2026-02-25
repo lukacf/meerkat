@@ -7,6 +7,8 @@ use crate::hooks::{
     HookToolCall, HookToolResult,
 };
 use crate::state::LoopState;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use crate::types::{
     AssistantBlock, BlockAssistantMessage, Message, RunResult, ToolCallView, ToolDef, ToolResult,
 };

@@ -6,6 +6,8 @@
 //! that wraps `InboxSender`.
 
 use crate::PlainEventSource;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 
 /// Error returned when event injection fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

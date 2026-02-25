@@ -40,6 +40,7 @@ categories = ["development-tools", "api-bindings"]
 [workspace.dependencies]
 # Async runtime
 tokio = { version = "1.43", features = ["full"] }
+tokio_with_wasm = { version = "0.8", features = ["macros", "sync", "time", "rt"] }
 futures = "0.3"
 async-trait = "0.1"
 async-stream = "0.3"

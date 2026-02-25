@@ -1,6 +1,8 @@
 //! Config store abstraction.
 
 use crate::config::{Config, ConfigDelta, ConfigError};
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::path::{Path, PathBuf};

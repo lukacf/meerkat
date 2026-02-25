@@ -10,6 +10,8 @@ use crate::ops::{
 use crate::retry::RetryPolicy;
 use crate::session::Session;
 use crate::state::LoopState;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use crate::types::{Message, RunResult};
 use async_trait::async_trait;
 use std::sync::Arc;

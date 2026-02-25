@@ -6,6 +6,8 @@
 //!
 //! Precedence: project > user (project wins on name collision)
 
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

@@ -24,6 +24,8 @@ use crate::schema::{CompiledSchema, SchemaError};
 use crate::session::Session;
 use crate::state::LoopState;
 use crate::sub_agent::SubAgentManager;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use crate::types::{
     AssistantBlock, BlockAssistantMessage, Message, OutputSchema, StopReason, ToolCallView,
     ToolDef, ToolResult, Usage,

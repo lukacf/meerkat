@@ -498,6 +498,15 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
         .map_err(|e| err_str("provider_error", e))?;
     builder.default_llm_client = Some(llm_client);
 
+    // Set default tool dispatcher + session store so mob-spawned sessions
+    // inherit them without needing explicit overrides in CreateSessionRequest.
+    let tools = build_wasm_tool_dispatcher().map_err(|e| err_str("tool_error", e))?;
+    builder.default_tool_dispatcher = Some(tools);
+    let store: Arc<dyn meerkat_core::AgentSessionStore> = Arc::new(
+        meerkat_store::StoreAdapter::new(Arc::new(meerkat_store::MemoryStore::new())),
+    );
+    builder.default_session_store = Some(store);
+
     let service = Arc::new(meerkat::EphemeralSessionService::new(builder, MAX_SESSIONS));
     let mob_state = Arc::new(MobMcpState::new(
         service as Arc<dyn meerkat_mob::MobSessionService>,
@@ -548,6 +557,13 @@ pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
     let llm_client = create_llm_client(&model, &rt_config.api_key, rt_config.base_url.as_deref())
         .map_err(|e| err_str("provider_error", e))?;
     builder.default_llm_client = Some(llm_client);
+
+    let tools = build_wasm_tool_dispatcher().map_err(|e| err_str("tool_error", e))?;
+    builder.default_tool_dispatcher = Some(tools);
+    let store: Arc<dyn meerkat_core::AgentSessionStore> = Arc::new(
+        meerkat_store::StoreAdapter::new(Arc::new(meerkat_store::MemoryStore::new())),
+    );
+    builder.default_session_store = Some(store);
 
     let service = Arc::new(meerkat::EphemeralSessionService::new(builder, max_sessions));
     let mob_state = Arc::new(MobMcpState::new(
@@ -911,13 +927,13 @@ pub async fn mob_lifecycle(mob_id: &str, action: &str) -> Result<(), JsValue> {
 #[wasm_bindgen]
 pub async fn mob_events(
     mob_id: &str,
-    after_cursor: u64,
+    after_cursor: u32,
     limit: u32,
 ) -> Result<JsValue, JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
     let events = mob_state
-        .mob_events(&id, after_cursor, limit as usize)
+        .mob_events(&id, after_cursor as u64, limit as usize)
         .await
         .map_err(err_mob)?;
     let json = serde_json::to_string(&events).map_err(|e| err_str("serialize_error", e))?;

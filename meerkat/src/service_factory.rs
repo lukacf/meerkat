@@ -153,6 +153,12 @@ pub struct FactoryAgentBuilder {
     config_store: Option<Arc<dyn ConfigStore>>,
     /// Optional default LLM client injected into all builds (for testing).
     pub default_llm_client: Option<Arc<dyn LlmClient>>,
+    /// Optional default tool dispatcher injected when no override is provided.
+    /// Used on wasm32 where filesystem-based tool resolution is unavailable.
+    pub default_tool_dispatcher: Option<Arc<dyn meerkat_core::AgentToolDispatcher>>,
+    /// Optional default session store injected when no override is provided.
+    /// Used on wasm32 where filesystem-based stores are unavailable.
+    pub default_session_store: Option<Arc<dyn meerkat_core::AgentSessionStore>>,
 }
 
 impl FactoryAgentBuilder {
@@ -164,6 +170,8 @@ impl FactoryAgentBuilder {
             #[cfg(not(target_arch = "wasm32"))]
             config_store: None,
             default_llm_client: None,
+            default_tool_dispatcher: None,
+            default_session_store: None,
         }
     }
 
@@ -181,6 +189,8 @@ impl FactoryAgentBuilder {
             config_snapshot: initial_config,
             config_store: Some(config_store),
             default_llm_client: None,
+            default_tool_dispatcher: None,
+            default_session_store: None,
         }
     }
 
@@ -225,6 +235,20 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
             && let Some(ref client) = self.default_llm_client
         {
             build_config.llm_client_override = Some(client.clone());
+        }
+
+        // Inject default tool dispatcher if none provided.
+        if build_config.tool_dispatcher_override.is_none()
+            && let Some(ref dispatcher) = self.default_tool_dispatcher
+        {
+            build_config.tool_dispatcher_override = Some(dispatcher.clone());
+        }
+
+        // Inject default session store if none provided.
+        if build_config.session_store_override.is_none()
+            && let Some(ref store) = self.default_session_store
+        {
+            build_config.session_store_override = Some(store.clone());
         }
 
         let config = self.resolve_config().await;

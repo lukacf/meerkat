@@ -60,6 +60,7 @@ impl MobMcpState {
         let storage = MobStorage::in_memory();
         let handle = MobBuilder::new(definition.clone(), storage)
             .with_session_service(self.session_service.clone())
+            .allow_ephemeral_sessions(!self.session_service.supports_persistent_sessions())
             .create()
             .await?;
         match self.mobs.write().await.entry(mob_id.clone()) {

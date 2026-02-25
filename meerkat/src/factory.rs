@@ -31,7 +31,6 @@ use meerkat_store::MemoryStore;
 #[cfg(not(feature = "memory-store"))]
 use meerkat_store::SessionFilter;
 use meerkat_store::{SessionStore, StoreAdapter};
-#[cfg(not(target_arch = "wasm32"))]
 use meerkat_tools::EmptyToolDispatcher;
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_tools::builtin::shell::ShellConfig;
@@ -1300,9 +1299,9 @@ impl AgentFactory {
                 }
                 #[cfg(target_arch = "wasm32")]
                 {
-                    return Err(BuildAgentError::Config(
-                        "wasm32 requires tool_dispatcher_override in AgentBuildConfig".to_string(),
-                    ));
+                    // Fallback: empty tool dispatcher when no override is set on wasm32.
+                    let usage = String::new();
+                    (Arc::new(EmptyToolDispatcher) as Arc<dyn AgentToolDispatcher>, usage)
                 }
             };
 

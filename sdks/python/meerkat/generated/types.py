@@ -102,4 +102,3 @@ class McpLiveOpResponse:
     status: str = ''
     persisted: bool = False
     applied_at_turn: Optional[int] = None
-

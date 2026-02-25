@@ -536,7 +536,7 @@ impl LlmClient for AnthropicClient {
                     .send()
                     .await
                     .map_err(|_| LlmError::NetworkTimeout {
-                        duration_ms: 30000,
+                        duration_ms: self.request_timeout.as_millis() as u64,
                     })?;
 
                 let status_code = response.status().as_u16();

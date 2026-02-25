@@ -12,6 +12,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::pin::Pin;
+use std::time::Duration;
+
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Client for Google Gemini API
 pub struct GeminiClient {
@@ -32,7 +35,10 @@ impl GeminiClient {
     /// Create a new Gemini client with an explicit base URL
     pub fn new_with_base_url(api_key: String, base_url: String) -> Self {
         let http =
-            crate::http::build_http_client_for_base_url(reqwest::Client::builder(), &base_url)
+            crate::http::build_http_client_for_base_url(
+                reqwest::Client::builder().timeout(DEFAULT_REQUEST_TIMEOUT),
+                &base_url,
+            )
                 .unwrap_or_else(|_| reqwest::Client::new());
         Self {
             api_key,
@@ -44,7 +50,10 @@ impl GeminiClient {
     /// Set custom base URL
     pub fn with_base_url(mut self, url: String) -> Self {
         if let Ok(http) =
-            crate::http::build_http_client_for_base_url(reqwest::Client::builder(), &url)
+            crate::http::build_http_client_for_base_url(
+                reqwest::Client::builder().timeout(DEFAULT_REQUEST_TIMEOUT),
+                &url,
+            )
         {
             self.http = http;
         }
@@ -446,7 +455,7 @@ impl LlmClient for GeminiClient {
                     .send()
                     .await
                     .map_err(|_| LlmError::NetworkTimeout {
-                        duration_ms: 30000,
+                        duration_ms: DEFAULT_REQUEST_TIMEOUT.as_millis() as u64,
                     })?;
 
                 let status_code = response.status().as_u16();

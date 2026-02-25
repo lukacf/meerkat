@@ -14,6 +14,9 @@ use serde_json::Value;
 use serde_json::value::RawValue;
 use std::collections::HashSet;
 use std::pin::Pin;
+use std::time::Duration;
+
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Client for OpenAI Responses API
 pub struct OpenAiClient {
@@ -44,7 +47,10 @@ impl OpenAiClient {
     /// Create a new OpenAI client with an explicit base URL
     pub fn new_with_base_url(api_key: String, base_url: String) -> Self {
         let http =
-            crate::http::build_http_client_for_base_url(reqwest::Client::builder(), &base_url)
+            crate::http::build_http_client_for_base_url(
+                reqwest::Client::builder().timeout(DEFAULT_REQUEST_TIMEOUT),
+                &base_url,
+            )
                 .unwrap_or_else(|_| reqwest::Client::new());
         Self {
             api_key,
@@ -56,7 +62,10 @@ impl OpenAiClient {
     /// Set custom base URL
     pub fn with_base_url(mut self, url: String) -> Self {
         if let Ok(http) =
-            crate::http::build_http_client_for_base_url(reqwest::Client::builder(), &url)
+            crate::http::build_http_client_for_base_url(
+                reqwest::Client::builder().timeout(DEFAULT_REQUEST_TIMEOUT),
+                &url,
+            )
         {
             self.http = http;
         }
@@ -283,7 +292,9 @@ impl LlmClient for OpenAiClient {
                     .await
                     .map_err(|e| {
                         if e.is_timeout() {
-                            LlmError::NetworkTimeout { duration_ms: 30000 }
+                            LlmError::NetworkTimeout {
+                                duration_ms: DEFAULT_REQUEST_TIMEOUT.as_millis() as u64,
+                            }
                         } else if e.is_connect() {
                             LlmError::ConnectionReset
                         } else {

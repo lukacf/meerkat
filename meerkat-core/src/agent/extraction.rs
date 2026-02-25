@@ -108,9 +108,13 @@ where
 
             match serde_json::from_str::<Value>(json_content) {
                 Ok(parsed) => {
+                    // Validate first using provider-compromised schema, then normalize
+                    // known nullable string-literals to JSON null for downstream consumers.
                     // Validate against schema
                     match validator.validate(&parsed) {
                         Ok(()) => {
+                            let mut normalized = parsed;
+                            normalize_nullable_string_literals(&mut normalized, output_schema.schema.as_value());
                             // Success! Return with structured output
                             return Ok(RunResult {
                                 text: self.session.last_assistant_text().unwrap_or_default(),
@@ -118,7 +122,7 @@ where
                                 usage: self.session.total_usage(),
                                 turns: turn_count + 1 + attempt + 1, // Include extraction attempts
                                 tool_calls: tool_call_count,
-                                structured_output: Some(parsed),
+                                structured_output: Some(normalized),
                                 schema_warnings: schema_warnings.clone(),
                                 skill_diagnostics: None,
                             });
@@ -171,6 +175,7 @@ fn strip_code_fences(content: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::OutputSchema;
 
     #[test]
     fn test_strip_code_fences_no_fences() {
@@ -205,4 +210,114 @@ mod tests {
 "#;
         assert_eq!(strip_code_fences(input), r#"{"name": "test"}"#);
     }
+
+    #[test]
+    fn test_normalize_nullable_string_literals_to_null() {
+        let schema = OutputSchema::new(json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" },
+                "date": { "type": ["string", "null"] },
+                "count": { "type": ["integer", "null"] }
+            },
+            "required": ["name", "date", "count"]
+        }))
+        .expect("valid schema");
+
+        let mut output = json!({
+            "name": "Alice",
+            "date": "null",
+            "count": "null",
+        });
+        normalize_nullable_string_literals(&mut output, schema.schema.as_value());
+
+        assert_eq!(output["name"], "Alice");
+        assert!(output["date"].is_null());
+        assert!(output["count"].is_null());
+    }
+
+    #[test]
+    fn test_normalize_nullable_string_literals_leaves_required_strings() {
+        let schema = OutputSchema::new(json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" },
+                "date": { "type": "string" }
+            },
+            "required": ["name", "date"]
+        }))
+        .expect("valid schema");
+
+        let mut output = json!({
+            "name": "null",
+            "date": "null",
+        });
+        normalize_nullable_string_literals(&mut output, schema.schema.as_value());
+
+        assert_eq!(output["name"], "null");
+        assert_eq!(output["date"], "null");
+    }
+}
+
+fn normalize_nullable_string_literals(value: &mut Value, schema: &Value) {
+    match value {
+        Value::Object(obj) => {
+            if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+                for (key, child) in obj.iter_mut() {
+                    if let Some(child_schema) = properties.get(key) {
+                        normalize_nullable_string_literals(child, child_schema);
+                    } else if let Some(additional) = schema.get("additionalProperties")
+                        && matches!(additional, Value::Object(_))
+                    {
+                        normalize_nullable_string_literals(child, additional);
+                    }
+                }
+            }
+
+            if let Some(items_schema) = schema.get("items") {
+                for child in obj.values_mut() {
+                    normalize_nullable_string_literals(child, items_schema);
+                }
+            }
+        }
+        Value::Array(values) => {
+            if let Some(items_schema) = schema.get("items") {
+                for value in values {
+                    normalize_nullable_string_literals(value, items_schema);
+                }
+            }
+        }
+        Value::String(s) if s == "null" => {
+            if schema_allows_json_null(schema) {
+                *value = Value::Null;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn schema_allows_json_null(schema: &Value) -> bool {
+    if matches!(schema.get("type"), Some(Value::String(t)) if t == "null") {
+        return true;
+    }
+
+    if let Some(Value::Array(types)) = schema.get("type")
+        && types.iter().any(|t| t.as_str() == Some("null"))
+    {
+        return true;
+    }
+
+    if let Some(Value::Array(any_of)) = schema.get("anyOf") {
+        return any_of.iter().any(schema_allows_json_null);
+    }
+
+    if let Some(Value::Array(one_of)) = schema.get("oneOf") {
+        return one_of.iter().any(schema_allows_json_null);
+    }
+
+    if let Some(Value::Array(all_of)) = schema.get("allOf") {
+        return all_of.iter().any(schema_allows_json_null);
+    }
+
+    false
 }

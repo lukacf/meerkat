@@ -14,27 +14,7 @@ tmp_cfg=$(mktemp)
 tmp_dir=$(mktemp -d)
 trap 'rm -f "$tmp_cfg"; rm -rf "$tmp_dir"' EXIT
 
-cat > "$tmp_cfg" <<EOF
-[patch.crates-io]
-meerkat-core = { path = "$ROOT/meerkat-core" }
-meerkat-client = { path = "$ROOT/meerkat-client" }
-meerkat-store = { path = "$ROOT/meerkat-store" }
-meerkat-tools = { path = "$ROOT/meerkat-tools" }
-meerkat-session = { path = "$ROOT/meerkat-session" }
-meerkat-memory = { path = "$ROOT/meerkat-memory" }
-meerkat-mcp = { path = "$ROOT/meerkat-mcp" }
-meerkat-mcp-server = { path = "$ROOT/meerkat-mcp-server" }
-meerkat-hooks = { path = "$ROOT/meerkat-hooks" }
-meerkat-skills = { path = "$ROOT/meerkat-skills" }
-meerkat-comms = { path = "$ROOT/meerkat-comms" }
-meerkat-rpc = { path = "$ROOT/meerkat-rpc" }
-meerkat-rest = { path = "$ROOT/meerkat-rest" }
-meerkat-contracts = { path = "$ROOT/meerkat-contracts" }
-meerkat = { path = "$ROOT/meerkat" }
-meerkat-mob = { path = "$ROOT/meerkat-mob" }
-meerkat-mob-mcp = { path = "$ROOT/meerkat-mob-mcp" }
-rkat = { path = "$ROOT/meerkat-cli" }
-EOF
+"$(dirname "$0")/generate-patch-config.sh" "$ROOT" > "$tmp_cfg"
 
 LOG_DIR="$tmp_dir/logs"
 mkdir -p "$LOG_DIR"

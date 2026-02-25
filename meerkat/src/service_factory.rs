@@ -4,6 +4,10 @@
 //! traits so any surface can create a `SessionService` backed by the standard factory.
 
 use async_trait::async_trait;
+use meerkat_core::Config;
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_core::ConfigStore;
+use meerkat_core::Session;
 use meerkat_core::comms::{
     CommsCommand, EventStream, PeerDirectoryEntry, SendAndStreamError, SendError, SendReceipt,
     StreamError, StreamScope,
@@ -11,10 +15,6 @@ use meerkat_core::comms::{
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{CreateSessionRequest, SessionError};
 use meerkat_core::types::{RunResult, SessionId};
-use meerkat_core::Config;
-#[cfg(not(target_arch = "wasm32"))]
-use meerkat_core::ConfigStore;
-use meerkat_core::Session;
 use meerkat_session::EphemeralSessionService;
 use meerkat_session::ephemeral::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
 use std::sync::Arc;
@@ -313,7 +313,7 @@ mod tests {
     }
 
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl LlmClient for MockLlmClient {
         fn stream<'a>(
             &'a self,

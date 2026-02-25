@@ -2,6 +2,8 @@
 
 use crate::mcp::tools::{ToolContext, handle_tools_call, tools_list};
 use crate::runtime::CommsRuntime;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use crate::{Router, TrustedPeers};
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
@@ -9,8 +11,6 @@ use meerkat_core::error::ToolError;
 use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
 use serde_json::Value;
 use std::sync::Arc;
-#[cfg(target_arch = "wasm32")]
-use crate::tokio;
 use tokio::sync::RwLock;
 
 /// Tool dispatcher that provides comms tools.

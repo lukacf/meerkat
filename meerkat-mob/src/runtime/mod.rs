@@ -16,6 +16,8 @@ use crate::run::{FlowRunConfig, MobRun, MobRunStatus};
 use crate::storage::MobStorage;
 use crate::store::{MobEventStore, MobRunStore};
 use crate::tasks::{MobTask, TaskBoard, TaskStatus};
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use meerkat_client::LlmClient;
 use meerkat_core::ToolGatewayBuilder;
 use meerkat_core::agent::{AgentToolDispatcher, CommsRuntime as CoreCommsRuntime};
@@ -28,8 +30,6 @@ use serde_json::json;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
-#[cfg(target_arch = "wasm32")]
-use crate::tokio;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::process::{Child, Command};
 use tokio::sync::{RwLock, mpsc, oneshot};

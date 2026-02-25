@@ -220,9 +220,12 @@ where
 {
     RUNTIME_STATE.with(|cell| {
         let borrow = cell.borrow();
-        let state = borrow
-            .as_ref()
-            .ok_or_else(|| err_js("not_initialized", "runtime not initialized — call init_runtime or init_runtime_from_config first"))?;
+        let state = borrow.as_ref().ok_or_else(|| {
+            err_js(
+                "not_initialized",
+                "runtime not initialized — call init_runtime or init_runtime_from_config first",
+            )
+        })?;
         f(state)
     })
 }
@@ -451,10 +454,9 @@ fn build_wasm_tool_dispatcher() -> Result<Arc<dyn meerkat_core::AgentToolDispatc
     let task_store: Arc<dyn meerkat_tools::builtin::TaskStore> =
         Arc::new(meerkat_tools::builtin::MemoryTaskStore::new());
     let config = meerkat_tools::builtin::BuiltinToolConfig::default();
-    let composite = meerkat_tools::builtin::CompositeDispatcher::new_wasm(
-        task_store, &config, None, None,
-    )
-    .map_err(|e| format!("failed to create tool dispatcher: {e}"))?;
+    let composite =
+        meerkat_tools::builtin::CompositeDispatcher::new_wasm(task_store, &config, None, None)
+            .map_err(|e| format!("failed to create tool dispatcher: {e}"))?;
     Ok(Arc::new(composite))
 }
 
@@ -484,7 +486,9 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
         return Err(err_js("invalid_credentials", "api_key must not be empty"));
     }
 
-    let model = creds.model.unwrap_or_else(|| "claude-sonnet-4-5".to_string());
+    let model = creds
+        .model
+        .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
 
     // Create the service infrastructure.
     let factory = meerkat::AgentFactory::minimal();
@@ -703,8 +707,12 @@ pub async fn start_turn(
             bc.host_mode = session.build_config_template.host_mode;
 
             // Rebuild tools + store fresh each turn (they're cheap, avoids ownership issues).
-            bc.tool_dispatcher_override = session.build_config_template.tool_dispatcher_override.clone();
-            bc.session_store_override = session.build_config_template.session_store_override.clone();
+            bc.tool_dispatcher_override = session
+                .build_config_template
+                .tool_dispatcher_override
+                .clone();
+            bc.session_store_override =
+                session.build_config_template.session_store_override.clone();
 
             // Resume from prior session if available.
             bc.resume_session = session.meerkat_session.take();
@@ -918,7 +926,9 @@ pub async fn mob_lifecycle(mob_id: &str, action: &str) -> Result<(), JsValue> {
         _ => {
             return Err(err_js(
                 "invalid_action",
-                &format!("unknown lifecycle action: {action} (expected stop/resume/complete/destroy)"),
+                &format!(
+                    "unknown lifecycle action: {action} (expected stop/resume/complete/destroy)"
+                ),
             ));
         }
     }
@@ -932,11 +942,7 @@ pub async fn mob_lifecycle(mob_id: &str, action: &str) -> Result<(), JsValue> {
 /// Note: `after_cursor` is u32 at the JS boundary (wasm_bindgen limitation),
 /// internally widened to u64. Cursors beyond 4B are not supported via this export.
 #[wasm_bindgen]
-pub async fn mob_events(
-    mob_id: &str,
-    after_cursor: u32,
-    limit: u32,
-) -> Result<JsValue, JsValue> {
+pub async fn mob_events(mob_id: &str, after_cursor: u32, limit: u32) -> Result<JsValue, JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
     let events = mob_state
@@ -1099,14 +1105,10 @@ pub async fn mob_flow_status(mob_id: &str, run_id: &str) -> Result<JsValue, JsVa
     let rid: RunId = run_id
         .parse()
         .map_err(|e| err_str("invalid_run_id", format!("{e}")))?;
-    let status = mob_state
-        .mob_flow_status(&id, rid)
-        .await
-        .map_err(err_mob)?;
+    let status = mob_state.mob_flow_status(&id, rid).await.map_err(err_mob)?;
     match status {
         Some(run) => {
-            let json =
-                serde_json::to_string(&run).map_err(|e| err_str("serialize_error", e))?;
+            let json = serde_json::to_string(&run).map_err(|e| err_str("serialize_error", e))?;
             Ok(JsValue::from_str(&json))
         }
         None => Ok(JsValue::from_str("null")),

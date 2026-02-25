@@ -217,11 +217,9 @@ impl Router {
         #[cfg(target_arch = "wasm32")]
         {
             match addr {
-                PeerAddr::Tcp(_) => Err(SendError::Transport(
-                    TransportError::InvalidAddress(
-                        "TCP transport is not available on wasm32".to_string(),
-                    ),
-                )),
+                PeerAddr::Tcp(_) => Err(SendError::Transport(TransportError::InvalidAddress(
+                    "TCP transport is not available on wasm32".to_string(),
+                ))),
                 PeerAddr::Inproc(_) => {
                     let registry = InprocRegistry::global();
                     registry

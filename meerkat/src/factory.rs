@@ -31,27 +31,32 @@ use meerkat_store::MemoryStore;
 #[cfg(not(feature = "memory-store"))]
 use meerkat_store::SessionFilter;
 use meerkat_store::{SessionStore, StoreAdapter};
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_tools::BuiltinDispatcherConfig;
+use meerkat_tools::CompositeDispatcherError;
 use meerkat_tools::EmptyToolDispatcher;
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_tools::builtin::FileTaskStore;
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_tools::builtin::shell::ShellConfig;
 #[cfg(all(feature = "sub-agents", not(target_arch = "wasm32")))]
 use meerkat_tools::builtin::sub_agent::{SubAgentConfig, SubAgentToolSet, SubAgentToolState};
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_tools::builtin::{
-    BuiltinToolConfig, CompositeDispatcher, MemoryTaskStore, TaskStore,
-    ToolPolicyLayer,
+    BuiltinToolConfig, CompositeDispatcher, MemoryTaskStore, TaskStore, ToolPolicyLayer,
 };
-#[cfg(not(target_arch = "wasm32"))]
-use meerkat_tools::builtin::FileTaskStore;
-#[cfg(not(target_arch = "wasm32"))]
-use meerkat_tools::BuiltinDispatcherConfig;
-use meerkat_tools::CompositeDispatcherError;
-#[cfg(all(any(not(feature = "memory-store"), feature = "sub-agents"), not(target_arch = "wasm32")))]
+#[cfg(all(
+    any(not(feature = "memory-store"), feature = "sub-agents"),
+    not(target_arch = "wasm32")
+))]
 use tokio::sync::RwLock;
-#[cfg(all(any(not(feature = "memory-store"), feature = "sub-agents"), target_arch = "wasm32"))]
-use tokio_with_wasm::alias::sync::RwLock;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::mpsc;
+#[cfg(all(
+    any(not(feature = "memory-store"), feature = "sub-agents"),
+    target_arch = "wasm32"
+))]
+use tokio_with_wasm::alias::sync::RwLock;
 #[cfg(target_arch = "wasm32")]
 use tokio_with_wasm::alias::sync::mpsc;
 
@@ -251,7 +256,6 @@ pub struct AgentBuildConfig {
     // embedded surfaces to inject pre-built resources programmatically.
     //
     // Precedence: override > factory field > config resolution > default
-
     /// Pre-built tool dispatcher. Skips shell/file/project resolution.
     pub tool_dispatcher_override: Option<Arc<dyn AgentToolDispatcher>>,
 
@@ -304,10 +308,19 @@ impl std::fmt::Debug for AgentBuildConfig {
                 "max_inline_peer_notifications",
                 &self.max_inline_peer_notifications,
             )
-            .field("tool_dispatcher_override", &self.tool_dispatcher_override.is_some())
-            .field("session_store_override", &self.session_store_override.is_some())
+            .field(
+                "tool_dispatcher_override",
+                &self.tool_dispatcher_override.is_some(),
+            )
+            .field(
+                "session_store_override",
+                &self.session_store_override.is_some(),
+            )
             .field("hook_engine_override", &self.hook_engine_override.is_some())
-            .field("skill_engine_override", &self.skill_engine_override.is_some())
+            .field(
+                "skill_engine_override",
+                &self.skill_engine_override.is_some(),
+            )
             .finish()
     }
 }
@@ -1177,46 +1190,46 @@ impl AgentFactory {
             if let Some(engine) = build_config.skill_engine_override.take() {
                 Some(engine)
             } else {
-            let skill_source: Option<Arc<meerkat_skills::CompositeSkillSource>> =
-                if self.skill_source.is_some() {
-                    self.skill_source.clone()
-                } else if !config.skills.enabled {
-                    None
-                } else {
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        match meerkat_skills::resolve_repositories_with_roots(
-                            &config.skills,
-                            conventions_context_root,
-                            conventions_user_root,
-                            Some(_realm_scope_root.as_path()),
-                        )
-                        .await
+                let skill_source: Option<Arc<meerkat_skills::CompositeSkillSource>> =
+                    if self.skill_source.is_some() {
+                        self.skill_source.clone()
+                    } else if !config.skills.enabled {
+                        None
+                    } else {
+                        #[cfg(not(target_arch = "wasm32"))]
                         {
-                            Ok(source) => source.map(Arc::new),
-                            Err(e) => {
-                                tracing::warn!("Failed to resolve skill repositories: {e}");
-                                None
+                            match meerkat_skills::resolve_repositories_with_roots(
+                                &config.skills,
+                                conventions_context_root,
+                                conventions_user_root,
+                                Some(_realm_scope_root.as_path()),
+                            )
+                            .await
+                            {
+                                Ok(source) => source.map(Arc::new),
+                                Err(e) => {
+                                    tracing::warn!("Failed to resolve skill repositories: {e}");
+                                    None
+                                }
                             }
                         }
-                    }
-                    #[cfg(target_arch = "wasm32")]
-                    None
-                };
+                        #[cfg(target_arch = "wasm32")]
+                        None
+                    };
 
-            skill_source.map(|source| {
-                let available_caps: Vec<String> = meerkat_contracts::build_capabilities()
-                    .into_iter()
-                    .map(|c| c.id.to_string())
-                    .collect();
-                let engine = Arc::new(
-                    meerkat_skills::DefaultSkillEngine::new(source, available_caps)
-                        .with_inventory_threshold(config.skills.inventory_threshold)
-                        .with_max_injection_bytes(config.skills.max_injection_bytes),
-                );
-                Arc::new(meerkat_core::skills::SkillRuntime::new(engine))
-            })
-        };  // end else (filesystem resolution fallthrough)
+                skill_source.map(|source| {
+                    let available_caps: Vec<String> = meerkat_contracts::build_capabilities()
+                        .into_iter()
+                        .map(|c| c.id.to_string())
+                        .collect();
+                    let engine = Arc::new(
+                        meerkat_skills::DefaultSkillEngine::new(source, available_caps)
+                            .with_inventory_threshold(config.skills.inventory_threshold)
+                            .with_max_injection_bytes(config.skills.max_injection_bytes),
+                    );
+                    Arc::new(meerkat_core::skills::SkillRuntime::new(engine))
+                })
+            }; // end else (filesystem resolution fallthrough)
         #[cfg(not(feature = "skills"))]
         let skill_engine: Option<Arc<meerkat_core::skills::SkillRuntime>> = None;
 
@@ -1317,37 +1330,41 @@ impl AgentFactory {
                 {
                     // Fallback: empty tool dispatcher when no override is set on wasm32.
                     let usage = String::new();
-                    (Arc::new(EmptyToolDispatcher) as Arc<dyn AgentToolDispatcher>, usage)
+                    (
+                        Arc::new(EmptyToolDispatcher) as Arc<dyn AgentToolDispatcher>,
+                        usage,
+                    )
                 }
             };
 
         // 7. Create session store adapter (override > factory > feature-flag default)
-        let store_adapter: Arc<dyn AgentSessionStore> = if let Some(store) = build_config.session_store_override.take() {
-            store
-        } else if let Some(store) = &self.custom_store {
-            Arc::new(StoreAdapter::new(Arc::clone(store)))
-        } else {
-            #[cfg(feature = "jsonl-store")]
-            {
-                let store = JsonlStore::new(self.store_path.clone());
+        let store_adapter: Arc<dyn AgentSessionStore> =
+            if let Some(store) = build_config.session_store_override.take() {
                 store
-                    .init()
-                    .await
-                    .map_err(|e| BuildAgentError::Config(format!("Store init failed: {e}")))?;
-                Arc::new(StoreAdapter::new(Arc::new(store)))
-            }
-            #[cfg(all(not(feature = "jsonl-store"), feature = "memory-store"))]
-            {
-                Arc::new(self.build_store_adapter(Arc::new(MemoryStore::new())).await)
-            }
-            #[cfg(all(not(feature = "jsonl-store"), not(feature = "memory-store")))]
-            {
-                Arc::new(
-                    self.build_store_adapter(Arc::new(EphemeralSessionStore::new()))
-                        .await,
-                )
-            }
-        };
+            } else if let Some(store) = &self.custom_store {
+                Arc::new(StoreAdapter::new(Arc::clone(store)))
+            } else {
+                #[cfg(feature = "jsonl-store")]
+                {
+                    let store = JsonlStore::new(self.store_path.clone());
+                    store
+                        .init()
+                        .await
+                        .map_err(|e| BuildAgentError::Config(format!("Store init failed: {e}")))?;
+                    Arc::new(StoreAdapter::new(Arc::new(store)))
+                }
+                #[cfg(all(not(feature = "jsonl-store"), feature = "memory-store"))]
+                {
+                    Arc::new(self.build_store_adapter(Arc::new(MemoryStore::new())).await)
+                }
+                #[cfg(all(not(feature = "jsonl-store"), not(feature = "memory-store")))]
+                {
+                    Arc::new(
+                        self.build_store_adapter(Arc::new(EphemeralSessionStore::new()))
+                            .await,
+                    )
+                }
+            };
 
         // 9. Compose tools with comms
         #[cfg(feature = "comms")]
@@ -1375,7 +1392,9 @@ impl AgentFactory {
                 create_default_hook_engine(layered_hooks)
             }
             #[cfg(target_arch = "wasm32")]
-            { None }
+            {
+                None
+            }
         };
 
         // 11. Generate skill inventory section using the engine created in step 6a

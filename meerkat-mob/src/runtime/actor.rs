@@ -268,10 +268,7 @@ impl MobActor {
                 );
             }
             #[cfg(target_arch = "wasm32")]
-            servers.insert(
-                name.clone(),
-                McpServerEntry { running: true },
-            );
+            servers.insert(name.clone(), McpServerEntry { running: true });
         }
         // Mark any servers that were already in the map but had no command
         // (i.e. URL-only servers) as running.

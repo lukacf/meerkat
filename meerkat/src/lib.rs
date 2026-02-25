@@ -212,8 +212,8 @@ pub use meerkat_tools::{DispatchError, ToolDispatcher, ToolRegistry, ToolValidat
 pub use meerkat_tools::CommsToolSurface;
 pub use meerkat_tools::{
     BuiltinTool, BuiltinToolConfig, BuiltinToolEntry, BuiltinToolError, CompositeDispatcher,
-    CompositeDispatcherError, EnforcedToolPolicy, MemoryTaskStore,
-    ResolvedToolPolicy, TaskStore, ToolMode, ToolPolicyLayer,
+    CompositeDispatcherError, EnforcedToolPolicy, MemoryTaskStore, ResolvedToolPolicy, TaskStore,
+    ToolMode, ToolPolicyLayer,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use meerkat_tools::{FileTaskStore, ensure_rkat_dir, find_project_root};
@@ -263,7 +263,10 @@ pub fn compose_tools_with_comms(
     tool_usage_instructions: String,
     runtime: &meerkat_comms::CommsRuntime,
 ) -> Result<
-    (std::sync::Arc<dyn meerkat_core::AgentToolDispatcher>, String),
+    (
+        std::sync::Arc<dyn meerkat_core::AgentToolDispatcher>,
+        String,
+    ),
     meerkat_tools::ToolError,
 > {
     use meerkat_tools::CommsToolSurface;

@@ -5,6 +5,8 @@ use super::turn_executor::{
 };
 use crate::error::MobError;
 use crate::ids::{MeerkatId, RunId, StepId};
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use async_trait::async_trait;
 use futures::FutureExt;
 use meerkat_core::event::{AgentEvent, ScopedAgentEvent, StreamScopeFrame};
@@ -14,8 +16,6 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-#[cfg(target_arch = "wasm32")]
-use crate::tokio;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 #[derive(Clone)]

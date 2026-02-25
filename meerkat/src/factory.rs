@@ -55,7 +55,7 @@ use tokio::sync::mpsc;
 #[cfg(target_arch = "wasm32")]
 use tokio_with_wasm::alias::sync::mpsc;
 
-#[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
+#[cfg(feature = "comms")]
 use crate::compose_tools_with_comms;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::{create_default_hook_engine, resolve_layered_hooks_config};
@@ -1252,7 +1252,23 @@ impl AgentFactory {
             None
         };
         #[cfg(all(feature = "comms", target_arch = "wasm32"))]
-        let comms_runtime: Option<meerkat_comms::CommsRuntime> = None;
+        let comms_runtime = if build_config.host_mode || build_config.comms_name.is_some() {
+            let comms_name = build_config
+                .comms_name
+                .as_ref()
+                .ok_or(BuildAgentError::HostModeRequiresCommsName)?;
+            let runtime = meerkat_comms::CommsRuntime::inproc_only_scoped(
+                comms_name,
+                build_config.realm_id.clone(),
+            )
+            .map_err(|e| BuildAgentError::Comms(e.to_string()))?;
+            if let Some(ref meta) = build_config.peer_meta {
+                runtime.set_peer_meta(meta.clone());
+            }
+            Some(runtime)
+        } else {
+            None
+        };
         #[cfg(not(feature = "comms"))]
         let _comms_runtime: Option<()> = None;
 
@@ -1334,7 +1350,7 @@ impl AgentFactory {
         };
 
         // 9. Compose tools with comms
-        #[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
+        #[cfg(feature = "comms")]
         if let Some(ref runtime) = comms_runtime {
             let composed = compose_tools_with_comms(tools, tool_usage_instructions, runtime)
                 .map_err(|e| {

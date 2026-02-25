@@ -2,7 +2,6 @@
 //!
 //! Supports layered configuration: defaults → file → env (secrets only) → CLI
 
-#[cfg(not(target_arch = "wasm32"))]
 use crate::mcp_config::McpServerConfig;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -345,7 +344,6 @@ impl Config {
 
     fn merge_tools(&mut self, other: &ToolsConfig) {
         let defaults = ToolsConfig::default();
-        #[cfg(not(target_arch = "wasm32"))]
         if !other.mcp_servers.is_empty() {
             self.tools.mcp_servers = other.mcp_servers.clone();
         }
@@ -379,7 +377,6 @@ impl Config {
         let Some(tools) = parsed.get("tools").and_then(toml::Value::as_table) else {
             return;
         };
-        #[cfg(not(target_arch = "wasm32"))]
         if tools.contains_key("mcp_servers") {
             self.tools.mcp_servers = layer.mcp_servers.clone();
         }
@@ -1330,7 +1327,6 @@ impl From<RetryConfig> for RetryPolicy {
 #[serde(default)]
 pub struct ToolsConfig {
     /// MCP server configurations
-    #[cfg(not(target_arch = "wasm32"))]
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
     /// Default timeout for tool execution (supports humantime format: "30s", "1m")
@@ -1356,7 +1352,6 @@ pub struct ToolsConfig {
 impl Default for ToolsConfig {
     fn default() -> Self {
         Self {
-            #[cfg(not(target_arch = "wasm32"))]
             mcp_servers: Vec::new(),
             default_timeout: Duration::from_secs(600),
             tool_timeouts: HashMap::new(),

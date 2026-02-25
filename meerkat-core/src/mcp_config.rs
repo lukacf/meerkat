@@ -183,6 +183,7 @@ pub enum McpConfigError {
     InvalidEnvVarSyntax { field: String, value: String },
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl McpConfig {
     /// Load from user + project config, project wins on name collision.
     /// Returns servers in precedence order (project first, then user).
@@ -316,6 +317,7 @@ impl McpConfig {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 async fn read_mcp_file(path: Option<&Path>) -> Result<McpConfig, McpConfigError> {
     let Some(path) = path else {
         return Ok(McpConfig::default());

@@ -155,8 +155,115 @@ async fn initialize_roundtrip() {
     assert!(method_names.contains(&"session/create"));
     assert!(method_names.contains(&"turn/start"));
     assert!(method_names.contains(&"config/get"));
+    assert!(method_names.contains(&"mcp/add"));
+    assert!(method_names.contains(&"mcp/remove"));
+    assert!(method_names.contains(&"mcp/reload"));
 
     // Close to trigger EOF
+    drop(writer);
+    server_handle.await.unwrap().unwrap();
+}
+
+/// mcp/* methods are registered and return contract-typed placeholder responses.
+#[tokio::test]
+async fn mcp_live_methods_roundtrip_and_validation() {
+    let (mut writer, mut reader, server_handle) = spawn_test_server();
+
+    // Create session for validation against an existing session ID
+    let create_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "session/create",
+        "params": {"prompt": "hello"}
+    });
+    send_request(&mut writer, &create_req).await;
+    let create_resp = read_response(&mut reader).await;
+    let session_id = create_resp["result"]["session_id"]
+        .as_str()
+        .expect("session_id")
+        .to_string();
+
+    // mcp/add success
+    let add_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "mcp/add",
+        "params": {
+            "session_id": session_id,
+            "server_name": "filesystem",
+            "server_config": {
+                "command": "echo",
+                "args": [],
+                "env": {}
+            },
+            "persisted": false
+        }
+    });
+    send_request(&mut writer, &add_req).await;
+    let add_resp = read_response(&mut reader).await;
+    assert!(add_resp["error"].is_null(), "mcp/add failed: {add_resp}");
+    assert_eq!(add_resp["result"]["operation"], "add");
+    assert_eq!(add_resp["result"]["status"], "staged");
+    assert_eq!(add_resp["result"]["persisted"], false);
+    assert!(add_resp["result"]["applied_at_turn"].is_null());
+
+    // mcp/remove success
+    let remove_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "mcp/remove",
+        "params": {
+            "session_id": add_resp["result"]["session_id"],
+            "server_name": "filesystem",
+            "persisted": true
+        }
+    });
+    send_request(&mut writer, &remove_req).await;
+    let remove_resp = read_response(&mut reader).await;
+    assert!(
+        remove_resp["error"].is_null(),
+        "mcp/remove failed: {remove_resp}"
+    );
+    assert_eq!(remove_resp["result"]["operation"], "remove");
+    assert_eq!(remove_resp["result"]["status"], "staged");
+    assert_eq!(remove_resp["result"]["persisted"], true);
+
+    // mcp/reload success
+    let reload_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "mcp/reload",
+        "params": {
+            "session_id": remove_resp["result"]["session_id"],
+            "server_name": "filesystem",
+            "persisted": false
+        }
+    });
+    send_request(&mut writer, &reload_req).await;
+    let reload_resp = read_response(&mut reader).await;
+    assert!(
+        reload_resp["error"].is_null(),
+        "mcp/reload failed: {reload_resp}"
+    );
+    assert_eq!(reload_resp["result"]["operation"], "reload");
+    assert_eq!(reload_resp["result"]["status"], "staged");
+
+    // invalid params are rejected
+    let invalid_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "mcp/add",
+        "params": {
+            "session_id": "not-a-session-id",
+            "server_name": "",
+            "server_config": {}
+        }
+    });
+    send_request(&mut writer, &invalid_req).await;
+    let invalid_resp = read_response(&mut reader).await;
+    assert!(invalid_resp["result"].is_null());
+    assert!(invalid_resp["error"].is_object());
+
     drop(writer);
     server_handle.await.unwrap().unwrap();
 }

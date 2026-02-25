@@ -41,6 +41,180 @@
         "summary": "SSE event stream"
       }
     },
+    "/sessions/{id}/mcp/add": {
+      "post": {
+        "requestBody": {
+          "contract": "McpAddParams"
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "applied_at_turn": {
+                      "minimum": 0,
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "operation": {
+                      "enum": [
+                        "add",
+                        "remove",
+                        "reload"
+                      ],
+                      "type": "string"
+                    },
+                    "persisted": {
+                      "type": "boolean"
+                    },
+                    "server_name": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "session_id": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "session_id",
+                    "operation",
+                    "status",
+                    "persisted"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "McpLiveOpResponse"
+          }
+        },
+        "summary": "Live MCP add"
+      }
+    },
+    "/sessions/{id}/mcp/reload": {
+      "post": {
+        "requestBody": {
+          "contract": "McpReloadParams"
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "applied_at_turn": {
+                      "minimum": 0,
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "operation": {
+                      "enum": [
+                        "add",
+                        "remove",
+                        "reload"
+                      ],
+                      "type": "string"
+                    },
+                    "persisted": {
+                      "type": "boolean"
+                    },
+                    "server_name": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "session_id": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "session_id",
+                    "operation",
+                    "status",
+                    "persisted"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "McpLiveOpResponse"
+          }
+        },
+        "summary": "Live MCP reload (optional skeleton)"
+      }
+    },
+    "/sessions/{id}/mcp/remove": {
+      "post": {
+        "requestBody": {
+          "contract": "McpRemoveParams"
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "applied_at_turn": {
+                      "minimum": 0,
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "operation": {
+                      "enum": [
+                        "add",
+                        "remove",
+                        "reload"
+                      ],
+                      "type": "string"
+                    },
+                    "persisted": {
+                      "type": "boolean"
+                    },
+                    "server_name": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "session_id": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "session_id",
+                    "operation",
+                    "status",
+                    "persisted"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "McpLiveOpResponse"
+          }
+        },
+        "summary": "Live MCP remove"
+      }
+    },
     "/sessions/{id}/messages": {
       "post": {
         "summary": "Continue session with new message"

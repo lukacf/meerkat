@@ -146,6 +146,8 @@ mod tests {
                 expected_schema_ref: Some("schema.json".to_string()),
                 branch: Some(BranchId::from("branch-a")),
                 depends_on_mode: crate::definition::DependencyMode::All,
+                allowed_tools: None,
+                blocked_tools: None,
             },
         );
 

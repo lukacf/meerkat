@@ -49,3 +49,31 @@ export interface SkillsParams {
   skills_enabled: boolean;
   skill_references: string[];
 }
+
+export interface McpAddParams {
+  session_id: string;
+  server_name: string;
+  server_config: Record<string, unknown>;
+  persisted: boolean;
+}
+
+export interface McpRemoveParams {
+  session_id: string;
+  server_name: string;
+  persisted: boolean;
+}
+
+export interface McpReloadParams {
+  session_id: string;
+  server_name?: string;
+  persisted: boolean;
+}
+
+export interface McpLiveOpResponse {
+  session_id: string;
+  operation: "add" | "remove" | "reload";
+  server_name?: string;
+  status: string;
+  persisted: boolean;
+  applied_at_turn?: number;
+}

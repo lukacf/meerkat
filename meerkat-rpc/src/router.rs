@@ -239,6 +239,9 @@ impl MethodRouter {
                 )
                 .await
             }
+            "mcp/add" => handlers::mcp::handle_add(id, params, &self.runtime).await,
+            "mcp/remove" => handlers::mcp::handle_remove(id, params, &self.runtime).await,
+            "mcp/reload" => handlers::mcp::handle_reload(id, params, &self.runtime).await,
             _ => RpcResponse::error(
                 id,
                 error::METHOD_NOT_FOUND,

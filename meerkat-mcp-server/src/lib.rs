@@ -1145,6 +1145,7 @@ async fn handle_meerkat_resume(
         event_tx: event_tx.clone(),
         host_mode,
         skill_references: None,
+        flow_tool_overlay: None,
     };
 
     let result = match state.service.start_turn(&session_id, turn_req).await {

@@ -93,6 +93,34 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         types_content += "    skills_enabled: bool = False\n"
         types_content += "    skill_references: list = field(default_factory=list)\n\n"
 
+    types_content += "\n@dataclass\nclass McpAddParams:\n"
+    types_content += '    """Request payload for mcp/add."""\n'
+    types_content += "    session_id: str = ''\n"
+    types_content += "    server_name: str = ''\n"
+    types_content += "    server_config: Optional[dict] = None\n"
+    types_content += "    persisted: bool = False\n\n"
+
+    types_content += "@dataclass\nclass McpRemoveParams:\n"
+    types_content += '    """Request payload for mcp/remove."""\n'
+    types_content += "    session_id: str = ''\n"
+    types_content += "    server_name: str = ''\n"
+    types_content += "    persisted: bool = False\n\n"
+
+    types_content += "@dataclass\nclass McpReloadParams:\n"
+    types_content += '    """Request payload for mcp/reload."""\n'
+    types_content += "    session_id: str = ''\n"
+    types_content += "    server_name: Optional[str] = None\n"
+    types_content += "    persisted: bool = False\n\n"
+
+    types_content += "@dataclass\nclass McpLiveOpResponse:\n"
+    types_content += '    """Response payload for mcp/add|remove|reload."""\n'
+    types_content += "    session_id: str = ''\n"
+    types_content += "    operation: str = ''\n"
+    types_content += "    server_name: Optional[str] = None\n"
+    types_content += "    status: str = ''\n"
+    types_content += "    persisted: bool = False\n"
+    types_content += "    applied_at_turn: Optional[int] = None\n\n"
+
     (output_dir / "types.py").write_text(types_content)
 
     # Generate error types
@@ -181,6 +209,34 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
         types_content += "  skills_enabled: boolean;\n"
         types_content += "  skill_references: string[];\n"
         types_content += "}\n"
+
+    types_content += "\nexport interface McpAddParams {\n"
+    types_content += "  session_id: string;\n"
+    types_content += "  server_name: string;\n"
+    types_content += "  server_config: Record<string, unknown>;\n"
+    types_content += "  persisted: boolean;\n"
+    types_content += "}\n"
+
+    types_content += "\nexport interface McpRemoveParams {\n"
+    types_content += "  session_id: string;\n"
+    types_content += "  server_name: string;\n"
+    types_content += "  persisted: boolean;\n"
+    types_content += "}\n"
+
+    types_content += "\nexport interface McpReloadParams {\n"
+    types_content += "  session_id: string;\n"
+    types_content += "  server_name?: string;\n"
+    types_content += "  persisted: boolean;\n"
+    types_content += "}\n"
+
+    types_content += "\nexport interface McpLiveOpResponse {\n"
+    types_content += "  session_id: string;\n"
+    types_content += "  operation: \"add\" | \"remove\" | \"reload\";\n"
+    types_content += "  server_name?: string;\n"
+    types_content += "  status: string;\n"
+    types_content += "  persisted: boolean;\n"
+    types_content += "  applied_at_turn?: number;\n"
+    types_content += "}\n"
 
     (output_dir / "types.ts").write_text(types_content)
 

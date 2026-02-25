@@ -41,6 +41,9 @@ pub fn handle_initialize(id: Option<RpcId>) -> RpcResponse {
                 "config/get".to_string(),
                 "config/set".to_string(),
                 "config/patch".to_string(),
+                "mcp/add".to_string(),
+                "mcp/remove".to_string(),
+                "mcp/reload".to_string(),
                 "capabilities/get".to_string(),
             ];
             #[cfg(feature = "comms")]

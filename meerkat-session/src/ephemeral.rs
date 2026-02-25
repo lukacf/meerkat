@@ -9,7 +9,7 @@ use indexmap::IndexMap;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{
     CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService, SessionSummary,
-    SessionUsage, SessionView, StartTurnRequest,
+    SessionUsage, SessionView, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::time_compat::SystemTime;
 use meerkat_core::types::{RunResult, SessionId, Usage};
@@ -65,6 +65,7 @@ enum SessionCommand {
         event_tx: Option<mpsc::Sender<AgentEvent>>,
         result_tx: oneshot::Sender<Result<RunResult, meerkat_core::error::AgentError>>,
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
+        flow_tool_overlay: Option<TurnToolOverlay>,
     },
     ReadSnapshot {
         reply_tx: oneshot::Sender<SessionSnapshot>,
@@ -159,6 +160,12 @@ pub trait SessionAgent: Send {
 
     /// Stage skill references to resolve and inject on the next turn.
     fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillKey>>);
+
+    /// Apply or clear a per-turn flow tool overlay.
+    fn set_flow_tool_overlay(
+        &mut self,
+        overlay: Option<TurnToolOverlay>,
+    ) -> Result<(), meerkat_core::error::AgentError>;
 
     /// Cancel the currently running turn.
     fn cancel(&mut self);
@@ -472,6 +479,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                 event_tx: caller_event_tx,
                 result_tx,
                 skill_references: req.skill_references,
+                flow_tool_overlay: None,
             })
             .await
             .is_err()
@@ -527,6 +535,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                     event_tx: req.event_tx,
                     result_tx,
                     skill_references: req.skill_references,
+                    flow_tool_overlay: req.flow_tool_overlay,
                 })
                 .await
                 .map_err(|_| {
@@ -678,8 +687,15 @@ async fn session_task<A: SessionAgent>(
                 event_tx,
                 result_tx,
                 skill_references,
+                flow_tool_overlay,
             } => {
                 agent.set_skill_references(skill_references);
+                if let Err(error) = agent.set_flow_tool_overlay(flow_tool_overlay) {
+                    control.turn_lock.store(false, Ordering::Release);
+                    control.interrupt_requested.store(false, Ordering::Release);
+                    let _ = result_tx.send(Err(error));
+                    continue;
+                }
                 control.state_tx.send_replace(SessionState::Running);
                 let mut event_stream_open = true;
 
@@ -767,6 +783,15 @@ async fn session_task<A: SessionAgent>(
                 control.state_tx.send_replace(SessionState::Idle);
                 // Release the turn lock AFTER setting state to Idle and
                 // updating the summary, so the next caller sees consistent state.
+                let result = if let Err(error) = agent.set_flow_tool_overlay(None) {
+                    tracing::error!(
+                        error = %error,
+                        "failed to clear flow tool overlay; failing turn to avoid stale scope"
+                    );
+                    Err(error)
+                } else {
+                    result
+                };
                 control.turn_lock.store(false, Ordering::Release);
                 control.interrupt_requested.store(false, Ordering::Release);
                 let _ = result_tx.send(result);

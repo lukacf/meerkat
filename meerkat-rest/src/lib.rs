@@ -33,7 +33,10 @@ use meerkat::{
     PersistentSessionService, Session, SessionId, SessionService,
     encode_llm_client_override_for_service,
 };
-use meerkat_contracts::{SessionLocator, format_session_ref};
+use meerkat_contracts::{
+    McpAddParams, McpLiveOpResponse, McpLiveOpStatus, McpLiveOperation, McpReloadParams,
+    McpRemoveParams, SessionLocator, format_session_ref,
+};
 use meerkat_core::service::{
     CreateSessionRequest as SvcCreateSessionRequest, InitialTurnPolicy, SessionBuildOptions,
     SessionError, StartTurnRequest as SvcStartTurnRequest,
@@ -387,6 +390,9 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}", get(get_session))
         .route("/sessions/{id}/messages", post(continue_session))
         .route("/sessions/{id}/events", get(session_events))
+        .route("/sessions/{id}/mcp/add", post(mcp_add))
+        .route("/sessions/{id}/mcp/remove", post(mcp_remove))
+        .route("/sessions/{id}/mcp/reload", post(mcp_reload))
         .route("/comms/send", post(comms_send))
         .route("/comms/peers", get(comms_peers))
         // BRIDGE(M11→M12): Legacy event push endpoint.
@@ -1077,6 +1083,7 @@ async fn continue_session(
         event_tx: Some(caller_event_tx.clone()),
         host_mode,
         skill_references: None,
+        flow_tool_overlay: None,
     };
 
     let result = state.session_service.start_turn(&session_id, svc_req).await;
@@ -1211,6 +1218,95 @@ async fn continue_session(
     }
 }
 
+/// Stage a live MCP add operation for a session (placeholder contract surface).
+async fn mcp_add(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<McpAddParams>,
+) -> Result<Json<McpLiveOpResponse>, ApiError> {
+    let path_session_id = resolve_session_id_for_state(&id, &state)?;
+    let body_session_id = resolve_session_id_for_state(&req.session_id, &state)?;
+    if body_session_id != path_session_id {
+        return Err(ApiError::BadRequest(format!(
+            "Session ID mismatch: path={} body={}",
+            id, req.session_id
+        )));
+    }
+    if req.server_name.trim().is_empty() {
+        return Err(ApiError::BadRequest(
+            "server_name cannot be empty".to_string(),
+        ));
+    }
+    Ok(Json(McpLiveOpResponse {
+        session_id: path_session_id.to_string(),
+        operation: McpLiveOperation::Add,
+        server_name: Some(req.server_name),
+        status: McpLiveOpStatus::Staged,
+        persisted: req.persisted,
+        applied_at_turn: None,
+    }))
+}
+
+/// Stage a live MCP remove operation for a session (placeholder contract surface).
+async fn mcp_remove(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<McpRemoveParams>,
+) -> Result<Json<McpLiveOpResponse>, ApiError> {
+    let path_session_id = resolve_session_id_for_state(&id, &state)?;
+    let body_session_id = resolve_session_id_for_state(&req.session_id, &state)?;
+    if body_session_id != path_session_id {
+        return Err(ApiError::BadRequest(format!(
+            "Session ID mismatch: path={} body={}",
+            id, req.session_id
+        )));
+    }
+    if req.server_name.trim().is_empty() {
+        return Err(ApiError::BadRequest(
+            "server_name cannot be empty".to_string(),
+        ));
+    }
+    Ok(Json(McpLiveOpResponse {
+        session_id: path_session_id.to_string(),
+        operation: McpLiveOperation::Remove,
+        server_name: Some(req.server_name),
+        status: McpLiveOpStatus::Staged,
+        persisted: req.persisted,
+        applied_at_turn: None,
+    }))
+}
+
+/// Stage a live MCP reload operation for a session (placeholder contract surface).
+async fn mcp_reload(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<McpReloadParams>,
+) -> Result<Json<McpLiveOpResponse>, ApiError> {
+    let path_session_id = resolve_session_id_for_state(&id, &state)?;
+    let body_session_id = resolve_session_id_for_state(&req.session_id, &state)?;
+    if body_session_id != path_session_id {
+        return Err(ApiError::BadRequest(format!(
+            "Session ID mismatch: path={} body={}",
+            id, req.session_id
+        )));
+    }
+    if let Some(server_name) = req.server_name.as_ref()
+        && server_name.trim().is_empty()
+    {
+        return Err(ApiError::BadRequest(
+            "server_name cannot be empty".to_string(),
+        ));
+    }
+    Ok(Json(McpLiveOpResponse {
+        session_id: path_session_id.to_string(),
+        operation: McpLiveOperation::Reload,
+        server_name: req.server_name,
+        status: McpLiveOpStatus::Staged,
+        persisted: req.persisted,
+        applied_at_turn: None,
+    }))
+}
+
 /// SSE endpoint for streaming session events
 async fn session_events(
     State(state): State<AppState>,
@@ -1325,8 +1421,11 @@ impl IntoResponse for ApiError {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
     use std::path::PathBuf;
     use tempfile::TempDir;
+    use tower::ServiceExt;
 
     fn hooks_override_fixture() -> HookRunOverrides {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1609,5 +1708,163 @@ mod tests {
             response.session_ref.as_deref().expect("session_ref"),
             format_session_ref("test-realm", &session_id)
         );
+    }
+
+    #[tokio::test]
+    async fn test_mcp_add_placeholder_response_shape() {
+        let temp = TempDir::new().expect("temp");
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .expect("state");
+        let session_id = "01234567-89ab-cdef-0123-456789abcdef".to_string();
+        let req = McpAddParams {
+            session_id: session_id.clone(),
+            server_name: "filesystem".to_string(),
+            server_config: json!({"cmd":"npx"}),
+            persisted: true,
+        };
+
+        let Json(response) = mcp_add(State(state), Path(session_id.clone()), Json(req))
+            .await
+            .expect("mcp add");
+
+        assert_eq!(response.session_id, session_id);
+        assert_eq!(response.operation, McpLiveOperation::Add);
+        assert_eq!(response.status, McpLiveOpStatus::Staged);
+        assert!(response.persisted);
+        assert!(response.applied_at_turn.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_mcp_remove_rejects_session_id_mismatch() {
+        let temp = TempDir::new().expect("temp");
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .expect("state");
+        let req = McpRemoveParams {
+            session_id: "01234567-89ab-cdef-0123-456789abcdef".to_string(),
+            server_name: "filesystem".to_string(),
+            persisted: false,
+        };
+
+        let result = mcp_remove(
+            State(state),
+            Path("aaaaaaaa-89ab-cdef-0123-456789abcdef".to_string()),
+            Json(req),
+        )
+        .await;
+
+        assert!(matches!(result, Err(ApiError::BadRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn test_mcp_remove_placeholder_response_shape() {
+        let temp = TempDir::new().expect("temp");
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .expect("state");
+        let session_id = "01234567-89ab-cdef-0123-456789abcdef".to_string();
+        let req = McpRemoveParams {
+            session_id: session_id.clone(),
+            server_name: "filesystem".to_string(),
+            persisted: false,
+        };
+
+        let Json(response) = mcp_remove(State(state), Path(session_id.clone()), Json(req))
+            .await
+            .expect("mcp remove");
+
+        assert_eq!(response.session_id, session_id);
+        assert_eq!(response.operation, McpLiveOperation::Remove);
+        assert_eq!(response.server_name.as_deref(), Some("filesystem"));
+        assert_eq!(response.status, McpLiveOpStatus::Staged);
+        assert!(!response.persisted);
+        assert!(response.applied_at_turn.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_mcp_reload_placeholder_response_shape() {
+        let temp = TempDir::new().expect("temp");
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .expect("state");
+        let session_id = "01234567-89ab-cdef-0123-456789abcdef".to_string();
+        let req = McpReloadParams {
+            session_id: session_id.clone(),
+            server_name: Some("filesystem".to_string()),
+            persisted: true,
+        };
+
+        let Json(response) = mcp_reload(State(state), Path(session_id.clone()), Json(req))
+            .await
+            .expect("mcp reload");
+
+        assert_eq!(response.session_id, session_id);
+        assert_eq!(response.operation, McpLiveOperation::Reload);
+        assert_eq!(response.server_name.as_deref(), Some("filesystem"));
+        assert_eq!(response.status, McpLiveOpStatus::Staged);
+        assert!(response.persisted);
+        assert!(response.applied_at_turn.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_mcp_reload_rejects_empty_server_name() {
+        let temp = TempDir::new().expect("temp");
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .expect("state");
+        let req = McpReloadParams {
+            session_id: "01234567-89ab-cdef-0123-456789abcdef".to_string(),
+            server_name: Some("   ".to_string()),
+            persisted: false,
+        };
+
+        let result = mcp_reload(
+            State(state),
+            Path("01234567-89ab-cdef-0123-456789abcdef".to_string()),
+            Json(req),
+        )
+        .await;
+
+        assert!(matches!(result, Err(ApiError::BadRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn test_mcp_routes_registered() {
+        let temp = TempDir::new().expect("temp");
+        let app = router(
+            AppState::load_from(temp.path().to_path_buf())
+                .await
+                .expect("state"),
+        );
+
+        let valid_id = "01234567-89ab-cdef-0123-456789abcdef";
+
+        let add_req = Request::builder()
+            .method("POST")
+            .uri(format!("/sessions/{valid_id}/mcp/add"))
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .expect("request");
+        let add_resp = app.clone().oneshot(add_req).await.expect("response");
+        assert_ne!(add_resp.status(), StatusCode::NOT_FOUND);
+
+        let remove_req = Request::builder()
+            .method("POST")
+            .uri(format!("/sessions/{valid_id}/mcp/remove"))
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .expect("request");
+        let remove_resp = app.clone().oneshot(remove_req).await.expect("response");
+        assert_ne!(remove_resp.status(), StatusCode::NOT_FOUND);
+
+        let reload_req = Request::builder()
+            .method("POST")
+            .uri(format!("/sessions/{valid_id}/mcp/reload"))
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .expect("request");
+        let reload_resp = app.oneshot(reload_req).await.expect("response");
+        assert_ne!(reload_resp.status(), StatusCode::NOT_FOUND);
     }
 }

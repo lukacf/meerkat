@@ -70,3 +70,36 @@ class SkillsParams:
     skills_enabled: bool = False
     skill_references: list = field(default_factory=list)
 
+
+@dataclass
+class McpAddParams:
+    """Request payload for mcp/add."""
+    session_id: str = ''
+    server_name: str = ''
+    server_config: Optional[dict] = None
+    persisted: bool = False
+
+@dataclass
+class McpRemoveParams:
+    """Request payload for mcp/remove."""
+    session_id: str = ''
+    server_name: str = ''
+    persisted: bool = False
+
+@dataclass
+class McpReloadParams:
+    """Request payload for mcp/reload."""
+    session_id: str = ''
+    server_name: Optional[str] = None
+    persisted: bool = False
+
+@dataclass
+class McpLiveOpResponse:
+    """Response payload for mcp/add|remove|reload."""
+    session_id: str = ''
+    operation: str = ''
+    server_name: Optional[str] = None
+    status: str = ''
+    persisted: bool = False
+    applied_at_turn: Optional[int] = None
+

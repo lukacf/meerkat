@@ -8,12 +8,17 @@ use crate::ops::{
     ForkBranch, ForkBudgetPolicy, OperationId, OperationResult, SpawnSpec, ToolAccessPolicy,
 };
 use crate::retry::RetryPolicy;
+use crate::service::TurnToolOverlay;
 use crate::session::Session;
 use crate::state::LoopState;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
+use crate::tool_scope::{
+    EXTERNAL_TOOL_FILTER_METADATA_KEY, ToolFilter, ToolScopeRevision, ToolScopeStageError,
+};
 use crate::types::{Message, RunResult};
 use async_trait::async_trait;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -62,6 +67,50 @@ pub trait AgentRunner: Send {
         prompt: String,
         tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, AgentError>;
+}
+
+impl<C, T, S> Agent<C, T, S>
+where
+    C: AgentLlmClient + ?Sized,
+    T: AgentToolDispatcher + ?Sized,
+    S: AgentSessionStore + ?Sized,
+{
+    /// Stage an external tool visibility filter update for subsequent turns.
+    pub fn stage_external_tool_filter(
+        &mut self,
+        filter: ToolFilter,
+    ) -> Result<ToolScopeRevision, ToolScopeStageError> {
+        let handle = self.tool_scope.handle();
+        let revision = handle.stage_external_filter(filter.clone())?;
+        let _ = handle.staged_revision();
+        if let Ok(value) = serde_json::to_value(filter) {
+            self.session
+                .set_metadata(EXTERNAL_TOOL_FILTER_METADATA_KEY, value);
+        }
+        Ok(revision)
+    }
+
+    /// Set or clear a per-turn flow tool overlay.
+    pub fn set_flow_tool_overlay(
+        &mut self,
+        overlay: Option<TurnToolOverlay>,
+    ) -> Result<(), ToolScopeStageError> {
+        let handle = self.tool_scope.handle();
+        if let Some(overlay) = overlay {
+            let allow = overlay
+                .allowed_tools
+                .map(|tools| tools.into_iter().collect::<HashSet<_>>());
+            let deny = overlay
+                .blocked_tools
+                .unwrap_or_default()
+                .into_iter()
+                .collect::<HashSet<_>>();
+            handle.set_turn_overlay(allow, deny)?;
+        } else {
+            handle.clear_turn_overlay();
+        }
+        Ok(())
+    }
 }
 
 impl<C, T, S> Agent<C, T, S>

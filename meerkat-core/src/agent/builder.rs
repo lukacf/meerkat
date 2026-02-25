@@ -12,6 +12,7 @@ use crate::state::LoopState;
 use crate::sub_agent::SubAgentManager;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
+use crate::tool_scope::{EXTERNAL_TOOL_FILTER_METADATA_KEY, ToolFilter, ToolScope};
 use crate::types::{Message, OutputSchema};
 use serde_json::Value;
 use std::sync::Arc;
@@ -208,11 +209,13 @@ impl AgentBuilder {
 
         let budget = Budget::new(self.budget_limits.unwrap_or_default());
         let sub_agent_manager = Arc::new(SubAgentManager::new(self.concurrency_limits, self.depth));
+        let tool_scope = ToolScope::new(tools.tools());
 
-        Agent {
+        let mut agent = Agent {
             config: self.config,
             client,
             tools,
+            tool_scope,
             store,
             session,
             budget,
@@ -254,7 +257,33 @@ impl AgentBuilder {
             default_scoped_event_tx: self.default_scoped_event_tx,
             default_scope_path: self.default_scope_path,
             host_drain_active: false,
+        };
+
+        if let Some(raw_filter) = agent
+            .session
+            .metadata()
+            .get(EXTERNAL_TOOL_FILTER_METADATA_KEY)
+            .cloned()
+        {
+            match serde_json::from_value::<ToolFilter>(raw_filter) {
+                Ok(filter) => {
+                    if let Err(err) = agent.stage_external_tool_filter(filter) {
+                        tracing::warn!(
+                            error = %err,
+                            "invalid persisted tool scope filter; ignoring"
+                        );
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "failed to parse persisted tool scope filter; ignoring"
+                    );
+                }
+            }
         }
+
+        agent
     }
 
     /// Set the session checkpointer for host-mode persistence.

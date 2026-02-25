@@ -13,7 +13,7 @@ use meerkat_core::comms::{
     StreamError, StreamScope,
 };
 use meerkat_core::event::AgentEvent;
-use meerkat_core::service::{CreateSessionRequest, SessionError};
+use meerkat_core::service::{CreateSessionRequest, SessionError, TurnToolOverlay};
 use meerkat_core::types::{RunResult, SessionId};
 use meerkat_session::EphemeralSessionService;
 use meerkat_session::ephemeral::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
@@ -108,6 +108,15 @@ impl SessionAgent for FactoryAgent {
 
     fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillKey>>) {
         self.agent.pending_skill_references = refs;
+    }
+
+    fn set_flow_tool_overlay(
+        &mut self,
+        overlay: Option<TurnToolOverlay>,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        self.agent
+            .set_flow_tool_overlay(overlay)
+            .map_err(|error| meerkat_core::error::AgentError::ConfigError(error.to_string()))
     }
 
     fn cancel(&mut self) {

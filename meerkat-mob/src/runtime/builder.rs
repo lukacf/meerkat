@@ -542,6 +542,7 @@ impl MobBuilder {
                                 event_tx: None,
                                 host_mode: false,
                                 skill_references: None,
+                                flow_tool_overlay: None,
                             },
                         )
                         .await?;

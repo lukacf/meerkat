@@ -169,6 +169,10 @@ pub struct FlowStepSpec {
     pub branch: Option<BranchId>,
     #[serde(default)]
     pub depends_on_mode: DependencyMode,
+    #[serde(default)]
+    pub allowed_tools: Option<Vec<String>>,
+    #[serde(default)]
+    pub blocked_tools: Option<Vec<String>>,
 }
 
 /// Flow definition for a named workflow.

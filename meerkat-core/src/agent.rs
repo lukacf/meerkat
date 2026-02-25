@@ -26,6 +26,7 @@ use crate::state::LoopState;
 use crate::sub_agent::SubAgentManager;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
+use crate::tool_scope::ToolScope;
 use crate::types::{
     AssistantBlock, BlockAssistantMessage, Message, OutputSchema, StopReason, ToolCallView,
     ToolDef, ToolResult, Usage,
@@ -359,6 +360,7 @@ where
     config: AgentConfig,
     client: Arc<C>,
     tools: Arc<T>,
+    pub(crate) tool_scope: ToolScope,
     store: Arc<S>,
     session: Session,
     budget: Budget,

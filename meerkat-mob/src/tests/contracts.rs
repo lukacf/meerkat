@@ -672,6 +672,7 @@ async fn contract_mob_001_host_mode_session_stays_alive() {
                 event_tx: None,
                 host_mode: true,
                 skill_references: None,
+                flow_tool_overlay: None,
             },
         )
         .await
@@ -741,6 +742,7 @@ async fn contract_mob_007_session_archive_removes_from_active_list() {
                 event_tx: None,
                 host_mode: false,
                 skill_references: None,
+                flow_tool_overlay: None,
             },
         )
         .await;

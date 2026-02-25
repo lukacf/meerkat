@@ -1271,6 +1271,7 @@ mod scenario_09_session_service {
             event_tx: None,
             host_mode: false,
             skill_references: None,
+            flow_tool_overlay: None,
         };
 
         let turn_result = service

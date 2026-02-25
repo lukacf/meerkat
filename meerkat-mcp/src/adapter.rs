@@ -5,9 +5,10 @@ use meerkat_core::error::ToolError;
 use meerkat_core::{ToolCallView, ToolDef, ToolResult, agent::AgentToolDispatcher};
 use serde_json::Value;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 
-use crate::McpRouter;
+use crate::{McpApplyDelta, McpReloadTarget, McpRouter, McpServerConfig};
 
 /// Adapter that wraps an [`McpRouter`] to implement [`AgentToolDispatcher`].
 ///
@@ -47,6 +48,101 @@ impl McpRouterAdapter {
         if let Some(router) = router.take() {
             router.shutdown().await;
         }
+    }
+
+    /// Stage an MCP server add operation.
+    pub async fn stage_add(&self, config: McpServerConfig) -> Result<(), String> {
+        let mut router = self.router.write().await;
+        let router = router
+            .as_mut()
+            .ok_or_else(|| "MCP router has been shut down".to_string())?;
+        router.stage_add(config);
+        Ok(())
+    }
+
+    /// Stage an MCP server remove operation.
+    pub async fn stage_remove(&self, server_name: impl Into<String>) -> Result<(), String> {
+        let mut router = self.router.write().await;
+        let router = router
+            .as_mut()
+            .ok_or_else(|| "MCP router has been shut down".to_string())?;
+        router.stage_remove(server_name);
+        Ok(())
+    }
+
+    /// Stage an MCP server reload operation.
+    pub async fn stage_reload<T: Into<McpReloadTarget>>(&self, target: T) -> Result<(), String> {
+        let mut router = self.router.write().await;
+        let router = router
+            .as_mut()
+            .ok_or_else(|| "MCP router has been shut down".to_string())?;
+        router.stage_reload(target);
+        Ok(())
+    }
+
+    /// Apply staged MCP operations and refresh the visible tool cache.
+    pub async fn apply_staged(&self) -> Result<McpApplyDelta, String> {
+        let mut router = self.router.write().await;
+        let router = router
+            .as_mut()
+            .ok_or_else(|| "MCP router has been shut down".to_string())?;
+        let delta = router
+            .apply_staged()
+            .await
+            .map_err(|error| error.to_string())?;
+        let tools: Arc<[Arc<ToolDef>]> = router.list_tools().to_vec().into();
+        let mut cached = self.cached_tools.write().await;
+        *cached = tools;
+        Ok(delta)
+    }
+
+    /// Progress only Removing server finalization (drain/timeout) without applying staged ops.
+    pub async fn progress_removals(&self) -> Result<McpApplyDelta, String> {
+        let mut router = self.router.write().await;
+        let router = router
+            .as_mut()
+            .ok_or_else(|| "MCP router has been shut down".to_string())?;
+        let delta = router.progress_removals().await;
+        let tools: Arc<[Arc<ToolDef>]> = router.list_tools().to_vec().into();
+        let mut cached = self.cached_tools.write().await;
+        *cached = tools;
+        Ok(delta)
+    }
+
+    /// Returns true if any MCP server is currently draining in Removing state.
+    pub async fn has_removing_servers(&self) -> Result<bool, String> {
+        let router = self.router.read().await;
+        let router = router
+            .as_ref()
+            .ok_or_else(|| "MCP router has been shut down".to_string())?;
+        Ok(router.has_removing_servers())
+    }
+
+    /// Test helper for cross-crate runtime integration tests.
+    pub async fn set_inflight_calls_for_testing(
+        &self,
+        server_name: &str,
+        count: usize,
+    ) -> Result<(), String> {
+        let mut router = self.router.write().await;
+        let router = router
+            .as_mut()
+            .ok_or_else(|| "MCP router has been shut down".to_string())?;
+        router.set_inflight_calls_for_testing(server_name, count);
+        Ok(())
+    }
+
+    /// Test helper for controlling removal timeout from integration tests.
+    pub async fn set_removal_timeout_for_testing(
+        &self,
+        removal_timeout: Duration,
+    ) -> Result<(), String> {
+        let mut router = self.router.write().await;
+        let router = router
+            .as_mut()
+            .ok_or_else(|| "MCP router has been shut down".to_string())?;
+        router.set_removal_timeout(removal_timeout);
+        Ok(())
     }
 }
 

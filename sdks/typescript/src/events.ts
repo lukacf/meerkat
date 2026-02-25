@@ -311,6 +311,21 @@ export interface StreamTruncatedEvent {
   readonly reason: string;
 }
 
+export type ToolConfigChangeOperation = "add" | "remove" | "reload";
+
+export interface ToolConfigChangedPayload {
+  readonly operation: ToolConfigChangeOperation;
+  readonly target: string;
+  readonly status: string;
+  readonly persisted: boolean;
+  readonly appliedAtTurn?: number;
+}
+
+export interface ToolConfigChangedEvent {
+  readonly type: "tool_config_changed";
+  readonly payload: ToolConfigChangedPayload;
+}
+
 // ---------------------------------------------------------------------------
 // Unknown / forward-compat
 // ---------------------------------------------------------------------------
@@ -354,6 +369,7 @@ export type AgentEvent =
   | InteractionCompleteEvent
   | InteractionFailedEvent
   | StreamTruncatedEvent
+  | ToolConfigChangedEvent
   | UnknownEvent;
 
 /** Backward-compatible alias retained for SDK consumers. */
@@ -513,6 +529,25 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
     // Stream management
     case "stream_truncated":
       return { type, reason: String(raw.reason ?? "") };
+    case "tool_config_changed": {
+      const payloadRaw = typeof raw.payload === "object" && raw.payload !== null
+        ? (raw.payload as Record<string, unknown>)
+        : {};
+      const appliedAtTurnRaw = payloadRaw.applied_at_turn;
+      const appliedAtTurn = typeof appliedAtTurnRaw === "number" && Number.isFinite(appliedAtTurnRaw)
+        ? appliedAtTurnRaw
+        : undefined;
+      return {
+        type,
+        payload: {
+          operation: String(payloadRaw.operation ?? "reload") as ToolConfigChangeOperation,
+          target: String(payloadRaw.target ?? ""),
+          status: String(payloadRaw.status ?? ""),
+          persisted: typeof payloadRaw.persisted === "boolean" ? payloadRaw.persisted : false,
+          ...(appliedAtTurn != null ? { appliedAtTurn } : {}),
+        },
+      };
+    }
 
     // Unknown — forward-compat
     default:

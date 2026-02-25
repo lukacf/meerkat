@@ -11,6 +11,12 @@ from dataclasses import dataclass, field
 from typing import Any, Union
 
 from .generated.types import CONTRACT_VERSION as CONTRACT_VERSION  # re-export
+from .generated.types import (
+    McpAddParams as McpAddParams,
+    McpLiveOpResponse as McpLiveOpResponse,
+    McpReloadParams as McpReloadParams,
+    McpRemoveParams as McpRemoveParams,
+)
 
 # Re-export Usage from events so there's a single canonical definition.
 from .events import Usage as Usage  # noqa: F401

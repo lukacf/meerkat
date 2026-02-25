@@ -172,6 +172,7 @@ impl MobActor {
                                 event_tx: None,
                                 host_mode: false,
                                 skill_references: None,
+                                flow_tool_overlay: None,
                             },
                         )
                         .await
@@ -330,6 +331,7 @@ impl MobActor {
                         event_tx: None,
                         host_mode: true,
                         skill_references: None,
+                        flow_tool_overlay: None,
                     },
                 )
                 .await
@@ -2078,6 +2080,7 @@ impl MobActor {
                     event_tx: None,
                     host_mode: false,
                     skill_references: None,
+                    flow_tool_overlay: None,
                 };
                 self.provisioner.start_turn(&entry.member_ref, req).await
             }

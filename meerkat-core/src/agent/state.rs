@@ -1,7 +1,9 @@
 //! Agent state machine internals.
 
 use crate::error::AgentError;
-use crate::event::{AgentEvent, BudgetType};
+use crate::event::{
+    AgentEvent, BudgetType, ToolConfigChangeOperation, ToolConfigChangedPayload,
+};
 use crate::hooks::{
     HookDecision, HookInvocation, HookLlmRequest, HookLlmResponse, HookPatch, HookPoint,
     HookToolCall, HookToolResult,
@@ -11,6 +13,7 @@ use crate::state::LoopState;
 use crate::tokio;
 use crate::types::{
     AssistantBlock, BlockAssistantMessage, Message, RunResult, ToolCallView, ToolDef, ToolResult,
+    UserMessage,
 };
 use serde_json::Value;
 use serde_json::value::RawValue;
@@ -186,13 +189,67 @@ where
 
             match self.state {
                 LoopState::CallingLlm => {
+                    // Apply tool scope staged updates atomically at the CallingLlm boundary.
+                    let tool_defs = {
+                        let dispatcher_tools = self.tools.tools();
+                        match self.tool_scope.apply_staged(dispatcher_tools.clone()) {
+                            Ok(applied) => {
+                                if applied.changed() {
+                                    let status = format!(
+                                        "boundary_applied(base_changed={},visible_changed={},revision={})",
+                                        applied.base_changed(),
+                                        applied.visible_changed(),
+                                        applied.applied_revision.0
+                                    );
+                                    emit_event!(AgentEvent::ToolConfigChanged {
+                                        payload: ToolConfigChangedPayload {
+                                            operation: ToolConfigChangeOperation::Reload,
+                                            target: "tool_scope".to_string(),
+                                            status: status.clone(),
+                                            persisted: false,
+                                            applied_at_turn: Some(turn_count),
+                                        },
+                                    });
+                                    // Represent runtime notices as user-scoped synthetic context
+                                    // (same pattern as peer lifecycle updates) so this does not
+                                    // mutate or replace the canonical system prompt.
+                                    self.session.push(Message::User(UserMessage {
+                                        content: format!(
+                                            "[SYSTEM NOTICE][TOOL_SCOPE] Tool configuration changed at turn boundary: {status}"
+                                        ),
+                                    }));
+                                }
+                                applied.tools
+                            }
+                            Err(err) => {
+                                let status = format!("warning_fallback_all({err})");
+                                tracing::warn!(
+                                    error = %err,
+                                    "tool scope boundary apply failed; falling back to full dispatcher tools"
+                                );
+                                emit_event!(AgentEvent::ToolConfigChanged {
+                                    payload: ToolConfigChangedPayload {
+                                        operation: ToolConfigChangeOperation::Reload,
+                                        target: "tool_scope".to_string(),
+                                        status: status.clone(),
+                                        persisted: false,
+                                        applied_at_turn: Some(turn_count),
+                                    },
+                                });
+                                self.session.push(Message::User(UserMessage {
+                                    content: format!(
+                                        "[SYSTEM NOTICE][TOOL_SCOPE][WARNING] Tool scope apply failed ({err}); falling back to full tool set."
+                                    ),
+                                }));
+                                dispatcher_tools
+                            }
+                        }
+                    };
+
                     // Emit turn start
                     emit_event!(AgentEvent::TurnStarted {
                         turn_number: turn_count,
                     });
-
-                    // Get tool definitions
-                    let tool_defs = self.tools.tools();
 
                     let mut effective_max_tokens = self.config.max_tokens_per_turn;
                     let mut effective_temperature = self.config.temperature;
@@ -866,13 +923,14 @@ mod tests {
         SkillKey, SkillName, SourceUuid,
     };
     use crate::state::LoopState;
+    use crate::tool_scope::{EXTERNAL_TOOL_FILTER_METADATA_KEY, ToolFilter};
     use crate::types::{
         AssistantBlock, Message, StopReason, ToolCallView, ToolDef, ToolResult, Usage,
     };
     use async_trait::async_trait;
     use serde_json::Value;
     use std::sync::{Arc, Mutex};
-    use tokio::sync::Notify;
+    use tokio::sync::{Notify, mpsc};
 
     #[test]
     fn rewrite_assistant_text_rewrites_all_text_blocks() {
@@ -1125,6 +1183,169 @@ mod tests {
         }
     }
 
+    struct FullToolDispatcher {
+        tools: Arc<[Arc<ToolDef>]>,
+        dispatched_names: Mutex<Vec<String>>,
+    }
+
+    impl FullToolDispatcher {
+        fn new(tool_names: &[&str]) -> Self {
+            let tools = tool_names
+                .iter()
+                .map(|name| {
+                    Arc::new(ToolDef {
+                        name: (*name).to_string(),
+                        description: format!("{name} tool"),
+                        input_schema: serde_json::json!({ "type": "object" }),
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into();
+
+            Self {
+                tools,
+                dispatched_names: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn dispatched(&self) -> Vec<String> {
+            self.dispatched_names.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl AgentToolDispatcher for FullToolDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::clone(&self.tools)
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+            self.dispatched_names
+                .lock()
+                .unwrap()
+                .push(call.name.to_string());
+
+            Ok(ToolResult::new(
+                call.id.to_string(),
+                format!("dispatched {}", call.name),
+                false,
+            ))
+        }
+    }
+
+    struct VisibilityRecordingLlmClient {
+        call_count: Mutex<u32>,
+        seen_tools: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl VisibilityRecordingLlmClient {
+        fn new() -> Self {
+            Self {
+                call_count: Mutex::new(0),
+                seen_tools: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn seen_tools(&self) -> Vec<Vec<String>> {
+            self.seen_tools.lock().unwrap().clone()
+        }
+    }
+
+    struct SingleTurnVisibilityClient {
+        seen_tools: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl SingleTurnVisibilityClient {
+        fn new() -> Self {
+            Self {
+                seen_tools: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn seen_tools(&self) -> Vec<Vec<String>> {
+            self.seen_tools.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl AgentLlmClient for SingleTurnVisibilityClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&Value>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            self.seen_tools.lock().unwrap().push(
+                tools
+                    .iter()
+                    .map(|tool| tool.name.clone())
+                    .collect::<Vec<_>>(),
+            );
+            Ok(super::LlmStreamResult::new(
+                vec![AssistantBlock::Text {
+                    text: "done".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+                Usage::default(),
+            ))
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+    }
+
+    #[async_trait]
+    impl AgentLlmClient for VisibilityRecordingLlmClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&Value>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            self.seen_tools.lock().unwrap().push(
+                tools
+                    .iter()
+                    .map(|tool| tool.name.clone())
+                    .collect::<Vec<_>>(),
+            );
+
+            let mut calls = self.call_count.lock().unwrap();
+            let response = if *calls == 0 {
+                super::LlmStreamResult::new(
+                    vec![AssistantBlock::ToolUse {
+                        id: "call-1".to_string(),
+                        name: "secret".to_string(),
+                        args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+                        meta: None,
+                    }],
+                    StopReason::ToolUse,
+                    Usage::default(),
+                )
+            } else {
+                super::LlmStreamResult::new(
+                    vec![AssistantBlock::Text {
+                        text: "done".to_string(),
+                        meta: None,
+                    }],
+                    StopReason::EndTurn,
+                    Usage::default(),
+                )
+            };
+            *calls += 1;
+            Ok(response)
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+    }
+
     struct MockDrainCommsRuntime {
         queued: tokio::sync::Mutex<Vec<String>>,
         notify: Arc<Notify>,
@@ -1278,6 +1499,188 @@ mod tests {
                 .iter()
                 .any(|msg| msg.contains("<skill>injected canonical skill</skill>")),
             "expected runtime prompt to include rendered skill injection, saw: {seen_messages:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_receives_filtered_tools_but_dispatcher_keeps_full_execution_path() {
+        let client = Arc::new(VisibilityRecordingLlmClient::new());
+        let tools = Arc::new(FullToolDispatcher::new(&["visible", "secret"]));
+        let mut agent = AgentBuilder::new()
+            .build(client.clone(), tools.clone(), Arc::new(NoopStore))
+            .await;
+
+        agent
+            .stage_external_tool_filter(ToolFilter::Deny(
+                ["secret".to_string()].into_iter().collect(),
+            ))
+            .unwrap();
+        agent.config.max_turns = Some(2);
+
+        let result = agent.run("prompt".to_string()).await.unwrap();
+        assert_eq!(result.text, "done");
+
+        let seen = client.seen_tools();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0], vec!["visible".to_string()]);
+        assert_eq!(seen[1], vec!["visible".to_string()]);
+
+        let dispatched = tools.dispatched();
+        assert_eq!(dispatched, vec!["secret".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn run_loop_boundary_applies_filter_and_emits_tool_config_changed_and_notice() {
+        let client = Arc::new(SingleTurnVisibilityClient::new());
+        let tools = Arc::new(FullToolDispatcher::new(&["visible", "secret"]));
+        let mut agent = AgentBuilder::new()
+            .build(client.clone(), tools, Arc::new(NoopStore))
+            .await;
+        agent
+            .stage_external_tool_filter(ToolFilter::Deny(
+                ["secret".to_string()].into_iter().collect(),
+            ))
+            .unwrap();
+
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
+        let result = agent.run_with_events("prompt".to_string(), tx).await.unwrap();
+        assert_eq!(result.text, "done");
+        assert_eq!(client.seen_tools(), vec![vec!["visible".to_string()]]);
+
+        let mut saw_config_event = false;
+        while let Ok(event) = rx.try_recv() {
+            if let crate::event::AgentEvent::ToolConfigChanged { payload } = event {
+                assert_eq!(payload.operation, crate::event::ToolConfigChangeOperation::Reload);
+                assert_eq!(payload.target, "tool_scope");
+                assert!(payload.status.contains("boundary_applied"));
+                saw_config_event = true;
+            }
+        }
+        assert!(
+            saw_config_event,
+            "expected ToolConfigChanged event on boundary visibility change"
+        );
+
+        let notices: Vec<String> = agent
+            .session()
+            .messages()
+            .iter()
+            .filter_map(|msg| match msg {
+                Message::User(user) if user.content.contains("[SYSTEM NOTICE][TOOL_SCOPE]") => {
+                    Some(user.content.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(notices.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn run_loop_fails_safe_to_full_tools_with_warning_event_and_notice() {
+        let client = Arc::new(SingleTurnVisibilityClient::new());
+        let tools = Arc::new(FullToolDispatcher::new(&["visible", "secret"]));
+        let mut agent = AgentBuilder::new()
+            .build(client.clone(), tools, Arc::new(NoopStore))
+            .await;
+        agent
+            .stage_external_tool_filter(ToolFilter::Deny(
+                ["secret".to_string()].into_iter().collect(),
+            ))
+            .unwrap();
+        agent.tool_scope.inject_boundary_failure_once_for_test();
+
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
+        let result = agent.run_with_events("prompt".to_string(), tx).await.unwrap();
+        assert_eq!(result.text, "done");
+        assert_eq!(
+            client.seen_tools(),
+            vec![vec!["visible".to_string(), "secret".to_string()]]
+        );
+
+        let mut saw_warning_event = false;
+        while let Ok(event) = rx.try_recv() {
+            if let crate::event::AgentEvent::ToolConfigChanged { payload } = event
+                && payload.status.contains("warning_fallback_all")
+            {
+                saw_warning_event = true;
+            }
+        }
+        assert!(
+            saw_warning_event,
+            "expected warning ToolConfigChanged event during fail-safe fallback"
+        );
+
+        let notices: Vec<String> = agent
+            .session()
+            .messages()
+            .iter()
+            .filter_map(|msg| match msg {
+                Message::User(user) if user.content.contains("[TOOL_SCOPE][WARNING]") => {
+                    Some(user.content.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(notices.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn builder_restores_persisted_external_filter_from_session_metadata() {
+        let client = Arc::new(VisibilityRecordingLlmClient::new());
+        let tools = Arc::new(FullToolDispatcher::new(&["visible", "secret"]));
+        let mut session = crate::Session::new();
+        session.set_metadata(
+            EXTERNAL_TOOL_FILTER_METADATA_KEY,
+            serde_json::to_value(ToolFilter::Deny(
+                ["secret".to_string()].into_iter().collect(),
+            ))
+            .unwrap(),
+        );
+
+        let mut agent = AgentBuilder::new()
+            .resume_session(session)
+            .build(client.clone(), tools, Arc::new(NoopStore))
+            .await;
+        agent.config.max_turns = Some(2);
+
+        let result = agent.run("prompt".to_string()).await.unwrap();
+        assert_eq!(result.text, "done");
+        assert_eq!(
+            client.seen_tools(),
+            vec![vec!["visible".to_string()], vec!["visible".to_string()]]
+        );
+    }
+
+    #[tokio::test]
+    async fn builder_ignores_unknown_persisted_filter_tools() {
+        let client = Arc::new(VisibilityRecordingLlmClient::new());
+        let tools = Arc::new(FullToolDispatcher::new(&["visible", "secret"]));
+        let mut session = crate::Session::new();
+        session.set_metadata(
+            EXTERNAL_TOOL_FILTER_METADATA_KEY,
+            serde_json::to_value(ToolFilter::Allow(
+                ["visible".to_string(), "missing".to_string()]
+                    .into_iter()
+                    .collect(),
+            ))
+            .unwrap(),
+        );
+
+        let mut agent = AgentBuilder::new()
+            .resume_session(session)
+            .build(client.clone(), tools, Arc::new(NoopStore))
+            .await;
+        agent.config.max_turns = Some(2);
+
+        let result = agent.run("prompt".to_string()).await.unwrap();
+        assert_eq!(result.text, "done");
+        let seen = client.seen_tools();
+        assert_eq!(
+            seen,
+            vec![
+                vec!["visible".to_string(), "secret".to_string()],
+                vec!["visible".to_string(), "secret".to_string()]
+            ]
         );
     }
 }

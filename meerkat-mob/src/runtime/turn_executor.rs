@@ -3,6 +3,7 @@ use crate::ids::{MeerkatId, RunId, StepId};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use async_trait::async_trait;
+use meerkat_core::service::TurnToolOverlay;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -50,6 +51,7 @@ pub trait FlowTurnExecutor: Send + Sync {
         step_id: &StepId,
         target: &MeerkatId,
         message: String,
+        flow_tool_overlay: Option<TurnToolOverlay>,
     ) -> Result<FlowTurnTicket, MobError>;
 
     async fn await_terminal(

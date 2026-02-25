@@ -37,7 +37,13 @@ import os from "node:os";
 import path from "node:path";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 import { MeerkatError, CapabilityUnavailableError } from "./generated/errors.js";
-import { CONTRACT_VERSION } from "./generated/types.js";
+import {
+  CONTRACT_VERSION,
+  type McpAddParams,
+  type McpLiveOpResponse,
+  type McpReloadParams,
+  type McpRemoveParams,
+} from "./generated/types.js";
 import { Session } from "./session.js";
 import { EventStream, AsyncQueue } from "./streaming.js";
 import type {
@@ -330,6 +336,37 @@ export class MeerkatClient {
     return this.request("config/patch", params);
   }
 
+  async mcpAdd(params: McpAddParams): Promise<McpLiveOpResponse> {
+    const raw = await this.request("mcp/add", params as unknown as Record<string, unknown>);
+    return MeerkatClient.parseMcpLiveOpResponse(raw);
+  }
+
+  async mcpRemove(params: McpRemoveParams): Promise<McpLiveOpResponse> {
+    const raw = await this.request("mcp/remove", params as unknown as Record<string, unknown>);
+    return MeerkatClient.parseMcpLiveOpResponse(raw);
+  }
+
+  async mcpReload(params: McpReloadParams): Promise<McpLiveOpResponse> {
+    const raw = await this.request(
+      "mcp/reload",
+      params as unknown as Record<string, unknown>,
+    );
+    return MeerkatClient.parseMcpLiveOpResponse(raw);
+  }
+
+  // snake_case aliases for parity with other SDKs/surfaces
+  async mcp_add(params: McpAddParams): Promise<McpLiveOpResponse> {
+    return this.mcpAdd(params);
+  }
+
+  async mcp_remove(params: McpRemoveParams): Promise<McpLiveOpResponse> {
+    return this.mcpRemove(params);
+  }
+
+  async mcp_reload(params: McpReloadParams): Promise<McpLiveOpResponse> {
+    return this.mcpReload(params);
+  }
+
   // -- Skills ---------------------------------------------------------------
 
   async listSkills(): Promise<Array<Record<string, unknown>>> {
@@ -580,6 +617,40 @@ export class MeerkatClient {
       schemaWarnings,
       skillDiagnostics: MeerkatClient.parseSkillDiagnostics(data.skill_diagnostics),
     };
+  }
+
+  private static parseMcpLiveOpResponse(
+    raw: Record<string, unknown>,
+  ): McpLiveOpResponse {
+    const sessionId = raw.session_id;
+    const operation = raw.operation;
+    const status = raw.status;
+    const persisted = raw.persisted;
+    if (typeof sessionId !== "string" || sessionId.length === 0) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid mcp response: missing session_id",
+      );
+    }
+    if (operation !== "add" && operation !== "remove" && operation !== "reload") {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid mcp response: invalid operation",
+      );
+    }
+    if (typeof status !== "string" || status.length === 0) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid mcp response: missing status",
+      );
+    }
+    if (typeof persisted !== "boolean") {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid mcp response: persisted must be boolean",
+      );
+    }
+    return raw as unknown as McpLiveOpResponse;
   }
 
   private static buildCreateParams(

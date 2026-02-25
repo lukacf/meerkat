@@ -11,6 +11,7 @@ pub mod config;
 #[cfg(feature = "comms")]
 pub mod event;
 pub mod initialize;
+pub mod mcp;
 pub mod session;
 pub mod skills;
 pub mod turn;

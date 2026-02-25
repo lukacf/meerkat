@@ -7,6 +7,26 @@ use crate::types::{SessionId, StopReason, Usage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Payload for tool configuration change notifications.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolConfigChangedPayload {
+    pub operation: ToolConfigChangeOperation,
+    pub target: String,
+    pub status: String,
+    pub persisted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied_at_turn: Option<u32>,
+}
+
+/// Operation kind for live tool configuration changes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolConfigChangeOperation {
+    Add,
+    Remove,
+    Reload,
+}
+
 /// Events emitted during agent execution
 ///
 /// These events form the streaming API for consumers.
@@ -200,6 +220,9 @@ pub enum AgentEvent {
     /// Some streaming events were dropped due to channel backpressure.
     /// Best-effort marker — the terminal event is authoritative.
     StreamTruncated { reason: String },
+
+    /// Live tool configuration changed for this session.
+    ToolConfigChanged { payload: ToolConfigChangedPayload },
 }
 
 /// Scope attribution frame for multi-agent streaming.
@@ -512,6 +535,15 @@ mod tests {
             },
             AgentEvent::StreamTruncated {
                 reason: "channel full".to_string(),
+            },
+            AgentEvent::ToolConfigChanged {
+                payload: ToolConfigChangedPayload {
+                    operation: ToolConfigChangeOperation::Remove,
+                    target: "filesystem".to_string(),
+                    status: "staged".to_string(),
+                    persisted: false,
+                    applied_at_turn: Some(12),
+                },
             },
         ];
 

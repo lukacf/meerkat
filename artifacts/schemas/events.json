@@ -1,6 +1,51 @@
 {
   "WireEvent": {
     "description": "Event envelope: session_id, sequence, event (AgentEvent), contract_version",
+    "known_payloads": {
+      "tool_config_changed": {
+        "properties": {
+          "payload": {
+            "properties": {
+              "applied_at_turn": {
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "operation": {
+                "enum": [
+                  "add",
+                  "remove",
+                  "reload"
+                ],
+                "type": "string"
+              },
+              "persisted": {
+                "type": "boolean"
+              },
+              "status": {
+                "type": "string"
+              },
+              "target": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "operation",
+              "target",
+              "status",
+              "persisted"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "payload"
+        ],
+        "type": "object"
+      }
+    },
     "note": "AgentEvent is a large enum; full JSON Schema requires schemars derives on meerkat-core types"
   }
 }

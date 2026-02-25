@@ -99,48 +99,80 @@ Web build env overrides:
 - `RKAT_WASM_PACK_BIN`: explicit wasm-pack binary path
 - `RKAT_WEB_RUNTIME_CRATE_DIR`: explicit web runtime crate directory for build
 
-### WASM runtime capabilities (browser surface)
+### WASM runtime (embedded deployment target)
 
-The `meerkat-web-runtime` crate compiles the **real meerkat agent stack** to wasm32 — same agent loop, same providers, same streaming as CLI/RPC/REST. It is NOT a mock or simulation.
+The `meerkat-web-runtime` crate is an **embedded deployment target for mobpacks** — the JavaScript equivalent of the Rust SDK. It compiles the real meerkat agent stack to wasm32, routing through the same `AgentFactory::build_agent()` pipeline as all other surfaces.
+
+**Not a protocol server** — unlike RPC/REST, the WASM runtime is deployed INTO a host application (browser, Node.js). A mobpack defines what it is. The host provides credentials and drives interaction.
 
 **Architecture:**
-- `tokio_with_wasm` provides the async runtime (drop-in tokio replacement backed by JS event loop)
-- `reqwest` uses browser `fetch` on wasm32 (no custom JS bridge needed)
-- `web-time` replaces `std::time::{SystemTime, Instant}` (browser-safe via `Date.now()` / `performance.now()`)
-- `#[async_trait(?Send)]` on wasm32 (single-threaded, no `Send` requirement)
-- Anthropic CORS header (`anthropic-dangerous-direct-browser-access`) added automatically on wasm32
+- Routes through `EphemeralSessionService<FactoryAgentBuilder>` → `AgentFactory::build_agent()` with override-first resource injection
+- `MobMcpState` handles all mob lifecycle operations (same state manager as native MCP mob surface)
+- `tokio_with_wasm` provides the async runtime (single-threaded, JS event loop backed)
+- `reqwest` uses browser `fetch` on wasm32
+- `InprocRegistry` provides peer discovery for comms (all sessions share one process-global registry)
+- 9 crates compile for wasm32 (store, skills, hooks, comms, tools, session, facade, mob, mob-mcp)
 
 **Fully available on wasm32:**
 - Agent loop (streaming, retries, error recovery, budget enforcement)
 - All three LLM providers (Anthropic, OpenAI, Gemini) via browser fetch
-- Session management (create, fork, push, serialize)
-- JSON schema validation (structured output extraction)
-- Event model (all AgentEvent variants)
-- MCP config types (McpServerConfig, McpTransportConfig)
-- Tool dispatcher trait, compactor trait, memory store trait
-- Comms runtime trait, sub-agent management
-- Skills types and resolution
-- Hook engine trait
+- Session lifecycle (EphemeralSessionService)
+- Mob orchestration (MobBuilder, MobActor, FlowEngine, in-memory storage)
+- Comms (inproc — InprocRegistry, Ed25519 signing, peer discovery)
+- Tool dispatch (task tools, comms tools, skill tools — no shell)
+- Skills (embedded + memory sources from mobpack)
+- Hooks (in-process + HTTP — no command hooks)
+- Config (in-memory, programmatic)
+- Compaction (DefaultCompactor)
 
 **Not available on wasm32 (inherent browser limitations):**
-- Filesystem config loading (Config::load, skills file loading) — use programmatic config
-- Default system prompt from AGENTS.md — set explicitly via AgentBuilder.system_prompt()
-- Stdio MCP servers — no process spawning in browser
-- MCP protocol client (rmcp crate) — blocked by rmcp's tokio/mio dependency; types available but connections not
-- Shell tool, process spawning
-- File-based session persistence — use in-memory or API-backed storage
+- Filesystem (config loading, AGENTS.md, skill files, session persistence)
+- Shell tool, process spawning, sub-agent spawning
+- MCP protocol client (rmcp blocked by tokio/mio)
+- Network comms (TCP/UDS sockets — inproc only)
 
-**API surface:**
+**API surface (25 wasm_bindgen exports):**
 ```
+# Bootstrap
+init_runtime(mobpack_bytes, credentials_json)
+init_runtime_from_config(config_json)
+
+# Sessions
 create_session(mobpack_bytes, config_json) → handle
 start_turn(handle, prompt, options_json) → RunResult JSON  [async]
-poll_events(handle) → RuntimeEvent[] JSON
-get_session_state(handle) → session metadata JSON
-inspect_mobpack(mobpack_bytes) → manifest + skills JSON
+get_session_state(handle) → JSON
 destroy_session(handle)
+poll_events(handle) → AgentEvent[] JSON
+
+# Mob lifecycle
+mob_create(definition_json) → mob_id  [async]
+mob_spawn(mob_id, specs_json) → result JSON  [async]
+mob_wire(mob_id, a, b)  [async]
+mob_unwire(mob_id, a, b)  [async]
+mob_retire(mob_id, meerkat_id)  [async]
+mob_list_members(mob_id) → JSON
+mob_send_message(mob_id, meerkat_id, msg)  [async]
+mob_events(mob_id, after_cursor, limit) → JSON
+mob_status(mob_id) → JSON
+mob_list() → JSON
+mob_lifecycle(mob_id, action)  [async]
+mob_run_flow(mob_id, flow_id, params_json) → run_id  [async]
+mob_flow_status(mob_id, run_id) → JSON
+mob_cancel_flow(mob_id, run_id)  [async]
+
+# Comms
+comms_peers(session_id) → JSON
+comms_send(session_id, params_json) → JSON  [async]
+
+# Inspection
+inspect_mobpack(bytes) → JSON
 ```
 
-Mob flows are optional and layered on top of this lifecycle.
+**Build:**
+```bash
+RUSTFLAGS='--cfg getrandom_backend="wasm_js"' wasm-pack build meerkat-web-runtime --target web --out-dir <dir>
+# Note: --out-dir is relative to crate root (meerkat-web-runtime/), not workspace root
+```
 
 ### Mob flows (DAG runtime)
 

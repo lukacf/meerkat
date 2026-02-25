@@ -7,12 +7,18 @@ pub fn build_http_client_for_base_url(
     builder: reqwest::ClientBuilder,
     base_url: &str,
 ) -> Result<reqwest::Client, LlmError> {
-    let disable_proxy = cfg!(test) || is_loopback_base_url(base_url);
-    let builder = if disable_proxy {
-        builder.no_proxy()
-    } else {
-        builder
+    // no_proxy is not available on wasm32 (browser handles proxies)
+    #[cfg(not(target_arch = "wasm32"))]
+    let builder = {
+        let disable_proxy = cfg!(test) || is_loopback_base_url(base_url);
+        if disable_proxy {
+            builder.no_proxy()
+        } else {
+            builder
+        }
     };
+    #[cfg(target_arch = "wasm32")]
+    let _ = base_url; // suppress unused warning
 
     builder.build().map_err(|e| LlmError::Unknown {
         message: format!("Failed to build HTTP client: {}", e),

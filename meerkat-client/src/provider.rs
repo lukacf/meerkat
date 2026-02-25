@@ -3,7 +3,7 @@
 use crate::error::LlmError;
 use crate::factory::{DefaultClientFactory, DefaultFactoryConfig, LlmClientFactory, LlmProvider};
 use crate::test_client::TestClient;
-use crate::types::{LlmClient, LlmEvent, LlmRequest};
+use crate::types::{LlmClient, LlmEvent, LlmRequest, LlmStream};
 use async_trait::async_trait;
 use futures::Stream;
 use meerkat_core::Provider;
@@ -104,10 +104,7 @@ impl UnsupportedClient {
 
 #[async_trait]
 impl LlmClient for UnsupportedClient {
-    fn stream<'a>(
-        &'a self,
-        _request: &'a LlmRequest,
-    ) -> Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+    fn stream<'a>(&'a self, _request: &'a LlmRequest) -> LlmStream<'a> {
         let message = self.message.clone();
         crate::streaming::ensure_terminal_done(Box::pin(futures::stream::once(async move {
             Err(LlmError::InvalidRequest { message })

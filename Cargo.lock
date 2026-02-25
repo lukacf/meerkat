@@ -2460,6 +2460,7 @@ dependencies = [
  "async-trait",
  "axum",
  "futures",
+ "getrandom 0.3.4",
  "indexmap",
  "meerkat-core",
  "reqwest",
@@ -2469,6 +2470,7 @@ dependencies = [
  "slab",
  "thiserror 2.0.18",
  "tokio",
+ "tokio_with_wasm",
  "tracing",
 ]
 

@@ -39,7 +39,7 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 uuid = { version = "1.11", features = ["v4", "v7", "serde", "js"] }
 
 [features]
-default = ["schema", "jsonschema"]
+default = ["schema"]
 schema = []
 jsonschema = ["dep:jsonschema"]
 

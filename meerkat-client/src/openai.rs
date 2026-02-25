@@ -5,7 +5,7 @@
 
 use crate::BlockAssembler;
 use crate::error::LlmError;
-use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
+use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream};
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use meerkat_core::{AssistantBlock, Message, OutputSchema, ProviderMeta, StopReason, Usage};
@@ -266,217 +266,348 @@ impl OpenAiClient {
 
 #[async_trait]
 impl LlmClient for OpenAiClient {
-    fn stream<'a>(
-        &'a self,
-        request: &'a LlmRequest,
-    ) -> Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
-        let inner: Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> = Box::pin(
-            async_stream::try_stream! {
-                let body = self.build_request_body(request)?;
+    fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+        let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
+            let body = self.build_request_body(request)?;
 
-                let response = self.http
-                    .post(format!("{}/v1/responses", self.base_url))
-                    .header("Authorization", format!("Bearer {}", self.api_key))
-                    .header("Content-Type", "application/json")
-                    .json(&body)
-                    .send()
-                    .await
-                    .map_err(|e| {
-                        if e.is_timeout() {
-                            LlmError::NetworkTimeout { duration_ms: 30000 }
-                        } else if e.is_connect() {
-                            LlmError::ConnectionReset
-                        } else {
-                            LlmError::Unknown { message: e.to_string() }
+            let response = self.http
+                .post(format!("{}/v1/responses", self.base_url))
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| {
+                    if e.is_timeout() {
+                        LlmError::NetworkTimeout { duration_ms: 30000 }
+                    } else {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if e.is_connect() {
+                            return LlmError::ConnectionReset;
                         }
-                    })?;
+                        LlmError::Unknown { message: e.to_string() }
+                    }
+                })?;
 
-                let status_code = response.status().as_u16();
-                let stream_result = if (200..=299).contains(&status_code) {
-                    Ok(response.bytes_stream())
-                } else {
-                    let text = response.text().await.unwrap_or_default();
-                    Err(LlmError::from_http_status(status_code, text))
-                };
-                let mut stream = stream_result?;
-                let mut buffer = String::with_capacity(512);
-                let mut assembler = BlockAssembler::new();
-                let mut usage = Usage::default();
-                let mut saw_stream_text_delta = false;
-                let mut streamed_tool_ids: HashSet<String> = HashSet::with_capacity(4);
-                let mut streamed_reasoning_ids: HashSet<String> = HashSet::with_capacity(2);
-                let mut done_emitted = false;
+            let status_code = response.status().as_u16();
+            let stream_result = if (200..=299).contains(&status_code) {
+                Ok(response.bytes_stream())
+            } else {
+                let text = response.text().await.unwrap_or_default();
+                Err(LlmError::from_http_status(status_code, text))
+            };
+            let mut stream = stream_result?;
+            let mut buffer = String::with_capacity(512);
+            let mut assembler = BlockAssembler::new();
+            let mut usage = Usage::default();
+            let mut saw_stream_text_delta = false;
+            let mut streamed_tool_ids: HashSet<String> = HashSet::with_capacity(4);
+            let mut streamed_reasoning_ids: HashSet<String> = HashSet::with_capacity(2);
+            let mut done_emitted = false;
 
-                while let Some(chunk) = stream.next().await {
-                    let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
-                    buffer.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
 
-                    while let Some(newline_pos) = buffer.find('\n') {
-                        let line = buffer[..newline_pos].trim();
-                        let should_process = !line.is_empty() && !line.starts_with(':');
-                        let parsed_event = if should_process {
-                            Self::parse_responses_sse_line(line)
-                        } else {
-                            None
-                        };
+                while let Some(newline_pos) = buffer.find('\n') {
+                    let line = buffer[..newline_pos].trim();
+                    let should_process = !line.is_empty() && !line.starts_with(':');
+                    let parsed_event = if should_process {
+                        Self::parse_responses_sse_line(line)
+                    } else {
+                        None
+                    };
 
-                        buffer.drain(..=newline_pos);
+                    buffer.drain(..=newline_pos);
 
-                        if let Some(event) = parsed_event {
-                            // Handle response.completed event (non-streaming final response)
-                            if event.event_type == "response.completed" {
-                                if done_emitted {
-                                    // Already processed a terminal event, skip
-                                    continue;
-                                }
-                                if let Some(response_obj) = &event.response {
-                                    // Process output items
-                                    if let Some(output) = response_obj.get("output").and_then(|o| o.as_array()) {
-                                        for item in output {
-                                            if let Some(item_type) = item.get("type").and_then(|t| t.as_str()) {
-                                                match item_type {
-                                                    "message" => {
-                                                        // content is an array: [{"type": "output_text", "text": "..."}, ...]
-                                                        if let Some(content_parts) = item.get("content").and_then(|c| c.as_array()) {
-                                                            for part in content_parts {
-                                                                if let Some(part_type) = part.get("type").and_then(|t| t.as_str()) {
-                                                                    match part_type {
-                                                                        "output_text" => {
-                                                                            if let Some(text) = part.get("text").and_then(|t| t.as_str())
-                                                                                && !saw_stream_text_delta
-                                                                            {
-                                                                                assembler.on_text_delta(text, None);
-                                                                                yield LlmEvent::TextDelta { delta: text.to_string(), meta: None };
-                                                                            }
+                    if let Some(event) = parsed_event {
+                        // Handle response.completed event (non-streaming final response)
+                        if event.event_type == "response.completed" {
+                            if done_emitted {
+                                // Already processed a terminal event, skip
+                                continue;
+                            }
+                            if let Some(response_obj) = &event.response {
+                                // Process output items
+                                if let Some(output) = response_obj.get("output").and_then(|o| o.as_array()) {
+                                    for item in output {
+                                        if let Some(item_type) = item.get("type").and_then(|t| t.as_str()) {
+                                            match item_type {
+                                                "message" => {
+                                                    // content is an array: [{"type": "output_text", "text": "..."}, ...]
+                                                    if let Some(content_parts) = item.get("content").and_then(|c| c.as_array()) {
+                                                        for part in content_parts {
+                                                            if let Some(part_type) = part.get("type").and_then(|t| t.as_str()) {
+                                                                match part_type {
+                                                                    "output_text" => {
+                                                                        if let Some(text) = part.get("text").and_then(|t| t.as_str())
+                                                                            && !saw_stream_text_delta
+                                                                        {
+                                                                            assembler.on_text_delta(text, None);
+                                                                            yield LlmEvent::TextDelta { delta: text.to_string(), meta: None };
                                                                         }
-                                                                        "refusal" => {
-                                                                            if let Some(refusal) = part.get("refusal").and_then(|r| r.as_str())
-                                                                                && !saw_stream_text_delta
-                                                                            {
-                                                                                assembler.on_text_delta(refusal, None);
-                                                                                yield LlmEvent::TextDelta { delta: refusal.to_string(), meta: None };
-                                                                            }
+                                                                    }
+                                                                    "refusal" => {
+                                                                        if let Some(refusal) = part.get("refusal").and_then(|r| r.as_str())
+                                                                            && !saw_stream_text_delta
+                                                                        {
+                                                                            assembler.on_text_delta(refusal, None);
+                                                                            yield LlmEvent::TextDelta { delta: refusal.to_string(), meta: None };
                                                                         }
-                                                                        _ => {}
                                                                     }
+                                                                    _ => {}
                                                                 }
                                                             }
                                                         }
                                                     }
-                                                    "reasoning" => {
-                                                        // Required: reasoning item ID for replay
-                                                        let Some(reasoning_id) = item.get("id").and_then(|i| i.as_str()) else {
-                                                            tracing::warn!("reasoning item missing id, skipping");
-                                                            continue;
-                                                        };
-
-                                                        // Skip if already emitted via streaming
-                                                        if streamed_reasoning_ids.contains(reasoning_id) {
-                                                            continue;
-                                                        }
-
-                                                        // Extract summary text
-                                                        let mut summary_text = String::new();
-                                                        if let Some(summaries) = item.get("summary").and_then(|s| s.as_array()) {
-                                                            for summary in summaries {
-                                                                if let Some(text) = summary.get("text").and_then(|t| t.as_str()) {
-                                                                    if !summary_text.is_empty() {
-                                                                        summary_text.push('\n');
-                                                                    }
-                                                                    summary_text.push_str(text);
-                                                                }
-                                                            }
-                                                        }
-
-                                                        // encrypted_content is optional
-                                                        let encrypted = item.get("encrypted_content")
-                                                            .and_then(|v| v.as_str())
-                                                            .map(|s| s.to_string());
-
-                                                        let meta = Some(Box::new(ProviderMeta::OpenAi {
-                                                            id: reasoning_id.to_string(),
-                                                            encrypted_content: encrypted,
-                                                        }));
-
-                                                        assembler.on_reasoning_start();
-                                                        if !summary_text.is_empty() {
-                                                            let _ = assembler.on_reasoning_delta(&summary_text);
-                                                        }
-                                                        assembler.on_reasoning_complete(meta.clone());
-
-                                                        yield LlmEvent::ReasoningComplete {
-                                                            text: summary_text,
-                                                            meta,
-                                                        };
-                                                    }
-                                                    "function_call" => {
-                                                        // Extract required fields
-                                                        let Some(call_id) = item.get("call_id").and_then(|c| c.as_str()) else {
-                                                            tracing::warn!("function_call missing call_id");
-                                                            continue;
-                                                        };
-
-                                                        // Skip if already emitted via streaming
-                                                        if streamed_tool_ids.contains(call_id) {
-                                                            continue;
-                                                        }
-                                                        let Some(name) = item.get("name").and_then(|n| n.as_str()) else {
-                                                            tracing::warn!(call_id, "function_call missing name");
-                                                            continue;
-                                                        };
-                                                        // arguments is a JSON string
-                                                        let args: Box<RawValue> = match item.get("arguments").and_then(|a| a.as_str()) {
-                                                            Some(args_str) => match RawValue::from_string(args_str.to_string()) {
-                                                                Ok(raw) => raw,
-                                                                Err(e) => {
-                                                                    tracing::error!(call_id, "invalid args JSON, skipping: {e}");
-                                                                    continue;
-                                                                }
-                                                            },
-                                                            None => {
-                                                                // Empty args - treat as empty object
-                                                                fallback_raw_value()
-                                                            }
-                                                        };
-
-                                                        let _ = assembler.on_tool_call_start(call_id.to_string());
-                                                        let _ = assembler.on_tool_call_complete(
-                                                            call_id.to_string(),
-                                                            name.to_string(),
-                                                            args.clone(),
-                                                            None,
-                                                        );
-
-                                                        // Also emit as legacy Value for compatibility
-                                                        let args_value: Value = serde_json::from_str(args.get()).unwrap_or_default();
-                                                        yield LlmEvent::ToolCallComplete {
-                                                            id: call_id.to_string(),
-                                                            name: name.to_string(),
-                                                            args: args_value,
-                                                            meta: None,
-                                                        };
-                                                    }
-                                                    _ => {}
                                                 }
+                                                "reasoning" => {
+                                                    // Required: reasoning item ID for replay
+                                                    let Some(reasoning_id) = item.get("id").and_then(|i| i.as_str()) else {
+                                                        tracing::warn!("reasoning item missing id, skipping");
+                                                        continue;
+                                                    };
+
+                                                    // Skip if already emitted via streaming
+                                                    if streamed_reasoning_ids.contains(reasoning_id) {
+                                                        continue;
+                                                    }
+
+                                                    // Extract summary text
+                                                    let mut summary_text = String::new();
+                                                    if let Some(summaries) = item.get("summary").and_then(|s| s.as_array()) {
+                                                        for summary in summaries {
+                                                            if let Some(text) = summary.get("text").and_then(|t| t.as_str()) {
+                                                                if !summary_text.is_empty() {
+                                                                    summary_text.push('\n');
+                                                                }
+                                                                summary_text.push_str(text);
+                                                            }
+                                                        }
+                                                    }
+
+                                                    // encrypted_content is optional
+                                                    let encrypted = item.get("encrypted_content")
+                                                        .and_then(|v| v.as_str())
+                                                        .map(|s| s.to_string());
+
+                                                    let meta = Some(Box::new(ProviderMeta::OpenAi {
+                                                        id: reasoning_id.to_string(),
+                                                        encrypted_content: encrypted,
+                                                    }));
+
+                                                    assembler.on_reasoning_start();
+                                                    if !summary_text.is_empty() {
+                                                        let _ = assembler.on_reasoning_delta(&summary_text);
+                                                    }
+                                                    assembler.on_reasoning_complete(meta.clone());
+
+                                                    yield LlmEvent::ReasoningComplete {
+                                                        text: summary_text,
+                                                        meta,
+                                                    };
+                                                }
+                                                "function_call" => {
+                                                    // Extract required fields
+                                                    let Some(call_id) = item.get("call_id").and_then(|c| c.as_str()) else {
+                                                        tracing::warn!("function_call missing call_id");
+                                                        continue;
+                                                    };
+
+                                                    // Skip if already emitted via streaming
+                                                    if streamed_tool_ids.contains(call_id) {
+                                                        continue;
+                                                    }
+                                                    let Some(name) = item.get("name").and_then(|n| n.as_str()) else {
+                                                        tracing::warn!(call_id, "function_call missing name");
+                                                        continue;
+                                                    };
+                                                    // arguments is a JSON string
+                                                    let args: Box<RawValue> = match item.get("arguments").and_then(|a| a.as_str()) {
+                                                        Some(args_str) => match RawValue::from_string(args_str.to_string()) {
+                                                            Ok(raw) => raw,
+                                                            Err(e) => {
+                                                                tracing::error!(call_id, "invalid args JSON, skipping: {e}");
+                                                                continue;
+                                                            }
+                                                        },
+                                                        None => {
+                                                            // Empty args - treat as empty object
+                                                            fallback_raw_value()
+                                                        }
+                                                    };
+
+                                                    let _ = assembler.on_tool_call_start(call_id.to_string());
+                                                    let _ = assembler.on_tool_call_complete(
+                                                        call_id.to_string(),
+                                                        name.to_string(),
+                                                        args.clone(),
+                                                        None,
+                                                    );
+
+                                                    // Also emit as legacy Value for compatibility
+                                                    let args_value: Value = serde_json::from_str(args.get()).unwrap_or_default();
+                                                    yield LlmEvent::ToolCallComplete {
+                                                        id: call_id.to_string(),
+                                                        name: name.to_string(),
+                                                        args: args_value,
+                                                        meta: None,
+                                                    };
+                                                }
+                                                _ => {}
                                             }
                                         }
                                     }
+                                }
 
-                                    // Extract usage
-                                    if let Some(usage_obj) = response_obj.get("usage") {
-                                        usage.input_tokens = usage_obj.get("input_tokens")
-                                            .and_then(|v| v.as_u64())
-                                            .unwrap_or(0);
-                                        usage.output_tokens = usage_obj.get("output_tokens")
-                                            .and_then(|v| v.as_u64())
-                                            .unwrap_or(0);
-                                        yield LlmEvent::UsageUpdate { usage: usage.clone() };
+                                // Extract usage
+                                if let Some(usage_obj) = response_obj.get("usage") {
+                                    usage.input_tokens = usage_obj.get("input_tokens")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0);
+                                    usage.output_tokens = usage_obj.get("output_tokens")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0);
+                                    yield LlmEvent::UsageUpdate { usage: usage.clone() };
+                                }
+
+                                // Determine stop reason
+                                let stop_reason = match response_obj.get("status").and_then(|s| s.as_str()) {
+                                    Some("completed") => {
+                                        // Check if there were tool calls
+                                        let has_tool_calls = response_obj.get("output")
+                                            .and_then(|o| o.as_array())
+                                            .map(|arr| arr.iter().any(|item| item.get("type").and_then(|t| t.as_str()) == Some("function_call")))
+                                            .unwrap_or(false);
+                                        if has_tool_calls {
+                                            StopReason::ToolUse
+                                        } else {
+                                            StopReason::EndTurn
+                                        }
                                     }
+                                    Some("incomplete") => {
+                                        match response_obj.get("incomplete_details").and_then(|d| d.get("reason")).and_then(|r| r.as_str()) {
+                                            Some("max_output_tokens") => StopReason::MaxTokens,
+                                            Some("content_filter") => StopReason::ContentFilter,
+                                            _ => StopReason::EndTurn,
+                                        }
+                                    }
+                                    Some("cancelled") => StopReason::Cancelled,
+                                    _ => StopReason::EndTurn,
+                                };
 
-                                    // Determine stop reason
+                                done_emitted = true;
+                                yield LlmEvent::Done {
+                                    outcome: LlmDoneOutcome::Success { stop_reason },
+                                };
+                            }
+                        }
+                        // Handle streaming delta events
+                        else if event.event_type == "response.output_text.delta" {
+                            if let Some(delta) = &event.delta {
+                                saw_stream_text_delta = true;
+                                assembler.on_text_delta(delta, None);
+                                yield LlmEvent::TextDelta { delta: delta.clone(), meta: None };
+                            }
+                        }
+                        else if event.event_type == "response.reasoning_summary_text.delta" {
+                            if let Some(delta) = &event.delta {
+                                yield LlmEvent::ReasoningDelta { delta: delta.clone() };
+                            }
+                        }
+                        else if event.event_type == "response.function_call_arguments.delta" {
+                            if let (Some(call_id), Some(delta)) = (&event.call_id, &event.delta) {
+                                let name = event.name.clone();
+                                yield LlmEvent::ToolCallDelta {
+                                    id: call_id.clone(),
+                                    name,
+                                    args_delta: delta.clone(),
+                                };
+                            }
+                        }
+                        else if event.event_type == "response.function_call_arguments.done" {
+                            if let (Some(call_id), Some(arguments)) = (&event.call_id, &event.arguments) {
+                                let name = event.name.clone().unwrap_or_default();
+                                let args: Box<RawValue> = RawValue::from_string(arguments.clone())
+                                    .unwrap_or_else(|_| fallback_raw_value());
+
+                                let _ = assembler.on_tool_call_start(call_id.clone());
+                                let _ = assembler.on_tool_call_complete(
+                                    call_id.clone(),
+                                    name.clone(),
+                                    args.clone(),
+                                    None,
+                                );
+
+                                let args_value: Value = serde_json::from_str(args.get()).unwrap_or_default();
+                                streamed_tool_ids.insert(call_id.clone());
+                                yield LlmEvent::ToolCallComplete {
+                                    id: call_id.clone(),
+                                    name,
+                                    args: args_value,
+                                    meta: None,
+                                };
+                            }
+                        }
+                        else if event.event_type == "response.reasoning_summary.done" || event.event_type == "response.reasoning.done" {
+                            // Extract reasoning item details from the item field
+                            if let Some(item) = &event.item {
+                                let Some(reasoning_id) = item.get("id")
+                                    .and_then(|i| i.as_str()) else {
+                                    tracing::warn!("reasoning item missing id, skipping");
+                                    continue;
+                                };
+
+                                let mut summary_text = String::new();
+                                if let Some(summaries) = item.get("summary").and_then(|s| s.as_array()) {
+                                    for summary in summaries {
+                                        if let Some(text) = summary.get("text").and_then(|t| t.as_str()) {
+                                            if !summary_text.is_empty() {
+                                                summary_text.push('\n');
+                                            }
+                                            summary_text.push_str(text);
+                                        }
+                                    }
+                                }
+
+                                let encrypted = item.get("encrypted_content")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string());
+
+                                let meta = Some(Box::new(ProviderMeta::OpenAi {
+                                    id: reasoning_id.to_string(),
+                                    encrypted_content: encrypted,
+                                }));
+
+                                assembler.on_reasoning_start();
+                                if !summary_text.is_empty() {
+                                    let _ = assembler.on_reasoning_delta(&summary_text);
+                                }
+                                assembler.on_reasoning_complete(meta.clone());
+
+                                streamed_reasoning_ids.insert(reasoning_id.to_string());
+                                yield LlmEvent::ReasoningComplete {
+                                    text: summary_text,
+                                    meta,
+                                };
+                            }
+                        }
+                        else if event.event_type == "response.done" {
+                            // Final done event — always update usage
+                            if let Some(response_obj) = &event.response {
+                                if let Some(usage_obj) = response_obj.get("usage") {
+                                    usage.input_tokens = usage_obj.get("input_tokens")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0);
+                                    usage.output_tokens = usage_obj.get("output_tokens")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0);
+                                    yield LlmEvent::UsageUpdate { usage: usage.clone() };
+                                }
+
+                                if !done_emitted {
                                     let stop_reason = match response_obj.get("status").and_then(|s| s.as_str()) {
                                         Some("completed") => {
-                                            // Check if there were tool calls
                                             let has_tool_calls = response_obj.get("output")
                                                 .and_then(|o| o.as_array())
                                                 .map(|arr| arr.iter().any(|item| item.get("type").and_then(|t| t.as_str()) == Some("function_call")))
@@ -504,183 +635,49 @@ impl LlmClient for OpenAiClient {
                                     };
                                 }
                             }
-                            // Handle streaming delta events
-                            else if event.event_type == "response.output_text.delta" {
-                                if let Some(delta) = &event.delta {
-                                    saw_stream_text_delta = true;
-                                    assembler.on_text_delta(delta, None);
-                                    yield LlmEvent::TextDelta { delta: delta.clone(), meta: None };
-                                }
-                            }
-                            else if event.event_type == "response.reasoning_summary_text.delta" {
-                                if let Some(delta) = &event.delta {
-                                    yield LlmEvent::ReasoningDelta { delta: delta.clone() };
-                                }
-                            }
-                            else if event.event_type == "response.function_call_arguments.delta" {
-                                if let (Some(call_id), Some(delta)) = (&event.call_id, &event.delta) {
-                                    let name = event.name.clone();
-                                    yield LlmEvent::ToolCallDelta {
-                                        id: call_id.clone(),
-                                        name,
-                                        args_delta: delta.clone(),
-                                    };
-                                }
-                            }
-                            else if event.event_type == "response.function_call_arguments.done" {
-                                if let (Some(call_id), Some(arguments)) = (&event.call_id, &event.arguments) {
-                                    let name = event.name.clone().unwrap_or_default();
-                                    let args: Box<RawValue> = RawValue::from_string(arguments.clone())
-                                        .unwrap_or_else(|_| fallback_raw_value());
+                        }
+                        else if event.event_type == "error" {
+                            // Streaming error event from OpenAI
+                            let error_msg = event.error
+                                .as_ref()
+                                .and_then(|e| e.get("message"))
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("unknown streaming error");
+                            let error_code = event.error
+                                .as_ref()
+                                .and_then(|e| e.get("code"))
+                                .and_then(|c| c.as_str())
+                                .unwrap_or("unknown");
 
-                                    let _ = assembler.on_tool_call_start(call_id.clone());
-                                    let _ = assembler.on_tool_call_complete(
-                                        call_id.clone(),
-                                        name.clone(),
-                                        args.clone(),
-                                        None,
-                                    );
+                            tracing::error!(
+                                code = error_code,
+                                message = error_msg,
+                                "OpenAI streaming error"
+                            );
 
-                                    let args_value: Value = serde_json::from_str(args.get()).unwrap_or_default();
-                                    streamed_tool_ids.insert(call_id.clone());
-                                    yield LlmEvent::ToolCallComplete {
-                                        id: call_id.clone(),
-                                        name,
-                                        args: args_value,
-                                        meta: None,
-                                    };
-                                }
-                            }
-                            else if event.event_type == "response.reasoning_summary.done" || event.event_type == "response.reasoning.done" {
-                                // Extract reasoning item details from the item field
-                                if let Some(item) = &event.item {
-                                    let Some(reasoning_id) = item.get("id")
-                                        .and_then(|i| i.as_str()) else {
-                                        tracing::warn!("reasoning item missing id, skipping");
-                                        continue;
-                                    };
+                            let error = match error_code {
+                                "rate_limit_exceeded" => LlmError::RateLimited { retry_after_ms: None },
+                                "server_error" => LlmError::ServerError {
+                                    status: 500,
+                                    message: error_msg.to_string(),
+                                },
+                                "invalid_request_error" => LlmError::InvalidRequest {
+                                    message: error_msg.to_string(),
+                                },
+                                _ => LlmError::Unknown {
+                                    message: format!("{error_code}: {error_msg}"),
+                                },
+                            };
 
-                                    let mut summary_text = String::new();
-                                    if let Some(summaries) = item.get("summary").and_then(|s| s.as_array()) {
-                                        for summary in summaries {
-                                            if let Some(text) = summary.get("text").and_then(|t| t.as_str()) {
-                                                if !summary_text.is_empty() {
-                                                    summary_text.push('\n');
-                                                }
-                                                summary_text.push_str(text);
-                                            }
-                                        }
-                                    }
-
-                                    let encrypted = item.get("encrypted_content")
-                                        .and_then(|v| v.as_str())
-                                        .map(|s| s.to_string());
-
-                                    let meta = Some(Box::new(ProviderMeta::OpenAi {
-                                        id: reasoning_id.to_string(),
-                                        encrypted_content: encrypted,
-                                    }));
-
-                                    assembler.on_reasoning_start();
-                                    if !summary_text.is_empty() {
-                                        let _ = assembler.on_reasoning_delta(&summary_text);
-                                    }
-                                    assembler.on_reasoning_complete(meta.clone());
-
-                                    streamed_reasoning_ids.insert(reasoning_id.to_string());
-                                    yield LlmEvent::ReasoningComplete {
-                                        text: summary_text,
-                                        meta,
-                                    };
-                                }
-                            }
-                            else if event.event_type == "response.done" {
-                                // Final done event — always update usage
-                                if let Some(response_obj) = &event.response {
-                                    if let Some(usage_obj) = response_obj.get("usage") {
-                                        usage.input_tokens = usage_obj.get("input_tokens")
-                                            .and_then(|v| v.as_u64())
-                                            .unwrap_or(0);
-                                        usage.output_tokens = usage_obj.get("output_tokens")
-                                            .and_then(|v| v.as_u64())
-                                            .unwrap_or(0);
-                                        yield LlmEvent::UsageUpdate { usage: usage.clone() };
-                                    }
-
-                                    if !done_emitted {
-                                        let stop_reason = match response_obj.get("status").and_then(|s| s.as_str()) {
-                                            Some("completed") => {
-                                                let has_tool_calls = response_obj.get("output")
-                                                    .and_then(|o| o.as_array())
-                                                    .map(|arr| arr.iter().any(|item| item.get("type").and_then(|t| t.as_str()) == Some("function_call")))
-                                                    .unwrap_or(false);
-                                                if has_tool_calls {
-                                                    StopReason::ToolUse
-                                                } else {
-                                                    StopReason::EndTurn
-                                                }
-                                            }
-                                            Some("incomplete") => {
-                                                match response_obj.get("incomplete_details").and_then(|d| d.get("reason")).and_then(|r| r.as_str()) {
-                                                    Some("max_output_tokens") => StopReason::MaxTokens,
-                                                    Some("content_filter") => StopReason::ContentFilter,
-                                                    _ => StopReason::EndTurn,
-                                                }
-                                            }
-                                            Some("cancelled") => StopReason::Cancelled,
-                                            _ => StopReason::EndTurn,
-                                        };
-
-                                        done_emitted = true;
-                                        yield LlmEvent::Done {
-                                            outcome: LlmDoneOutcome::Success { stop_reason },
-                                        };
-                                    }
-                                }
-                            }
-                            else if event.event_type == "error" {
-                                // Streaming error event from OpenAI
-                                let error_msg = event.error
-                                    .as_ref()
-                                    .and_then(|e| e.get("message"))
-                                    .and_then(|m| m.as_str())
-                                    .unwrap_or("unknown streaming error");
-                                let error_code = event.error
-                                    .as_ref()
-                                    .and_then(|e| e.get("code"))
-                                    .and_then(|c| c.as_str())
-                                    .unwrap_or("unknown");
-
-                                tracing::error!(
-                                    code = error_code,
-                                    message = error_msg,
-                                    "OpenAI streaming error"
-                                );
-
-                                let error = match error_code {
-                                    "rate_limit_exceeded" => LlmError::RateLimited { retry_after_ms: None },
-                                    "server_error" => LlmError::ServerError {
-                                        status: 500,
-                                        message: error_msg.to_string(),
-                                    },
-                                    "invalid_request_error" => LlmError::InvalidRequest {
-                                        message: error_msg.to_string(),
-                                    },
-                                    _ => LlmError::Unknown {
-                                        message: format!("{error_code}: {error_msg}"),
-                                    },
-                                };
-
-                                done_emitted = true;
-                                yield LlmEvent::Done {
-                                    outcome: LlmDoneOutcome::Error { error },
-                                };
-                            }
+                            done_emitted = true;
+                            yield LlmEvent::Done {
+                                outcome: LlmDoneOutcome::Error { error },
+                            };
                         }
                     }
                 }
-            },
-        );
+            }
+        });
 
         crate::streaming::ensure_terminal_done(inner)
     }

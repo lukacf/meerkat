@@ -1,5 +1,5 @@
 use crate::error::LlmError;
-use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
+use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream};
 use async_trait::async_trait;
 use futures::Stream;
 use std::pin::Pin;
@@ -33,10 +33,7 @@ impl Default for TestClient {
 
 #[async_trait]
 impl LlmClient for TestClient {
-    fn stream<'a>(
-        &'a self,
-        _request: &'a LlmRequest,
-    ) -> Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+    fn stream<'a>(&'a self, _request: &'a LlmRequest) -> LlmStream<'a> {
         let events = self.events.clone();
         crate::streaming::ensure_terminal_done(Box::pin(futures::stream::iter(
             events.into_iter().map(Ok),

@@ -1,5 +1,7 @@
 //! Adapter from LlmClient to AgentLlmClient.
 
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat_core::schema::{CompiledSchema, SchemaError};

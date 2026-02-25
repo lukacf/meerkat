@@ -167,6 +167,12 @@ impl GeminiParams {
     }
 }
 
+/// Stream type alias — Send on native, not required on wasm32 (single-threaded).
+#[cfg(not(target_arch = "wasm32"))]
+pub type LlmStream<'a> = Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>>;
+#[cfg(target_arch = "wasm32")]
+pub type LlmStream<'a> = Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + 'a>>;
+
 /// Abstraction over LLM providers
 ///
 /// Each provider implementation normalizes its streaming response
@@ -177,10 +183,7 @@ pub trait LlmClient: Send + Sync {
     ///
     /// Returns a stream of normalized events. The stream completes
     /// when the model finishes (either with EndTurn or ToolUse).
-    fn stream<'a>(
-        &'a self,
-        request: &'a LlmRequest,
-    ) -> Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>>;
+    fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a>;
 
     /// Get the provider name (for logging/debugging)
     fn provider(&self) -> &'static str;

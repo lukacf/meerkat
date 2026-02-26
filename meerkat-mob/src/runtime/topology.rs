@@ -22,10 +22,9 @@ pub fn evaluate_topology(
 ) -> PolicyDecision {
     rules
         .iter()
-        .filter(|rule| {
+        .rfind(|rule| {
             role_matches(&rule.from_role, from_role) && role_matches(&rule.to_role, to_role)
         })
-        .next_back()
         .map(|rule| {
             if rule.allowed {
                 PolicyDecision::Allow

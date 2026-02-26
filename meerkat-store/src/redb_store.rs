@@ -20,10 +20,7 @@ const EMPTY_VALUE: &[u8] = &[];
 
 fn system_time_millis(time: SystemTime) -> u64 {
     match time.duration_since(UNIX_EPOCH) {
-        Ok(duration) => match u64::try_from(duration.as_millis()) {
-            Ok(millis) => millis,
-            Err(_) => u64::MAX,
-        },
+        Ok(duration) => u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
         Err(_) => 0,
     }
 }

@@ -97,18 +97,15 @@ pub enum DispatchMode {
 }
 
 /// Aggregation policy for step outcomes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CollectionPolicy {
+    #[default]
     All,
     Any,
-    Quorum { n: u8 },
-}
-
-impl Default for CollectionPolicy {
-    fn default() -> Self {
-        Self::All
-    }
+    Quorum {
+        n: u8,
+    },
 }
 
 /// Dependency interpretation for a step.

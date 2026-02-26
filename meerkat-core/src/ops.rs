@@ -55,10 +55,11 @@ pub enum ResultShape {
 }
 
 /// How much context a sub-agent receives
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ContextStrategy {
     /// Complete conversation history (Fork default)
+    #[default]
     FullHistory,
     /// Last N turns from parent
     LastTurns(u32),
@@ -68,17 +69,12 @@ pub enum ContextStrategy {
     Custom { messages: Vec<Message> },
 }
 
-impl Default for ContextStrategy {
-    fn default() -> Self {
-        Self::FullHistory
-    }
-}
-
 /// How to allocate budget when forking
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ForkBudgetPolicy {
     /// Split remaining budget equally among branches
+    #[default]
     Equal,
     /// Split proportionally based on weights
     Proportional,
@@ -88,28 +84,17 @@ pub enum ForkBudgetPolicy {
     Remaining,
 }
 
-impl Default for ForkBudgetPolicy {
-    fn default() -> Self {
-        Self::Equal
-    }
-}
-
 /// Tool access control for sub-agents
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ToolAccessPolicy {
     /// Inherit all tools from parent
+    #[default]
     Inherit,
     /// Only allow specific tools
     AllowList(Vec<String>),
     /// Block specific tools
     DenyList(Vec<String>),
-}
-
-impl Default for ToolAccessPolicy {
-    fn default() -> Self {
-        Self::Inherit
-    }
 }
 
 /// Policy for operation execution

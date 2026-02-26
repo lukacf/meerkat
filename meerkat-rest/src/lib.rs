@@ -187,7 +187,7 @@ impl AppState {
         let enable_builtins = config.tools.builtins_enabled;
         let enable_shell = config.tools.shell_enabled;
 
-        let default_model = Cow::Owned(config.agent.model.to_string());
+        let default_model = Cow::Owned(config.agent.model.clone());
         let max_tokens = config.agent.max_tokens_per_turn;
         let rest_host = Cow::Owned(config.rest.host.clone());
         let rest_port = config.rest.port;

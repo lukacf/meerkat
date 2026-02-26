@@ -697,21 +697,21 @@ mod three_agent_coordination {
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
         // Create LLM clients and tool dispatchers
-        let llm_client_a = Arc::new(AnthropicClient::new(api_key.to_string()).unwrap());
+        let llm_client_a = Arc::new(AnthropicClient::new(api_key.clone()).unwrap());
         let llm_adapter_a = Arc::new(LlmClientAdapter::new(llm_client_a, anthropic_model()));
         let tools_a = Arc::new(CommsToolDispatcher::new(
             comms_manager_a.router().clone(),
             trusted_a_shared,
         ));
 
-        let llm_client_b = Arc::new(AnthropicClient::new(api_key.to_string()).unwrap());
+        let llm_client_b = Arc::new(AnthropicClient::new(api_key.clone()).unwrap());
         let llm_adapter_b = Arc::new(LlmClientAdapter::new(llm_client_b, anthropic_model()));
         let tools_b = Arc::new(CommsToolDispatcher::new(
             comms_manager_b.router().clone(),
             trusted_b_shared,
         ));
 
-        let llm_client_c = Arc::new(AnthropicClient::new(api_key.to_string()).unwrap());
+        let llm_client_c = Arc::new(AnthropicClient::new(api_key.clone()).unwrap());
         let llm_adapter_c = Arc::new(LlmClientAdapter::new(llm_client_c, anthropic_model()));
         let tools_c = Arc::new(CommsToolDispatcher::new(
             comms_manager_c.router().clone(),

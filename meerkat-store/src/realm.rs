@@ -31,12 +31,13 @@ impl RealmBackend {
 }
 
 /// Realm creation origin metadata.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RealmOrigin {
     Generated,
     Workspace,
     Explicit,
+    #[default]
     LegacyUnknown,
 }
 
@@ -48,12 +49,6 @@ impl RealmOrigin {
             Self::Explicit => "explicit",
             Self::LegacyUnknown => "legacy_unknown",
         }
-    }
-}
-
-impl Default for RealmOrigin {
-    fn default() -> Self {
-        Self::LegacyUnknown
     }
 }
 

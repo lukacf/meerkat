@@ -220,7 +220,7 @@ impl CommsCommandRequest {
                             errors.push(CommsCommandValidationError::new(
                                 "in_reply_to",
                                 "invalid_uuid",
-                                Some(in_reply_to.to_string()),
+                                Some(in_reply_to.clone()),
                             ));
                             return Err(errors);
                         }

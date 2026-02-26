@@ -157,7 +157,7 @@ async fn contract_mob_003_inproc_namespace_isolation() {
     let alpha_a_peers = CoreCommsRuntime::peers(&alpha_a).await;
     let alpha_a_peer_names: Vec<String> = alpha_a_peers
         .iter()
-        .map(|e| e.name.as_string().to_string())
+        .map(|e| e.name.as_string().clone())
         .collect();
 
     // alpha_b should NOT be visible either, because inproc_only_scoped
@@ -182,7 +182,7 @@ async fn contract_mob_003_inproc_namespace_isolation() {
     let alpha_a_peers_after = CoreCommsRuntime::peers(&alpha_a).await;
     let peer_names_after: Vec<String> = alpha_a_peers_after
         .iter()
-        .map(|e| e.name.as_string().to_string())
+        .map(|e| e.name.as_string().clone())
         .collect();
 
     assert!(

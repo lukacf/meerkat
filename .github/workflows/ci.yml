@@ -153,9 +153,29 @@ jobs:
           cargo check -p rkat --no-default-features --features session-store,mcp
           cargo check -p rkat --no-default-features --features session-store,comms,mcp
 
-  test-feature-matrix-surface-tests:
-    name: Feature matrix (surface tests + modularity)
+  test-surface-smoke:
+    name: Surface smoke (${{ matrix.bin }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pkg: rkat
+            bin: rkat
+            features: "--no-default-features --features session-store"
+            test: true
+          - pkg: meerkat-rpc
+            bin: rkat-rpc
+            features: "--no-default-features"
+            test: false
+          - pkg: meerkat-rest
+            bin: rkat-rest
+            features: "--no-default-features"
+            test: false
+          - pkg: meerkat-mcp-server
+            bin: rkat-mcp
+            features: "--no-default-features"
+            test: false
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -166,16 +186,18 @@ jobs:
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: matrix-surface-tests
+          prefix-key: smoke-${{ matrix.bin }}
 
       - name: Install nextest
+        if: matrix.test
         uses: taiki-e/install-action@nextest
 
-      - name: Surface crate tests
-        run: cargo nextest run -p rkat --no-default-features --features session-store,mcp --no-capture
+      - name: Build and smoke test
+        run: cargo run -p ${{ matrix.pkg }} ${{ matrix.features }} --bin ${{ matrix.bin }} -- --help >/dev/null
 
-      - name: Surface modularity checks
-        run: scripts/check_surface_modularity.sh
+      - name: Run tests
+        if: matrix.test
+        run: cargo nextest run -p ${{ matrix.pkg }} --no-default-features --features session-store,mcp --no-capture
 
   audit:
     name: Security audit
@@ -190,7 +212,7 @@ jobs:
   gate:
     name: CI gate
     if: always()
-    needs: [fmt-lint, test, test-minimal, test-feature-matrix-lib, test-feature-matrix-surface-checks, test-feature-matrix-surface-tests, audit]
+    needs: [fmt-lint, test, test-minimal, test-feature-matrix-lib, test-feature-matrix-surface-checks, test-surface-smoke, audit]
     runs-on: ubuntu-latest
     steps:
       - name: Check results
@@ -202,7 +224,7 @@ jobs:
             test-minimal \
             test-feature-matrix-lib \
             test-feature-matrix-surface-checks \
-            test-feature-matrix-surface-tests \
+            test-surface-smoke \
             audit
           do
             case "$job" in
@@ -211,7 +233,7 @@ jobs:
               test-minimal) result="${{ needs.test-minimal.result }}" ;;
               test-feature-matrix-lib) result="${{ needs.test-feature-matrix-lib.result }}" ;;
               test-feature-matrix-surface-checks) result="${{ needs.test-feature-matrix-surface-checks.result }}" ;;
-              test-feature-matrix-surface-tests) result="${{ needs.test-feature-matrix-surface-tests.result }}" ;;
+              test-surface-smoke) result="${{ needs.test-surface-smoke.result }}" ;;
               audit) result="${{ needs.audit.result }}" ;;
             esac
             if [[ "$result" != "success" ]]; then

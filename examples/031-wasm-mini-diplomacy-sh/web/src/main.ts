@@ -44,6 +44,7 @@ interface RuntimeModule {
   mob_create: (definitionJson: string) => Promise<unknown>;
   mob_spawn: (mobId: string, specsJson: string) => Promise<unknown>;
   mob_wire: (mobId: string, a: string, b: string) => Promise<void>;
+  wire_cross_mob: (mobA: string, meerkatA: string, mobB: string, meerkatB: string) => Promise<void>;
   mob_send_message: (mobId: string, meerkatId: string, message: string) => Promise<void>;
   mob_run_flow: (mobId: string, flowId: string, paramsJson: string) => Promise<unknown>;
   mob_flow_status: (mobId: string, runId: string) => Promise<unknown>;
@@ -782,6 +783,22 @@ async function startMatch(): Promise<void> {
       }
 
       factions.push({ team, mobId });
+    }
+
+    // Wire ambassadors across mobs so they can discover each other via peers()
+    setStatus("Wiring cross-mob ambassador trust...");
+    for (let i = 0; i < factions.length; i++) {
+      for (let j = i + 1; j < factions.length; j++) {
+        const a = factions[i], b = factions[j];
+        try {
+          await mod.wire_cross_mob(
+            a.mobId, `${a.team}-ambassador`,
+            b.mobId, `${b.team}-ambassador`,
+          );
+        } catch (e) {
+          console.warn(`Cross-mob wire ${a.team}↔${b.team} failed:`, e);
+        }
+      }
     }
 
     // Narrator mob (turn_driven, flow-based — just summarizes)

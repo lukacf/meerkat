@@ -1081,6 +1081,98 @@ pub async fn mob_list_members(mob_id: &str) -> Result<JsValue, JsValue> {
     Ok(JsValue::from_str(&json))
 }
 
+/// Wire bidirectional comms trust between meerkats in DIFFERENT mobs.
+///
+/// Unlike `mob_wire` (which is intra-mob), this establishes peer trust across
+/// mob boundaries by accessing each member's comms runtime through the shared
+/// session service. Both members must have comms enabled.
+#[wasm_bindgen]
+pub async fn wire_cross_mob(
+    mob_a: &str,
+    meerkat_a: &str,
+    mob_b: &str,
+    meerkat_b: &str,
+) -> Result<(), JsValue> {
+    let mob_state = with_mob_state(Ok)?;
+
+    // Get session IDs from both mobs' rosters
+    let members_a = mob_state
+        .mob_list_members(&MobId::from(mob_a))
+        .await
+        .map_err(err_mob)?;
+    let entry_a = members_a
+        .iter()
+        .find(|m| m.meerkat_id == MeerkatId::from(meerkat_a))
+        .ok_or_else(|| err_js("not_found", &format!("{meerkat_a} not in {mob_a}")))?;
+
+    let members_b = mob_state
+        .mob_list_members(&MobId::from(mob_b))
+        .await
+        .map_err(err_mob)?;
+    let entry_b = members_b
+        .iter()
+        .find(|m| m.meerkat_id == MeerkatId::from(meerkat_b))
+        .ok_or_else(|| err_js("not_found", &format!("{meerkat_b} not in {mob_b}")))?;
+
+    let sid_a = entry_a
+        .member_ref
+        .session_id()
+        .ok_or_else(|| err_js("no_session", meerkat_a))?;
+    let sid_b = entry_b
+        .member_ref
+        .session_id()
+        .ok_or_else(|| err_js("no_session", meerkat_b))?;
+
+    // Get comms runtimes from the shared session service
+    let svc = RUNTIME_STATE.with(|cell| {
+        let borrow = cell.borrow();
+        let state = borrow.as_ref().ok_or_else(|| err_js("not_initialized", ""))?;
+        Ok::<_, JsValue>(state.session_service.clone())
+    })?;
+
+    let comms_a = svc
+        .comms_runtime(sid_a)
+        .await
+        .ok_or_else(|| err_js("no_comms", &format!("{meerkat_a} has no comms runtime")))?;
+    let comms_b = svc
+        .comms_runtime(sid_b)
+        .await
+        .ok_or_else(|| err_js("no_comms", &format!("{meerkat_b} has no comms runtime")))?;
+
+    let key_a = comms_a
+        .public_key()
+        .ok_or_else(|| err_js("no_key", meerkat_a))?;
+    let key_b = comms_b
+        .public_key()
+        .ok_or_else(|| err_js("no_key", meerkat_b))?;
+
+    // Build peer specs with full mob/profile/meerkat addressing
+    let name_a = format!("{mob_a}/{}/{meerkat_a}", entry_a.profile);
+    let name_b = format!("{mob_b}/{}/{meerkat_b}", entry_b.profile);
+
+    let spec_b = meerkat_core::comms::TrustedPeerSpec::new(
+        name_b,
+        key_b.clone(),
+        format!("inproc://{meerkat_b}"),
+    ).map_err(|e| err_str("wire_error", e))?;
+    let spec_a = meerkat_core::comms::TrustedPeerSpec::new(
+        name_a,
+        key_a,
+        format!("inproc://{meerkat_a}"),
+    ).map_err(|e| err_str("wire_error", e))?;
+
+    comms_a
+        .add_trusted_peer(spec_b)
+        .await
+        .map_err(|e| err_str("wire_error", e))?;
+    comms_b
+        .add_trusted_peer(spec_a)
+        .await
+        .map_err(|e| err_str("wire_error", e))?;
+
+    Ok(())
+}
+
 /// Send an external message to a spawned meerkat.
 #[wasm_bindgen]
 pub async fn mob_send_message(

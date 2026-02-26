@@ -5,24 +5,24 @@
 default_stages: [pre-commit]
 
 repos:
-  # Fast tests on commit — only changed crates
+  # On commit: clippy + unit tests on changed crates only (~5-10s)
   - repo: local
     hooks:
-      - id: cargo-test
-        name: cargo test (changed crates)
+      - id: cargo-check-changed
+        name: clippy + unit tests (changed crates)
         entry: scripts/test-changed-crates.sh
         language: script
         types: [rust]
         pass_filenames: false
 
-  # Secret detection (pre-push)
+  # On push: secret detection
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.18.4
     hooks:
       - id: gitleaks
         stages: [pre-push]
 
-  # General file checks (pre-push)
+  # On push: file hygiene checks
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0
     hooks:
@@ -40,45 +40,24 @@ repos:
         args: ['--maxkb=1000']
         stages: [pre-push]
 
-  # Fast tests on push (unit + integration-fast)
-  - repo: local
-    hooks:
-      - id: cargo-test-fast
-        name: cargo test (fast)
-        entry: make test
-        language: system
-        types: [rust]
-        pass_filenames: false
-        stages: [pre-push]
-
-  # Clippy lint check on push
+  # On push: full workspace clippy (compile check + lint)
   - repo: local
     hooks:
       - id: cargo-clippy
-        name: cargo clippy
-        entry: cargo clippy --workspace -- -D warnings
+        name: cargo clippy (workspace)
+        entry: cargo clippy --workspace --all-targets --all-features -- -D warnings
         language: system
         types: [rust]
         pass_filenames: false
         stages: [pre-push]
 
-  # Documentation build on push
+  # On push: unit tests workspace-wide
   - repo: local
     hooks:
-      - id: cargo-doc
-        name: cargo doc
-        entry: make doc
+      - id: cargo-test
+        name: cargo nextest (unit tests)
+        entry: cargo nextest run --workspace --lib
         language: system
         types: [rust]
-        pass_filenames: false
-        stages: [pre-push]
-
-  # Security audit on push
-  - repo: local
-    hooks:
-      - id: cargo-audit
-        name: cargo deny (security audit)
-        entry: make audit
-        language: system
         pass_filenames: false
         stages: [pre-push]

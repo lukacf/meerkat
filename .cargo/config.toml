@@ -2,20 +2,20 @@
 
 [alias]
 # Fast test suite (unit + integration-fast, skips doctests)
-fast = "test --target-dir target/fast --workspace --lib --bins --tests"
-rct = "test --target-dir target/fast --workspace --lib --bins --tests"
+fast = "nextest run --workspace"
+rct = "nextest run --workspace"
 
 # Unit tests only (no integration tests, skips doctests)
-unit = "test --target-dir target/fast --workspace --lib --bins"
+unit = "nextest run --workspace --lib"
 
 # Integration-fast tests only (ignored tests are not run)
-int = "test --target-dir target/fast --workspace --tests"
+int = "nextest run --workspace --tests"
 
 # Integration tests that spawn real processes / need binaries (ignored by default)
-int-real = "test --workspace integration_real -- --ignored --test-threads=1"
+int-real = "nextest run --workspace --run-ignored ignored-only -E 'test(integration_real)' --test-threads=1"
 
 # End-to-end tests (live APIs / full-system resources, ignored by default)
-e2e = "test --workspace e2e_ -- --ignored --test-threads=1"
+e2e = "nextest run --workspace --run-ignored ignored-only -E 'test(e2e_)' --test-threads=1"
 
 # Feature matrix helpers (shell aliases to make targets)
 test-minimal = "!make test-minimal"

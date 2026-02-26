@@ -2,7 +2,6 @@
 # Single source of truth for all build, test, and lint commands
 
 CRATE_NAME := meerkat
-FAST_TARGET_DIR ?= target/fast
 
 # Colors for terminal output
 GREEN := \033[0;32m
@@ -25,37 +24,36 @@ release:
 	@echo "$(GREEN)Building release version...$(NC)"
 	cargo build --workspace --release
 
-# Fast test suite (for commit/push hooks)
-# Unit + integration-fast, skips doctests and ignored tests
+# Fast test suite (unit + integration-fast, skips doctests and ignored)
 test:
 	@echo "$(GREEN)Running fast tests (unit + integration-fast)...$(NC)"
-	cargo test --target-dir $(FAST_TARGET_DIR) --workspace --lib --bins --tests
+	cargo nextest run --workspace
 
 # Unit tests only
 test-unit:
 	@echo "$(GREEN)Running unit tests...$(NC)"
-	cargo test --target-dir $(FAST_TARGET_DIR) --workspace --lib --bins
+	cargo nextest run --workspace --lib
 
 # Integration-fast tests only (no unit tests)
 test-int:
 	@echo "$(GREEN)Running integration-fast tests...$(NC)"
-	cargo test --target-dir $(FAST_TARGET_DIR) --workspace --tests
+	cargo nextest run --workspace --tests
 
 # Integration-real tests (ignored by default)
 test-int-real:
 	@echo "$(YELLOW)Running integration-real tests (ignored by default)...$(NC)"
-	cargo test --workspace integration_real -- --ignored --test-threads=1
+	cargo nextest run --workspace --run-ignored ignored-only -E 'test(integration_real)' --test-threads=1
 
 # End-to-end tests (ignored by default)
 test-e2e:
 	@echo "$(YELLOW)Running e2e tests (ignored by default)...$(NC)"
-	cargo test --workspace e2e_ -- --ignored --test-threads=1
+	cargo nextest run --workspace --run-ignored ignored-only -E 'test(e2e_)' --test-threads=1
 
 # Full test suite (for CI)
 # Includes all tests with all features
 test-all:
 	@echo "$(GREEN)Running full test suite...$(NC)"
-	cargo test --workspace --all-features --all-targets
+	cargo nextest run --workspace --all-features
 
 # Minimal builds without optional features
 test-minimal:
@@ -65,7 +63,7 @@ test-minimal:
 	cargo check -p meerkat-store --no-default-features
 	cargo check -p meerkat-tools --no-default-features
 	cargo check -p meerkat --no-default-features
-	cargo test -p meerkat-core --lib --bins --tests
+	cargo nextest run -p meerkat-core
 
 # Library crate feature combinations
 test-feature-matrix-lib:
@@ -78,7 +76,7 @@ test-feature-matrix-lib:
 	cargo check -p meerkat --no-default-features --features openai,memory-store
 	cargo check -p meerkat --no-default-features --features gemini,jsonl-store
 	cargo check -p meerkat --features all-providers,comms,mcp,sub-agents
-	cargo test -p meerkat --features all-providers,comms,mcp --lib --bins --tests
+	cargo nextest run -p meerkat --features all-providers,comms,mcp
 
 # Surface crate feature combinations
 test-feature-matrix-surface:
@@ -91,7 +89,7 @@ test-feature-matrix-surface:
 	cargo check -p meerkat-mcp-server --no-default-features --features comms
 	cargo check -p rkat --no-default-features --features session-store
 	cargo check -p rkat --no-default-features --features session-store,mcp
-	cargo test -p rkat --no-default-features --features session-store,mcp -- --nocapture
+	cargo nextest run -p rkat --no-default-features --features session-store,mcp --no-capture
 	cargo check -p rkat --no-default-features --features session-store,comms,mcp
 
 # Session capability matrix (A-F builds from spec)
@@ -99,7 +97,7 @@ test-session-matrix:
 	@echo "$(GREEN)Running session capability matrix...$(NC)"
 	@echo "  Build A: no-default-features (ephemeral only)"
 	cargo check -p meerkat-session --no-default-features
-	cargo test -p meerkat-session --no-default-features --lib --tests
+	cargo nextest run -p meerkat-session --no-default-features
 	@echo "  Build B: session-store"
 	cargo check -p meerkat-session --no-default-features --features session-store
 	@echo "  Build C: (memory-store — Phase 6)"

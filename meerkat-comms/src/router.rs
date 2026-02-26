@@ -213,6 +213,7 @@ impl Router {
                             .send_cross_namespace(
                                 &self.keypair,
                                 peer_name,
+                                &peer.pubkey,
                                 envelope.kind,
                                 self.require_peer_auth,
                             )
@@ -231,10 +232,6 @@ impl Router {
                 ))),
                 PeerAddr::Inproc(_) => {
                     let registry = InprocRegistry::global();
-                    // Try the sender's namespace first, then fall back to
-                    // cross-namespace lookup for cross-mob communication.
-                    // This enables external_addressable agents to receive
-                    // messages from agents in other mobs (different namespaces).
                     match registry.send_with_signature_in_namespace(
                         inproc_namespace,
                         &self.keypair,
@@ -243,20 +240,15 @@ impl Router {
                         self.require_peer_auth,
                     ) {
                         Ok(uuid) => Ok(uuid),
-                        Err(InprocSendError::PeerNotFound(_)) => {
-                            // Peer not in sender's namespace — try all namespaces.
-                            // The peer was found in trusted_peers so we know they're
-                            // a valid recipient; they're just in a different namespace
-                            // (e.g., a different mob's realm).
-                            registry
-                                .send_cross_namespace(
-                                    &self.keypair,
-                                    peer_name,
-                                    envelope.kind,
-                                    self.require_peer_auth,
-                                )
-                                .map_err(map_inproc_send_error)
-                        }
+                        Err(InprocSendError::PeerNotFound(_)) => registry
+                            .send_cross_namespace(
+                                &self.keypair,
+                                peer_name,
+                                &peer.pubkey,
+                                envelope.kind,
+                                self.require_peer_auth,
+                            )
+                            .map_err(map_inproc_send_error),
                         Err(other) => Err(map_inproc_send_error(other)),
                     }
                 }

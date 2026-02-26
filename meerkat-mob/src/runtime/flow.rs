@@ -907,7 +907,15 @@ fn step_tool_overlay(step: &FlowStepSpec) -> Option<TurnToolOverlay> {
 }
 
 fn parse_output_value(raw: &str, step_id: &StepId, target: &MeerkatId) -> Result<Value, String> {
-    serde_json::from_str(raw).map_err(|error| {
+    // Try parsing the raw output as-is first.
+    if let Ok(value) = serde_json::from_str(raw) {
+        return Ok(value);
+    }
+
+    // LLMs sometimes wrap JSON in markdown code fences (```json ... ```).
+    // Strip them and retry before reporting a parse error.
+    let stripped = strip_code_fences(raw);
+    serde_json::from_str(&stripped).map_err(|error| {
         let excerpt = if raw.chars().count() > 200 {
             format!("{}...", raw.chars().take(200).collect::<String>())
         } else {
@@ -917,6 +925,24 @@ fn parse_output_value(raw: &str, step_id: &StepId, target: &MeerkatId) -> Result
             "malformed JSON output for step '{step_id}' target '{target}': {error}; raw_output={excerpt:?}"
         )
     })
+}
+
+/// Strip markdown code fences from LLM output.
+///
+/// Handles ```` ```json ... ``` ````, ```` ``` ... ``` ````, and leading/trailing whitespace.
+fn strip_code_fences(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if let Some(rest) = trimmed.strip_prefix("```") {
+        // Skip optional language tag on the opening fence line
+        let after_tag = rest.find('\n').map_or(rest, |i| &rest[i + 1..]);
+        // Strip closing fence
+        let body = after_tag
+            .rfind("```")
+            .map_or(after_tag, |i| &after_tag[..i]);
+        body.trim().to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn aggregate_output(
@@ -1231,5 +1257,33 @@ mod template_tests {
         let rendered = render_template("hello {{ params.user }}", &sample_context())
             .expect("valid template should render");
         assert_eq!(rendered, "hello luka");
+    }
+}
+
+#[cfg(test)]
+mod strip_code_fences_tests {
+    use super::strip_code_fences;
+
+    #[test]
+    fn plain_json_unchanged() {
+        assert_eq!(strip_code_fences(r#"{"a":1}"#), r#"{"a":1}"#);
+    }
+
+    #[test]
+    fn strips_json_fenced_block() {
+        let input = "```json\n{\"narrative\": \"boom\"}\n```";
+        assert_eq!(strip_code_fences(input), r#"{"narrative": "boom"}"#);
+    }
+
+    #[test]
+    fn strips_plain_fenced_block() {
+        let input = "```\n{\"a\":1}\n```";
+        assert_eq!(strip_code_fences(input), r#"{"a":1}"#);
+    }
+
+    #[test]
+    fn handles_whitespace_around_fences() {
+        let input = "  \n```json\n{\"x\":2}\n```\n  ";
+        assert_eq!(strip_code_fences(input), r#"{"x":2}"#);
     }
 }

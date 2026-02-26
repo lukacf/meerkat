@@ -229,10 +229,10 @@ impl InprocRegistry {
     pub fn get_by_name_any_namespace(&self, name: &str) -> Option<(PubKey, InboxSender)> {
         let state = self.state.read();
         for namespace_state in state.namespaces.values() {
-            if let Some(&pubkey) = namespace_state.names.get(name) {
-                if let Some(peer) = namespace_state.peers.get(&pubkey) {
-                    return Some((peer.pubkey, peer.sender.clone()));
-                }
+            if let Some(&pubkey) = namespace_state.names.get(name)
+                && let Some(peer) = namespace_state.peers.get(&pubkey)
+            {
+                return Some((peer.pubkey, peer.sender.clone()));
             }
         }
         None

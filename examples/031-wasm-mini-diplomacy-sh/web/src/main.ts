@@ -64,6 +64,7 @@ interface MatchSession {
   messages: ChatMessage[];
   running: boolean;
   prevControllers: Map<string, Team>;
+  seenToolCallIds: Set<string>;  // dedup tool_call_requested events
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -163,41 +164,98 @@ COMBAT: aggression + rand(0-12) vs defense + rand(0-8). Capture if greater. Fort
 SCORING: Each turn, factions earn sum of their territories' values. 10 turns total. Highest cumulative score wins.
 DIPLOMACY: 2v1 is decisive. Alliances, betrayals, and threats are critical to winning.`;
 
-const NARRATOR_SCHEMA = {
-  type: "object",
-  properties: { narrative: { type: "string", description: "2-3 sentences of dramatic war narrative" } },
-  required: ["narrative"],
-  additionalProperties: false,
-};
-
 function buildFactionDefinition(team: Team, model: string): object {
+  const T = team.toUpperCase();
+  const mobId = `diplomacy-${team}`;
+  const others = TEAMS.filter(t => t !== team);
+  const peerAddr = (role: string, t: Team = team) => `diplomacy-${t}/${role}/${t}-${role}`;
+
+  const plannerSkill = `You are the strategic PLANNER for ${T}. You are cunning, ruthless, and play to WIN.
+${GAME_RULES}
+
+YOUR PEERS (use these exact addresses with send_message):
+- Operator: ${peerAddr("operator")}
+- Ambassador: ${peerAddr("ambassador")}
+
+Do NOT act until you receive a turn message with game state.
+When you receive game state:
+1. Message your OPERATOR to debate strategy — target, aggression, risk.
+2. After agreeing, brief your AMBASSADOR with diplomatic objectives. Be specific about:
+   - What to PROPOSE to each foreign ambassador
+   - What to CONCEAL (never reveal your actual attack target to enemies!)
+   - What lies or misdirection to use (e.g. "we're attacking X" when you're really attacking Y)
+3. Wait for diplomatic intel from your ambassador.
+4. Adjust plan if needed, then tell your OPERATOR to finalize.
+Concise messages. Do not call peers().`;
+
+  const operatorSkill = `You are the military OPERATOR for ${T}. Cold, analytical, focused on winning.
+${GAME_RULES}
+
+YOUR PEERS (use these exact addresses with send_message):
+- Planner: ${peerAddr("planner")}
+
+Do NOT act until your planner messages you.
+When the planner discusses strategy:
+1. Run the combat math. Challenge weak plans. Push for high-probability attacks.
+2. Agree on target and aggression.
+3. When told to finalize, send your planner a message containing EXACTLY:
+   FINAL ORDER: target=<region-id> aggression=<0-100>
+Concise messages. Do not call peers().`;
+
+  const ambassadorSkill = `You are the diplomatic AMBASSADOR for ${T}. You are a master of deception and persuasion.
+${GAME_RULES}
+
+YOUR PEERS (use these exact addresses with send_message):
+- Planner (your boss): ${peerAddr("planner")}
+- Foreign ambassadors: ${others.map(t => `${t.toUpperCase()} → ${peerAddr("ambassador", t)}`).join(", ")}
+
+Do NOT act until your planner briefs you.
+
+CARDINAL RULES OF DIPLOMACY:
+- NEVER reveal your faction's actual attack target to foreign ambassadors.
+- NEVER share internal strategy discussions.
+- LIE freely. Promise alliances you won't keep. Claim you're attacking faction X when you're really hitting Y.
+- Use misdirection: "We're considering a defensive turn" when you're going all-out offense.
+- Gather intelligence: get the enemy to reveal THEIR plans while giving away nothing real.
+- Propose deals that benefit you more than them. Make them think it's mutual.
+
+When briefed by your planner:
+1. Contact foreign ambassadors. Pursue your planner's objectives using deception.
+2. Try to extract enemy intentions — who are they attacking? What alliances are they forming?
+3. Report back to your planner with intel and negotiation results.
+Concise messages. Do not call peers().`;
+
   return {
-    id: `diplomacy-${team}`,
+    id: mobId,
+    skills: {
+      [`${team}-planner-role`]: { source: "inline", content: plannerSkill },
+      [`${team}-operator-role`]: { source: "inline", content: operatorSkill },
+      [`${team}-ambassador-role`]: { source: "inline", content: ambassadorSkill },
+    },
     profiles: {
       planner: {
         model, runtime_mode: "autonomous_host",
         tools: { comms: true },
-        peer_description: `${team} strategic planner — analyzes territory, proposes attacks, coordinates with operator and ambassador`,
+        skills: [`${team}-planner-role`],
+        peer_description: `${T} strategic planner`,
         external_addressable: true,
       },
       operator: {
         model, runtime_mode: "autonomous_host",
         tools: { comms: true },
-        peer_description: `${team} military operator — validates orders, challenges assumptions, executes final commands`,
+        skills: [`${team}-operator-role`],
+        peer_description: `${T} military operator`,
         external_addressable: true,
       },
       ambassador: {
         model, runtime_mode: "autonomous_host",
         tools: { comms: true },
-        peer_description: `${team} diplomatic ambassador — negotiates alliances and truces with foreign ambassadors`,
+        skills: [`${team}-ambassador-role`],
+        peer_description: `${T} diplomatic ambassador`,
         external_addressable: true,
       },
     },
-    // No role_wiring — we wire explicitly after spawn so planner↔operator
-    // and planner↔ambassador are paired, but operator↔ambassador are not
-    // (ambassador reports to planner, not directly to operator)
     wiring: {},
-    // Narrator flow only — faction agents converse via comms, not flows
     flows: {},
   };
 }
@@ -208,9 +266,9 @@ function buildNarratorDefinition(model: string): object {
     profiles: {
       narrator: {
         model, runtime_mode: "turn_driven",
+        tools: { comms: true },
         peer_description: "War correspondent narrator",
         external_addressable: false,
-        output_schema: NARRATOR_SCHEMA,
       },
     },
     flows: {
@@ -218,14 +276,15 @@ function buildNarratorDefinition(model: string): object {
         steps: {
           summarize: {
             role: "narrator",
-            message: `You are a dramatic war correspondent narrating an epic 3-faction territorial conflict.
+            message: `You are a dramatic, omniscient war correspondent who sees EVERYTHING — the secret war rooms, the whispered lies between diplomats, the private doubts of commanders. You know who lied to whom, who is planning betrayal, and what each faction REALLY discussed behind closed doors.
 
-Turn summary:
+Below is the COMPLETE intelligence from this turn: battle outcomes, private strategy discussions, diplomatic briefings, and the actual negotiations between ambassadors.
+
 {{params.summary}}
 
-Write 2-3 sentences of vivid, gripping war narrative. Reference specific territories by name. Describe the drama of alliances forming and breaking, the clash of armies, the cunning of diplomats. Make the reader feel the tension.
-
-Respond with ONLY a JSON object.`,
+Write 2-4 sentences of vivid, dramatic narrative. You can reveal dramatic irony — e.g. "North's ambassador smiled and promised peace, even as her generals sharpened their swords for Crimson Pass." Reference specific territories, betrayals, and secret plans. Make the reader feel the tension and treachery.
+CRITICAL: Output RAW JSON only. No markdown, no code fences, no backticks.
+{"narrative": "your narrative here"}`,
             dispatch_mode: "one_to_one",
           },
         },
@@ -505,19 +564,32 @@ function dmChannel(senderId: string, receiverId: string): ChannelId | null {
 // Event Streaming → DM Channels
 // ═══════════════════════════════════════════════════════════
 
-/** Poll all agent subscriptions and push events to DM channels. Returns count of new messages. */
-function drainAllEvents(mod: RuntimeModule, turn: number): number {
-  if (!session) return 0;
-  let count = 0;
+/** Result of polling agent events. */
+interface DrainResult { events: number; errors: string[] }
+
+/** Poll all agent subscriptions and push events to DM channels. */
+function drainAllEvents(mod: RuntimeModule, turn: number): DrainResult {
+  if (!session) return { events: 0, errors: [] };
+  let events = 0;
+  const errors: string[] = [];
   for (const sub of session.subs) {
     try {
       const raw = mod.poll_subscription(sub.handle);
-      const events: any[] = JSON.parse(raw);
-      // Uncomment for debugging: if (events.length > 0) console.log(`[${sub.meerkatId}] ${events.length} events`);
-      for (const event of events) {
-        // Outgoing comms: agent used "send" tool (not "send_message")
-        // AgentEvent::ToolCallRequested { id, name, args: { kind, to, body } }
+      const parsed: any[] = JSON.parse(raw);
+      for (const event of parsed) {
+        events++;
+
+        // Detect agent run failures (e.g. 401 auth errors)
+        if (event.type === "run_failed" && event.error) {
+          errors.push(`${sub.meerkatId}: ${event.error}`);
+        }
+
+        // Outgoing comms: agent used "send" tool
         if (event.type === "tool_call_requested" && event.name === "send") {
+          const callId = event.id;
+          if (callId && session.seenToolCallIds.has(callId)) continue;
+          if (callId) session.seenToolCallIds.add(callId);
+
           try {
             const args = typeof event.args === "string" ? JSON.parse(event.args) : event.args;
             const to = args.to || "";
@@ -525,26 +597,64 @@ function drainAllEvents(mod: RuntimeModule, turn: number): number {
             if (to && body) {
               const ch = dmChannel(sub.meerkatId, to);
               if (ch) {
-                const targetRole = meerkatRole(to);
                 pushMessage({ channel: ch, role: sub.role, faction: sub.team, content: body, turn });
               }
             }
           } catch { /* skip parse errors */ }
         }
-        // Agent's text output — AgentEvent::TextComplete { content }
-        if (event.type === "text_complete" && event.content) {
-          const ch = `${sub.team[0]}-plan-op` as ChannelId;
-          if (sub.role === "planner" || sub.role === "operator") {
-            pushMessage({ channel: ch, role: sub.role, faction: sub.team, content: event.content.slice(0, 500), turn });
-            count++;
-          }
-        }
-        // Count ANY event for quiescence detection (even text_delta)
-        count++;
       }
     } catch { /* poll error */ }
   }
-  return count;
+  return { events, errors };
+}
+
+// ═══════════════════════════════════════════════════════════
+// Narrator Context Builder
+// ═══════════════════════════════════════════════════════════
+
+/** Build a rich summary for the narrator including all DM conversations from this turn. */
+function buildNarratorSummary(
+  sess: MatchSession, turn: number, decisions: TurnDecision[],
+  captures: Set<string>, newState: ArenaState,
+): string {
+  const turnMsgs = sess.messages.filter(m => m.turn === turn);
+  const sections: string[] = [];
+
+  // 1. Battle outcomes
+  sections.push("=== BATTLE OUTCOMES ===");
+  for (const d of decisions) {
+    const hit = captures.has(d.order.target_region) ? "CAPTURED" : "REPELLED";
+    sections.push(`${d.order.team.toUpperCase()} attacked ${d.order.target_region.replace(/-/g, " ")} (aggression ${d.order.aggression}) → ${hit}`);
+  }
+  if (captures.size > 0) sections.push(`Territories changed hands: ${[...captures].map(id => id.replace(/-/g, " ")).join(", ")}`);
+  sections.push(`Scores: ${TEAMS.map(t => `${t}=${newState.scores[t]}`).join(", ")}. Turn ${turn} of ${newState.max_turns}.`);
+
+  // 2. Per-channel conversation logs (truncate each message to keep context manageable)
+  const channelGroups: [string, ChannelId[]][] = [
+    ["INTERNAL STRATEGY (private — the public doesn't know these plans)", ["n-plan-op", "s-plan-op", "e-plan-op"]],
+    ["DIPLOMATIC BRIEFINGS (faction leaders instructing their ambassadors)", ["n-plan-amb", "s-plan-amb", "e-plan-amb"]],
+    ["DIPLOMATIC NEGOTIATIONS (what the ambassadors said to each other)", ["e-n-diplo", "e-s-diplo", "n-s-diplo"]],
+  ];
+
+  for (const [heading, channels] of channelGroups) {
+    const channelLines: string[] = [];
+    for (const chId of channels) {
+      const chMsgs = turnMsgs.filter(m => m.channel === chId);
+      if (chMsgs.length === 0) continue;
+      const label = CHANNELS.find(c => c.id === chId)?.label ?? chId;
+      channelLines.push(`--- ${label} ---`);
+      for (const m of chMsgs) {
+        const who = `${m.role.toUpperCase()} [${m.faction.toUpperCase()}]`;
+        channelLines.push(`${who}: ${m.content.slice(0, 250)}`);
+      }
+    }
+    if (channelLines.length > 0) {
+      sections.push(`\n=== ${heading} ===`);
+      sections.push(channelLines.join("\n"));
+    }
+  }
+
+  return sections.join("\n");
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -564,32 +674,11 @@ async function tick(): Promise<void> {
     showBanner(`Round ${turn}`, "Agents are deliberating and negotiating...", 8000);
 
     // Trigger each planner with the game state.
-    // The planner's system prompt tells it to:
-    //   1. Discuss with operator (comms)
-    //   2. Brief ambassador with diplomatic intent (comms)
-    //   3. Ambassador negotiates with foreign ambassadors (comms, cross-mob)
-    //   4. Ambassador reports back to planner (comms)
-    //   5. Planner tells operator to finalize
-    //   6. Operator produces final order
+    // System prompts (from skills) already contain role instructions and peer addresses.
+    // We just inject the turn-specific game state.
     for (const f of session.factions) {
       const stateStr = serializeState(f.team, session.state);
-      const prompt = `=== TURN ${turn} ===
-${GAME_RULES}
-
-You are the PLANNER for ${f.team.toUpperCase()}.
-
-CURRENT STATE:
-${stateStr}
-
-PROTOCOL:
-1. Use send_message to your OPERATOR (${f.team}-operator) to discuss strategy. Debate which territory to attack, what aggression level to use. Challenge each other's ideas. Agree on a plan.
-2. Use send_message to your AMBASSADOR (${f.team}-ambassador) with your diplomatic intent — what alliances or threats should they pursue.
-3. Wait for your ambassador to report back with negotiation results.
-4. Based on diplomatic outcomes, send your OPERATOR the final instruction. Tell them to produce the order as: FINAL ORDER: target=<region-id> aggression=<0-100>
-5. The operator will output the final order.
-
-Start by messaging your operator to discuss the situation.`;
-
+      const prompt = `=== TURN ${turn} GAME STATE ===\n${stateStr}\n\nBegin: message your operator to discuss strategy, then brief your ambassador.`;
       try {
         await mod.mob_send_message(f.mobId, `${f.team}-planner`, prompt);
       } catch (e) {
@@ -602,13 +691,14 @@ Start by messaging your operator to discuss the situation.`;
     const QUIET_THRESHOLD = 8_000; // 8 seconds of silence = done
     const deadline = Date.now() + MAX_WAIT_MS;
     let lastEventTime = Date.now();
+    const allErrors: string[] = [];
 
     while (Date.now() < deadline && session.running) {
       await sleep(300);
-      const newMessages = drainAllEvents(mod, turn);
-      if (newMessages > 0) {
+      const { events: newEvents, errors } = drainAllEvents(mod, turn);
+      if (errors.length > 0) allErrors.push(...errors);
+      if (newEvents > 0) {
         lastEventTime = Date.now();
-        // Update status with activity indicator
         const totalDMs = session.messages.filter(m => m.turn === turn).length;
         setStatus(`Round ${turn}: ${totalDMs} messages exchanged...`);
       }
@@ -616,32 +706,77 @@ Start by messaging your operator to discuss the situation.`;
     }
     if (!session.running) return;
 
-    // Extract final orders from operator text outputs this turn.
-    // Look for "FINAL ORDER: target=X aggression=Y" pattern in operator messages.
+    // Abort if agents failed (e.g. invalid API key)
+    const turnMsgs = session.messages.filter(m => m.turn === turn).length;
+    if (turnMsgs === 0 && allErrors.length > 0) {
+      session.running = false;
+      setBadge("Error");
+      const first = allErrors[0];
+      const hint = first.includes("401") || first.toLowerCase().includes("auth")
+        ? "Check your API key in settings." : "";
+      setStatus(`Agents failed: ${first} ${hint}`);
+      showBanner("Error", "LLM calls failed — check API key", 10000);
+      return;
+    }
+
+    // ── Post-quiescence order extraction ──
+    // Ask each operator to send their final order via comms (so it appears in DM channel).
+    setStatus(`Round ${turn}: Extracting final orders from operators...`);
+    for (const f of session.factions) {
+      const validTargets = session.state.regions.filter(r => r.controller !== f.team).map(r => r.id);
+      const plannerAddr = `diplomacy-${f.team}/planner/${f.team}-planner`;
+      try {
+        await mod.mob_send_message(f.mobId, `${f.team}-operator`,
+          `TIME IS UP. Send your final order to your planner NOW using send_message. ` +
+          `Valid targets: ${validTargets.join(", ")}. ` +
+          `Your message MUST contain: FINAL ORDER: target=<region-id> aggression=<0-100>. ` +
+          `Send it to: ${plannerAddr}`);
+      } catch (e) {
+        console.warn(`Failed to prompt ${f.team} operator for order:`, e);
+      }
+    }
+    // Give operators time to respond
+    const extractDeadline = Date.now() + 20_000;
+    while (Date.now() < extractDeadline && session.running) {
+      await sleep(300);
+      const { events: n } = drainAllEvents(mod, turn);
+      if (n > 0) lastEventTime = Date.now();
+      // Stop early once all 3 operators have produced FINAL ORDER
+      const allHaveOrders = session.factions.every(f => {
+        return session!.messages.some(
+          m => m.turn === turn && m.faction === f.team && m.role === "operator"
+            && /FINAL\s*ORDER/i.test(m.content)
+        );
+      });
+      if (allHaveOrders) break;
+      if (Date.now() - lastEventTime > 6_000) break;
+    }
+    if (!session.running) return;
+
+    // Parse orders from operator messages
     const decisions: TurnDecision[] = [];
     for (const f of session.factions) {
       const opMsgs = session.messages.filter(
         m => m.turn === turn && m.faction === f.team && m.role === "operator"
       );
-      // Search backwards for the most recent message containing FINAL ORDER
       let order: OrderSet | null = null;
       let reasoning = "";
+      // Search backwards for FINAL ORDER pattern
       for (let i = opMsgs.length - 1; i >= 0; i--) {
         const text = opMsgs[i].content;
         const match = text.match(/FINAL\s*ORDER\s*:?\s*target\s*=\s*([\w-]+)\s*aggression\s*=\s*(\d+)/i);
         if (match) {
-          const targetRegion = match[1];
-          const aggression = Math.max(0, Math.min(100, parseInt(match[2], 10)));
           const validTargets = session.state.regions.filter(r => r.controller !== f.team).map(r => r.id);
+          const aggression = Math.max(0, Math.min(100, parseInt(match[2], 10)));
           order = {
             team: f.team, aggression, fortify: 100 - aggression,
-            target_region: validTargets.includes(targetRegion) ? targetRegion : validTargets[0],
+            target_region: validTargets.includes(match[1]) ? match[1] : validTargets[0],
           };
           reasoning = text;
           break;
         }
       }
-      // Fallback: try JSON extraction from any operator message
+      // Fallback: JSON extraction
       if (!order) {
         for (let i = opMsgs.length - 1; i >= 0; i--) {
           try {
@@ -652,10 +787,8 @@ Start by messaging your operator to discuss the situation.`;
               if (o.target_region && o.aggression != null) {
                 const validTargets = session.state.regions.filter(r => r.controller !== f.team).map(r => r.id);
                 const aggression = Math.max(0, Math.min(100, Number(o.aggression) || 50));
-                order = {
-                  team: f.team, aggression, fortify: 100 - aggression,
-                  target_region: validTargets.includes(o.target_region) ? o.target_region : validTargets[0],
-                };
+                order = { team: f.team, aggression, fortify: 100 - aggression,
+                  target_region: validTargets.includes(o.target_region) ? o.target_region : validTargets[0] };
                 reasoning = parsed.reasoning || opMsgs[i].content;
                 break;
               }
@@ -689,33 +822,50 @@ Start by messaging your operator to discuss the situation.`;
     renderScore(newState);
     if (captures.size) showBanner("Territory Changed", [...captures].map(id => id.replace(/-/g," ")).join(", "), 2000);
 
-    // Narrator
+    // Narrator — run a flow to get dramatic narrative
     if (session.narratorMobId) {
       try {
-        const summary = [
-          ...decisions.map(d => `${d.order.team.toUpperCase()} attacked ${d.order.target_region.replace(/-/g," ")} (aggression=${d.order.aggression}). ${d.reasoning.slice(0, 100)}`),
-          captures.size > 0 ? `Territories changed: ${[...captures].map(id => id.replace(/-/g, " ")).join(", ")}` : "No territories changed.",
-          `Scores: ${TEAMS.map(t => `${t}=${newState.scores[t]}`).join(", ")}`,
-          // Include diplomatic context from DM channels
-          ...session.messages.filter(m => m.turn === turn && m.role === "ambassador").slice(-3)
-            .map(m => `${m.faction} ambassador said: "${m.content.slice(0, 80)}"`),
-        ].join("\n");
+        const summary = buildNarratorSummary(session, turn, decisions, captures, newState);
         const runId = parseJsResult(await mod.mob_run_flow(session.narratorMobId, "narrate", JSON.stringify({ summary })));
-        for (let i = 0; i < 30; i++) {
+        let narrativeFound = false;
+        for (let i = 0; i < 40; i++) {
           await sleep(500);
           const raw = parseJsResult(await mod.mob_flow_status(session.narratorMobId, runId));
           if (raw === "null") continue;
-          const result = JSON.parse(raw);
-          if (result.status === "completed") {
-            const step = result.step_ledger?.find((s: any) => s.step_id === "summarize" && s.status === "completed");
-            if (step?.output?.narrative) {
-              pushMessage({ channel: "narrator", role: "narrator", faction: "neutral", content: step.output.narrative, turn });
+          try {
+            const result = JSON.parse(raw);
+            if (result.status === "completed") {
+              // Look in step_ledger for the summarize step's output
+              const step = result.step_ledger?.find((s: any) => s.step_id === "summarize" && s.status === "completed");
+              const narrative = step?.output?.narrative;
+              if (narrative) {
+                pushMessage({ channel: "narrator", role: "narrator", faction: "neutral", content: narrative, turn });
+                narrativeFound = true;
+              } else {
+                // Try raw output field (may be the full JSON)
+                const rawOut = step?.output;
+                if (typeof rawOut === "string") {
+                  pushMessage({ channel: "narrator", role: "narrator", faction: "neutral", content: rawOut, turn });
+                  narrativeFound = true;
+                }
+              }
+              break;
             }
-            break;
+            if (result.status !== "running" && result.status !== "pending") {
+              console.warn("Narrator flow ended with status:", result.status,
+                "failure_ledger:", JSON.stringify(result.failure_ledger));
+              break;
+            }
+          } catch (parseErr) {
+            console.warn("Narrator flow status parse error:", parseErr);
           }
-          if (result.status !== "running" && result.status !== "pending") break;
         }
-      } catch { /* narrator non-fatal */ }
+        if (!narrativeFound) {
+          console.warn("Narrator produced no output for turn", turn);
+        }
+      } catch (narratorErr) {
+        console.warn("Narrator error:", narratorErr);
+      }
     }
 
     setBadge("Live"); setStatus(`Round ${turn} resolved.`);
@@ -816,6 +966,7 @@ async function startMatch(): Promise<void> {
     session = {
       factions, narratorMobId, subs, state, messages: [], running: true,
       prevControllers: new Map(state.regions.map(r => [r.id, r.controller])),
+      seenToolCallIds: new Set(),
     };
     renderMap(state); renderScore(state);
     showBanner("Campaign Begins", "9 autonomous agents across 3 factions", 3000);

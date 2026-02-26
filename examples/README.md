@@ -78,7 +78,7 @@ For runnable Rust examples, see `meerkat/examples/` (e.g., `cargo run -p meerkat
 | 028 | [mobpack-release-triage-sh](028-mobpack-release-triage-sh/) | Shell | Build/sign/validate/deploy portable `.mobpack` artifact |
 | 029 | [web-incident-war-room-sh](029-web-incident-war-room-sh/) | Shell | Build browser-deployable incident-response mob bundle |
 | 030 | [web-dashboard-copilot-sh](030-web-dashboard-copilot-sh/) | Shell | Build embeddable web assistant for ops dashboards |
-| 031 | [wasm-mini-diplomacy-sh](031-wasm-mini-diplomacy-sh/) | Shell + Web | Two WASM mobs play diplomacy with live board, network graph, and replay |
+| 031 | [wasm-mini-diplomacy-sh](031-wasm-mini-diplomacy-sh/) | Shell + Web | 9 autonomous agents across 4 WASM mobs wage a 3-faction territory war with strategy, diplomacy, and deception |
 
 ## Examples by Feature
 

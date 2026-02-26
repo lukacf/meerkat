@@ -417,6 +417,10 @@ impl SessionRuntime {
         {
             let mut pending = self.pending.write().await;
             if pending.swap_remove(session_id).is_some() {
+                #[cfg(feature = "mcp")]
+                if let Some(state) = self.mcp_sessions.write().await.remove(session_id) {
+                    state.adapter.shutdown().await;
+                }
                 return Ok(());
             }
         }
@@ -594,19 +598,32 @@ impl SessionRuntime {
             });
         }
         let adapter = self.mcp_adapter_for_session(session_id).await?;
-        let name = server_name.ok_or_else(|| RpcError {
-            code: error::INVALID_PARAMS,
-            message: "server_name is required for reload".to_string(),
-            data: None,
-        })?;
-        adapter
-            .stage_reload(McpReloadTarget::ServerName(name))
-            .await
-            .map_err(|e| RpcError {
-                code: error::INTERNAL_ERROR,
-                message: e,
-                data: None,
-            })?;
+        match server_name {
+            Some(name) => {
+                adapter
+                    .stage_reload(McpReloadTarget::ServerName(name))
+                    .await
+                    .map_err(|e| RpcError {
+                        code: error::INTERNAL_ERROR,
+                        message: e,
+                        data: None,
+                    })?;
+            }
+            None => {
+                // Reload all active servers.
+                let names = adapter.active_server_names().await;
+                for name in names {
+                    adapter
+                        .stage_reload(McpReloadTarget::ServerName(name))
+                        .await
+                        .map_err(|e| RpcError {
+                            code: error::INTERNAL_ERROR,
+                            message: e,
+                            data: None,
+                        })?;
+                }
+            }
+        }
         Ok(())
     }
 

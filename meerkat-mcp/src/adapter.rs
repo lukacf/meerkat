@@ -70,6 +70,15 @@ impl McpRouterAdapter {
         Ok(())
     }
 
+    /// List names of all active (non-removed) servers.
+    pub async fn active_server_names(&self) -> Vec<String> {
+        let router = self.router.read().await;
+        match router.as_ref() {
+            Some(r) => r.active_server_names(),
+            None => Vec::new(),
+        }
+    }
+
     /// Stage an MCP server reload operation.
     pub async fn stage_reload<T: Into<McpReloadTarget>>(&self, target: T) -> Result<(), String> {
         let mut router = self.router.write().await;

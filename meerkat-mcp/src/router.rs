@@ -350,6 +350,15 @@ impl McpRouter {
         self.servers.get(server_name).map(|entry| entry.lifecycle)
     }
 
+    /// List names of all active (non-removed) servers.
+    pub fn active_server_names(&self) -> Vec<String> {
+        self.servers
+            .iter()
+            .filter(|(_, entry)| matches!(entry.lifecycle, McpServerLifecycleState::Active))
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
     /// Returns true if any server is currently in Removing state.
     pub fn has_removing_servers(&self) -> bool {
         self.servers

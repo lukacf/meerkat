@@ -2,7 +2,7 @@
 //!
 //! Provides `rkat mcp add|remove|list|get` commands for managing MCP server configuration.
 
-use meerkat_contracts::{McpAddParams, McpLiveOpResponse, McpRemoveParams};
+use meerkat_contracts::{McpAddParams, McpLiveOpResponse, McpLiveOpStatus, McpRemoveParams};
 use meerkat_core::mcp_config::{
     McpConfig, McpScope, McpServerConfig, McpTransportConfig, McpTransportKind, find_project_mcp,
     project_mcp_path, user_mcp_path,
@@ -219,10 +219,11 @@ async fn post_live_op<T: serde::Serialize>(
         let body = response.text().await.unwrap_or_else(|_| String::new());
         anyhow::bail!("Live MCP request failed ({status}): {body}");
     }
-    response
-        .json::<McpLiveOpResponse>()
-        .await
-        .map_err(Into::into)
+    let parsed = response.json::<McpLiveOpResponse>().await?;
+    if parsed.status == McpLiveOpStatus::Rejected {
+        anyhow::bail!("Live MCP {op} was rejected by server for session '{session_id}'");
+    }
+    Ok(parsed)
 }
 
 fn live_http_client() -> &'static reqwest::Client {

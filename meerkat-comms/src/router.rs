@@ -209,16 +209,14 @@ impl Router {
                         self.require_peer_auth,
                     ) {
                         Ok(uuid) => Ok(uuid),
-                        Err(InprocSendError::PeerNotFound(_)) => {
-                            registry
-                                .send_cross_namespace(
-                                    &self.keypair,
-                                    peer_name,
-                                    envelope.kind,
-                                    self.require_peer_auth,
-                                )
-                                .map_err(map_inproc_send_error)
-                        }
+                        Err(InprocSendError::PeerNotFound(_)) => registry
+                            .send_cross_namespace(
+                                &self.keypair,
+                                peer_name,
+                                envelope.kind,
+                                self.require_peer_auth,
+                            )
+                            .map_err(map_inproc_send_error),
                         Err(other) => Err(map_inproc_send_error(other)),
                     }
                 }

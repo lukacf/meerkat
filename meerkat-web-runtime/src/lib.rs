@@ -1126,7 +1126,9 @@ pub async fn wire_cross_mob(
     // Get comms runtimes from the shared session service
     let svc = RUNTIME_STATE.with(|cell| {
         let borrow = cell.borrow();
-        let state = borrow.as_ref().ok_or_else(|| err_js("not_initialized", ""))?;
+        let state = borrow
+            .as_ref()
+            .ok_or_else(|| err_js("not_initialized", ""))?;
         Ok::<_, JsValue>(state.session_service.clone())
     })?;
 
@@ -1154,12 +1156,11 @@ pub async fn wire_cross_mob(
         &name_b,
         key_b.clone(),
         format!("inproc://{name_b}"),
-    ).map_err(|e| err_str("wire_error", e))?;
-    let spec_a = meerkat_core::comms::TrustedPeerSpec::new(
-        &name_a,
-        key_a,
-        format!("inproc://{name_a}"),
-    ).map_err(|e| err_str("wire_error", e))?;
+    )
+    .map_err(|e| err_str("wire_error", e))?;
+    let spec_a =
+        meerkat_core::comms::TrustedPeerSpec::new(&name_a, key_a, format!("inproc://{name_a}"))
+            .map_err(|e| err_str("wire_error", e))?;
 
     comms_a
         .add_trusted_peer(spec_b)
@@ -1317,9 +1318,9 @@ pub async fn mob_member_subscribe(mob_id: &str, meerkat_id: &str) -> Result<u32,
     // in poll_subscription, which works reliably on wasm32.
     let rx = RUNTIME_STATE.with(|cell| {
         let borrow = cell.borrow();
-        let state = borrow.as_ref().ok_or_else(|| {
-            err_js("not_initialized", "runtime not initialized")
-        })?;
+        let state = borrow
+            .as_ref()
+            .ok_or_else(|| err_js("not_initialized", "runtime not initialized"))?;
         // We stored the concrete service in RuntimeState for exactly this purpose.
         // subscribe_session_events_raw returns the raw broadcast::Receiver.
         Ok::<_, JsValue>(state.session_service.clone())
@@ -1333,9 +1334,12 @@ pub async fn mob_member_subscribe(mob_id: &str, meerkat_id: &str) -> Result<u32,
         let mut registry = cell.borrow_mut();
         let h = registry.next_handle;
         registry.next_handle = registry.next_handle.saturating_add(1);
-        registry.subscriptions.insert(h, EventSubscription {
-            rx: std::cell::RefCell::new(raw_rx),
-        });
+        registry.subscriptions.insert(
+            h,
+            EventSubscription {
+                rx: std::cell::RefCell::new(raw_rx),
+            },
+        );
         h
     });
 
@@ -1350,10 +1354,12 @@ pub async fn mob_member_subscribe(mob_id: &str, meerkat_id: &str) -> Result<u32,
 pub fn poll_subscription(handle: u32) -> Result<String, JsValue> {
     SUBSCRIPTIONS.with(|cell| {
         let registry = cell.borrow();
-        let sub = registry
-            .subscriptions
-            .get(&handle)
-            .ok_or_else(|| err_js("invalid_handle", &format!("unknown subscription handle: {handle}")))?;
+        let sub = registry.subscriptions.get(&handle).ok_or_else(|| {
+            err_js(
+                "invalid_handle",
+                &format!("unknown subscription handle: {handle}"),
+            )
+        })?;
 
         // Drain all available events via synchronous try_recv.
         let mut events: Vec<serde_json::Value> = Vec::new();
@@ -1385,10 +1391,12 @@ pub fn poll_subscription(handle: u32) -> Result<String, JsValue> {
 pub fn close_subscription(handle: u32) -> Result<(), JsValue> {
     SUBSCRIPTIONS.with(|cell| {
         let mut registry = cell.borrow_mut();
-        registry
-            .subscriptions
-            .remove(&handle)
-            .ok_or_else(|| err_js("invalid_handle", &format!("unknown subscription handle: {handle}")))?;
+        registry.subscriptions.remove(&handle).ok_or_else(|| {
+            err_js(
+                "invalid_handle",
+                &format!("unknown subscription handle: {handle}"),
+            )
+        })?;
         Ok(())
     })
 }

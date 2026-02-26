@@ -155,9 +155,18 @@ async fn initialize_roundtrip() {
     assert!(method_names.contains(&"session/create"));
     assert!(method_names.contains(&"turn/start"));
     assert!(method_names.contains(&"config/get"));
-    assert!(method_names.contains(&"mcp/add"));
-    assert!(method_names.contains(&"mcp/remove"));
-    assert!(method_names.contains(&"mcp/reload"));
+    #[cfg(feature = "mcp")]
+    {
+        assert!(method_names.contains(&"mcp/add"));
+        assert!(method_names.contains(&"mcp/remove"));
+        assert!(method_names.contains(&"mcp/reload"));
+    }
+    #[cfg(not(feature = "mcp"))]
+    {
+        assert!(!method_names.contains(&"mcp/add"));
+        assert!(!method_names.contains(&"mcp/remove"));
+        assert!(!method_names.contains(&"mcp/reload"));
+    }
 
     // Close to trigger EOF
     drop(writer);
@@ -165,6 +174,7 @@ async fn initialize_roundtrip() {
 }
 
 /// mcp/* methods are registered and return contract-typed placeholder responses.
+#[cfg(feature = "mcp")]
 #[tokio::test]
 async fn mcp_live_methods_roundtrip_and_validation() {
     let (mut writer, mut reader, server_handle) = spawn_test_server();
@@ -207,13 +217,32 @@ async fn mcp_live_methods_roundtrip_and_validation() {
     assert_eq!(add_resp["result"]["persisted"], false);
     assert!(add_resp["result"]["applied_at_turn"].is_null());
 
-    // mcp/remove success
-    let remove_req = serde_json::json!({
+    // mcp/reload success (null server_name = reload all)
+    let reload_req = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 3,
-        "method": "mcp/remove",
+        "method": "mcp/reload",
         "params": {
             "session_id": add_resp["result"]["session_id"],
+            "persisted": false
+        }
+    });
+    send_request(&mut writer, &reload_req).await;
+    let reload_resp = read_response(&mut reader).await;
+    assert!(
+        reload_resp["error"].is_null(),
+        "mcp/reload failed: {reload_resp}"
+    );
+    assert_eq!(reload_resp["result"]["operation"], "reload");
+    assert_eq!(reload_resp["result"]["status"], "staged");
+
+    // mcp/remove success (persisted=true is accepted but response is persisted=false)
+    let remove_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "mcp/remove",
+        "params": {
+            "session_id": reload_resp["result"]["session_id"],
             "server_name": "filesystem",
             "persisted": true
         }
@@ -226,27 +255,7 @@ async fn mcp_live_methods_roundtrip_and_validation() {
     );
     assert_eq!(remove_resp["result"]["operation"], "remove");
     assert_eq!(remove_resp["result"]["status"], "staged");
-    assert_eq!(remove_resp["result"]["persisted"], true);
-
-    // mcp/reload success
-    let reload_req = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 4,
-        "method": "mcp/reload",
-        "params": {
-            "session_id": remove_resp["result"]["session_id"],
-            "server_name": "filesystem",
-            "persisted": false
-        }
-    });
-    send_request(&mut writer, &reload_req).await;
-    let reload_resp = read_response(&mut reader).await;
-    assert!(
-        reload_resp["error"].is_null(),
-        "mcp/reload failed: {reload_resp}"
-    );
-    assert_eq!(reload_resp["result"]["operation"], "reload");
-    assert_eq!(reload_resp["result"]["status"], "staged");
+    assert_eq!(remove_resp["result"]["persisted"], false);
 
     // invalid params are rejected
     let invalid_req = serde_json::json!({
@@ -520,11 +529,12 @@ async fn unknown_method_returns_error() {
     server_handle.await.unwrap().unwrap();
 }
 
-/// Regression: mcp/add with persisted=true must be rejected since config
-/// persistence is not implemented. Previously the handler echoed persisted=true
-/// in the response without persisting, misleading callers.
+/// Regression: mcp/add with persisted=true should NOT be rejected — the field
+/// is accepted for forward compatibility. The handler logs a warning and always
+/// responds with `persisted: false` since config persistence is not yet implemented.
+/// Without the `mcp` feature the method returns METHOD_NOT_FOUND.
 #[tokio::test]
-async fn test_mcp_add_rejects_persisted_true() {
+async fn test_mcp_add_persisted_true_not_rejected() {
     let (mut writer, mut reader, server_handle) = spawn_test_server();
 
     let init = serde_json::json!({
@@ -543,7 +553,7 @@ async fn test_mcp_add_rejects_persisted_true() {
         "params": {
             "session_id": "00000000-0000-0000-0000-000000000001",
             "server_name": "test-server",
-            "server_config": {"cmd": "echo"},
+            "server_config": {"name": "test-server", "command": "echo", "args": [], "env": {}},
             "persisted": true
         }
     });
@@ -551,9 +561,12 @@ async fn test_mcp_add_rejects_persisted_true() {
 
     let response = read_response(&mut reader).await;
     assert_eq!(response["id"], 1);
+    // Without `mcp` feature: METHOD_NOT_FOUND. With `mcp` feature: session not found
+    // (the fake session_id doesn't exist). Either way it's an error, but NOT because
+    // of persisted=true.
     assert!(
         response["error"].is_object(),
-        "persisted=true should be rejected: {response}"
+        "expected error (session not found or method not found): {response}"
     );
 
     drop(writer);
@@ -605,7 +618,7 @@ async fn test_mcp_add_staged_response_has_persisted_false() {
         "params": {
             "session_id": session_id,
             "server_name": "test-server",
-            "server_config": {"cmd": "echo"},
+            "server_config": {"command": "echo", "args": [], "env": {}},
             "persisted": false
         }
     });

@@ -17,5 +17,8 @@ tokio.workspace = true
 async-trait.workspace = true
 uuid = { workspace = true, features = ["v4"] }
 
+[package.metadata.cargo-machete]
+ignored = ["tempfile"]  # dev-dependency used in tests
+
 [dev-dependencies]
 tempfile.workspace = true

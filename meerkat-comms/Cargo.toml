@@ -74,5 +74,8 @@ name = "e2e"
 path = "tests/e2e.rs"
 required-features = ["integration-real-tests"]
 
+[package.metadata.cargo-machete]
+ignored = ["getrandom", "toml"]  # cfg(target_arch = "wasm32") / feature-gated
+
 [lints]
 workspace = true

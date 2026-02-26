@@ -63,5 +63,8 @@ futures = { workspace = true }
 async-stream = { workspace = true }
 meerkat-store = { workspace = true }
 
+[package.metadata.cargo-machete]
+ignored = ["async-stream"]  # proc macro (stream!)
+
 [lints]
 workspace = true

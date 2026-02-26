@@ -39,5 +39,8 @@ clap = { workspace = true, features = ["derive"] }
 default = ["comms"]
 comms = ["meerkat/comms", "dep:meerkat-comms"]
 
+[package.metadata.cargo-machete]
+ignored = ["dirs", "meerkat-client", "meerkat-comms", "meerkat-mcp", "rmcp"]  # feature-gated / optional
+
 [lints]
 workspace = true

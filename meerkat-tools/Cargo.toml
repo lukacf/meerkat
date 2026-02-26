@@ -63,5 +63,8 @@ nix = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tempfile = { workspace = true }
 
+[package.metadata.cargo-machete]
+ignored = ["ciborium", "humantime", "toml"]  # feature-gated dependencies
+
 [lints]
 workspace = true

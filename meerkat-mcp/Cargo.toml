@@ -36,5 +36,8 @@ sse-stream = "0.2"
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
 
+[package.metadata.cargo-machete]
+ignored = ["serde"]  # proc macro (derive)
+
 [lints]
 workspace = true

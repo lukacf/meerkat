@@ -439,7 +439,7 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_stdio_repo_wires_external_source_node() {
         let tmp = TempDir::new().unwrap();
-        let script = r##"
+        let script = r#"
 read line
 if echo "$line" | grep -q '"method":"capabilities/get"'; then
   echo '{"jsonrpc":"2.0","id":"1","payload":{"method":"capabilities/get","result":{"protocol_version":1,"methods":["skills/list_summaries","skills/load_package"]}}}'
@@ -448,7 +448,7 @@ elif echo "$line" | grep -q '"method":"skills/list_summaries"'; then
 elif echo "$line" | grep -q '"method":"skills/load_package"'; then
   echo '{"jsonrpc":"2.0","id":"1","payload":{"method":"skills/load_package","result":{"package":{"summary":{"source_uuid":"00000000-0000-4000-8000-000000000008","skill_name":"remote-skill","description":"remote"},"body":"body"}}}}'
 fi
-"##;
+"#;
 
         let config = SkillsConfig {
             repositories: vec![meerkat_core::skills_config::SkillRepositoryConfig {

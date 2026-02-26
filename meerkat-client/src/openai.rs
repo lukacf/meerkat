@@ -219,10 +219,6 @@ impl OpenAiClient {
                                     }));
                                 }
                             }
-                            AssistantBlock::Reasoning { .. } => {
-                                // Intentionally skipped: reasoning replay can violate
-                                // Responses API adjacency constraints and hard-fail requests.
-                            }
                             AssistantBlock::ToolUse { id, name, args, .. } => {
                                 items.push(serde_json::json!({
                                     "type": "function_call",
@@ -231,7 +227,10 @@ impl OpenAiClient {
                                     "arguments": args.get()  // Already JSON string
                                 }));
                             }
-                            _ => {} // non_exhaustive: ignore unknown future variants
+                            // Reasoning replay can violate Responses API adjacency
+                            // constraints and hard-fail requests; skip it and any
+                            // unknown future variants.
+                            _ => {}
                         }
                     }
                 }
@@ -389,7 +388,7 @@ impl LlmClient for OpenAiClient {
                                                     // encrypted_content is optional
                                                     let encrypted = item.get("encrypted_content")
                                                         .and_then(|v| v.as_str())
-                                                        .map(|s| s.to_string());
+                                                        .map(std::string::ToString::to_string);
 
                                                     let meta = Some(Box::new(ProviderMeta::OpenAi {
                                                         id: reasoning_id.to_string(),
@@ -463,10 +462,10 @@ impl LlmClient for OpenAiClient {
                                 // Extract usage
                                 if let Some(usage_obj) = response_obj.get("usage") {
                                     usage.input_tokens = usage_obj.get("input_tokens")
-                                        .and_then(|v| v.as_u64())
+                                        .and_then(serde_json::Value::as_u64)
                                         .unwrap_or(0);
                                     usage.output_tokens = usage_obj.get("output_tokens")
-                                        .and_then(|v| v.as_u64())
+                                        .and_then(serde_json::Value::as_u64)
                                         .unwrap_or(0);
                                     yield LlmEvent::UsageUpdate { usage: usage.clone() };
                                 }
@@ -477,8 +476,7 @@ impl LlmClient for OpenAiClient {
                                         // Check if there were tool calls
                                         let has_tool_calls = response_obj.get("output")
                                             .and_then(|o| o.as_array())
-                                            .map(|arr| arr.iter().any(|item| item.get("type").and_then(|t| t.as_str()) == Some("function_call")))
-                                            .unwrap_or(false);
+                                            .is_some_and(|arr| arr.iter().any(|item| item.get("type").and_then(|t| t.as_str()) == Some("function_call")));
                                         if has_tool_calls {
                                             StopReason::ToolUse
                                         } else {
@@ -572,7 +570,7 @@ impl LlmClient for OpenAiClient {
 
                                 let encrypted = item.get("encrypted_content")
                                     .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string());
+                                    .map(std::string::ToString::to_string);
 
                                 let meta = Some(Box::new(ProviderMeta::OpenAi {
                                     id: reasoning_id.to_string(),
@@ -597,10 +595,10 @@ impl LlmClient for OpenAiClient {
                             if let Some(response_obj) = &event.response {
                                 if let Some(usage_obj) = response_obj.get("usage") {
                                     usage.input_tokens = usage_obj.get("input_tokens")
-                                        .and_then(|v| v.as_u64())
+                                        .and_then(serde_json::Value::as_u64)
                                         .unwrap_or(0);
                                     usage.output_tokens = usage_obj.get("output_tokens")
-                                        .and_then(|v| v.as_u64())
+                                        .and_then(serde_json::Value::as_u64)
                                         .unwrap_or(0);
                                     yield LlmEvent::UsageUpdate { usage: usage.clone() };
                                 }
@@ -610,8 +608,7 @@ impl LlmClient for OpenAiClient {
                                         Some("completed") => {
                                             let has_tool_calls = response_obj.get("output")
                                                 .and_then(|o| o.as_array())
-                                                .map(|arr| arr.iter().any(|item| item.get("type").and_then(|t| t.as_str()) == Some("function_call")))
-                                                .unwrap_or(false);
+                                                .is_some_and(|arr| arr.iter().any(|item| item.get("type").and_then(|t| t.as_str()) == Some("function_call")));
                                             if has_tool_calls {
                                                 StopReason::ToolUse
                                             } else {
@@ -741,7 +738,7 @@ mod tests {
         let handle = tokio::spawn(async move {
             axum::serve(listener, app).await.expect("serve test server");
         });
-        (format!("http://{}", addr), handle)
+        (format!("http://{addr}"), handle)
     }
 
     // =========================================================================
@@ -1250,9 +1247,8 @@ mod tests {
         assert_eq!(parsed["units"], "celsius");
 
         assert!(
-            !arguments.starts_with(r#"{\"#),
-            "arguments should not be double-encoded: {}",
-            arguments
+            !arguments.starts_with(r"{\"),
+            "arguments should not be double-encoded: {arguments}"
         );
         Ok(())
     }
@@ -1797,11 +1793,10 @@ mod tests {
         });
         let has_tools = response_tool["output"]
             .as_array()
-            .map(|arr| {
+            .is_some_and(|arr| {
                 arr.iter()
                     .any(|item| item.get("type").and_then(|t| t.as_str()) == Some("function_call"))
-            })
-            .unwrap_or(false);
+            });
         assert!(has_tools);
 
         // completed without tool calls -> EndTurn
@@ -1811,11 +1806,10 @@ mod tests {
         });
         let has_tools = response_text["output"]
             .as_array()
-            .map(|arr| {
+            .is_some_and(|arr| {
                 arr.iter()
                     .any(|item| item.get("type").and_then(|t| t.as_str()) == Some("function_call"))
-            })
-            .unwrap_or(false);
+            });
         assert!(!has_tools);
     }
 

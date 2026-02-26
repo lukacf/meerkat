@@ -312,7 +312,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let sessions = self.sessions.read().await;
         let handle = sessions
             .get(id)
-            .ok_or_else(|| meerkat_core::comms::StreamError::NotFound(format!("session {}", id)))?;
+            .ok_or_else(|| meerkat_core::comms::StreamError::NotFound(format!("session {id}")))?;
         let rx = handle.session_event_tx.subscribe();
         Ok(Box::pin(futures::stream::unfold(rx, |mut rx| async move {
             loop {
@@ -716,7 +716,7 @@ async fn session_task<A: SessionAgent>(
                         let interrupt_wait = control.interrupt_notify.notified();
                         tokio::select! {
                             result = &mut run_fut => break result,
-                            _ = interrupt_wait => {
+                            () = interrupt_wait => {
                                 if control.interrupt_requested.swap(false, Ordering::AcqRel) {
                                     interrupted = true;
                                     break Err(meerkat_core::error::AgentError::Cancelled);

@@ -2,7 +2,7 @@ use crate::error::LlmError;
 use crate::types::{LlmDoneOutcome, LlmEvent, LlmStream};
 use futures::StreamExt;
 
-pub(crate) fn ensure_terminal_done<'a>(mut stream: LlmStream<'a>) -> LlmStream<'a> {
+pub(crate) fn ensure_terminal_done(mut stream: LlmStream<'_>) -> LlmStream<'_> {
     Box::pin(async_stream::stream! {
         while let Some(item) = stream.next().await {
             match item {

@@ -162,7 +162,7 @@ mod tests {
 
     #[test]
     fn test_parse_simple_skill() {
-        let content = r#"---
+        let content = r"---
 name: shell-patterns
 description: Background job workflows
 requires_capabilities: [builtins, shell]
@@ -170,7 +170,7 @@ requires_capabilities: [builtins, shell]
 
 # shell-patterns
 
-When running background jobs..."#;
+When running background jobs...";
 
         let doc = parse_skill_md(
             SkillId("shell-patterns".to_string()),
@@ -230,12 +230,12 @@ When running background jobs..."#;
 
     #[test]
     fn test_rejects_unnamespaced_unknown_field() {
-        let content = r#"---
+        let content = r"---
 name: test-skill
 description: d
 custom_field: true
 ---
-body"#;
+body";
         let result = parse_skill_md(
             SkillId("test-skill".to_string()),
             SkillScope::Builtin,
@@ -247,13 +247,13 @@ body"#;
 
     #[test]
     fn test_rejects_nontrivial_extension_without_version() {
-        let content = r#"---
+        let content = r"---
 name: test-skill
 description: d
 acme.config:
   mode: strict
 ---
-body"#;
+body";
         let result = parse_skill_md(
             SkillId("test-skill".to_string()),
             SkillScope::Builtin,
@@ -289,11 +289,11 @@ body"#;
 
     #[test]
     fn test_rejects_name_directory_mismatch() {
-        let content = r#"---
+        let content = r"---
 name: wrong-name
 description: d
 ---
-body"#;
+body";
         let result = parse_skill_md(
             SkillId("skills/correct-name".to_string()),
             SkillScope::Builtin,

@@ -75,7 +75,7 @@ impl Compactor for DefaultCompactor {
         }
 
         // 2. Inject summary as a user message
-        let summary_content = format!("{}{}", SUMMARY_PREFIX, summary);
+        let summary_content = format!("{SUMMARY_PREFIX}{summary}");
         rebuilt.push(Message::User(meerkat_core::types::UserMessage {
             content: summary_content,
         }));

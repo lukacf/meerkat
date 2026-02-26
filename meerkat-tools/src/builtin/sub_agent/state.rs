@@ -358,7 +358,7 @@ mod tests {
     #[test]
     fn test_state_debug() {
         let state = create_test_state();
-        let debug = format!("{:?}", state);
+        let debug = format!("{state:?}");
         assert!(debug.contains("SubAgentToolState"));
         assert!(debug.contains("current_depth: 0"));
     }
@@ -439,9 +439,7 @@ mod tests {
         for expected in &expected_tools {
             assert!(
                 tool_names.contains(expected),
-                "Sub-agent should have access to '{}' tool, but tools are: {:?}",
-                expected,
-                tool_names
+                "Sub-agent should have access to '{expected}' tool, but tools are: {tool_names:?}"
             );
         }
     }
@@ -484,8 +482,7 @@ mod tests {
         for forbidden in &forbidden_tools {
             assert!(
                 !tool_names.contains(forbidden),
-                "Sub-agent should NOT have access to '{}' tool to prevent infinite nesting",
-                forbidden
+                "Sub-agent should NOT have access to '{forbidden}' tool to prevent infinite nesting"
             );
         }
     }

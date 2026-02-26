@@ -145,8 +145,7 @@ async fn initialize_roundtrip() {
     assert_eq!(response["id"], 1);
     assert!(
         response["error"].is_null(),
-        "Expected success, got error: {}",
-        response
+        "Expected success, got error: {response}"
     );
     assert_eq!(response["result"]["server_info"]["name"], "meerkat-rpc");
     assert!(response["result"]["server_info"]["version"].is_string());
@@ -180,8 +179,7 @@ async fn session_create_and_turn_start() {
     assert_eq!(create_resp["id"], 1);
     assert!(
         create_resp["error"].is_null(),
-        "session/create failed: {}",
-        create_resp
+        "session/create failed: {create_resp}"
     );
     let session_id = create_resp["result"]["session_id"]
         .as_str()
@@ -208,8 +206,7 @@ async fn session_create_and_turn_start() {
     assert_eq!(turn_resp["id"], 2);
     assert!(
         turn_resp["error"].is_null(),
-        "turn/start failed: {}",
-        turn_resp
+        "turn/start failed: {turn_resp}"
     );
     assert_eq!(
         turn_resp["result"]["session_id"].as_str().unwrap(),
@@ -256,8 +253,7 @@ async fn malformed_json_returns_error_and_continues() {
     let error_resp = read_line_json(&mut reader).await;
     assert!(
         error_resp["error"].is_object(),
-        "Expected error response, got: {}",
-        error_resp
+        "Expected error response, got: {error_resp}"
     );
     assert_eq!(error_resp["error"]["code"], -32700); // PARSE_ERROR
 
@@ -274,8 +270,7 @@ async fn malformed_json_returns_error_and_continues() {
     assert_eq!(response["id"], 42);
     assert!(
         response["error"].is_null(),
-        "Expected success after recovery, got: {}",
-        response
+        "Expected success after recovery, got: {response}"
     );
     assert_eq!(response["result"]["server_info"]["name"], "meerkat-rpc");
 
@@ -300,8 +295,7 @@ async fn config_get_patch_roundtrip() {
     assert_eq!(get_resp["id"], 1);
     assert!(
         get_resp["error"].is_null(),
-        "config/get failed: {}",
-        get_resp
+        "config/get failed: {get_resp}"
     );
     let initial_max_tokens = get_resp["result"]["config"]["max_tokens"].as_u64().unwrap();
 
@@ -319,8 +313,7 @@ async fn config_get_patch_roundtrip() {
     assert_eq!(patch_resp["id"], 2);
     assert!(
         patch_resp["error"].is_null(),
-        "config/patch failed: {}",
-        patch_resp
+        "config/patch failed: {patch_resp}"
     );
     assert_eq!(patch_resp["result"]["config"]["max_tokens"], new_max_tokens);
 
@@ -354,7 +347,7 @@ async fn session_list_after_create() {
     });
     send_request(&mut writer, &create1).await;
     let resp1 = read_response(&mut reader).await;
-    assert!(resp1["error"].is_null(), "First create failed: {}", resp1);
+    assert!(resp1["error"].is_null(), "First create failed: {resp1}");
     let sid1 = resp1["result"]["session_id"].as_str().unwrap().to_string();
 
     let create2 = serde_json::json!({
@@ -365,7 +358,7 @@ async fn session_list_after_create() {
     });
     send_request(&mut writer, &create2).await;
     let resp2 = read_response(&mut reader).await;
-    assert!(resp2["error"].is_null(), "Second create failed: {}", resp2);
+    assert!(resp2["error"].is_null(), "Second create failed: {resp2}");
     let sid2 = resp2["result"]["session_id"].as_str().unwrap().to_string();
 
     // List sessions
@@ -379,8 +372,7 @@ async fn session_list_after_create() {
     assert_eq!(list_resp["id"], 3);
     assert!(
         list_resp["error"].is_null(),
-        "session/list failed: {}",
-        list_resp
+        "session/list failed: {list_resp}"
     );
 
     let sessions = list_resp["result"]["sessions"].as_array().unwrap();

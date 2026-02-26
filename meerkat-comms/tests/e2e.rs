@@ -253,7 +253,7 @@ async fn integration_real_tcp_message_exchange() {
         "tcp://127.0.0.1:0",
         "peer-b",
         &peer_b_keypair.public_key(),
-        &format!("tcp://{}", addr_b),
+        &format!("tcp://{addr_b}"),
     );
 
     // Keep inbox_b alive through the test (must not be dropped before handle_connection completes)

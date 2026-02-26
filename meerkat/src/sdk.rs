@@ -175,7 +175,7 @@ pub async fn create_dispatcher_with_builtins_in_project(
     .await
     .map_err(|e| CompositeDispatcherError::ToolInitFailed {
         name: "project_root".to_string(),
-        message: format!("Failed to resolve project root: {}", e),
+        message: format!("Failed to resolve project root: {e}"),
     })??;
 
     let store = Arc::new(FileTaskStore::in_project(&project_root));
@@ -235,7 +235,7 @@ pub async fn build_comms_runtime_from_config_scoped(
         .as_ref()
         .map(|addr| {
             addr.parse()
-                .map_err(|e| format!("Invalid event_address '{}': {}", addr, e))
+                .map_err(|e| format!("Invalid event_address '{addr}': {e}"))
         })
         .transpose()?;
 
@@ -243,7 +243,7 @@ pub async fn build_comms_runtime_from_config_scoped(
         match config.comms.mode {
             CommsRuntimeMode::Inproc => {
                 CommsRuntime::inproc_only_scoped(comms_name, inproc_namespace.clone())
-                    .map_err(|e| format!("Failed to create inproc comms runtime: {}", e))?
+                    .map_err(|e| format!("Failed to create inproc comms runtime: {e}"))?
             }
             CommsRuntimeMode::Tcp => {
                 let address =
@@ -252,7 +252,7 @@ pub async fn build_comms_runtime_from_config_scoped(
                     })?;
                 let listen_tcp = address
                     .parse()
-                    .map_err(|e| format!("Invalid comms TCP address '{}': {}", address, e))?;
+                    .map_err(|e| format!("Invalid comms TCP address '{address}': {e}"))?;
                 let comms = CoreCommsConfig {
                     enabled: true,
                     name: comms_name.to_string(),
@@ -265,10 +265,10 @@ pub async fn build_comms_runtime_from_config_scoped(
                 let resolved = comms.resolve_paths(base_dir.as_ref());
                 let mut rt = CommsRuntime::new(resolved)
                     .await
-                    .map_err(|e| format!("Failed to create comms runtime: {}", e))?;
+                    .map_err(|e| format!("Failed to create comms runtime: {e}"))?;
                 rt.start_listeners()
                     .await
-                    .map_err(|e| format!("Failed to start comms listeners: {}", e))?;
+                    .map_err(|e| format!("Failed to start comms listeners: {e}"))?;
                 rt
             }
             CommsRuntimeMode::Uds => {
@@ -288,10 +288,10 @@ pub async fn build_comms_runtime_from_config_scoped(
                 let resolved = comms.resolve_paths(base_dir.as_ref());
                 let mut rt = CommsRuntime::new(resolved)
                     .await
-                    .map_err(|e| format!("Failed to create comms runtime: {}", e))?;
+                    .map_err(|e| format!("Failed to create comms runtime: {e}"))?;
                 rt.start_listeners()
                     .await
-                    .map_err(|e| format!("Failed to start comms listeners: {}", e))?;
+                    .map_err(|e| format!("Failed to start comms listeners: {e}"))?;
                 rt
             }
         };
@@ -324,7 +324,7 @@ pub fn spawn_event_logger(
             if config.stream
                 && let AgentEvent::TextDelta { delta } = &event
             {
-                print!("{}", delta);
+                print!("{delta}");
                 let _ = std::io::stdout().flush();
             }
 
@@ -333,7 +333,7 @@ pub fn spawn_event_logger(
             }
 
             if let Some(line) = format_verbose_event(&event) {
-                eprintln!("{}", line);
+                eprintln!("{line}");
             }
         }
     })

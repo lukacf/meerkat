@@ -75,7 +75,7 @@ impl std::fmt::Debug for Availability {
         match self {
             Availability::Always => write!(f, "Availability::Always"),
             Availability::When { reason, .. } => {
-                write!(f, "Availability::When {{ reason: {:?} }}", reason)
+                write!(f, "Availability::When {{ reason: {reason:?} }}")
             }
         }
     }
@@ -166,7 +166,7 @@ impl std::fmt::Debug for ToolGateway {
                     .collect::<Vec<_>>(),
             )
             .field("routes", &self.route.keys().collect::<Vec<_>>())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -672,10 +672,10 @@ mod tests {
     #[test]
     fn test_availability_debug() {
         let always = Availability::Always;
-        assert_eq!(format!("{:?}", always), "Availability::Always");
+        assert_eq!(format!("{always:?}"), "Availability::Always");
 
         let when = Availability::when("test reason", Arc::new(|| true));
-        assert!(format!("{:?}", when).contains("test reason"));
+        assert!(format!("{when:?}").contains("test reason"));
     }
 
     #[test]

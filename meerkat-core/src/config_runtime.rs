@@ -207,9 +207,7 @@ impl ConfigRuntime {
         let body = serde_json::to_string_pretty(&state)?;
         let parent = self
             .state_path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."));
+            .parent().map_or_else(|| PathBuf::from("."), Path::to_path_buf);
         let tmp = parent.join(format!(".config_state.tmp.{}", Uuid::now_v7()));
         let mut file = tokio::fs::OpenOptions::new()
             .write(true)
@@ -377,12 +375,12 @@ mod tests {
         let ok_count = usize::from(res_a.is_ok()) + usize::from(res_b.is_ok());
         let known_failure_count = usize::from(matches!(
             res_a,
-            Err(ConfigRuntimeError::GenerationConflict { .. })
-                | Err(ConfigRuntimeError::LockTimeout)
+            Err(ConfigRuntimeError::GenerationConflict { .. } |
+ConfigRuntimeError::LockTimeout)
         )) + usize::from(matches!(
             res_b,
-            Err(ConfigRuntimeError::GenerationConflict { .. })
-                | Err(ConfigRuntimeError::LockTimeout)
+            Err(ConfigRuntimeError::GenerationConflict { .. } |
+ConfigRuntimeError::LockTimeout)
         ));
         assert!(ok_count <= 1);
         assert_eq!(known_failure_count + ok_count, 2);

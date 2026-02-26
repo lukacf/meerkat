@@ -108,8 +108,7 @@ impl ResolvedToolPolicy {
         // Then check mode
         match self.mode {
             ToolMode::AllowAll => default_enabled,
-            ToolMode::DenyAll => false,
-            ToolMode::AllowList => false, // Must be explicitly enabled
+            ToolMode::DenyAll | ToolMode::AllowList => false,
         }
     }
 

@@ -70,8 +70,7 @@ impl BuiltinTool for TaskGetTool {
             Some(t) => serde_json::to_value(&t)
                 .map_err(|e| BuiltinToolError::ExecutionFailed(e.to_string())),
             None => Err(BuiltinToolError::ExecutionFailed(format!(
-                "Task not found: {}",
-                id
+                "Task not found: {id}"
             ))),
         }
     }

@@ -207,11 +207,10 @@ impl CompositeDispatcher {
         for tool in &self.builtin_tools {
             if self.allowed_tools.contains(tool.name()) {
                 seen_names.insert(tool.name().to_string());
-                out.push_str(&format!(
-                    "## {}\n{}\n\n",
-                    tool.name(),
-                    tool.def().description
-                ));
+                {
+                    use std::fmt::Write;
+                    let _ = write!(out, "## {}\n{}\n\n", tool.name(), tool.def().description);
+                }
             }
         }
         #[cfg(feature = "sub-agents")]
@@ -231,7 +230,10 @@ impl CompositeDispatcher {
                     wrote_external_header = true;
                 }
                 seen_names.insert(tool.name.clone());
-                out.push_str(&format!("## {}\n{}\n\n", tool.name, tool.description));
+                {
+                    use std::fmt::Write;
+                    let _ = write!(out, "## {}\n{}\n\n", tool.name, tool.description);
+                }
             }
         }
         out

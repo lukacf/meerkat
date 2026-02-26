@@ -157,8 +157,7 @@ async fn e2e_scenario_15_full_rpc_conversation_flow() {
     assert_eq!(init_resp["id"], 1);
     assert!(
         init_resp["error"].is_null(),
-        "initialize failed: {}",
-        init_resp
+        "initialize failed: {init_resp}"
     );
     assert_eq!(init_resp["result"]["server_info"]["name"], "meerkat-rpc");
 
@@ -180,8 +179,7 @@ async fn e2e_scenario_15_full_rpc_conversation_flow() {
     assert_eq!(create_resp["id"], 2);
     assert!(
         create_resp["error"].is_null(),
-        "session/create failed: {}",
-        create_resp
+        "session/create failed: {create_resp}"
     );
     let session_id = create_resp["result"]["session_id"]
         .as_str()
@@ -212,8 +210,7 @@ async fn e2e_scenario_15_full_rpc_conversation_flow() {
     assert_eq!(turn_resp["id"], 3);
     assert!(
         turn_resp["error"].is_null(),
-        "turn/start failed: {}",
-        turn_resp
+        "turn/start failed: {turn_resp}"
     );
     assert_eq!(
         turn_resp["result"]["session_id"].as_str().unwrap(),
@@ -222,13 +219,11 @@ async fn e2e_scenario_15_full_rpc_conversation_flow() {
     let turn_text = turn_resp["result"]["text"].as_str().unwrap().to_lowercase();
     assert!(
         turn_text.contains("smokebot") || turn_text.contains("smoke"),
-        "Follow-up should recall the name. Got: {}",
-        turn_text
+        "Follow-up should recall the name. Got: {turn_text}"
     );
     assert!(
         turn_text.contains("teal"),
-        "Follow-up should recall the color. Got: {}",
-        turn_text
+        "Follow-up should recall the color. Got: {turn_text}"
     );
 
     // 4. session/read
@@ -245,8 +240,7 @@ async fn e2e_scenario_15_full_rpc_conversation_flow() {
     assert_eq!(read_resp["id"], 4);
     assert!(
         read_resp["error"].is_null(),
-        "session/read failed: {}",
-        read_resp
+        "session/read failed: {read_resp}"
     );
     assert_eq!(
         read_resp["result"]["session_id"].as_str().unwrap(),
@@ -267,8 +261,7 @@ async fn e2e_scenario_15_full_rpc_conversation_flow() {
     assert_eq!(list_resp["id"], 5);
     assert!(
         list_resp["error"].is_null(),
-        "session/list failed: {}",
-        list_resp
+        "session/list failed: {list_resp}"
     );
     let sessions = list_resp["result"]["sessions"].as_array().unwrap();
     let ids: Vec<&str> = sessions
@@ -277,8 +270,7 @@ async fn e2e_scenario_15_full_rpc_conversation_flow() {
         .collect();
     assert!(
         ids.contains(&session_id.as_str()),
-        "Session should appear in list. Got: {:?}",
-        ids
+        "Session should appear in list. Got: {ids:?}"
     );
 
     // 6. session/archive
@@ -295,8 +287,7 @@ async fn e2e_scenario_15_full_rpc_conversation_flow() {
     assert_eq!(archive_resp["id"], 6);
     assert!(
         archive_resp["error"].is_null(),
-        "session/archive failed: {}",
-        archive_resp
+        "session/archive failed: {archive_resp}"
     );
     assert_eq!(archive_resp["result"]["archived"], true);
 
@@ -313,8 +304,7 @@ async fn e2e_scenario_15_full_rpc_conversation_flow() {
     assert_eq!(list_resp2["id"], 7);
     assert!(
         list_resp2["error"].is_null(),
-        "session/list (after archive) failed: {}",
-        list_resp2
+        "session/list (after archive) failed: {list_resp2}"
     );
     let sessions2 = list_resp2["result"]["sessions"].as_array().unwrap();
     let ids2: Vec<&str> = sessions2
@@ -323,8 +313,7 @@ async fn e2e_scenario_15_full_rpc_conversation_flow() {
         .collect();
     assert!(
         !ids2.contains(&session_id.as_str()),
-        "Archived session should NOT appear in list. Got: {:?}",
-        ids2
+        "Archived session should NOT appear in list. Got: {ids2:?}"
     );
 
     // Clean up
@@ -714,8 +703,7 @@ async fn e2e_scenario_17_multi_turn_event_streaming() {
     assert_eq!(init_resp["id"], 1);
     assert!(
         init_resp["error"].is_null(),
-        "initialize failed: {}",
-        init_resp
+        "initialize failed: {init_resp}"
     );
 
     // 2. session/create - collect notifications emitted during the turn
@@ -737,8 +725,7 @@ async fn e2e_scenario_17_multi_turn_event_streaming() {
     assert_eq!(create_resp["id"], 2);
     assert!(
         create_resp["error"].is_null(),
-        "session/create failed: {}",
-        create_resp
+        "session/create failed: {create_resp}"
     );
     let session_id = create_resp["result"]["session_id"]
         .as_str()
@@ -754,8 +741,7 @@ async fn e2e_scenario_17_multi_turn_event_streaming() {
         // Notifications have "method" but no "id"
         assert!(
             notif.get("id").is_none(),
-            "Notifications should not have an id field: {}",
-            notif
+            "Notifications should not have an id field: {notif}"
         );
         assert_eq!(
             notif["method"].as_str().unwrap(),
@@ -765,8 +751,7 @@ async fn e2e_scenario_17_multi_turn_event_streaming() {
         let params = &notif["params"];
         assert!(
             params["session_id"].is_string(),
-            "Notification should have session_id: {}",
-            notif
+            "Notification should have session_id: {notif}"
         );
         assert_eq!(
             params["session_id"].as_str().unwrap(),
@@ -775,8 +760,7 @@ async fn e2e_scenario_17_multi_turn_event_streaming() {
         );
         assert!(
             params["event"].is_object(),
-            "Notification should have event payload: {}",
-            notif
+            "Notification should have event payload: {notif}"
         );
     }
 
@@ -798,8 +782,7 @@ async fn e2e_scenario_17_multi_turn_event_streaming() {
     assert_eq!(turn_resp["id"], 3);
     assert!(
         turn_resp["error"].is_null(),
-        "turn/start failed: {}",
-        turn_resp
+        "turn/start failed: {turn_resp}"
     );
     assert_eq!(
         turn_resp["result"]["session_id"].as_str().unwrap(),
@@ -810,8 +793,7 @@ async fn e2e_scenario_17_multi_turn_event_streaming() {
     let turn_text = turn_resp["result"]["text"].as_str().unwrap().to_lowercase();
     assert!(
         turn_text.contains("meerkat-sunrise-42") || turn_text.contains("meerkat sunrise 42"),
-        "Follow-up should recall the passphrase. Got: {}",
-        turn_text
+        "Follow-up should recall the passphrase. Got: {turn_text}"
     );
 
     // Verify notifications from the second turn

@@ -94,7 +94,7 @@ mod tests {
                 assert_eq!(body, "hello");
                 assert_eq!(*source, PlainEventSource::Tcp);
             }
-            other => panic!("Expected PlainEvent, got {:?}", other),
+            other => panic!("Expected PlainEvent, got {other:?}"),
         }
     }
 
@@ -118,7 +118,7 @@ mod tests {
             InboxItem::PlainEvent { body, .. } => {
                 assert_eq!(body, "plain text");
             }
-            other => panic!("Expected PlainEvent, got {:?}", other),
+            other => panic!("Expected PlainEvent, got {other:?}"),
         }
     }
 
@@ -230,7 +230,7 @@ mod tests {
             InboxItem::PlainEvent { source, .. } => {
                 assert_eq!(*source, PlainEventSource::Stdin);
             }
-            other => panic!("Expected PlainEvent, got {:?}", other),
+            other => panic!("Expected PlainEvent, got {other:?}"),
         }
     }
 }

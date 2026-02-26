@@ -234,7 +234,7 @@ mod tests {
 
     #[tokio::test]
     async fn source_node_external_dispatches_through_bounded_external_client() {
-        let response_script = r##"
+        let response_script = r#"
 read line
 if echo "$line" | grep -q '"method":"capabilities/get"'; then
   echo '{"jsonrpc":"2.0","id":"1","payload":{"method":"capabilities/get","result":{"protocol_version":1,"methods":["skills/list_summaries","skills/load_package"]}}}'
@@ -243,7 +243,7 @@ elif echo "$line" | grep -q '"method":"skills/list_summaries"'; then
 elif echo "$line" | grep -q '"method":"skills/load_package"'; then
   echo '{"jsonrpc":"2.0","id":"1","payload":{"method":"skills/load_package","result":{"package":{"summary":{"source_uuid":"ext-src","skill_name":"external-skill","description":"external"},"body":"external body"}}}}'
 fi
-"##;
+"#;
         let client = StdioExternalClient::new(
             "sh",
             vec!["-c".to_string(), response_script.to_string()],

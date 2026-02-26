@@ -109,7 +109,7 @@ mod tests {
 
         // Properties should be empty
         let props = schema.get("properties").unwrap();
-        assert!(props.as_object().is_none_or(|o| o.is_empty()));
+        assert!(props.as_object().is_none_or(serde_json::Map::is_empty));
 
         // Should have empty required fields array
         assert_eq!(schema["required"], serde_json::json!([]));

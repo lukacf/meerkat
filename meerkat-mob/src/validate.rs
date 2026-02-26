@@ -168,7 +168,7 @@ pub fn validate_definition(def: &MobDefinition) -> Vec<Diagnostic> {
             if !def.skills.contains_key(skill_ref) {
                 diagnostics.push(Diagnostic {
                     code: DiagnosticCode::MissingSkillRef,
-                    message: format!("skill '{}' is not defined", skill_ref),
+                    message: format!("skill '{skill_ref}' is not defined"),
                     location: Some(format!("profiles.{}.skills[{}]", name.as_str(), i)),
                     severity: DiagnosticSeverity::Error,
                 });
@@ -180,7 +180,7 @@ pub fn validate_definition(def: &MobDefinition) -> Vec<Diagnostic> {
             if !def.mcp_servers.contains_key(mcp_ref) {
                 diagnostics.push(Diagnostic {
                     code: DiagnosticCode::MissingMcpRef,
-                    message: format!("MCP server '{}' is not defined", mcp_ref),
+                    message: format!("MCP server '{mcp_ref}' is not defined"),
                     location: Some(format!("profiles.{}.tools.mcp[{}]", name.as_str(), i)),
                     severity: DiagnosticSeverity::Error,
                 });
@@ -215,7 +215,7 @@ pub fn validate_definition(def: &MobDefinition) -> Vec<Diagnostic> {
                     "wiring rule references non-existent profile '{}'",
                     rule.a.as_str()
                 ),
-                location: Some(format!("wiring.role_wiring[{}].a", i)),
+                location: Some(format!("wiring.role_wiring[{i}].a")),
                 severity: DiagnosticSeverity::Error,
             });
         }
@@ -226,7 +226,7 @@ pub fn validate_definition(def: &MobDefinition) -> Vec<Diagnostic> {
                     "wiring rule references non-existent profile '{}'",
                     rule.b.as_str()
                 ),
-                location: Some(format!("wiring.role_wiring[{}].b", i)),
+                location: Some(format!("wiring.role_wiring[{i}].b")),
                 severity: DiagnosticSeverity::Error,
             });
         }
@@ -252,7 +252,7 @@ pub fn validate_definition(def: &MobDefinition) -> Vec<Diagnostic> {
                     message: "backend.external.address_base must not be empty".to_string(),
                     location: Some("backend.external.address_base".to_string()),
                     severity: DiagnosticSeverity::Error,
-                })
+                });
             }
             Some(_) => {}
         }
@@ -363,7 +363,7 @@ mod tests {
     #[test]
     fn test_valid_definition_passes() {
         let diagnostics = validate_definition(&valid_definition());
-        assert!(diagnostics.is_empty(), "unexpected: {:?}", diagnostics);
+        assert!(diagnostics.is_empty(), "unexpected: {diagnostics:?}");
     }
 
     #[test]

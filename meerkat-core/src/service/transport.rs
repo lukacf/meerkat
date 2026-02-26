@@ -22,12 +22,9 @@ pub fn jsonrpc_code(err: &SessionError) -> i64 {
 pub fn http_status(err: &SessionError) -> u16 {
     match err {
         SessionError::NotFound { .. } => 404,
-        SessionError::Busy { .. } => 409,
-        SessionError::PersistenceDisabled => 501,
-        SessionError::CompactionDisabled => 501,
-        SessionError::NotRunning { .. } => 409,
-        SessionError::Store(_) => 500,
-        SessionError::Agent(_) => 500,
+        SessionError::Busy { .. } | SessionError::NotRunning { .. } => 409,
+        SessionError::PersistenceDisabled | SessionError::CompactionDisabled => 501,
+        SessionError::Store(_) | SessionError::Agent(_) => 500,
     }
 }
 

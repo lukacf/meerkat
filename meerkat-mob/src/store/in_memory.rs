@@ -211,8 +211,7 @@ impl MobRunStore for InMemoryMobRunStore {
             return Ok(());
         }
         Err(MobError::Internal(format!(
-            "cannot set output for unknown step '{}' in run '{}'",
-            step_id, run_id
+            "cannot set output for unknown step '{step_id}' in run '{run_id}'"
         )))
     }
 
@@ -398,7 +397,7 @@ mod tests {
         let outcomes = join_all(tasks).await;
         let wins = outcomes
             .into_iter()
-            .filter_map(|result| result.ok())
+            .filter_map(std::result::Result::ok)
             .filter(|cas_result| *cas_result)
             .count();
         assert_eq!(wins, 1);

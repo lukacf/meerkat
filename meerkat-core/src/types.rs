@@ -113,8 +113,8 @@ impl PartialEq for AssistantBlock {
             (
                 AssistantBlock::Text { text: t1, meta: m1 },
                 AssistantBlock::Text { text: t2, meta: m2 },
-            ) => t1 == t2 && m1 == m2,
-            (
+            )
+            | (
                 AssistantBlock::Reasoning { text: t1, meta: m1 },
                 AssistantBlock::Reasoning { text: t2, meta: m2 },
             ) => t1 == t2 && m1 == m2,
@@ -165,11 +165,8 @@ impl<'a> Iterator for ToolCallIter<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            match self.inner.next()? {
-                AssistantBlock::ToolUse { id, name, args, .. } => {
-                    return Some(ToolCallView { id, name, args });
-                }
-                _ => continue,
+            if let AssistantBlock::ToolUse { id, name, args, .. } = self.inner.next()? {
+                return Some(ToolCallView { id, name, args });
             }
         }
     }

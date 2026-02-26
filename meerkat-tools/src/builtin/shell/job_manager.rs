@@ -35,7 +35,7 @@ async fn graceful_kill(child: &mut Child) -> std::io::Result<()> {
 
         // Wait up to 2 seconds for graceful exit
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(2)) => {
+            () = tokio::time::sleep(Duration::from_secs(2)) => {
                 // Still running, force kill the process group
                 let _ = killpg(pgid, Signal::SIGKILL);
                 // Wait for the process to be reaped
@@ -348,7 +348,7 @@ impl JobManager {
             }
 
             let wait_outcome = tokio::select! {
-                _ = cancel_notify.notified() => WaitOutcome::Cancelled,
+                () = cancel_notify.notified() => WaitOutcome::Cancelled,
                 result = tokio::time::timeout(timeout_duration, child.wait()) => {
                     match result {
                         Ok(Ok(status)) => WaitOutcome::Completed(status.code()),
@@ -835,8 +835,7 @@ mod tests {
         // Should return almost immediately (less than 1 second)
         assert!(
             elapsed.as_millis() < 1000,
-            "spawn_job should return immediately, took {:?}",
-            elapsed
+            "spawn_job should return immediately, took {elapsed:?}"
         );
 
         // Job should exist
@@ -1267,8 +1266,7 @@ mod tests {
         // All spawns should complete in under 1 second (non-blocking)
         assert!(
             elapsed.as_millis() < 1000,
-            "Spawning 3 jobs should be nearly instant, took {:?}",
-            elapsed
+            "Spawning 3 jobs should be nearly instant, took {elapsed:?}"
         );
 
         // Verify all jobs are running
@@ -1276,8 +1274,7 @@ mod tests {
             let job = manager.get_status(id).await.unwrap();
             assert!(
                 matches!(job.status, JobStatus::Running { .. }),
-                "Job {} should be running",
-                id
+                "Job {id} should be running"
             );
         }
 
@@ -1319,8 +1316,7 @@ mod tests {
         if let JobStatus::TimedOut { duration_secs, .. } = &job.status {
             assert!(
                 *duration_secs >= 1.0 && *duration_secs < 3.0,
-                "Duration should be close to timeout: {}",
-                duration_secs
+                "Duration should be close to timeout: {duration_secs}"
             );
         }
     }
@@ -1392,7 +1388,7 @@ mod tests {
         let mut handles = Vec::new();
         for i in 0..10 {
             let mgr = Arc::clone(&manager);
-            let cmd = format!("echo job{}", i);
+            let cmd = format!("echo job{i}");
             handles.push(tokio::spawn(
                 async move { mgr.spawn_job(&cmd, None, 30).await },
             ));
@@ -1415,8 +1411,7 @@ mod tests {
         };
         assert_eq!(
             unique_count, 10,
-            "All 10 jobs should have unique IDs, got {}",
-            unique_count
+            "All 10 jobs should have unique IDs, got {unique_count}"
         );
 
         // Verify all jobs complete
@@ -1531,7 +1526,7 @@ mod tests {
         // Spawn 5 jobs and wait for them to complete
         for i in 0..5 {
             let _ = manager
-                .spawn_job(&format!("echo job{}", i), None, 30)
+                .spawn_job(&format!("echo job{i}"), None, 30)
                 .await
                 .unwrap();
         }
@@ -1547,8 +1542,7 @@ mod tests {
         let completed_after = manager.completed_job_count().await;
         assert!(
             completed_after <= 3,
-            "Should have at most 3 completed jobs after cleanup, got {}",
-            completed_after
+            "Should have at most 3 completed jobs after cleanup, got {completed_after}"
         );
 
         // The new job should still be running (not counted in completed)
@@ -1711,8 +1705,7 @@ mod tests {
         {
             assert!(
                 stdout.contains("hello"),
-                "stdout should contain 'hello', got: {}",
-                stdout
+                "stdout should contain 'hello', got: {stdout}"
             );
             assert_eq!(*exit_code, Some(0), "exit code should be 0");
         }
@@ -1853,8 +1846,7 @@ mod tests {
         if let Err(err) = &failures[0] {
             assert!(
                 matches!(err, ShellError::JobNotRunning),
-                "Expected JobNotRunning error, got: {:?}",
-                err
+                "Expected JobNotRunning error, got: {err:?}"
             );
         }
     }
@@ -1883,7 +1875,7 @@ mod tests {
 
         // graceful_kill should complete without panicking
         let result = super::graceful_kill(&mut child).await;
-        assert!(result.is_ok(), "graceful_kill should succeed: {:?}", result);
+        assert!(result.is_ok(), "graceful_kill should succeed: {result:?}");
     }
 
     /// Regression test for Task #7: Single write lock for cleanup
@@ -1906,7 +1898,7 @@ mod tests {
         // Spawn and complete several jobs
         for i in 0..5 {
             let _id = manager
-                .spawn_job(&format!("echo job{}", i), None, 30)
+                .spawn_job(&format!("echo job{i}"), None, 30)
                 .await
                 .unwrap();
         }
@@ -1919,14 +1911,14 @@ mod tests {
         for i in 0..5 {
             let mgr = Arc::clone(&manager);
             handles.push(tokio::spawn(async move {
-                mgr.spawn_job(&format!("echo trigger{}", i), None, 30).await
+                mgr.spawn_job(&format!("echo trigger{i}"), None, 30).await
             }));
         }
 
         // All spawns should succeed (cleanup is atomic, no race-induced panics)
         for handle in handles {
             let result = handle.await.expect("Task should not panic");
-            assert!(result.is_ok(), "Spawn should succeed: {:?}", result);
+            assert!(result.is_ok(), "Spawn should succeed: {result:?}");
         }
 
         // After cleanup, we should be at or under max_completed_jobs
@@ -1934,8 +1926,7 @@ mod tests {
         let count = manager.job_count().await;
         assert!(
             count <= 12, // 5 original completed (some cleaned up) + 5 new triggers
-            "Job count should be reasonable after cleanup: {}",
-            count
+            "Job count should be reasonable after cleanup: {count}"
         );
     }
 
@@ -2024,16 +2015,14 @@ mod tests {
         let result = String::from_utf8(buffer.clone());
         assert!(
             result.is_ok(),
-            "Buffer should be valid UTF-8 after truncation: {:?}",
-            buffer
+            "Buffer should be valid UTF-8 after truncation: {buffer:?}"
         );
 
         // Should contain data from the tail
         let result_str = result.unwrap();
         assert!(
             result_str.contains("Test") || result_str.contains("据"),
-            "Should contain tail data: {}",
-            result_str
+            "Should contain tail data: {result_str}"
         );
     }
 
@@ -2091,8 +2080,7 @@ mod tests {
         let err = result.unwrap_err();
         assert!(
             err.to_string().contains("Concurrency limit exceeded"),
-            "Expected concurrency limit error, got: {:?}",
-            err
+            "Expected concurrency limit error, got: {err:?}"
         );
 
         let _ = manager.cancel_job(&job1).await;
@@ -2270,11 +2258,8 @@ mod tests {
         // The critical assertion: max concurrent slots should never exceed limit
         assert!(
             final_max <= 2,
-            "TOCTOU race detected! Max concurrent slots was {}, limit is 2. \
-             Successes: {}, Failures: {}",
-            final_max,
-            total_successes,
-            total_failures
+            "TOCTOU race detected! Max concurrent slots was {final_max}, limit is 2. \
+             Successes: {total_successes}, Failures: {total_failures}"
         );
 
         // Sanity check: all tasks completed
@@ -2366,9 +2351,7 @@ mod tests {
             let final_max = max_observed.load(Ordering::SeqCst);
             assert!(
                 final_max <= 2,
-                "TOCTOU race on iteration {}! Max concurrent was {}, limit is 2",
-                iteration,
-                final_max
+                "TOCTOU race on iteration {iteration}! Max concurrent was {final_max}, limit is 2"
             );
         }
     }

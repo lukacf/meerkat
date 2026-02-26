@@ -16,7 +16,7 @@ fn truncate_str(s: &str, max_chars: usize) -> String {
     let chars: Vec<char> = s.chars().collect();
     if chars.len() > max_chars {
         let truncated: String = chars[..max_chars.saturating_sub(3)].iter().collect();
-        format!("{}...", truncated)
+        format!("{truncated}...")
     } else {
         s.to_string()
     }
@@ -30,7 +30,7 @@ fn mask_secret(s: &str) -> String {
     } else {
         let prefix: String = chars[..2].iter().collect();
         let suffix: String = chars[chars.len() - 2..].iter().collect();
-        format!("{}...{}", prefix, suffix)
+        format!("{prefix}...{suffix}")
     }
 }
 
@@ -78,11 +78,7 @@ pub async fn add_server(
     // Check if server already exists in this scope
     if McpConfig::server_exists(&name, scope).await? {
         anyhow::bail!(
-            "MCP server '{}' already exists in {} scope. Remove it first with: rkat mcp remove {} --scope {}",
-            name,
-            scope,
-            name,
-            scope
+            "MCP server '{name}' already exists in {scope} scope. Remove it first with: rkat mcp remove {name} --scope {scope}"
         );
     }
 
@@ -160,7 +156,7 @@ pub async fn add_server(
         let server = server.clone();
         tokio::task::spawn_blocking(move || add_server_to_file(&path, &server))
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to update mcp.toml: {}", e))??;
+            .map_err(|e| anyhow::anyhow!("Failed to update mcp.toml: {e}"))??;
     }
 
     let (kind, target) = format_server_target(&server);
@@ -182,8 +178,7 @@ fn parse_env_vars(env: &[String]) -> anyhow::Result<HashMap<String, String>> {
         let parts: Vec<&str> = e.splitn(2, '=').collect();
         if parts.len() != 2 {
             anyhow::bail!(
-                "Invalid environment variable format: '{}'. Expected KEY=VALUE",
-                e
+                "Invalid environment variable format: '{e}'. Expected KEY=VALUE"
             );
         }
         env_map.insert(parts[0].to_string(), parts[1].to_string());
@@ -197,7 +192,7 @@ fn parse_headers(headers: &[String]) -> anyhow::Result<HashMap<String, String>> 
     for h in headers {
         let parts: Vec<&str> = h.splitn(2, ':').collect();
         if parts.len() != 2 {
-            anyhow::bail!("Invalid header format: '{}'. Expected KEY:VALUE", h);
+            anyhow::bail!("Invalid header format: '{h}'. Expected KEY:VALUE");
         }
         header_map.insert(parts[0].trim().to_string(), parts[1].trim().to_string());
     }
@@ -210,14 +205,14 @@ pub async fn remove_server(name: String, scope: Option<McpScope>) -> anyhow::Res
     let scopes = McpConfig::find_server_scopes(&name).await?;
 
     if scopes.is_empty() {
-        anyhow::bail!("MCP server '{}' not found", name);
+        anyhow::bail!("MCP server '{name}' not found");
     }
 
     // If scope not specified and exists in multiple, error
     let target_scope = match scope {
         Some(s) => {
             if !scopes.contains(&s) {
-                anyhow::bail!("MCP server '{}' not found in {} scope", name, s);
+                anyhow::bail!("MCP server '{name}' not found in {s} scope");
             }
             s
         }
@@ -226,7 +221,7 @@ pub async fn remove_server(name: String, scope: Option<McpScope>) -> anyhow::Res
                 anyhow::bail!(
                     "MCP server '{}' exists in multiple scopes: {:?}. Specify --scope to remove from a specific scope.",
                     name,
-                    scopes.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+                    scopes.iter().map(std::string::ToString::to_string).collect::<Vec<_>>()
                 );
             }
             scopes[0]
@@ -249,7 +244,7 @@ pub async fn remove_server(name: String, scope: Option<McpScope>) -> anyhow::Res
         let name = name.clone();
         tokio::task::spawn_blocking(move || remove_server_from_file(&path, &name))
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to update mcp.toml: {}", e))??;
+            .map_err(|e| anyhow::anyhow!("Failed to update mcp.toml: {e}"))??;
     }
 
     println!(
@@ -350,7 +345,7 @@ pub async fn get_server(
     };
 
     if servers.is_empty() {
-        anyhow::bail!("MCP server '{}' not found", name);
+        anyhow::bail!("MCP server '{name}' not found");
     }
 
     let server = &servers[0];
@@ -399,7 +394,7 @@ pub async fn get_server(
                         } else {
                             v.clone()
                         };
-                        println!("  {}={}", k, display_value);
+                        println!("  {k}={display_value}");
                     }
                 }
             }
@@ -408,7 +403,7 @@ pub async fn get_server(
                     McpTransportKind::Sse => "sse",
                     _ => "streamable-http",
                 };
-                println!("Transport: {}", transport);
+                println!("Transport: {transport}");
                 println!("URL:       {}", http.url);
                 if !http.headers.is_empty() {
                     println!("Headers:");
@@ -422,7 +417,7 @@ pub async fn get_server(
                         } else {
                             v.clone()
                         };
-                        println!("  {}: {}", k, display_value);
+                        println!("  {k}: {display_value}");
                     }
                 }
             }
@@ -545,7 +540,7 @@ mod tests {
         McpServerConfig::stdio(
             name,
             cmd,
-            args.into_iter().map(|s| s.to_string()).collect(),
+            args.into_iter().map(std::string::ToString::to_string).collect(),
             HashMap::new(),
         )
     }

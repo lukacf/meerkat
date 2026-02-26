@@ -43,7 +43,7 @@ impl ReqwestStreamableHttpClient {
     }
 
     fn apply_headers(&self, mut builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        for (name, value) in self.headers.iter() {
+        for (name, value) in &self.headers {
             builder = builder.header(name, value);
         }
         builder
@@ -179,7 +179,7 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
         let session_id = response.headers().get(HEADER_SESSION_ID);
         let session_id = session_id
             .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
+            .map(std::string::ToString::to_string);
         match content_type {
             Some(ct) if ct.as_bytes().starts_with(EVENT_STREAM_MIME_TYPE.as_bytes()) => {
                 let event_stream = SseStream::from_byte_stream(response.bytes_stream()).boxed();

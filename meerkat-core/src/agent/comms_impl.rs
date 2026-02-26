@@ -437,8 +437,8 @@ where
             }
 
             tokio::select! {
-                _ = notified => {}
-                _ = tokio::time::sleep(timeout) => {
+                () = notified => {}
+                () = tokio::time::sleep(timeout) => {
                     tracing::trace!("Host mode: timeout, checking budget");
                 }
             }
@@ -572,8 +572,7 @@ where
             if !self.peer_notification_suppression_active {
                 self.peer_notification_suppression_active = true;
                 return Some(format!(
-                    "[PEER UPDATE] Peer updates suppressed at current scale ({} peers). Use peers() to inspect peers.",
-                    peer_count
+                    "[PEER UPDATE] Peer updates suppressed at current scale ({peer_count} peers). Use peers() to inspect peers."
                 ));
             }
             return None;
@@ -584,8 +583,7 @@ where
         let summary = render_peer_update_summary(batch)?;
         if resumed {
             return Some(format!(
-                "[PEER UPDATE] Peer updates resumed at current scale ({} peers).\n{}",
-                peer_count, summary
+                "[PEER UPDATE] Peer updates resumed at current scale ({peer_count} peers).\n{summary}"
             ));
         }
         Some(summary)
@@ -965,7 +963,7 @@ mod tests {
                 assert!(user.content.contains("Hello from peer"));
                 assert!(user.content.contains("Another message"));
             }
-            _ => panic!("Expected User message, got {:?}", last),
+            _ => panic!("Expected User message, got {last:?}"),
         }
     }
 
@@ -1261,8 +1259,7 @@ mod tests {
             .find(|e| matches!(e, AgentEvent::InteractionComplete { .. }));
         assert!(
             terminal.is_some(),
-            "Expected InteractionComplete, got events: {:?}",
-            sub_events
+            "Expected InteractionComplete, got events: {sub_events:?}"
         );
 
         match terminal.unwrap() {
@@ -1444,8 +1441,7 @@ mod tests {
                 assert_eq!(id, interaction_id);
                 assert!(
                     error.contains("forced failure"),
-                    "unexpected error payload: {}",
-                    error
+                    "unexpected error payload: {error}"
                 );
                 saw_failed = true;
                 break;

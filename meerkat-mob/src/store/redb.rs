@@ -106,8 +106,7 @@ impl MobEventStore for RedbMobEventStore {
                 let cursor = meta
                     .get(EVENT_CURSOR_KEY)
                     .map_err(storage_error)?
-                    .map(|value| value.value())
-                    .unwrap_or(1);
+                    .map_or(1, |value| value.value());
                 meta.insert(EVENT_CURSOR_KEY, cursor.saturating_add(1))
                     .map_err(storage_error)?;
                 cursor
@@ -148,8 +147,7 @@ impl MobEventStore for RedbMobEventStore {
                 let mut cursor = meta
                     .get(EVENT_CURSOR_KEY)
                     .map_err(storage_error)?
-                    .map(|value| value.value())
-                    .unwrap_or(1);
+                    .map_or(1, |value| value.value());
 
                 for event in batch {
                     let stored = MobEvent {
@@ -524,8 +522,7 @@ impl MobRunStore for RedbMobRunStore {
                     entry.output = Some(output);
                 } else {
                     return Err(MobError::Internal(format!(
-                        "cannot set output for unknown step '{}' in run '{}'",
-                        step_id, run_id
+                        "cannot set output for unknown step '{step_id}' in run '{run_id}'"
                     )));
                 }
 

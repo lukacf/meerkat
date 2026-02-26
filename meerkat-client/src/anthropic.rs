@@ -315,7 +315,7 @@ impl AnthropicClient {
                 if thinking.get("type").and_then(|t| t.as_str()) == Some("adaptive") {
                     // Opus 4.6 adaptive thinking — pass through directly
                     body["thinking"] = serde_json::json!({"type": "adaptive"});
-                } else if let Some(budget) = thinking.get("budget_tokens").and_then(|v| v.as_u64())
+                } else if let Some(budget) = thinking.get("budget_tokens").and_then(serde_json::Value::as_u64)
                 {
                     // Explicit enabled format with budget
                     body["thinking"] = serde_json::json!({
@@ -323,7 +323,7 @@ impl AnthropicClient {
                         "budget_tokens": budget
                     });
                 }
-            } else if let Some(budget) = params.get("thinking_budget").and_then(|v| v.as_u64()) {
+            } else if let Some(budget) = params.get("thinking_budget").and_then(serde_json::Value::as_u64) {
                 // Legacy flat format
                 body["thinking"] = serde_json::json!({
                     "type": "enabled",
@@ -423,11 +423,11 @@ impl AnthropicClient {
 
     fn map_stop_reason(reason: &str) -> StopReason {
         match reason {
-            "end_turn" => StopReason::EndTurn,
             "tool_use" => StopReason::ToolUse,
             "max_tokens" => StopReason::MaxTokens,
             "stop_sequence" => StopReason::StopSequence,
             "content_filter" => StopReason::ContentFilter,
+            // "end_turn" and any unrecognized reason default to EndTurn
             _ => StopReason::EndTurn,
         }
     }
@@ -1237,7 +1237,7 @@ mod tests {
 
     #[test]
     fn test_parse_sse_line() {
-        let line = r###"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"###;
+        let line = r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#;
         let event = AnthropicClient::parse_sse_line(line);
         assert!(event.is_some());
         assert_eq!(event.unwrap().event_type, "content_block_delta");
@@ -1601,7 +1601,7 @@ mod tests {
         );
         request.provider_params = Some(serde_json::json!({
             "compaction": {
-                "trigger": {"type": "input_tokens", "value": 100000}
+                "trigger": {"type": "input_tokens", "value": 100_000}
             }
         }));
 
@@ -1609,7 +1609,7 @@ mod tests {
 
         let edits = body["context_management"]["edits"].as_array().unwrap();
         assert_eq!(edits[0]["type"], "compact_20260112");
-        assert_eq!(edits[0]["trigger"]["value"], 100000);
+        assert_eq!(edits[0]["trigger"]["value"], 100_000);
         Ok(())
     }
 
@@ -1728,7 +1728,7 @@ mod tests {
         let handle = tokio::spawn(async move {
             axum::serve(listener, app).await.expect("serve test server");
         });
-        (format!("http://{}", addr), handle)
+        (format!("http://{addr}"), handle)
     }
 
     /// Regression: message_delta with stop_reason (no "type" in delta) must yield Done.

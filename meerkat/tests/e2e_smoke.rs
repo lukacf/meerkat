@@ -198,7 +198,7 @@ impl<S: SessionStore + 'static> AgentSessionStore for SessionStoreAdapter<S> {
 
     async fn load(&self, id: &str) -> Result<Option<Session>, AgentError> {
         let session_id = SessionId::parse(id)
-            .map_err(|e| AgentError::StoreError(format!("Invalid session ID: {}", e)))?;
+            .map_err(|e| AgentError::StoreError(format!("Invalid session ID: {e}")))?;
 
         self.store
             .load(&session_id)
@@ -322,7 +322,7 @@ mod scenario_01_multi_provider {
         #[cfg(feature = "openai")]
         if let Some(_api_key) = openai_api_key() {
             let openai_model = "gpt-5.2".to_string();
-            eprintln!("[scenario 1] Testing OpenAI with model {}", openai_model);
+            eprintln!("[scenario 1] Testing OpenAI with model {openai_model}");
             let temp_dir = TempDir::new().unwrap();
             let factory = AgentFactory::new(temp_dir.path().join("sessions"));
             let config = Config::default();
@@ -358,7 +358,7 @@ mod scenario_01_multi_provider {
         #[cfg(feature = "gemini")]
         if let Some(_api_key) = gemini_api_key() {
             let gemini_model = "gemini-3-flash-preview".to_string();
-            eprintln!("[scenario 1] Testing Gemini with model {}", gemini_model);
+            eprintln!("[scenario 1] Testing Gemini with model {gemini_model}");
             let temp_dir = TempDir::new().unwrap();
             let factory = AgentFactory::new(temp_dir.path().join("sessions"));
             let config = Config::default();
@@ -557,18 +557,16 @@ mod scenario_03_structured_output {
             .get("files")
             .and_then(|f| f.as_array())
             .expect("Structured output must have a 'files' array");
-        assert!(!files.is_empty(), "Files array must not be empty: {:?}", so);
+        assert!(!files.is_empty(), "Files array must not be empty: {so:?}");
 
         for file in files {
             assert!(
                 file.get("name").is_some(),
-                "Each file must have a 'name' field: {:?}",
-                file
+                "Each file must have a 'name' field: {file:?}"
             );
             assert!(
                 file.get("size").is_some(),
-                "Each file must have a 'size' field: {:?}",
-                file
+                "Each file must have a 'size' field: {file:?}"
             );
         }
         eprintln!(
@@ -860,7 +858,7 @@ mod scenario_06_hooks {
                         Ok(RuntimeHookResponse {
                             decision: None,
                             patches: vec![HookPatch::AssistantText {
-                                text: format!("{} [REVIEWED]", original_text),
+                                text: format!("{original_text} [REVIEWED]"),
                             }],
                         })
                     })
@@ -992,7 +990,7 @@ mod scenario_07_session_resume {
 
             eprintln!("[scenario 7] Phase 2: {}", result.text.trim());
             assert!(
-                result.text.contains("ALPHA") || result.text.contains("7"),
+                result.text.contains("ALPHA") || result.text.contains('7'),
                 "Resumed agent should remember the secret code: {}",
                 result.text
             );
@@ -1049,7 +1047,7 @@ mod scenario_08_comms {
             peers: vec![TrustedPeer {
                 name: "agent-b".to_string(),
                 pubkey: pubkey_b,
-                addr: format!("tcp://{}", addr_b),
+                addr: format!("tcp://{addr_b}"),
                 meta: meerkat_comms::PeerMeta::default(),
             }],
         };
@@ -1058,7 +1056,7 @@ mod scenario_08_comms {
             peers: vec![TrustedPeer {
                 name: "agent-a".to_string(),
                 pubkey: pubkey_a,
-                addr: format!("tcp://{}", addr_a),
+                addr: format!("tcp://{addr_a}"),
                 meta: meerkat_comms::PeerMeta::default(),
             }],
         };
@@ -1302,7 +1300,7 @@ mod scenario_09_session_service {
             .archive(&session_id)
             .await
             .expect("archive should succeed");
-        eprintln!("[scenario 9] Archived session {}", session_id);
+        eprintln!("[scenario 9] Archived session {session_id}");
 
         // 6. List again (verify absent)
         let summaries_after = service

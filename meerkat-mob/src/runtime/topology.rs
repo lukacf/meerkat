@@ -25,14 +25,13 @@ pub fn evaluate_topology(
         .rfind(|rule| {
             role_matches(&rule.from_role, from_role) && role_matches(&rule.to_role, to_role)
         })
-        .map(|rule| {
+        .map_or(PolicyDecision::Allow, |rule| {
             if rule.allowed {
                 PolicyDecision::Allow
             } else {
                 PolicyDecision::Deny
             }
         })
-        .unwrap_or(PolicyDecision::Allow)
 }
 
 fn role_matches(rule_role: &ProfileName, actual_role: &ProfileName) -> bool {

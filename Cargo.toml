@@ -129,7 +129,12 @@ meerkat-mob-mcp = { version = "0.4.0", path = "meerkat-mob-mcp" }
 unsafe_code = "forbid"
 
 [workspace.lints.clippy]
+# ── Lint groups (pedantic is the main "paranoid" level) ──────────────
 all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+
+# ── Hard denies (these are bugs, not style) ─────────────────────────
 panic = "deny"
 unwrap_used = "deny"
 expect_used = "deny"
@@ -137,20 +142,62 @@ mutex_integer = "deny"
 mutex_atomic = "deny"
 redundant_clone = "deny"
 implicit_clone = "deny"
-# Allow patterns common in development
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+print_stdout = "allow"
+print_stderr = "allow"
+
+# ── Pedantic allows (noisy or inapplicable) ─────────────────────────
 module_name_repetitions = "allow"
 must_use_candidate = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
+missing_docs_in_private_items = "allow"
 return_self_not_must_use = "allow"
 manual_string_new = "allow"
 cast_sign_loss = "allow"
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_lossless = "allow"
+cast_possible_wrap = "allow"
+missing_fields_in_debug = "allow"
+unreadable_literal = "allow"
 float_cmp = "allow"
 single_match_else = "allow"
 similar_names = "allow"
 doc_markdown = "allow"
 match_bool = "allow"
 items_after_statements = "allow"
+too_many_lines = "allow"
+wildcard_imports = "allow"
+struct_excessive_bools = "allow"
+fn_params_excessive_bools = "allow"
+needless_pass_by_value = "allow"
+needless_continue = "allow"
+trivially_copy_pass_by_ref = "allow"
+unnecessary_wraps = "allow"
+unused_self = "allow"
+used_underscore_binding = "allow"
+struct_field_names = "allow"
+doc_link_with_quotes = "allow"
+missing_const_for_fn = "allow"
+default_trait_access = "allow"
+let_underscore_untyped = "allow"
+allow_attributes_without_reason = "allow"
+ignore_without_reason = "allow"
+manual_let_else = "allow"
+unused_async = "allow"
+assigning_clones = "allow"
+format_push_string = "allow"
+match_same_arms = "allow"
+match_wildcard_for_single_variants = "allow"
+map_unwrap_or = "allow"
+case_sensitive_file_extension_comparisons = "allow"
+ref_option = "allow"
+# Cargo
+multiple_crate_versions = "allow"
+cargo_common_metadata = "allow"
 
 [workspace.metadata.release]
 shared-version = true

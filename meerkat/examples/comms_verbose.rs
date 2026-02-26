@@ -73,7 +73,7 @@ impl AgentLlmClient for LoggingLlmAdapter {
         for msg in messages.iter().rev() {
             if let Message::User(u) = msg {
                 let preview: String = u.content.chars().take(150).collect();
-                println!("║ Last user message: {}...", preview);
+                println!("║ Last user message: {preview}...");
                 break;
             }
         }
@@ -119,7 +119,7 @@ impl AgentLlmClient for LoggingLlmAdapter {
                         buffer.args_json.push_str(&args_delta);
                     }
                     LlmEvent::ToolCallComplete { id, name, args, .. } => {
-                        println!("\n┌─── LLM REQUESTED TOOL: {} ───┐", name);
+                        println!("\n┌─── LLM REQUESTED TOOL: {name} ───┐");
                         println!(
                             "│ Args: {}",
                             serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string())
@@ -240,7 +240,7 @@ impl AgentToolDispatcher for LoggingToolDispatcher {
                 println!("┃ SUCCESS: {}", r.content);
             }
             Err(e) => {
-                println!("┃ ERROR: {}", e);
+                println!("┃ ERROR: {e}");
             }
         }
         println!("┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛");
@@ -279,8 +279,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pubkey_b = keypair_b.public_key();
 
     println!("=== IDENTITY SETUP (separate keypairs for each agent) ===");
-    println!("Agent A pubkey: {:?}", pubkey_a);
-    println!("Agent B pubkey: {:?}", pubkey_b);
+    println!("Agent A pubkey: {pubkey_a:?}");
+    println!("Agent B pubkey: {pubkey_b:?}");
 
     // Each agent gets its own TCP port
     let listener_a = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -292,15 +292,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     drop(listener_b);
 
     println!("\n=== NETWORK SETUP (each agent has own TCP listener) ===");
-    println!("Agent A listening on: tcp://{}", addr_a);
-    println!("Agent B listening on: tcp://{}", addr_b);
+    println!("Agent A listening on: tcp://{addr_a}");
+    println!("Agent B listening on: tcp://{addr_b}");
 
     // Each agent knows about the other as a trusted peer
     let trusted_for_a = TrustedPeers {
         peers: vec![TrustedPeer {
             name: "agent-b".to_string(),
             pubkey: pubkey_b,
-            addr: format!("tcp://{}", addr_b),
+            addr: format!("tcp://{addr_b}"),
             meta: meerkat_comms::PeerMeta::default(),
         }],
     };
@@ -309,7 +309,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         peers: vec![TrustedPeer {
             name: "agent-a".to_string(),
             pubkey: pubkey_a,
-            addr: format!("tcp://{}", addr_a),
+            addr: format!("tcp://{addr_a}"),
             meta: meerkat_comms::PeerMeta::default(),
         }],
     };
@@ -338,7 +338,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         comms_manager_a.inbox_sender().clone(),
     )
     .await?;
-    println!("Agent A TCP listener started on {}", addr_a);
+    println!("Agent A TCP listener started on {addr_a}");
 
     let _handle_b = spawn_tcp_listener(
         &addr_b.to_string(),
@@ -347,7 +347,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         comms_manager_b.inbox_sender().clone(),
     )
     .await?;
-    println!("Agent B TCP listener started on {}", addr_b);
+    println!("Agent B TCP listener started on {addr_b}");
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
@@ -374,7 +374,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model =
         std::env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-sonnet-4-5".to_string());
     println!("\n=== LLM SETUP ===");
-    println!("Model: {}", model);
+    println!("Model: {model}");
     println!("Each agent has its own AnthropicClient instance");
 
     let llm_a = Arc::new(LoggingLlmAdapter {

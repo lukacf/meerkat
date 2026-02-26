@@ -184,7 +184,7 @@ impl DefaultHookEngine {
             let read = stream
                 .read(&mut chunk)
                 .await
-                .map_err(|err| format!("failed reading {}: {}", stream_name, err))?;
+                .map_err(|err| format!("failed reading {stream_name}: {err}"))?;
             if read == 0 {
                 break;
             }
@@ -304,7 +304,7 @@ impl DefaultHookEngine {
 
         match runtime_result {
             Err(_) => {
-                let message = format!("hook timed out after {}ms", timeout_ms);
+                let message = format!("hook timed out after {timeout_ms}ms");
                 if policy == HookFailurePolicy::FailClosed {
                     outcome.decision = Some(HookDecision::deny(
                         entry.id.clone(),
@@ -376,7 +376,7 @@ impl DefaultHookEngine {
                 .config_value()
                 .map_err(|err| HookEngineError::ExecutionFailed {
                     hook_id: entry.id.clone(),
-                    reason: format!("invalid runtime config payload: {}", err),
+                    reason: format!("invalid runtime config payload: {err}"),
                 })?;
 
         match runtime_kind {
@@ -385,14 +385,14 @@ impl DefaultHookEngine {
                     serde_json::from_value(runtime_config).map_err(|err| {
                         HookEngineError::ExecutionFailed {
                             hook_id: entry.id.clone(),
-                            reason: format!("invalid in_process runtime config: {}", err),
+                            reason: format!("invalid in_process runtime config: {err}"),
                         }
                     })?;
                 let handler = {
                     let handlers = self.in_process_handlers.read().map_err(|err| {
                         HookEngineError::ExecutionFailed {
                             hook_id: entry.id.clone(),
-                            reason: format!("in-process handler lock poisoned: {}", err),
+                            reason: format!("in-process handler lock poisoned: {err}"),
                         }
                     })?;
                     handlers.get(&cfg.name).cloned().ok_or_else(|| {
@@ -414,7 +414,7 @@ impl DefaultHookEngine {
                     serde_json::from_value(runtime_config).map_err(|err| {
                         HookEngineError::ExecutionFailed {
                             hook_id: entry.id.clone(),
-                            reason: format!("invalid command runtime config: {}", err),
+                            reason: format!("invalid command runtime config: {err}"),
                         }
                     })?;
                 self.invoke_command_runtime(entry, &cfg.command, &cfg.args, &cfg.env, invocation)
@@ -425,7 +425,7 @@ impl DefaultHookEngine {
                     serde_json::from_value(runtime_config).map_err(|err| {
                         HookEngineError::ExecutionFailed {
                             hook_id: entry.id.clone(),
-                            reason: format!("invalid http runtime config: {}", err),
+                            reason: format!("invalid http runtime config: {err}"),
                         }
                     })?;
                 self.invoke_http_runtime(entry, &cfg.url, &cfg.method, &cfg.headers, invocation)
@@ -433,7 +433,7 @@ impl DefaultHookEngine {
             }
             other => Err(HookEngineError::ExecutionFailed {
                 hook_id: entry.id.clone(),
-                reason: format!("unsupported hook runtime '{}'", other),
+                reason: format!("unsupported hook runtime '{other}'"),
             }),
         }
     }
@@ -456,13 +456,13 @@ impl DefaultHookEngine {
             .spawn()
             .map_err(|err| HookEngineError::ExecutionFailed {
                 hook_id: entry.id.clone(),
-                reason: format!("failed to spawn command hook: {}", err),
+                reason: format!("failed to spawn command hook: {err}"),
             })?;
 
         let payload =
             serde_json::to_vec(&invocation).map_err(|err| HookEngineError::ExecutionFailed {
                 hook_id: entry.id.clone(),
-                reason: format!("failed to encode invocation payload: {}", err),
+                reason: format!("failed to encode invocation payload: {err}"),
             })?;
 
         if payload.len() > self.config.payload_max_bytes {
@@ -482,7 +482,7 @@ impl DefaultHookEngine {
                 .await
                 .map_err(|err| HookEngineError::ExecutionFailed {
                     hook_id: entry.id.clone(),
-                    reason: format!("failed to write command hook stdin: {}", err),
+                    reason: format!("failed to write command hook stdin: {err}"),
                 })?;
         }
 
@@ -518,14 +518,14 @@ impl DefaultHookEngine {
             .await
             .map_err(|err| HookEngineError::ExecutionFailed {
                 hook_id: entry.id.clone(),
-                reason: format!("failed waiting for command hook: {}", err),
+                reason: format!("failed waiting for command hook: {err}"),
             })?;
 
         let stdout = stdout_task
             .await
             .map_err(|err| HookEngineError::ExecutionFailed {
                 hook_id: entry.id.clone(),
-                reason: format!("command stdout task join failed: {}", err),
+                reason: format!("command stdout task join failed: {err}"),
             })?
             .map_err(|reason| HookEngineError::ExecutionFailed {
                 hook_id: entry.id.clone(),
@@ -535,7 +535,7 @@ impl DefaultHookEngine {
             .await
             .map_err(|err| HookEngineError::ExecutionFailed {
                 hook_id: entry.id.clone(),
-                reason: format!("command stderr task join failed: {}", err),
+                reason: format!("command stderr task join failed: {err}"),
             })?
             .map_err(|reason| HookEngineError::ExecutionFailed {
                 hook_id: entry.id.clone(),
@@ -546,14 +546,14 @@ impl DefaultHookEngine {
             let stderr = String::from_utf8_lossy(&stderr).to_string();
             return Err(HookEngineError::ExecutionFailed {
                 hook_id: entry.id.clone(),
-                reason: format!("command hook exited with {}: {}", status, stderr),
+                reason: format!("command hook exited with {status}: {stderr}"),
             });
         }
 
         serde_json::from_slice::<RuntimeHookResponse>(&stdout).map_err(|err| {
             HookEngineError::ExecutionFailed {
                 hook_id: entry.id.clone(),
-                reason: format!("invalid command hook response: {}", err),
+                reason: format!("invalid command hook response: {err}"),
             }
         })
     }
@@ -584,7 +584,7 @@ impl DefaultHookEngine {
         let payload =
             serde_json::to_vec(&invocation).map_err(|err| HookEngineError::ExecutionFailed {
                 hook_id: entry.id.clone(),
-                reason: format!("failed to encode invocation payload: {}", err),
+                reason: format!("failed to encode invocation payload: {err}"),
             })?;
 
         if payload.len() > self.config.payload_max_bytes {
@@ -601,7 +601,7 @@ impl DefaultHookEngine {
         let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|err| {
             HookEngineError::ExecutionFailed {
                 hook_id: entry.id.clone(),
-                reason: format!("invalid HTTP method '{}': {}", method, err),
+                reason: format!("invalid HTTP method '{method}': {err}"),
             }
         })?;
 
@@ -620,7 +620,7 @@ impl DefaultHookEngine {
             .await
             .map_err(|err| HookEngineError::ExecutionFailed {
                 hook_id: entry.id.clone(),
-                reason: format!("HTTP hook request failed: {}", err),
+                reason: format!("HTTP hook request failed: {err}"),
             })?;
 
         let status = response.status();
@@ -629,7 +629,7 @@ impl DefaultHookEngine {
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|err| HookEngineError::ExecutionFailed {
                 hook_id: entry.id.clone(),
-                reason: format!("failed reading HTTP hook response body: {}", err),
+                reason: format!("failed reading HTTP hook response body: {err}"),
             })?;
             bytes.extend_from_slice(&chunk);
             if bytes.len() > self.config.payload_max_bytes {
@@ -648,14 +648,14 @@ impl DefaultHookEngine {
             let body = String::from_utf8_lossy(&bytes);
             return Err(HookEngineError::ExecutionFailed {
                 hook_id: entry.id.clone(),
-                reason: format!("HTTP hook returned {}: {}", status, body),
+                reason: format!("HTTP hook returned {status}: {body}"),
             });
         }
 
         serde_json::from_slice::<RuntimeHookResponse>(&bytes).map_err(|err| {
             HookEngineError::ExecutionFailed {
                 hook_id: entry.id.clone(),
-                reason: format!("invalid HTTP hook response: {}", err),
+                reason: format!("invalid HTTP hook response: {err}"),
             }
         })
     }

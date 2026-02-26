@@ -397,8 +397,7 @@ mod tests {
         let meta_path = temp_dir.path().join(format!("{}.meta", id.0));
         assert!(
             meta_path.exists(),
-            "Metadata sidecar file should exist at {:?}",
-            meta_path
+            "Metadata sidecar file should exist at {meta_path:?}"
         );
 
         // Verify the metadata file contains valid SessionMeta
@@ -588,7 +587,7 @@ mod tests {
         for i in 0..5 {
             let mut session = Session::new();
             session.push(Message::User(UserMessage {
-                content: format!("Message {}", i),
+                content: format!("Message {i}"),
             }));
             store.save(&session).await?;
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;

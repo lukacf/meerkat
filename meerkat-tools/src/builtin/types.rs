@@ -65,8 +65,7 @@ impl<'de> Deserialize<'de> for TaskStatus {
             "in_progress" => Ok(Self::InProgress),
             "completed" => Ok(Self::Completed),
             other => Err(serde::de::Error::custom(format!(
-                "Invalid status: {}. Must be pending, in_progress, or completed",
-                other
+                "Invalid status: {other}. Must be pending, in_progress, or completed"
             ))),
         }
     }
@@ -96,8 +95,7 @@ impl<'de> Deserialize<'de> for TaskPriority {
             "medium" => Ok(Self::Medium),
             "high" => Ok(Self::High),
             other => Err(serde::de::Error::custom(format!(
-                "Invalid priority: {}. Must be low, medium, or high",
-                other
+                "Invalid priority: {other}. Must be low, medium, or high"
             ))),
         }
     }
@@ -253,7 +251,7 @@ mod tests {
     #[test]
     fn test_task_id_display() {
         let id = TaskId::from_string("01ARZ3NDEKTSV4RRFFQ69G5FAV");
-        assert_eq!(format!("{}", id), "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        assert_eq!(format!("{id}"), "01ARZ3NDEKTSV4RRFFQ69G5FAV");
     }
 
     #[test]

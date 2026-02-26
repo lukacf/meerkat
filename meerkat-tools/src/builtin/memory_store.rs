@@ -62,7 +62,7 @@ impl MemoryTaskStore {
     ///
     /// This is a convenience method for testing.
     pub fn len(&self) -> usize {
-        self.tasks.try_read().ok().map(|t| t.len()).unwrap_or(0)
+        self.tasks.try_read().ok().map_or(0, |t| t.len())
     }
 
     /// Check if the store is empty
@@ -470,7 +470,7 @@ mod tests {
             store
                 .create(
                     NewTask {
-                        subject: format!("Task {}", i),
+                        subject: format!("Task {i}"),
                         description: "".to_string(),
                         priority: None,
                         labels: None,

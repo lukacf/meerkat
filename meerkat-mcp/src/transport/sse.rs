@@ -86,8 +86,7 @@ impl<C: SseClient> Transport<RoleClient> for SseClientTransport<C> {
                         }
                     }
                 }
-                Some(Err(_)) => return None,
-                None => return None,
+                Some(Err(_)) | None => return None,
             }
         }
     }
@@ -152,18 +151,18 @@ fn message_endpoint<E: std::error::Error + Send + Sync + 'static>(
 
     let mut base_parts = base.into_parts();
 
-    if endpoint.starts_with("?") {
+    if endpoint.starts_with('?') {
         if let Some(base_path_and_query) = &base_parts.path_and_query {
             let base_path = base_path_and_query.path();
-            base_parts.path_and_query = Some(format!("{}{}", base_path, endpoint).parse()?);
+            base_parts.path_and_query = Some(format!("{base_path}{endpoint}").parse()?);
         } else {
-            base_parts.path_and_query = Some(format!("/{}", endpoint).parse()?);
+            base_parts.path_and_query = Some(format!("/{endpoint}").parse()?);
         }
     } else {
-        let path_to_use = if endpoint.starts_with("/") {
+        let path_to_use = if endpoint.starts_with('/') {
             endpoint
         } else {
-            format!("/{}", endpoint)
+            format!("/{endpoint}")
         };
         base_parts.path_and_query = Some(path_to_use.parse()?);
     }
@@ -201,7 +200,7 @@ impl ReqwestSseClient {
     }
 
     fn apply_headers(&self, mut builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        for (name, value) in self.headers.iter() {
+        for (name, value) in &self.headers {
             builder = builder.header(name, value);
         }
         builder
@@ -231,7 +230,7 @@ impl SseClient for ReqwestSseClient {
         request_builder
             .send()
             .await
-            .and_then(|resp| resp.error_for_status())
+            .and_then(reqwest::Response::error_for_status)
             .map_err(SseTransportError::from)
             .map(drop)
     }

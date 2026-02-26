@@ -54,7 +54,7 @@ fn truncate_to_tail(s: &str, max_chars: usize) -> String {
     // Skip the first `skip_count` characters and collect the rest
     let tail: String = s.chars().skip(skip_count).collect();
 
-    format!("[truncated {} chars]...{}", skip_count, tail)
+    format!("[truncated {skip_count} chars]...{tail}")
 }
 
 #[cfg(unix)]
@@ -68,7 +68,7 @@ async fn graceful_kill(child: &mut tokio::process::Child) -> std::io::Result<()>
         let _ = killpg(pgid, Signal::SIGTERM);
 
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(2)) => {
+            () = tokio::time::sleep(Duration::from_secs(2)) => {
                 let _ = killpg(pgid, Signal::SIGKILL);
                 let _ = child.wait().await;
             }
@@ -814,8 +814,7 @@ mod tests {
         let pwd = output.stdout.trim();
         assert!(
             pwd.contains("subdir"),
-            "PWD should contain 'subdir', got: {}",
-            pwd
+            "PWD should contain 'subdir', got: {pwd}"
         );
     }
 
@@ -1032,15 +1031,14 @@ mod tests {
         // \xff\xfe are invalid UTF-8 sequences
         let result = tool
             .call(json!({
-                "command": r#"printf '\xff\xfe'"#
+                "command": r"printf '\xff\xfe'"
             }))
             .await;
 
         // Should not panic or error - lossy conversion should handle it
         assert!(
             result.is_ok(),
-            "Non-UTF-8 output should be handled gracefully: {:?}",
-            result
+            "Non-UTF-8 output should be handled gracefully: {result:?}"
         );
 
         let output: ShellOutput = serde_json::from_value(result.unwrap()).unwrap();
@@ -1122,8 +1120,7 @@ mod tests {
         // Allow some slack for overhead
         assert!(
             elapsed.as_secs() < 3,
-            "Parallel execution should complete faster than sequential: {:?}",
-            elapsed
+            "Parallel execution should complete faster than sequential: {elapsed:?}"
         );
     }
 
@@ -1158,7 +1155,8 @@ mod tests {
         // The most important part: recent output (tail) is preserved
         let mut lines = String::new();
         for i in 1..=100 {
-            lines.push_str(&format!("Line {}\n", i));
+            use std::fmt::Write;
+            let _ = writeln!(lines, "Line {i}");
         }
 
         // Truncate to a smaller size
@@ -1167,13 +1165,11 @@ mod tests {
         // Should contain recent lines (tail), not early lines (head)
         assert!(
             result.contains("Line 100"),
-            "Should contain most recent line: {}",
-            result
+            "Should contain most recent line: {result}"
         );
         assert!(
             !result.contains("Line 1\n"),
-            "Should not contain early line: {}",
-            result
+            "Should not contain early line: {result}"
         );
     }
 
@@ -1194,7 +1190,7 @@ mod tests {
         // In Rust chars(): 界 is 1 char, ! is 1, space is 1, 😀 is 1 = the last 5 chars would be "! 世界! 😀"
         // Actually: H(1) e(2) l(3) l(4) o(5) ,(6) (7) 世(8) 界(9) !(10) (11) 😀(12)
         // Last 5 chars at positions 8-12: "世界! 😀"
-        assert!(result.contains("😀"), "Should contain emoji: {}", result);
+        assert!(result.contains("😀"), "Should contain emoji: {result}");
         assert!(result.contains("[truncated"));
     }
 
@@ -1223,8 +1219,7 @@ mod tests {
             // and has reasonable content
             assert!(
                 result.is_empty() || result.chars().count() > 0,
-                "Result should be valid: {}",
-                result
+                "Result should be valid: {result}"
             );
         }
 
@@ -1234,8 +1229,7 @@ mod tests {
             let result = truncate_to_tail(chinese, max_chars);
             assert!(
                 result.is_empty() || result.chars().count() > 0,
-                "Result should be valid for Chinese: {}",
-                result
+                "Result should be valid for Chinese: {result}"
             );
         }
 
@@ -1243,8 +1237,7 @@ mod tests {
         let result = truncate_to_tail("🎉🎊🎈", 1);
         assert!(
             result.contains("🎈"),
-            "Should keep last emoji when truncating to 1: {}",
-            result
+            "Should keep last emoji when truncating to 1: {result}"
         );
 
         // Test edge case: max_chars = 0
@@ -1252,20 +1245,18 @@ mod tests {
         // With 0 max chars, we expect empty or truncation indicator only
         assert!(
             result.contains("[truncated") || result.is_empty(),
-            "Should handle max_chars=0: {}",
-            result
+            "Should handle max_chars=0: {result}"
         );
 
         // Test mixed multi-byte sequences don't split
         let mixed = "a🎉b世c界d";
-        for max_chars in 1..mixed.chars().count() + 1 {
+        for max_chars in 1..=mixed.chars().count() {
             let result = truncate_to_tail(mixed, max_chars);
             // Each character in result should be valid
             for c in result.chars() {
                 assert!(
                     c.len_utf8() >= 1,
-                    "Character should be valid UTF-8: {:?}",
-                    c
+                    "Character should be valid UTF-8: {c:?}"
                 );
             }
         }
@@ -1358,13 +1349,11 @@ mod tests {
             Err(ShellError::ShellNotInstalled(details)) => {
                 assert!(
                     details.contains("completely_fake_shell_abc"),
-                    "Should include requested shell in details: {:?}",
-                    details
+                    "Should include requested shell in details: {details:?}"
                 );
                 assert!(
                     details.contains("nonexistent"),
-                    "Should include explicit path in details: {:?}",
-                    details
+                    "Should include explicit path in details: {details:?}"
                 );
             }
             Ok(path) => unreachable!("Expected ShellNotInstalled, got Ok({:?})", path),
@@ -1393,8 +1382,7 @@ mod tests {
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("Security policy violation"),
-            "Error should mention policy violation: {}",
-            err
+            "Error should mention policy violation: {err}"
         );
     }
 
@@ -1437,8 +1425,7 @@ mod tests {
 
         assert!(
             result.is_ok(),
-            "Pipeline command should succeed: {:?}",
-            result
+            "Pipeline command should succeed: {result:?}"
         );
 
         let output: ShellOutput = serde_json::from_value(result.unwrap()).unwrap();
@@ -1481,8 +1468,7 @@ mod tests {
 
         assert!(
             result.is_ok(),
-            "Redirection command should succeed: {:?}",
-            result
+            "Redirection command should succeed: {result:?}"
         );
 
         let output: ShellOutput = serde_json::from_value(result.unwrap()).unwrap();

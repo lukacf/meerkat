@@ -184,7 +184,7 @@ impl GitSkillSource {
                 let repo_canonical = repo_dir.canonicalize().unwrap_or_else(|_| repo_dir.clone());
                 if !canonical.starts_with(&repo_canonical) {
                     return Err(SkillError::Load(
-                        format!("skills_root '{}' escapes repository directory", root).into(),
+                        format!("skills_root '{root}' escapes repository directory").into(),
                     ));
                 }
                 joined

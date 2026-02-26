@@ -272,7 +272,7 @@ mod tests {
     fn test_tool_set_debug() {
         let state = create_test_state();
         let tool_set = SubAgentToolSet::new(state);
-        let debug = format!("{:?}", tool_set);
+        let debug = format!("{tool_set:?}");
 
         assert!(debug.contains("SubAgentToolSet"));
         assert!(debug.contains("agent_spawn"));

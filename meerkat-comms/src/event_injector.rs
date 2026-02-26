@@ -113,7 +113,7 @@ mod tests {
                 assert_eq!(body, "hello");
                 assert_eq!(*source, PlainEventSource::Tcp);
             }
-            other => panic!("Expected PlainEvent, got {:?}", other),
+            other => panic!("Expected PlainEvent, got {other:?}"),
         }
     }
 
@@ -176,7 +176,7 @@ mod tests {
                 assert_eq!(body, "tracked");
                 assert_eq!(*interaction_id, Some(sub.id.0));
             }
-            other => panic!("Expected PlainEvent, got {:?}", other),
+            other => panic!("Expected PlainEvent, got {other:?}"),
         }
 
         // Subscriber should be in registry

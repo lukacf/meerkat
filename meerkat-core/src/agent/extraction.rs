@@ -56,8 +56,7 @@ where
                 "Based on our conversation, provide the final output as valid JSON matching the required schema. Output ONLY the JSON, no additional text or markdown formatting.".to_string()
             } else {
                 format!(
-                    "The previous output was invalid: {}. Please provide valid JSON matching the schema. Output ONLY the JSON, no additional text.",
-                    last_error
+                    "The previous output was invalid: {last_error}. Please provide valid JSON matching the schema. Output ONLY the JSON, no additional text."
                 )
             };
 
@@ -116,7 +115,7 @@ where
                         match validator.validate(&parsed) {
                             Ok(()) => {}
                             Err(error) => {
-                                last_error = format!("Schema validation failed: {}", error);
+                                last_error = format!("Schema validation failed: {error}");
                                 continue;
                             }
                         }
@@ -142,7 +141,7 @@ where
                     });
                 }
                 Err(e) => {
-                    last_error = format!("Invalid JSON: {}", e);
+                    last_error = format!("Invalid JSON: {e}");
                 }
             }
         }

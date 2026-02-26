@@ -256,7 +256,7 @@ pub trait CommsRuntime: Send + Sync {
     /// Open a stream for a session or interaction scope.
     fn stream(&self, scope: StreamScope) -> Result<EventStream, StreamError> {
         let scope_desc = match scope {
-            StreamScope::Session(session_id) => format!("session {}", session_id),
+            StreamScope::Session(session_id) => format!("session {session_id}"),
             StreamScope::Interaction(interaction_id) => format!("interaction {}", interaction_id.0),
         };
         Err(StreamError::NotFound(scope_desc))

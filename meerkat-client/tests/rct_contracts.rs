@@ -120,7 +120,7 @@ async fn test_llm_adapter_streaming_contract() -> Result<(), Box<dyn std::error:
         Some(ProviderMeta::Gemini { thought_signature }) => {
             assert_eq!(thought_signature, "sig-123");
         }
-        other => return Err(format!("unexpected meta: {:?}", other).into()),
+        other => return Err(format!("unexpected meta: {other:?}").into()),
     }
 
     let event = rx.recv().await.ok_or("text delta event missing")?;

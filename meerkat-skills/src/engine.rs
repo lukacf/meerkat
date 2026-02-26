@@ -231,7 +231,7 @@ mod tests {
                 name: name.to_string(),
                 description: format!("Description for {name}"),
                 scope: SkillScope::Builtin,
-                requires_capabilities: caps.iter().map(|s| s.to_string()).collect(),
+                requires_capabilities: caps.iter().map(std::string::ToString::to_string).collect(),
                 ..Default::default()
             },
             body: format!("# {name}\n\nContent for {id}."),

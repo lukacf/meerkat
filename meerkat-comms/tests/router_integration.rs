@@ -608,8 +608,7 @@ async fn integration_real_send_response_no_ack_wait() {
     assert!(result.is_ok(), "send_response should succeed");
     assert!(
         elapsed < Duration::from_secs(1),
-        "send_response should not wait for ack, took {:?}",
-        elapsed
+        "send_response should not wait for ack, took {elapsed:?}"
     );
 
     server_handle.abort();
@@ -661,7 +660,7 @@ async fn integration_real_router_inproc_send() {
             },
         )
         .await;
-    assert!(result.is_ok(), "inproc send should succeed: {:?}", result);
+    assert!(result.is_ok(), "inproc send should succeed: {result:?}");
 
     // Verify message was received
     let items = inbox.try_drain();

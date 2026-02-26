@@ -337,7 +337,7 @@ pub fn format_verbose_event_with_config(
         AgentEvent::ToolCallRequested { name, args, .. } => {
             let args_str = serde_json::to_string(args).unwrap_or_default();
             let args_preview = truncate_preview(&args_str, config.max_tool_args_bytes);
-            Some(format!("  → Calling tool: {} {}", name, args_preview))
+            Some(format!("  → Calling tool: {name} {args_preview}"))
         }
         AgentEvent::ToolExecutionCompleted {
             name,
@@ -349,8 +349,7 @@ pub fn format_verbose_event_with_config(
             let status = if *is_error { "✗" } else { "✓" };
             let result_preview = truncate_preview(result, config.max_tool_result_bytes);
             Some(format!(
-                "  {} {} ({}ms): {}",
-                status, name, duration_ms, result_preview
+                "  {status} {name} ({duration_ms}ms): {result_preview}"
             ))
         }
         AgentEvent::TurnCompleted { stop_reason, usage } => Some(format!(
@@ -362,7 +361,7 @@ pub fn format_verbose_event_with_config(
                 None
             } else {
                 let preview = truncate_preview(content, config.max_text_bytes);
-                Some(format!("  💬 Response: {}", preview))
+                Some(format!("  💬 Response: {preview}"))
             }
         }
         AgentEvent::ReasoningComplete { content } => {
@@ -370,7 +369,7 @@ pub fn format_verbose_event_with_config(
                 None
             } else {
                 let preview = truncate_preview(content, config.max_text_bytes);
-                Some(format!("  💭 Thinking: {}", preview))
+                Some(format!("  💭 Thinking: {preview}"))
             }
         }
         AgentEvent::Retrying {
@@ -379,8 +378,7 @@ pub fn format_verbose_event_with_config(
             error,
             delay_ms,
         } => Some(format!(
-            "  ⟳ Retry {}/{}: {} (waiting {}ms)",
-            attempt, max_attempts, error, delay_ms
+            "  ⟳ Retry {attempt}/{max_attempts}: {error} (waiting {delay_ms}ms)"
         )),
         AgentEvent::BudgetWarning {
             budget_type,
@@ -399,19 +397,17 @@ pub fn format_verbose_event_with_config(
             estimated_history_tokens,
             message_count,
         } => Some(format!(
-            "  ⟳ Compaction started: {} input tokens, ~{} history tokens, {} messages",
-            input_tokens, estimated_history_tokens, message_count
+            "  ⟳ Compaction started: {input_tokens} input tokens, ~{estimated_history_tokens} history tokens, {message_count} messages"
         )),
         AgentEvent::CompactionCompleted {
             summary_tokens,
             messages_before,
             messages_after,
         } => Some(format!(
-            "  ✓ Compaction complete: {} → {} messages, {} summary tokens",
-            messages_before, messages_after, summary_tokens
+            "  ✓ Compaction complete: {messages_before} → {messages_after} messages, {summary_tokens} summary tokens"
         )),
         AgentEvent::CompactionFailed { error } => {
-            Some(format!("  ✗ Compaction failed (continuing): {}", error))
+            Some(format!("  ✗ Compaction failed (continuing): {error}"))
         }
         _ => None,
     }
@@ -432,8 +428,7 @@ fn truncate_str(s: &str, max_bytes: usize) -> &str {
         .char_indices()
         .take_while(|(i, _)| *i < max_bytes)
         .last()
-        .map(|(i, c)| i + c.len_utf8())
-        .unwrap_or(0);
+        .map_or(0, |(i, c)| i + c.len_utf8());
     &s[..truncate_at]
 }
 
@@ -526,8 +521,7 @@ mod tests {
             // All events should have a "type" field
             assert!(
                 json.get("type").is_some(),
-                "Event missing type field: {:?}",
-                event
+                "Event missing type field: {event:?}"
             );
 
             // Should roundtrip

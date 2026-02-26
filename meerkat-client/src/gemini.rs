@@ -505,7 +505,7 @@ impl LlmClient for GeminiClient {
                                                 };
                                             }
                                             if let Some(fc) = part.function_call {
-                                                let id = format!("fc_{}", tool_call_index);
+                                                let id = format!("fc_{tool_call_index}");
                                                 tool_call_index += 1;
                                                 yield LlmEvent::ToolCallComplete {
                                                     id,
@@ -520,11 +520,11 @@ impl LlmClient for GeminiClient {
 
                                 if let Some(reason) = cand.finish_reason {
                                     let stop = match reason.as_str() {
-                                        "STOP" => StopReason::EndTurn,
                                         "MAX_TOKENS" => StopReason::MaxTokens,
                                         "SAFETY" | "RECITATION" => StopReason::ContentFilter,
                                         // Gemini uses various names for tool calls
                                         "TOOL_CALL" | "FUNCTION_CALL" => StopReason::ToolUse,
+                                        // "STOP" and any unrecognized reason default to EndTurn
                                         _ => StopReason::EndTurn,
                                     };
                                     yield LlmEvent::Done {
@@ -840,17 +840,16 @@ mod tests {
 
         for reason in finish_reasons {
             let stop = match reason {
-                "STOP" => StopReason::EndTurn,
                 "MAX_TOKENS" => StopReason::MaxTokens,
                 "SAFETY" | "RECITATION" => StopReason::ContentFilter,
                 "TOOL_CALL" | "FUNCTION_CALL" => StopReason::ToolUse,
+                // "STOP" and any unrecognized reason default to EndTurn
                 _ => StopReason::EndTurn,
             };
             assert_eq!(
                 stop,
                 StopReason::ToolUse,
-                "finish_reason '{}' should map to ToolUse",
-                reason
+                "finish_reason '{reason}' should map to ToolUse"
             );
         }
     }
@@ -860,10 +859,10 @@ mod tests {
     fn test_regression_gemini_finish_reason_recitation_maps_to_content_filter() {
         let reason = "RECITATION";
         let stop = match reason {
-            "STOP" => StopReason::EndTurn,
             "MAX_TOKENS" => StopReason::MaxTokens,
             "SAFETY" | "RECITATION" => StopReason::ContentFilter,
             "TOOL_CALL" | "FUNCTION_CALL" => StopReason::ToolUse,
+            // "STOP" and any unrecognized reason default to EndTurn
             _ => StopReason::EndTurn,
         };
         assert_eq!(stop, StopReason::ContentFilter);
@@ -883,7 +882,7 @@ mod tests {
         let mut generated_ids = Vec::new();
 
         for _name in tool_names {
-            let id = format!("fc_{}", tool_call_index);
+            let id = format!("fc_{tool_call_index}");
             tool_call_index += 1;
             generated_ids.push(id);
         }
@@ -898,8 +897,7 @@ mod tests {
         for id in &generated_ids {
             assert!(
                 seen.insert(id.clone()),
-                "Duplicate tool call ID found: {}",
-                id
+                "Duplicate tool call ID found: {id}"
             );
         }
     }
@@ -914,7 +912,7 @@ mod tests {
         let mut id_to_name = Vec::new();
 
         for name in tool_names {
-            let id = format!("fc_{}", tool_call_index);
+            let id = format!("fc_{tool_call_index}");
             tool_call_index += 1;
             id_to_name.push((id, name));
         }
@@ -1050,7 +1048,7 @@ mod tests {
         Ok(())
     }
 
-    /// Regression: Gemini doesn't support array types like ["string", "null"]
+    /// Regression: Gemini doesn't support array types like `["string", "null"]`
     /// The sanitizer should convert them to just "string".
     #[test]
     fn test_sanitize_schema_converts_array_type_to_string() {

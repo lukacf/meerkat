@@ -46,7 +46,9 @@ pub fn tap_try_send(tap: &EventTap, event: &AgentEvent) {
         return;
     };
     match state.tx.try_send(event.clone()) {
-        Ok(()) => {}
+        Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {
+            // Ok: delivered. Closed: subscriber dropped — no-op.
+        }
         Err(mpsc::error::TrySendError::Full(_)) => {
             if !state.truncated.swap(true, Ordering::Relaxed) {
                 // First truncation — attempt one-time marker (also best-effort)
@@ -54,9 +56,6 @@ pub fn tap_try_send(tap: &EventTap, event: &AgentEvent) {
                     reason: "channel full".to_string(),
                 });
             }
-        }
-        Err(mpsc::error::TrySendError::Closed(_)) => {
-            // Subscriber dropped — no-op
         }
     }
 }
@@ -75,9 +74,8 @@ pub async fn tap_send_terminal(tap: &EventTap, event: AgentEvent) {
     };
 
     match tokio::time::timeout(std::time::Duration::from_secs(5), tx.send(event)).await {
-        Ok(Ok(())) => {}
-        Ok(Err(_)) => {
-            // Receiver dropped
+        Ok(Ok(()) | Err(_)) => {
+            // Ok: delivered. Err: receiver dropped — no-op.
         }
         Err(_) => {
             tracing::warn!("tap_send_terminal timed out after 5s; continuing");
@@ -185,8 +183,7 @@ mod tests {
         let first = rx.try_recv().unwrap();
         assert!(
             matches!(&first, AgentEvent::TextDelta { delta } if delta == "first"),
-            "Expected first TextDelta, got {:?}",
-            first
+            "Expected first TextDelta, got {first:?}"
         );
     }
 

@@ -95,7 +95,7 @@ impl BuiltinTool for WaitTool {
         use tokio::time::sleep;
 
         let args: WaitArgs = serde_json::from_value(args)
-            .map_err(|e| BuiltinToolError::invalid_args(format!("Invalid arguments: {}", e)))?;
+            .map_err(|e| BuiltinToolError::invalid_args(format!("Invalid arguments: {e}")))?;
 
         // Clamp to valid range
         let seconds = args.seconds.clamp(0.0, MAX_WAIT_SECONDS);
@@ -297,8 +297,7 @@ mod tests {
         assert_eq!(result["status"], "complete");
         assert!(
             elapsed >= Duration::from_millis(180),
-            "Should wait full duration, got {:?}",
-            elapsed
+            "Should wait full duration, got {elapsed:?}"
         );
     }
 }

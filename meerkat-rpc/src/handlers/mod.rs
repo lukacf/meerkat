@@ -67,7 +67,7 @@ pub(crate) fn parse_session_id_for_runtime(
             return Err(RpcResponse::error(
                 id,
                 error::INVALID_PARAMS,
-                format!("Invalid session_id '{}': {}", raw, err),
+                format!("Invalid session_id '{raw}': {err}"),
             ));
         }
     };

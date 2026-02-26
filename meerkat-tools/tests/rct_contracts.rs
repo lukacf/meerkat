@@ -357,8 +357,7 @@ async fn test_regression_builder_populates_registry() -> Result<(), Box<dyn std:
     let result = dispatcher.dispatch_call(call).await;
     assert!(
         result.is_ok(),
-        "dispatch_call should succeed, not return NotFound: {:?}",
-        result
+        "dispatch_call should succeed, not return NotFound: {result:?}"
     );
 
     Ok(())
@@ -413,8 +412,7 @@ async fn test_regression_dispatcher_timeout_enforced() -> Result<(), Box<dyn std
     // Should timeout quickly, not hang
     assert!(
         elapsed < Duration::from_secs(1),
-        "dispatch should timeout quickly, took {:?}",
-        elapsed
+        "dispatch should timeout quickly, took {elapsed:?}"
     );
     assert!(result.is_err(), "dispatch should return timeout error");
 
@@ -432,13 +430,12 @@ async fn test_regression_dispatcher_timeout_enforced() -> Result<(), Box<dyn std
         }
         Err(ToolError::ExecutionFailed { message }) => {
             return Err(format!(
-                "Regression: Timeout was incorrectly mapped to ExecutionFailed: {}",
-                message
+                "Regression: Timeout was incorrectly mapped to ExecutionFailed: {message}"
             )
             .into());
         }
         Err(other) => {
-            return Err(format!("Expected Timeout error, got: {:?}", other).into());
+            return Err(format!("Expected Timeout error, got: {other:?}").into());
         }
     }
 
@@ -501,8 +498,7 @@ async fn test_regression_composite_deduplicates_external_tools()
     let task_list_count = tools.iter().filter(|t| t.name == "task_list").count();
     assert_eq!(
         task_list_count, 1,
-        "task_list should appear exactly once, not duplicated (found {})",
-        task_list_count
+        "task_list should appear exactly once, not duplicated (found {task_list_count})"
     );
 
     // Verify the builtin version is kept (check description doesn't say "External")
@@ -587,8 +583,7 @@ fn test_regression_filtered_dispatcher_enforces_tool_access_policy() {
         // Shell and agent_spawn should be blocked
         assert!(
             !tool_names.contains(&"shell".to_string()),
-            "shell should be blocked by deny list but tools are: {:?}",
-            tool_names
+            "shell should be blocked by deny list but tools are: {tool_names:?}"
         );
         assert!(
             !tool_names.contains(&"agent_spawn".to_string()),
@@ -695,6 +690,6 @@ async fn test_regression_filtered_dispatcher_dispatch_blocked_returns_not_found(
             assert_eq!(name, "shell", "NotFound error should name the blocked tool");
         }
         Ok(_) => panic!("Dispatch to blocked tool should fail, not succeed!"),
-        Err(other) => panic!("Expected NotFound error, got: {:?}", other),
+        Err(other) => panic!("Expected NotFound error, got: {other:?}"),
     }
 }

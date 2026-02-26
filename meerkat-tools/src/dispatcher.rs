@@ -127,14 +127,14 @@ impl FilteredDispatcher {
         let allowed_names = match policy {
             ToolAccessPolicy::Inherit => all_names,
             ToolAccessPolicy::AllowList(allow) => {
-                let allow_set: HashSet<&str> = allow.iter().map(|s| s.as_str()).collect();
+                let allow_set: HashSet<&str> = allow.iter().map(std::string::String::as_str).collect();
                 all_names
                     .into_iter()
                     .filter(|n| allow_set.contains(n.as_str()))
                     .collect()
             }
             ToolAccessPolicy::DenyList(deny) => {
-                let deny_set: HashSet<&str> = deny.iter().map(|s| s.as_str()).collect();
+                let deny_set: HashSet<&str> = deny.iter().map(std::string::String::as_str).collect();
                 all_names
                     .into_iter()
                     .filter(|n| !deny_set.contains(n.as_str()))
@@ -215,7 +215,7 @@ mod tests {
                 .map(|name| {
                     Arc::new(ToolDef {
                         name: (*name).to_string(),
-                        description: format!("{} tool", name),
+                        description: format!("{name} tool"),
                         input_schema: json!({"type": "object"}),
                     })
                 })
@@ -292,7 +292,7 @@ mod tests {
         let result = filtered.dispatch(make_call("shell", &args_raw)).await;
         match result {
             Err(ToolError::NotFound { name }) => assert_eq!(name, "shell"),
-            other => panic!("Expected NotFound error, got: {:?}", other),
+            other => panic!("Expected NotFound error, got: {other:?}"),
         }
     }
 

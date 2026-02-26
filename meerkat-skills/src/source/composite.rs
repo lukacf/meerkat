@@ -52,21 +52,20 @@ impl SkillSource for CompositeSkillSource {
         for named in &self.sources {
             let descriptors = named.source.list(filter).await?;
             for mut desc in descriptors {
-                if !first_source.contains_key(&desc.id) {
-                    desc.source_name.clone_from(&named.name);
-                    first_source.insert(desc.id.clone(), named.name.clone());
-                    result.push(desc);
-                } else {
+                if first_source.contains_key(&desc.id) {
                     let winning_source = first_source
                         .get(&desc.id)
-                        .map(|s| s.as_str())
-                        .unwrap_or("unknown");
+                        .map_or("unknown", std::string::String::as_str);
                     tracing::info!(
                         skill_id = %desc.id,
                         shadowed_source = %named.name,
                         winning_source = %winning_source,
                         "Skill shadowed by higher-precedence repository"
                     );
+                } else {
+                    desc.source_name.clone_from(&named.name);
+                    first_source.insert(desc.id.clone(), named.name.clone());
+                    result.push(desc);
                 }
             }
         }

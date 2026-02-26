@@ -18,7 +18,7 @@ use crate::tokio;
 use std::path::{Path, PathBuf};
 
 /// Default system prompt for Meerkat agents
-pub const DEFAULT_SYSTEM_PROMPT: &str = r#"You are an autonomous agent. Your task is to accomplish the user's goal by systematically using the tools available to you.
+pub const DEFAULT_SYSTEM_PROMPT: &str = r"You are an autonomous agent. Your task is to accomplish the user's goal by systematically using the tools available to you.
 
 # Core Behavior
 - Break complex tasks into steps and execute them one by one.
@@ -34,7 +34,7 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = r#"You are an autonomous agent. Your tas
 
 # Output
 - When the task is complete, provide a clear summary of what was accomplished.
-- If the task cannot be completed, explain what blocked progress and what was attempted."#;
+- If the task cannot be completed, explain what blocked progress and what was attempted.";
 
 /// Maximum size for AGENTS.md files (32 KiB, matching Codex default)
 pub const AGENTS_MD_MAX_BYTES: usize = 32 * 1024;
@@ -103,16 +103,14 @@ impl SystemPromptConfig {
         // Load global AGENTS.md
         if let Some(content) = self.load_global_agents_md().await {
             parts.push(format!(
-                "\n# Project Instructions (from global AGENTS.md)\n\n{}",
-                content
+                "\n# Project Instructions (from global AGENTS.md)\n\n{content}"
             ));
         }
 
         // Load project AGENTS.md
         if let Some(content) = self.load_project_agents_md().await {
             parts.push(format!(
-                "\n# Project Instructions (from AGENTS.md)\n\n{}",
-                content
+                "\n# Project Instructions (from AGENTS.md)\n\n{content}"
             ));
         }
 

@@ -1027,7 +1027,7 @@ async fn get_session(
         .await
         .map_err(|e| match e {
             SessionError::NotFound { .. } => {
-                ApiError::NotFound(format!("Session not found: {}", id))
+                ApiError::NotFound(format!("Session not found: {id}"))
             }
             _ => ApiError::Internal(format!("{e}")),
         })?;
@@ -1094,7 +1094,7 @@ async fn continue_session(
                 .load_persisted(&session_id)
                 .await
                 .map_err(|e| ApiError::Internal(format!("{e}")))?
-                .ok_or_else(|| ApiError::NotFound(format!("Session not found: {}", id)))?;
+                .ok_or_else(|| ApiError::NotFound(format!("Session not found: {id}")))?;
 
             let stored_metadata = session.session_metadata();
 
@@ -1129,8 +1129,7 @@ async fn continue_session(
             let continue_host_mode_requested = host_mode_requested
                 || stored_metadata
                     .as_ref()
-                    .map(|meta| meta.host_mode)
-                    .unwrap_or(false);
+                    .is_some_and(|meta| meta.host_mode);
             let continue_host_mode = resolve_host_mode(continue_host_mode_requested)?;
             let comms_name = req.comms_name.clone().or_else(|| {
                 stored_metadata
@@ -1232,7 +1231,7 @@ async fn session_events(
         .load_persisted(&session_id)
         .await
         .map_err(|e| ApiError::Internal(format!("{e}")))?
-        .ok_or_else(|| ApiError::NotFound(format!("Session not found: {}", id)))?;
+        .ok_or_else(|| ApiError::NotFound(format!("Session not found: {id}")))?;
 
     let mut rx = state.event_tx.subscribe();
 

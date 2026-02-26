@@ -412,7 +412,7 @@ mod tests {
             Message::System(sys) => {
                 assert_eq!(sys.content, "Custom system prompt");
             }
-            other => panic!("First message should be System, got: {:?}", other),
+            other => panic!("First message should be System, got: {other:?}"),
         }
     }
 
@@ -449,7 +449,7 @@ mod tests {
                     "System prompt should be updated when resuming with a new prompt"
                 );
             }
-            other => panic!("First message should be System, got: {:?}", other),
+            other => panic!("First message should be System, got: {other:?}"),
         }
 
         // User message should still be preserved
@@ -458,7 +458,7 @@ mod tests {
             Message::User(user) => {
                 assert_eq!(user.content, "Hello");
             }
-            other => panic!("Second message should be User, got: {:?}", other),
+            other => panic!("Second message should be User, got: {other:?}"),
         }
     }
 
@@ -489,7 +489,7 @@ mod tests {
                     "Original system prompt should be preserved when not overridden"
                 );
             }
-            other => panic!("First message should be System, got: {:?}", other),
+            other => panic!("First message should be System, got: {other:?}"),
         }
     }
 

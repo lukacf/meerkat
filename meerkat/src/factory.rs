@@ -1121,8 +1121,7 @@ impl AgentFactory {
             && value < -1
         {
             return Err(BuildAgentError::Config(format!(
-                "max_inline_peer_notifications={} is invalid (allowed: -1, 0, or >0)",
-                value
+                "max_inline_peer_notifications={value} is invalid (allowed: -1, 0, or >0)"
             )));
         }
 

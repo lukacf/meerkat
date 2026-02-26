@@ -125,7 +125,7 @@ impl InprocRegistry {
             pubkey,
             sender,
             PeerMeta::default(),
-        )
+        );
     }
 
     /// Register an agent's inbox with associated [`PeerMeta`].
@@ -581,7 +581,7 @@ mod tests {
         for i in 0..3 {
             let keypair = make_keypair();
             let (_, sender) = Inbox::new();
-            registry.register(format!("agent-{}", i), keypair.public_key(), sender);
+            registry.register(format!("agent-{i}"), keypair.public_key(), sender);
         }
 
         let names = registry.peer_names();
@@ -612,7 +612,7 @@ mod tests {
         for i in 0..3 {
             let keypair = make_keypair();
             let (_, sender) = Inbox::new();
-            registry.register(format!("agent-{}", i), keypair.public_key(), sender);
+            registry.register(format!("agent-{i}"), keypair.public_key(), sender);
         }
 
         assert_eq!(registry.len(), 3);

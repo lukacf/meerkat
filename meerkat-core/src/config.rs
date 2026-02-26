@@ -345,13 +345,13 @@ impl Config {
     fn merge_tools(&mut self, other: &ToolsConfig) {
         let defaults = ToolsConfig::default();
         if !other.mcp_servers.is_empty() {
-            self.tools.mcp_servers = other.mcp_servers.clone();
+            self.tools.mcp_servers.clone_from(&other.mcp_servers);
         }
         if other.default_timeout != defaults.default_timeout {
             self.tools.default_timeout = other.default_timeout;
         }
         if other.tool_timeouts != defaults.tool_timeouts {
-            self.tools.tool_timeouts = other.tool_timeouts.clone();
+            self.tools.tool_timeouts.clone_from(&other.tool_timeouts);
         }
         if other.max_concurrent != defaults.max_concurrent {
             self.tools.max_concurrent = other.max_concurrent;
@@ -378,13 +378,13 @@ impl Config {
             return;
         };
         if tools.contains_key("mcp_servers") {
-            self.tools.mcp_servers = layer.mcp_servers.clone();
+            self.tools.mcp_servers.clone_from(&layer.mcp_servers);
         }
         if tools.contains_key("default_timeout") {
             self.tools.default_timeout = layer.default_timeout;
         }
         if tools.contains_key("tool_timeouts") {
-            self.tools.tool_timeouts = layer.tool_timeouts.clone();
+            self.tools.tool_timeouts.clone_from(&layer.tool_timeouts);
         }
         if tools.contains_key("max_concurrent") {
             self.tools.max_concurrent = layer.max_concurrent;
@@ -568,8 +568,7 @@ impl ResolvedSubAgentConfig {
     pub fn is_model_allowed(&self, provider: Provider, model: &str) -> bool {
         self.allowed_models
             .get(provider.as_str())
-            .map(|list| list.iter().any(|m| m == model))
-            .unwrap_or(false)
+            .is_some_and(|list| list.iter().any(|m| m == model))
     }
 
     /// Format the allowed models as a description string suitable for tool descriptions.
@@ -686,21 +685,18 @@ impl Config {
             let key = provider.as_str();
             let models = sa.allowed_models.get(key).ok_or_else(|| {
                 ConfigError::Validation(format!(
-                    "sub_agents.allowed_models missing provider key '{}'",
-                    key
+                    "sub_agents.allowed_models missing provider key '{key}'"
                 ))
             })?;
             if models.is_empty() {
                 return Err(ConfigError::Validation(format!(
-                    "sub_agents.allowed_models['{}'] must not be empty",
-                    key
+                    "sub_agents.allowed_models['{key}'] must not be empty"
                 )));
             }
             for model in models {
                 if model == "*" {
                     return Err(ConfigError::Validation(format!(
-                        "sub_agents.allowed_models['{}']: wildcards ('*') are not allowed",
-                        key
+                        "sub_agents.allowed_models['{key}']: wildcards ('*') are not allowed"
                     )));
                 }
             }
@@ -762,8 +758,7 @@ impl Config {
                 // Try to infer from parent model
                 Provider::infer_from_model(parent_model).ok_or_else(|| {
                     ConfigError::Validation(format!(
-                        "Cannot resolve sub-agent provider: parent provider unknown and model '{}' is ambiguous",
-                        parent_model
+                        "Cannot resolve sub-agent provider: parent provider unknown and model '{parent_model}' is ambiguous"
                     ))
                 })?
             }
@@ -1638,6 +1633,9 @@ mod optional_duration_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::time::Duration;
 
+    // Signature constrained by serde's `#[serde(with)]` contract:
+    // `serialize_with` passes `&Option<T>`, not `Option<&T>`.
+    #[allow(clippy::ref_option)]
     pub fn serialize<S>(duration: &Option<Duration>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -1840,10 +1838,10 @@ mod tests {
 
         config
             .merge_toml_str(
-                r#"
+                r"
 [tools]
 shell_enabled = false
-"#,
+",
             )
             .expect("merge should succeed");
 
@@ -1858,10 +1856,10 @@ shell_enabled = false
 
         config
             .merge_toml_str(
-                r#"
+                r"
 [tools]
 mob_enabled = false
-"#,
+",
             )
             .expect("merge should succeed");
 
@@ -1934,7 +1932,7 @@ initial_delay = "750ms"
     #[test]
     fn test_budget_config_serialization() {
         let budget = BudgetConfig {
-            max_tokens: Some(100000),
+            max_tokens: Some(100_000),
             max_duration: Some(Duration::from_secs(300)),
             max_tool_calls: Some(50),
         };
@@ -1942,7 +1940,7 @@ initial_delay = "750ms"
         let json = serde_json::to_string(&budget).unwrap();
         let parsed: BudgetConfig = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(parsed.max_tokens, Some(100000));
+        assert_eq!(parsed.max_tokens, Some(100_000));
         assert_eq!(parsed.max_duration, Some(Duration::from_secs(300)));
         assert_eq!(parsed.max_tool_calls, Some(50));
     }
@@ -2308,9 +2306,9 @@ auto_enable_for_subagents = false
         ];
         for (variant, expected_json) in cases {
             let json = serde_json::to_string(&variant).unwrap();
-            assert_eq!(json, expected_json, "serialize {:?}", variant);
+            assert_eq!(json, expected_json, "serialize {variant:?}");
             let parsed: PlainEventSource = serde_json::from_str(&json).unwrap();
-            assert_eq!(parsed, variant, "deserialize {:?}", variant);
+            assert_eq!(parsed, variant, "deserialize {variant:?}");
         }
     }
 

@@ -459,7 +459,7 @@ fn render_event(
             injection_bytes,
         } => {
             if !skills.is_empty() {
-                let names: Vec<String> = skills.iter().map(|s| s.to_string()).collect();
+                let names: Vec<String> = skills.iter().map(std::string::ToString::to_string).collect();
                 chrome_line(
                     mux,
                     scope_id,
@@ -627,8 +627,7 @@ fn truncate_str(s: &str, max_bytes: usize) -> &str {
         .char_indices()
         .take_while(|(i, c)| *i + c.len_utf8() <= max_bytes)
         .last()
-        .map(|(i, c)| i + c.len_utf8())
-        .unwrap_or(0);
+        .map_or(0, |(i, c)| i + c.len_utf8());
     &s[..truncate_at]
 }
 

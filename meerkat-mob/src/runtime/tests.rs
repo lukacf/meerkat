@@ -81,11 +81,7 @@ impl MockCommsRuntime {
             }),
             fail_add_trust: behavior.fail_add_trust,
             fail_remove_trust: behavior.fail_remove_trust,
-            remove_failures_remaining: RwLock::new(if behavior.fail_remove_trust_once {
-                1
-            } else {
-                0
-            }),
+            remove_failures_remaining: RwLock::new(usize::from(behavior.fail_remove_trust_once)),
             fail_send_peer_added: behavior.fail_send_peer_added,
             fail_send_peer_retired: behavior.fail_send_peer_retired,
             fail_send_peer_unwired: behavior.fail_send_peer_unwired,
@@ -942,8 +938,7 @@ impl MobSessionService for MockSessionService {
     ) -> Result<meerkat_core::EventStream, meerkat_core::StreamError> {
         if !self.sessions.read().await.contains_key(session_id) {
             return Err(meerkat_core::StreamError::NotFound(format!(
-                "session {}",
-                session_id
+                "session {session_id}"
             )));
         }
         Ok(Box::pin(futures::stream::empty::<AgentEvent>()))
@@ -957,8 +952,7 @@ impl MobSessionService for MockSessionService {
         let names = self.session_comms_names.read().await;
         names
             .get(session_id)
-            .map(|name| name.starts_with(&format!("{mob_id}/")))
-            .unwrap_or(false)
+            .is_some_and(|name| name.starts_with(&format!("{mob_id}/")))
     }
 }
 
@@ -2554,8 +2548,7 @@ async fn test_mob_management_tools_dispatch_to_handle() {
     assert!(
         listed_json["meerkats"]
             .as_array()
-            .map(|v| v.len())
-            .unwrap_or(0)
+            .map_or(0, std::vec::Vec::len)
             >= 2,
         "list_meerkats should include spawned peers"
     );
@@ -2882,7 +2875,7 @@ async fn test_mob_task_tools_dispatch_and_blocked_by_enforcement() {
     let list_json: serde_json::Value =
         serde_json::from_str(&listed.content).expect("task list content json");
     assert_eq!(
-        list_json["tasks"].as_array().map(|v| v.len()).unwrap_or(0),
+        list_json["tasks"].as_array().map_or(0, std::vec::Vec::len),
         2,
         "mob_task_list should project created tasks"
     );
@@ -6352,8 +6345,7 @@ async fn test_parallel_targets_complete_concurrently() {
     assert_eq!(terminal.status, MobRunStatus::Completed);
     assert!(
         elapsed < Duration::from_millis(700),
-        "two 400ms target turns should complete in parallel; observed {:?}",
-        elapsed
+        "two 400ms target turns should complete in parallel; observed {elapsed:?}"
     );
 }
 
@@ -8401,8 +8393,7 @@ impl MobSessionService for RealCommsSessionService {
         let names = self.session_comms_names.read().await;
         names
             .get(session_id)
-            .map(|name| name.starts_with(&format!("{mob_id}/")))
-            .unwrap_or(false)
+            .is_some_and(|name| name.starts_with(&format!("{mob_id}/")))
     }
 }
 

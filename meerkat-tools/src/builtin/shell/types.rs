@@ -169,7 +169,7 @@ mod tests {
     #[test]
     fn test_job_id_display() {
         let id = JobId::from_string("job_01hx7z8k9m2n3p4q5r6s7t8u9v");
-        assert_eq!(format!("{}", id), "job_01hx7z8k9m2n3p4q5r6s7t8u9v");
+        assert_eq!(format!("{id}"), "job_01hx7z8k9m2n3p4q5r6s7t8u9v");
     }
 
     #[test]

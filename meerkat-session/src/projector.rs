@@ -372,7 +372,7 @@ mod tests {
         // events.jsonl should have all 3 events
         let events_content =
             std::fs::read_to_string(projector.session_dir(&sid).join("events.jsonl")).unwrap();
-        let lines: Vec<&str> = events_content.trim().split('\n').collect();
+        let lines: Vec<&str> = events_content.trim().lines().collect();
         assert_eq!(lines.len(), 3);
     }
 }

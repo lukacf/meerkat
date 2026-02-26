@@ -945,7 +945,7 @@ mod tests {
         let budget = json
             .get("thinking")
             .and_then(|t| t.get("budget_tokens"))
-            .and_then(|v| v.as_u64());
+            .and_then(serde_json::Value::as_u64);
 
         assert_eq!(
             budget,
@@ -968,7 +968,7 @@ mod tests {
         let budget = json
             .get("thinking")
             .and_then(|t| t.get("thinking_budget"))
-            .and_then(|v| v.as_u64());
+            .and_then(serde_json::Value::as_u64);
         assert_eq!(
             budget,
             Some(8000),
@@ -976,7 +976,7 @@ mod tests {
         );
 
         // Provider code checks: params["top_p"]
-        let top_p = json.get("top_p").and_then(|v| v.as_f64());
+        let top_p = json.get("top_p").and_then(serde_json::Value::as_f64);
         assert!(
             (top_p.unwrap_or(0.0) - 0.95).abs() < 0.001,
             "top_p must be extractable"

@@ -82,6 +82,13 @@ pub struct Profile {
     /// - `<-1`: invalid
     #[serde(default)]
     pub max_inline_peer_notifications: Option<i32>,
+    /// Optional JSON Schema for structured output extraction.
+    ///
+    /// When set, the agent session is configured with an [`OutputSchema`] that
+    /// forces the LLM to respond with validated JSON conforming to this schema.
+    /// The value should be a valid JSON Schema object.
+    #[serde(default)]
+    pub output_schema: Option<serde_json::Value>,
 }
 
 #[cfg(test)]
@@ -142,6 +149,7 @@ mod tests {
             backend: None,
             runtime_mode: MobRuntimeMode::AutonomousHost,
             max_inline_peer_notifications: None,
+            output_schema: None,
         };
         let json = serde_json::to_string(&profile).unwrap();
         let parsed: Profile = serde_json::from_str(&json).unwrap();
@@ -168,6 +176,7 @@ mod tests {
             backend: Some(MobBackendKind::External),
             runtime_mode: MobRuntimeMode::TurnDriven,
             max_inline_peer_notifications: Some(20),
+            output_schema: None,
         };
         let toml_str = toml::to_string(&profile).unwrap();
         let parsed: Profile = toml::from_str(&toml_str).unwrap();

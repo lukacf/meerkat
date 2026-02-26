@@ -86,6 +86,22 @@ pub async fn build_agent_config(
     // External tools (mob tools, task tools, rust bundles composed externally)
     config.external_tools = external_tools;
 
+    // Structured output: convert JSON schema value to OutputSchema
+    if let Some(schema_value) = &profile.output_schema {
+        let schema = meerkat_core::MeerkatSchema::new(schema_value.clone()).map_err(|e| {
+            MobError::WiringError(format!(
+                "invalid output_schema for profile '{profile_name}': {e}"
+            ))
+        })?;
+        config.output_schema = Some(meerkat_core::OutputSchema {
+            schema,
+            name: Some(format!("{mob_id}_{profile_name}")),
+            strict: true,
+            compat: Default::default(),
+            format: Default::default(),
+        });
+    }
+
     Ok(config)
 }
 
@@ -185,6 +201,7 @@ mod tests {
                 backend: None,
                 runtime_mode: crate::MobRuntimeMode::AutonomousHost,
                 max_inline_peer_notifications: None,
+                output_schema: None,
             },
         );
         profiles.insert(
@@ -207,6 +224,7 @@ mod tests {
                 backend: None,
                 runtime_mode: crate::MobRuntimeMode::AutonomousHost,
                 max_inline_peer_notifications: None,
+                output_schema: None,
             },
         );
 

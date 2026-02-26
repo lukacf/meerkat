@@ -1252,6 +1252,7 @@ fn sample_definition() -> MobDefinition {
             backend: None,
             runtime_mode: crate::MobRuntimeMode::AutonomousHost,
             max_inline_peer_notifications: None,
+            output_schema: None,
         },
     );
     profiles.insert(
@@ -1268,6 +1269,7 @@ fn sample_definition() -> MobDefinition {
             backend: None,
             runtime_mode: crate::MobRuntimeMode::AutonomousHost,
             max_inline_peer_notifications: None,
+            output_schema: None,
         },
     );
 

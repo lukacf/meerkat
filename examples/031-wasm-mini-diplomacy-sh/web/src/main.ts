@@ -12,109 +12,78 @@ interface ArenaState {
   turn: number; max_turns: number; regions: RegionState[];
   scores: Record<Team, number>; winner?: Team | "draw";
 }
-interface OrderSet { team: Team; aggression: number; fortify: number; target_region: string; diplomacy: string }
+interface OrderSet { team: Team; aggression: number; fortify: number; target_region: string }
 interface TurnDecision { order: OrderSet; reasoning: string }
-interface Dispatch { team: Team; turn: number; diplomacy: string; reasoning: string }
 
-// ── Channel / Message types for Slack-like UI ──
-type ChannelId = "north-ops" | "south-ops" | "east-ops" | "negotiations" | "narrator";
-type MessageRole = "planner" | "operator" | "narrator" | "system";
+// ── DM Channels ──
+type ChannelId =
+  | "n-plan-op" | "s-plan-op" | "e-plan-op"       // planner↔operator
+  | "n-plan-amb" | "s-plan-amb" | "e-plan-amb"     // planner↔ambassador
+  | "n-s-diplo" | "n-e-diplo" | "s-e-diplo"        // ambassador↔ambassador
+  | "narrator";
+type MessageRole = "planner" | "operator" | "ambassador" | "narrator" | "system";
 interface ChatMessage { channel: ChannelId; role: MessageRole; faction: Team | "neutral"; content: string; turn: number }
+
 const CHANNELS: { id: ChannelId; label: string; icon: string }[] = [
-  { id: "north-ops", label: "#north-ops", icon: "\u{1F9ED}" },
-  { id: "south-ops", label: "#south-ops", icon: "\u{1F9ED}" },
-  { id: "east-ops", label: "#east-ops", icon: "\u{1F9ED}" },
-  { id: "negotiations", label: "#negotiations", icon: "\u{1F91D}" },
-  { id: "narrator", label: "#narrator", icon: "\u{1F4DC}" },
+  { id: "n-plan-op",  label: "N: Plan\u2194Op",  icon: "\u{1F9ED}" },
+  { id: "s-plan-op",  label: "S: Plan\u2194Op",  icon: "\u{1F9ED}" },
+  { id: "e-plan-op",  label: "E: Plan\u2194Op",  icon: "\u{1F9ED}" },
+  { id: "n-plan-amb", label: "N: Plan\u2194Amb", icon: "\u{1F4E8}" },
+  { id: "s-plan-amb", label: "S: Plan\u2194Amb", icon: "\u{1F4E8}" },
+  { id: "e-plan-amb", label: "E: Plan\u2194Amb", icon: "\u{1F4E8}" },
+  { id: "n-s-diplo",  label: "N\u2194S Diplo",   icon: "\u{1F91D}" },
+  { id: "n-e-diplo",  label: "N\u2194E Diplo",   icon: "\u{1F91D}" },
+  { id: "s-e-diplo",  label: "S\u2194E Diplo",   icon: "\u{1F91D}" },
+  { id: "narrator",   label: "#narrator",         icon: "\u{1F4DC}" },
 ];
 
+// ── WASM Runtime ──
 interface RuntimeModule {
   default: () => Promise<unknown>;
-  create_session: (bytes: Uint8Array, configJson: string) => number;
-  start_turn: (handle: number, prompt: string, optionsJson: string) => Promise<string>;
-  poll_events: (handle: number) => string;
-  get_session_state: (handle: number) => string;
-  inspect_mobpack: (bytes: Uint8Array) => string;
-  destroy_session: (handle: number) => void;
+  init_runtime_from_config: (configJson: string) => unknown;
+  mob_create: (definitionJson: string) => Promise<unknown>;
+  mob_spawn: (mobId: string, specsJson: string) => Promise<unknown>;
+  mob_wire: (mobId: string, a: string, b: string) => Promise<void>;
+  mob_send_message: (mobId: string, meerkatId: string, message: string) => Promise<void>;
+  mob_run_flow: (mobId: string, flowId: string, paramsJson: string) => Promise<unknown>;
+  mob_flow_status: (mobId: string, runId: string) => Promise<unknown>;
+  mob_list_members: (mobId: string) => Promise<unknown>;
+  mob_member_subscribe: (mobId: string, meerkatId: string) => Promise<number>;
+  poll_subscription: (handle: number) => string;
+  close_subscription: (handle: number) => void;
 }
 
-interface FactionSession { team: Team; handle: number; model: string }
+interface AgentSub { meerkatId: string; handle: number; role: MessageRole; team: Team }
+interface FactionMob { team: Team; mobId: string }
 interface MatchSession {
-  factions: FactionSession[];
-  narratorHandle: number | null;
+  factions: FactionMob[];
+  narratorMobId: string | null;
+  subs: AgentSub[];  // event subscriptions for all 9 agents
   state: ArenaState;
-  dispatches: Dispatch[];
   messages: ChatMessage[];
   running: boolean;
   prevControllers: Map<string, Team>;
 }
 
 // ═══════════════════════════════════════════════════════════
-// Map Data — 12 territories, 3 factions (geographic landmass)
+// Map Data
 // ═══════════════════════════════════════════════════════════
 
-interface TerritoryInfo {
-  path: string;          // SVG path string for irregular polygon border
-  center: { x: number; y: number };  // label placement
-  label: string;
-}
+interface TerritoryInfo { path: string; center: { x: number; y: number }; label: string }
 
-// Continental landmass: North = mountainous highlands (top), East = frontier steppe (right),
-// South = delta lowlands (bottom-left). Territories are irregular polygons that tile together.
 const MAP: Record<string, TerritoryInfo> = {
-  // ── North Faction (top of the landmass — highlands) ──
-  "north-capital":  {
-    path: "M350,15 L390,10 L460,8 L520,14 L550,25 L540,60 L510,95 L450,110 L390,105 L355,80 L340,50 Z",
-    center: { x: 450, y: 58 }, label: "North\nCapital"
-  },
-  "north-harbor":   {
-    path: "M140,75 L195,48 L250,35 L310,22 L350,15 L340,50 L355,80 L390,105 L340,130 L280,145 L220,150 L165,135 L130,110 Z",
-    center: { x: 255, y: 88 }, label: "North\nHarbor"
-  },
-  "north-ridge":    {
-    path: "M550,25 L610,30 L680,50 L740,78 L760,110 L730,140 L670,150 L610,145 L560,130 L510,95 L540,60 Z",
-    center: { x: 640, y: 95 }, label: "North\nRidge"
-  },
-  // ── Contested Middle ──
-  "obsidian-gate":  {
-    path: "M130,110 L165,135 L220,150 L280,145 L340,130 L390,105 L450,110 L440,155 L410,200 L350,225 L280,230 L210,220 L155,195 L120,160 Z",
-    center: { x: 290, y: 170 }, label: "Obsidian\nGate"
-  },
-  "crimson-pass":   {
-    path: "M450,110 L510,95 L560,130 L610,145 L670,150 L660,195 L630,230 L570,250 L500,245 L440,230 L410,200 L440,155 Z",
-    center: { x: 545, y: 180 }, label: "Crimson\nPass"
-  },
-  // ── East Faction (right side — frontier steppe) ──
-  "glass-frontier": {
-    path: "M120,160 L155,195 L210,220 L280,230 L350,225 L410,200 L440,230 L430,280 L390,320 L320,340 L240,330 L170,305 L120,265 L100,220 Z",
-    center: { x: 270, y: 270 }, label: "Glass\nFrontier"
-  },
-  "ember-crossing": {
-    path: "M670,150 L730,140 L760,110 L800,145 L830,195 L840,250 L820,300 L770,330 L710,335 L650,320 L610,285 L590,250 L630,230 L660,195 Z",
-    center: { x: 720, y: 240 }, label: "Ember\nCrossing"
-  },
-  // ── Central contested ──
-  "saffron-fields": {
-    path: "M440,230 L500,245 L570,250 L590,250 L610,285 L650,320 L630,360 L570,385 L500,390 L430,380 L380,355 L390,320 L430,280 Z",
-    center: { x: 510, y: 315 }, label: "Saffron\nFields"
-  },
-  // ── South Faction (bottom — delta lowlands) ──
-  "southern-rail":  {
-    path: "M100,220 L120,265 L170,305 L240,330 L320,340 L300,385 L260,420 L200,440 L140,430 L90,400 L65,350 L70,290 Z",
-    center: { x: 175, y: 355 }, label: "Southern\nRail"
-  },
-  "ash-basin":      {
-    path: "M650,320 L710,335 L770,330 L820,300 L850,340 L855,395 L830,440 L780,465 L720,470 L660,455 L620,420 L600,385 L630,360 Z",
-    center: { x: 740, y: 395 }, label: "Ash\nBasin"
-  },
-  "mercury-delta":  {
-    path: "M320,340 L390,320 L380,355 L430,380 L500,390 L480,430 L440,465 L380,485 L310,490 L250,475 L200,440 L260,420 L300,385 Z",
-    center: { x: 355, y: 425 }, label: "Mercury\nDelta"
-  },
-  "south-capital":  {
-    path: "M500,390 L570,385 L630,360 L600,385 L620,420 L660,455 L640,490 L590,520 L530,535 L460,530 L400,510 L380,485 L440,465 L480,430 Z",
-    center: { x: 530, y: 465 }, label: "South\nCapital"
-  },
+  "north-capital":  { path: "M350,15 L390,10 L460,8 L520,14 L550,25 L540,60 L510,95 L450,110 L390,105 L355,80 L340,50 Z", center: { x: 450, y: 58 }, label: "North\nCapital" },
+  "north-harbor":   { path: "M140,75 L195,48 L250,35 L310,22 L350,15 L340,50 L355,80 L390,105 L340,130 L280,145 L220,150 L165,135 L130,110 Z", center: { x: 255, y: 88 }, label: "North\nHarbor" },
+  "north-ridge":    { path: "M550,25 L610,30 L680,50 L740,78 L760,110 L730,140 L670,150 L610,145 L560,130 L510,95 L540,60 Z", center: { x: 640, y: 95 }, label: "North\nRidge" },
+  "obsidian-gate":  { path: "M130,110 L165,135 L220,150 L280,145 L340,130 L390,105 L450,110 L440,155 L410,200 L350,225 L280,230 L210,220 L155,195 L120,160 Z", center: { x: 290, y: 170 }, label: "Obsidian\nGate" },
+  "crimson-pass":   { path: "M450,110 L510,95 L560,130 L610,145 L670,150 L660,195 L630,230 L570,250 L500,245 L440,230 L410,200 L440,155 Z", center: { x: 545, y: 180 }, label: "Crimson\nPass" },
+  "glass-frontier": { path: "M120,160 L155,195 L210,220 L280,230 L350,225 L410,200 L440,230 L430,280 L390,320 L320,340 L240,330 L170,305 L120,265 L100,220 Z", center: { x: 270, y: 270 }, label: "Glass\nFrontier" },
+  "ember-crossing": { path: "M670,150 L730,140 L760,110 L800,145 L830,195 L840,250 L820,300 L770,330 L710,335 L650,320 L610,285 L590,250 L630,230 L660,195 Z", center: { x: 720, y: 240 }, label: "Ember\nCrossing" },
+  "saffron-fields": { path: "M440,230 L500,245 L570,250 L590,250 L610,285 L650,320 L630,360 L570,385 L500,390 L430,380 L380,355 L390,320 L430,280 Z", center: { x: 510, y: 315 }, label: "Saffron\nFields" },
+  "southern-rail":  { path: "M100,220 L120,265 L170,305 L240,330 L320,340 L300,385 L260,420 L200,440 L140,430 L90,400 L65,350 L70,290 Z", center: { x: 175, y: 355 }, label: "Southern\nRail" },
+  "ash-basin":      { path: "M650,320 L710,335 L770,330 L820,300 L850,340 L855,395 L830,440 L780,465 L720,470 L660,455 L620,420 L600,385 L630,360 Z", center: { x: 740, y: 395 }, label: "Ash\nBasin" },
+  "mercury-delta":  { path: "M320,340 L390,320 L380,355 L430,380 L500,390 L480,430 L440,465 L380,485 L310,490 L250,475 L200,440 L260,420 L300,385 Z", center: { x: 355, y: 425 }, label: "Mercury\nDelta" },
+  "south-capital":  { path: "M500,390 L570,385 L630,360 L600,385 L620,420 L660,455 L640,490 L590,520 L530,535 L460,530 L400,510 L380,485 L440,465 L480,430 Z", center: { x: 530, y: 465 }, label: "South\nCapital" },
 };
 
 const EDGES: [string, string][] = [
@@ -131,7 +100,7 @@ const EDGES: [string, string][] = [
 ];
 
 // ═══════════════════════════════════════════════════════════
-// Game Engine (TypeScript — app layer, NOT in WASM)
+// Game Engine
 // ═══════════════════════════════════════════════════════════
 
 function defaultState(): ArenaState {
@@ -184,72 +153,95 @@ function resolveOrders(state: ArenaState, orders: TurnDecision[]): ArenaState {
   return { turn, max_turns: state.max_turns, regions: newRegions, scores, winner };
 }
 
-function stateBlock(team: Team, state: ArenaState, signals: Record<Team, string>): string {
+// ═══════════════════════════════════════════════════════════
+// Mob Definitions — autonomous agents with comms
+// ═══════════════════════════════════════════════════════════
+
+const GAME_RULES = `GAME: 3-faction territory war (North, South, East). 12 territories with defense (0-100) and value (2-4 pts).
+COMBAT: aggression + rand(0-12) vs defense + rand(0-8). Capture if greater. Fortify = 100 - aggression.
+SCORING: Each turn, factions earn sum of their territories' values. 10 turns total. Highest cumulative score wins.
+DIPLOMACY: 2v1 is decisive. Alliances, betrayals, and threats are critical to winning.`;
+
+const NARRATOR_SCHEMA = {
+  type: "object",
+  properties: { narrative: { type: "string", description: "2-3 sentences of dramatic war narrative" } },
+  required: ["narrative"],
+  additionalProperties: false,
+};
+
+function buildFactionDefinition(team: Team, model: string): object {
+  return {
+    id: `diplomacy-${team}`,
+    profiles: {
+      planner: {
+        model, runtime_mode: "autonomous_host",
+        tools: { comms: true },
+        peer_description: `${team} strategic planner — analyzes territory, proposes attacks, coordinates with operator and ambassador`,
+        external_addressable: true,
+      },
+      operator: {
+        model, runtime_mode: "autonomous_host",
+        tools: { comms: true },
+        peer_description: `${team} military operator — validates orders, challenges assumptions, executes final commands`,
+        external_addressable: true,
+      },
+      ambassador: {
+        model, runtime_mode: "autonomous_host",
+        tools: { comms: true },
+        peer_description: `${team} diplomatic ambassador — negotiates alliances and truces with foreign ambassadors`,
+        external_addressable: true,
+      },
+    },
+    // No role_wiring — we wire explicitly after spawn so planner↔operator
+    // and planner↔ambassador are paired, but operator↔ambassador are not
+    // (ambassador reports to planner, not directly to operator)
+    wiring: {},
+    // Narrator flow only — faction agents converse via comms, not flows
+    flows: {},
+  };
+}
+
+function buildNarratorDefinition(model: string): object {
+  return {
+    id: "diplomacy-narrator",
+    profiles: {
+      narrator: {
+        model, runtime_mode: "turn_driven",
+        peer_description: "War correspondent narrator",
+        external_addressable: false,
+        output_schema: NARRATOR_SCHEMA,
+      },
+    },
+    flows: {
+      narrate: {
+        steps: {
+          summarize: {
+            role: "narrator",
+            message: `You are a dramatic war correspondent narrating an epic 3-faction territorial conflict.
+
+Turn summary:
+{{params.summary}}
+
+Write 2-3 sentences of vivid, gripping war narrative. Reference specific territories by name. Describe the drama of alliances forming and breaking, the clash of armies, the cunning of diplomats. Make the reader feel the tension.
+
+Respond with ONLY a JSON object.`,
+            dispatch_mode: "one_to_one",
+          },
+        },
+      },
+    },
+  };
+}
+
+function serializeState(team: Team, state: ArenaState): string {
   const ours = state.regions.filter(r => r.controller === team);
   const enemies = state.regions.filter(r => r.controller !== team);
-  const others = TEAMS.filter(t => t !== team);
-  return `Turn ${state.turn}/${state.max_turns}. You are ${team.toUpperCase()}.
-
-SCORES: ${TEAMS.map(t => `${t}=${state.scores[t]}`).join(", ")}
-
-YOUR TERRITORIES (${ours.length}):
-${ours.map(r => `  ${r.id}: def=${r.defense}, val=${r.value}`).join("\n")}
-
-ENEMY TERRITORIES (${enemies.length}):
-${enemies.map(r => `  ${r.id} [${r.controller}]: def=${r.defense}, val=${r.value}`).join("\n")}
-
-DIPLOMATIC SIGNALS FROM LAST TURN:
-${others.map(t => `  ${t}: "${signals[t]}"`).join("\n")}`;
-}
-
-function buildPlannerPrompt(team: Team, state: ArenaState, signals: Record<Team, string>): string {
-  return `[PLANNER PHASE] ${stateBlock(team, state, signals)}
-
-As the PLANNER for ${team.toUpperCase()}, analyze the strategic situation and propose:
-1. Which enemy territory should we target and why?
-2. What aggression level (0-100) is appropriate?
-3. What diplomatic signal should we send? Remember: diplomacy is PUBLIC. You can propose alliances, threaten, deceive, or negotiate.
-
-Think 2-3 turns ahead. Consider alliances and betrayals.
-
-Respond with ONLY valid JSON:
-{"order":{"aggression":<0-100>,"fortify":<0-100>,"target_region":"<id>","diplomacy":"<your public diplomatic message>"},"reasoning":"<your strategic analysis>"}`;
-}
-
-function buildOperatorPrompt(team: Team, plannerOutput: string): string {
-  return `[OPERATOR PHASE] The planner has proposed the following:
-
-${plannerOutput}
-
-As the OPERATOR for ${team.toUpperCase()}, validate this order:
-- Is the target an enemy territory?
-- Does aggression + fortify = 100?
-- Is the diplomatic signal strategically sound?
-
-If the plan is good, commit it. If not, adjust and explain why.
-
-Respond with ONLY valid JSON (the final committed order):
-{"order":{"aggression":<0-100>,"fortify":<0-100>,"target_region":"<id>","diplomacy":"<your public diplomatic message>"},"reasoning":"<brief execution note>"}`;
-}
-
-function parseDecision(team: Team, text: string, state: ArenaState): TurnDecision | null {
-  try {
-    const match = text.match(/\{[\s\S]*\}/);
-    if (!match) return null;
-    const parsed = JSON.parse(match[0]);
-    const order = parsed.order || parsed;
-    const validTargets = state.regions.filter(r => r.controller !== team).map(r => r.id);
-    if (validTargets.length === 0) return null;
-    const aggression = Math.max(0, Math.min(100, Number(order.aggression) || 50));
-    return {
-      order: {
-        team, aggression, fortify: 100 - aggression,
-        target_region: validTargets.includes(order.target_region) ? order.target_region : validTargets[0],
-        diplomacy: typeof order.diplomacy === "string" ? order.diplomacy : (order.diplomacy ? JSON.stringify(order.diplomacy) : "no comment"),
-      },
-      reasoning: String(parsed.reasoning || ""),
-    };
-  } catch { return null; }
+  return JSON.stringify({
+    turn: state.turn, max_turns: state.max_turns, team,
+    scores: state.scores,
+    your_territories: ours.map(r => ({ id: r.id, defense: r.defense, value: r.value })),
+    enemy_territories: enemies.map(r => ({ id: r.id, controller: r.controller, defense: r.defense, value: r.value })),
+  });
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -294,10 +286,8 @@ app.innerHTML = `
   <button class="close-btn" id="closeDrawer">\u2715 Close</button>
   <h3>Settings</h3>
   <div class="setting"><label>API Key</label><input type="password" id="apiKey" placeholder="sk-ant-..." /></div>
-  <div class="setting"><label>North Model</label><select id="northModel"><option value="claude-sonnet-4-5" selected>claude-sonnet-4-5</option><option value="claude-opus-4-6">claude-opus-4-6</option></select></div>
-  <div class="setting"><label>South Model</label><select id="southModel"><option value="claude-sonnet-4-5" selected>claude-sonnet-4-5</option><option value="claude-opus-4-6">claude-opus-4-6</option></select></div>
-  <div class="setting"><label>East Model</label><select id="eastModel"><option value="claude-sonnet-4-5" selected>claude-sonnet-4-5</option><option value="claude-opus-4-6">claude-opus-4-6</option></select></div>
-  <p class="settings-note">Each faction runs inside the real meerkat agent loop via WASM. The runtime calls Anthropic directly through browser fetch.</p>
+  <div class="setting"><label>Model</label><select id="modelSelect"><option value="claude-sonnet-4-5" selected>claude-sonnet-4-5</option><option value="claude-opus-4-6">claude-opus-4-6</option><option value="gpt-5.2">gpt-5.2</option><option value="gemini-3-flash-preview">gemini-3-flash-preview</option></select></div>
+  <p class="settings-note">Each faction is a mob of 3 autonomous agents (planner, operator, ambassador) communicating via comms. Ambassadors negotiate across factions. Sessions persist across turns.</p>
 </div>
 <p class="status-bar" id="statusLine">Open settings (\u2699) to configure API key, then start.</p>`;
 
@@ -310,7 +300,7 @@ let runtime: RuntimeModule | null = null;
 let session: MatchSession | null = null;
 let bannerTimer: ReturnType<typeof setTimeout> | null = null;
 let activeChannel: ChannelId = "narrator";
-const unreadCounts: Record<ChannelId, number> = { "north-ops": 0, "south-ops": 0, "east-ops": 0, negotiations: 0, narrator: 0 };
+const unreadCounts: Record<ChannelId, number> = Object.fromEntries(CHANNELS.map(c => [c.id, 0])) as Record<ChannelId, number>;
 
 const apiKeyInput = $<HTMLInputElement>("apiKey");
 apiKeyInput.value = sessionStorage.getItem("api_key") ?? "";
@@ -351,8 +341,6 @@ function renderMap(state: ArenaState, targets?: Record<Team, string>, captures?:
   <filter id="terrainNoise"><feTurbulence type="fractalNoise" baseFrequency="0.04" numOctaves="3" result="n"/><feColorMatrix type="saturate" values="0" in="n" result="ng"/><feBlend in="SourceGraphic" in2="ng" mode="overlay" result="blended"/><feComposite in="blended" in2="SourceGraphic" operator="in"/></filter>
   <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0 L0 0 0 40" fill="none" stroke="rgba(50,70,100,0.03)" stroke-width="0.5"/></pattern></defs>`;
   svg += `<rect width="900" height="570" fill="url(#grid)"/>`;
-
-  // Draw territories as irregular polygons
   for (const region of state.regions) {
     const t = MAP[region.id]; if (!t) continue;
     const lines = t.label.split("\n");
@@ -368,27 +356,20 @@ function renderMap(state: ArenaState, targets?: Record<Team, string>, captures?:
     svg += `<text class="region-stats" x="${t.center.x}" y="${t.center.y + 20}">\u2694${region.defense} \u2605${region.value}</text>`;
     svg += `</g>`;
   }
-
-  // Front lines: shared borders between different factions
   for (const [a, b] of EDGES) {
     if (ctrl.get(a) !== ctrl.get(b)) {
       const pa = MAP[a], pb = MAP[b];
       svg += `<line x1="${pa.center.x}" y1="${pa.center.y}" x2="${pb.center.x}" y2="${pb.center.y}" class="edge-front"/>`;
     }
   }
-
-  // Capture flash animation
   if (captures) for (const id of captures) {
     const t = MAP[id], team = ctrl.get(id);
     if (t && team) svg += `<path d="${t.path}" class="captured-flash to-${team}" filter="url(#glow)"/>`;
   }
-
-  // Target indicators
   if (targets) for (const [team, rid] of Object.entries(targets)) {
     const t = MAP[rid];
     if (t) svg += `<circle cx="${t.center.x}" cy="${t.center.y}" r="28" class="target-ring ${team}"/>`;
   }
-
   ($<SVGSVGElement>("mapSvg")).innerHTML = svg;
 }
 
@@ -405,8 +386,10 @@ function renderScore(state: ArenaState): void {
 
 // ── Channel UI ──
 
-const ROLE_ICONS: Record<MessageRole, string> = { planner: "\u{1F9ED}", operator: "\u{1F6E1}\uFE0F", narrator: "\u{1F4DC}", system: "\u2699\uFE0F" };
-const TEAM_CHANNEL: Record<Team, ChannelId> = { north: "north-ops", south: "south-ops", east: "east-ops" };
+const ROLE_ICONS: Record<MessageRole, string> = {
+  planner: "\u{1F9ED}", operator: "\u{1F6E1}\uFE0F", ambassador: "\u{1F3F3}\uFE0F",
+  narrator: "\u{1F4DC}", system: "\u2699\uFE0F",
+};
 
 function pushMessage(msg: ChatMessage): void {
   if (!session) return;
@@ -440,7 +423,6 @@ function renderMessages(): void {
   const feed = $<HTMLDivElement>("msgFeed");
   const ch = CHANNELS.find(c => c.id === activeChannel);
   header.textContent = ch ? `${ch.icon} ${ch.label}` : activeChannel;
-
   const msgs = session ? session.messages.filter(m => m.channel === activeChannel) : [];
   feed.innerHTML = msgs.map(m => {
     const fClass = m.faction === "neutral" ? "" : ` ${m.faction}`;
@@ -456,11 +438,12 @@ function escapeHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-// (dispatch messages are now pushed directly in runFactionTurn and tick)
+// ═══════════════════════════════════════════════════════════
+// Helpers
+// ═══════════════════════════════════════════════════════════
 
-// ═══════════════════════════════════════════════════════════
-// Runtime + Game Loop
-// ═══════════════════════════════════════════════════════════
+function parseJsResult(val: unknown): string { return typeof val === "string" ? val : String(val); }
+function sleep(ms: number): Promise<void> { return new Promise(r => setTimeout(r, ms)); }
 
 async function loadRuntime(): Promise<RuntimeModule> {
   if (runtime) return runtime;
@@ -471,72 +454,217 @@ async function loadRuntime(): Promise<RuntimeModule> {
   return mod;
 }
 
-async function runFactionTurn(f: FactionSession, signals: Record<Team, string>): Promise<TurnDecision | null> {
-  if (!runtime || !session) return null;
-  const turn = session.state.turn;
-  const ch = TEAM_CHANNEL[f.team];
-
-  // Step 1: Planner phase
-  setStatus(`Round ${turn}: ${f.team.toUpperCase()} planner thinking...`);
-  const plannerPrompt = buildPlannerPrompt(f.team, session.state, signals);
-  const pj = await runtime.start_turn(f.handle, plannerPrompt, "{}");
-  const pr = JSON.parse(pj);
-  const plannerText = pr.text as string;
-
-  // Post planner message to faction channel
-  const plannerDecision = parseDecision(f.team, plannerText, session.state);
-  pushMessage({ channel: ch, role: "planner", faction: f.team, content: plannerDecision?.reasoning || plannerText.slice(0, 200), turn });
-
-  if (!session.running) return null;
-
-  // Step 2: Operator phase
-  setStatus(`Round ${turn}: ${f.team.toUpperCase()} operator validating...`);
-  const operatorPrompt = buildOperatorPrompt(f.team, plannerText);
-  const oj = await runtime.start_turn(f.handle, operatorPrompt, "{}");
-  const or_ = JSON.parse(oj);
-  const operatorText = or_.text as string;
-
-  // Post operator message to faction channel
-  const operatorDecision = parseDecision(f.team, operatorText, session.state);
-  pushMessage({ channel: ch, role: "operator", faction: f.team, content: operatorDecision?.reasoning || "Order committed.", turn });
-
-  // Use operator's decision (final committed order), fall back to planner's
-  return operatorDecision || plannerDecision;
+/** Resolve meerkat_id → team. */
+function meerkatTeam(id: string): Team | null {
+  for (const t of TEAMS) if (id.startsWith(t)) return t;
+  return null;
 }
+
+/** Resolve meerkat_id → role. */
+function meerkatRole(id: string): MessageRole {
+  if (id.includes("planner")) return "planner";
+  if (id.includes("operator")) return "operator";
+  if (id.includes("ambassador")) return "ambassador";
+  return "system";
+}
+
+/** Map a (sender, receiver) pair to the correct DM channel. */
+function dmChannel(senderId: string, receiverId: string): ChannelId | null {
+  const sTeam = meerkatTeam(senderId);
+  const rTeam = meerkatTeam(receiverId);
+  if (!sTeam || !rTeam) return null;
+
+  const sRole = meerkatRole(senderId);
+  const rRole = meerkatRole(receiverId);
+
+  // Cross-faction: ambassador↔ambassador
+  if (sTeam !== rTeam) {
+    const sorted = [sTeam, rTeam].sort();
+    return `${sorted[0][0]}-${sorted[1][0]}-diplo` as ChannelId;
+  }
+
+  // Same faction: planner↔operator or planner↔ambassador
+  if ((sRole === "planner" && rRole === "operator") || (sRole === "operator" && rRole === "planner"))
+    return `${sTeam[0]}-plan-op` as ChannelId;
+  if ((sRole === "planner" && rRole === "ambassador") || (sRole === "ambassador" && rRole === "planner"))
+    return `${sTeam[0]}-plan-amb` as ChannelId;
+
+  return null;
+}
+
+// ═══════════════════════════════════════════════════════════
+// Event Streaming → DM Channels
+// ═══════════════════════════════════════════════════════════
+
+/** Poll all agent subscriptions and push events to DM channels. Returns count of new messages. */
+function drainAllEvents(mod: RuntimeModule, turn: number): number {
+  if (!session) return 0;
+  let count = 0;
+  for (const sub of session.subs) {
+    try {
+      const raw = mod.poll_subscription(sub.handle);
+      const events: any[] = JSON.parse(raw);
+      if (events.length > 0) console.log(`[${sub.meerkatId}] ${events.length} events:`, events.map(e => e.type));
+      for (const event of events) {
+        // Outgoing comms: agent used send_message tool
+        if (event.type === "tool_call_requested" && event.name === "send_message") {
+          try {
+            const args = typeof event.arguments === "string" ? JSON.parse(event.arguments) : event.arguments;
+            const to = args.to || args.peer || "";
+            const content = args.content || args.message || "";
+            const ch = dmChannel(sub.meerkatId, to);
+            if (ch && content) {
+              pushMessage({ channel: ch, role: sub.role, faction: sub.team, content, turn });
+              count++;
+            }
+          } catch { /* skip parse errors */ }
+        }
+        // Agent's text output (reasoning, analysis)
+        if (event.type === "text_complete" && event.text) {
+          // Show in the agent's own faction ops channel as context
+          const ch = `${sub.team[0]}-plan-op` as ChannelId;
+          // Only show planner/operator text, not ambassador (ambassador output goes to DMs)
+          if (sub.role === "planner" || sub.role === "operator") {
+            pushMessage({ channel: ch, role: sub.role, faction: sub.team, content: event.text.slice(0, 500), turn });
+            count++;
+          }
+        }
+      }
+    } catch { /* poll error */ }
+  }
+  return count;
+}
+
+// ═══════════════════════════════════════════════════════════
+// Game Loop — Autonomous Agents
+// ═══════════════════════════════════════════════════════════
 
 async function tick(): Promise<void> {
   if (!runtime || !session || !session.running) return;
   if (session.state.winner) { session.running = false; showVictory(session.state.winner, session.state); setBadge("Complete"); return; }
+
+  const mod = runtime;
+  const turn = session.state.turn;
+
   try {
-    const turn = session.state.turn;
-    setBadge("Thinking...", true);
-    setStatus(`Round ${turn}: Factions deliberating...`);
-    const signals: Record<Team, string> = { north: "opening", south: "opening", east: "opening" };
-    for (const d of session.dispatches.slice(-3)) signals[d.team] = d.diplomacy;
+    setBadge("Agents working...", true);
+    setStatus(`Round ${turn}: Triggering planners — agents will deliberate, negotiate, and finalize autonomously...`);
+    showBanner(`Round ${turn}`, "Agents are deliberating and negotiating...", 8000);
 
-    // Run all factions in parallel (each does planner + operator internally)
-    const results = await Promise.all(session.factions.map(f => runFactionTurn(f, signals)));
-    if (!session.running) return;
+    // Trigger each planner with the game state.
+    // The planner's system prompt tells it to:
+    //   1. Discuss with operator (comms)
+    //   2. Brief ambassador with diplomatic intent (comms)
+    //   3. Ambassador negotiates with foreign ambassadors (comms, cross-mob)
+    //   4. Ambassador reports back to planner (comms)
+    //   5. Planner tells operator to finalize
+    //   6. Operator produces final order
+    for (const f of session.factions) {
+      const stateStr = serializeState(f.team, session.state);
+      const prompt = `=== TURN ${turn} ===
+${GAME_RULES}
 
-    const decisions: TurnDecision[] = [];
-    for (let i = 0; i < results.length; i++) {
-      const d = results[i];
-      const team = session.factions[i].team;
-      if (d) {
-        decisions.push(d);
-        session.dispatches.push({ team, turn, diplomacy: d.order.diplomacy, reasoning: d.reasoning });
-        // Post diplomatic signal to negotiations channel
-        if (d.order.diplomacy && d.order.diplomacy !== "no comment") {
-          pushMessage({ channel: "negotiations", role: "planner", faction: team, content: d.order.diplomacy, turn });
-        }
+You are the PLANNER for ${f.team.toUpperCase()}.
+
+CURRENT STATE:
+${stateStr}
+
+PROTOCOL:
+1. Use send_message to your OPERATOR (${f.team}-operator) to discuss strategy. Debate which territory to attack, what aggression level to use. Challenge each other's ideas. Agree on a plan.
+2. Use send_message to your AMBASSADOR (${f.team}-ambassador) with your diplomatic intent — what alliances or threats should they pursue.
+3. Wait for your ambassador to report back with negotiation results.
+4. Based on diplomatic outcomes, send your OPERATOR the final instruction. Tell them to produce the order as: FINAL ORDER: target=<region-id> aggression=<0-100>
+5. The operator will output the final order.
+
+Start by messaging your operator to discuss the situation.`;
+
+      try {
+        await mod.mob_send_message(f.mobId, `${f.team}-planner`, prompt);
+      } catch (e) {
+        console.warn(`Failed to trigger ${f.team} planner:`, e);
       }
     }
-    if (decisions.length === 0) { session.running = false; setBadge("Error"); setStatus("No valid orders."); return; }
 
+    // Poll events until quiescence (agents done talking)
+    const MAX_WAIT_MS = 120_000; // 2 minutes max per turn
+    const QUIET_THRESHOLD = 8_000; // 8 seconds of silence = done
+    const deadline = Date.now() + MAX_WAIT_MS;
+    let lastEventTime = Date.now();
+
+    while (Date.now() < deadline && session.running) {
+      await sleep(300);
+      const newMessages = drainAllEvents(mod, turn);
+      if (newMessages > 0) {
+        lastEventTime = Date.now();
+        // Update status with activity indicator
+        const totalDMs = session.messages.filter(m => m.turn === turn).length;
+        setStatus(`Round ${turn}: ${totalDMs} messages exchanged...`);
+      }
+      if (Date.now() - lastEventTime > QUIET_THRESHOLD) break;
+    }
+    if (!session.running) return;
+
+    // Extract final orders from operator text outputs this turn.
+    // Look for "FINAL ORDER: target=X aggression=Y" pattern in operator messages.
+    const decisions: TurnDecision[] = [];
+    for (const f of session.factions) {
+      const opMsgs = session.messages.filter(
+        m => m.turn === turn && m.faction === f.team && m.role === "operator"
+      );
+      // Search backwards for the most recent message containing FINAL ORDER
+      let order: OrderSet | null = null;
+      let reasoning = "";
+      for (let i = opMsgs.length - 1; i >= 0; i--) {
+        const text = opMsgs[i].content;
+        const match = text.match(/FINAL\s*ORDER\s*:?\s*target\s*=\s*([\w-]+)\s*aggression\s*=\s*(\d+)/i);
+        if (match) {
+          const targetRegion = match[1];
+          const aggression = Math.max(0, Math.min(100, parseInt(match[2], 10)));
+          const validTargets = session.state.regions.filter(r => r.controller !== f.team).map(r => r.id);
+          order = {
+            team: f.team, aggression, fortify: 100 - aggression,
+            target_region: validTargets.includes(targetRegion) ? targetRegion : validTargets[0],
+          };
+          reasoning = text;
+          break;
+        }
+      }
+      // Fallback: try JSON extraction from any operator message
+      if (!order) {
+        for (let i = opMsgs.length - 1; i >= 0; i--) {
+          try {
+            const jsonMatch = opMsgs[i].content.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+              const parsed = JSON.parse(jsonMatch[0]);
+              const o = parsed.order || parsed;
+              if (o.target_region && o.aggression != null) {
+                const validTargets = session.state.regions.filter(r => r.controller !== f.team).map(r => r.id);
+                const aggression = Math.max(0, Math.min(100, Number(o.aggression) || 50));
+                order = {
+                  team: f.team, aggression, fortify: 100 - aggression,
+                  target_region: validTargets.includes(o.target_region) ? o.target_region : validTargets[0],
+                };
+                reasoning = parsed.reasoning || opMsgs[i].content;
+                break;
+              }
+            }
+          } catch { /* skip parse errors */ }
+        }
+      }
+      // Last resort fallback
+      if (!order) {
+        const validTargets = session.state.regions.filter(r => r.controller !== f.team).map(r => r.id);
+        order = { team: f.team, aggression: 50, fortify: 50, target_region: validTargets[0] };
+        reasoning = "Fallback: no clear order from operator.";
+      }
+      decisions.push({ order, reasoning });
+    }
+
+    // Resolve & Render
     const targets = Object.fromEntries(decisions.map(d => [d.order.team, d.order.target_region])) as Record<Team, string>;
     showBanner(`Round ${turn}`, decisions.map(d => `${d.order.team}\u2192${d.order.target_region.replace(/-/g," ")}`).join(" \u2022 "), 2500);
     renderMap(session.state, targets);
-    await new Promise(r => setTimeout(r, 1500));
+    await sleep(1500);
     if (!session.running) return;
 
     const newState = resolveOrders(session.state, decisions);
@@ -549,63 +677,120 @@ async function tick(): Promise<void> {
     renderScore(newState);
     if (captures.size) showBanner("Territory Changed", [...captures].map(id => id.replace(/-/g," ")).join(", "), 2000);
 
-    // Narrator: summarize the turn
-    if (session.narratorHandle && runtime) {
+    // Narrator
+    if (session.narratorMobId) {
       try {
-        const captureList = [...captures].map(id => id.replace(/-/g, " ")).join(", ");
-        const narratorPrompt = `Turn ${turn} summary:
-${decisions.map(d => `${d.order.team.toUpperCase()} attacked ${d.order.target_region.replace(/-/g," ")} (aggression=${d.order.aggression}). Diplomacy: "${d.order.diplomacy}"`).join("\n")}
-${captures.size > 0 ? `Territories changed hands: ${captureList}` : "No territories changed hands."}
-Scores: ${TEAMS.map(t => `${t}=${newState.scores[t]}`).join(", ")}
-${newState.winner ? `GAME OVER: ${newState.winner === "draw" ? "It's a draw!" : `${newState.winner.toUpperCase()} wins!`}` : ""}
-
-Write 2-3 sentences of dramatic war narrative.`;
-        const nj = await runtime.start_turn(session.narratorHandle, narratorPrompt, "{}");
-        const nr = JSON.parse(nj);
-        if (nr.text) {
-          pushMessage({ channel: "narrator", role: "narrator", faction: "neutral", content: nr.text, turn });
+        const summary = [
+          ...decisions.map(d => `${d.order.team.toUpperCase()} attacked ${d.order.target_region.replace(/-/g," ")} (aggression=${d.order.aggression}). ${d.reasoning.slice(0, 100)}`),
+          captures.size > 0 ? `Territories changed: ${[...captures].map(id => id.replace(/-/g, " ")).join(", ")}` : "No territories changed.",
+          `Scores: ${TEAMS.map(t => `${t}=${newState.scores[t]}`).join(", ")}`,
+          // Include diplomatic context from DM channels
+          ...session.messages.filter(m => m.turn === turn && m.role === "ambassador").slice(-3)
+            .map(m => `${m.faction} ambassador said: "${m.content.slice(0, 80)}"`),
+        ].join("\n");
+        const runId = parseJsResult(await mod.mob_run_flow(session.narratorMobId, "narrate", JSON.stringify({ summary })));
+        for (let i = 0; i < 30; i++) {
+          await sleep(500);
+          const raw = parseJsResult(await mod.mob_flow_status(session.narratorMobId, runId));
+          if (raw === "null") continue;
+          const result = JSON.parse(raw);
+          if (result.status === "completed") {
+            const step = result.step_ledger?.find((s: any) => s.step_id === "summarize" && s.status === "completed");
+            if (step?.output?.narrative) {
+              pushMessage({ channel: "narrator", role: "narrator", faction: "neutral", content: step.output.narrative, turn });
+            }
+            break;
+          }
+          if (result.status !== "running" && result.status !== "pending") break;
         }
-      } catch { /* narrator failure is non-fatal */ }
+      } catch { /* narrator non-fatal */ }
     }
 
-    setBadge("Live");
-    setStatus(`Round ${turn} resolved.`);
+    setBadge("Live"); setStatus(`Round ${turn} resolved.`);
     if (newState.winner) {
       session.running = false;
-      await new Promise(r => setTimeout(r, 800));
-      // Show victory with narrator's final words if available
-      const lastNarrator = session.messages.filter(m => m.channel === "narrator").pop();
+      await sleep(800);
+      const lastNarrator = session.messages.filter(m => m.channel === "narrator" && m.role === "narrator").pop();
       showVictory(newState.winner, newState, lastNarrator?.content);
       setBadge("Complete");
       return;
     }
-    await new Promise(r => setTimeout(r, 2000));
+    await sleep(2000);
     if (session.running) void tick();
-  } catch (error) { session.running = false; setBadge("Error"); setStatus(`Error: ${error instanceof Error ? error.message : String(error)}`); }
+  } catch (error) {
+    session.running = false; setBadge("Error");
+    setStatus(`Error: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
+
+// ═══════════════════════════════════════════════════════════
+// Start Match
+// ═══════════════════════════════════════════════════════════
 
 async function startMatch(): Promise<void> {
   try {
     ($<HTMLDivElement>("victory")).classList.remove("visible");
     const apiKey = apiKeyInput.value.trim();
     if (!apiKey) { setStatus("Enter API key in settings."); return; }
+    const model = ($<HTMLSelectElement>("modelSelect")).value;
     setBadge("Loading...", true);
+    setStatus("Loading WASM runtime...");
     const mod = await loadRuntime();
-    const packs = await Promise.all(["/north.mobpack","/south.mobpack","/east.mobpack","/narrator.mobpack"].map(async p => { const r = await fetch(p, {cache:"no-store"}); return new Uint8Array(await r.arrayBuffer()); }));
-    const models: Record<Team, string> = { north: ($<HTMLSelectElement>("northModel")).value, south: ($<HTMLSelectElement>("southModel")).value, east: ($<HTMLSelectElement>("eastModel")).value };
-    const factions: FactionSession[] = TEAMS.map((team, i) => {
-      const h = mod.create_session(packs[i], JSON.stringify({ model: models[team], api_key: apiKey, max_tokens: 1024 }));
-      return { team, handle: h, model: models[team] };
-    });
-    // Create narrator session (4th pack)
-    let narratorHandle: number | null = null;
+
+    setStatus("Initializing runtime...");
+    mod.init_runtime_from_config(JSON.stringify({ api_key: apiKey, model }));
+
+    const factions: FactionMob[] = [];
+    const subs: AgentSub[] = [];
+
+    for (const team of TEAMS) {
+      setStatus(`Creating ${team} faction mob (3 autonomous agents)...`);
+      const def = buildFactionDefinition(team, model);
+      const mobId = parseJsResult(await mod.mob_create(JSON.stringify(def)));
+
+      // Spawn all 3 agents as autonomous_host
+      await mod.mob_spawn(mobId, JSON.stringify([
+        { profile: "planner", meerkat_id: `${team}-planner`, runtime_mode: "autonomous_host" },
+        { profile: "operator", meerkat_id: `${team}-operator`, runtime_mode: "autonomous_host" },
+        { profile: "ambassador", meerkat_id: `${team}-ambassador`, runtime_mode: "autonomous_host" },
+      ]));
+
+      // Explicit wiring: planner↔operator, planner↔ambassador
+      // (NOT operator↔ambassador — ambassador reports through planner)
+      await mod.mob_wire(mobId, `${team}-planner`, `${team}-operator`);
+      await mod.mob_wire(mobId, `${team}-planner`, `${team}-ambassador`);
+
+      // Subscribe to all 3 agents' event streams
+      for (const role of ["planner", "operator", "ambassador"] as const) {
+        try {
+          const handle = await mod.mob_member_subscribe(mobId, `${team}-${role}`);
+          subs.push({ meerkatId: `${team}-${role}`, handle, role, team });
+        } catch (e) {
+          console.warn(`Failed to subscribe to ${team}-${role}:`, e);
+        }
+      }
+
+      factions.push({ team, mobId });
+    }
+
+    // Narrator mob (turn_driven, flow-based — just summarizes)
+    let narratorMobId: string | null = null;
     try {
-      narratorHandle = mod.create_session(packs[3], JSON.stringify({ model: models.north, api_key: apiKey, max_tokens: 512 }));
-    } catch { /* narrator is optional — game works without it */ }
+      setStatus("Creating narrator...");
+      const narratorDef = buildNarratorDefinition(model);
+      narratorMobId = parseJsResult(await mod.mob_create(JSON.stringify(narratorDef)));
+      await mod.mob_spawn(narratorMobId, JSON.stringify([
+        { profile: "narrator", meerkat_id: "narrator", runtime_mode: "turn_driven" },
+      ]));
+    } catch { /* narrator optional */ }
+
     const state = defaultState();
-    session = { factions, narratorHandle, state, dispatches: [], messages: [], running: true, prevControllers: new Map(state.regions.map(r => [r.id, r.controller])) };
+    session = {
+      factions, narratorMobId, subs, state, messages: [], running: true,
+      prevControllers: new Map(state.regions.map(r => [r.id, r.controller])),
+    };
     renderMap(state); renderScore(state);
-    showBanner("Campaign Begins", `3 factions, real LLM reasoning`, 2000);
+    showBanner("Campaign Begins", "9 autonomous agents across 3 factions", 3000);
     setBadge("Live"); setStatus("Campaign started.");
     ($<HTMLDivElement>("drawer")).classList.remove("open");
     await tick();
@@ -619,7 +804,7 @@ async function startMatch(): Promise<void> {
 document.getElementById("startBtn")!.addEventListener("click", () => void startMatch());
 document.getElementById("pauseBtn")!.addEventListener("click", () => { if (!session) return; session.running = !session.running; (document.getElementById("pauseBtn") as HTMLButtonElement).textContent = session.running ? "Pause" : "Resume"; if (session.running) void tick(); });
 document.getElementById("stepBtn")!.addEventListener("click", () => { if (!session) return; session.running = true; (document.getElementById("pauseBtn") as HTMLButtonElement).textContent = "Resume"; const doStep = async () => { await tick(); if (session) session.running = false; (document.getElementById("pauseBtn") as HTMLButtonElement).textContent = "Resume"; }; void doStep(); });
-document.getElementById("exportBtn")!.addEventListener("click", () => { if (!session) return; const b = new Blob([JSON.stringify({state:session.state,dispatches:session.dispatches},null,2)],{type:"application/json"}); const a = document.createElement("a"); a.href = URL.createObjectURL(b); a.download = "replay.json"; a.click(); });
+document.getElementById("exportBtn")!.addEventListener("click", () => { if (!session) return; const b = new Blob([JSON.stringify({state:session.state,messages:session.messages},null,2)],{type:"application/json"}); const a = document.createElement("a"); a.href = URL.createObjectURL(b); a.download = "replay.json"; a.click(); });
 document.getElementById("gearBtn")!.addEventListener("click", () => ($<HTMLDivElement>("drawer")).classList.toggle("open"));
 document.getElementById("closeDrawer")!.addEventListener("click", () => ($<HTMLDivElement>("drawer")).classList.remove("open"));
 

@@ -332,6 +332,24 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         })))
     }
 
+    /// Get a raw broadcast receiver for a session's events.
+    ///
+    /// Unlike [`subscribe_session_events`] which returns an `EventStream`,
+    /// this returns the raw `broadcast::Receiver` which supports synchronous
+    /// `try_recv()` — useful for WASM where async polling with noop wakers
+    /// doesn't work reliably.
+    pub async fn subscribe_session_events_raw(
+        &self,
+        id: &SessionId,
+    ) -> Result<tokio::sync::broadcast::Receiver<AgentEvent>, meerkat_core::comms::StreamError>
+    {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| meerkat_core::comms::StreamError::NotFound(format!("session {id}")))?;
+        Ok(handle.session_event_tx.subscribe())
+    }
+
     /// Acquire the turn lock atomically. Returns Err(Busy) if already locked.
     fn try_acquire_turn(id: &SessionId, handle: &SessionHandle) -> Result<(), SessionError> {
         match handle

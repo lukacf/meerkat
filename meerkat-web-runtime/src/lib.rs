@@ -56,6 +56,22 @@ use meerkat_mob::{FlowId, MeerkatId, MobDefinition, MobId, RunId};
 use meerkat_mob_mcp::MobMcpState;
 
 // ═══════════════════════════════════════════════════════════
+// Tracing → browser console (wasm32 only)
+// ═══════════════════════════════════════════════════════════
+
+#[cfg(target_arch = "wasm32")]
+fn init_tracing() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        tracing_wasm::set_as_global_default();
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn init_tracing() {}
+
+// ═══════════════════════════════════════════════════════════
 // Constants
 // ═══════════════════════════════════════════════════════════
 
@@ -200,8 +216,12 @@ thread_local! {
 // RuntimeState — service-based infrastructure
 // ═══════════════════════════════════════════════════════════
 
+type WasmSessionService = meerkat::EphemeralSessionService<meerkat::FactoryAgentBuilder>;
+
 struct RuntimeState {
     mob_state: Arc<MobMcpState>,
+    /// Concrete session service — needed for subscribe_session_events_raw.
+    session_service: Arc<WasmSessionService>,
     #[allow(dead_code)]
     model: String,
     #[allow(dead_code)]
@@ -478,6 +498,7 @@ fn build_wasm_tool_dispatcher() -> Result<Arc<dyn meerkat_core::AgentToolDispatc
 /// in a `thread_local! RuntimeState` for subsequent mob/comms calls.
 #[wasm_bindgen]
 pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsValue, JsValue> {
+    init_tracing();
     let _parsed = parse_mobpack(mobpack_bytes).map_err(|e| err_str("invalid_mobpack", e))?;
     let creds: Credentials =
         serde_json::from_str(credentials_json).map_err(|e| err_str("invalid_credentials", e))?;
@@ -512,6 +533,7 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
     builder.default_session_store = Some(store);
 
     let service = Arc::new(meerkat::EphemeralSessionService::new(builder, MAX_SESSIONS));
+    let session_service = service.clone();
     let mob_state = Arc::new(MobMcpState::new(
         service as Arc<dyn meerkat_mob::MobSessionService>,
     ));
@@ -519,6 +541,7 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
     RUNTIME_STATE.with(|cell| {
         *cell.borrow_mut() = Some(RuntimeState {
             mob_state,
+            session_service,
             model: model.clone(),
             api_key: creds.api_key.clone(),
             base_url: creds.base_url.clone(),
@@ -541,6 +564,7 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
 /// `config_json`: `{ "api_key": "sk-ant-...", "model"?: "claude-sonnet-4-5", "max_sessions"?: 64 }`
 #[wasm_bindgen]
 pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
+    init_tracing();
     let rt_config: RuntimeConfig =
         serde_json::from_str(config_json).map_err(|e| err_str("invalid_config", e))?;
 
@@ -570,6 +594,7 @@ pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
     builder.default_session_store = Some(store);
 
     let service = Arc::new(meerkat::EphemeralSessionService::new(builder, max_sessions));
+    let session_service = service.clone();
     let mob_state = Arc::new(MobMcpState::new(
         service as Arc<dyn meerkat_mob::MobSessionService>,
     ));
@@ -577,6 +602,7 @@ pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
     RUNTIME_STATE.with(|cell| {
         *cell.borrow_mut() = Some(RuntimeState {
             mob_state,
+            session_service,
             model: model.clone(),
             api_key: rt_config.api_key.clone(),
             base_url: rt_config.base_url.clone(),
@@ -1127,31 +1153,150 @@ pub async fn mob_cancel_flow(mob_id: &str, run_id: &str) -> Result<(), JsValue> 
 }
 
 // ═══════════════════════════════════════════════════════════
-// Comms Exports (placeholder)
+// Event Streaming — subscribe to individual meerkat sessions
 // ═══════════════════════════════════════════════════════════
 
-/// List peers for a session (placeholder).
+/// Per-subscription state: raw broadcast receiver for synchronous try_recv.
 ///
-/// Returns JSON array. Currently returns empty array — will be wired
-/// when sessions route through SessionService.
-#[wasm_bindgen]
-pub async fn comms_peers(_session_id: &str) -> Result<JsValue, JsValue> {
-    // Placeholder: comms peer discovery will be wired when sessions
-    // go through the service-based path with comms runtime access.
-    Ok(JsValue::from_str("[]"))
+/// On wasm32, the broadcast channel is from the real `tokio` crate (not
+/// tokio_with_wasm) since `tokio::sync` is platform-independent. The
+/// `EphemeralSessionService` creates the broadcast channel from the real
+/// tokio sync primitives.
+struct EventSubscription {
+    /// Raw broadcast receiver — polled with try_recv() in poll_subscription.
+    /// RefCell because poll_subscription takes &self but try_recv needs &mut.
+    rx: std::cell::RefCell<meerkat_session::BroadcastEventReceiver>,
 }
 
-/// Send a comms command for a session (placeholder).
+#[derive(Default)]
+struct SubscriptionRegistry {
+    next_handle: u32,
+    subscriptions: BTreeMap<u32, EventSubscription>,
+}
+
+thread_local! {
+    static SUBSCRIPTIONS: RefCell<SubscriptionRegistry> = const { RefCell::new(SubscriptionRegistry {
+        next_handle: 1,
+        subscriptions: BTreeMap::new(),
+    }) };
+}
+
+/// Subscribe to a mob member's session event stream.
 ///
-/// Returns JSON result. Currently returns a stub — will be wired
-/// when sessions route through SessionService.
+/// Returns a subscription handle. Use `poll_subscription(handle)` to drain
+/// buffered events. Each call returns all events since the last poll.
+///
+/// The subscription captures ALL agent activity: text deltas, tool calls
+/// (including comms send_message/peers), turn completions, etc.
 #[wasm_bindgen]
-pub async fn comms_send(_session_id: &str, _params_json: &str) -> Result<JsValue, JsValue> {
-    // Placeholder: comms send will be wired when sessions
-    // go through the service-based path with comms runtime access.
-    let result = serde_json::json!({
-        "status": "not_implemented",
-        "message": "comms_send will be wired when sessions use SessionService",
+pub async fn mob_member_subscribe(mob_id: &str, meerkat_id: &str) -> Result<u32, JsValue> {
+    let mob_state = with_mob_state(Ok)?;
+    let mob_id_typed = MobId::from(mob_id);
+    let mid = MeerkatId::from(meerkat_id);
+
+    // Get the member's session_id from the mob roster.
+    let members = mob_state
+        .mob_list_members(&mob_id_typed)
+        .await
+        .map_err(err_mob)?;
+    let entry = members
+        .iter()
+        .find(|m| m.meerkat_id == mid)
+        .ok_or_else(|| {
+            err_js(
+                "member_not_found",
+                &format!("meerkat '{meerkat_id}' not in mob '{mob_id}'"),
+            )
+        })?;
+
+    let session_id = entry
+        .member_ref
+        .session_id()
+        .ok_or_else(|| {
+            err_js(
+                "no_session",
+                &format!("meerkat '{meerkat_id}' has no session"),
+            )
+        })?
+        .clone();
+
+    // Get a raw broadcast receiver via the concrete EphemeralSessionService.
+    // This avoids the async EventStream wrapper — we use synchronous try_recv()
+    // in poll_subscription, which works reliably on wasm32.
+    let rx = RUNTIME_STATE.with(|cell| {
+        let borrow = cell.borrow();
+        let state = borrow.as_ref().ok_or_else(|| {
+            err_js("not_initialized", "runtime not initialized")
+        })?;
+        // We stored the concrete service in RuntimeState for exactly this purpose.
+        // subscribe_session_events_raw returns the raw broadcast::Receiver.
+        Ok::<_, JsValue>(state.session_service.clone())
+    })?;
+    let raw_rx = rx
+        .subscribe_session_events_raw(&session_id)
+        .await
+        .map_err(|e| err_str("subscribe_error", e))?;
+
+    let handle = SUBSCRIPTIONS.with(|cell| {
+        let mut registry = cell.borrow_mut();
+        let h = registry.next_handle;
+        registry.next_handle = registry.next_handle.saturating_add(1);
+        registry.subscriptions.insert(h, EventSubscription {
+            rx: std::cell::RefCell::new(raw_rx),
+        });
+        h
     });
-    Ok(JsValue::from_str(&result.to_string()))
+
+    Ok(handle)
+}
+
+/// Poll a subscription for new events.
+///
+/// Returns a JSON array of `AgentEvent` objects. Drains all buffered events
+/// since the last poll. Non-blocking: returns `[]` if no new events.
+#[wasm_bindgen]
+pub fn poll_subscription(handle: u32) -> Result<String, JsValue> {
+    SUBSCRIPTIONS.with(|cell| {
+        let registry = cell.borrow();
+        let sub = registry
+            .subscriptions
+            .get(&handle)
+            .ok_or_else(|| err_js("invalid_handle", &format!("unknown subscription handle: {handle}")))?;
+
+        // Drain all available events via synchronous try_recv.
+        let mut events: Vec<serde_json::Value> = Vec::new();
+        let mut rx = sub.rx.borrow_mut();
+        loop {
+            match rx.try_recv() {
+                Ok(event) => {
+                    if let Ok(val) = serde_json::to_value(&event) {
+                        events.push(val);
+                    }
+                }
+                Err(e) => {
+                    // Lagged: skip missed events and retry
+                    let msg = format!("{e}");
+                    if msg.contains("lagged") {
+                        tracing::warn!("subscription lagged, skipping missed events");
+                        continue;
+                    }
+                    break; // Empty or Closed
+                }
+            }
+        }
+        serde_json::to_string(&events).map_err(|e| err_str("serialize_error", e))
+    })
+}
+
+/// Close a subscription and free resources.
+#[wasm_bindgen]
+pub fn close_subscription(handle: u32) -> Result<(), JsValue> {
+    SUBSCRIPTIONS.with(|cell| {
+        let mut registry = cell.borrow_mut();
+        registry
+            .subscriptions
+            .remove(&handle)
+            .ok_or_else(|| err_js("invalid_handle", &format!("unknown subscription handle: {handle}")))?;
+        Ok(())
+    })
 }

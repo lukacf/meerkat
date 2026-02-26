@@ -779,6 +779,7 @@ mod tests {
                 backend: None,
                 runtime_mode: crate::MobRuntimeMode::AutonomousHost,
                 max_inline_peer_notifications: None,
+                output_schema: None,
             },
         );
 

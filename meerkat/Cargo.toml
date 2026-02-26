@@ -77,6 +77,9 @@ mcp = ["dep:meerkat-mcp", "meerkat-tools/mcp"]
 sub-agents = ["meerkat-tools/sub-agents"]
 skills = ["dep:meerkat-skills", "meerkat-skills/skills-http", "meerkat-tools/skills"]
 
+[package.metadata.cargo-machete]
+ignored = ["which"]  # dev-dependency used in e2e tests
+
 [lints]
 workspace = true
 

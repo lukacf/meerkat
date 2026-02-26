@@ -68,8 +68,7 @@ fn truncate_str(s: &str, max_bytes: usize) -> &str {
         .char_indices()
         .take_while(|(i, _)| *i < max_bytes)
         .last()
-        .map(|(i, c)| i + c.len_utf8())
-        .unwrap_or(0);
+        .map_or(0, |(i, c)| i + c.len_utf8());
     &s[..truncate_at]
 }
 
@@ -104,7 +103,7 @@ fn spawn_verbose_event_handler(
     tokio::spawn(async move {
         while let Some(event) = agent_event_rx.recv().await {
             if verbose && let Some(line) = format_verbose_event(&event) {
-                eprintln!("{}", line);
+                eprintln!("{line}");
             }
         }
     })
@@ -165,8 +164,7 @@ fn resolve_stream_policy(
             })?;
             if !stream_renderer::is_valid_scope_id(&focus) {
                 return Err(anyhow::anyhow!(
-                    "invalid --stream-focus scope '{}': expected primary, mob:<member>, primary/sub:<agent>, or mob:<member>/sub:<agent>",
-                    focus
+                    "invalid --stream-focus scope '{focus}': expected primary, mob:<member>, primary/sub:<agent>, or mob:<member>/sub:<agent>"
                 ));
             }
             Ok(Some(stream_renderer::StreamRenderPolicy::Focus(focus)))
@@ -1208,10 +1206,10 @@ async fn main() -> anyhow::Result<ExitCode> {
                 && agent_err.is_graceful()
             {
                 // Budget exhausted - this is a graceful termination
-                eprintln!("Budget exhausted: {}", agent_err);
+                eprintln!("Budget exhausted: {agent_err}");
                 return Ok(ExitCode::from(EXIT_BUDGET_EXHAUSTED));
             }
-            eprintln!("Error: {}", e);
+            eprintln!("Error: {e}");
             ExitCode::from(EXIT_ERROR)
         }
     })
@@ -1327,7 +1325,7 @@ async fn handle_run_command(
 
 /// Parse a duration string like "5m", "1h30m", "30s"
 fn parse_duration(s: &str) -> anyhow::Result<Duration> {
-    humantime::parse_duration(s).map_err(|e| anyhow::anyhow!("Invalid duration '{}': {}", s, e))
+    humantime::parse_duration(s).map_err(|e| anyhow::anyhow!("Invalid duration '{s}': {e}"))
 }
 
 /// Parse --param KEY=VALUE flags into a JSON object
@@ -1342,7 +1340,7 @@ fn parse_provider_params(params: &[String]) -> anyhow::Result<Option<serde_json:
     let mut map = serde_json::Map::new();
     for param in params {
         let (key, value) = param.split_once('=').ok_or_else(|| {
-            anyhow::anyhow!("Invalid --param format '{}': expected KEY=VALUE", param)
+            anyhow::anyhow!("Invalid --param format '{param}': expected KEY=VALUE")
         })?;
         map.insert(
             key.to_string(),
@@ -1361,11 +1359,11 @@ fn parse_output_schema(schema_arg: &str) -> anyhow::Result<OutputSchema> {
         schema_arg.to_string()
     } else {
         std::fs::read_to_string(schema_arg)
-            .map_err(|e| anyhow::anyhow!("Failed to read schema file '{}': {}", schema_arg, e))?
+            .map_err(|e| anyhow::anyhow!("Failed to read schema file '{schema_arg}': {e}"))?
     };
 
     OutputSchema::from_json_str(&schema_str)
-        .map_err(|e| anyhow::anyhow!("Invalid output schema: {}", e))
+        .map_err(|e| anyhow::anyhow!("Invalid output schema: {e}"))
 }
 
 /// Parse run-scoped hook overrides from either --hooks-override-json or --hooks-override-file.
@@ -1394,7 +1392,7 @@ fn parse_hook_run_overrides(
             })
         }
         (None, Some(json_payload)) => serde_json::from_str::<HookRunOverrides>(&json_payload)
-            .map_err(|e| anyhow::anyhow!("Invalid --hooks-override-json payload: {}", e)),
+            .map_err(|e| anyhow::anyhow!("Invalid --hooks-override-json payload: {e}")),
         (None, None) => Ok(HookRunOverrides::default()),
     }
 }
@@ -1514,7 +1512,7 @@ async fn handle_config_get(
             if with_generation {
                 println!("# generation = {}", snapshot.generation);
             }
-            println!("{}", rendered);
+            println!("{rendered}");
         }
         ConfigFormat::Json => {
             let rendered = if with_generation {
@@ -1526,7 +1524,7 @@ async fn handle_config_get(
                 serde_json::to_string_pretty(&snapshot.config)
             }
             .map_err(|e| anyhow::anyhow!("Failed to serialize config: {e}"))?;
-            println!("{}", rendered);
+            println!("{rendered}");
         }
     }
     Ok(())
@@ -1668,7 +1666,7 @@ async fn handle_realm_command(command: RealmCommands, scope: &RuntimeScope) -> a
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to check manifest path: {e}"))?
             {
-                return Err(anyhow::anyhow!("Realm not found: {}", realm_id));
+                return Err(anyhow::anyhow!("Realm not found: {realm_id}"));
             }
             let payload = tokio::fs::read_to_string(&paths.manifest_path)
                 .await
@@ -1750,8 +1748,8 @@ async fn delete_realm(
     let paths = meerkat_store::realm_paths_in(state_root, realm_id);
     remove_realm_root_with_retries(&paths, force)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to delete realm '{}': {}", realm_id, e))?;
-    println!("Deleted realm '{}'", realm_id);
+        .map_err(|e| anyhow::anyhow!("Failed to delete realm '{realm_id}': {e}"))?;
+    println!("Deleted realm '{realm_id}'");
     Ok(())
 }
 
@@ -1804,7 +1802,7 @@ async fn prune_realms(
     if !outcome.leftovers.is_empty() {
         eprintln!("Leftover realms (partial cleanup):");
         for item in &outcome.leftovers {
-            eprintln!("  - {}", item);
+            eprintln!("  - {item}");
         }
         return Err(anyhow::anyhow!(
             "Realm prune completed with partial failures (see leftovers above)."
@@ -1915,7 +1913,7 @@ async fn create_mcp_tools(scope: &RuntimeScope) -> anyhow::Result<Option<McpRout
         scope.user_config_root.as_deref(),
     )
     .await
-    .map_err(|e| anyhow::anyhow!("MCP config error: {}", e))?;
+    .map_err(|e| anyhow::anyhow!("MCP config error: {e}"))?;
 
     if servers_with_scope.is_empty() {
         return Ok(None);
@@ -1964,7 +1962,7 @@ async fn create_mcp_tools(scope: &RuntimeScope) -> anyhow::Result<Option<McpRout
     adapter
         .refresh_tools()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to refresh MCP tools: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to refresh MCP tools: {e}"))?;
 
     Ok(Some(adapter))
 }
@@ -2574,7 +2572,7 @@ async fn run_agent(
     } else {
         None
     };
-    let mob_external_tools = run_mob_tools.as_ref().map(|ctx| ctx.dispatcher());
+    let mob_external_tools = run_mob_tools.as_ref().map(RunMobToolsContext::dispatcher);
     let external_tools = compose_external_tool_dispatchers(mob_external_tools, mcp_external_tools)?;
 
     let build = SessionBuildOptions {
@@ -2723,9 +2721,7 @@ async fn run_agent(
                 summary.discovered_scopes.join(", ")
             };
             return Err(anyhow::anyhow!(
-                "stream focus '{}' did not match any emitted scope (discovered scopes: {})",
-                focus,
-                discovered
+                "stream focus '{focus}' did not match any emitted scope (discovered scopes: {discovered})"
             ));
         }
     }
@@ -2846,8 +2842,8 @@ async fn resume_session_with_llm_override(
     let session = loader_service
         .load_persisted(&session_id)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to load session: {}", e))?
-        .ok_or_else(|| anyhow::anyhow!("Session not found: {}", session_id))?;
+        .map_err(|e| anyhow::anyhow!("Failed to load session: {e}"))?
+        .ok_or_else(|| anyhow::anyhow!("Session not found: {session_id}"))?;
     drop(loader_service);
     log_stage("create_session_store");
     let (manifest, store) = create_session_store(scope).await?;
@@ -2863,10 +2859,7 @@ async fn resume_session_with_llm_override(
             mob: config.tools.mob_enabled,
             active_skills: None,
         });
-    let host_mode_requested = stored_metadata
-        .as_ref()
-        .map(|meta| meta.host_mode)
-        .unwrap_or(false);
+    let host_mode_requested = stored_metadata.as_ref().is_some_and(|meta| meta.host_mode);
     let host_mode = resolve_host_mode(host_mode_requested)?;
     let comms_name = stored_metadata
         .as_ref()
@@ -2874,12 +2867,10 @@ async fn resume_session_with_llm_override(
 
     let model = stored_metadata
         .as_ref()
-        .map(|meta| meta.model.clone())
-        .unwrap_or_else(|| config.agent.model.clone());
+        .map_or_else(|| config.agent.model.clone(), |meta| meta.model.clone());
     let max_tokens = stored_metadata
         .as_ref()
-        .map(|meta| meta.max_tokens)
-        .unwrap_or(config.agent.max_tokens_per_turn);
+        .map_or(config.agent.max_tokens_per_turn, |meta| meta.max_tokens);
 
     let provider_core = stored_metadata
         .as_ref()
@@ -2941,7 +2932,7 @@ async fn resume_session_with_llm_override(
     } else {
         None
     };
-    let mob_external_tools = run_mob_tools.as_ref().map(|ctx| ctx.dispatcher());
+    let mob_external_tools = run_mob_tools.as_ref().map(RunMobToolsContext::dispatcher);
     let external_tools = compose_external_tool_dispatchers(mob_external_tools, mcp_external_tools)?;
 
     let (event_tx, event_task) = if verbose {
@@ -3246,7 +3237,7 @@ async fn list_sessions(limit: usize, scope: &RuntimeScope) -> anyhow::Result<()>
     let sessions = service
         .list(query)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to list sessions: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to list sessions: {e}"))?;
 
     if sessions.is_empty() {
         println!("No sessions found.");
@@ -3290,11 +3281,11 @@ async fn show_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
     let session = service
         .load_persisted(&session_id)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to load session: {}", e))?
-        .ok_or_else(|| anyhow::anyhow!("Session not found: {}", session_id))?;
+        .map_err(|e| anyhow::anyhow!("Failed to load session: {e}"))?
+        .ok_or_else(|| anyhow::anyhow!("Session not found: {session_id}"))?;
 
     // Print session header
-    println!("Session: {}", session_id);
+    println!("Session: {session_id}");
     println!(
         "Session Ref: {}",
         format_session_ref(&scope.locator.realm_id, &session_id)
@@ -3324,7 +3315,7 @@ async fn show_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
                     } else {
                         a.content.clone()
                     };
-                    println!("  {}", display_text);
+                    println!("  {display_text}");
                 }
                 if !a.tool_calls.is_empty() {
                     println!(
@@ -3356,7 +3347,7 @@ async fn show_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
                             } else {
                                 text.clone()
                             };
-                            println!("  {}", display_text);
+                            println!("  {display_text}");
                         }
                         meerkat_core::AssistantBlock::Reasoning { text, .. } => {
                             let display_text = if text.len() > 200 {
@@ -3364,10 +3355,10 @@ async fn show_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
                             } else {
                                 text.clone()
                             };
-                            println!("  [thinking] {}", display_text);
+                            println!("  [thinking] {display_text}");
                         }
                         meerkat_core::AssistantBlock::ToolUse { name, .. } => {
-                            println!("  Tool call: {}", name);
+                            println!("  Tool call: {name}");
                         }
                         _ => {} // non_exhaustive
                     }
@@ -3390,9 +3381,9 @@ async fn delete_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
     service
         .archive(&session_id)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to delete session: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to delete session: {e}"))?;
 
-    println!("Deleted session: {}", session_id);
+    println!("Deleted session: {session_id}");
     println!(
         "Session Ref: {}",
         format_session_ref(&scope.locator.realm_id, &session_id)
@@ -3427,8 +3418,7 @@ async fn locate_sessions(
 
     if matches.is_empty() {
         return Err(anyhow::anyhow!(
-            "Session '{}' was not found in the scanned state roots.",
-            locator_input
+            "Session '{locator_input}' was not found in the scanned state roots."
         ));
     }
 
@@ -3976,8 +3966,7 @@ async fn hydrate_mob_state(
         if persisted.events.is_empty() {
             let definition = persisted.definition.clone().ok_or_else(|| {
                 anyhow::anyhow!(
-                    "mob registry entry '{}' has no persisted events and no legacy definition",
-                    mob_id
+                    "mob registry entry '{mob_id}' has no persisted events and no legacy definition"
                 )
             })?;
             storage
@@ -4023,9 +4012,7 @@ async fn hydrate_mob_state(
         let created = handle.mob_id().clone();
         if created.as_str() != mob_id {
             return Err(anyhow::anyhow!(
-                "mob registry id mismatch: key='{}' definition='{}'",
-                mob_id,
-                created
+                "mob registry id mismatch: key='{mob_id}' definition='{created}'"
             ));
         }
 
@@ -4038,8 +4025,10 @@ async fn hydrate_mob_state(
                 (meerkat_mob::MobState::Stopped, meerkat_mob::MobState::Running) => {
                     handle.resume().await.map_err(|e| anyhow::anyhow!("{e}"))?;
                 }
-                (meerkat_mob::MobState::Running, meerkat_mob::MobState::Completed)
-                | (meerkat_mob::MobState::Stopped, meerkat_mob::MobState::Completed) => {
+                (
+                    meerkat_mob::MobState::Running | meerkat_mob::MobState::Stopped,
+                    meerkat_mob::MobState::Completed,
+                ) => {
                     handle
                         .complete()
                         .await
@@ -4086,8 +4075,7 @@ async fn wait_for_terminal_flow_run(
             .map_err(|e| anyhow::anyhow!("{e}"))?
         else {
             return Err(anyhow::anyhow!(
-                "run '{}' disappeared before reaching terminal state",
-                run_id
+                "run '{run_id}' disappeared before reaching terminal state"
             ));
         };
         if run.status.is_terminal() {
@@ -4180,7 +4168,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             }
             let mob_id = if let Some(prefab_key) = prefab {
                 let prefab = Prefab::from_key(&prefab_key)
-                    .ok_or_else(|| anyhow::anyhow!("unknown prefab '{}'", prefab_key))?;
+                    .ok_or_else(|| anyhow::anyhow!("unknown prefab '{prefab_key}'"))?;
                 let definition = prefab.definition();
                 state
                     .mob_create_definition(definition.clone())
@@ -4388,9 +4376,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                         summary.discovered_scopes.join(", ")
                     };
                     return Err(anyhow::anyhow!(
-                        "stream focus '{}' did not match any emitted scope (discovered scopes: {})",
-                        focus,
-                        discovered
+                        "stream focus '{focus}' did not match any emitted scope (discovered scopes: {discovered})"
                     ));
                 }
             }
@@ -4638,7 +4624,7 @@ fn derive_manifest_web_toml(
             profile: "browser-safe".to_string(),
             forbid: forbidden_web_capabilities()
                 .iter()
-                .map(|capability| capability.to_string())
+                .map(std::string::ToString::to_string)
                 .collect(),
         },
     };
@@ -4667,8 +4653,7 @@ fn validate_web_forbidden_capabilities(
     for capability in &requires.capabilities {
         if forbidden.contains(&capability.as_str()) {
             return Err(anyhow::anyhow!(
-                "forbidden capability '{}' is not allowed for web builds",
-                capability
+                "forbidden capability '{capability}' is not allowed for web builds"
             ));
         }
     }
@@ -4698,7 +4683,7 @@ async fn run_wasm_pack_build(
         .env("RUSTFLAGS", rustflags)
         .output()
         .await
-        .map_err(|err| anyhow::anyhow!("failed invoking wasm-pack '{}': {err}", wasm_pack_bin))?;
+        .map_err(|err| anyhow::anyhow!("failed invoking wasm-pack '{wasm_pack_bin}': {err}"))?;
     if runtime_crate.cleanup_after_use {
         let _ = tokio::fs::remove_dir_all(&runtime_crate.path).await;
     }
@@ -5043,7 +5028,7 @@ where
     }
     if let Some(raw_env) = env_lookup("RKAT_TRUST_POLICY") {
         return parse_trust_policy(raw_env.trim())
-            .ok_or_else(|| anyhow::anyhow!("invalid RKAT_TRUST_POLICY value '{}'", raw_env));
+            .ok_or_else(|| anyhow::anyhow!("invalid RKAT_TRUST_POLICY value '{raw_env}'"));
     }
     if let Some(policy) = config_policy {
         return Ok(policy);
@@ -5079,7 +5064,7 @@ fn read_config_trust_policy(scope: &RuntimeScope) -> anyhow::Result<Option<Trust
         return Ok(None);
     };
     parse_trust_policy(policy_raw)
-        .ok_or_else(|| anyhow::anyhow!("invalid trust.policy value '{}'", policy_raw))
+        .ok_or_else(|| anyhow::anyhow!("invalid trust.policy value '{policy_raw}'"))
         .map(Some)
 }
 
@@ -6126,8 +6111,7 @@ mod tests {
         ] {
             assert!(
                 out_dir.join(file).exists(),
-                "missing required web artifact {}",
-                file
+                "missing required web artifact {file}"
             );
         }
         let manifest_web =
@@ -6249,13 +6233,13 @@ capabilities = ["shell"]
         std::fs::write(&config_path, "[agent]\nmax_tokens_per_turn = 1234\n")
             .expect("write config");
 
-        let pack_defaults = br#"
+        let pack_defaults = br"
 [agent]
 max_tokens_per_turn = 100
 
 [tools]
 mob_enabled = true
-"#
+"
         .to_vec();
 
         let merged = load_deploy_config_with_pack_defaults(
@@ -6286,10 +6270,10 @@ mob_enabled = true
             .expect("mkdir config");
         std::fs::write(&config_path, "[tools]\nmob_enabled = false\n").expect("write config");
 
-        let pack_defaults = br#"
+        let pack_defaults = br"
 [tools]
 mob_enabled = true
-"#
+"
         .to_vec();
         let merged = load_deploy_config_with_pack_defaults(
             &scope,
@@ -6602,7 +6586,7 @@ capabilities = ["definitely_missing_capability"]
         std::fs::create_dir_all(trust_path.parent().expect("trust parent")).expect("trust dir");
         std::fs::write(
             &trust_path,
-            format!("[signers]\n{} = \"{}\"\n", signer_id, public_key),
+            format!("[signers]\n{signer_id} = \"{public_key}\"\n"),
         )
         .expect("write trusted signers");
 
@@ -6698,7 +6682,7 @@ capabilities = ["definitely_missing_capability"]
         std::fs::create_dir_all(trust_path.parent().expect("trust parent")).expect("trust dir");
         std::fs::write(
             &trust_path,
-            format!("[signers]\n{} = \"{}\"\n", signer_id, public_key),
+            format!("[signers]\n{signer_id} = \"{public_key}\"\n"),
         )
         .expect("write trust store");
 
@@ -6834,7 +6818,7 @@ capabilities = ["definitely_missing_capability"]
         std::fs::create_dir_all(trust_path.parent().expect("trust parent")).expect("trust dir");
         std::fs::write(
             &trust_path,
-            format!("[signers]\n{} = \"{}\"\n", signer_id, public_key),
+            format!("[signers]\n{signer_id} = \"{public_key}\"\n"),
         )
         .expect("write trust store");
 
@@ -7920,7 +7904,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
                     "datetime",
                 ]
                 .iter()
-                .map(|s| s.to_string()),
+                .map(std::string::ToString::to_string),
             );
         }
 
@@ -8005,7 +7989,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
                     "datetime",
                 ]
                 .iter()
-                .map(|s| s.to_string()),
+                .map(std::string::ToString::to_string),
             );
         }
 
@@ -8138,7 +8122,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
     fn test_resolve_scoped_session_id_accepts_session_ref_in_active_realm() {
         let sid = SessionId::new();
         let scope = test_scope(PathBuf::from("/tmp/realms"), "team-alpha");
-        let resolved = resolve_scoped_session_id(&format!("team-alpha:{}", sid), &scope)
+        let resolved = resolve_scoped_session_id(&format!("team-alpha:{sid}"), &scope)
             .expect("session_ref in active realm should resolve");
         assert_eq!(resolved, sid);
     }
@@ -8147,7 +8131,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
     fn test_resolve_scoped_session_id_rejects_realm_mismatch() {
         let sid = SessionId::new();
         let scope = test_scope(PathBuf::from("/tmp/realms"), "team-alpha");
-        let err = resolve_scoped_session_id(&format!("other-realm:{}", sid), &scope)
+        let err = resolve_scoped_session_id(&format!("other-realm:{sid}"), &scope)
             .expect_err("mismatched realm should fail");
         assert!(err.to_string().contains("active realm is 'team-alpha'"));
     }

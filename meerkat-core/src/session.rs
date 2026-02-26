@@ -409,7 +409,7 @@ mod tests {
         let mut session = Session::new();
         for i in 0..100 {
             session.push(Message::User(UserMessage {
-                content: format!("Message {}", i),
+                content: format!("Message {i}"),
             }));
         }
 
@@ -426,7 +426,7 @@ mod tests {
         let mut session = Session::new();
         for i in 0..100 {
             session.push(Message::User(UserMessage {
-                content: format!("Message {}", i),
+                content: format!("Message {i}"),
             }));
         }
 

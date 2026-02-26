@@ -188,8 +188,7 @@ Your parent agent is '{parent_name}'. To report findings or request help:
   send({{"kind":"peer_message","to":"{parent_name}","body":"your message here"}})
 
 Always report important findings to your parent. Follow instructions from your parent.
-"#,
-        parent_name = parent_name
+"#
     )
 }
 
@@ -197,8 +196,7 @@ Always report important findings to your parent. Follow instructions from your p
 #[cfg(feature = "comms")]
 fn parent_comms_instructions(child_name: &str) -> String {
     format!(
-        "To message this child: send({{\"kind\":\"peer_message\",\"to\":\"{child_name}\",\"body\":\"your message\"}})",
-        child_name = child_name
+        "To message this child: send({{\"kind\":\"peer_message\",\"to\":\"{child_name}\",\"body\":\"your message\"}})"
     )
 }
 
@@ -350,8 +348,7 @@ impl AgentSpawnTool {
         // Resolve tool access policy and apply filtering
         let tool_access: ToolAccessPolicy = params
             .tool_access
-            .map(Into::into)
-            .unwrap_or(ToolAccessPolicy::Inherit);
+            .map_or(ToolAccessPolicy::Inherit, Into::into);
 
         let filtered_tools: Arc<dyn meerkat_core::AgentToolDispatcher> = match &tool_access {
             ToolAccessPolicy::Inherit => self.state.tool_dispatcher.clone(),
@@ -370,7 +367,7 @@ impl AgentSpawnTool {
             .client_factory
             .create_client(provider, None)
             .map_err(|e| {
-                BuiltinToolError::execution_failed(format!("Failed to create LLM client: {}", e))
+                BuiltinToolError::execution_failed(format!("Failed to create LLM client: {e}"))
             })?;
 
         // Generate operation ID and name
@@ -476,7 +473,7 @@ impl AgentSpawnTool {
         )
         .await
         .map_err(|e| {
-            BuiltinToolError::execution_failed(format!("Failed to spawn sub-agent: {}", e))
+            BuiltinToolError::execution_failed(format!("Failed to spawn sub-agent: {e}"))
         })?;
 
         Ok(SpawnResponse {
@@ -539,7 +536,7 @@ impl BuiltinTool for AgentSpawnTool {
         {
             obj.insert(
                 "description".to_string(),
-                Value::String(format!("Model name (provider-specific). {}", models_desc)),
+                Value::String(format!("Model name (provider-specific). {models_desc}")),
             );
         }
 
@@ -557,7 +554,7 @@ impl BuiltinTool for AgentSpawnTool {
     async fn call(&self, args: Value) -> Result<Value, BuiltinToolError> {
         #[cfg(feature = "comms")]
         let params: SpawnParams = serde_json::from_value(args)
-            .map_err(|e| BuiltinToolError::invalid_args(format!("Invalid parameters: {}", e)))?;
+            .map_err(|e| BuiltinToolError::invalid_args(format!("Invalid parameters: {e}")))?;
 
         #[cfg(not(feature = "comms"))]
         let params: SpawnParams = {
@@ -569,7 +566,7 @@ impl BuiltinTool for AgentSpawnTool {
 
         let response = self.spawn_agent(params).await?;
         serde_json::to_value(response).map_err(|e| {
-            BuiltinToolError::execution_failed(format!("Failed to serialize response: {}", e))
+            BuiltinToolError::execution_failed(format!("Failed to serialize response: {e}"))
         })
     }
 }

@@ -21,7 +21,7 @@ fn registration_to_descriptor(reg: &SkillRegistration) -> Result<SkillDescriptor
         requires_capabilities: reg
             .requires_capabilities
             .iter()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .collect(),
         metadata: IndexMap::from([("display_name".to_string(), reg.name.to_string())]),
         ..Default::default()

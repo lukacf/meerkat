@@ -238,7 +238,7 @@ impl BudgetPool {
                 .map(|r| r.min(available_tokens.unwrap_or(u64::MAX))),
             max_duration: request
                 .max_duration
-                .map(|r| available_duration.map(|a| r.min(a)).unwrap_or(r)),
+                .map(|r| available_duration.map_or(r, |a| r.min(a))),
             max_tool_calls: request.max_tool_calls,
         };
 

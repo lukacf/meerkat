@@ -197,7 +197,7 @@ impl<S: SessionStore + 'static> AgentSessionStore for SessionStoreAdapter<S> {
 
     async fn load(&self, id: &str) -> Result<Option<Session>, AgentError> {
         let session_id = SessionId::parse(id)
-            .map_err(|e| AgentError::StoreError(format!("Invalid session ID: {}", e)))?;
+            .map_err(|e| AgentError::StoreError(format!("Invalid session ID: {e}")))?;
 
         self.store
             .load(&session_id)
@@ -756,7 +756,7 @@ mod session_resume {
             assert!(
                 result.text.contains("ALPHA")
                     || result.text.contains("BRAVO")
-                    || result.text.contains("7"),
+                    || result.text.contains('7'),
                 "Should remember the secret code: {}",
                 result.text
             );
@@ -814,7 +814,7 @@ mod budget_exhaustion {
 
         // Note: The budget might already be exhausted after the first turn
         // depending on how many tokens were used
-        eprintln!("Budget: used={}, limit={}", used, limit);
+        eprintln!("Budget: used={used}, limit={limit}");
 
         // If budget is not exhausted, try another turn
         if !budget.is_exhausted() {
@@ -1057,18 +1057,18 @@ mod parallel_tools {
                         .get("city")
                         .and_then(|v| v.as_str())
                         .unwrap_or("Unknown");
-                    Value::String(format!("Weather in {}: Sunny, 22°C", city))
+                    Value::String(format!("Weather in {city}: Sunny, 22°C"))
                 }
                 "get_time" => {
                     let tz = args
                         .get("timezone")
                         .and_then(|v| v.as_str())
                         .unwrap_or("UTC");
-                    Value::String(format!("Current time in {}: 14:30 PM", tz))
+                    Value::String(format!("Current time in {tz}: 14:30 PM"))
                 }
                 "get_stock" => {
                     let symbol = args.get("symbol").and_then(|v| v.as_str()).unwrap_or("???");
-                    Value::String(format!("Stock {}: $150.25 (+2.3%)", symbol))
+                    Value::String(format!("Stock {symbol}: $150.25 (+2.3%)"))
                 }
                 _ => return Err(ToolError::not_found(call.name)),
             };
@@ -1144,15 +1144,14 @@ mod parallel_tools {
             let last_start = *starts.iter().max().unwrap();
             let start_spread = last_start.duration_since(first_start);
 
-            eprintln!("Tool start spread: {:?}", start_spread);
+            eprintln!("Tool start spread: {start_spread:?}");
 
             // If parallel, tools should start within ~50ms of each other
             // If serial, they'd start 200ms+ apart
             assert!(
                 start_spread.as_millis() < 100,
                 "Tools should start nearly simultaneously for parallel execution. \
-                 Start spread was {:?}, suggesting serial execution.",
-                start_spread
+                 Start spread was {start_spread:?}, suggesting serial execution."
             );
         }
 
@@ -1220,8 +1219,7 @@ mod parallel_tools {
         let total_tool_calls = result1.tool_calls + result2.tool_calls;
         assert!(
             total_tool_calls >= 2,
-            "Should have made multiple tool calls across turns, got: {}",
-            total_tool_calls
+            "Should have made multiple tool calls across turns, got: {total_tool_calls}"
         );
 
         // Verify session maintained context
@@ -1341,10 +1339,7 @@ mod parallel_tools {
             || text_lower.contains("fail")
             || text_lower.contains("broken");
 
-        eprintln!(
-            "Mentions success: {}, Mentions error: {}",
-            mentions_success, mentions_error
-        );
+        eprintln!("Mentions success: {mentions_success}, Mentions error: {mentions_error}");
 
         // At minimum, the agent should complete and respond coherently
         assert!(!result.text.is_empty(), "Should have a response");

@@ -32,16 +32,18 @@ fn get_tool_def(name: &str) -> ToolDef {
     tools_list()
         .into_iter()
         .find(|t| t["name"].as_str() == Some(name))
-        .map(|t| ToolDef {
-            name: t["name"].as_str().unwrap_or_default().to_string(),
-            description: t["description"].as_str().unwrap_or_default().to_string(),
-            input_schema: t["inputSchema"].clone(),
-        })
-        .unwrap_or_else(|| ToolDef {
-            name: name.to_string(),
-            description: String::new(),
-            input_schema: empty_object_schema(),
-        })
+        .map_or_else(
+            || ToolDef {
+                name: name.to_string(),
+                description: String::new(),
+                input_schema: empty_object_schema(),
+            },
+            |t| ToolDef {
+                name: t["name"].as_str().unwrap_or_default().to_string(),
+                description: t["description"].as_str().unwrap_or_default().to_string(),
+                input_schema: t["inputSchema"].clone(),
+            },
+        )
 }
 
 /// Unified send tool — dispatches peer_message, peer_request, peer_response via `kind`.

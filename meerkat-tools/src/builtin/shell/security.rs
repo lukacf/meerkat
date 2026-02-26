@@ -52,15 +52,12 @@ impl CommandInvocation {
         }
 
         let mut out = shlex::try_quote(&self.executable)
-            .map(|q| q.into_owned())
-            .unwrap_or_else(|_| self.executable.clone());
+            .map_or_else(|_| self.executable.clone(), std::borrow::Cow::into_owned);
 
         for arg in &self.arguments {
             out.push(' ');
             out.push_str(
-                &shlex::try_quote(arg)
-                    .map(|q| q.into_owned())
-                    .unwrap_or_else(|_| arg.clone()),
+                &shlex::try_quote(arg).map_or_else(|_| arg.clone(), std::borrow::Cow::into_owned),
             );
         }
         out
@@ -95,7 +92,7 @@ impl SecurityEngine {
                 .map_err(|e| {
                     ShellError::Io(std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
-                        format!("Invalid glob pattern '{}': {}", pat, e),
+                        format!("Invalid glob pattern '{pat}': {e}"),
                     ))
                 })?;
             builder.add(glob);
@@ -103,8 +100,7 @@ impl SecurityEngine {
 
         let matcher = builder.build().map_err(|e| {
             ShellError::Io(std::io::Error::other(format!(
-                "Failed to compile security patterns: {}",
-                e
+                "Failed to compile security patterns: {e}"
             )))
         })?;
 
@@ -149,16 +145,14 @@ impl SecurityEngine {
                     Ok(())
                 } else {
                     Err(ShellError::BlockedCommand(format!(
-                        "Command '{}' does not match any allowed patterns",
-                        canonical
+                        "Command '{canonical}' does not match any allowed patterns"
                     )))
                 }
             }
             SecurityMode::DenyList => {
                 if is_match {
                     Err(ShellError::BlockedCommand(format!(
-                        "Command '{}' matches a denied pattern",
-                        canonical
+                        "Command '{canonical}' matches a denied pattern"
                     )))
                 } else {
                     Ok(())

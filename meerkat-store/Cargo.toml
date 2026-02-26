@@ -39,5 +39,8 @@ default = ["jsonl", "memory"]
 jsonl = []
 memory = []
 
+[package.metadata.cargo-machete]
+ignored = ["toml"]  # dev-dependency used in tests
+
 [lints]
 workspace = true

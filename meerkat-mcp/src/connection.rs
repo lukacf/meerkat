@@ -37,13 +37,13 @@ impl McpConnection {
 
                 let transport =
                     TokioChildProcess::new(cmd).map_err(|e| McpError::ConnectionFailed {
-                        reason: format!("Failed to spawn process: {}", e),
+                        reason: format!("Failed to spawn process: {e}"),
                     })?;
 
                 ().serve(transport)
                     .await
                     .map_err(|e| McpError::ConnectionFailed {
-                        reason: format!("Failed to establish MCP connection: {}", e),
+                        reason: format!("Failed to establish MCP connection: {e}"),
                     })?
             }
             McpTransportConfig::Http(http) => {
@@ -59,7 +59,7 @@ impl McpConnection {
                         ().serve(transport)
                             .await
                             .map_err(|e| McpError::ConnectionFailed {
-                                reason: format!("Failed to establish MCP connection: {}", e),
+                                reason: format!("Failed to establish MCP connection: {e}"),
                             })?
                     }
                     McpHttpTransport::Sse => {
@@ -73,12 +73,12 @@ impl McpConnection {
                         )
                         .await
                         .map_err(|e| McpError::ConnectionFailed {
-                            reason: format!("Failed to establish SSE connection: {}", e),
+                            reason: format!("Failed to establish SSE connection: {e}"),
                         })?;
                         ().serve(transport)
                             .await
                             .map_err(|e| McpError::ConnectionFailed {
-                                reason: format!("Failed to establish MCP connection: {}", e),
+                                reason: format!("Failed to establish MCP connection: {e}"),
                             })?
                     }
                 }
@@ -103,7 +103,7 @@ impl McpConnection {
                 .list_tools(None)
                 .await
                 .map_err(|e| McpError::ProtocolError {
-                    message: format!("Failed to list tools: {}", e),
+                    message: format!("Failed to list tools: {e}"),
                 })?;
 
         // Convert MCP tools to our ToolDef format
@@ -141,7 +141,7 @@ impl McpConnection {
             .await
             .map_err(|e| McpError::ToolCallFailed {
                 tool: name.to_string(),
-                reason: format!("{}", e),
+                reason: format!("{e}"),
             })?;
 
         // Check for tool error
@@ -180,7 +180,7 @@ impl McpConnection {
             .cancel()
             .await
             .map_err(|e| McpError::ConnectionFailed {
-                reason: format!("Failed to close connection: {:?}", e),
+                reason: format!("Failed to close connection: {e:?}"),
             })?;
         Ok(())
     }

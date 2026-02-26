@@ -90,8 +90,7 @@ async fn integration_real_p1_shell_tool_shares_job_manager_with_job_control_tool
 
     assert!(
         job_id.starts_with("job_"),
-        "job_id should have job_ prefix, got: {}",
-        job_id
+        "job_id should have job_ prefix, got: {job_id}"
     );
 
     // Step 2: Verify the job is visible via shell_jobs (list all jobs)
@@ -116,10 +115,8 @@ async fn integration_real_p1_shell_tool_shares_job_manager_with_job_control_tool
 
     assert!(
         our_job.is_some(),
-        "Job {} spawned via shell tool should be visible in shell_jobs list. \
-         Jobs found: {:?}",
-        job_id,
-        jobs
+        "Job {job_id} spawned via shell tool should be visible in shell_jobs list. \
+         Jobs found: {jobs:?}"
     );
 
     // Verify job status is running
@@ -137,9 +134,8 @@ async fn integration_real_p1_shell_tool_shares_job_manager_with_job_control_tool
     // If JobManagers aren't shared, this will return null/error
     assert!(
         !status_result.is_null(),
-        "BUG: shell_job_status returns null for job {}! \
-         ShellTool uses a different JobManager than shell_job_status.",
-        job_id
+        "BUG: shell_job_status returns null for job {job_id}! \
+         ShellTool uses a different JobManager than shell_job_status."
     );
 
     // Verify the status response has expected fields
@@ -171,11 +167,10 @@ async fn integration_real_p1_shell_tool_shares_job_manager_with_job_control_tool
     let status_obj = final_status.get("status");
     // JobStatus is serialized with serde tag="status", so it looks like:
     // {"duration_secs": 0.0, "status": "cancelled"}
-    let is_cancelled = status_obj
-        .map(|s| {
-            // Check various serialization formats:
-            // 1. Direct string: "cancelled"
-            s.as_str() == Some("cancelled")
+    let is_cancelled = status_obj.is_some_and(|s| {
+        // Check various serialization formats:
+        // 1. Direct string: "cancelled"
+        s.as_str() == Some("cancelled")
                 // 2. Object with "Cancelled" key (enum variant)
                 || s.get("Cancelled").is_some()
                 // 3. Object with inner "status" field containing "cancelled" (serde tag format)
@@ -183,15 +178,12 @@ async fn integration_real_p1_shell_tool_shares_job_manager_with_job_control_tool
                 // 4. Check first key contains "cancel"
                 || s.as_object()
                     .and_then(|o| o.keys().next())
-                    .map(|k| k.to_lowercase().contains("cancel"))
-                    .unwrap_or(false)
-        })
-        .unwrap_or(false);
+                    .is_some_and(|k| k.to_lowercase().contains("cancel"))
+    });
 
     assert!(
         is_cancelled,
-        "Job should be cancelled after shell_job_cancel. Got status: {:?}",
-        final_status
+        "Job should be cancelled after shell_job_cancel. Got status: {final_status:?}"
     );
 
     Ok(())
@@ -233,8 +225,7 @@ async fn integration_real_multiple_background_jobs_tracked()
     assert_eq!(
         jobs.len(),
         3,
-        "All 3 background jobs should be visible. Got: {:?}",
-        jobs
+        "All 3 background jobs should be visible. Got: {jobs:?}"
     );
 
     // Verify each job_id is in the list
@@ -242,7 +233,7 @@ async fn integration_real_multiple_background_jobs_tracked()
         let found = jobs
             .iter()
             .any(|j| j.get("id").and_then(|v| v.as_str()) == Some(job_id));
-        assert!(found, "Job {} should be in the list", job_id);
+        assert!(found, "Job {job_id} should be in the list");
     }
 
     // Clean up: cancel all jobs

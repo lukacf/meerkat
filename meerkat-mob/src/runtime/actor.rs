@@ -159,8 +159,7 @@ impl MobActor {
                         .inject(message, meerkat_core::PlainEventSource::Rpc)
                         .map_err(|error| {
                             MobError::Internal(format!(
-                                "orchestrator lifecycle inject failed for '{}': {}",
-                                meerkat_id, error
+                                "orchestrator lifecycle inject failed for '{meerkat_id}': {error}"
                             ))
                         })
                 }
@@ -409,14 +408,12 @@ impl MobActor {
     ) -> Result<(), MobError> {
         let session_id = member_ref.session_id().ok_or_else(|| {
             MobError::Internal(format!(
-                "autonomous member '{}' must be session-backed for injector dispatch",
-                meerkat_id
+                "autonomous member '{meerkat_id}' must be session-backed for injector dispatch"
             ))
         })?;
         if provisioner.event_injector(session_id).await.is_none() {
             return Err(MobError::Internal(format!(
-                "autonomous member '{}' is missing event injector capability",
-                meerkat_id
+                "autonomous member '{meerkat_id}' is missing event injector capability"
             )));
         }
         Ok(())
@@ -975,8 +972,7 @@ impl MobActor {
                 .starts_with(FLOW_SYSTEM_MEMBER_ID_PREFIX)
             {
                 return Err(MobError::WiringError(format!(
-                    "meerkat id '{}' uses reserved system prefix '{}'",
-                    meerkat_id, FLOW_SYSTEM_MEMBER_ID_PREFIX
+                    "meerkat id '{meerkat_id}' uses reserved system prefix '{FLOW_SYSTEM_MEMBER_ID_PREFIX}'"
                 )));
             }
             tracing::debug!(
@@ -1089,8 +1085,7 @@ impl MobActor {
                 {
                     if let Err(retire_error) = provisioner.retire_member(&member_ref).await {
                         return Err(MobError::Internal(format!(
-                            "autonomous capability check failed for '{}': {}; cleanup retire failed for member '{member_ref:?}': {}",
-                            spawn_meerkat_id, capability_error, retire_error
+                            "autonomous capability check failed for '{spawn_meerkat_id}': {capability_error}; cleanup retire failed for member '{member_ref:?}': {retire_error}"
                         )));
                     }
                     return Err(capability_error);
@@ -1102,8 +1097,7 @@ impl MobActor {
             let provision_result = match provision_result {
                 Ok(result) => result,
                 Err(_) => Err(MobError::Internal(format!(
-                    "spawn provisioning task panicked for '{}'",
-                    panic_meerkat_id
+                    "spawn provisioning task panicked for '{panic_meerkat_id}'"
                 ))),
             };
 
@@ -1182,8 +1176,7 @@ impl MobActor {
                         {
                             if let Err(retire_error) = provision.rollback().await {
                                 Err(MobError::Internal(format!(
-                                    "spawn completed while mob state changed for '{}': {}; cleanup retire failed: {}",
-                                    meerkat_id, error, retire_error
+                                    "spawn completed while mob state changed for '{meerkat_id}': {error}; cleanup retire failed: {retire_error}"
                                 )))
                             } else {
                                 Err(error)
@@ -2199,12 +2192,14 @@ impl MobActor {
             .limits
             .as_ref()
             .and_then(|limits| limits.cancel_grace_timeout_ms)
-            .map(std::time::Duration::from_millis)
-            .unwrap_or_else(|| std::time::Duration::from_secs(5));
+            .map_or_else(
+                || std::time::Duration::from_secs(5),
+                std::time::Duration::from_millis,
+            );
         tokio::spawn(async move {
             let completed = tokio::select! {
                 _ = &mut handle => true,
-                _ = tokio::time::sleep(cancel_grace_timeout) => false,
+                () = tokio::time::sleep(cancel_grace_timeout) => false,
             };
             if completed {
                 return;
@@ -2720,8 +2715,7 @@ impl MobActor {
             .definition
             .profiles
             .get(&new_peer_entry.profile)
-            .map(|p| p.peer_description.as_str())
-            .unwrap_or("");
+            .map_or("", |p| p.peer_description.as_str());
 
         let peer_name = PeerName::new(recipient_comms_name).map_err(|error| {
             MobError::WiringError(format!(

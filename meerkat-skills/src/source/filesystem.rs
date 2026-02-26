@@ -375,16 +375,16 @@ impl SkillSource for FilesystemSkillSource {
             let canonical = skill_dir
                 .canonicalize()
                 .or_else(|_| {
-                    skill_dir
-                        .parent()
-                        .map(|p| {
-                            p.canonicalize()
-                                .map(|c| c.join(skill_dir.file_name().unwrap_or_default()))
-                        })
-                        .unwrap_or(Err(std::io::Error::new(
+                    skill_dir.parent().map_or(
+                        Err(std::io::Error::new(
                             std::io::ErrorKind::NotFound,
                             "cannot resolve",
-                        )))
+                        )),
+                        |p| {
+                            p.canonicalize()
+                                .map(|c| c.join(skill_dir.file_name().unwrap_or_default()))
+                        },
+                    )
                 })
                 .unwrap_or_else(|_| skill_dir.clone());
             let root_canonical = self

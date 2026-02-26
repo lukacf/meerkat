@@ -256,7 +256,7 @@ mod tests {
         let store = Arc::new(crate::SimpleMemoryStore::new());
         for i in 0..10 {
             store
-                .index(&format!("Memory entry {} about testing", i), meta())
+                .index(&format!("Memory entry {i} about testing"), meta())
                 .await
                 .unwrap();
         }
@@ -275,7 +275,7 @@ mod tests {
         let store = Arc::new(crate::SimpleMemoryStore::new());
         for i in 0..10 {
             store
-                .index(&format!("Entry {} about Rust programming", i), meta())
+                .index(&format!("Entry {i} about Rust programming"), meta())
                 .await
                 .unwrap();
         }
@@ -341,7 +341,7 @@ mod tests {
         let store = Arc::new(crate::SimpleMemoryStore::new());
         for i in 0..30 {
             store
-                .index(&format!("Data point {} about science", i), meta())
+                .index(&format!("Data point {i} about science"), meta())
                 .await
                 .unwrap();
         }

@@ -518,7 +518,7 @@ where
                         },
                     )
                     .await;
-                    result.text = text.clone();
+                    result.text.clone_from(text);
                     self.apply_run_result_text_patch(text);
                 }
             }

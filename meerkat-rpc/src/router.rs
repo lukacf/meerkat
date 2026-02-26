@@ -310,7 +310,7 @@ impl MethodRouter {
                             return RpcResponse::error(
                                 id,
                                 error::INVALID_PARAMS,
-                                format!("Invalid interaction ID: {}", value),
+                                format!("Invalid interaction ID: {value}"),
                             );
                         }
                     },

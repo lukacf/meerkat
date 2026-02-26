@@ -87,7 +87,7 @@ impl ShellToolSet {
     /// These instructions should be injected into the system prompt when
     /// shell tools are enabled.
     pub fn usage_instructions() -> &'static str {
-        r#"# Shell Tools
+        r"# Shell Tools
 
 You have access to tools for executing shell commands. Use these carefully and responsibly.
 
@@ -126,7 +126,7 @@ You have access to tools for executing shell commands. Use these carefully and r
 - Use `ls`, `find`, `grep` to explore the filesystem
 - Use `cat`, `head`, `tail` to read file contents
 - Use `git` commands for version control operations
-- Use package managers (`npm`, `pip`, `cargo`) for dependencies"#
+- Use package managers (`npm`, `pip`, `cargo`) for dependencies"
     }
 }
 

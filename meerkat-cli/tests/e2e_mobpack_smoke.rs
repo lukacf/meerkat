@@ -307,7 +307,7 @@ async fn e2e_smoke_mobpack_deploy_signed_strict_live() -> Result<(), Box<dyn std
     tokio::fs::create_dir_all(trust_path.parent().ok_or("missing trust parent")?).await?;
     tokio::fs::write(
         &trust_path,
-        format!("[signers]\n{} = \"{}\"\n", signer_id, public_key),
+        format!("[signers]\n{signer_id} = \"{public_key}\"\n"),
     )
     .await?;
 

@@ -259,8 +259,7 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
             crate::MobRuntimeMode::AutonomousHost => {
                 let session_id = entry.member_ref.session_id().ok_or_else(|| {
                     MobError::Internal(format!(
-                        "autonomous flow dispatch requires session-backed member ref for '{}'",
-                        target
+                        "autonomous flow dispatch requires session-backed member ref for '{target}'"
                     ))
                 })?;
                 let injector = self
@@ -269,16 +268,14 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                     .await
                     .ok_or_else(|| {
                         MobError::Internal(format!(
-                            "missing event injector for autonomous flow target '{}'",
-                            target
+                            "missing event injector for autonomous flow target '{target}'"
                         ))
                     })?;
                 let subscription = injector
                     .inject_with_subscription(message, meerkat_core::PlainEventSource::Rpc)
                     .map_err(|error| {
                         MobError::Internal(format!(
-                            "autonomous flow dispatch inject failed for '{}': {}",
-                            target, error
+                            "autonomous flow dispatch inject failed for '{target}': {error}"
                         ))
                     })?;
                 Self::spawn_subscription_bridge(

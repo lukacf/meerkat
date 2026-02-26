@@ -864,8 +864,7 @@ mod tests {
             };
             assert!(
                 msg.to_user_message_text().contains(label),
-                "PlainMessage should contain source label '{}'",
-                label
+                "PlainMessage should contain source label '{label}'"
             );
         }
     }

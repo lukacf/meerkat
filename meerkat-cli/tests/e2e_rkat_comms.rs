@@ -826,7 +826,7 @@ async fn test_e2e_rkat_ack_is_immediate() {
     // Note: Without RKAT_TEST_LLM_DELAY_MS, we can't strictly verify timing,
     // but we verify the mechanism exists and sender completes.
 
-    eprintln!("Sender completed in {:?}", send_duration);
+    eprintln!("Sender completed in {send_duration:?}");
 
     instance_a.kill();
     instance_b.kill();
@@ -876,7 +876,7 @@ async fn test_e2e_rkat_sender_nonblocking() {
 
     assert!(exited.is_some(), "Sender should complete");
 
-    eprintln!("Sender completed 2 messages in {:?}", total_duration);
+    eprintln!("Sender completed 2 messages in {total_duration:?}");
 
     // The key assertion: sender completes without waiting for recipient to process.
     // With proper async model, sender exits after receiving acks.

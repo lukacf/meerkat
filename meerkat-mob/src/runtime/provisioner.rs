@@ -228,8 +228,7 @@ impl MultiBackendProvisioner {
     ) -> Result<MemberRef, MobError> {
         if !is_valid_external_peer_name(&peer_name) {
             return Err(MobError::WiringError(format!(
-                "invalid external peer name '{}': expected '<mob>/<profile>/<meerkat>' using identifier-safe segments",
-                peer_name
+                "invalid external peer name '{peer_name}': expected '<mob>/<profile>/<meerkat>' using identifier-safe segments"
             )));
         }
         tracing::debug!(

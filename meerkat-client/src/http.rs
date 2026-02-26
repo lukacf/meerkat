@@ -21,7 +21,7 @@ pub fn build_http_client_for_base_url(
     let _ = base_url; // suppress unused warning
 
     builder.build().map_err(|e| LlmError::Unknown {
-        message: format!("Failed to build HTTP client: {}", e),
+        message: format!("Failed to build HTTP client: {e}"),
     })
 }
 

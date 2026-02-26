@@ -143,8 +143,7 @@ struct ForkResponse {
 #[cfg(feature = "comms")]
 fn parent_comms_instructions(child_name: &str) -> String {
     format!(
-        "To message this fork: send({{\"kind\":\"peer_message\",\"to\":\"{child_name}\",\"body\":\"your message\"}})",
-        child_name = child_name
+        "To message this fork: send({{\"kind\":\"peer_message\",\"to\":\"{child_name}\",\"body\":\"your message\"}})"
     )
 }
 
@@ -284,8 +283,7 @@ impl AgentForkTool {
         // Resolve tool access policy and apply filtering
         let tool_access: ToolAccessPolicy = params
             .tool_access
-            .map(Into::into)
-            .unwrap_or(ToolAccessPolicy::Inherit);
+            .map_or(ToolAccessPolicy::Inherit, Into::into);
 
         let filtered_tools: Arc<dyn meerkat_core::AgentToolDispatcher> = match &tool_access {
             ToolAccessPolicy::Inherit => self.state.tool_dispatcher.clone(),
@@ -305,7 +303,7 @@ impl AgentForkTool {
             .client_factory
             .create_client(provider, None)
             .map_err(|e| {
-                BuiltinToolError::execution_failed(format!("Failed to create LLM client: {}", e))
+                BuiltinToolError::execution_failed(format!("Failed to create LLM client: {e}"))
             })?;
 
         // Get parent session and create forked session
@@ -379,7 +377,7 @@ impl AgentForkTool {
         )
         .await
         .map_err(|e| {
-            BuiltinToolError::execution_failed(format!("Failed to spawn forked agent: {}", e))
+            BuiltinToolError::execution_failed(format!("Failed to spawn forked agent: {e}"))
         })?;
 
         Ok(ForkResponse {
@@ -415,11 +413,11 @@ impl BuiltinTool for AgentForkTool {
 
     async fn call(&self, args: Value) -> Result<Value, BuiltinToolError> {
         let params: ForkParams = serde_json::from_value(args)
-            .map_err(|e| BuiltinToolError::invalid_args(format!("Invalid parameters: {}", e)))?;
+            .map_err(|e| BuiltinToolError::invalid_args(format!("Invalid parameters: {e}")))?;
 
         let response = self.fork_agent(params).await?;
         serde_json::to_value(response).map_err(|e| {
-            BuiltinToolError::execution_failed(format!("Failed to serialize response: {}", e))
+            BuiltinToolError::execution_failed(format!("Failed to serialize response: {e}"))
         })
     }
 }

@@ -626,7 +626,7 @@ fn format_agent_result(
             });
             Ok(wrap_tool_payload(payload))
         }
-        Err(e) => Err(format!("Agent error: {}", e)),
+        Err(e) => Err(format!("Agent error: {e}")),
     }
 }
 
@@ -948,7 +948,7 @@ async fn handle_meerkat_run(
 
     let current_generation = state.config_runtime.get().await.ok().map(|s| s.generation);
     let build = SessionBuildOptions {
-        provider: input.provider.map(|p| p.to_provider()),
+        provider: input.provider.map(ProviderInput::to_provider),
         output_schema,
         structured_output_retries: input.structured_output_retries,
         hooks_override: input.hooks_override.clone().unwrap_or_default(),

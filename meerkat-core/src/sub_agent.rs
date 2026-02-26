@@ -551,10 +551,10 @@ mod tests {
         // Add 4 turns (8 messages)
         for i in 0..4 {
             session.push(Message::User(UserMessage {
-                content: format!("User {}", i),
+                content: format!("User {i}"),
             }));
             session.push(Message::User(UserMessage {
-                content: format!("Assistant {}", i),
+                content: format!("Assistant {i}"),
             }));
         }
 

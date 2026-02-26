@@ -30,14 +30,14 @@ impl CommsToolSet {
 
     /// Usage instructions for comms tools
     pub fn usage_instructions() -> &'static str {
-        r#"## Inter-Agent Communication Tools
+        r"## Inter-Agent Communication Tools
 
 You have access to comms tools for communicating with other agents:
 
 - `send`: Send a message, request, or response to a peer. Use `kind` to select the type.
 - `peers`: List all visible peers.
 
-When communicating with other agents, identify them by their peer name (not pubkey)."#
+When communicating with other agents, identify them by their peer name (not pubkey)."
     }
 }
 

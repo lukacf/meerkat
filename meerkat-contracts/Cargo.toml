@@ -31,6 +31,9 @@ schemars = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 serde_json = { workspace = true }
 
+[package.metadata.cargo-machete]
+ignored = ["tokio"]  # dev-dependency used in test runtime
+
 [lints]
 workspace = true
 

@@ -635,7 +635,7 @@ mod tests {
 
         // Complete in reverse order
         assembler
-            .on_tool_call_delta("tc_second", Some("tool_b"), r#"{}"#)
+            .on_tool_call_delta("tc_second", Some("tool_b"), r"{}")
             .unwrap();
         let args2 = assembler.finalize_tool_args("tc_second").unwrap();
         assembler
@@ -643,7 +643,7 @@ mod tests {
             .unwrap();
 
         assembler
-            .on_tool_call_delta("tc_first", Some("tool_a"), r#"{}"#)
+            .on_tool_call_delta("tc_first", Some("tool_a"), r"{}")
             .unwrap();
         let args1 = assembler.finalize_tool_args("tc_first").unwrap();
         assembler

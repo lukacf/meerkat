@@ -181,7 +181,7 @@ async fn inner_test_rest_resume_metadata() {
     });
     let request = Request::builder()
         .method("POST")
-        .uri(format!("/sessions/{}/messages", session_id))
+        .uri(format!("/sessions/{session_id}/messages"))
         .header("content-type", "application/json")
         .body(Body::from(
             serde_json::to_vec(&resume_payload).expect("serialize payload"),

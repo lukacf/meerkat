@@ -119,8 +119,7 @@ async fn build_agent_without_override_fails_missing_api_key() {
     let err_str = err.to_string();
     assert!(
         err_str.contains("API key"),
-        "Error should mention API key, got: {}",
-        err_str
+        "Error should mention API key, got: {err_str}"
     );
 }
 
@@ -163,8 +162,7 @@ async fn build_agent_unknown_provider_fails() {
     let err_str = err.to_string();
     assert!(
         err_str.contains("infer provider") || err_str.contains("unknown-model-xyz"),
-        "Error should mention model inference failure, got: {}",
-        err_str
+        "Error should mention model inference failure, got: {err_str}"
     );
 }
 
@@ -339,7 +337,7 @@ async fn build_agent_applies_system_prompt_override() {
                 sys.content
             );
         }
-        other => panic!("First message should be System, got: {:?}", other),
+        other => panic!("First message should be System, got: {other:?}"),
     }
 }
 
@@ -365,8 +363,7 @@ async fn build_agent_host_mode_without_comms_name_fails() {
     };
     assert!(
         matches!(err, BuildAgentError::HostModeRequiresCommsName),
-        "Should be HostModeRequiresCommsName, got: {:?}",
-        err
+        "Should be HostModeRequiresCommsName, got: {err:?}"
     );
 }
 
@@ -389,8 +386,7 @@ async fn build_agent_rejects_invalid_inline_peer_notification_threshold() {
     };
     assert!(
         matches!(err, BuildAgentError::Config(_)),
-        "Should be Config error, got: {:?}",
-        err
+        "Should be Config error, got: {err:?}"
     );
     assert!(
         err.to_string()

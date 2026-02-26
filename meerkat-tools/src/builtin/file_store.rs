@@ -74,7 +74,7 @@ impl FileTaskStore {
     async fn load(&self) -> Result<TaskStoreData, TaskError> {
         let exists = fs::try_exists(&self.path)
             .await
-            .map_err(|e| TaskError::StorageError(format!("Failed to check file: {}", e)))?;
+            .map_err(|e| TaskError::StorageError(format!("Failed to check file: {e}")))?;
         if !exists {
             return Ok(TaskStoreData {
                 meta: TaskStoreMeta {
@@ -89,10 +89,10 @@ impl FileTaskStore {
 
         let content = fs::read_to_string(&self.path)
             .await
-            .map_err(|e| TaskError::StorageError(format!("Failed to read file: {}", e)))?;
+            .map_err(|e| TaskError::StorageError(format!("Failed to read file: {e}")))?;
 
         serde_json::from_str(&content)
-            .map_err(|e| TaskError::InvalidData(format!("Failed to parse JSON: {}", e)))
+            .map_err(|e| TaskError::InvalidData(format!("Failed to parse JSON: {e}")))
     }
 
     /// Save the store data to disk atomically
@@ -105,32 +105,32 @@ impl FileTaskStore {
 
         // Ensure parent directory exists
         if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent).await.map_err(|e| {
-                TaskError::StorageError(format!("Failed to create directory: {}", e))
-            })?;
+            fs::create_dir_all(parent)
+                .await
+                .map_err(|e| TaskError::StorageError(format!("Failed to create directory: {e}")))?;
         }
 
         // Write to temp file first
         let temp_path = self.path.with_extension("json.tmp");
         let content = serde_json::to_string_pretty(data)
-            .map_err(|e| TaskError::StorageError(format!("Failed to serialize: {}", e)))?;
+            .map_err(|e| TaskError::StorageError(format!("Failed to serialize: {e}")))?;
 
         let mut file = fs::File::create(&temp_path)
             .await
-            .map_err(|e| TaskError::StorageError(format!("Failed to create temp file: {}", e)))?;
+            .map_err(|e| TaskError::StorageError(format!("Failed to create temp file: {e}")))?;
 
         file.write_all(content.as_bytes())
             .await
-            .map_err(|e| TaskError::StorageError(format!("Failed to write: {}", e)))?;
+            .map_err(|e| TaskError::StorageError(format!("Failed to write: {e}")))?;
 
         file.sync_all()
             .await
-            .map_err(|e| TaskError::StorageError(format!("Failed to sync: {}", e)))?;
+            .map_err(|e| TaskError::StorageError(format!("Failed to sync: {e}")))?;
 
         // Atomic rename
         fs::rename(&temp_path, &self.path)
             .await
-            .map_err(|e| TaskError::StorageError(format!("Failed to rename: {}", e)))?;
+            .map_err(|e| TaskError::StorageError(format!("Failed to rename: {e}")))?;
 
         Ok(())
     }

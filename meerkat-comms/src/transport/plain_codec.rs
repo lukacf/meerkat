@@ -78,11 +78,11 @@ mod tests {
 
     #[test]
     fn test_parse_plain_line_json_array() {
-        let result = parse_plain_line(r#"[1, 2, 3]"#);
+        let result = parse_plain_line(r"[1, 2, 3]");
         // Arrays should be pretty-printed
-        assert!(result.contains("1"));
-        assert!(result.contains("2"));
-        assert!(result.contains("3"));
+        assert!(result.contains('1'));
+        assert!(result.contains('2'));
+        assert!(result.contains('3'));
     }
 
     #[test]

@@ -42,5 +42,19 @@ tokio_with_wasm = { workspace = true }
 getrandom = { version = "0.3", features = ["wasm_js"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
 
+[package.metadata.cargo-machete]
+ignored = [
+    "async-trait",             # proc macro
+    "futures",                 # used via re-exports
+    "getrandom",               # cfg(target_arch = "wasm32")
+    "js-sys",                  # cfg(target_arch = "wasm32")
+    "meerkat-comms",           # wired into session config
+    "meerkat-hooks",           # wired into agent builder
+    "meerkat-session",         # wired into agent builder
+    "reqwest",                 # cfg(target_arch = "wasm32")
+    "tracing",                 # logging macros
+    "wasm-bindgen-futures",    # wasm async runtime adapter
+]
+
 [lints]
 workspace = true

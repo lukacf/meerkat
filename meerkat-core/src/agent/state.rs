@@ -1237,8 +1237,7 @@ mod tests {
         let seen = client.seen();
         assert!(
             seen.iter().any(|m| m.contains("queued during recovery")),
-            "expected queued comms message to be drained into LLM input, saw: {:?}",
-            seen
+            "expected queued comms message to be drained into LLM input, saw: {seen:?}"
         );
     }
 
@@ -1270,8 +1269,7 @@ mod tests {
             seen_ids
                 .iter()
                 .any(|id| id.0 == "dc256086-0d2f-4f61-a307-320d4148107f/email-extractor"),
-            "expected canonical skill id to be forwarded to skill engine, saw: {:?}",
-            seen_ids
+            "expected canonical skill id to be forwarded to skill engine, saw: {seen_ids:?}"
         );
 
         let seen_messages = client.seen();
@@ -1279,8 +1277,7 @@ mod tests {
             seen_messages
                 .iter()
                 .any(|msg| msg.contains("<skill>injected canonical skill</skill>")),
-            "expected runtime prompt to include rendered skill injection, saw: {:?}",
-            seen_messages
+            "expected runtime prompt to include rendered skill injection, saw: {seen_messages:?}"
         );
     }
 }

@@ -129,7 +129,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse host and port from config (non-secret settings)
     let addr: SocketAddr = format!("{}:{}", state.rest_host, state.rest_port)
         .parse()
-        .map_err(|e| format!("Invalid host:port combination: {}", e))?;
+        .map_err(|e| format!("Invalid host:port combination: {e}"))?;
 
     // Build router with middleware
     let app = router(state)
@@ -171,10 +171,10 @@ async fn shutdown_signal() {
     let terminate = std::future::pending::<()>();
 
     tokio::select! {
-        _ = ctrl_c => {
+        () = ctrl_c => {
             tracing::info!("Received Ctrl+C, shutting down...");
         },
-        _ = terminate => {
+        () = terminate => {
             tracing::info!("Received SIGTERM, shutting down...");
         },
     }

@@ -61,8 +61,7 @@ fn smoke_timeout_secs() -> u64 {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)
-        .map(|value| value.min(600))
-        .unwrap_or(180)
+        .map_or(180, |value| value.min(600))
 }
 
 fn skip_if_no_api_prereqs() -> bool {
@@ -134,13 +133,10 @@ impl SmokeHarness {
 
         let rkat = rkat_binary_path().ok_or("rkat binary not found")?;
         let api_key = anthropic_api_key().ok_or("anthropic api key missing")?;
-        let verbose = std::env::var("SMOKE_VERBOSE")
-            .ok()
-            .map(|value| {
-                let value = value.to_ascii_lowercase();
-                matches!(value.as_str(), "1" | "true" | "yes" | "on")
-            })
-            .unwrap_or(false);
+        let verbose = std::env::var("SMOKE_VERBOSE").ok().is_some_and(|value| {
+            let value = value.to_ascii_lowercase();
+            matches!(value.as_str(), "1" | "true" | "yes" | "on")
+        });
         let provider = std::env::var("SMOKE_PROVIDER")
             .ok()
             .map(|value| value.trim().to_string())
@@ -215,7 +211,7 @@ impl SmokeHarness {
                         );
                     }
                 }
-                _ = &mut deadline => {
+                () = &mut deadline => {
                     let _ = child.kill().await;
                     let _ = child.wait().await;
                     let stdout = stdout_task.await??;
@@ -667,13 +663,12 @@ fn list_has_status(list_output: &str, mob_id: &str, status: &str) -> bool {
 fn event_count(registry: &Value, mob_id: &str, event_type: &str) -> usize {
     registry["mobs"][mob_id]["events"]
         .as_array()
-        .map(|events| {
+        .map_or(0, |events| {
             events
                 .iter()
                 .filter(|event| event["kind"]["type"].as_str() == Some(event_type))
                 .count()
         })
-        .unwrap_or(0)
 }
 
 fn parse_tool_latencies(stderr: &str) -> Vec<(String, u64)> {
@@ -1479,8 +1474,7 @@ async fn e2e_smoke_08_kitchen_sink_lifecycle_mutations() -> Result<(), Box<dyn s
     });
     let create_run = harness.run_json_with_schema(
             &format!(
-                "Use mob_* tools only (no simulation). Call mob_create with arguments {{\"definition\": {}}}. Return structured output with field mob_id only.",
-                definition_json
+                "Use mob_* tools only (no simulation). Call mob_create with arguments {{\"definition\": {definition_json}}}. Return structured output with field mob_id only."
             ),
             &create_schema,
         ).await?;
@@ -1516,8 +1510,7 @@ async fn e2e_smoke_08_kitchen_sink_lifecycle_mutations() -> Result<(), Box<dyn s
         &harness,
         &session_id,
         format!(
-        "Use mob_* tools only. For mob '{}', call mob_spawn with profile='lead' and meerkat_id='lead-1'. Reply exactly OK.",
-        returned_mob_id
+        "Use mob_* tools only. For mob '{returned_mob_id}', call mob_spawn with profile='lead' and meerkat_id='lead-1'. Reply exactly OK."
     ),
     )
     .await?;
@@ -1525,8 +1518,7 @@ async fn e2e_smoke_08_kitchen_sink_lifecycle_mutations() -> Result<(), Box<dyn s
         &harness,
         &session_id,
         format!(
-        "Use mob_* tools only. For mob '{}', call mob_spawn with profile='worker' and meerkat_id='worker-1'. Reply exactly OK.",
-        returned_mob_id
+        "Use mob_* tools only. For mob '{returned_mob_id}', call mob_spawn with profile='worker' and meerkat_id='worker-1'. Reply exactly OK."
     ),
     )
     .await?;
@@ -1534,8 +1526,7 @@ async fn e2e_smoke_08_kitchen_sink_lifecycle_mutations() -> Result<(), Box<dyn s
         &harness,
         &session_id,
         format!(
-        "Use mob_* tools only. For mob '{}', call mob_spawn with profile='worker' and meerkat_id='worker-2'. Reply exactly OK.",
-        returned_mob_id
+        "Use mob_* tools only. For mob '{returned_mob_id}', call mob_spawn with profile='worker' and meerkat_id='worker-2'. Reply exactly OK."
     ),
     )
     .await?;
@@ -1543,8 +1534,7 @@ async fn e2e_smoke_08_kitchen_sink_lifecycle_mutations() -> Result<(), Box<dyn s
         &harness,
         &session_id,
         format!(
-        "Use mob_* tools only. For mob '{}', call mob_wire with a='lead-1' and b='worker-1'. Reply exactly OK.",
-        returned_mob_id
+        "Use mob_* tools only. For mob '{returned_mob_id}', call mob_wire with a='lead-1' and b='worker-1'. Reply exactly OK."
     ),
     )
     .await?;
@@ -1552,8 +1542,7 @@ async fn e2e_smoke_08_kitchen_sink_lifecycle_mutations() -> Result<(), Box<dyn s
         &harness,
         &session_id,
         format!(
-        "Use mob_* tools only. For mob '{}', call mob_wire with a='lead-1' and b='worker-2'. Reply exactly OK.",
-        returned_mob_id
+        "Use mob_* tools only. For mob '{returned_mob_id}', call mob_wire with a='lead-1' and b='worker-2'. Reply exactly OK."
     ),
     )
     .await?;
@@ -1561,8 +1550,7 @@ async fn e2e_smoke_08_kitchen_sink_lifecycle_mutations() -> Result<(), Box<dyn s
         &harness,
         &session_id,
         format!(
-        "Use mob_* tools only. For mob '{}', call mob_unwire with a='lead-1' and b='worker-2'. Reply exactly OK.",
-        returned_mob_id
+        "Use mob_* tools only. For mob '{returned_mob_id}', call mob_unwire with a='lead-1' and b='worker-2'. Reply exactly OK."
     ),
     )
     .await?;
@@ -1570,8 +1558,7 @@ async fn e2e_smoke_08_kitchen_sink_lifecycle_mutations() -> Result<(), Box<dyn s
         &harness,
         &session_id,
         format!(
-        "Use mob_* tools only. For mob '{}', call mob_retire with meerkat_id='worker-2'. Reply exactly OK.",
-        returned_mob_id
+        "Use mob_* tools only. For mob '{returned_mob_id}', call mob_retire with meerkat_id='worker-2'. Reply exactly OK."
     ),
     )
     .await?;
@@ -1579,8 +1566,7 @@ async fn e2e_smoke_08_kitchen_sink_lifecycle_mutations() -> Result<(), Box<dyn s
         &harness,
         &session_id,
         format!(
-        "Use mob_* tools only. For mob '{}', call mob_spawn with profile='worker' and meerkat_id='worker-3'. Reply exactly OK.",
-        returned_mob_id
+        "Use mob_* tools only. For mob '{returned_mob_id}', call mob_spawn with profile='worker' and meerkat_id='worker-3'. Reply exactly OK."
     ),
     )
     .await?;
@@ -1588,8 +1574,7 @@ async fn e2e_smoke_08_kitchen_sink_lifecycle_mutations() -> Result<(), Box<dyn s
         &harness,
         &session_id,
         format!(
-        "Use mob_* tools only. For mob '{}', call mob_wire with a='lead-1' and b='worker-3'. Reply exactly OK.",
-        returned_mob_id
+        "Use mob_* tools only. For mob '{returned_mob_id}', call mob_wire with a='lead-1' and b='worker-3'. Reply exactly OK."
     ),
     )
     .await?;
@@ -1597,8 +1582,7 @@ async fn e2e_smoke_08_kitchen_sink_lifecycle_mutations() -> Result<(), Box<dyn s
         &harness,
         &session_id,
         format!(
-            "Use mob_* tools only. For mob '{}', call mob_stop. Reply exactly OK.",
-            returned_mob_id
+            "Use mob_* tools only. For mob '{returned_mob_id}', call mob_stop. Reply exactly OK."
         ),
     )
     .await?;
@@ -1606,8 +1590,7 @@ async fn e2e_smoke_08_kitchen_sink_lifecycle_mutations() -> Result<(), Box<dyn s
         &harness,
         &session_id,
         format!(
-            "Use mob_* tools only. For mob '{}', call mob_resume. Reply exactly OK.",
-            returned_mob_id
+            "Use mob_* tools only. For mob '{returned_mob_id}', call mob_resume. Reply exactly OK."
         ),
     )
     .await?;
@@ -1615,8 +1598,7 @@ async fn e2e_smoke_08_kitchen_sink_lifecycle_mutations() -> Result<(), Box<dyn s
         &harness,
         &session_id,
         format!(
-            "Use mob_* tools only. For mob '{}', call mob_complete. Reply exactly OK.",
-            returned_mob_id
+            "Use mob_* tools only. For mob '{returned_mob_id}', call mob_complete. Reply exactly OK."
         ),
     )
     .await?;
@@ -1625,7 +1607,7 @@ async fn e2e_smoke_08_kitchen_sink_lifecycle_mutations() -> Result<(), Box<dyn s
         .resume_text(
             &session_id,
             &format!(
-                "Use mob_* tools only (no simulation) for existing mob '{}':\n\
+                "Use mob_* tools only (no simulation) for existing mob '{returned_mob_id}':\n\
                  1) mob_status\n\
                  2) mob_events with after_cursor=0 and limit=200\n\
                  3) mob_destroy\n\
@@ -1633,8 +1615,7 @@ async fn e2e_smoke_08_kitchen_sink_lifecycle_mutations() -> Result<(), Box<dyn s
                  FINAL:<final_status>\n\
                  EVENTS:<comma-separated unique event kind.type values>\n\
                  KINDS:<comma-separated member_ref.kind values from meerkat_spawned events>\n\
-                 DESTROYED:true",
-                returned_mob_id
+                 DESTROYED:true"
             ),
         )
         .await?;
@@ -2032,8 +2013,7 @@ async fn e2e_smoke_12_mixed_backend_and_verbose_observability()
 
     let artifact_dir = std::env::var("SMOKE_ARTIFACT_DIR")
         .ok()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| harness.project_dir.join(".rkat"));
+        .map_or_else(|| harness.project_dir.join(".rkat"), PathBuf::from);
     tokio::fs::create_dir_all(&artifact_dir).await?;
     let artifact_path = artifact_dir.join("phase3_mixed_verbose_observability.log");
     tokio::fs::write(

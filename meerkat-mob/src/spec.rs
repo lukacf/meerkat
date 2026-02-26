@@ -85,7 +85,7 @@ impl SpecValidator {
                 if !step_keys.contains(dep) {
                     diagnostics.push(Diagnostic {
                         code: DiagnosticCode::FlowUnknownStep,
-                        message: format!("step '{}' depends on unknown step '{}'", step_id, dep),
+                        message: format!("step '{step_id}' depends on unknown step '{dep}'"),
                         location: Some(format!("flows.{flow_name}.steps.{step_id}.depends_on")),
                         severity: DiagnosticSeverity::Error,
                     });
@@ -97,7 +97,7 @@ impl SpecValidator {
             {
                 diagnostics.push(Diagnostic {
                     code: DiagnosticCode::QuorumInvalid,
-                    message: format!("step '{}' has invalid quorum n=0", step_id),
+                    message: format!("step '{step_id}' has invalid quorum n=0"),
                     location: Some(format!(
                         "flows.{flow_name}.steps.{step_id}.collection_policy.n"
                     )),
@@ -122,8 +122,7 @@ impl SpecValidator {
                     diagnostics.push(Diagnostic {
                         code: DiagnosticCode::BranchJoinWithoutBranch,
                         message: format!(
-                            "step '{}' uses depends_on_mode=any without branch dependencies",
-                            step_id
+                            "step '{step_id}' uses depends_on_mode=any without branch dependencies"
                         ),
                         location: Some(format!(
                             "flows.{flow_name}.steps.{step_id}.depends_on_mode"
@@ -139,8 +138,7 @@ impl SpecValidator {
                 diagnostics.push(Diagnostic {
                     code: DiagnosticCode::BranchGroupEmpty,
                     message: format!(
-                        "branch group '{}' in flow '{}' must contain at least two steps",
-                        branch_name, flow_name
+                        "branch group '{branch_name}' in flow '{flow_name}' must contain at least two steps"
                     ),
                     location: Some(format!("flows.{flow_name}.steps")),
                     severity: DiagnosticSeverity::Error,
@@ -157,8 +155,7 @@ impl SpecValidator {
                     diagnostics.push(Diagnostic {
                         code: DiagnosticCode::BranchStepMissingCondition,
                         message: format!(
-                            "branch step '{}' in group '{}' is missing condition",
-                            step_id, branch_name
+                            "branch step '{step_id}' in group '{branch_name}' is missing condition"
                         ),
                         location: Some(format!("flows.{flow_name}.steps.{step_id}.condition")),
                         severity: DiagnosticSeverity::Error,
@@ -170,8 +167,7 @@ impl SpecValidator {
                     diagnostics.push(Diagnostic {
                         code: DiagnosticCode::BranchStepConflictingDeps,
                         message: format!(
-                            "branch step '{}' in group '{}' has conflicting dependencies",
-                            step_id, branch_name
+                            "branch step '{step_id}' in group '{branch_name}' has conflicting dependencies"
                         ),
                         location: Some(format!("flows.{flow_name}.steps.{step_id}.depends_on")),
                         severity: DiagnosticSeverity::Error,
@@ -184,14 +180,14 @@ impl SpecValidator {
         if has_cycle {
             diagnostics.push(Diagnostic {
                 code: DiagnosticCode::FlowCycleDetected,
-                message: format!("flow '{}' contains a cycle", flow_name),
+                message: format!("flow '{flow_name}' contains a cycle"),
                 location: Some(format!("flows.{flow_name}.steps")),
                 severity: DiagnosticSeverity::Error,
             });
         } else if max_depth > 32 {
             diagnostics.push(Diagnostic {
                 code: DiagnosticCode::FlowDepthExceeded,
-                message: format!("flow '{}' exceeds max depth of 32", flow_name),
+                message: format!("flow '{flow_name}' exceeds max depth of 32"),
                 location: Some(format!("flows.{flow_name}.steps")),
                 severity: DiagnosticSeverity::Error,
             });
@@ -219,7 +215,7 @@ fn analyze_dag(flow: &FlowSpec) -> (bool, usize) {
 
     let mut depth: BTreeMap<&str, usize> = indegree
         .iter()
-        .map(|(step, deg)| (*step, if *deg == 0 { 1 } else { 0 }))
+        .map(|(step, deg)| (*step, usize::from(*deg == 0)))
         .collect();
     let mut queue = VecDeque::new();
     for (step, degree) in &indegree {

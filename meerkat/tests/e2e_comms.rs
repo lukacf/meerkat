@@ -203,7 +203,7 @@ impl<S: SessionStore + 'static> AgentSessionStore for SessionStoreAdapter<S> {
 
     async fn load(&self, id: &str) -> Result<Option<Session>, AgentError> {
         let session_id = SessionId::parse(id)
-            .map_err(|e| AgentError::StoreError(format!("Invalid session ID: {}", e)))?;
+            .map_err(|e| AgentError::StoreError(format!("Invalid session ID: {e}")))?;
 
         self.store
             .load(&session_id)
@@ -288,7 +288,7 @@ async fn create_agent_pair(
         peers: vec![TrustedPeer {
             name: "agent-b".to_string(),
             pubkey: pubkey_b,
-            addr: format!("tcp://{}", addr_b),
+            addr: format!("tcp://{addr_b}"),
             meta: meerkat_comms::PeerMeta::default(),
         }],
     };
@@ -297,7 +297,7 @@ async fn create_agent_pair(
         peers: vec![TrustedPeer {
             name: "agent-a".to_string(),
             pubkey: pubkey_a,
-            addr: format!("tcp://{}", addr_a),
+            addr: format!("tcp://{addr_a}"),
             meta: meerkat_comms::PeerMeta::default(),
         }],
     };
@@ -603,13 +603,13 @@ mod three_agent_coordination {
                 TrustedPeer {
                     name: "agent-b".to_string(),
                     pubkey: pubkey_b,
-                    addr: format!("tcp://{}", addr_b),
+                    addr: format!("tcp://{addr_b}"),
                     meta: meerkat_comms::PeerMeta::default(),
                 },
                 TrustedPeer {
                     name: "agent-c".to_string(),
                     pubkey: pubkey_c,
-                    addr: format!("tcp://{}", addr_c),
+                    addr: format!("tcp://{addr_c}"),
                     meta: meerkat_comms::PeerMeta::default(),
                 },
             ],
@@ -620,13 +620,13 @@ mod three_agent_coordination {
                 TrustedPeer {
                     name: "agent-a".to_string(),
                     pubkey: pubkey_a,
-                    addr: format!("tcp://{}", addr_a),
+                    addr: format!("tcp://{addr_a}"),
                     meta: meerkat_comms::PeerMeta::default(),
                 },
                 TrustedPeer {
                     name: "agent-c".to_string(),
                     pubkey: pubkey_c,
-                    addr: format!("tcp://{}", addr_c),
+                    addr: format!("tcp://{addr_c}"),
                     meta: meerkat_comms::PeerMeta::default(),
                 },
             ],
@@ -637,13 +637,13 @@ mod three_agent_coordination {
                 TrustedPeer {
                     name: "agent-a".to_string(),
                     pubkey: pubkey_a,
-                    addr: format!("tcp://{}", addr_a),
+                    addr: format!("tcp://{addr_a}"),
                     meta: meerkat_comms::PeerMeta::default(),
                 },
                 TrustedPeer {
                     name: "agent-b".to_string(),
                     pubkey: pubkey_b,
-                    addr: format!("tcp://{}", addr_b),
+                    addr: format!("tcp://{addr_b}"),
                     meta: meerkat_comms::PeerMeta::default(),
                 },
             ],

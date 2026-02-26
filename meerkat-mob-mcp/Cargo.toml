@@ -37,5 +37,8 @@ tokio_with_wasm = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 chrono = { workspace = true }
 
+[package.metadata.cargo-machete]
+ignored = ["chrono", "meerkat-client", "thiserror"]  # proc macros / transitive
+
 [lints]
 workspace = true

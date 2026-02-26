@@ -318,9 +318,8 @@ pub async fn start_realm_lease_in(
         .map_err(StoreError::Io)?;
 
     let pid = std::process::id();
-    let resolved_instance = instance_id
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| format!("instance-{}", Uuid::now_v7()));
+    let resolved_instance =
+        instance_id.map_or_else(|| format!("instance-{}", Uuid::now_v7()), ToOwned::to_owned);
     let lease_name = format!("{}.json", sanitize_instance_id(&resolved_instance));
     let lease_path = lease_dir.join(lease_name);
 
@@ -643,8 +642,8 @@ pub async fn open_realm_session_store_in(
 }
 
 pub fn fnv1a64_hex(input: &str) -> String {
-    const OFFSET: u64 = 0xcbf29ce484222325;
-    const PRIME: u64 = 0x100000001b3;
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0100_0000_01b3;
     let mut hash = OFFSET;
     for b in input.as_bytes() {
         hash ^= u64::from(*b);

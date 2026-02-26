@@ -15,9 +15,9 @@ pub fn evaluate_condition(expr: &ConditionExpr, ctx: &FlowContext) -> bool {
             resolve_context_path(ctx, path).is_some_and(|v| values.contains(v))
         }
         ConditionExpr::Gt { path, value } => resolve_context_path(ctx, path)
-            .is_some_and(|v| compare_values(v, value).is_some_and(|ord| ord.is_gt())),
+            .is_some_and(|v| compare_values(v, value).is_some_and(std::cmp::Ordering::is_gt)),
         ConditionExpr::Lt { path, value } => resolve_context_path(ctx, path)
-            .is_some_and(|v| compare_values(v, value).is_some_and(|ord| ord.is_lt())),
+            .is_some_and(|v| compare_values(v, value).is_some_and(std::cmp::Ordering::is_lt)),
         ConditionExpr::And { exprs } => exprs.iter().all(|expr| evaluate_condition(expr, ctx)),
         ConditionExpr::Or { exprs } => exprs.iter().any(|expr| evaluate_condition(expr, ctx)),
         ConditionExpr::Not { expr } => !evaluate_condition(expr, ctx),

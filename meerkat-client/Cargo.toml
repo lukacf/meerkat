@@ -55,5 +55,11 @@ name = "e2e"
 path = "tests/e2e.rs"
 required-features = ["integration-real-tests"]
 
+[package.metadata.cargo-machete]
+ignored = [
+    "getrandom",  # cfg(target_arch = "wasm32")
+    "slab",        # used in streaming block assembly
+]
+
 [lints]
 workspace = true

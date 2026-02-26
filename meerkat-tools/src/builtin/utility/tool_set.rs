@@ -56,7 +56,7 @@ impl UtilityToolSet {
     /// These instructions should be injected into the system prompt when
     /// utility tools are enabled.
     pub fn usage_instructions() -> &'static str {
-        r#"# Utility Tools
+        r"# Utility Tools
 
 You have access to utility tools for timing and coordination.
 
@@ -85,7 +85,7 @@ Example pattern for sub-agents:
 Use `datetime` when you need to:
 - Know the current time for scheduling or logging
 - Calculate durations or deadlines
-- Include timestamps in outputs or task metadata"#
+- Include timestamps in outputs or task metadata"
     }
 }
 

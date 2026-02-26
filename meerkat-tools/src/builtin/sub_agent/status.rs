@@ -55,7 +55,7 @@ impl AgentStatusTool {
     fn parse_agent_id(id_str: &str) -> Result<OperationId, BuiltinToolError> {
         Uuid::parse_str(id_str)
             .map(OperationId)
-            .map_err(|e| BuiltinToolError::invalid_args(format!("Invalid agent_id format: {}", e)))
+            .map_err(|e| BuiltinToolError::invalid_args(format!("Invalid agent_id format: {e}")))
     }
 
     async fn get_status(&self, params: StatusParams) -> Result<StatusResponse, BuiltinToolError> {
@@ -135,11 +135,11 @@ impl BuiltinTool for AgentStatusTool {
 
     async fn call(&self, args: Value) -> Result<Value, BuiltinToolError> {
         let params: StatusParams = serde_json::from_value(args)
-            .map_err(|e| BuiltinToolError::invalid_args(format!("Invalid parameters: {}", e)))?;
+            .map_err(|e| BuiltinToolError::invalid_args(format!("Invalid parameters: {e}")))?;
 
         let response = self.get_status(params).await?;
         serde_json::to_value(response).map_err(|e| {
-            BuiltinToolError::execution_failed(format!("Failed to serialize response: {}", e))
+            BuiltinToolError::execution_failed(format!("Failed to serialize response: {e}"))
         })
     }
 }

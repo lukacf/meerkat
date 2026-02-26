@@ -45,7 +45,7 @@ impl AgentCancelTool {
     fn parse_agent_id(id_str: &str) -> Result<OperationId, BuiltinToolError> {
         Uuid::parse_str(id_str)
             .map(OperationId)
-            .map_err(|e| BuiltinToolError::invalid_args(format!("Invalid agent_id format: {}", e)))
+            .map_err(|e| BuiltinToolError::invalid_args(format!("Invalid agent_id format: {e}")))
     }
 
     async fn cancel_agent(&self, params: CancelParams) -> Result<CancelResponse, BuiltinToolError> {
@@ -70,8 +70,7 @@ impl AgentCancelTool {
                 success: false,
                 previous_state: previous_state.to_string(),
                 message: format!(
-                    "Cannot cancel sub-agent: already {} (only running agents can be cancelled)",
-                    previous_state
+                    "Cannot cancel sub-agent: already {previous_state} (only running agents can be cancelled)"
                 ),
             });
         }
@@ -108,11 +107,11 @@ impl BuiltinTool for AgentCancelTool {
 
     async fn call(&self, args: Value) -> Result<Value, BuiltinToolError> {
         let params: CancelParams = serde_json::from_value(args)
-            .map_err(|e| BuiltinToolError::invalid_args(format!("Invalid parameters: {}", e)))?;
+            .map_err(|e| BuiltinToolError::invalid_args(format!("Invalid parameters: {e}")))?;
 
         let response = self.cancel_agent(params).await?;
         serde_json::to_value(response).map_err(|e| {
-            BuiltinToolError::execution_failed(format!("Failed to serialize response: {}", e))
+            BuiltinToolError::execution_failed(format!("Failed to serialize response: {e}"))
         })
     }
 }

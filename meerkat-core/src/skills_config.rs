@@ -249,7 +249,7 @@ fn repository_fingerprint(repo: &SkillRepositoryConfig) -> String {
         SkillRepoTransport::Filesystem { path } => format!("filesystem:{path}"),
         SkillRepoTransport::Stdio {
             command, cwd, env, ..
-        } => format!("stdio:{command}:{cwd:?}:{:?}", env),
+        } => format!("stdio:{command}:{cwd:?}:{env:?}"),
         SkillRepoTransport::Http { url, .. } => format!("http:{url}"),
         SkillRepoTransport::Git {
             url,
@@ -257,7 +257,7 @@ fn repository_fingerprint(repo: &SkillRepositoryConfig) -> String {
             ref_type,
             skills_root,
             ..
-        } => format!("git:{url}:{git_ref}:{ref_type:?}:{:?}", skills_root),
+        } => format!("git:{url}:{git_ref}:{ref_type:?}:{skills_root:?}"),
     };
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     hasher.write(material.as_bytes());

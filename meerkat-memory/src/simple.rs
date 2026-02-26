@@ -143,7 +143,7 @@ mod tests {
 
         for i in 0..10 {
             store
-                .index(&format!("Item {} with keyword test", i), meta("s1"))
+                .index(&format!("Item {i} with keyword test"), meta("s1"))
                 .await
                 .unwrap();
         }

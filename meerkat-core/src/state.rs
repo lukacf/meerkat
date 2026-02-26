@@ -37,36 +37,22 @@ impl LoopState {
 
     /// Validate a transition from this state to another
     pub fn can_transition_to(&self, next: &LoopState) -> bool {
-        use LoopState::*;
+        use LoopState::{
+            CallingLlm, Cancelling, Completed, DrainingEvents, ErrorRecovery, WaitingForOps,
+        };
 
-        match (self, next) {
-            // From CallingLlm
-            (CallingLlm, WaitingForOps) => true, // ops pending after tool dispatch
-            (CallingLlm, DrainingEvents) => true, // tool_use stop reason
-            (CallingLlm, Completed) => true,     // end_turn and no ops
-            (CallingLlm, ErrorRecovery) => true, // LLM error
-            (CallingLlm, Cancelling) => true,    // cancel signal
-
-            // From WaitingForOps
-            (WaitingForOps, DrainingEvents) => true, // when ops complete
-            (WaitingForOps, Cancelling) => true,     // cancel signal
-
-            // From DrainingEvents
-            (DrainingEvents, CallingLlm) => true, // more work needed
-            (DrainingEvents, Completed) => true,  // done
-            (DrainingEvents, Cancelling) => true, // cancel signal
-
-            // From Cancelling
-            (Cancelling, Completed) => true, // after drain
-
-            // From ErrorRecovery
-            (ErrorRecovery, CallingLlm) => true, // after recovery
-            (ErrorRecovery, Completed) => true,  // if unrecoverable
-            (ErrorRecovery, Cancelling) => true, // cancel during recovery
-
-            // No other transitions allowed
-            _ => false,
-        }
+        matches!(
+            (self, next),
+            (
+                CallingLlm,
+                WaitingForOps | DrainingEvents | Completed | ErrorRecovery | Cancelling
+            ) | (WaitingForOps, DrainingEvents | Cancelling)
+                | (
+                    DrainingEvents | ErrorRecovery,
+                    CallingLlm | Completed | Cancelling
+                )
+                | (Cancelling, Completed)
+        )
     }
 
     /// Transition to a new state, returning error if invalid
@@ -76,8 +62,8 @@ impl LoopState {
             Ok(())
         } else {
             Err(AgentError::InvalidStateTransition {
-                from: format!("{:?}", self),
-                to: format!("{:?}", next),
+                from: format!("{self:?}"),
+                to: format!("{next:?}"),
             })
         }
     }

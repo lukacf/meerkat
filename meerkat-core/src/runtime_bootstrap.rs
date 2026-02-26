@@ -150,8 +150,8 @@ pub fn derive_workspace_realm_id(path: &Path) -> String {
 }
 
 pub fn fnv1a64_hex(input: &str) -> String {
-    const OFFSET: u64 = 0xcbf29ce484222325;
-    const PRIME: u64 = 0x100000001b3;
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0100_0000_01b3;
     let mut hash = OFFSET;
     for b in input.as_bytes() {
         hash ^= u64::from(*b);

@@ -59,18 +59,15 @@ impl ErrorCode {
     /// Map to HTTP status code.
     pub const fn http_status(self) -> u16 {
         match self {
-            Self::SessionNotFound => 404,
-            Self::SessionBusy => 409,
-            Self::SessionNotRunning => 409,
+            Self::SessionNotFound | Self::SkillNotFound => 404,
+            Self::SessionBusy | Self::SessionNotRunning => 409,
             Self::ProviderError => 502,
             Self::BudgetExhausted => 429,
             Self::HookDenied => 403,
-            Self::AgentError => 500,
+            Self::AgentError | Self::InternalError => 500,
             Self::CapabilityUnavailable => 501,
-            Self::SkillNotFound => 404,
             Self::SkillResolutionFailed => 422,
             Self::InvalidParams => 400,
-            Self::InternalError => 500,
         }
     }
 

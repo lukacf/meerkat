@@ -132,8 +132,6 @@ async fn stress_session_listing_p95_is_stable_across_scale() {
     // This catches regressions where listing becomes O(N) over all sessions.
     assert!(
         p95_10k <= p95_1k + p95_1k,
-        "p95 list time regressed: p95_1k={:?}, p95_10k={:?}",
-        p95_1k,
-        p95_10k
+        "p95 list time regressed: p95_1k={p95_1k:?}, p95_10k={p95_10k:?}"
     );
 }

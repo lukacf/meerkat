@@ -63,5 +63,14 @@ tokio = { workspace = true, features = ["test-util", "macros"] }
 tempfile = { workspace = true }
 http-body-util = { workspace = true }
 
+[package.metadata.cargo-machete]
+ignored = [
+    "async-trait",     # proc macro (derive)
+    "hyper",           # dev-dependency used in tests
+    "meerkat-comms",   # optional dep behind comms feature
+    "meerkat-tools",   # used via meerkat facade re-exports
+    "thiserror",       # proc macro (derive)
+]
+
 [lints]
 workspace = true

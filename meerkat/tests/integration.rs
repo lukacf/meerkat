@@ -78,10 +78,10 @@ mod llm_normalization {
                     // Usage should have positive tokens
                     assert!(usage.input_tokens > 0 || usage.output_tokens > 0);
                 }
-                Ok(LlmEvent::ReasoningDelta { .. }) | Ok(LlmEvent::ReasoningComplete { .. }) => {
+                Ok(LlmEvent::ReasoningDelta { .. } | LlmEvent::ReasoningComplete { .. }) => {
                     // Reasoning events are valid
                 }
-                Err(e) => panic!("Unexpected error: {:?}", e),
+                Err(e) => panic!("Unexpected error: {e:?}"),
             }
         }
 
@@ -119,7 +119,7 @@ mod llm_normalization {
                 Ok(LlmEvent::TextDelta { .. }) => got_text_delta = true,
                 Ok(LlmEvent::Done { .. }) => got_done = true,
                 Ok(_) => {}
-                Err(e) => panic!("Unexpected error: {:?}", e),
+                Err(e) => panic!("Unexpected error: {e:?}"),
             }
         }
 
@@ -158,7 +158,7 @@ mod llm_normalization {
                 Ok(LlmEvent::TextDelta { .. }) => got_text_delta = true,
                 Ok(LlmEvent::Done { .. }) => got_done = true,
                 Ok(_) => {}
-                Err(e) => panic!("Unexpected error: {:?}", e),
+                Err(e) => panic!("Unexpected error: {e:?}"),
             }
         }
 
@@ -256,19 +256,19 @@ mod tool_dispatch {
         let error = ToolError::execution_failed("Something went wrong with test_tool");
 
         // Error should contain the message
-        let error_str = format!("{:?}", error);
+        let error_str = format!("{error:?}");
         assert!(error_str.contains("Something went wrong"));
         assert!(error_str.contains("test_tool"));
 
         // Test other variants via helpers
         let not_found = ToolError::not_found("missing_tool");
-        assert!(format!("{:?}", not_found).contains("missing_tool"));
+        assert!(format!("{not_found:?}").contains("missing_tool"));
 
         let timeout = ToolError::timeout("slow_tool", 5000);
-        assert!(format!("{:?}", timeout).contains("slow_tool"));
+        assert!(format!("{timeout:?}").contains("slow_tool"));
 
         let validation = ToolError::invalid_arguments("test_tool", "invalid params");
-        assert!(format!("{:?}", validation).contains("invalid params"));
+        assert!(format!("{validation:?}").contains("invalid params"));
     }
 }
 
@@ -437,10 +437,10 @@ mod config_loading {
         assert_eq!(retry_config.max_delay, std::time::Duration::from_secs(60));
 
         // Verify BudgetLimits can be deserialized
-        let budget_toml = r#"
+        let budget_toml = r"
             max_tokens = 100000
             max_tool_calls = 50
-        "#;
+        ";
 
         let budget: BudgetLimits = toml::from_str(budget_toml).expect("Should parse budget TOML");
         assert_eq!(budget.max_tokens, Some(100000));
@@ -1097,7 +1097,7 @@ mod external_source_lifecycle {
     #[tokio::test]
     #[ignore = "integration-real: spawns stdio child process and TCP listener"]
     async fn e2e_external_source_lifecycle_stdio_and_http_like_transports() {
-        let stdio_script = r##"
+        let stdio_script = r#"
 read line
 if echo "$line" | grep -q '"method":"capabilities/get"'; then
   echo '{"jsonrpc":"2.0","id":"1","payload":{"method":"capabilities/get","result":{"protocol_version":1,"methods":["skills/list_summaries","skills/load_package","skills/list_artifacts","skills/read_artifact","skills/invoke_function"]}}}'
@@ -1112,7 +1112,7 @@ elif echo "$line" | grep -q '"method":"skills/read_artifact"'; then
 elif echo "$line" | grep -q '"method":"skills/invoke_function"'; then
   echo '{"jsonrpc":"2.0","id":"1","payload":{"method":"skills/invoke_function","result":{"output":{"transport":"stdio","ok":true}}}}'
 fi
-"##;
+"#;
         let stdio = ExternalSkillSource::new(
             "stdio-src",
             StdioExternalClient::new(

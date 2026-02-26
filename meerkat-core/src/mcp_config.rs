@@ -555,7 +555,7 @@ headers = { Authorization = "Bearer token" }
                 assert_eq!(stdio.args, vec!["-y", "@test/mcp-server"]);
                 assert_eq!(stdio.env.get("API_KEY"), Some(&"secret".to_string()));
             }
-            _ => unreachable!("Expected stdio transport"),
+            McpTransportConfig::Http(_) => unreachable!("Expected stdio transport"),
         }
         assert_eq!(config.servers[1].name, "remote-server");
         match &config.servers[1].transport {
@@ -566,7 +566,7 @@ headers = { Authorization = "Bearer token" }
                     Some(&"Bearer token".to_string())
                 );
             }
-            _ => unreachable!("Expected http transport"),
+            McpTransportConfig::Stdio(_) => unreachable!("Expected http transport"),
         }
     }
 
@@ -595,7 +595,7 @@ headers = { Authorization = "Bearer token" }
             McpTransportConfig::Stdio(stdio) => {
                 assert_eq!(stdio.command, "project-cmd"); // Project wins
             }
-            _ => unreachable!("Expected stdio transport"),
+            McpTransportConfig::Http(_) => unreachable!("Expected stdio transport"),
         }
         assert_eq!(merged.servers[1].name, "project-only");
         assert_eq!(merged.servers[2].name, "user-only");
@@ -763,7 +763,7 @@ headers = { Authorization = "Bearer ${RKAT_TEST_API_KEY}" }
                     Some(&"Bearer secret".to_string())
                 );
             }
-            _ => unreachable!("Expected http transport"),
+            McpTransportConfig::Stdio(_) => unreachable!("Expected http transport"),
         }
     }
 

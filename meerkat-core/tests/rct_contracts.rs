@@ -165,7 +165,11 @@ async fn test_config_store_contract() -> Result<(), Box<dyn std::error::Error>> 
             delta: ConfigDelta,
         ) -> Result<Config, meerkat_core::config::ConfigError> {
             let mut guard = self.config.lock().await;
-            if let Some(max_tokens) = delta.0.get("max_tokens").and_then(|v| v.as_u64()) {
+            if let Some(max_tokens) = delta
+                .0
+                .get("max_tokens")
+                .and_then(serde_json::Value::as_u64)
+            {
                 guard.max_tokens = max_tokens as u32;
             }
             Ok(guard.clone())
@@ -400,7 +404,7 @@ impl MockDispatcher {
             .map(|name| {
                 Arc::new(ToolDef {
                     name: name.to_string(),
-                    description: format!("Mock tool {}", name),
+                    description: format!("Mock tool {name}"),
                     input_schema: json!({"type": "object"}),
                 })
             })

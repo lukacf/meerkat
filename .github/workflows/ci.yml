@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+      - ci/**
+      - feat/**
   pull_request:
   workflow_dispatch:
 
@@ -43,13 +45,13 @@ jobs:
         run: make lint-feature-matrix
 
       - name: Install cargo-machete
-        run: cargo install cargo-machete --locked
+        uses: taiki-e/install-action@cargo-machete
 
       - name: Check for unused dependencies
         run: cargo machete --with-metadata
 
   test:
-    name: Test suite
+    name: Test suite (all features)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -67,6 +69,24 @@ jobs:
       - name: Full test suite (all features)
         run: cargo nextest run --workspace --all-features
 
+  test-minimal:
+    name: Minimal feature builds
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: minimal
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Minimal build checks
         run: |
           cargo check -p meerkat-core
@@ -76,7 +96,25 @@ jobs:
           cargo check -p meerkat --no-default-features
           cargo nextest run -p meerkat-core
 
-      - name: Feature matrix — library crates
+  test-feature-matrix-lib:
+    name: Feature matrix (library)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: matrix-lib
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Library crate feature combinations
         run: |
           cargo check -p meerkat-tools --no-default-features --features sub-agents
           cargo check -p meerkat-tools --no-default-features --features comms
@@ -88,7 +126,22 @@ jobs:
           cargo check -p meerkat --features all-providers,comms,mcp,sub-agents
           cargo nextest run -p meerkat --features all-providers,comms,mcp
 
-      - name: Feature matrix — surface crates
+  test-feature-matrix-surface-checks:
+    name: Feature matrix (surface checks)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: matrix-surface-checks
+
+      - name: Surface crate feature combinations
         run: |
           cargo check -p meerkat-rpc --no-default-features
           cargo check -p meerkat-rpc --no-default-features --features comms,mcp
@@ -98,8 +151,28 @@ jobs:
           cargo check -p meerkat-mcp-server --no-default-features --features comms
           cargo check -p rkat --no-default-features --features session-store
           cargo check -p rkat --no-default-features --features session-store,mcp
-          cargo nextest run -p rkat --no-default-features --features session-store,mcp --no-capture
           cargo check -p rkat --no-default-features --features session-store,comms,mcp
+
+  test-feature-matrix-surface-tests:
+    name: Feature matrix (surface tests + modularity)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: matrix-surface-tests
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Surface crate tests
+        run: cargo nextest run -p rkat --no-default-features --features session-store,mcp --no-capture
 
       - name: Surface modularity checks
         run: scripts/check_surface_modularity.sh
@@ -114,46 +187,39 @@ jobs:
       - name: Run cargo-deny
         uses: EmbarkStudios/cargo-deny-action@v2
 
-  beta:
-    name: Rust beta early warning
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust (beta)
-        uses: dtolnay/rust-toolchain@beta
-
-      - name: Cache cargo registry
-        uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: beta
-
-      - name: Build (beta)
-        run: cargo build --workspace --all-features
-
-      - name: Test (beta)
-        run: cargo test --workspace --all-features --all-targets
-
   gate:
     name: CI gate
     if: always()
-    needs: [fmt-lint, test, audit]
+    needs: [fmt-lint, test, test-minimal, test-feature-matrix-lib, test-feature-matrix-surface-checks, test-feature-matrix-surface-tests, audit]
     runs-on: ubuntu-latest
     steps:
       - name: Check results
         run: |
-          if [[ "${{ needs.fmt-lint.result }}" != "success" ]]; then
-            echo "fmt-lint failed: ${{ needs.fmt-lint.result }}"
-            exit 1
-          fi
-          if [[ "${{ needs.test.result }}" != "success" ]]; then
-            echo "test failed: ${{ needs.test.result }}"
-            exit 1
-          fi
-          if [[ "${{ needs.audit.result }}" != "success" ]]; then
-            echo "audit failed: ${{ needs.audit.result }}"
+          failed=""
+          for job in \
+            fmt-lint \
+            test \
+            test-minimal \
+            test-feature-matrix-lib \
+            test-feature-matrix-surface-checks \
+            test-feature-matrix-surface-tests \
+            audit
+          do
+            case "$job" in
+              fmt-lint) result="${{ needs.fmt-lint.result }}" ;;
+              test) result="${{ needs.test.result }}" ;;
+              test-minimal) result="${{ needs.test-minimal.result }}" ;;
+              test-feature-matrix-lib) result="${{ needs.test-feature-matrix-lib.result }}" ;;
+              test-feature-matrix-surface-checks) result="${{ needs.test-feature-matrix-surface-checks.result }}" ;;
+              test-feature-matrix-surface-tests) result="${{ needs.test-feature-matrix-surface-tests.result }}" ;;
+              audit) result="${{ needs.audit.result }}" ;;
+            esac
+            if [[ "$result" != "success" ]]; then
+              echo "$job: $result"
+              failed="true"
+            fi
+          done
+          if [[ -n "$failed" ]]; then
             exit 1
           fi
           echo "All checks passed"

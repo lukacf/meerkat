@@ -231,8 +231,7 @@ mod tests {
         if let Err(BuiltinToolError::ExecutionFailed(msg)) = result {
             assert!(
                 msg.contains("already completed") || msg.contains("not running"),
-                "Expected 'already completed' in error message, got: {}",
-                msg
+                "Expected 'already completed' in error message, got: {msg}"
             );
         }
     }

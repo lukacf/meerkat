@@ -194,8 +194,7 @@ impl ConfigStore for FileConfigStore {
         let parent = self
             .path
             .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."));
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
         let tmp_path = parent.join(format!(".config.tmp.{}", Uuid::now_v7()));
         let mut tmp = tokio::fs::OpenOptions::new()
             .write(true)

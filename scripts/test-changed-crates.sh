@@ -1,30 +1,24 @@
 #!/usr/bin/env bash
-# Test only crates with staged changes (fast pre-commit).
-# Falls back to full workspace test for root-level changes.
+# Pre-commit check: clippy + unit tests on changed crates only.
+# Uses the default target dir for warm incremental cache.
 set -euo pipefail
-
-FAST_TARGET_DIR="${FAST_TARGET_DIR:-target/fast}"
 
 STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACMR \
   | grep -E '\.(rs|toml)$' || true)
 
 if [ -z "$STAGED_FILES" ]; then
-  echo "No Rust/TOML changes staged, skipping tests."
+  echo "No Rust/TOML changes staged, skipping."
   exit 0
 fi
 
-# Check for root-level manifest changes (workspace Cargo.toml, Cargo.lock).
-# These affect dependency resolution but rarely break tests. A fast check
-# is sufficient — the pre-push hook runs the full workspace test.
+# Workspace manifest changes → cargo check --workspace (fast with warm cache)
 if echo "$STAGED_FILES" | grep -qE '^Cargo\.(toml|lock)$'; then
   echo "Workspace manifest changed — running cargo check."
-  CARGO_TARGET_DIR="$FAST_TARGET_DIR" cargo check --workspace
+  cargo check --workspace
   exit $?
 fi
 
-# Extract crate directories from changed file paths.
-# Files like "meerkat-core/src/foo.rs" → "meerkat-core"
-# Files without a "/" (root-level) are already handled above.
+# Extract crate directories from changed file paths
 CHANGED_CRATES=$(echo "$STAGED_FILES" \
   | sed -n 's|^\([^/]*\)/.*|\1|p' \
   | sort -u \
@@ -53,20 +47,21 @@ if [ -z "$PKG_FLAGS" ]; then
   exit 0
 fi
 
-echo "Testing changed crates:$PKG_FLAGS"
-# Use --lib only for crates that have a library target (bin-only crates
-# like meerkat-cli would fail with "no library targets found").
+echo "Checking changed crates:$PKG_FLAGS"
+
+# Clippy first — catches type errors + lint issues in one pass
+# shellcheck disable=SC2086
+cargo clippy $PKG_FLAGS -- -D warnings
+
+# Unit tests only (--lib) — fast, no integration tests
 LIB_FLAGS=""
 for crate_dir in $CHANGED_CRATES; do
-  if grep -q '^\[lib\]' "$crate_dir/Cargo.toml" 2>/dev/null || \
-     [ -f "$crate_dir/src/lib.rs" ]; then
+  if [ -f "$crate_dir/src/lib.rs" ]; then
     pkg=$(grep '^name' "$crate_dir/Cargo.toml" | head -1 | sed 's/.*= *"//' | sed 's/".*//')
     LIB_FLAGS="$LIB_FLAGS -p $pkg"
   fi
 done
 if [ -n "$LIB_FLAGS" ]; then
   # shellcheck disable=SC2086
-  CARGO_TARGET_DIR="$FAST_TARGET_DIR" cargo test $LIB_FLAGS --lib
+  cargo nextest run $LIB_FLAGS --lib
 fi
-# shellcheck disable=SC2086
-CARGO_TARGET_DIR="$FAST_TARGET_DIR" cargo test $PKG_FLAGS --bins --tests

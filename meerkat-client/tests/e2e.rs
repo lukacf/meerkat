@@ -30,7 +30,7 @@ async fn spawn_test_server(
 ) -> Result<(String, AbortOnDrop), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
-    let base_url = format!("http://{}", addr);
+    let base_url = format!("http://{addr}");
 
     let handle = tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
@@ -146,7 +146,7 @@ async fn e2e_anthropic_stream() -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(LlmEvent::Done { .. }) => break,
             Ok(_) => {}
-            Err(e) => return Err(format!("Unexpected error: {:?}", e).into()),
+            Err(e) => return Err(format!("Unexpected error: {e:?}").into()),
         }
     }
 
@@ -190,9 +190,9 @@ async fn e2e_anthropic_tool_use() -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(LlmEvent::Done {
                 outcome: LlmDoneOutcome::Error { error },
-            }) => return Err(format!("Unexpected error: {:?}", error).into()),
+            }) => return Err(format!("Unexpected error: {error:?}").into()),
             Ok(_) => {}
-            Err(e) => return Err(format!("Unexpected error: {:?}", e).into()),
+            Err(e) => return Err(format!("Unexpected error: {e:?}").into()),
         }
     }
 
@@ -232,7 +232,7 @@ async fn test_anthropic_auth_error() -> Result<(), Box<dyn std::error::Error>> {
                     error: LlmError::AuthenticationFailed { .. },
                 },
         }) => {}
-        other => return Err(format!("Expected auth error, got {:?}", other).into()),
+        other => return Err(format!("Expected auth error, got {other:?}").into()),
     }
     Ok(())
 }
@@ -288,9 +288,9 @@ async fn test_anthropic_message_stop_without_newline_yields_done()
             }
             Ok(LlmEvent::Done {
                 outcome: LlmDoneOutcome::Error { error },
-            }) => return Err(format!("Unexpected error: {:?}", error).into()),
+            }) => return Err(format!("Unexpected error: {error:?}").into()),
             Ok(_) => {}
-            Err(e) => return Err(format!("Unexpected error: {:?}", e).into()),
+            Err(e) => return Err(format!("Unexpected error: {e:?}").into()),
         }
     }
 
@@ -351,9 +351,9 @@ async fn test_anthropic_message_stop_without_space_prefix_yields_done()
             }
             Ok(LlmEvent::Done {
                 outcome: LlmDoneOutcome::Error { error },
-            }) => return Err(format!("Unexpected error: {:?}", error).into()),
+            }) => return Err(format!("Unexpected error: {error:?}").into()),
             Ok(_) => {}
-            Err(e) => return Err(format!("Unexpected error: {:?}", e).into()),
+            Err(e) => return Err(format!("Unexpected error: {e:?}").into()),
         }
     }
 
@@ -411,9 +411,9 @@ async fn test_anthropic_stream_end_without_done_yields_success()
             }
             Ok(LlmEvent::Done {
                 outcome: LlmDoneOutcome::Error { error },
-            }) => return Err(format!("Unexpected error: {:?}", error).into()),
+            }) => return Err(format!("Unexpected error: {error:?}").into()),
             Ok(_) => {}
-            Err(e) => return Err(format!("Unexpected error: {:?}", e).into()),
+            Err(e) => return Err(format!("Unexpected error: {e:?}").into()),
         }
     }
 
@@ -450,7 +450,7 @@ async fn e2e_openai_stream() -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(LlmEvent::Done { .. }) => break,
             Ok(_) => {}
-            Err(e) => return Err(format!("Unexpected error: {:?}", e).into()),
+            Err(e) => return Err(format!("Unexpected error: {e:?}").into()),
         }
     }
 
@@ -494,9 +494,9 @@ async fn e2e_openai_tool_use() -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(LlmEvent::Done {
                 outcome: LlmDoneOutcome::Error { error },
-            }) => return Err(format!("Unexpected error: {:?}", error).into()),
+            }) => return Err(format!("Unexpected error: {error:?}").into()),
             Ok(_) => {}
-            Err(e) => return Err(format!("Unexpected error: {:?}", e).into()),
+            Err(e) => return Err(format!("Unexpected error: {e:?}").into()),
         }
     }
 
@@ -531,7 +531,7 @@ async fn e2e_gemini_stream() -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(LlmEvent::Done { .. }) => break,
             Ok(_) => {}
-            Err(e) => return Err(format!("Unexpected error: {:?}", e).into()),
+            Err(e) => return Err(format!("Unexpected error: {e:?}").into()),
         }
     }
 
@@ -575,9 +575,9 @@ async fn e2e_gemini_tool_use() -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(LlmEvent::Done {
                 outcome: LlmDoneOutcome::Error { error },
-            }) => return Err(format!("Unexpected error: {:?}", error).into()),
+            }) => return Err(format!("Unexpected error: {error:?}").into()),
             Ok(_) => {}
-            Err(e) => return Err(format!("Unexpected error: {:?}", e).into()),
+            Err(e) => return Err(format!("Unexpected error: {e:?}").into()),
         }
     }
 
@@ -620,7 +620,7 @@ async fn test_openai_auth_error() -> Result<(), Box<dyn std::error::Error>> {
                     error: LlmError::AuthenticationFailed { .. },
                 },
         }) => {}
-        other => return Err(format!("Expected auth error, got {:?}", other).into()),
+        other => return Err(format!("Expected auth error, got {other:?}").into()),
     }
     Ok(())
 }
@@ -661,9 +661,9 @@ async fn collect_stream_text(
             }) => break,
             Ok(LlmEvent::Done {
                 outcome: LlmDoneOutcome::Error { error },
-            }) => return Err(format!("LLM error: {:?}", error).into()),
+            }) => return Err(format!("LLM error: {error:?}").into()),
             Ok(_) => {}
-            Err(e) => return Err(format!("Stream error: {:?}", e).into()),
+            Err(e) => return Err(format!("Stream error: {e:?}").into()),
         }
     }
 

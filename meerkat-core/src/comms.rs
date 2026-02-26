@@ -21,7 +21,7 @@ impl PeerName {
         if name.trim().is_empty() {
             return Err("peer name cannot be empty".to_string());
         }
-        if name.chars().any(|c| c.is_control()) {
+        if name.chars().any(char::is_control) {
             return Err("peer name cannot contain control characters".to_string());
         }
         Ok(Self(name))
@@ -159,7 +159,7 @@ impl CommsCommandRequest {
                 })
             }
             "peer_message" => {
-                let to = to_peer_name(&self.to, &mut errors);
+                let to = to_peer_name(self.to.as_ref(), &mut errors);
                 if let Some(to) = to {
                     Ok(CommsCommand::PeerMessage {
                         to,
@@ -170,17 +170,14 @@ impl CommsCommandRequest {
                 }
             }
             "peer_request" => {
-                let to = to_peer_name(&self.to, &mut errors);
-                let intent = match self.intent.clone() {
-                    Some(intent) => intent,
-                    None => {
-                        errors.push(CommsCommandValidationError::new(
-                            "intent",
-                            "required_field",
-                            None,
-                        ));
-                        return Err(errors);
-                    }
+                let to = to_peer_name(self.to.as_ref(), &mut errors);
+                let Some(intent) = self.intent.clone() else {
+                    errors.push(CommsCommandValidationError::new(
+                        "intent",
+                        "required_field",
+                        None,
+                    ));
+                    return Err(errors);
                 };
                 let stream = match self.stream.as_deref() {
                     Some("reserve_interaction") => InputStreamMode::ReserveInteraction,
@@ -195,11 +192,8 @@ impl CommsCommandRequest {
                     }
                 };
                 if errors.is_empty() {
-                    let to = match to {
-                        Some(to) => to,
-                        None => {
-                            return Err(errors);
-                        }
+                    let Some(to) = to else {
+                        return Err(errors);
                     };
                     Ok(CommsCommand::PeerRequest {
                         to,
@@ -212,7 +206,7 @@ impl CommsCommandRequest {
                 }
             }
             "peer_response" => {
-                let to = to_peer_name(&self.to, &mut errors);
+                let to = to_peer_name(self.to.as_ref(), &mut errors);
                 let in_reply_to = match &self.in_reply_to {
                     Some(in_reply_to) => match uuid::Uuid::parse_str(in_reply_to) {
                         Ok(id) => crate::interaction::InteractionId(id),
@@ -248,11 +242,8 @@ impl CommsCommandRequest {
                     }
                 };
                 if errors.is_empty() {
-                    let to = match to {
-                        Some(to) => to,
-                        None => {
-                            return Err(errors);
-                        }
+                    let Some(to) = to else {
+                        return Err(errors);
                     };
                     Ok(CommsCommand::PeerResponse {
                         to,
@@ -286,7 +277,7 @@ impl CommsCommandRequest {
 }
 
 fn to_peer_name(
-    value: &Option<String>,
+    value: Option<&String>,
     errors: &mut Vec<CommsCommandValidationError>,
 ) -> Option<PeerName> {
     match value {
@@ -548,7 +539,7 @@ mod tests {
             address: "inproc://agent".to_string(),
             source: PeerDirectorySource::Inproc,
             sendable_kinds: vec!["peer_message".to_string()],
-            capabilities: Value::Object(Default::default()),
+            capabilities: Value::Object(serde_json::Map::default()),
             meta: crate::PeerMeta::default(),
         };
         assert_eq!(entry.name.as_str(), "agent");

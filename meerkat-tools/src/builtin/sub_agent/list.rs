@@ -121,7 +121,7 @@ impl BuiltinTool for AgentListTool {
     async fn call(&self, _args: Value) -> Result<Value, BuiltinToolError> {
         let response = self.list_agents().await?;
         serde_json::to_value(response).map_err(|e| {
-            BuiltinToolError::execution_failed(format!("Failed to serialize response: {}", e))
+            BuiltinToolError::execution_failed(format!("Failed to serialize response: {e}"))
         })
     }
 }

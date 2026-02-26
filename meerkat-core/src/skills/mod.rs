@@ -932,6 +932,7 @@ type LoadFromSourceFn =
     dyn Fn(SkillId, Option<String>) -> OwnedSkillFuture<SkillDocument> + Send + Sync;
 
 #[derive(Clone)]
+#[allow(clippy::struct_field_names)] // fields are function pointers; _fn suffix is intentional
 pub struct SkillRuntime {
     inventory_fn: Arc<InventoryFn>,
     resolve_fn: Arc<ResolveFn>,

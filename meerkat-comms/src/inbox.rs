@@ -220,7 +220,7 @@ mod tests {
         // Inbox should expose a Notify
         let notify = inbox.notify();
         // Arc should be clonable
-        let _notify2 = notify;
+        drop(notify);
     }
 
     #[tokio::test]

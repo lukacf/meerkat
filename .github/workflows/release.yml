@@ -32,7 +32,7 @@ env:
 
 jobs:
   release_validate:
-    name: Validate release branch/state
+    name: Validate release state
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -46,20 +46,20 @@ jobs:
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
 
-      - name: Install cargo-deny
-        run: cargo install cargo-deny --locked
+      # CI already ran fmt, lint, tests, and audit on the PR.
+      # Release validation only checks release-specific invariants.
+      - name: Verify version parity
+        run: make verify-version-parity
 
-      # Use smoke preflight in CI release gate — the full feature matrix
-      # runs in regular CI on push/PR. Release validation only needs core
-      # checks (fmt, lint, tests, audit) to avoid 15+ minute delays.
-      - name: Run preflight checks
-        run: |
-          make release-preflight-smoke
-          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-            make verify-version
-          else
-            echo "Skipping tag-version check (non-tag workflow trigger)."
-          fi
+      - name: Verify schema freshness
+        run: make verify-schema-freshness
+
+      - name: Verify tag matches version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: make verify-version
+
+      - name: Check formatting
+        run: make fmt-check
 
   build_binaries:
     name: Build and package surface binaries

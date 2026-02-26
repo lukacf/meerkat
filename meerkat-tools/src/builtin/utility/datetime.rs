@@ -123,7 +123,7 @@ mod tests {
 
         let iso8601 = result["iso8601"].as_str().unwrap();
         // Basic ISO 8601 format check: contains T and ends with Z or timezone
-        assert!(iso8601.contains("T"));
+        assert!(iso8601.contains('T'));
     }
 
     #[tokio::test]

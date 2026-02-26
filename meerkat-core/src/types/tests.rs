@@ -325,15 +325,15 @@ fn test_session_checkpoint_complex() {
     // Add 25 user/assistant pairs with tool calls
     for i in 0..25 {
         messages.push(Message::User(UserMessage {
-            content: format!("Request {}", i),
+            content: format!("Request {i}"),
         }));
 
         if i % 3 == 0 {
             // With tool calls
             messages.push(Message::Assistant(AssistantMessage {
-                content: format!("Let me help with request {}", i),
+                content: format!("Let me help with request {i}"),
                 tool_calls: vec![ToolCall::new(
-                    format!("tc_{}", i),
+                    format!("tc_{i}"),
                     "test_tool".to_string(),
                     json!({"index": i}),
                 )],
@@ -348,14 +348,14 @@ fn test_session_checkpoint_complex() {
 
             messages.push(Message::ToolResults {
                 results: vec![ToolResult::new(
-                    format!("tc_{}", i),
-                    format!("Tool result for {}", i),
+                    format!("tc_{i}"),
+                    format!("Tool result for {i}"),
                     false,
                 )],
             });
 
             messages.push(Message::Assistant(AssistantMessage {
-                content: format!("Completed request {} with tool result", i),
+                content: format!("Completed request {i} with tool result"),
                 tool_calls: vec![],
                 stop_reason: StopReason::EndTurn,
                 usage: Usage {
@@ -368,7 +368,7 @@ fn test_session_checkpoint_complex() {
         } else {
             // Without tool calls
             messages.push(Message::Assistant(AssistantMessage {
-                content: format!("Response to request {}", i),
+                content: format!("Response to request {i}"),
                 tool_calls: vec![],
                 stop_reason: StopReason::EndTurn,
                 usage: Usage {
@@ -825,9 +825,9 @@ mod ordered_transcript_types {
     fn test_message_block_assistant_tool_use_roundtrip() {
         for (case_id, args_json) in [
             ("tool_001", r#"{"path":"/tmp","recursive":false}"#),
-            ("tool_002", r#"{}"#),
+            ("tool_002", r"{}"),
             ("tool_003", r#"{"config":{"nested":true}}"#),
-            ("tool_004", r#"[1,2,3]"#),
+            ("tool_004", r"[1,2,3]"),
             ("tool_005", r#""line1\nline2\\\"quoted\\\"""#),
         ] {
             let expected_args: Value = serde_json::from_str(args_json).unwrap();
@@ -979,7 +979,7 @@ mod ordered_transcript_types {
 
     #[test]
     fn test_assistant_message_has_tool_calls() {
-        let args = RawValue::from_string(r#"{}"#.to_string()).unwrap();
+        let args = RawValue::from_string(r"{}".to_string()).unwrap();
 
         let msg_with_tools = BlockAssistantMessage {
             blocks: vec![AssistantBlock::ToolUse {
@@ -1040,7 +1040,7 @@ mod ordered_transcript_types {
 
     #[test]
     fn test_assistant_message_display() {
-        let args = RawValue::from_string(r#"{}"#.to_string()).unwrap();
+        let args = RawValue::from_string(r"{}".to_string()).unwrap();
 
         let msg = BlockAssistantMessage {
             blocks: vec![
@@ -1066,7 +1066,7 @@ mod ordered_transcript_types {
             stop_reason: StopReason::ToolUse,
         };
 
-        let display = format!("{}", msg);
+        let display = format!("{msg}");
         assert_eq!(display, "First part. Second part.");
     }
 
@@ -1077,7 +1077,7 @@ mod ordered_transcript_types {
             stop_reason: StopReason::EndTurn,
         };
 
-        let display = format!("{}", msg);
+        let display = format!("{msg}");
         assert_eq!(display, "");
     }
 
@@ -1087,7 +1087,7 @@ mod ordered_transcript_types {
 
     #[test]
     fn test_assistant_message_text_blocks() {
-        let args = RawValue::from_string(r#"{}"#.to_string()).unwrap();
+        let args = RawValue::from_string(r"{}".to_string()).unwrap();
 
         let msg = BlockAssistantMessage {
             blocks: vec![

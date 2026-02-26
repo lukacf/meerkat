@@ -58,14 +58,12 @@ impl MobBuilder {
             if let crate::definition::SkillSource::Path { path } = source {
                 let bytes = packed_skills.get(path).ok_or_else(|| {
                     MobError::Internal(format!(
-                        "mobpack skill path '{}' for '{}' missing from archive",
-                        path, skill_name
+                        "mobpack skill path '{path}' for '{skill_name}' missing from archive"
                     ))
                 })?;
                 let content = String::from_utf8(bytes.clone()).map_err(|_| {
                     MobError::Internal(format!(
-                        "mobpack skill path '{}' for '{}' is not valid UTF-8",
-                        path, skill_name
+                        "mobpack skill path '{path}' for '{skill_name}' is not valid UTF-8"
                     ))
                 })?;
                 *source = crate::definition::SkillSource::Inline { content };

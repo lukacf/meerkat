@@ -153,7 +153,7 @@ impl AgentToolDispatcher for MultiToolDispatcher {
 fn parse_and_calculate(expr: &str) -> Result<f64, String> {
     let parts: Vec<&str> = expr.split_whitespace().collect();
     if parts.len() != 3 {
-        return Err(format!("Invalid expression format: {}", expr));
+        return Err(format!("Invalid expression format: {expr}"));
     }
 
     let a: f64 = parts[0].parse().map_err(|_| "Invalid first number")?;
@@ -170,7 +170,7 @@ fn parse_and_calculate(expr: &str) -> Result<f64, String> {
                 Ok(a / b)
             }
         }
-        op => Err(format!("Unknown operator: {}", op)),
+        op => Err(format!("Unknown operator: {op}")),
     }
 }
 

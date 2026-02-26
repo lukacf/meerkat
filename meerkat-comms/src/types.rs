@@ -371,8 +371,7 @@ mod tests {
         let cbor_str = String::from_utf8_lossy(&buf);
         assert!(
             cbor_str.contains("accepted"),
-            "Status should encode as string 'accepted', got: {:?}",
-            buf
+            "Status should encode as string 'accepted', got: {buf:?}"
         );
     }
 
@@ -388,8 +387,7 @@ mod tests {
         // Should contain "type" and "message" as strings
         assert!(
             cbor_str.contains("type") && cbor_str.contains("message"),
-            "MessageKind should use string tags, got: {:?}",
-            buf
+            "MessageKind should use string tags, got: {buf:?}"
         );
     }
 
@@ -521,7 +519,7 @@ mod tests {
                 assert_eq!(source, meerkat_core::PlainEventSource::Tcp);
                 assert_eq!(interaction_id, None);
             }
-            other => panic!("Expected PlainEvent, got {:?}", other),
+            other => panic!("Expected PlainEvent, got {other:?}"),
         }
     }
 

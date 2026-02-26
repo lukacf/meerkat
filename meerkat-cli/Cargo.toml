@@ -108,5 +108,8 @@ tokio = { workspace = true, features = ["test-util", "macros"] }
 serde_json = { workspace = true }
 meerkat-comms = { workspace = true }
 
+[package.metadata.cargo-machete]
+ignored = ["thiserror"]  # proc macro (derive)
+
 [lints]
 workspace = true

@@ -36,7 +36,7 @@ pub async fn build_agent_config(
     }
 
     // Comms name: "{mob_id}/{profile}/{meerkat_id}"
-    let comms_name = format!("{}/{}/{}", mob_id, profile_name, meerkat_id);
+    let comms_name = format!("{mob_id}/{profile_name}/{meerkat_id}");
 
     // Peer metadata with labels for discovery
     let peer_meta = PeerMeta::default()
@@ -46,7 +46,7 @@ pub async fn build_agent_config(
         .with_label("meerkat_id", meerkat_id.as_str());
 
     // Realm ID for namespace isolation
-    let realm_id = format!("mob:{}", mob_id);
+    let realm_id = format!("mob:{mob_id}");
 
     // Assemble system prompt from profile skills (inline/path-based).
     let system_prompt = assemble_system_prompt(profile, definition).await?;

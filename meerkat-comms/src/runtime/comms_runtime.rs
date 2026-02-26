@@ -2038,8 +2038,7 @@ mod tests {
         assert!(
             public_key
                 .as_ref()
-                .map(|id| id.starts_with("ed25519:"))
-                .unwrap_or(false),
+                .is_some_and(|id| id.starts_with("ed25519:")),
             "public_key should be available and formatted as ed25519 peer id"
         );
     }
@@ -2229,7 +2228,9 @@ mod tests {
         let (sender, receiver) = mpsc::channel::<meerkat_core::AgentEvent>(16);
         {
             let mut entry = StreamRegistryEntry::reserved(sender, receiver);
-            entry.created_at = Instant::now() - meerkat_core::time_compat::Duration::from_secs(60);
+            entry.created_at = Instant::now()
+                .checked_sub(meerkat_core::time_compat::Duration::from_secs(60))
+                .unwrap();
             runtime.interaction_stream_registry.lock().insert(id, entry);
         }
 

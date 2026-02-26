@@ -73,7 +73,7 @@ where
             if user_input.is_empty() {
                 comms_text
             } else {
-                format!("{}\n\n---\n\n{}", comms_text, user_input)
+                format!("{comms_text}\n\n---\n\n{user_input}")
             }
         };
         self.agent.run(combined_input).await
@@ -130,7 +130,7 @@ fn contains_dismiss(messages: &[CommsMessage]) -> bool {
 fn format_inbox_messages(messages: &[CommsMessage]) -> String {
     messages
         .iter()
-        .map(|m| m.to_user_message_text())
+        .map(types::CommsMessage::to_user_message_text)
         .collect::<Vec<_>>()
         .join("\n\n")
 }

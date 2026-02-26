@@ -288,7 +288,7 @@ impl AgentError {
             Self::Llm { reason, .. } => match reason {
                 LlmFailureReason::RateLimited { .. } => true,
                 LlmFailureReason::ProviderError(value) => {
-                    value.get("retryable").and_then(|v| v.as_bool()) == Some(true)
+                    value.get("retryable").and_then(serde_json::Value::as_bool) == Some(true)
                 }
                 _ => false,
             },
@@ -307,5 +307,5 @@ pub fn store_error_message(err: impl std::fmt::Display) -> String {
     err.to_string()
 }
 pub fn invalid_session_id_message(err: impl std::fmt::Display) -> String {
-    format!("Invalid session ID: {}", err)
+    format!("Invalid session ID: {err}")
 }

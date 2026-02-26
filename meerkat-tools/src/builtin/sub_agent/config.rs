@@ -396,7 +396,7 @@ mod tests {
     #[test]
     fn test_sub_agent_error_debug() {
         let err = SubAgentError::not_found("test");
-        let debug = format!("{:?}", err);
+        let debug = format!("{err:?}");
         assert!(debug.contains("NotFound"));
         assert!(debug.contains("test"));
     }

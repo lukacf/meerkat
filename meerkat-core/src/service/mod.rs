@@ -317,7 +317,7 @@ pub trait SessionService: Send + Sync {
     ///
     /// Services that do not support this capability return `StreamError::NotFound`.
     async fn subscribe_session_events(&self, id: &SessionId) -> Result<EventStream, StreamError> {
-        Err(StreamError::NotFound(format!("session {}", id)))
+        Err(StreamError::NotFound(format!("session {id}")))
     }
 }
 

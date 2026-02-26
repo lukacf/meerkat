@@ -919,8 +919,7 @@ fn aggregate_output(
     if matches!(policy, CollectionPolicy::Any) {
         return successes
             .first()
-            .map(|(_, output)| output.clone())
-            .unwrap_or(Value::Null);
+            .map_or(Value::Null, |(_, output)| output.clone());
     }
 
     let mut output = Map::new();
@@ -986,8 +985,7 @@ async fn validate_schema_ref(
         .next()
         .ok_or_else(|| {
             MobError::Internal(format!(
-                "schema validator reported invalid output for step '{}' but yielded no errors",
-                step_id
+                "schema validator reported invalid output for step '{step_id}' but yielded no errors"
             ))
         })?
         .to_string();

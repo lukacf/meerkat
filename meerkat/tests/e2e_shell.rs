@@ -349,8 +349,7 @@ async fn integration_real_shell_not_installed() {
                 err_msg.contains("not installed")
                     || err_msg.contains("Shell not installed")
                     || err_msg.contains("not found"),
-                "Error should mention shell not found: {}",
-                err_msg
+                "Error should mention shell not found: {err_msg}"
             );
         }
         // If it succeeds, that's also fine - fallback worked
@@ -398,8 +397,7 @@ async fn integration_real_shell_invalid_workdir() {
             || err_msg.contains("escape")
             || err_msg.contains("not found")
             || err_msg.contains("Working directory"),
-        "Error should mention working directory issue: {}",
-        err_msg
+        "Error should mention working directory issue: {err_msg}"
     );
 }
 
@@ -426,7 +424,7 @@ async fn integration_real_shell_job_not_found() {
     if let Err(ShellError::JobNotFound(job_id)) = result {
         assert_eq!(job_id, "job_nonexistent123");
     } else {
-        panic!("Expected JobNotFound error, got {:?}", result);
+        panic!("Expected JobNotFound error, got {result:?}");
     }
 }
 
@@ -623,8 +621,7 @@ async fn integration_real_regression_async_execution_nonblocking() {
     // All spawns should complete in under 1 second (non-blocking)
     assert!(
         elapsed.as_millis() < 1000,
-        "Spawning 5 jobs should be nearly instant, took {:?}",
-        elapsed
+        "Spawning 5 jobs should be nearly instant, took {elapsed:?}"
     );
 
     // Verify all jobs are running
@@ -679,8 +676,7 @@ async fn integration_real_regression_timeout_enforced() {
     if let JobStatus::TimedOut { duration_secs, .. } = &job.status {
         assert!(
             *duration_secs >= 1.0 && *duration_secs < 3.0,
-            "Duration should be close to timeout: {}",
-            duration_secs
+            "Duration should be close to timeout: {duration_secs}"
         );
     }
 }
@@ -745,7 +741,7 @@ async fn integration_real_regression_kill_terminates_process() {
     let mut terminated = false;
     for _ in 0..30 {
         match kill(pid, None) {
-            Ok(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+            Ok(()) => tokio::time::sleep(Duration::from_millis(100)).await,
             Err(Errno::ESRCH) => {
                 terminated = true;
                 break;
@@ -789,15 +785,14 @@ async fn integration_real_regression_non_utf8_output() {
     // Using printf to output raw bytes that are invalid UTF-8
     let result = tool
         .call(json!({
-            "command": r#"printf '\xff\xfe'"#
+            "command": r"printf '\xff\xfe'"
         }))
         .await;
 
     // Should not panic or error - lossy conversion should handle it
     assert!(
         result.is_ok(),
-        "Non-UTF-8 output should be handled gracefully: {:?}",
-        result
+        "Non-UTF-8 output should be handled gracefully: {result:?}"
     );
 
     let output: ShellOutput = serde_json::from_value(result.unwrap()).unwrap();
@@ -862,7 +857,7 @@ async fn integration_real_regression_concurrent_job_spawning() {
     let mut handles = Vec::new();
     for i in 0..20 {
         let mgr = Arc::clone(&job_manager);
-        let cmd = format!("echo job{}", i);
+        let cmd = format!("echo job{i}");
         handles.push(tokio::spawn(
             async move { mgr.spawn_job(&cmd, None, 30).await },
         ));
@@ -885,8 +880,7 @@ async fn integration_real_regression_concurrent_job_spawning() {
     };
     assert_eq!(
         unique_count, 20,
-        "All 20 jobs should have unique IDs, got {}",
-        unique_count
+        "All 20 jobs should have unique IDs, got {unique_count}"
     );
 
     // Wait for jobs to complete (echo is fast)
@@ -921,7 +915,7 @@ async fn integration_real_regression_job_cleanup_prevents_leak() {
     // Spawn many jobs that complete quickly
     let mut all_ids = Vec::new();
     for i in 0..50 {
-        let cmd = format!("echo job{}", i);
+        let cmd = format!("echo job{i}");
         let id = job_manager
             .spawn_job(&cmd, None, 30)
             .await

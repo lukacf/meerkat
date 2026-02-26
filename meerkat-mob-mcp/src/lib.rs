@@ -1497,7 +1497,10 @@ timeout_ms = 1000
         )
         .await;
         let listed = call_tool(&d, "meerkat_list", json!({"mob_id": mob_id})).await;
-        assert_eq!(listed["members"].as_array().map(|v| v.len()), Some(3));
+        assert_eq!(
+            listed["members"].as_array().map(std::vec::Vec::len),
+            Some(3)
+        );
         call_tool(
             &d,
             "meerkat_wire",
@@ -1691,10 +1694,7 @@ timeout_ms = 1000
             sleep(Duration::from_millis(25)).await;
         }
         assert!(
-            matches!(
-                terminal_status.as_deref(),
-                Some("canceled") | Some("failed")
-            ),
+            matches!(terminal_status.as_deref(), Some("canceled" | "failed")),
             "mob_cancel_flow should converge to canceled, or failed if terminal failure won the race first"
         );
     }

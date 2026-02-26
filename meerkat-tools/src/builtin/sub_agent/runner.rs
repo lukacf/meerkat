@@ -76,10 +76,10 @@ pub fn create_child_comms_config(child_name: &str, base_dir: &std::path::Path) -
         enabled: true,
         name: child_name.to_string(),
         // Use UDS for local communication (more efficient than TCP)
-        listen_uds: Some(base_dir.join(format!("{}.sock", child_name))),
+        listen_uds: Some(base_dir.join(format!("{child_name}.sock"))),
         listen_tcp: None,
-        identity_dir: base_dir.join(format!("{}/identity", child_name)),
-        trusted_peers_path: base_dir.join(format!("{}/trusted_peers.json", child_name)),
+        identity_dir: base_dir.join(format!("{child_name}/identity")),
+        trusted_peers_path: base_dir.join(format!("{child_name}/trusted_peers.json")),
         ack_timeout_secs: 30,
         max_message_bytes: 1_048_576,
         ..Default::default()
@@ -159,26 +159,26 @@ pub async fn setup_child_comms(
     tokio::fs::create_dir_all(&resolved_config.identity_dir)
         .await
         .map_err(|e| {
-            SubAgentRunnerError::CommsSetup(format!("Failed to create identity dir: {}", e))
+            SubAgentRunnerError::CommsSetup(format!("Failed to create identity dir: {e}"))
         })?;
 
     if let Some(parent) = resolved_config.trusted_peers_path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
-            .map_err(|e| SubAgentRunnerError::CommsSetup(format!("Failed to create dir: {}", e)))?;
+            .map_err(|e| SubAgentRunnerError::CommsSetup(format!("Failed to create dir: {e}")))?;
     }
 
     // Save trusted peers
     let trusted_peers_path = resolved_config.trusted_peers_path.clone();
     trusted_peers.save(&trusted_peers_path).await.map_err(|e| {
-        SubAgentRunnerError::CommsSetup(format!("Failed to save trusted peers: {}", e))
+        SubAgentRunnerError::CommsSetup(format!("Failed to save trusted peers: {e}"))
     })?;
 
     // Create and start comms runtime
     let mut runtime = CommsRuntime::new(resolved_config.clone())
         .await
         .map_err(|e| {
-            SubAgentRunnerError::CommsSetup(format!("Failed to create comms runtime: {}", e))
+            SubAgentRunnerError::CommsSetup(format!("Failed to create comms runtime: {e}"))
         })?;
 
     // Get child's public key before starting listeners
@@ -192,9 +192,10 @@ pub async fn setup_child_comms(
     );
 
     // Start listeners
-    runtime.start_listeners().await.map_err(|e| {
-        SubAgentRunnerError::CommsSetup(format!("Failed to start listeners: {}", e))
-    })?;
+    runtime
+        .start_listeners()
+        .await
+        .map_err(|e| SubAgentRunnerError::CommsSetup(format!("Failed to start listeners: {e}")))?;
 
     Ok((runtime, child_pubkey, child_addr))
 }
@@ -385,7 +386,7 @@ pub async fn spawn_sub_agent_dyn(
         .register_with_comms(id.clone(), name.clone(), comms_info)
         .await
         .map_err(|e| {
-            SubAgentRunnerError::ExecutionError(format!("Failed to register sub-agent: {}", e))
+            SubAgentRunnerError::ExecutionError(format!("Failed to register sub-agent: {e}"))
         })?;
 
     // Clone what we need for the spawned task
@@ -513,7 +514,7 @@ where
         .register(id.clone(), name.clone())
         .await
         .map_err(|e| {
-            SubAgentRunnerError::ExecutionError(format!("Failed to register sub-agent: {}", e))
+            SubAgentRunnerError::ExecutionError(format!("Failed to register sub-agent: {e}"))
         })?;
 
     // Clone what we need for the spawned task

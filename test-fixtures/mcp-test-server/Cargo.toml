@@ -9,6 +9,9 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[package.metadata.cargo-machete]
+ignored = ["serde", "tokio", "tracing"]  # proc macros / test fixture runtime
+
 [lints]
 workspace = true
 

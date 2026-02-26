@@ -102,8 +102,7 @@ impl EventStore for RedbEventStore {
                 let mut current_seq = seqs_table
                     .get(sk.as_slice())
                     .map_err(|e| EventStoreError::Store(format!("get seq: {e}")))?
-                    .map(|v| v.value())
-                    .unwrap_or(0);
+                    .map_or(0, |v| v.value());
 
                 let now = SystemTime::now();
 
@@ -198,8 +197,7 @@ impl EventStore for RedbEventStore {
                 seqs_table
                     .get(sk.as_slice())
                     .map_err(|e| EventStoreError::Store(format!("get seq: {e}")))?
-                    .map(|v| v.value())
-                    .unwrap_or(0),
+                    .map_or(0, |v| v.value()),
             )
         })
         .await

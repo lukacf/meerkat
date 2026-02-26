@@ -101,7 +101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 _ => {
                     // Unknown notification, ignore
-                    eprintln!("Unknown notification: {method}");
+                    tracing::debug!("Unknown notification: {method}");
                 }
             }
             continue;
@@ -193,8 +193,14 @@ fn handle_request(request: &Value) -> Value {
                     })
                 }
                 "add" => {
-                    let a = arguments.get("a").and_then(|n| n.as_f64()).unwrap_or(0.0);
-                    let b = arguments.get("b").and_then(|n| n.as_f64()).unwrap_or(0.0);
+                    let a = arguments
+                        .get("a")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.0);
+                    let b = arguments
+                        .get("b")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.0);
                     json!({
                         "content": [{
                             "type": "text",
@@ -205,7 +211,7 @@ fn handle_request(request: &Value) -> Value {
                 "slow" => {
                     let seconds = arguments
                         .get("seconds")
-                        .and_then(|n| n.as_f64())
+                        .and_then(serde_json::Value::as_f64)
                         .unwrap_or(1.0);
                     std::thread::sleep(Duration::from_secs_f64(seconds));
                     json!({

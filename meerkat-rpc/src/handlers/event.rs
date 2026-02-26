@@ -95,7 +95,7 @@ mod tests {
         let source = Some("github".to_string());
         let payload_raw = r#"{"pr":42}"#;
         let body = if let Some(ref s) = source {
-            format!("[source: {}] {}", s, payload_raw)
+            format!("[source: {s}] {payload_raw}")
         } else {
             payload_raw.to_string()
         };
@@ -109,7 +109,7 @@ mod tests {
         let source: Option<String> = None;
         let payload_raw = r#""hello""#;
         let body = if let Some(ref s) = source {
-            format!("[source: {}] {}", s, payload_raw)
+            format!("[source: {s}] {payload_raw}")
         } else {
             payload_raw.to_string()
         };

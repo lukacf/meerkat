@@ -126,8 +126,8 @@ jobs:
           cargo check -p meerkat --features all-providers,comms,mcp,sub-agents
           cargo nextest run -p meerkat --features all-providers,comms,mcp
 
-  test-feature-matrix-surface:
-    name: Feature matrix (surface)
+  test-feature-matrix-surface-checks:
+    name: Feature matrix (surface checks)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -139,10 +139,7 @@ jobs:
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: matrix-surface
-
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
+          prefix-key: matrix-surface-checks
 
       - name: Surface crate feature combinations
         run: |
@@ -154,8 +151,28 @@ jobs:
           cargo check -p meerkat-mcp-server --no-default-features --features comms
           cargo check -p rkat --no-default-features --features session-store
           cargo check -p rkat --no-default-features --features session-store,mcp
-          cargo nextest run -p rkat --no-default-features --features session-store,mcp --no-capture
           cargo check -p rkat --no-default-features --features session-store,comms,mcp
+
+  test-feature-matrix-surface-tests:
+    name: Feature matrix (surface tests + modularity)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: matrix-surface-tests
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Surface crate tests
+        run: cargo nextest run -p rkat --no-default-features --features session-store,mcp --no-capture
 
       - name: Surface modularity checks
         run: scripts/check_surface_modularity.sh
@@ -170,44 +187,31 @@ jobs:
       - name: Run cargo-deny
         uses: EmbarkStudios/cargo-deny-action@v2
 
-  beta:
-    name: Rust beta early warning
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust (beta)
-        uses: dtolnay/rust-toolchain@beta
-
-      - name: Cache cargo registry
-        uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: beta
-
-      - name: Build (beta)
-        run: cargo build --workspace --all-features
-
-      - name: Test (beta)
-        run: cargo test --workspace --all-features --all-targets
-
   gate:
     name: CI gate
     if: always()
-    needs: [fmt-lint, test, test-minimal, test-feature-matrix-lib, test-feature-matrix-surface, audit]
+    needs: [fmt-lint, test, test-minimal, test-feature-matrix-lib, test-feature-matrix-surface-checks, test-feature-matrix-surface-tests, audit]
     runs-on: ubuntu-latest
     steps:
       - name: Check results
         run: |
           failed=""
-          for job in fmt-lint test test-minimal test-feature-matrix-lib test-feature-matrix-surface audit; do
+          for job in \
+            fmt-lint \
+            test \
+            test-minimal \
+            test-feature-matrix-lib \
+            test-feature-matrix-surface-checks \
+            test-feature-matrix-surface-tests \
+            audit
+          do
             case "$job" in
               fmt-lint) result="${{ needs.fmt-lint.result }}" ;;
               test) result="${{ needs.test.result }}" ;;
               test-minimal) result="${{ needs.test-minimal.result }}" ;;
               test-feature-matrix-lib) result="${{ needs.test-feature-matrix-lib.result }}" ;;
-              test-feature-matrix-surface) result="${{ needs.test-feature-matrix-surface.result }}" ;;
+              test-feature-matrix-surface-checks) result="${{ needs.test-feature-matrix-surface-checks.result }}" ;;
+              test-feature-matrix-surface-tests) result="${{ needs.test-feature-matrix-surface-tests.result }}" ;;
               audit) result="${{ needs.audit.result }}" ;;
             esac
             if [[ "$result" != "success" ]]; then

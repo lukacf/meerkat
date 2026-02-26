@@ -2,7 +2,6 @@
 //!
 //! Provides `rkat mcp add|remove|list|get` commands for managing MCP server configuration.
 
-use meerkat_contracts::{McpAddParams, McpLiveOpResponse, McpLiveOpStatus, McpRemoveParams};
 use meerkat_core::mcp_config::{
     McpConfig, McpScope, McpServerConfig, McpTransportConfig, McpTransportKind, find_project_mcp,
     project_mcp_path, user_mcp_path,
@@ -10,7 +9,6 @@ use meerkat_core::mcp_config::{
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::sync::OnceLock;
 use toml_edit::{Array, DocumentMut, Item, Table};
 
 /// Truncate a string to max_chars, adding "..." if truncated (Unicode-safe)
@@ -173,62 +171,6 @@ pub async fn add_server(
         path.display()
     );
     Ok(())
-}
-
-pub async fn live_add_server(
-    base_url: &str,
-    session_id: &str,
-    server_name: &str,
-    server: &McpServerConfig,
-    persisted: bool,
-) -> anyhow::Result<McpLiveOpResponse> {
-    let params = McpAddParams {
-        session_id: session_id.to_string(),
-        server_name: server_name.to_string(),
-        server_config: serde_json::to_value(server)?,
-        persisted,
-    };
-    post_live_op(base_url, session_id, "add", &params).await
-}
-
-pub async fn live_remove_server(
-    base_url: &str,
-    session_id: &str,
-    server_name: &str,
-    persisted: bool,
-) -> anyhow::Result<McpLiveOpResponse> {
-    let params = McpRemoveParams {
-        session_id: session_id.to_string(),
-        server_name: server_name.to_string(),
-        persisted,
-    };
-    post_live_op(base_url, session_id, "remove", &params).await
-}
-
-async fn post_live_op<T: serde::Serialize>(
-    base_url: &str,
-    session_id: &str,
-    op: &str,
-    payload: &T,
-) -> anyhow::Result<McpLiveOpResponse> {
-    let base = base_url.trim_end_matches('/');
-    let url = format!("{base}/sessions/{session_id}/mcp/{op}");
-    let response = live_http_client().post(&url).json(payload).send().await?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_else(|_| String::new());
-        anyhow::bail!("Live MCP request failed ({status}): {body}");
-    }
-    let parsed = response.json::<McpLiveOpResponse>().await?;
-    if parsed.status == McpLiveOpStatus::Rejected {
-        anyhow::bail!("Live MCP {op} was rejected by server for session '{session_id}'");
-    }
-    Ok(parsed)
-}
-
-fn live_http_client() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(reqwest::Client::new)
 }
 
 /// Parse KEY=VALUE environment variables
@@ -596,7 +538,6 @@ fn remove_server_from_file(path: &Path, name: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn create_test_server(name: &str, cmd: &str, args: Vec<&str>) -> McpServerConfig {
         McpServerConfig::stdio(
@@ -911,154 +852,5 @@ command = "cmd"
             "streamable-http"
         );
         assert_eq!(transport_label(McpTransportKind::Sse), "sse");
-    }
-
-    async fn spawn_single_response_server(status_line: &str, body: String) -> String {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind test listener");
-        let addr = listener.local_addr().expect("local addr");
-        let status_line = status_line.to_string();
-        tokio::spawn(async move {
-            if let Ok((mut stream, _peer)) = listener.accept().await {
-                let mut buf = [0_u8; 4096];
-                let _ = stream.read(&mut buf).await;
-                let response = format!(
-                    "{status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = stream.write_all(response.as_bytes()).await;
-                let _ = stream.shutdown().await;
-            }
-        });
-        format!("http://{addr}")
-    }
-
-    async fn spawn_capture_response_server(
-        status_line: &str,
-        body: String,
-    ) -> (String, tokio::sync::oneshot::Receiver<String>) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind test listener");
-        let addr = listener.local_addr().expect("local addr");
-        let status_line = status_line.to_string();
-        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
-        tokio::spawn(async move {
-            if let Ok((mut stream, _peer)) = listener.accept().await {
-                let mut buf = [0_u8; 4096];
-                if let Ok(bytes_read) = stream.read(&mut buf).await {
-                    let request = String::from_utf8_lossy(&buf[..bytes_read]).to_string();
-                    let _ = tx.send(request);
-                }
-                let response = format!(
-                    "{status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = stream.write_all(response.as_bytes()).await;
-                let _ = stream.shutdown().await;
-            }
-        });
-        (format!("http://{addr}"), rx)
-    }
-
-    #[tokio::test]
-    async fn test_live_remove_server_parses_success_response() {
-        let body = serde_json::json!({
-            "session_id": "session-1",
-            "operation": "remove",
-            "server_name": "srv",
-            "status": "staged",
-            "persisted": false,
-            "applied_at_turn": null
-        })
-        .to_string();
-        let base_url = spawn_single_response_server("HTTP/1.1 200 OK", body).await;
-
-        let response = live_remove_server(&base_url, "session-1", "srv", false)
-            .await
-            .expect("live remove succeeds");
-        assert_eq!(response.session_id, "session-1");
-        assert_eq!(response.server_name.as_deref(), Some("srv"));
-        assert!(!response.persisted);
-    }
-
-    #[tokio::test]
-    async fn test_live_add_server_parses_success_response() {
-        let body = serde_json::json!({
-            "session_id": "session-1",
-            "operation": "add",
-            "server_name": "srv",
-            "status": "staged",
-            "persisted": false,
-            "applied_at_turn": null
-        })
-        .to_string();
-        let base_url = spawn_single_response_server("HTTP/1.1 200 OK", body).await;
-        let server = McpServerConfig::stdio("srv", "echo", vec!["ok".to_string()], HashMap::new());
-
-        let response = live_add_server(&base_url, "session-1", "srv", &server, false)
-            .await
-            .expect("live add succeeds");
-        assert_eq!(response.session_id, "session-1");
-        assert_eq!(response.server_name.as_deref(), Some("srv"));
-        assert!(!response.persisted);
-    }
-
-    #[tokio::test]
-    async fn test_live_add_server_surfaces_http_error_status() {
-        let base_url = spawn_single_response_server(
-            "HTTP/1.1 500 Internal Server Error",
-            "{\"error\":\"boom\"}".to_string(),
-        )
-        .await;
-        let server = McpServerConfig::stdio("srv", "echo", vec!["ok".to_string()], HashMap::new());
-
-        let err = live_add_server(&base_url, "session-1", "srv", &server, false)
-            .await
-            .expect_err("live add should fail");
-        let msg = err.to_string();
-        assert!(msg.contains("Live MCP request failed"));
-        assert!(msg.contains("500"));
-    }
-
-    #[tokio::test]
-    async fn test_live_remove_server_surfaces_http_error_status() {
-        let base_url = spawn_single_response_server(
-            "HTTP/1.1 503 Service Unavailable",
-            "{\"error\":\"temporarily unavailable\"}".to_string(),
-        )
-        .await;
-
-        let err = live_remove_server(&base_url, "session-1", "srv", false)
-            .await
-            .expect_err("live remove should fail");
-        let msg = err.to_string();
-        assert!(msg.contains("Live MCP request failed"));
-        assert!(msg.contains("503"));
-    }
-
-    #[tokio::test]
-    async fn test_live_add_server_forwards_persisted_flag() {
-        let body = serde_json::json!({
-            "session_id": "session-1",
-            "operation": "add",
-            "server_name": "srv",
-            "status": "staged",
-            "persisted": true,
-            "applied_at_turn": null
-        })
-        .to_string();
-        let (base_url, captured_request_rx) =
-            spawn_capture_response_server("HTTP/1.1 200 OK", body).await;
-        let server = McpServerConfig::stdio("srv", "echo", vec!["ok".to_string()], HashMap::new());
-
-        let response = live_add_server(&base_url, "session-1", "srv", &server, true)
-            .await
-            .expect("live add succeeds");
-        let captured = captured_request_rx.await.expect("captured request");
-        assert_eq!(response.session_id, "session-1");
-        assert!(response.persisted);
-        assert!(captured.contains("\"persisted\":true"));
     }
 }

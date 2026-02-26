@@ -97,7 +97,7 @@ def _typescript_type_from_schema(root: dict[str, Any], field_schema: Any) -> tup
         case "object":
             return ("Record<string, unknown>", optional)
         case _:
-            return ("unknown", True or optional)
+            return ("unknown", optional)
 
 
 def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = True, has_skills: bool = True) -> None:

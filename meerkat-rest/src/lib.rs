@@ -34,8 +34,8 @@ use meerkat::{
     encode_llm_client_override_for_service,
 };
 use meerkat_contracts::{
-    McpAddParams, McpLiveOpResponse, McpLiveOpStatus, McpLiveOperation, McpReloadParams,
-    McpRemoveParams, SessionLocator, format_session_ref,
+    McpAddParams, McpLiveOpResponse, McpReloadParams, McpRemoveParams, SessionLocator,
+    format_session_ref,
 };
 use meerkat_core::service::{
     CreateSessionRequest as SvcCreateSessionRequest, InitialTurnPolicy, SessionBuildOptions,
@@ -1218,93 +1218,37 @@ async fn continue_session(
     }
 }
 
-/// Validate live MCP add request and return explicit placeholder status.
+/// Live MCP add — not yet implemented on the REST surface.
 async fn mcp_add(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(req): Json<McpAddParams>,
+    State(_state): State<AppState>,
+    Path(_id): Path<String>,
+    Json(_req): Json<McpAddParams>,
 ) -> Result<Json<McpLiveOpResponse>, ApiError> {
-    let path_session_id = resolve_session_id_for_state(&id, &state)?;
-    let body_session_id = resolve_session_id_for_state(&req.session_id, &state)?;
-    if body_session_id != path_session_id {
-        return Err(ApiError::BadRequest(format!(
-            "Session ID mismatch: path={} body={}",
-            id, req.session_id
-        )));
-    }
-    if req.server_name.trim().is_empty() {
-        return Err(ApiError::BadRequest(
-            "server_name cannot be empty".to_string(),
-        ));
-    }
-    Ok(Json(McpLiveOpResponse {
-        session_id: path_session_id.to_string(),
-        operation: McpLiveOperation::Add,
-        server_name: Some(req.server_name),
-        status: McpLiveOpStatus::Rejected,
-        persisted: req.persisted,
-        applied_at_turn: None,
-    }))
+    Err(ApiError::NotImplemented(
+        "Live MCP operations are not yet supported on the REST surface; use the JSON-RPC surface instead".to_string(),
+    ))
 }
 
-/// Validate live MCP remove request and return explicit placeholder status.
+/// Live MCP remove — not yet implemented on the REST surface.
 async fn mcp_remove(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(req): Json<McpRemoveParams>,
+    State(_state): State<AppState>,
+    Path(_id): Path<String>,
+    Json(_req): Json<McpRemoveParams>,
 ) -> Result<Json<McpLiveOpResponse>, ApiError> {
-    let path_session_id = resolve_session_id_for_state(&id, &state)?;
-    let body_session_id = resolve_session_id_for_state(&req.session_id, &state)?;
-    if body_session_id != path_session_id {
-        return Err(ApiError::BadRequest(format!(
-            "Session ID mismatch: path={} body={}",
-            id, req.session_id
-        )));
-    }
-    if req.server_name.trim().is_empty() {
-        return Err(ApiError::BadRequest(
-            "server_name cannot be empty".to_string(),
-        ));
-    }
-    Ok(Json(McpLiveOpResponse {
-        session_id: path_session_id.to_string(),
-        operation: McpLiveOperation::Remove,
-        server_name: Some(req.server_name),
-        status: McpLiveOpStatus::Rejected,
-        persisted: req.persisted,
-        applied_at_turn: None,
-    }))
+    Err(ApiError::NotImplemented(
+        "Live MCP operations are not yet supported on the REST surface; use the JSON-RPC surface instead".to_string(),
+    ))
 }
 
-/// Validate live MCP reload request and return explicit placeholder status.
+/// Live MCP reload — not yet implemented on the REST surface.
 async fn mcp_reload(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(req): Json<McpReloadParams>,
+    State(_state): State<AppState>,
+    Path(_id): Path<String>,
+    Json(_req): Json<McpReloadParams>,
 ) -> Result<Json<McpLiveOpResponse>, ApiError> {
-    let path_session_id = resolve_session_id_for_state(&id, &state)?;
-    let body_session_id = resolve_session_id_for_state(&req.session_id, &state)?;
-    if body_session_id != path_session_id {
-        return Err(ApiError::BadRequest(format!(
-            "Session ID mismatch: path={} body={}",
-            id, req.session_id
-        )));
-    }
-    if let Some(server_name) = req.server_name.as_ref()
-        && server_name.trim().is_empty()
-    {
-        return Err(ApiError::BadRequest(
-            "server_name cannot be empty".to_string(),
-        ));
-    }
-    Ok(Json(McpLiveOpResponse {
-        session_id: path_session_id.to_string(),
-        operation: McpLiveOperation::Reload,
-        server_name: req.server_name,
-        status: McpLiveOpStatus::Rejected,
-        persisted: req.persisted,
-        applied_at_turn: None,
-    }))
+    Err(ApiError::NotImplemented(
+        "Live MCP operations are not yet supported on the REST surface; use the JSON-RPC surface instead".to_string(),
+    ))
 }
 
 /// SSE endpoint for streaming session events
@@ -1387,6 +1331,7 @@ pub enum ApiError {
     Internal(String),
     ServiceUnavailable(String),
     Gone(String),
+    NotImplemented(String),
 }
 
 impl IntoResponse for ApiError {
@@ -1406,6 +1351,7 @@ impl IntoResponse for ApiError {
                 (StatusCode::SERVICE_UNAVAILABLE, "SERVICE_UNAVAILABLE", msg)
             }
             ApiError::Gone(msg) => (StatusCode::GONE, "GONE", msg),
+            ApiError::NotImplemented(msg) => (StatusCode::NOT_IMPLEMENTED, "NOT_IMPLEMENTED", msg),
         };
 
         let body = Json(ErrorResponse {
@@ -1711,111 +1657,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_mcp_add_placeholder_response_shape() {
+    async fn test_mcp_add_returns_not_implemented() {
         let temp = TempDir::new().expect("temp");
         let state = AppState::load_from(temp.path().to_path_buf())
             .await
             .expect("state");
-        let session_id = "01234567-89ab-cdef-0123-456789abcdef".to_string();
         let req = McpAddParams {
-            session_id: session_id.clone(),
-            server_name: "filesystem".to_string(),
-            server_config: json!({"cmd":"npx"}),
-            persisted: true,
-        };
-
-        let Json(response) = mcp_add(State(state), Path(session_id.clone()), Json(req))
-            .await
-            .expect("mcp add");
-
-        assert_eq!(response.session_id, session_id);
-        assert_eq!(response.operation, McpLiveOperation::Add);
-        assert_eq!(response.status, McpLiveOpStatus::Rejected);
-        assert!(response.persisted);
-        assert!(response.applied_at_turn.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_mcp_remove_rejects_session_id_mismatch() {
-        let temp = TempDir::new().expect("temp");
-        let state = AppState::load_from(temp.path().to_path_buf())
-            .await
-            .expect("state");
-        let req = McpRemoveParams {
             session_id: "01234567-89ab-cdef-0123-456789abcdef".to_string(),
             server_name: "filesystem".to_string(),
+            server_config: json!({"cmd":"npx"}),
             persisted: false,
         };
-
-        let result = mcp_remove(
+        let result = mcp_add(
             State(state),
-            Path("aaaaaaaa-89ab-cdef-0123-456789abcdef".to_string()),
+            Path("01234567-89ab-cdef-0123-456789abcdef".to_string()),
             Json(req),
         )
         .await;
-
-        assert!(matches!(result, Err(ApiError::BadRequest(_))));
+        assert!(matches!(result, Err(ApiError::NotImplemented(_))));
     }
 
     #[tokio::test]
-    async fn test_mcp_remove_placeholder_response_shape() {
+    async fn test_mcp_remove_returns_not_implemented() {
         let temp = TempDir::new().expect("temp");
         let state = AppState::load_from(temp.path().to_path_buf())
             .await
             .expect("state");
-        let session_id = "01234567-89ab-cdef-0123-456789abcdef".to_string();
         let req = McpRemoveParams {
-            session_id: session_id.clone(),
+            session_id: "01234567-89ab-cdef-0123-456789abcdef".to_string(),
             server_name: "filesystem".to_string(),
             persisted: false,
         };
-
-        let Json(response) = mcp_remove(State(state), Path(session_id.clone()), Json(req))
-            .await
-            .expect("mcp remove");
-
-        assert_eq!(response.session_id, session_id);
-        assert_eq!(response.operation, McpLiveOperation::Remove);
-        assert_eq!(response.server_name.as_deref(), Some("filesystem"));
-        assert_eq!(response.status, McpLiveOpStatus::Rejected);
-        assert!(!response.persisted);
-        assert!(response.applied_at_turn.is_none());
+        let result = mcp_remove(
+            State(state),
+            Path("01234567-89ab-cdef-0123-456789abcdef".to_string()),
+            Json(req),
+        )
+        .await;
+        assert!(matches!(result, Err(ApiError::NotImplemented(_))));
     }
 
     #[tokio::test]
-    async fn test_mcp_reload_placeholder_response_shape() {
-        let temp = TempDir::new().expect("temp");
-        let state = AppState::load_from(temp.path().to_path_buf())
-            .await
-            .expect("state");
-        let session_id = "01234567-89ab-cdef-0123-456789abcdef".to_string();
-        let req = McpReloadParams {
-            session_id: session_id.clone(),
-            server_name: Some("filesystem".to_string()),
-            persisted: true,
-        };
-
-        let Json(response) = mcp_reload(State(state), Path(session_id.clone()), Json(req))
-            .await
-            .expect("mcp reload");
-
-        assert_eq!(response.session_id, session_id);
-        assert_eq!(response.operation, McpLiveOperation::Reload);
-        assert_eq!(response.server_name.as_deref(), Some("filesystem"));
-        assert_eq!(response.status, McpLiveOpStatus::Rejected);
-        assert!(response.persisted);
-        assert!(response.applied_at_turn.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_mcp_reload_rejects_empty_server_name() {
+    async fn test_mcp_reload_returns_not_implemented() {
         let temp = TempDir::new().expect("temp");
         let state = AppState::load_from(temp.path().to_path_buf())
             .await
             .expect("state");
         let req = McpReloadParams {
             session_id: "01234567-89ab-cdef-0123-456789abcdef".to_string(),
-            server_name: Some("   ".to_string()),
+            server_name: Some("filesystem".to_string()),
             persisted: false,
         };
 
@@ -1825,8 +1715,7 @@ mod tests {
             Json(req),
         )
         .await;
-
-        assert!(matches!(result, Err(ApiError::BadRequest(_))));
+        assert!(matches!(result, Err(ApiError::NotImplemented(_))));
     }
 
     #[tokio::test]

@@ -519,3 +519,104 @@ async fn unknown_method_returns_error() {
     drop(writer);
     server_handle.await.unwrap().unwrap();
 }
+
+/// Regression: mcp/add with persisted=true must be rejected since config
+/// persistence is not implemented. Previously the handler echoed persisted=true
+/// in the response without persisting, misleading callers.
+#[tokio::test]
+async fn test_mcp_add_rejects_persisted_true() {
+    let (mut writer, mut reader, server_handle) = spawn_test_server();
+
+    let init = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "initialize",
+        "params": {}
+    });
+    send_request(&mut writer, &init).await;
+    let _init_resp = read_response(&mut reader).await;
+
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "mcp/add",
+        "params": {
+            "session_id": "00000000-0000-0000-0000-000000000001",
+            "server_name": "test-server",
+            "server_config": {"cmd": "echo"},
+            "persisted": true
+        }
+    });
+    send_request(&mut writer, &req).await;
+
+    let response = read_response(&mut reader).await;
+    assert_eq!(response["id"], 1);
+    assert!(
+        response["error"].is_object(),
+        "persisted=true should be rejected: {response}"
+    );
+
+    drop(writer);
+    server_handle.await.unwrap().unwrap();
+}
+
+/// Regression: mcp/add staged response must always have persisted: false
+/// since config persistence is not implemented.
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn test_mcp_add_staged_response_has_persisted_false() {
+    let (mut writer, mut reader, server_handle) = spawn_test_server();
+
+    let init = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "initialize",
+        "params": {}
+    });
+    send_request(&mut writer, &init).await;
+    let _init_resp = read_response(&mut reader).await;
+
+    let create = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "session/create",
+        "params": { "prompt": "hello" }
+    });
+    send_request(&mut writer, &create).await;
+    let mut session_id = None;
+    loop {
+        let msg = read_response(&mut reader).await;
+        if msg.get("id") == Some(&serde_json::json!(1)) {
+            if let Some(result) = msg.get("result") {
+                session_id = result
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+            }
+            break;
+        }
+    }
+    let session_id = session_id.expect("session_id from create");
+
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "mcp/add",
+        "params": {
+            "session_id": session_id,
+            "server_name": "test-server",
+            "server_config": {"cmd": "echo"},
+            "persisted": false
+        }
+    });
+    send_request(&mut writer, &req).await;
+
+    let response = read_response(&mut reader).await;
+    assert_eq!(response["id"], 2);
+    let result = &response["result"];
+    assert_eq!(result["status"], "staged");
+    assert_eq!(result["persisted"], false);
+
+    drop(writer);
+    server_handle.await.unwrap().unwrap();
+}

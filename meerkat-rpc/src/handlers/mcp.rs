@@ -8,7 +8,21 @@ use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 
-/// Handle `mcp/add` with contract-typed params and placeholder response.
+/// Reject persisted=true requests — config persistence is not yet implemented.
+#[cfg(feature = "mcp")]
+fn reject_if_persisted(id: &Option<RpcId>, persisted: bool) -> Option<RpcResponse> {
+    if persisted {
+        Some(RpcResponse::error(
+            id.clone(),
+            error::INVALID_PARAMS,
+            "persisted=true is not yet supported; live MCP changes are session-scoped only",
+        ))
+    } else {
+        None
+    }
+}
+
+/// Handle `mcp/add`.
 pub async fn handle_add(
     id: Option<RpcId>,
     params: Option<&RawValue>,
@@ -41,6 +55,10 @@ pub async fn handle_add(
             return RpcResponse::error(id, error::INVALID_PARAMS, "server_name cannot be empty");
         }
 
+        if let Some(resp) = reject_if_persisted(&id, params.persisted) {
+            return resp;
+        }
+
         if let Err(err) = runtime
             .mcp_stage_add(
                 &session_id,
@@ -57,14 +75,14 @@ pub async fn handle_add(
             operation: meerkat_contracts::McpLiveOperation::Add,
             server_name: Some(params.server_name),
             status: meerkat_contracts::McpLiveOpStatus::Staged,
-            persisted: params.persisted,
+            persisted: false,
             applied_at_turn: None,
         };
         RpcResponse::success(id, response)
     }
 }
 
-/// Handle `mcp/remove` with contract-typed params and placeholder response.
+/// Handle `mcp/remove`.
 pub async fn handle_remove(
     id: Option<RpcId>,
     params: Option<&RawValue>,
@@ -97,6 +115,10 @@ pub async fn handle_remove(
             return RpcResponse::error(id, error::INVALID_PARAMS, "server_name cannot be empty");
         }
 
+        if let Some(resp) = reject_if_persisted(&id, params.persisted) {
+            return resp;
+        }
+
         if let Err(err) = runtime
             .mcp_stage_remove(&session_id, params.server_name.clone())
             .await
@@ -109,14 +131,14 @@ pub async fn handle_remove(
             operation: meerkat_contracts::McpLiveOperation::Remove,
             server_name: Some(params.server_name),
             status: meerkat_contracts::McpLiveOpStatus::Staged,
-            persisted: params.persisted,
+            persisted: false,
             applied_at_turn: None,
         };
         RpcResponse::success(id, response)
     }
 }
 
-/// Handle `mcp/reload` with contract-typed params and placeholder response.
+/// Handle `mcp/reload`.
 pub async fn handle_reload(
     id: Option<RpcId>,
     params: Option<&RawValue>,
@@ -151,6 +173,10 @@ pub async fn handle_reload(
             return RpcResponse::error(id, error::INVALID_PARAMS, "server_name cannot be empty");
         }
 
+        if let Some(resp) = reject_if_persisted(&id, params.persisted) {
+            return resp;
+        }
+
         if let Err(err) = runtime
             .mcp_stage_reload(&session_id, params.server_name.clone())
             .await
@@ -163,7 +189,7 @@ pub async fn handle_reload(
             operation: meerkat_contracts::McpLiveOperation::Reload,
             server_name: params.server_name,
             status: meerkat_contracts::McpLiveOpStatus::Staged,
-            persisted: params.persisted,
+            persisted: false,
             applied_at_turn: None,
         };
         RpcResponse::success(id, response)

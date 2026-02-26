@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+      - ci/**
+      - feat/**
   pull_request:
   workflow_dispatch:
 
@@ -94,8 +96,8 @@ jobs:
           cargo check -p meerkat --no-default-features
           cargo nextest run -p meerkat-core
 
-  test-feature-matrix:
-    name: Feature matrix
+  test-feature-matrix-lib:
+    name: Feature matrix (library)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -107,7 +109,7 @@ jobs:
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: feature-matrix
+          prefix-key: matrix-lib
 
       - name: Install nextest
         uses: taiki-e/install-action@nextest
@@ -123,6 +125,24 @@ jobs:
           cargo check -p meerkat --no-default-features --features gemini,jsonl-store
           cargo check -p meerkat --features all-providers,comms,mcp,sub-agents
           cargo nextest run -p meerkat --features all-providers,comms,mcp
+
+  test-feature-matrix-surface:
+    name: Feature matrix (surface)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: matrix-surface
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
 
       - name: Surface crate feature combinations
         run: |
@@ -175,18 +195,19 @@ jobs:
   gate:
     name: CI gate
     if: always()
-    needs: [fmt-lint, test, test-minimal, test-feature-matrix, audit]
+    needs: [fmt-lint, test, test-minimal, test-feature-matrix-lib, test-feature-matrix-surface, audit]
     runs-on: ubuntu-latest
     steps:
       - name: Check results
         run: |
           failed=""
-          for job in fmt-lint test test-minimal test-feature-matrix audit; do
-            result="${{ needs.fmt-lint.result }}"
+          for job in fmt-lint test test-minimal test-feature-matrix-lib test-feature-matrix-surface audit; do
             case "$job" in
+              fmt-lint) result="${{ needs.fmt-lint.result }}" ;;
               test) result="${{ needs.test.result }}" ;;
               test-minimal) result="${{ needs.test-minimal.result }}" ;;
-              test-feature-matrix) result="${{ needs.test-feature-matrix.result }}" ;;
+              test-feature-matrix-lib) result="${{ needs.test-feature-matrix-lib.result }}" ;;
+              test-feature-matrix-surface) result="${{ needs.test-feature-matrix-surface.result }}" ;;
               audit) result="${{ needs.audit.result }}" ;;
             esac
             if [[ "$result" != "success" ]]; then

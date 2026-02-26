@@ -454,17 +454,25 @@ async function loadRuntime(): Promise<RuntimeModule> {
   return mod;
 }
 
-/** Resolve meerkat_id → team. */
+/** Extract meerkat_id from a full peer address like "diplomacy-north/ambassador/north-ambassador" */
+function extractMeerkatId(peerAddress: string): string {
+  const parts = peerAddress.split("/");
+  return parts[parts.length - 1] || peerAddress;
+}
+
+/** Resolve meerkat_id or peer address → team. */
 function meerkatTeam(id: string): Team | null {
-  for (const t of TEAMS) if (id.startsWith(t)) return t;
+  const mid = extractMeerkatId(id);
+  for (const t of TEAMS) if (mid.startsWith(t)) return t;
   return null;
 }
 
-/** Resolve meerkat_id → role. */
+/** Resolve meerkat_id or peer address → role. */
 function meerkatRole(id: string): MessageRole {
-  if (id.includes("planner")) return "planner";
-  if (id.includes("operator")) return "operator";
-  if (id.includes("ambassador")) return "ambassador";
+  const mid = extractMeerkatId(id);
+  if (mid.includes("planner")) return "planner";
+  if (mid.includes("operator")) return "operator";
+  if (mid.includes("ambassador")) return "ambassador";
   return "system";
 }
 
@@ -506,17 +514,19 @@ function drainAllEvents(mod: RuntimeModule, turn: number): number {
       const events: any[] = JSON.parse(raw);
       // Uncomment for debugging: if (events.length > 0) console.log(`[${sub.meerkatId}] ${events.length} events`);
       for (const event of events) {
-        // Outgoing comms: agent used send_message tool
-        // AgentEvent::ToolCallRequested { id, name, args }
-        if (event.type === "tool_call_requested" && event.name === "send_message") {
+        // Outgoing comms: agent used "send" tool (not "send_message")
+        // AgentEvent::ToolCallRequested { id, name, args: { kind, to, body } }
+        if (event.type === "tool_call_requested" && event.name === "send") {
           try {
             const args = typeof event.args === "string" ? JSON.parse(event.args) : event.args;
-            const to = args.to || args.peer || "";
-            const content = args.content || args.message || "";
-            const ch = dmChannel(sub.meerkatId, to);
-            if (ch && content) {
-              pushMessage({ channel: ch, role: sub.role, faction: sub.team, content, turn });
-              count++;
+            const to = args.to || "";
+            const body = args.body || "";
+            if (to && body) {
+              const ch = dmChannel(sub.meerkatId, to);
+              if (ch) {
+                const targetRole = meerkatRole(to);
+                pushMessage({ channel: ch, role: sub.role, faction: sub.team, content: body, turn });
+              }
             }
           } catch { /* skip parse errors */ }
         }

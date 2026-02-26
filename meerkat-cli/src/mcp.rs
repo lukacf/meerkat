@@ -139,11 +139,7 @@ pub async fn add_server(
     // Check if server already exists in this scope
     if McpConfig::server_exists(&name, scope).await? {
         anyhow::bail!(
-            "MCP server '{}' already exists in {} scope. Remove it first with: rkat mcp remove {} --scope {}",
-            name,
-            scope,
-            name,
-            scope
+            "MCP server '{name}' already exists in {scope} scope. Remove it first with: rkat mcp remove {name} --scope {scope}"
         );
     }
 

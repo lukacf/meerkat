@@ -1282,6 +1282,7 @@ impl AgentFactory {
             None
         };
         #[cfg(not(feature = "comms"))]
+        #[allow(clippy::no_effect_underscore_binding)]
         let _comms_runtime: Option<()> = None;
 
         #[cfg(all(feature = "sub-agents", feature = "comms"))]
@@ -1481,7 +1482,7 @@ impl AgentFactory {
             // No AGENTS.md or system_prompt_file on wasm32 (no filesystem).
             let base = per_request_prompt
                 .or_else(|| config.agent.system_prompt.clone())
-                .unwrap_or_else(|| meerkat_core::prompt::DEFAULT_SYSTEM_PROMPT.to_string());
+                .unwrap_or_else(|| "You are an autonomous agent. Your task is to accomplish the user's goal by systematically using the tools available to you.".to_string());
             let mut prompt = base;
             for section in &extra_sections {
                 if !section.is_empty() {

@@ -6,20 +6,15 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 /// Visibility filter for tools.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ToolFilter {
     /// All tools are visible.
+    #[default]
     All,
     /// Only listed tools are visible.
     Allow(HashSet<String>),
     /// Listed tools are hidden.
     Deny(HashSet<String>),
-}
-
-impl Default for ToolFilter {
-    fn default() -> Self {
-        Self::All
-    }
 }
 
 impl ToolFilter {
@@ -479,13 +474,13 @@ mod tests {
         let deny_b = ToolFilter::Deny(set(&["b"]));
 
         // Allow lists intersect.
-        let composed_allow = ToolScope::compose(&[allow_a_b.clone(), allow_b_c.clone()]);
+        let composed_allow = ToolScope::compose(&[allow_a_b.clone(), allow_b_c]);
         assert!(composed_allow.allows("b"));
         assert!(!composed_allow.allows("a"));
         assert!(!composed_allow.allows("c"));
 
         // Deny lists union.
-        let composed_deny = ToolScope::compose(&[deny_c.clone(), deny_b.clone()]);
+        let composed_deny = ToolScope::compose(&[deny_c, deny_b.clone()]);
         assert!(!composed_deny.allows("b"));
         assert!(!composed_deny.allows("c"));
         assert!(composed_deny.allows("a"));

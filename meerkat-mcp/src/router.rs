@@ -451,7 +451,7 @@ impl Default for McpRouter {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn test_server_path() -> PathBuf {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
@@ -477,7 +477,7 @@ mod tests {
         }
     }
 
-    fn test_server_config(name: &str, path: &PathBuf) -> McpServerConfig {
+    fn test_server_config(name: &str, path: &Path) -> McpServerConfig {
         McpServerConfig::stdio(
             name,
             path.to_string_lossy().to_string(),

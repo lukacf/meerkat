@@ -1,6 +1,7 @@
 //! CommsAgent and related high-level agent integration.
 
 pub mod dispatcher;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod listener;
 pub mod manager;
 pub mod types;
@@ -10,10 +11,13 @@ pub use dispatcher::{
 };
 #[cfg(unix)]
 pub use listener::spawn_uds_listener;
+#[cfg(not(target_arch = "wasm32"))]
 pub use listener::{ListenerHandle, spawn_tcp_listener};
 pub use manager::{CommsManager, CommsManagerConfig};
 pub use types::{CommsContent, CommsMessage, CommsStatus, MessageIntent};
 
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use meerkat_core::budget::BudgetLimits;
 use meerkat_core::error::AgentError;
 use meerkat_core::retry::RetryPolicy;

@@ -7,6 +7,8 @@ use crate::hooks::{
     HookToolCall, HookToolResult,
 };
 use crate::state::LoopState;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use crate::types::{
     AssistantBlock, BlockAssistantMessage, Message, RunResult, ToolCallView, ToolDef, ToolResult,
 };
@@ -166,7 +168,7 @@ where
                                         let metadata = crate::memory::MemoryMetadata {
                                             session_id: session_id.clone(),
                                             turn: Some(turn_count),
-                                            indexed_at: std::time::SystemTime::now(),
+                                            indexed_at: crate::time_compat::SystemTime::now(),
                                         };
                                         if let Err(e) = store.index(&content, metadata).await {
                                             tracing::warn!(
@@ -475,7 +477,7 @@ where
                             .map(|tc| {
                                 let tools_ref = Arc::clone(&tools_ref);
                                 async move {
-                                    let start = std::time::Instant::now();
+                                    let start = crate::time_compat::Instant::now();
                                     let dispatch_result = tools_ref.dispatch(tc.as_view()).await;
                                     let duration_ms = start.elapsed().as_millis() as u64;
                                     (tc, dispatch_result, duration_ms)
@@ -906,7 +908,8 @@ mod tests {
 
     struct StaticLlmClient;
 
-    #[async_trait]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl AgentLlmClient for StaticLlmClient {
         async fn stream_response(
             &self,
@@ -1058,7 +1061,8 @@ mod tests {
         }
     }
 
-    #[async_trait]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl AgentLlmClient for RecordingLlmClient {
         async fn stream_response(
             &self,
@@ -1093,7 +1097,8 @@ mod tests {
 
     struct NoTools;
 
-    #[async_trait]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl AgentToolDispatcher for NoTools {
         fn tools(&self) -> Arc<[Arc<ToolDef>]> {
             Arc::new([])
@@ -1108,7 +1113,8 @@ mod tests {
 
     struct NoopStore;
 
-    #[async_trait]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl AgentSessionStore for NoopStore {
         async fn save(&self, _session: &crate::session::Session) -> Result<(), AgentError> {
             Ok(())
@@ -1133,7 +1139,8 @@ mod tests {
         }
     }
 
-    #[async_trait]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl crate::agent::CommsRuntime for MockDrainCommsRuntime {
         async fn drain_messages(&self) -> Vec<String> {
             let mut guard = self.queued.lock().await;

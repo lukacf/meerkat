@@ -6,6 +6,8 @@
 
 use crate::config::{Config, ConfigDelta, ConfigError};
 use crate::config_store::{ConfigResolvedPaths, ConfigStore, ConfigStoreMetadata};
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

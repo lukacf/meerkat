@@ -3,14 +3,13 @@
 //! Implements the LlmClient trait for Anthropic's Claude API.
 
 use crate::error::LlmError;
-use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
+use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream};
 use async_trait::async_trait;
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{Message, OutputSchema, StopReason, Usage};
 use serde::Deserialize;
 use serde_json::Value;
-use std::pin::Pin;
 use std::time::Duration;
 
 /// Default connect timeout
@@ -82,15 +81,16 @@ impl AnthropicClientBuilder {
         let connect_timeout = self.connect_timeout;
         let request_timeout = self.request_timeout;
         let pool_idle_timeout = self.pool_idle_timeout;
-        let http = crate::http::build_http_client_for_base_url(
-            reqwest::Client::builder()
-                .connect_timeout(connect_timeout)
-                .timeout(request_timeout)
-                .pool_idle_timeout(pool_idle_timeout)
-                .pool_max_idle_per_host(4)
-                .tcp_keepalive(Duration::from_secs(30)),
-            &base_url,
-        )?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let builder = reqwest::Client::builder()
+            .connect_timeout(connect_timeout)
+            .timeout(request_timeout)
+            .pool_idle_timeout(pool_idle_timeout)
+            .pool_max_idle_per_host(4)
+            .tcp_keepalive(Duration::from_secs(30));
+        #[cfg(target_arch = "wasm32")]
+        let builder = reqwest::Client::builder();
+        let http = crate::http::build_http_client_for_base_url(builder, &base_url)?;
 
         Ok(AnthropicClient {
             api_key: self.api_key,
@@ -124,15 +124,16 @@ impl AnthropicClient {
 
     /// Set custom base URL
     pub fn with_base_url(mut self, url: String) -> Self {
-        if let Ok(http) = crate::http::build_http_client_for_base_url(
-            reqwest::Client::builder()
-                .connect_timeout(self.connect_timeout)
-                .timeout(self.request_timeout)
-                .pool_idle_timeout(self.pool_idle_timeout)
-                .pool_max_idle_per_host(4)
-                .tcp_keepalive(Duration::from_secs(30)),
-            &url,
-        ) {
+        #[cfg(not(target_arch = "wasm32"))]
+        let builder = reqwest::Client::builder()
+            .connect_timeout(self.connect_timeout)
+            .timeout(self.request_timeout)
+            .pool_idle_timeout(self.pool_idle_timeout)
+            .pool_max_idle_per_host(4)
+            .tcp_keepalive(Duration::from_secs(30));
+        #[cfg(target_arch = "wasm32")]
+        let builder = reqwest::Client::builder();
+        if let Ok(http) = crate::http::build_http_client_for_base_url(builder, &url) {
             self.http = http;
         }
         self.base_url = url;
@@ -482,251 +483,228 @@ fn merge_usage(target: &mut Usage, update: &AnthropicUsage) {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl LlmClient for AnthropicClient {
-    fn stream<'a>(
-        &'a self,
-        request: &'a LlmRequest,
-    ) -> Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
-        let inner: Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> = Box::pin(
-            async_stream::try_stream! {
-                let body = self.build_request_body(request)?;
+    fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+        let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
+            let body = self.build_request_body(request)?;
 
-                // Collect beta headers based on request features
-                let mut betas = Vec::new();
+            // Collect beta headers based on request features
+            let mut betas = Vec::new();
 
-                // Legacy thinking (type: "enabled") requires interleaved-thinking header
-                // Adaptive thinking (Opus 4.6) does NOT need this header
-                let thinking_type = body.get("thinking")
-                    .and_then(|t| t.get("type"))
-                    .and_then(|t| t.as_str());
-                if thinking_type == Some("enabled") {
-                    betas.push("interleaved-thinking-2025-05-14");
-                }
+            // Legacy thinking (type: "enabled") requires interleaved-thinking header
+            // Adaptive thinking (Opus 4.6) does NOT need this header
+            let thinking_type = body.get("thinking")
+                .and_then(|t| t.get("type"))
+                .and_then(|t| t.as_str());
+            if thinking_type == Some("enabled") {
+                betas.push("interleaved-thinking-2025-05-14");
+            }
 
-                // Structured output format requires beta header
-                if body.get("output_config").and_then(|c| c.get("format")).is_some() {
-                    betas.push("structured-outputs-2025-11-13");
-                }
+            // Structured output format requires beta header
+            if body.get("output_config").and_then(|c| c.get("format")).is_some() {
+                betas.push("structured-outputs-2025-11-13");
+            }
 
-                // 1M context window (opt-in via provider_params)
-                if let Some(ref params) = request.provider_params
-                    && params.get("context").and_then(|v| v.as_str()) == Some("1m")
-                {
-                    betas.push("context-1m-2025-08-07");
-                }
+            // 1M context window (opt-in via provider_params)
+            if let Some(ref params) = request.provider_params
+                && params.get("context").and_then(|v| v.as_str()) == Some("1m")
+            {
+                betas.push("context-1m-2025-08-07");
+            }
 
-                // Compaction API (beta)
-                if body.get("context_management").is_some() {
-                    betas.push("compact-2026-01-12");
-                }
+            // Compaction API (beta)
+            if body.get("context_management").is_some() {
+                betas.push("compact-2026-01-12");
+            }
 
-                let mut req = self.http
-                    .post(format!("{}/v1/messages", self.base_url))
-                    .header("x-api-key", &self.api_key)
-                    .header("anthropic-version", "2023-06-01")
-                    .header("Content-Type", "application/json");
+            let mut req = self.http
+                .post(format!("{}/v1/messages", self.base_url))
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("Content-Type", "application/json");
 
-                if !betas.is_empty() {
-                    req = req.header("anthropic-beta", betas.join(","));
-                }
+            if !betas.is_empty() {
+                req = req.header("anthropic-beta", betas.join(","));
+            }
 
-                let response = req
-                    .json(&body)
-                    .send()
-                    .await
-                    .map_err(|_| LlmError::NetworkTimeout {
-                        duration_ms: 30000,
-                    })?;
+            // On wasm32 (browser), Anthropic requires this header for CORS
+            #[cfg(target_arch = "wasm32")]
+            {
+                req = req.header("anthropic-dangerous-direct-browser-access", "true");
+            }
 
-                let status_code = response.status().as_u16();
-                let stream_result = if (200..=299).contains(&status_code) {
-                    Ok(response.bytes_stream())
-                } else {
-                    let text = response.text().await.unwrap_or_default();
-                    Err(LlmError::from_http_status(status_code, text))
-                };
-                let mut stream = stream_result?;
-                let mut buffer = String::with_capacity(SSE_BUFFER_CAPACITY);
-                let mut current_tool_id: Option<String> = None;
-                let mut current_tool_name: Option<String> = None;
-                let mut accumulated_tool_args = String::new();
-                let mut current_block_type: Option<String> = None;
-                let mut current_thinking_signature: Option<String> = None;
-                let mut last_stop_reason: Option<StopReason> = None;
-                let mut usage = Usage::default();
-                let mut saw_done = false;
-                let mut saw_event = false;
+            let response = req
+                .json(&body)
+                .send()
+                .await
+                .map_err(|_| LlmError::NetworkTimeout {
+                    duration_ms: 30000,
+                })?;
 
-                macro_rules! handle_event {
-                    ($event:expr) => {
-                        match $event.event_type.as_str() {
-                            "content_block_delta" => {
-                                if let Some(delta) = $event.delta {
-                                    match delta.delta_type.as_str() {
-                                        "text_delta" => {
-                                            if let Some(text) = delta.text {
-                                                saw_event = true;
-                                                yield LlmEvent::TextDelta { delta: text, meta: None };
-                                            }
+            let status_code = response.status().as_u16();
+            let stream_result = if (200..=299).contains(&status_code) {
+                Ok(response.bytes_stream())
+            } else {
+                let text = response.text().await.unwrap_or_default();
+                Err(LlmError::from_http_status(status_code, text))
+            };
+            let mut stream = stream_result?;
+            let mut buffer = String::with_capacity(SSE_BUFFER_CAPACITY);
+            let mut current_tool_id: Option<String> = None;
+            let mut current_tool_name: Option<String> = None;
+            let mut accumulated_tool_args = String::new();
+            let mut current_block_type: Option<String> = None;
+            let mut current_thinking_signature: Option<String> = None;
+            let mut last_stop_reason: Option<StopReason> = None;
+            let mut usage = Usage::default();
+            let mut saw_done = false;
+            let mut saw_event = false;
+
+            macro_rules! handle_event {
+                ($event:expr) => {
+                    match $event.event_type.as_str() {
+                        "content_block_delta" => {
+                            if let Some(delta) = $event.delta {
+                                match delta.delta_type.as_str() {
+                                    "text_delta" => {
+                                        if let Some(text) = delta.text {
+                                            saw_event = true;
+                                            yield LlmEvent::TextDelta { delta: text, meta: None };
                                         }
-                                        "thinking_delta" => {
-                                            // Emit incremental thinking content
-                                            if let Some(text) = delta.thinking {
-                                                saw_event = true;
-                                                yield LlmEvent::ReasoningDelta { delta: text };
-                                            }
-                                        }
-                                        "signature_delta" => {
-                                            // Signature arrives as separate delta before content_block_stop
-                                            if let Some(sig) = delta.signature {
-                                                saw_event = true;
-                                                current_thinking_signature = Some(sig);
-                                            }
-                                        }
-                                        "input_json_delta" => {
-                                            if let Some(partial_json) = delta.partial_json {
-                                                accumulated_tool_args.push_str(&partial_json);
-                                                saw_event = true;
-                                                yield LlmEvent::ToolCallDelta {
-                                                    id: current_tool_id.clone().unwrap_or_default(),
-                                                    name: None,
-                                                    args_delta: partial_json,
-                                                };
-                                            }
-                                        }
-                                        "compaction_delta" => {
-                                            // Compaction summary arrives as single delta — emit as Reasoning with compaction meta
-                                            if let Some(content) = delta.content {
-                                                saw_event = true;
-                                                yield LlmEvent::ReasoningComplete {
-                                                    text: String::new(),
-                                                    meta: Some(Box::new(meerkat_core::ProviderMeta::AnthropicCompaction { content })),
-                                                };
-                                            }
-                                        }
-                                        _ => {}
                                     }
-                                }
-                            }
-                            "content_block_start" => {
-                                if let Some(content_block) = $event.content_block {
-                                    current_block_type = Some(content_block.block_type.clone());
-                                    match content_block.block_type.as_str() {
-                                        "thinking" => {
-                                            // Start of thinking block
-                                            // Signature may already be present or arrive via signature_delta
-                                            current_thinking_signature = content_block.signature;
+                                    "thinking_delta" => {
+                                        // Emit incremental thinking content
+                                        if let Some(text) = delta.thinking {
+                                            saw_event = true;
+                                            yield LlmEvent::ReasoningDelta { delta: text };
                                         }
-                                        "redacted_thinking" => {
-                                            // Redacted by safety systems — emit as Reasoning with redacted meta
-                                            if let Some(data) = content_block.data {
-                                                saw_event = true;
-                                                yield LlmEvent::ReasoningComplete {
-                                                    text: String::new(),
-                                                    meta: Some(Box::new(meerkat_core::ProviderMeta::AnthropicRedacted { data })),
-                                                };
-                                            }
+                                    }
+                                    "signature_delta" => {
+                                        // Signature arrives as separate delta before content_block_stop
+                                        if let Some(sig) = delta.signature {
+                                            saw_event = true;
+                                            current_thinking_signature = Some(sig);
                                         }
-                                        "compaction" => {
-                                            // Compaction block start — content arrives via compaction_delta
-                                        }
-                                        "tool_use" => {
-                                            let id = content_block.id.unwrap_or_default();
-                                            current_tool_id = Some(id.clone());
-                                            current_tool_name = content_block.name.clone();
-                                            accumulated_tool_args.clear();
+                                    }
+                                    "input_json_delta" => {
+                                        if let Some(partial_json) = delta.partial_json {
+                                            accumulated_tool_args.push_str(&partial_json);
                                             saw_event = true;
                                             yield LlmEvent::ToolCallDelta {
-                                                id,
-                                                name: content_block.name,
-                                                args_delta: String::new(),
+                                                id: current_tool_id.clone().unwrap_or_default(),
+                                                name: None,
+                                                args_delta: partial_json,
                                             };
                                         }
-                                        _ => {}
                                     }
-                                }
-                            }
-                            "content_block_stop" => {
-                                // Emit complete events based on block type
-                                match current_block_type.as_deref() {
-                                    Some("thinking") => {
-                                        // Emit ReasoningComplete with Anthropic signature
-                                        let meta = current_thinking_signature
-                                            .take()
-                                            .map(|sig| Box::new(meerkat_core::ProviderMeta::Anthropic { signature: sig }));
-                                        yield LlmEvent::ReasoningComplete {
-                                            text: String::new(), // Text was already streamed via deltas
-                                            meta,
-                                        };
-                                    }
-                                    Some("tool_use") => {
-                                        // Finalize tool call: assemble accumulated
-                                        // JSON args from deltas into a complete event.
-                                        if let Some(ref tool_id) = current_tool_id {
-                                            // Accumulate args from the buffer by
-                                            // reading the accumulated json string.
-                                            // The name was set in content_block_start
-                                            // and passed via the initial ToolCallDelta.
-                                            // We emit ToolCallComplete with the
-                                            // accumulated_tool_args (collected during
-                                            // input_json_delta events).
-                                            let args_str = accumulated_tool_args.clone();
-                                            let args_val: serde_json::Value = serde_json::from_str(&args_str)
-                                                .unwrap_or(serde_json::json!({}));
+                                    "compaction_delta" => {
+                                        // Compaction summary arrives as single delta — emit as Reasoning with compaction meta
+                                        if let Some(content) = delta.content {
                                             saw_event = true;
-                                            yield LlmEvent::ToolCallComplete {
-                                                id: tool_id.clone(),
-                                                name: current_tool_name.take().unwrap_or_default(),
-                                                args: args_val,
-                                                meta: None,
+                                            yield LlmEvent::ReasoningComplete {
+                                                text: String::new(),
+                                                meta: Some(Box::new(meerkat_core::ProviderMeta::AnthropicCompaction { content })),
                                             };
-                                            accumulated_tool_args.clear();
                                         }
-                                        current_tool_id = None;
                                     }
                                     _ => {}
                                 }
-                                current_block_type = None;
                             }
-                            "message_delta" => {
-                                if let Some(usage_update) = $event.usage {
-                                    merge_usage(&mut usage, &usage_update);
-                                    saw_event = true;
-                                    yield LlmEvent::UsageUpdate {
-                                        usage: usage.clone(),
-                                    };
-                                }
-                                if let Some(finish_reason) = $event.delta.and_then(|d| d.stop_reason) {
-                                    let reason = Self::map_stop_reason(finish_reason.as_str());
-                                    last_stop_reason = Some(reason);
-                                    if !saw_done {
-                                        saw_event = true;
-                                        yield LlmEvent::Done {
-                                            outcome: LlmDoneOutcome::Success { stop_reason: reason },
-                                        };
-                                        saw_done = true;
+                        }
+                        "content_block_start" => {
+                            if let Some(content_block) = $event.content_block {
+                                current_block_type = Some(content_block.block_type.clone());
+                                match content_block.block_type.as_str() {
+                                    "thinking" => {
+                                        // Start of thinking block
+                                        // Signature may already be present or arrive via signature_delta
+                                        current_thinking_signature = content_block.signature;
                                     }
+                                    "redacted_thinking" => {
+                                        // Redacted by safety systems — emit as Reasoning with redacted meta
+                                        if let Some(data) = content_block.data {
+                                            saw_event = true;
+                                            yield LlmEvent::ReasoningComplete {
+                                                text: String::new(),
+                                                meta: Some(Box::new(meerkat_core::ProviderMeta::AnthropicRedacted { data })),
+                                            };
+                                        }
+                                    }
+                                    "compaction" => {
+                                        // Compaction block start — content arrives via compaction_delta
+                                    }
+                                    "tool_use" => {
+                                        let id = content_block.id.unwrap_or_default();
+                                        current_tool_id = Some(id.clone());
+                                        current_tool_name = content_block.name.clone();
+                                        accumulated_tool_args.clear();
+                                        saw_event = true;
+                                        yield LlmEvent::ToolCallDelta {
+                                            id,
+                                            name: content_block.name,
+                                            args_delta: String::new(),
+                                        };
+                                    }
+                                    _ => {}
                                 }
                             }
-                            "message_start" => {
-                                if let Some(usage_update) = $event.message.and_then(|m| m.usage) {
-                                    merge_usage(&mut usage, &usage_update);
-                                    saw_event = true;
-                                    yield LlmEvent::UsageUpdate {
-                                        usage: usage.clone(),
+                        }
+                        "content_block_stop" => {
+                            // Emit complete events based on block type
+                            match current_block_type.as_deref() {
+                                Some("thinking") => {
+                                    // Emit ReasoningComplete with Anthropic signature
+                                    let meta = current_thinking_signature
+                                        .take()
+                                        .map(|sig| Box::new(meerkat_core::ProviderMeta::Anthropic { signature: sig }));
+                                    yield LlmEvent::ReasoningComplete {
+                                        text: String::new(), // Text was already streamed via deltas
+                                        meta,
                                     };
                                 }
+                                Some("tool_use") => {
+                                    // Finalize tool call: assemble accumulated
+                                    // JSON args from deltas into a complete event.
+                                    if let Some(ref tool_id) = current_tool_id {
+                                        // Accumulate args from the buffer by
+                                        // reading the accumulated json string.
+                                        // The name was set in content_block_start
+                                        // and passed via the initial ToolCallDelta.
+                                        // We emit ToolCallComplete with the
+                                        // accumulated_tool_args (collected during
+                                        // input_json_delta events).
+                                        let args_str = accumulated_tool_args.clone();
+                                        let args_val: serde_json::Value = serde_json::from_str(&args_str)
+                                            .unwrap_or(serde_json::json!({}));
+                                        saw_event = true;
+                                        yield LlmEvent::ToolCallComplete {
+                                            id: tool_id.clone(),
+                                            name: current_tool_name.take().unwrap_or_default(),
+                                            args: args_val,
+                                            meta: None,
+                                        };
+                                        accumulated_tool_args.clear();
+                                    }
+                                    current_tool_id = None;
+                                }
+                                _ => {}
                             }
-                            "message_stop" => {
+                            current_block_type = None;
+                        }
+                        "message_delta" => {
+                            if let Some(usage_update) = $event.usage {
+                                merge_usage(&mut usage, &usage_update);
+                                saw_event = true;
+                                yield LlmEvent::UsageUpdate {
+                                    usage: usage.clone(),
+                                };
+                            }
+                            if let Some(finish_reason) = $event.delta.and_then(|d| d.stop_reason) {
+                                let reason = Self::map_stop_reason(finish_reason.as_str());
+                                last_stop_reason = Some(reason);
                                 if !saw_done {
-                                    let finish_reason = $event.delta.and_then(|d| d.stop_reason);
-                                    let reason = finish_reason
-                                        .as_deref()
-                                        .map(Self::map_stop_reason)
-                                        .or(last_stop_reason)
-                                        .unwrap_or(StopReason::EndTurn);
-                                    last_stop_reason = Some(reason);
                                     saw_event = true;
                                     yield LlmEvent::Done {
                                         outcome: LlmDoneOutcome::Success { stop_reason: reason },
@@ -734,102 +712,127 @@ impl LlmClient for AnthropicClient {
                                     saw_done = true;
                                 }
                             }
-                            "error" => {
-                                // Anthropic streaming error (e.g. overloaded_error mid-stream)
-                                let error_msg = $event.error
-                                    .as_ref()
-                                    .and_then(|e| e.get("message"))
-                                    .and_then(|m| m.as_str())
-                                    .unwrap_or("unknown streaming error");
-                                let error_type = $event.error
-                                    .as_ref()
-                                    .and_then(|e| e.get("type"))
-                                    .and_then(|t| t.as_str())
-                                    .unwrap_or("unknown");
-
-                                tracing::error!(
-                                    error_type,
-                                    error_msg,
-                                    "Anthropic streaming error"
-                                );
-
-                                let error = match error_type {
-                                    "overloaded_error" => LlmError::ServerOverloaded,
-                                    "rate_limit_error" => LlmError::RateLimited { retry_after_ms: None },
-                                    "api_error" => LlmError::ServerError {
-                                        status: 500,
-                                        message: error_msg.to_string(),
-                                    },
-                                    _ => LlmError::Unknown {
-                                        message: format!("{error_type}: {error_msg}"),
-                                    },
+                        }
+                        "message_start" => {
+                            if let Some(usage_update) = $event.message.and_then(|m| m.usage) {
+                                merge_usage(&mut usage, &usage_update);
+                                saw_event = true;
+                                yield LlmEvent::UsageUpdate {
+                                    usage: usage.clone(),
                                 };
+                            }
+                        }
+                        "message_stop" => {
+                            if !saw_done {
+                                let finish_reason = $event.delta.and_then(|d| d.stop_reason);
+                                let reason = finish_reason
+                                    .as_deref()
+                                    .map(Self::map_stop_reason)
+                                    .or(last_stop_reason)
+                                    .unwrap_or(StopReason::EndTurn);
+                                last_stop_reason = Some(reason);
+                                saw_event = true;
+                                yield LlmEvent::Done {
+                                    outcome: LlmDoneOutcome::Success { stop_reason: reason },
+                                };
+                                saw_done = true;
+                            }
+                        }
+                        "error" => {
+                            // Anthropic streaming error (e.g. overloaded_error mid-stream)
+                            let error_msg = $event.error
+                                .as_ref()
+                                .and_then(|e| e.get("message"))
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("unknown streaming error");
+                            let error_type = $event.error
+                                .as_ref()
+                                .and_then(|e| e.get("type"))
+                                .and_then(|t| t.as_str())
+                                .unwrap_or("unknown");
 
+                            tracing::error!(
+                                error_type,
+                                error_msg,
+                                "Anthropic streaming error"
+                            );
+
+                            let error = match error_type {
+                                "overloaded_error" => LlmError::ServerOverloaded,
+                                "rate_limit_error" => LlmError::RateLimited { retry_after_ms: None },
+                                "api_error" => LlmError::ServerError {
+                                    status: 500,
+                                    message: error_msg.to_string(),
+                                },
+                                _ => LlmError::Unknown {
+                                    message: format!("{error_type}: {error_msg}"),
+                                },
+                            };
+
+                            if !saw_done {
+                                saw_event = true;
+                                yield LlmEvent::Done {
+                                    outcome: LlmDoneOutcome::Error { error },
+                                };
+                                saw_done = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                };
+            }
+
+            macro_rules! handle_line {
+                ($line:expr) => {
+                    if !$line.is_empty() {
+                        if let Some(data) = Self::strip_data_prefix($line) {
+                            if data == "[DONE]" {
                                 if !saw_done {
+                                    let reason =
+                                        last_stop_reason.unwrap_or(StopReason::EndTurn);
                                     saw_event = true;
                                     yield LlmEvent::Done {
-                                        outcome: LlmDoneOutcome::Error { error },
+                                        outcome: LlmDoneOutcome::Success { stop_reason: reason },
                                     };
                                     saw_done = true;
                                 }
-                            }
-                            _ => {}
-                        }
-                    };
-                }
-
-                macro_rules! handle_line {
-                    ($line:expr) => {
-                        if !$line.is_empty() {
-                            if let Some(data) = Self::strip_data_prefix($line) {
-                                if data == "[DONE]" {
-                                    if !saw_done {
-                                        let reason =
-                                            last_stop_reason.unwrap_or(StopReason::EndTurn);
-                                        saw_event = true;
-                                        yield LlmEvent::Done {
-                                            outcome: LlmDoneOutcome::Success { stop_reason: reason },
-                                        };
-                                        saw_done = true;
-                                    }
-                                } else if let Some(event) = Self::parse_sse_line($line) {
-                                    handle_event!(event);
-                                }
+                            } else if let Some(event) = Self::parse_sse_line($line) {
+                                handle_event!(event);
                             }
                         }
-                    };
-                }
-
-                while let Some(chunk) = stream.next().await {
-                    let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
-                    buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-                    while let Some(newline_pos) = buffer.find('\n') {
-                        let line = buffer[..newline_pos].trim();
-                        handle_line!(line);
-                        buffer.drain(..=newline_pos);
                     }
-                }
+                };
+            }
 
-                if !buffer.is_empty() {
-                    for line in buffer.lines() {
-                        let line = line.trim();
-                        handle_line!(line);
-                    }
-                }
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
 
-                if !saw_done && saw_event {
-                    tracing::warn!(
-                        model = %request.model,
-                        "Anthropic stream ended without terminal event; emitting synthetic Done"
-                    );
-                    let reason = last_stop_reason.unwrap_or(StopReason::EndTurn);
-                    yield LlmEvent::Done {
-                        outcome: LlmDoneOutcome::Success { stop_reason: reason },
-                    };
+                while let Some(newline_pos) = buffer.find('\n') {
+                    let line = buffer[..newline_pos].trim();
+                    handle_line!(line);
+                    buffer.drain(..=newline_pos);
                 }
-            },
-        );
+            }
+
+            if !buffer.is_empty() {
+                for line in buffer.lines() {
+                    let line = line.trim();
+                    handle_line!(line);
+                }
+            }
+
+            if !saw_done && saw_event {
+                tracing::warn!(
+                    model = %request.model,
+                    "Anthropic stream ended without terminal event; emitting synthetic Done"
+                );
+                let reason = last_stop_reason.unwrap_or(StopReason::EndTurn);
+                yield LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success { stop_reason: reason },
+                };
+            }
+        });
 
         crate::streaming::ensure_terminal_done(inner)
     }

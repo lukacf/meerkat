@@ -1,4 +1,4 @@
-#![cfg(test)]
+#![allow(clippy::expect_used)] // Test utility — panics are acceptable
 
 use flate2::Compression;
 use flate2::write::GzEncoder;

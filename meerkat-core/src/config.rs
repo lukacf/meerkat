@@ -2,10 +2,12 @@
 //!
 //! Supports layered configuration: defaults → file → env (secrets only) → CLI
 
+use crate::mcp_config::McpServerConfig;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use crate::{
     budget::BudgetLimits,
     hooks::{HookCapability, HookExecutionMode, HookFailurePolicy, HookId, HookPoint},
-    mcp_config::McpServerConfig,
     provider::Provider,
     retry::RetryPolicy,
     types::{OutputSchema, SecurityMode},
@@ -86,7 +88,11 @@ impl Config {
     pub fn template() -> Result<Self, ConfigError> {
         toml::from_str(CONFIG_TEMPLATE_TOML).map_err(ConfigError::Parse)
     }
+}
 
+// File-system dependent methods — not available on wasm32.
+#[cfg(not(target_arch = "wasm32"))]
+impl Config {
     /// Load configuration from all sources with proper layering
     /// Order: defaults → project config OR global config → env vars (secrets only)
     /// → CLI (CLI applied separately)
@@ -171,13 +177,16 @@ impl Config {
 
         Ok(hooks)
     }
+}
 
+impl Config {
     /// Convert config limits into runtime budget limits.
     pub fn budget_limits(&self) -> BudgetLimits {
         self.limits.to_budget_limits()
     }
 
     /// Get global config path (~/.rkat/config.toml)
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn global_config_path() -> Option<PathBuf> {
         dirs::home_dir().map(|h| h.join(".rkat/config.toml"))
     }
@@ -187,6 +196,7 @@ impl Config {
     /// Only returns a path if both `.rkat/` directory AND `config.toml` exist.
     /// This allows `.rkat/` to be created for session storage without requiring
     /// a config file.
+    #[cfg(not(target_arch = "wasm32"))]
     async fn find_project_config_from(start_dir: &std::path::Path) -> Option<PathBuf> {
         let mut current = start_dir.to_path_buf();
         loop {
@@ -206,6 +216,7 @@ impl Config {
     }
 
     /// Merge configuration from a TOML file
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn merge_file(&mut self, path: &PathBuf) -> Result<(), ConfigError> {
         let content = tokio::fs::read_to_string(path).await?;
         self.merge_toml_str(&content)
@@ -465,6 +476,7 @@ impl Config {
     ///
     /// - Explicit CLI flags override scalar runtime knobs.
     /// - `override_config` applies RFC 7396 JSON merge-patch semantics.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn apply_cli_overrides(&mut self, cli: CliOverrides) {
         if let Some(model) = cli.model {
             self.agent.model = model;

@@ -2,8 +2,15 @@ use crate::error::MobError;
 use std::future::Future;
 use std::pin::Pin;
 
+#[cfg(not(target_arch = "wasm32"))]
 type RollbackFuture<'a> = Pin<Box<dyn Future<Output = Result<(), MobError>> + Send + 'a>>;
+#[cfg(not(target_arch = "wasm32"))]
 type RollbackAction<'a> = Box<dyn FnOnce() -> RollbackFuture<'a> + Send + 'a>;
+
+#[cfg(target_arch = "wasm32")]
+type RollbackFuture<'a> = Pin<Box<dyn Future<Output = Result<(), MobError>> + 'a>>;
+#[cfg(target_arch = "wasm32")]
+type RollbackAction<'a> = Box<dyn FnOnce() -> RollbackFuture<'a> + 'a>;
 
 /// Shared transactional rollback guard for lifecycle operations.
 ///
@@ -22,10 +29,21 @@ impl<'a> LifecycleRollback<'a> {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn defer<F, Fut>(&mut self, label: impl Into<String>, action: F)
     where
         F: FnOnce() -> Fut + Send + 'a,
         Fut: Future<Output = Result<(), MobError>> + Send + 'a,
+    {
+        self.actions
+            .push((label.into(), Box::new(move || Box::pin(action()))));
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(super) fn defer<F, Fut>(&mut self, label: impl Into<String>, action: F)
+    where
+        F: FnOnce() -> Fut + 'a,
+        Fut: Future<Output = Result<(), MobError>> + 'a,
     {
         self.actions
             .push((label.into(), Box::new(move || Box::pin(action()))));

@@ -10,7 +10,8 @@ use async_trait::async_trait;
 ///
 /// Implementations of this trait provide persistence for tasks.
 /// The trait is async to support both in-memory and file-based storage.
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait TaskStore: Send + Sync {
     /// List all tasks in the store
     async fn list(&self) -> Result<Vec<Task>, TaskError>;

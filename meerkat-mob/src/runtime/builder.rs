@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 
 // ---------------------------------------------------------------------------
 // MobBuilder
@@ -306,6 +308,7 @@ impl MobBuilder {
                     (
                         name.clone(),
                         actor::McpServerEntry {
+                            #[cfg(not(target_arch = "wasm32"))]
                             process: None,
                             running: false,
                         },
@@ -573,6 +576,7 @@ impl MobBuilder {
                     (
                         name.clone(),
                         actor::McpServerEntry {
+                            #[cfg(not(target_arch = "wasm32"))]
                             process: None,
                             running: false,
                         },

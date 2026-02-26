@@ -14,7 +14,8 @@ pub struct ProvisionMemberRequest {
     pub peer_name: String,
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait MobProvisioner: Send + Sync {
     async fn provision_member(&self, req: ProvisionMemberRequest) -> Result<MemberRef, MobError>;
     async fn retire_member(&self, member_ref: &MemberRef) -> Result<(), MobError>;
@@ -76,7 +77,8 @@ impl SubagentBackend {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MobProvisioner for SubagentBackend {
     async fn provision_member(&self, req: ProvisionMemberRequest) -> Result<MemberRef, MobError> {
         tracing::debug!(
@@ -274,7 +276,8 @@ impl MultiBackendProvisioner {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MobProvisioner for MultiBackendProvisioner {
     async fn provision_member(&self, req: ProvisionMemberRequest) -> Result<MemberRef, MobError> {
         match req.backend {

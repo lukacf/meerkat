@@ -2,6 +2,8 @@
 
 use crate::mcp::tools::{ToolContext, handle_tools_call, tools_list};
 use crate::runtime::CommsRuntime;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use crate::{Router, TrustedPeers};
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
@@ -56,7 +58,8 @@ impl<T: AgentToolDispatcher> CommsToolDispatcher<T> {
 
 pub struct NoOpDispatcher;
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AgentToolDispatcher for NoOpDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         Arc::from([])
@@ -90,7 +93,8 @@ pub fn comms_tool_defs() -> Vec<Arc<ToolDef>> {
         .collect()
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl<T: AgentToolDispatcher + 'static> AgentToolDispatcher for CommsToolDispatcher<T> {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         Arc::clone(&self.tool_defs)
@@ -145,7 +149,8 @@ impl DynCommsToolDispatcher {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AgentToolDispatcher for DynCommsToolDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         Arc::clone(&self.tool_defs)

@@ -4,11 +4,14 @@ use crate::budget::{Budget, BudgetLimits};
 use crate::config::{AgentConfig, HookRunOverrides};
 use crate::hooks::HookEngine;
 use crate::ops::ConcurrencyLimits;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::prompt::SystemPromptConfig;
 use crate::retry::RetryPolicy;
 use crate::session::Session;
 use crate::state::LoopState;
 use crate::sub_agent::SubAgentManager;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use crate::types::{Message, OutputSchema};
 use serde_json::Value;
 use std::sync::Arc;
@@ -193,7 +196,14 @@ impl AgentBuilder {
             session.set_system_prompt(prompt);
         } else if !has_system_prompt {
             // Only set default prompt for new sessions without an existing system prompt
-            session.set_system_prompt(SystemPromptConfig::new().compose().await);
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                session.set_system_prompt(SystemPromptConfig::new().compose().await);
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                session.set_system_prompt(String::new());
+            }
         }
 
         let budget = Budget::new(self.budget_limits.unwrap_or_default());
@@ -327,7 +337,8 @@ mod tests {
 
     struct MockClient;
 
-    #[async_trait]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl AgentLlmClient for MockClient {
         async fn stream_response(
             &self,
@@ -354,7 +365,8 @@ mod tests {
 
     struct MockTools;
 
-    #[async_trait]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl AgentToolDispatcher for MockTools {
         fn tools(&self) -> Arc<[Arc<ToolDef>]> {
             Arc::new([])
@@ -369,7 +381,8 @@ mod tests {
 
     struct MockStore;
 
-    #[async_trait]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl AgentSessionStore for MockStore {
         async fn save(&self, _session: &Session) -> Result<(), AgentError> {
             Ok(())

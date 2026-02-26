@@ -1,10 +1,11 @@
 //! Composite dispatcher that combines multiple dispatchers into one.
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::builtin::shell::{JobManager, ShellConfig};
 #[cfg(feature = "skills")]
 use crate::builtin::skills::SkillToolSet;
 use crate::builtin::store::TaskStore;
-#[cfg(feature = "sub-agents")]
+#[cfg(all(feature = "sub-agents", not(target_arch = "wasm32")))]
 use crate::builtin::sub_agent::SubAgentToolSet;
 use crate::builtin::{BuiltinTool, BuiltinToolConfig, BuiltinToolError};
 use async_trait::async_trait;
@@ -31,13 +32,14 @@ pub enum CompositeDispatcherError {
 /// A composite dispatcher that combines multiple sources of tools.
 pub struct CompositeDispatcher {
     builtin_tools: Vec<Arc<dyn BuiltinTool>>,
-    #[cfg(feature = "sub-agents")]
+    #[cfg(all(feature = "sub-agents", not(target_arch = "wasm32")))]
     sub_agent_tools: Option<SubAgentToolSet>,
     #[cfg(feature = "skills")]
     skill_tools: Option<SkillToolSet>,
     external: Option<Arc<dyn AgentToolDispatcher>>,
     #[allow(dead_code)]
     task_store: Arc<dyn TaskStore>,
+    #[cfg(not(target_arch = "wasm32"))]
     #[allow(dead_code)]
     job_manager: Option<Arc<JobManager>>,
     allowed_tools: HashSet<String>,
@@ -45,6 +47,7 @@ pub struct CompositeDispatcher {
 
 impl CompositeDispatcher {
     /// Create a new composite dispatcher with builtin tools.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new(
         task_store: Arc<dyn TaskStore>,
         config: &BuiltinToolConfig,
@@ -116,8 +119,55 @@ impl CompositeDispatcher {
         })
     }
 
+    /// Create a new composite dispatcher with builtin tools (wasm32 version, no shell).
+    #[cfg(target_arch = "wasm32")]
+    pub fn new_wasm(
+        task_store: Arc<dyn TaskStore>,
+        config: &BuiltinToolConfig,
+        external: Option<Arc<dyn AgentToolDispatcher>>,
+        session_id: Option<String>,
+    ) -> Result<Self, CompositeDispatcherError> {
+        let mut builtin_tools: Vec<Arc<dyn BuiltinTool>> = Vec::new();
+
+        // Add task tools
+        use crate::builtin::tasks::{TaskCreateTool, TaskGetTool, TaskListTool, TaskUpdateTool};
+        builtin_tools.push(Arc::new(TaskListTool::new(task_store.clone())));
+        builtin_tools.push(Arc::new(TaskGetTool::new(task_store.clone())));
+        builtin_tools.push(Arc::new(TaskCreateTool::with_session_opt(
+            task_store.clone(),
+            session_id.clone(),
+        )));
+        builtin_tools.push(Arc::new(TaskUpdateTool::with_session_opt(
+            task_store.clone(),
+            session_id,
+        )));
+
+        // Add utility tools
+        use crate::builtin::utility::{DateTimeTool, WaitTool};
+        builtin_tools.push(Arc::new(WaitTool::new()));
+        builtin_tools.push(Arc::new(DateTimeTool::new()));
+
+        let mut allowed_tools = HashSet::new();
+        let resolved_policy = config.resolve();
+        for tool in &builtin_tools {
+            let name = tool.name().to_string();
+            if resolved_policy.is_enabled(&name, tool.default_enabled()) {
+                allowed_tools.insert(name);
+            }
+        }
+
+        Ok(Self {
+            builtin_tools,
+            #[cfg(feature = "skills")]
+            skill_tools: None,
+            external,
+            task_store,
+            allowed_tools,
+        })
+    }
+
     /// Register sub-agent tools.
-    #[cfg(feature = "sub-agents")]
+    #[cfg(all(feature = "sub-agents", not(target_arch = "wasm32")))]
     pub fn register_sub_agent_tools(
         &mut self,
         tool_set: SubAgentToolSet,
@@ -188,7 +238,8 @@ impl CompositeDispatcher {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AgentToolDispatcher for CompositeDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         let mut tools = Vec::new();
@@ -203,7 +254,7 @@ impl AgentToolDispatcher for CompositeDispatcher {
         }
 
         // Add allowed sub-agent tools
-        #[cfg(feature = "sub-agents")]
+        #[cfg(all(feature = "sub-agents", not(target_arch = "wasm32")))]
         if let Some(ref sub) = self.sub_agent_tools {
             for tool in sub.tools() {
                 if self.allowed_tools.contains(tool.name()) {
@@ -283,7 +334,7 @@ impl AgentToolDispatcher for CompositeDispatcher {
         }
 
         // Check sub-agent tools
-        #[cfg(feature = "sub-agents")]
+        #[cfg(all(feature = "sub-agents", not(target_arch = "wasm32")))]
         if let Some(ref sub) = self.sub_agent_tools {
             for tool in sub.tools() {
                 if tool.name() == call.name {

@@ -5,6 +5,7 @@
 
 use crate::error::AgentError;
 use crate::types::{BlockAssistantMessage, Message, RunResult, UserMessage};
+#[cfg(feature = "jsonschema")]
 use jsonschema::Validator;
 use serde_json::{Value, json};
 
@@ -36,7 +37,8 @@ where
             .compile_schema(output_schema)
             .map_err(|e| AgentError::InvalidOutputSchema(e.to_string()))?;
 
-        // Build the JSON schema validator
+        // Build the JSON schema validator (not available on wasm32)
+        #[cfg(feature = "jsonschema")]
         let validator = Validator::new(&compiled.schema)
             .map_err(|e| AgentError::InvalidOutputSchema(e.to_string()))?;
 
@@ -108,26 +110,36 @@ where
 
             match serde_json::from_str::<Value>(json_content) {
                 Ok(parsed) => {
-                    // Validate against schema
-                    match validator.validate(&parsed) {
-                        Ok(()) => {
-                            // Success! Return with structured output
-                            return Ok(RunResult {
-                                text: self.session.last_assistant_text().unwrap_or_default(),
-                                session_id: self.session.id().clone(),
-                                usage: self.session.total_usage(),
-                                turns: turn_count + 1 + attempt + 1, // Include extraction attempts
-                                tool_calls: tool_call_count,
-                                structured_output: Some(parsed),
-                                schema_warnings: schema_warnings.clone(),
-                                skill_diagnostics: None,
-                            });
-                        }
-                        Err(error) => {
-                            // Collect validation errors
-                            last_error = format!("Schema validation failed: {}", error);
+                    // Validate against schema (when jsonschema is available)
+                    #[cfg(feature = "jsonschema")]
+                    {
+                        match validator.validate(&parsed) {
+                            Ok(()) => {}
+                            Err(error) => {
+                                last_error = format!("Schema validation failed: {}", error);
+                                continue;
+                            }
                         }
                     }
+                    #[cfg(not(feature = "jsonschema"))]
+                    {
+                        tracing::warn!(
+                            "Structured output schema validation unavailable \
+                             (jsonschema feature disabled). Accepting parsed JSON without \
+                             schema validation."
+                        );
+                    }
+                    // Success! Return with structured output
+                    return Ok(RunResult {
+                        text: self.session.last_assistant_text().unwrap_or_default(),
+                        session_id: self.session.id().clone(),
+                        usage: self.session.total_usage(),
+                        turns: turn_count + 1 + attempt + 1,
+                        tool_calls: tool_call_count,
+                        structured_output: Some(parsed),
+                        schema_warnings: schema_warnings.clone(),
+                        skill_diagnostics: None,
+                    });
                 }
                 Err(e) => {
                     last_error = format!("Invalid JSON: {}", e);

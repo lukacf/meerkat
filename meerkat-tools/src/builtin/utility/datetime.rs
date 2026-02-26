@@ -25,7 +25,8 @@ impl Default for DateTimeTool {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl BuiltinTool for DateTimeTool {
     fn name(&self) -> &'static str {
         "datetime"
@@ -44,7 +45,7 @@ impl BuiltinTool for DateTimeTool {
     }
 
     async fn call(&self, _args: Value) -> Result<Value, BuiltinToolError> {
-        use std::time::{SystemTime, UNIX_EPOCH};
+        use meerkat_core::time_compat::{SystemTime, UNIX_EPOCH};
 
         let now = SystemTime::now();
         let unix_timestamp = now

@@ -8,6 +8,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
 flate2 = "1.0"
 tar = "0.4"
 toml = "0.8"

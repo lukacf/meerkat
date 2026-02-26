@@ -18,22 +18,32 @@ serde_json = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
 toml = { workspace = true }
 dirs = { workspace = true }
 humantime-serde = { workspace = true }
-jsonschema = { workspace = true }
+jsonschema = { workspace = true, optional = true }
 schemars = { workspace = true }
 strum = { workspace = true }
 indexmap = { version = "2", features = ["serde"] }
 parking_lot = { workspace = true }
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio_with_wasm = { workspace = true }
+js-sys = "0.3"
+web-time = { version = "1", features = ["serde"] }
+getrandom = { version = "0.3", features = ["wasm_js"] }
+uuid = { version = "1.11", features = ["v4", "v7", "serde", "js"] }
+
 [features]
-default = ["schema"]
+default = ["schema", "jsonschema"]
 schema = []
+jsonschema = ["dep:jsonschema"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

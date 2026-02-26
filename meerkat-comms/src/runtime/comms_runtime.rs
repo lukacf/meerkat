@@ -1,11 +1,13 @@
 //! CommsRuntime - Full lifecycle manager for agent-to-agent communication.
 
+#[cfg(not(target_arch = "wasm32"))]
 use super::comms_config::ResolvedCommsConfig;
 use crate::agent::types::{CommsContent, CommsMessage};
-use crate::{
-    InboxSender, InprocRegistry, Keypair, PubKey, Router, TrustedPeer, TrustedPeers,
-    handle_connection,
-};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::handle_connection;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
+use crate::{InboxSender, InprocRegistry, Keypair, PubKey, Router, TrustedPeer, TrustedPeers};
 use async_trait::async_trait;
 use futures::Stream;
 use futures::task::{Context, Poll};
@@ -15,6 +17,7 @@ use meerkat_core::comms::{
     SendAndStreamError, SendError, SendReceipt, StreamError, StreamScope, TrustedPeerSpec,
 };
 use meerkat_core::config::PlainEventSource;
+use meerkat_core::time_compat::Instant;
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 #[cfg(unix)]
@@ -23,11 +26,13 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::net::TcpListener;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Receiver;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -57,14 +62,15 @@ impl ReservationState {
 }
 
 /// Default reservation TTL (time from Reserved to Expired if not attached).
-const RESERVATION_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+const RESERVATION_TTL: meerkat_core::time_compat::Duration =
+    meerkat_core::time_compat::Duration::from_secs(30);
 
 #[derive(Debug)]
 struct StreamRegistryEntry {
     state: ReservationState,
     _sender: mpsc::Sender<meerkat_core::AgentEvent>,
     receiver: Option<Receiver<meerkat_core::AgentEvent>>,
-    created_at: std::time::Instant,
+    created_at: Instant,
 }
 
 impl StreamRegistryEntry {
@@ -76,7 +82,7 @@ impl StreamRegistryEntry {
             state: ReservationState::Reserved,
             _sender: sender,
             receiver: Some(receiver),
-            created_at: std::time::Instant::now(),
+            created_at: Instant::now(),
         }
     }
 
@@ -155,7 +161,8 @@ fn is_dismiss(msg: &CommsMessage) -> bool {
     matches!(&msg.content, CommsContent::Message { body } if body.trim().eq_ignore_ascii_case("DISMISS"))
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl CoreCommsRuntime for CommsRuntime {
     async fn drain_messages(&self) -> Vec<String> {
         let mut inbox = self.inbox.lock().await;
@@ -640,8 +647,17 @@ pub struct CommsRuntime {
     trusted_peers: Arc<RwLock<TrustedPeers>>,
     inbox: Arc<AsyncMutex<crate::Inbox>>,
     inbox_notify: Arc<tokio::sync::Notify>,
+    #[cfg(not(target_arch = "wasm32"))]
     config: ResolvedCommsConfig,
+    /// Participant name (wasm32-only; on native this comes from `config.name`).
+    #[cfg(target_arch = "wasm32")]
+    name: String,
+    /// Inproc namespace (wasm32-only; on native this comes from `config.inproc_namespace`).
+    #[cfg(target_arch = "wasm32")]
+    inproc_namespace: Option<String>,
+    #[cfg(not(target_arch = "wasm32"))]
     listener_handles: Vec<ListenerHandle>,
+    #[cfg(not(target_arch = "wasm32"))]
     listeners_started: bool,
     keypair: Arc<Keypair>,
     require_peer_auth: bool,
@@ -651,6 +667,7 @@ pub struct CommsRuntime {
 }
 
 impl CommsRuntime {
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn new(config: ResolvedCommsConfig) -> Result<Self, CommsRuntimeError> {
         // Always load keypair and trusted peers — outbound routing needs them
         // regardless of auth mode. The auth mode only affects the external
@@ -711,6 +728,7 @@ impl CommsRuntime {
         let (inbox, inbox_sender) = crate::Inbox::new();
         let inbox_notify = inbox.notify();
         let comms_config = crate::CommsConfig::default();
+        #[cfg(not(target_arch = "wasm32"))]
         let config = ResolvedCommsConfig {
             enabled: true,
             name: name.to_string(),
@@ -741,8 +759,15 @@ impl CommsRuntime {
             trusted_peers,
             inbox: Arc::new(AsyncMutex::new(inbox)),
             inbox_notify,
+            #[cfg(not(target_arch = "wasm32"))]
             config,
+            #[cfg(target_arch = "wasm32")]
+            name: name.to_string(),
+            #[cfg(target_arch = "wasm32")]
+            inproc_namespace: namespace.clone(),
+            #[cfg(not(target_arch = "wasm32"))]
             listener_handles: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
             listeners_started: false,
             keypair: Arc::new(keypair),
             require_peer_auth: true,
@@ -761,13 +786,28 @@ impl CommsRuntime {
     }
 
     pub fn participant_name(&self) -> &str {
-        &self.config.name
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            &self.config.name
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            &self.name
+        }
     }
 
     pub fn inproc_namespace(&self) -> Option<&str> {
-        self.config.inproc_namespace.as_deref()
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.config.inproc_namespace.as_deref()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.inproc_namespace.as_deref()
+        }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn advertised_address(&self) -> String {
         if let Some(ref uds) = self.config.listen_uds {
             return format!("uds://{}", uds.display());
@@ -778,6 +818,7 @@ impl CommsRuntime {
         format!("inproc://{}", self.config.name)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn start_listeners(&mut self) -> Result<(), CommsRuntimeError> {
         if self.listeners_started {
             return Err(CommsRuntimeError::AlreadyStarted);
@@ -866,8 +907,8 @@ impl CommsRuntime {
     /// deliveries are unaffected.
     pub fn set_peer_meta(&self, meta: crate::PeerMeta) {
         InprocRegistry::global().register_with_meta_in_namespace(
-            self.config.inproc_namespace.as_deref().unwrap_or(""),
-            &self.config.name,
+            self.inproc_namespace().unwrap_or(""),
+            self.participant_name(),
             self.public_key,
             self.router.inbox_sender().clone(),
             meta,
@@ -910,13 +951,14 @@ impl CommsRuntime {
     where
         F: FnMut(ResolvedPeer),
     {
-        let inproc_peers = InprocRegistry::global()
-            .peers_in_namespace(self.config.inproc_namespace.as_deref().unwrap_or(""));
+        let inproc_peers =
+            InprocRegistry::global().peers_in_namespace(self.inproc_namespace().unwrap_or(""));
         let inproc_by_name: std::collections::HashMap<String, crate::identity::PubKey> =
             inproc_peers
                 .iter()
                 .map(|p| (p.name.clone(), p.pubkey))
                 .collect();
+        let participant_name = self.participant_name().to_string();
         let mut trusted_names = HashSet::new();
         let mut trusted_pubkeys = HashSet::new();
         let mut emitted = 0usize;
@@ -924,7 +966,7 @@ impl CommsRuntime {
         {
             let trusted = self.trusted_peers.read().await;
             for peer in &trusted.peers {
-                if peer.name == self.config.name || peer.pubkey == self.public_key {
+                if peer.name == participant_name || peer.pubkey == self.public_key {
                     continue;
                 }
                 trusted_names.insert(peer.name.clone());
@@ -959,7 +1001,7 @@ impl CommsRuntime {
             }
         }
 
-        if self.config.require_peer_auth {
+        if self.require_peer_auth {
             return emitted;
         }
 
@@ -979,7 +1021,7 @@ impl CommsRuntime {
             if trusted_names.contains(name.as_str()) || trusted_pubkeys.contains(&inproc.pubkey) {
                 continue;
             }
-            if peer_name_str == self.config.name || inproc.pubkey == self.public_key {
+            if peer_name_str == participant_name || inproc.pubkey == self.public_key {
                 continue;
             }
             on_peer(ResolvedPeer {
@@ -1134,26 +1176,30 @@ impl CommsRuntime {
     }
 
     pub fn shutdown(&mut self) {
-        for handle in self.listener_handles.drain(..) {
-            handle.abort();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            for handle in self.listener_handles.drain(..) {
+                handle.abort();
+            }
+            self.listeners_started = false;
         }
-        self.listeners_started = false;
     }
 }
 
 impl Drop for CommsRuntime {
     fn drop(&mut self) {
         self.shutdown();
-        InprocRegistry::global().unregister_in_namespace(
-            self.config.inproc_namespace.as_deref().unwrap_or(""),
-            &self.public_key,
-        );
+        InprocRegistry::global()
+            .unregister_in_namespace(self.inproc_namespace().unwrap_or(""), &self.public_key);
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub struct ListenerHandle {
     handle: JoinHandle<()>,
 }
+
+#[cfg(not(target_arch = "wasm32"))]
 impl ListenerHandle {
     pub fn abort(&self) {
         self.handle.abort();
@@ -1199,6 +1245,7 @@ async fn spawn_uds_listener(
     Ok(ListenerHandle { handle })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 async fn spawn_tcp_listener(
     addr: &str,
     keypair: Arc<Keypair>,
@@ -1228,8 +1275,10 @@ async fn spawn_tcp_listener(
 }
 
 /// Max concurrent connections for the plain listener (DoS protection).
+#[cfg(not(target_arch = "wasm32"))]
 const PLAIN_LISTENER_MAX_CONCURRENT: usize = 64;
 
+#[cfg(not(target_arch = "wasm32"))]
 async fn spawn_plain_tcp_listener(
     addr: &str,
     inbox_sender: InboxSender,
@@ -1299,7 +1348,7 @@ async fn spawn_plain_uds_listener(
     Ok(ListenerHandle { handle })
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
@@ -2180,7 +2229,7 @@ mod tests {
         let (sender, receiver) = mpsc::channel::<meerkat_core::AgentEvent>(16);
         {
             let mut entry = StreamRegistryEntry::reserved(sender, receiver);
-            entry.created_at = std::time::Instant::now() - std::time::Duration::from_secs(60);
+            entry.created_at = Instant::now() - meerkat_core::time_compat::Duration::from_secs(60);
             runtime.interaction_stream_registry.lock().insert(id, entry);
         }
 

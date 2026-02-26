@@ -16,11 +16,31 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
 flate2 = "1.0"
 tar = "0.4"
 toml = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+tracing = { workspace = true }
+meerkat-core = { workspace = true, features = ["jsonschema"] }
+meerkat-client = { workspace = true, features = ["anthropic", "openai", "gemini"] }
+meerkat-store = { workspace = true, features = ["memory"] }
+meerkat-tools = { workspace = true, default-features = false }
+meerkat-session = { workspace = true }
+meerkat-hooks = { workspace = true }
+meerkat-comms = { workspace = true }
+meerkat-mob = { workspace = true }
+meerkat-mob-mcp = { workspace = true }
+meerkat = { workspace = true, features = ["comms", "memory-store", "anthropic", "openai", "gemini"] }
+async-trait = { workspace = true }
+futures = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio_with_wasm = { workspace = true }
+getrandom = { version = "0.3", features = ["wasm_js"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
 
 [lints]
 workspace = true

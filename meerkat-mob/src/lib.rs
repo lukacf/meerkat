@@ -29,6 +29,12 @@
     )
 )]
 
+// On wasm32, use tokio_with_wasm as a drop-in replacement for tokio.
+#[cfg(target_arch = "wasm32")]
+pub mod tokio {
+    pub use tokio_with_wasm::alias::*;
+}
+
 pub mod backend;
 pub mod build;
 pub mod definition;
@@ -70,8 +76,10 @@ pub use spec::SpecValidator;
 pub use storage::MobStorage;
 pub use store::{
     InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobSpecStore, MobEventStore, MobRunStore,
-    MobSpecStore, RedbMobEventStore, RedbMobRunStore, RedbMobSpecStore, RedbMobStores,
+    MobSpecStore,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use store::{RedbMobEventStore, RedbMobRunStore, RedbMobSpecStore, RedbMobStores};
 pub use tasks::{MobTask, TaskBoard, TaskStatus};
 pub use validate::{
     Diagnostic, DiagnosticCode, DiagnosticSeverity, partition_diagnostics, validate_definition,

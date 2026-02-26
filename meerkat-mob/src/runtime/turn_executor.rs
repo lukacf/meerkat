@@ -1,5 +1,7 @@
 use crate::error::MobError;
 use crate::ids::{MeerkatId, RunId, StepId};
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use async_trait::async_trait;
 use std::fmt;
 use std::sync::Arc;
@@ -39,7 +41,8 @@ pub enum TimeoutDisposition {
     Canceled,
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait FlowTurnExecutor: Send + Sync {
     async fn dispatch(
         &self,

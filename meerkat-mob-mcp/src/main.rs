@@ -1,92 +1,109 @@
-use serde_json::{Value, json};
-use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
+// The binary target is native-only; wasm-pack only builds the lib target.
+// Gate the entire file behind cfg(not(wasm32)) so `cargo check --target wasm32-unknown-unknown`
+// can compile the bin target as an empty stub.
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let state = meerkat_mob_mcp::MobMcpState::new_in_memory();
-    eprintln!("rkat-mob-mcp starting (stdio json-rpc)");
+#[cfg(not(target_arch = "wasm32"))]
+mod app {
+    use serde_json::{Value, json};
+    use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
-    let mut reader = BufReader::new(stdin).lines();
+    pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
+        let state = meerkat_mob_mcp::MobMcpState::new_in_memory();
+        eprintln!("rkat-mob-mcp starting (stdio json-rpc)");
 
-    while let Some(line) = reader.next_line().await? {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
+        let stdin = io::stdin();
+        let mut stdout = io::stdout();
+        let mut reader = BufReader::new(stdin).lines();
 
-        let request: Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(e) => {
-                let error = json!({
-                    "jsonrpc": "2.0",
-                    "id": null,
-                    "error": {"code": -32700, "message": format!("Parse error: {e}")}
-                });
-                stdout.write_all(format!("{error}\n").as_bytes()).await?;
-                stdout.flush().await?;
+        while let Some(line) = reader.next_line().await? {
+            let line = line.trim();
+            if line.is_empty() {
                 continue;
             }
-        };
 
-        if request.get("id").is_none() {
-            continue;
+            let request: Value = match serde_json::from_str(line) {
+                Ok(v) => v,
+                Err(e) => {
+                    let error = json!({
+                        "jsonrpc": "2.0",
+                        "id": null,
+                        "error": {"code": -32700, "message": format!("Parse error: {e}")}
+                    });
+                    stdout.write_all(format!("{error}\n").as_bytes()).await?;
+                    stdout.flush().await?;
+                    continue;
+                }
+            };
+
+            if request.get("id").is_none() {
+                continue;
+            }
+
+            let response = handle_request(&state, &request).await;
+            stdout.write_all(format!("{response}\n").as_bytes()).await?;
+            stdout.flush().await?;
         }
 
-        let response = handle_request(&state, &request).await;
-        stdout.write_all(format!("{response}\n").as_bytes()).await?;
-        stdout.flush().await?;
+        Ok(())
     }
 
-    Ok(())
-}
+    async fn handle_request(
+        state: &std::sync::Arc<meerkat_mob_mcp::MobMcpState>,
+        request: &Value,
+    ) -> Value {
+        let id = request.get("id").cloned().unwrap_or(Value::Null);
+        let method = request.get("method").and_then(Value::as_str).unwrap_or("");
 
-async fn handle_request(
-    state: &std::sync::Arc<meerkat_mob_mcp::MobMcpState>,
-    request: &Value,
-) -> Value {
-    let id = request.get("id").cloned().unwrap_or(Value::Null);
-    let method = request.get("method").and_then(Value::as_str).unwrap_or("");
-
-    match method {
-        "initialize" => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": { "tools": {} },
-                "serverInfo": {"name": "rkat-mob-mcp", "version": env!("CARGO_PKG_VERSION")}
-            }
-        }),
-        "ping" => json!({"jsonrpc": "2.0", "id": id, "result": {}}),
-        "tools/list" => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": { "tools": meerkat_mob_mcp::tools_list() }
-        }),
-        "tools/call" => {
-            let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
-            let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-            let arguments = params
-                .get("arguments")
-                .cloned()
-                .unwrap_or_else(|| json!({}));
-            match meerkat_mob_mcp::handle_tools_call(state, name, &arguments).await {
-                Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
-                Err(err) => {
-                    let mut e = json!({"code": err.code, "message": err.message});
-                    if let Some(data) = err.data {
-                        e["data"] = data;
+        match method {
+            "initialize" => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": { "tools": {} },
+                    "serverInfo": {"name": "rkat-mob-mcp", "version": env!("CARGO_PKG_VERSION")}
+                }
+            }),
+            "ping" => json!({"jsonrpc": "2.0", "id": id, "result": {}}),
+            "tools/list" => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": { "tools": meerkat_mob_mcp::tools_list() }
+            }),
+            "tools/call" => {
+                let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
+                let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+                let arguments = params
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                match meerkat_mob_mcp::handle_tools_call(state, name, &arguments).await {
+                    Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
+                    Err(err) => {
+                        let mut e = json!({"code": err.code, "message": err.message});
+                        if let Some(data) = err.data {
+                            e["data"] = data;
+                        }
+                        json!({"jsonrpc": "2.0", "id": id, "error": e})
                     }
-                    json!({"jsonrpc": "2.0", "id": id, "error": e})
                 }
             }
+            _ => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {"code": -32601, "message": format!("Method not found: {method}")}
+            }),
         }
-        _ => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": {"code": -32601, "message": format!("Method not found: {method}")}
-        }),
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    app::run().await
+}
+
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    // Binary target is not used on wasm32; only the lib target is relevant.
 }

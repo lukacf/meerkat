@@ -10,6 +10,8 @@ use crate::ops::{
 use crate::retry::RetryPolicy;
 use crate::session::Session;
 use crate::state::LoopState;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use crate::types::{Message, RunResult};
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -50,7 +52,8 @@ fn spawn_scoped_forwarder(
 }
 
 /// Minimal runner interface for an Agent.
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait AgentRunner: Send {
     async fn run(&mut self, prompt: String) -> Result<RunResult, AgentError>;
 
@@ -186,7 +189,7 @@ where
 
         // Spawn the sub-agent in a background task
         tokio::spawn(async move {
-            let start = std::time::Instant::now();
+            let start = crate::time_compat::Instant::now();
 
             // Build sub-agent with filtered tools
             let mut sub_agent = AgentBuilder::new()
@@ -341,7 +344,7 @@ where
 
             // Spawn the branch in a background task
             tokio::spawn(async move {
-                let start = std::time::Instant::now();
+                let start = crate::time_compat::Instant::now();
 
                 // Build sub-agent for this branch with filtered tools
                 let mut sub_agent = AgentBuilder::new()

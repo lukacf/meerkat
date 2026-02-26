@@ -4,6 +4,8 @@
 //! Lives in `meerkat-core` following the `McpServerConfig` precedent.
 //! Resolution logic is in `meerkat-skills::resolve`.
 
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -175,6 +177,7 @@ pub enum SkillsConfigError {
 // Config loading
 // ---------------------------------------------------------------------------
 
+#[cfg(not(target_arch = "wasm32"))]
 impl SkillsConfig {
     /// Load from user + project config, project wins.
     pub async fn load() -> Result<Self, SkillsConfigError> {
@@ -201,7 +204,9 @@ impl SkillsConfig {
             project_has_file,
         ))
     }
+}
 
+impl SkillsConfig {
     /// Build a source identity registry from repository config + governance overlays.
     pub fn build_source_identity_registry(&self) -> Result<SourceIdentityRegistry, SkillError> {
         let records = self
@@ -263,6 +268,7 @@ fn repository_fingerprint(repo: &SkillRepositoryConfig) -> String {
     fp
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 async fn read_skills_file(path: Option<&Path>) -> Result<Option<SkillsConfig>, SkillsConfigError> {
     let Some(path) = path else {
         return Ok(None);

@@ -2,11 +2,14 @@
 
 pub mod composite;
 pub mod embedded;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod filesystem;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod git;
-#[cfg(any(feature = "skills-http", test))]
+#[cfg(all(any(feature = "skills-http", test), not(target_arch = "wasm32")))]
 pub mod http;
 pub mod memory;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod protocol;
 
 use meerkat_core::skills::{
@@ -17,20 +20,25 @@ use meerkat_core::skills::{
 
 pub use composite::{CompositeSkillSource, NamedSource};
 pub use embedded::EmbeddedSkillSource;
+#[cfg(not(target_arch = "wasm32"))]
 pub use filesystem::FilesystemSkillSource;
-#[cfg(any(feature = "skills-http", test))]
+#[cfg(all(any(feature = "skills-http", test), not(target_arch = "wasm32")))]
 pub use http::HttpSkillSource;
 pub use memory::InMemorySkillSource;
+#[cfg(not(target_arch = "wasm32"))]
 pub use protocol::{ExternalSkillSource, StdioExternalClient};
 
 /// Typed source composition node for built-ins + bounded external seam.
 pub enum SourceNode {
     Embedded(EmbeddedSkillSource),
+    #[cfg(not(target_arch = "wasm32"))]
     Filesystem(FilesystemSkillSource),
+    #[cfg(not(target_arch = "wasm32"))]
     Git(Box<git::GitSkillSource>),
     Memory(InMemorySkillSource),
-    #[cfg(any(feature = "skills-http", test))]
+    #[cfg(all(any(feature = "skills-http", test), not(target_arch = "wasm32")))]
     Http(Box<HttpSkillSource>),
+    #[cfg(not(target_arch = "wasm32"))]
     External(ExternalSkillSource<StdioExternalClient>),
 }
 
@@ -41,11 +49,14 @@ impl SkillSource for SourceNode {
     ) -> Result<Vec<SkillDescriptor>, meerkat_core::skills::SkillError> {
         match self {
             Self::Embedded(source) => source.list(filter).await,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Filesystem(source) => source.list(filter).await,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Git(source) => source.list(filter).await,
             Self::Memory(source) => source.list(filter).await,
-            #[cfg(any(feature = "skills-http", test))]
+            #[cfg(all(any(feature = "skills-http", test), not(target_arch = "wasm32")))]
             Self::Http(source) => source.list(filter).await,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::External(source) => source.list(filter).await,
         }
     }
@@ -53,11 +64,14 @@ impl SkillSource for SourceNode {
     async fn load(&self, id: &SkillId) -> Result<SkillDocument, meerkat_core::skills::SkillError> {
         match self {
             Self::Embedded(source) => source.load(id).await,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Filesystem(source) => source.load(id).await,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Git(source) => source.load(id).await,
             Self::Memory(source) => source.load(id).await,
-            #[cfg(any(feature = "skills-http", test))]
+            #[cfg(all(any(feature = "skills-http", test), not(target_arch = "wasm32")))]
             Self::Http(source) => source.load(id).await,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::External(source) => source.load(id).await,
         }
     }
@@ -65,11 +79,14 @@ impl SkillSource for SourceNode {
     async fn collections(&self) -> Result<Vec<SkillCollection>, meerkat_core::skills::SkillError> {
         match self {
             Self::Embedded(source) => source.collections().await,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Filesystem(source) => source.collections().await,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Git(source) => source.collections().await,
             Self::Memory(source) => source.collections().await,
-            #[cfg(any(feature = "skills-http", test))]
+            #[cfg(all(any(feature = "skills-http", test), not(target_arch = "wasm32")))]
             Self::Http(source) => source.collections().await,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::External(source) => source.collections().await,
         }
     }
@@ -79,11 +96,14 @@ impl SkillSource for SourceNode {
     ) -> Result<Vec<SkillQuarantineDiagnostic>, meerkat_core::skills::SkillError> {
         match self {
             Self::Embedded(source) => source.quarantined_diagnostics().await,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Filesystem(source) => source.quarantined_diagnostics().await,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Git(source) => source.quarantined_diagnostics().await,
             Self::Memory(source) => source.quarantined_diagnostics().await,
-            #[cfg(any(feature = "skills-http", test))]
+            #[cfg(all(any(feature = "skills-http", test), not(target_arch = "wasm32")))]
             Self::Http(source) => source.quarantined_diagnostics().await,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::External(source) => source.quarantined_diagnostics().await,
         }
     }
@@ -93,11 +113,14 @@ impl SkillSource for SourceNode {
     ) -> Result<SourceHealthSnapshot, meerkat_core::skills::SkillError> {
         match self {
             Self::Embedded(source) => source.health_snapshot().await,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Filesystem(source) => source.health_snapshot().await,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Git(source) => source.health_snapshot().await,
             Self::Memory(source) => source.health_snapshot().await,
-            #[cfg(any(feature = "skills-http", test))]
+            #[cfg(all(any(feature = "skills-http", test), not(target_arch = "wasm32")))]
             Self::Http(source) => source.health_snapshot().await,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::External(source) => source.health_snapshot().await,
         }
     }
@@ -108,11 +131,14 @@ impl SkillSource for SourceNode {
     ) -> Result<Vec<SkillArtifact>, meerkat_core::skills::SkillError> {
         match self {
             Self::Embedded(source) => source.list_artifacts(id).await,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Filesystem(source) => source.list_artifacts(id).await,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Git(source) => source.list_artifacts(id).await,
             Self::Memory(source) => source.list_artifacts(id).await,
-            #[cfg(any(feature = "skills-http", test))]
+            #[cfg(all(any(feature = "skills-http", test), not(target_arch = "wasm32")))]
             Self::Http(source) => source.list_artifacts(id).await,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::External(source) => source.list_artifacts(id).await,
         }
     }
@@ -124,11 +150,14 @@ impl SkillSource for SourceNode {
     ) -> Result<SkillArtifactContent, meerkat_core::skills::SkillError> {
         match self {
             Self::Embedded(source) => source.read_artifact(id, artifact_path).await,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Filesystem(source) => source.read_artifact(id, artifact_path).await,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Git(source) => source.read_artifact(id, artifact_path).await,
             Self::Memory(source) => source.read_artifact(id, artifact_path).await,
-            #[cfg(any(feature = "skills-http", test))]
+            #[cfg(all(any(feature = "skills-http", test), not(target_arch = "wasm32")))]
             Self::Http(source) => source.read_artifact(id, artifact_path).await,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::External(source) => source.read_artifact(id, artifact_path).await,
         }
     }
@@ -141,11 +170,14 @@ impl SkillSource for SourceNode {
     ) -> Result<serde_json::Value, meerkat_core::skills::SkillError> {
         match self {
             Self::Embedded(source) => source.invoke_function(id, function_name, arguments).await,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Filesystem(source) => source.invoke_function(id, function_name, arguments).await,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Git(source) => source.invoke_function(id, function_name, arguments).await,
             Self::Memory(source) => source.invoke_function(id, function_name, arguments).await,
-            #[cfg(any(feature = "skills-http", test))]
+            #[cfg(all(any(feature = "skills-http", test), not(target_arch = "wasm32")))]
             Self::Http(source) => source.invoke_function(id, function_name, arguments).await,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::External(source) => source.invoke_function(id, function_name, arguments).await,
         }
     }
@@ -156,11 +188,14 @@ impl SkillSource for SourceNode {
     ) -> Result<Vec<SkillIntrospectionEntry>, meerkat_core::skills::SkillError> {
         match self {
             Self::Embedded(source) => source.list_all_with_provenance(filter).await,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Filesystem(source) => source.list_all_with_provenance(filter).await,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Git(source) => source.list_all_with_provenance(filter).await,
             Self::Memory(source) => source.list_all_with_provenance(filter).await,
-            #[cfg(any(feature = "skills-http", test))]
+            #[cfg(all(any(feature = "skills-http", test), not(target_arch = "wasm32")))]
             Self::Http(source) => source.list_all_with_provenance(filter).await,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::External(source) => source.list_all_with_provenance(filter).await,
         }
     }
@@ -172,11 +207,14 @@ impl SkillSource for SourceNode {
     ) -> Result<SkillDocument, meerkat_core::skills::SkillError> {
         match self {
             Self::Embedded(source) => source.load_from_source(id, source_name).await,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Filesystem(source) => source.load_from_source(id, source_name).await,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Git(source) => source.load_from_source(id, source_name).await,
             Self::Memory(source) => source.load_from_source(id, source_name).await,
-            #[cfg(any(feature = "skills-http", test))]
+            #[cfg(all(any(feature = "skills-http", test), not(target_arch = "wasm32")))]
             Self::Http(source) => source.load_from_source(id, source_name).await,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::External(source) => source.load_from_source(id, source_name).await,
         }
     }

@@ -13,7 +13,8 @@ use async_trait::async_trait;
 /// Implementations clone what they need from the borrowed `Session`.
 /// Errors are logged, not propagated — a checkpoint failure should not
 /// kill the agent loop.
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait SessionCheckpointer: Send + Sync {
     /// Save a snapshot of the current session state.
     async fn checkpoint(&self, session: &Session);

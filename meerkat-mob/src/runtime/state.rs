@@ -1,5 +1,7 @@
 use super::*;
 use crate::run::MobRun;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 
 // ---------------------------------------------------------------------------
 // MobState

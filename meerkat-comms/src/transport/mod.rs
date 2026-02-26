@@ -2,13 +2,16 @@
 //!
 //! Provides length-prefix framing and address parsing for UDS and TCP transports.
 
+#[cfg(not(target_arch = "wasm32"))]
 pub mod codec;
 pub mod plain_codec;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod tcp;
 #[cfg(unix)]
 pub mod uds;
 
 use std::io;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 
 use thiserror::Error;
@@ -37,6 +40,7 @@ pub enum TransportError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PeerAddr {
     /// Unix domain socket path.
+    #[cfg(not(target_arch = "wasm32"))]
     Uds(PathBuf),
     /// TCP address as "host:port" string (supports both IP addresses and hostnames).
     /// DNS resolution happens at connect time via ToSocketAddrs.
@@ -50,12 +54,21 @@ impl PeerAddr {
     /// Parse an address string into a PeerAddr.
     ///
     /// Supported formats:
-    /// - `uds:///path/to/socket.sock`
+    /// - `uds:///path/to/socket.sock` (not available on wasm32)
     /// - `tcp://host:port` (host can be IP address or hostname)
     /// - `inproc://agent-name` (in-process delivery via registry)
     pub fn parse(s: &str) -> Result<Self, TransportError> {
-        if let Some(path) = s.strip_prefix("uds://") {
-            Ok(PeerAddr::Uds(PathBuf::from(path)))
+        if let Some(_path) = s.strip_prefix("uds://") {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                Ok(PeerAddr::Uds(PathBuf::from(_path)))
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                Err(TransportError::InvalidAddress(
+                    "UDS transport is not available on wasm32".to_string(),
+                ))
+            }
         } else if let Some(addr_str) = s.strip_prefix("tcp://") {
             // Validate format: must have host:port structure
             if !addr_str.contains(':') {
@@ -94,6 +107,7 @@ impl PeerAddr {
 }
 
 #[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;

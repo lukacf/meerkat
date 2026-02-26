@@ -4,6 +4,7 @@ use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 use thiserror::Error;
 use zeroize::Zeroize;
@@ -181,6 +182,7 @@ impl Keypair {
 
     /// Save the keypair to a directory.
     /// Writes `identity.key` (secret, mode 0600) and `identity.pub` (public).
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn save(&self, dir: &Path) -> Result<(), IdentityError> {
         tokio::fs::create_dir_all(dir).await?;
 
@@ -206,6 +208,7 @@ impl Keypair {
     }
 
     /// Load a keypair from a directory.
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn load(dir: &Path) -> Result<Self, IdentityError> {
         let mut secret_bytes = tokio::fs::read(dir.join("identity.key")).await?;
         if secret_bytes.len() != 32 {
@@ -221,6 +224,7 @@ impl Keypair {
     }
 
     /// Load existing keypair or generate a new one.
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn load_or_generate(dir: &Path) -> Result<Self, IdentityError> {
         let key_path = dir.join("identity.key");
         if tokio::fs::try_exists(&key_path).await? {

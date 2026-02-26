@@ -94,12 +94,12 @@ impl RetryPolicy {
 
 /// Simple pseudo-random jitter (0.0 to 1.0)
 fn rand_jitter() -> f64 {
+    use crate::time_compat::SystemTime;
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
-    use std::time::SystemTime;
 
     let mut hasher = DefaultHasher::new();
-    SystemTime::now()
+    crate::time_compat::SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos()

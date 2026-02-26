@@ -1,6 +1,8 @@
 //! Config store abstraction.
 
 use crate::config::{Config, ConfigDelta, ConfigError};
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -28,7 +30,8 @@ pub struct ConfigStoreMetadata {
 }
 
 /// Abstraction over config persistence backends.
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait ConfigStore: Send + Sync {
     /// Fetch the current config.
     async fn get(&self) -> Result<Config, ConfigError>;
@@ -58,7 +61,8 @@ impl MemoryConfigStore {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl ConfigStore for MemoryConfigStore {
     async fn get(&self) -> Result<Config, ConfigError> {
         Ok(self.config.read().await.clone())
@@ -93,7 +97,8 @@ impl TaggedConfigStore {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl ConfigStore for TaggedConfigStore {
     async fn get(&self) -> Result<Config, ConfigError> {
         self.inner.get().await
@@ -163,7 +168,8 @@ impl FileConfigStore {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl ConfigStore for FileConfigStore {
     async fn get(&self) -> Result<Config, ConfigError> {
         if self.create_if_missing {

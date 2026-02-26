@@ -8,7 +8,8 @@ use super::*;
 ///
 /// This bridges the gap between `SessionService` (which doesn't expose comms)
 /// and the mob runtime's need to access comms runtimes for wiring.
-#[async_trait::async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 pub trait MobSessionService: SessionService {
     /// Get the comms runtime for a session.
     async fn comms_runtime(&self, session_id: &SessionId) -> Option<Arc<dyn CoreCommsRuntime>>;
@@ -55,7 +56,8 @@ pub trait MobSessionService: SessionService {
     async fn rearm_all_checkpointers(&self) {}
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl<B> MobSessionService for meerkat_session::EphemeralSessionService<B>
 where
     B: meerkat_session::SessionAgentBuilder + 'static,
@@ -88,6 +90,7 @@ where
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[async_trait::async_trait]
 impl<B> MobSessionService for meerkat_session::PersistentSessionService<B>
 where

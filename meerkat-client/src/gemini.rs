@@ -3,15 +3,14 @@
 //! Implements the LlmClient trait for Google's Gemini API.
 
 use crate::error::LlmError;
-use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
+use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream};
 use async_trait::async_trait;
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 use meerkat_core::schema::{CompiledSchema, SchemaCompat, SchemaError, SchemaWarning};
 use meerkat_core::{Message, OutputSchema, Provider, StopReason, Usage};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::pin::Pin;
 
 /// Client for Google Gemini API
 pub struct GeminiClient {
@@ -425,123 +424,119 @@ fn join_index(prefix: &str, index: usize) -> String {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl LlmClient for GeminiClient {
-    fn stream<'a>(
-        &'a self,
-        request: &'a LlmRequest,
-    ) -> Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
-        let inner: Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> = Box::pin(
-            async_stream::try_stream! {
-                let body = self.build_request_body(request)?;
-                let url = format!(
-                    "{}/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
-                    self.base_url, request.model, self.api_key
-                );
+    fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+        let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
+            let body = self.build_request_body(request)?;
+            let url = format!(
+                "{}/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
+                self.base_url, request.model, self.api_key
+            );
 
-                let response = self.http
-                    .post(url)
-                    .header("Content-Type", "application/json")
-                    .json(&body)
-                    .send()
-                    .await
-                    .map_err(|_| LlmError::NetworkTimeout {
-                        duration_ms: 30000,
-                    })?;
+            let response = self.http
+                .post(url)
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+                .await
+                .map_err(|_| LlmError::NetworkTimeout {
+                    duration_ms: 30000,
+                })?;
 
-                let status_code = response.status().as_u16();
-                let stream_result = if (200..=299).contains(&status_code) {
-                    Ok(response.bytes_stream())
-                } else {
-                    let text = response.text().await.unwrap_or_default();
-                    Err(LlmError::from_http_status(status_code, text))
-                };
-                let mut stream = stream_result?;
-                let mut buffer = String::with_capacity(512);
-                let mut tool_call_index: u32 = 0;
+            let status_code = response.status().as_u16();
+            let stream_result = if (200..=299).contains(&status_code) {
+                Ok(response.bytes_stream())
+            } else {
+                let text = response.text().await.unwrap_or_default();
+                Err(LlmError::from_http_status(status_code, text))
+            };
+            let mut stream = stream_result?;
+            let mut buffer = String::with_capacity(512);
+            let mut tool_call_index: u32 = 0;
 
-                while let Some(chunk) = stream.next().await {
-                    let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
-                    buffer.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
 
-                    while let Some(newline_pos) = buffer.find('\n') {
-                        let line = buffer[..newline_pos].trim();
-                        let data = line.strip_prefix("data: ");
-                        let parsed_response = if let Some(d) = data {
-                            Self::parse_stream_line(d)
-                        } else {
-                            None
-                        };
+                while let Some(newline_pos) = buffer.find('\n') {
+                    let line = buffer[..newline_pos].trim();
+                    let data = line.strip_prefix("data: ");
+                    let parsed_response = if let Some(d) = data {
+                        Self::parse_stream_line(d)
+                    } else {
+                        None
+                    };
 
-                        buffer.drain(..=newline_pos);
+                    buffer.drain(..=newline_pos);
 
-                        if let Some(resp) = parsed_response {
-                            if let Some(usage) = resp.usage_metadata {
-                                yield LlmEvent::UsageUpdate {
-                                    usage: Usage {
-                                        input_tokens: usage.prompt_token_count.unwrap_or(0),
-                                        output_tokens: usage.candidates_token_count.unwrap_or(0),
-                                        cache_creation_tokens: None,
-                                        cache_read_tokens: None,
-                                    }
-                                };
-                            }
+                    if let Some(resp) = parsed_response {
+                        if let Some(usage) = resp.usage_metadata {
+                            yield LlmEvent::UsageUpdate {
+                                usage: Usage {
+                                    input_tokens: usage.prompt_token_count.unwrap_or(0),
+                                    output_tokens: usage.candidates_token_count.unwrap_or(0),
+                                    cache_creation_tokens: None,
+                                    cache_read_tokens: None,
+                                }
+                            };
+                        }
 
-                            if let Some(candidates) = resp.candidates {
-                                for cand in candidates {
-                                    if let Some(content) = cand.content {
-                                        // Not collapsed: inner loop processes heterogeneous part types
-                                        // (text, function_call, function_response) independently.
-                                        #[allow(clippy::collapsible_if)]
-                                        if let Some(parts) = content.parts {
-                                            for part in parts {
-                                                // Build meta from thoughtSignature if present
-                                                let meta = part.thought_signature.as_ref().map(|sig| {
-                                                    Box::new(meerkat_core::ProviderMeta::Gemini {
-                                                        thought_signature: sig.clone(),
-                                                    })
-                                                });
+                        if let Some(candidates) = resp.candidates {
+                            for cand in candidates {
+                                if let Some(content) = cand.content {
+                                    // Not collapsed: inner loop processes heterogeneous part types
+                                    // (text, function_call, function_response) independently.
+                                    #[allow(clippy::collapsible_if)]
+                                    if let Some(parts) = content.parts {
+                                        for part in parts {
+                                            // Build meta from thoughtSignature if present
+                                            let meta = part.thought_signature.as_ref().map(|sig| {
+                                                Box::new(meerkat_core::ProviderMeta::Gemini {
+                                                    thought_signature: sig.clone(),
+                                                })
+                                            });
 
-                                                if let Some(text) = part.text {
-                                                    yield LlmEvent::TextDelta {
-                                                        delta: text,
-                                                        meta: meta.clone(),
-                                                    };
-                                                }
-                                                if let Some(fc) = part.function_call {
-                                                    let id = format!("fc_{}", tool_call_index);
-                                                    tool_call_index += 1;
-                                                    yield LlmEvent::ToolCallComplete {
-                                                        id,
-                                                        name: fc.name,
-                                                        args: fc.args.unwrap_or(json!({})),
-                                                        meta,
-                                                    };
-                                                }
+                                            if let Some(text) = part.text {
+                                                yield LlmEvent::TextDelta {
+                                                    delta: text,
+                                                    meta: meta.clone(),
+                                                };
+                                            }
+                                            if let Some(fc) = part.function_call {
+                                                let id = format!("fc_{}", tool_call_index);
+                                                tool_call_index += 1;
+                                                yield LlmEvent::ToolCallComplete {
+                                                    id,
+                                                    name: fc.name,
+                                                    args: fc.args.unwrap_or(json!({})),
+                                                    meta,
+                                                };
                                             }
                                         }
                                     }
+                                }
 
-                                    if let Some(reason) = cand.finish_reason {
-                                        let stop = match reason.as_str() {
-                                            "STOP" => StopReason::EndTurn,
-                                            "MAX_TOKENS" => StopReason::MaxTokens,
-                                            "SAFETY" | "RECITATION" => StopReason::ContentFilter,
-                                            // Gemini uses various names for tool calls
-                                            "TOOL_CALL" | "FUNCTION_CALL" => StopReason::ToolUse,
-                                            _ => StopReason::EndTurn,
-                                        };
-                                        yield LlmEvent::Done {
-                                            outcome: LlmDoneOutcome::Success { stop_reason: stop },
-                                        };
-                                    }
+                                if let Some(reason) = cand.finish_reason {
+                                    let stop = match reason.as_str() {
+                                        "STOP" => StopReason::EndTurn,
+                                        "MAX_TOKENS" => StopReason::MaxTokens,
+                                        "SAFETY" | "RECITATION" => StopReason::ContentFilter,
+                                        // Gemini uses various names for tool calls
+                                        "TOOL_CALL" | "FUNCTION_CALL" => StopReason::ToolUse,
+                                        _ => StopReason::EndTurn,
+                                    };
+                                    yield LlmEvent::Done {
+                                        outcome: LlmDoneOutcome::Success { stop_reason: stop },
+                                    };
                                 }
                             }
                         }
                     }
                 }
-            },
-        );
+            }
+        });
 
         crate::streaming::ensure_terminal_done(inner)
     }

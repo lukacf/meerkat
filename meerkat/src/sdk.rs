@@ -6,13 +6,11 @@ use std::{cmp, collections::HashSet};
 
 use crate::{AgentFactory, AgentToolDispatcher, Config, HookEngine, HooksConfig};
 #[cfg(feature = "comms")]
-use crate::{CommsRuntime, CoreCommsConfig, ToolError, ToolGatewayBuilder};
+use crate::{CommsRuntime, CoreCommsConfig};
 #[cfg(feature = "comms")]
 use meerkat_core::CommsRuntimeMode;
 use meerkat_core::{AgentEvent, format_verbose_event};
 use meerkat_hooks::DefaultHookEngine;
-#[cfg(feature = "comms")]
-use meerkat_tools::builtin::comms::CommsToolSurface;
 use meerkat_tools::builtin::shell::ShellConfig;
 use meerkat_tools::{
     BuiltinToolConfig, CompositeDispatcherError, FileTaskStore, MemoryTaskStore, ensure_rkat_dir,
@@ -305,32 +303,7 @@ pub async fn build_comms_runtime_from_config_scoped(
     Ok(runtime)
 }
 
-/// Compose a tool dispatcher with comms tools and append usage instructions.
-#[cfg(feature = "comms")]
-pub fn compose_tools_with_comms(
-    base_tools: Arc<dyn AgentToolDispatcher>,
-    tool_usage_instructions: String,
-    runtime: &CommsRuntime,
-) -> Result<(Arc<dyn AgentToolDispatcher>, String), ToolError> {
-    let router = runtime.router_arc();
-    let trusted_peers = runtime.trusted_peers_shared();
-    let self_pubkey = router.keypair_arc().public_key();
-    let comms_surface = CommsToolSurface::new(router, trusted_peers.clone());
-    let availability = CommsToolSurface::peer_availability(trusted_peers, self_pubkey);
-
-    let gateway = ToolGatewayBuilder::new()
-        .add_dispatcher(base_tools)
-        .add_dispatcher_with_availability(Arc::new(comms_surface), availability)
-        .build()?;
-
-    let mut instructions = tool_usage_instructions;
-    if !instructions.is_empty() {
-        instructions.push_str("\n\n");
-    }
-    instructions.push_str(CommsToolSurface::usage_instructions());
-
-    Ok((Arc::new(gateway), instructions))
-}
+// compose_tools_with_comms moved to lib.rs for wasm32 availability
 
 /// Configuration for the SDK event logger helper.
 #[derive(Debug, Clone, Copy, Default)]

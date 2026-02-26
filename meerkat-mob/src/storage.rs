@@ -2,10 +2,13 @@
 //!
 //! Groups the event store with a session store for a mob's isolated storage.
 
+#[cfg(not(target_arch = "wasm32"))]
+use crate::store::RedbMobStores;
 use crate::store::{
     InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobSpecStore, MobEventStore, MobRunStore,
-    MobSpecStore, RedbMobStores,
+    MobSpecStore,
 };
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 use std::sync::Arc;
 
@@ -52,6 +55,7 @@ impl MobStorage {
     }
 
     /// Create a storage bundle backed by a single shared redb database handle.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn redb(path: impl AsRef<Path>) -> Result<Self, crate::MobError> {
         let stores = RedbMobStores::open(path)?;
         Ok(Self {

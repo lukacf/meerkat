@@ -71,6 +71,8 @@ rkat mob deploy ./dist/release-triage.mobpack "boot service" --surface rpc
 
 ## Browser target: `mob web build`
 
+The web build compiles the **real meerkat agent stack** to wasm32 — same agent loop, same LLM providers (Anthropic, OpenAI, Gemini), same streaming as CLI/RPC/REST. Not a simulation.
+
 Prerequisites:
 
 ```bash
@@ -86,16 +88,35 @@ rkat mob web build ./dist/release-triage.mobpack -o ./dist/release-triage-web
 
 Output includes:
 
-- `index.html`
-- `runtime.js`
-- `runtime_bg.wasm`
-- `mobpack.bin`
-- `manifest.web.toml` (derived)
+- `runtime.js` — wasm-bindgen JS bindings
+- `runtime_bg.wasm` — compiled meerkat agent stack (~1.5MB)
+- `mobpack.bin` — the packed mob artifact
+- `manifest.web.toml` — derived web manifest
 
 Environment overrides:
 
 - `RKAT_WASM_PACK_BIN`: explicit wasm-pack binary
 - `RKAT_WEB_RUNTIME_CRATE_DIR`: explicit runtime crate directory for build
+
+### How the WASM runtime works
+
+The runtime uses `tokio_with_wasm` as a drop-in tokio replacement (backed by the JS event loop), `reqwest` with browser `fetch` for HTTP, and `web-time` for browser-safe timestamps. The `#[async_trait(?Send)]` pattern handles wasm32's single-threaded model.
+
+API:
+
+```js
+const handle = runtime.create_session(mobpackBytes, '{"model":"claude-sonnet-4-5","api_key":"sk-..."}');
+const result = await runtime.start_turn(handle, "Your prompt here", "{}");
+const events = runtime.poll_events(handle);
+```
+
+### Browser capabilities and limitations
+
+**Available:** agent loop (streaming, retries), all LLM providers, sessions, JSON schema validation, budget enforcement, events, skills, MCP config types, tool/compactor/memory traits.
+
+**Not available (browser inherent):** filesystem config loading, stdio MCP servers, shell tool, file-based persistence. Use programmatic config and in-memory storage instead.
+
+**Not yet available (upstream blocker):** MCP protocol client over HTTP — the `rmcp` crate depends on `tokio`/`mio` which don't compile on wasm32. MCP config types and tool definitions work; actual connections to MCP servers are blocked pending rmcp wasm32 support.
 
 ## Cool web patterns
 
@@ -114,3 +135,4 @@ See runnable examples:
 - `examples/028-mobpack-release-triage-sh`
 - `examples/029-web-incident-war-room-sh`
 - `examples/030-web-dashboard-copilot-sh`
+- `examples/031-wasm-mini-diplomacy-sh`

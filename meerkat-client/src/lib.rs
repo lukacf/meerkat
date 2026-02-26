@@ -5,6 +5,11 @@
 //! Each provider implementation normalizes its streaming response to the common
 //! `LlmEvent` type, hiding provider-specific quirks.
 
+#[cfg(target_arch = "wasm32")]
+pub mod tokio {
+    pub use tokio_with_wasm::alias::*;
+}
+
 pub mod adapter;
 pub mod block_assembler;
 pub mod error;

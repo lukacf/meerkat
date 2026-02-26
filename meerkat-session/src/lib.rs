@@ -9,21 +9,27 @@
 //! - `session-store`: Enables `PersistentSessionService` and `RedbEventStore`.
 //! - `session-compaction`: Enables `DefaultCompactor` and `CompactionConfig`.
 
+// On wasm32, use tokio_with_wasm as a drop-in replacement for tokio.
+#[cfg(target_arch = "wasm32")]
+pub mod tokio {
+    pub use tokio_with_wasm::alias::*;
+}
+
 pub mod ephemeral;
 
 #[cfg(feature = "session-compaction")]
 pub mod compactor;
 
-#[cfg(feature = "session-store")]
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub mod event_store;
 
-#[cfg(feature = "session-store")]
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub mod persistent;
 
-#[cfg(feature = "session-store")]
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub mod projector;
 
-#[cfg(feature = "session-store")]
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub mod redb_events;
 
 pub use ephemeral::{EphemeralSessionService, SessionAgent, SessionAgentBuilder, SessionSnapshot};
@@ -31,11 +37,11 @@ pub use ephemeral::{EphemeralSessionService, SessionAgent, SessionAgentBuilder, 
 #[cfg(feature = "session-compaction")]
 pub use compactor::DefaultCompactor;
 
-#[cfg(feature = "session-store")]
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub use persistent::PersistentSessionService;
 
-// Skill registration
-#[cfg(feature = "session-store")]
+// Skill registration (inventory + meerkat-skills not available on wasm32)
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 inventory::submit! {
     meerkat_skills::SkillRegistration {
         id: "session-management",
@@ -48,8 +54,8 @@ inventory::submit! {
     }
 }
 
-// Capability registrations
-#[cfg(feature = "session-store")]
+// Capability registrations (inventory not available on wasm32)
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 inventory::submit! {
     meerkat_contracts::CapabilityRegistration {
         id: meerkat_contracts::CapabilityId::SessionStore,
@@ -61,7 +67,7 @@ inventory::submit! {
     }
 }
 
-#[cfg(feature = "session-compaction")]
+#[cfg(all(feature = "session-compaction", not(target_arch = "wasm32")))]
 inventory::submit! {
     meerkat_contracts::CapabilityRegistration {
         id: meerkat_contracts::CapabilityId::SessionCompaction,

@@ -24,7 +24,6 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 serde_bytes = "0.11"
 ciborium = "0.2"
-toml = { workspace = true }
 schemars = { workspace = true }
 
 # Encryption/Identity
@@ -32,8 +31,6 @@ ed25519-dalek = { version = "2.0", features = ["rand_core"] }
 zeroize = "1"
 
 # Async runtime
-tokio = { workspace = true, features = ["fs", "net", "sync", "rt", "io-util", "macros", "time"] }
-tokio-util = { version = "0.7", features = ["codec"] }
 futures = { workspace = true }
 async-trait = { workspace = true }
 
@@ -46,7 +43,17 @@ base64 = "0.22"
 rand = "0.8"
 parking_lot = "0.12"
 tracing = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true, features = ["fs", "net", "sync", "rt", "io-util", "macros", "time"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+toml = { workspace = true }
 bytes = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio_with_wasm = { workspace = true }
+getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["fs", "rt-multi-thread", "macros", "time", "test-util"] }

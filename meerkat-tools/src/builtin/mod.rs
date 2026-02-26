@@ -19,14 +19,17 @@
 pub mod comms;
 pub mod composite;
 pub mod config;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod file_store;
 pub mod memory_store;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod project;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod shell;
 #[cfg(feature = "skills")]
 pub mod skills;
 pub mod store;
-#[cfg(feature = "sub-agents")]
+#[cfg(all(feature = "sub-agents", not(target_arch = "wasm32")))]
 pub mod sub_agent;
 pub mod tasks;
 pub mod types;
@@ -39,8 +42,10 @@ pub use composite::{CompositeDispatcher, CompositeDispatcherError};
 pub use config::{
     BuiltinToolConfig, EnforcedToolPolicy, ResolvedToolPolicy, ToolMode, ToolPolicyLayer,
 };
+#[cfg(not(target_arch = "wasm32"))]
 pub use file_store::FileTaskStore;
 pub use memory_store::MemoryTaskStore;
+#[cfg(not(target_arch = "wasm32"))]
 pub use project::{ensure_rkat_dir, ensure_rkat_dir_async, find_project_root};
 pub use store::TaskStore;
 
@@ -53,7 +58,8 @@ use std::sync::Arc;
 ///
 /// Built-in tools are tools that are bundled with the Meerkat agent harness
 /// rather than being provided by external MCP servers.
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait BuiltinTool: Send + Sync {
     /// Returns the unique name of this tool
     fn name(&self) -> &'static str;

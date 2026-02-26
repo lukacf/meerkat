@@ -1,3 +1,5 @@
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;

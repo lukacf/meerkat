@@ -20,7 +20,8 @@ impl<S: SessionStore + ?Sized> StoreAdapter<S> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl<S: SessionStore + ?Sized + 'static> AgentSessionStore for StoreAdapter<S> {
     async fn save(&self, session: &Session) -> Result<(), AgentError> {
         self.store.save(session).await.map_err(store_error)

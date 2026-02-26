@@ -18,11 +18,10 @@ meerkat-core = { workspace = true }
 meerkat-comms = { workspace = true }
 meerkat-skills = { workspace = true }
 meerkat = { workspace = true, features = ["comms", "skills", "session-compaction", "memory-store", "anthropic", "openai", "gemini"] }
-meerkat-session = { workspace = true, features = ["session-compaction", "session-store"] }
+meerkat-session = { workspace = true, features = ["session-compaction"] }
 meerkat-client = { workspace = true }
 
 # Async runtime
-tokio = { workspace = true }
 async-trait = { workspace = true }
 
 # Serialization
@@ -42,11 +41,18 @@ inventory = { workspace = true }
 # Utilities
 uuid = { workspace = true, features = ["v4"] }
 chrono = { workspace = true }
-redb = { workspace = true }
 indexmap = { workspace = true }
 jsonschema = { workspace = true }
 futures = { workspace = true }
 tokio-util = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true }
+redb = { workspace = true }
+meerkat-session = { workspace = true, features = ["session-store"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio_with_wasm = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

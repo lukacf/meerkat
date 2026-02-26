@@ -13,7 +13,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-meerkat-core = { workspace = true }
+meerkat-core = { workspace = true, features = ["jsonschema"] }
 meerkat-client = { workspace = true }
 meerkat-store = { workspace = true }
 meerkat-tools = { workspace = true }
@@ -24,12 +24,17 @@ meerkat-comms = { workspace = true, optional = true }
 meerkat-hooks = { workspace = true }
 meerkat-contracts = { workspace = true }
 meerkat-skills = { workspace = true, optional = true }
-tokio = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 futures = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio_with_wasm = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

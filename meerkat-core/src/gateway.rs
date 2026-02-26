@@ -30,6 +30,8 @@
 
 use crate::AgentToolDispatcher;
 use crate::error::ToolError;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use crate::types::{ToolCallView, ToolDef, ToolResult};
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -299,7 +301,8 @@ impl ToolGatewayBuilder {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AgentToolDispatcher for ToolGateway {
     /// Returns only the tools that are currently available.
     ///
@@ -426,7 +429,8 @@ mod tests {
         }
     }
 
-    #[async_trait]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl AgentToolDispatcher for MockDispatcher {
         fn tools(&self) -> Arc<[Arc<ToolDef>]> {
             Arc::clone(&self.tools)

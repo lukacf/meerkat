@@ -9,10 +9,12 @@ use crate::ops::{
     SubAgentState, ToolAccessPolicy,
 };
 use crate::session::Session;
+use crate::time_compat::Instant;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use crate::types::{Message, ToolDef};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::Instant;
 use tokio::sync::{Mutex, RwLock, watch};
 
 const MAX_COMPLETED_AGENTS: usize = 256;

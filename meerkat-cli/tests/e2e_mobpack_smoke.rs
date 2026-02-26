@@ -170,7 +170,7 @@ async fn e2e_smoke_mobpack_pack_inspect_validate() -> Result<(), Box<dyn std::er
     let pack = project_dir.join("smoke.mobpack");
     let rkat = rkat_binary_path().ok_or("rkat binary not found")?;
 
-    let pack_args = vec![
+    let pack_args = [
         "mob".to_string(),
         "pack".to_string(),
         mob_dir.display().to_string(),
@@ -185,7 +185,7 @@ async fn e2e_smoke_mobpack_pack_inspect_validate() -> Result<(), Box<dyn std::er
         "mob pack should print digest output, got empty stdout"
     );
 
-    let inspect_args = vec![
+    let inspect_args = [
         "mob".to_string(),
         "inspect".to_string(),
         pack.display().to_string(),
@@ -199,7 +199,7 @@ async fn e2e_smoke_mobpack_pack_inspect_validate() -> Result<(), Box<dyn std::er
         "inspect output missing expected fields: {inspect_stdout}"
     );
 
-    let validate_args = vec![
+    let validate_args = [
         "mob".to_string(),
         "validate".to_string(),
         pack.display().to_string(),
@@ -232,7 +232,7 @@ async fn e2e_smoke_mobpack_deploy_unsigned_permissive_live()
     let pack = project_dir.join("unsigned.mobpack");
     let rkat = rkat_binary_path().ok_or("rkat binary not found")?;
 
-    let pack_args = vec![
+    let pack_args = [
         "mob".to_string(),
         "pack".to_string(),
         mob_dir.display().to_string(),
@@ -243,7 +243,7 @@ async fn e2e_smoke_mobpack_deploy_unsigned_permissive_live()
     let pack_out = run_rkat(&rkat, &project_dir, &pack_refs, Some(&api_key)).await?;
     let _ = output_ok_or_err(pack_out, &pack_refs).map_err(std::io::Error::other)?;
 
-    let deploy_args = vec![
+    let deploy_args = [
         "mob".to_string(),
         "deploy".to_string(),
         pack.display().to_string(),
@@ -288,7 +288,7 @@ async fn e2e_smoke_mobpack_deploy_signed_strict_live() -> Result<(), Box<dyn std
     .await?;
     let rkat = rkat_binary_path().ok_or("rkat binary not found")?;
 
-    let pack_args = vec![
+    let pack_args = [
         "mob".to_string(),
         "pack".to_string(),
         mob_dir.display().to_string(),
@@ -311,7 +311,7 @@ async fn e2e_smoke_mobpack_deploy_signed_strict_live() -> Result<(), Box<dyn std
     )
     .await?;
 
-    let deploy_args = vec![
+    let deploy_args = [
         "mob".to_string(),
         "deploy".to_string(),
         pack.display().to_string(),
@@ -348,7 +348,7 @@ async fn e2e_smoke_wasm_surface_gate() -> Result<(), Box<dyn std::error::Error>>
     let mob_dir = write_mobpack_fixture(&project_dir).await?;
     let pack = project_dir.join("wasm-smoke.mobpack");
 
-    let pack_args = vec![
+    let pack_args = [
         "mob".to_string(),
         "pack".to_string(),
         mob_dir.display().to_string(),
@@ -359,7 +359,7 @@ async fn e2e_smoke_wasm_surface_gate() -> Result<(), Box<dyn std::error::Error>>
     let pack_out = run_rkat(&rkat, &project_dir, &pack_refs, None).await?;
     let _ = output_ok_or_err(pack_out, &pack_refs).map_err(std::io::Error::other)?;
 
-    let wasm_args = vec![
+    let wasm_args = [
         "mob".to_string(),
         "web".to_string(),
         "build".to_string(),
@@ -424,7 +424,7 @@ capabilities = ["shell"]
     .await?;
     let pack = project_dir.join("forbidden-web.mobpack");
 
-    let pack_args = vec![
+    let pack_args = [
         "mob".to_string(),
         "pack".to_string(),
         mob_dir.display().to_string(),
@@ -435,7 +435,7 @@ capabilities = ["shell"]
     let pack_out = run_rkat(&rkat, &project_dir, &pack_refs, None).await?;
     let _ = output_ok_or_err(pack_out, &pack_refs).map_err(std::io::Error::other)?;
 
-    let wasm_args = vec![
+    let wasm_args = [
         "mob".to_string(),
         "web".to_string(),
         "build".to_string(),

@@ -31,6 +31,12 @@
 //! }
 //! ```
 
+// On wasm32, provide tokio alias backed by tokio_with_wasm.
+#[cfg(target_arch = "wasm32")]
+pub mod tokio {
+    pub use tokio_with_wasm::alias::*;
+}
+
 // Re-export core types
 pub use meerkat_core::{
     // Agent
@@ -194,10 +200,11 @@ pub use meerkat_store::JsonlStore;
 #[cfg(feature = "memory-store")]
 pub use meerkat_store::MemoryStore;
 
-#[cfg(feature = "session-store")]
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub use meerkat_store::RedbSessionStore;
 
 // Re-export tools
+#[cfg(not(target_arch = "wasm32"))]
 pub use meerkat_tools::{DispatchError, ToolDispatcher, ToolRegistry, ToolValidationError};
 
 // Re-export builtin tools infrastructure
@@ -205,9 +212,11 @@ pub use meerkat_tools::{DispatchError, ToolDispatcher, ToolRegistry, ToolValidat
 pub use meerkat_tools::CommsToolSurface;
 pub use meerkat_tools::{
     BuiltinTool, BuiltinToolConfig, BuiltinToolEntry, BuiltinToolError, CompositeDispatcher,
-    CompositeDispatcherError, EnforcedToolPolicy, FileTaskStore, MemoryTaskStore,
-    ResolvedToolPolicy, TaskStore, ToolMode, ToolPolicyLayer, ensure_rkat_dir, find_project_root,
+    CompositeDispatcherError, EnforcedToolPolicy, MemoryTaskStore, ResolvedToolPolicy, TaskStore,
+    ToolMode, ToolPolicyLayer,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use meerkat_tools::{FileTaskStore, ensure_rkat_dir, find_project_root};
 
 // Re-export MCP client
 #[cfg(feature = "mcp")]
@@ -231,15 +240,53 @@ pub use meerkat_contracts::{
 // Surface infrastructure
 pub mod surface;
 
-// Prompt assembly
+// Prompt assembly (filesystem-dependent: reads AGENTS.md, system_prompt_file)
+#[cfg(not(target_arch = "wasm32"))]
 mod prompt_assembly;
+#[cfg(not(target_arch = "wasm32"))]
 pub use prompt_assembly::assemble_system_prompt;
 
-// SDK module
+// SDK helpers (filesystem-dependent: .rkat dir, hook config files)
+#[cfg(not(target_arch = "wasm32"))]
 mod sdk;
+#[cfg(not(target_arch = "wasm32"))]
 pub use sdk::*;
+#[cfg(not(target_arch = "wasm32"))]
 mod sdk_config;
+#[cfg(not(target_arch = "wasm32"))]
 pub use sdk_config::SdkConfigStore;
+
+// Comms tool composition (available on all platforms including wasm32)
+#[cfg(feature = "comms")]
+pub fn compose_tools_with_comms(
+    base_tools: std::sync::Arc<dyn meerkat_core::AgentToolDispatcher>,
+    tool_usage_instructions: String,
+    runtime: &meerkat_comms::CommsRuntime,
+) -> Result<
+    (
+        std::sync::Arc<dyn meerkat_core::AgentToolDispatcher>,
+        String,
+    ),
+    meerkat_tools::ToolError,
+> {
+    use meerkat_tools::CommsToolSurface;
+    use std::sync::Arc;
+    let router = runtime.router_arc();
+    let trusted_peers = runtime.trusted_peers_shared();
+    let self_pubkey = router.keypair_arc().public_key();
+    let comms_surface = CommsToolSurface::new(router, trusted_peers.clone());
+    let availability = CommsToolSurface::peer_availability(trusted_peers, self_pubkey);
+    let gateway = meerkat_core::ToolGatewayBuilder::new()
+        .add_dispatcher(base_tools)
+        .add_dispatcher_with_availability(Arc::new(comms_surface), availability)
+        .build()?;
+    let mut instructions = tool_usage_instructions;
+    if !instructions.is_empty() {
+        instructions.push_str("\n\n");
+    }
+    instructions.push_str(CommsToolSurface::usage_instructions());
+    Ok((Arc::new(gateway), instructions))
+}
 
 /// Prelude module for convenient imports
 pub mod prelude {

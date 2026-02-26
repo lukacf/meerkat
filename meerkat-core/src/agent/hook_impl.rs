@@ -4,6 +4,8 @@ use crate::agent::{Agent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher
 use crate::error::AgentError;
 use crate::event::AgentEvent;
 use crate::hooks::{HookDecision, HookEngineError, HookExecutionReport, HookInvocation};
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use tokio::sync::mpsc;
 
 impl<C, T, S> Agent<C, T, S>

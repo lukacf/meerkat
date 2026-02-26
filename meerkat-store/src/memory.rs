@@ -4,7 +4,12 @@ use crate::{SessionFilter, SessionStore, StoreError};
 use async_trait::async_trait;
 use meerkat_core::{Session, SessionId, SessionMeta};
 use std::collections::HashMap;
-use tokio::sync::RwLock;
+
+// Use crate-level tokio alias for consistency with other crates.
+#[cfg(target_arch = "wasm32")]
+use crate::tokio::sync::RwLock;
+#[cfg(not(target_arch = "wasm32"))]
+use ::tokio::sync::RwLock;
 
 /// In-memory session store
 pub struct MemoryStore {
@@ -26,7 +31,8 @@ impl Default for MemoryStore {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl SessionStore for MemoryStore {
     async fn save(&self, session: &Session) -> Result<(), StoreError> {
         let mut sessions = self.sessions.write().await;

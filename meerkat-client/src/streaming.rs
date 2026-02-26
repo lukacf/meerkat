@@ -1,11 +1,8 @@
 use crate::error::LlmError;
-use crate::types::{LlmDoneOutcome, LlmEvent};
-use futures::{Stream, StreamExt};
-use std::pin::Pin;
+use crate::types::{LlmDoneOutcome, LlmEvent, LlmStream};
+use futures::StreamExt;
 
-pub(crate) fn ensure_terminal_done<'a>(
-    mut stream: Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>>,
-) -> Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+pub(crate) fn ensure_terminal_done<'a>(mut stream: LlmStream<'a>) -> LlmStream<'a> {
     Box::pin(async_stream::stream! {
         while let Some(item) = stream.next().await {
             match item {

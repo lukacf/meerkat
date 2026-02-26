@@ -2,6 +2,8 @@
 //!
 //! Exposes exactly two tools: `send` and `peers`.
 
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};

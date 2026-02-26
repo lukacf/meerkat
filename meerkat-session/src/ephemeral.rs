@@ -11,10 +11,17 @@ use meerkat_core::service::{
     CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService, SessionSummary,
     SessionUsage, SessionView, StartTurnRequest,
 };
+use meerkat_core::time_compat::SystemTime;
 use meerkat_core::types::{RunResult, SessionId, Usage};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::SystemTime;
+
+// Tokio re-exports: on wasm32, use the crate-level alias (tokio_with_wasm).
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, mpsc, oneshot, watch};
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, mpsc, oneshot, watch};
 
 /// Capacity for the internal agent event channel.
@@ -114,10 +121,14 @@ struct SessionTaskControl {
 // ---------------------------------------------------------------------------
 
 /// Trait for building agents from session creation requests.
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait SessionAgentBuilder: Send + Sync {
     /// The concrete agent type.
+    #[cfg(not(target_arch = "wasm32"))]
     type Agent: SessionAgent + Send + 'static;
+    #[cfg(target_arch = "wasm32")]
+    type Agent: SessionAgent + 'static;
 
     /// Build an agent for a new session.
     async fn build_agent(
@@ -128,7 +139,8 @@ pub trait SessionAgentBuilder: Send + Sync {
 }
 
 /// Trait abstracting over the agent's run/cancel interface.
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait SessionAgent: Send {
     /// Run the agent with the given prompt, streaming events.
     async fn run_with_events(
@@ -325,7 +337,8 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionService<B> {
     async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
         // Reserve capacity up front so two concurrent create_session calls cannot race
@@ -673,14 +686,24 @@ async fn session_task<A: SessionAgent>(
                 // Scope the pinned future so its mutable borrow of `agent` is
                 // released before we call `agent.snapshot()`.
                 let result = {
-                    let run_fut: std::pin::Pin<
+                    #[cfg(not(target_arch = "wasm32"))]
+                    type RunFut<'a> = std::pin::Pin<
                         Box<
                             dyn std::future::Future<
                                     Output = Result<RunResult, meerkat_core::error::AgentError>,
                                 > + Send
-                                + '_,
+                                + 'a,
                         >,
-                    > = if host_mode {
+                    >;
+                    #[cfg(target_arch = "wasm32")]
+                    type RunFut<'a> = std::pin::Pin<
+                        Box<
+                            dyn std::future::Future<
+                                    Output = Result<RunResult, meerkat_core::error::AgentError>,
+                                > + 'a,
+                        >,
+                    >;
+                    let run_fut: RunFut<'_> = if host_mode {
                         Box::pin(agent.run_host_mode(prompt))
                     } else {
                         Box::pin(agent.run_with_events(prompt, agent_event_tx.clone()))

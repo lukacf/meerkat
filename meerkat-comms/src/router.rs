@@ -1,29 +1,37 @@
 //! Router for Meerkat comms - high-level send API.
 
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
+#[cfg(not(target_arch = "wasm32"))]
 use futures::{SinkExt, StreamExt};
-#[cfg(not(unix))]
+#[cfg(all(not(unix), not(target_arch = "wasm32")))]
 use std::io::ErrorKind;
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 use thiserror::Error;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::io::{AsyncRead, AsyncWrite};
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::net::TcpStream;
 #[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::sync::RwLock;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio_util::codec::Framed;
 use uuid::Uuid;
 
 use crate::identity::{Keypair, Signature};
 use crate::inbox::InboxSender;
 use crate::inproc::{InprocRegistry, InprocSendError};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::transport::codec::{EnvelopeFrame, TransportCodec};
-use crate::transport::{MAX_PAYLOAD_SIZE, PeerAddr, TransportError};
+use crate::transport::{PeerAddr, TransportError};
 use crate::trust::{TrustedPeer, TrustedPeers};
 use crate::types::{Envelope, MessageKind, Status};
 
 pub const DEFAULT_ACK_TIMEOUT_SECS: u64 = 30;
-pub const DEFAULT_MAX_MESSAGE_BYTES: u32 = MAX_PAYLOAD_SIZE;
+pub const DEFAULT_MAX_MESSAGE_BYTES: u32 = crate::transport::MAX_PAYLOAD_SIZE;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CommsConfig {
@@ -158,7 +166,6 @@ impl Router {
             }
         })
         .ok_or_else(|| SendError::PeerNotFound(peer_name.to_string()))?;
-        let wait_for_ack = should_wait_for_ack(&kind);
         let addr = PeerAddr::parse(&peer.addr)?;
         let mut envelope = Envelope {
             id: Uuid::new_v4(),
@@ -171,39 +178,65 @@ impl Router {
             envelope.sign(&self.keypair);
         }
 
-        match addr {
-            #[cfg(unix)]
-            PeerAddr::Uds(path) => {
-                let mut stream = UnixStream::connect(&path).await?;
-                self.send_on_stream(&mut stream, envelope, wait_for_ack)
-                    .await
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let wait_for_ack = should_wait_for_ack(&envelope.kind);
+            match addr {
+                #[cfg(unix)]
+                PeerAddr::Uds(path) => {
+                    let mut stream = UnixStream::connect(&path).await?;
+                    self.send_on_stream(&mut stream, envelope, wait_for_ack)
+                        .await
+                }
+                #[cfg(not(unix))]
+                PeerAddr::Uds(_path) => Err(std::io::Error::new(
+                    ErrorKind::Unsupported,
+                    "unix domain sockets are not supported on this platform",
+                )
+                .into()),
+                PeerAddr::Tcp(addr_str) => {
+                    let mut stream = TcpStream::connect(&addr_str).await?;
+                    self.send_on_stream(&mut stream, envelope, wait_for_ack)
+                        .await
+                }
+                PeerAddr::Inproc(_) => {
+                    let registry = InprocRegistry::global();
+                    registry
+                        .send_with_signature_in_namespace(
+                            inproc_namespace,
+                            &self.keypair,
+                            peer_name,
+                            envelope.kind,
+                            self.require_peer_auth,
+                        )
+                        .map_err(map_inproc_send_error)
+                }
             }
-            #[cfg(not(unix))]
-            PeerAddr::Uds(_path) => Err(std::io::Error::new(
-                ErrorKind::Unsupported,
-                "unix domain sockets are not supported on this platform",
-            )
-            .into()),
-            PeerAddr::Tcp(addr_str) => {
-                let mut stream = TcpStream::connect(&addr_str).await?;
-                self.send_on_stream(&mut stream, envelope, wait_for_ack)
-                    .await
-            }
-            PeerAddr::Inproc(_) => {
-                let registry = InprocRegistry::global();
-                registry
-                    .send_with_signature_in_namespace(
-                        inproc_namespace,
-                        &self.keypair,
-                        peer_name,
-                        envelope.kind,
-                        self.require_peer_auth,
-                    )
-                    .map_err(map_inproc_send_error)
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            match addr {
+                PeerAddr::Tcp(_) => Err(SendError::Transport(TransportError::InvalidAddress(
+                    "TCP transport is not available on wasm32".to_string(),
+                ))),
+                PeerAddr::Inproc(_) => {
+                    let registry = InprocRegistry::global();
+                    registry
+                        .send_with_signature_in_namespace(
+                            inproc_namespace,
+                            &self.keypair,
+                            peer_name,
+                            envelope.kind,
+                            self.require_peer_auth,
+                        )
+                        .map_err(map_inproc_send_error)
+                }
             }
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     async fn send_on_stream<S>(
         &self,
         stream: &mut S,
@@ -256,6 +289,7 @@ impl Router {
             Ok(sent_id)
         }
     }
+
     pub async fn send_request(
         &self,
         peer_name: &str,
@@ -285,6 +319,7 @@ impl Router {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn should_wait_for_ack(kind: &MessageKind) -> bool {
     !matches!(kind, MessageKind::Ack { .. } | MessageKind::Response { .. })
 }

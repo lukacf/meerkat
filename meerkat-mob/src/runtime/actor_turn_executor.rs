@@ -5,6 +5,8 @@ use super::turn_executor::{
 };
 use crate::error::MobError;
 use crate::ids::{MeerkatId, RunId, StepId};
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use async_trait::async_trait;
 use futures::FutureExt;
 use meerkat_core::event::{AgentEvent, ScopedAgentEvent, StreamScopeFrame};
@@ -226,7 +228,8 @@ impl ActorFlowTurnExecutor {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl FlowTurnExecutor for ActorFlowTurnExecutor {
     async fn dispatch(
         &self,

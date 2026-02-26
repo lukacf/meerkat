@@ -52,7 +52,8 @@ fn canonical_key(id: &SkillId) -> Value {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl BuiltinTool for SkillListResourcesTool {
     fn name(&self) -> &'static str {
         "skill_list_resources"
@@ -90,7 +91,8 @@ impl BuiltinTool for SkillListResourcesTool {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl BuiltinTool for SkillReadResourceTool {
     fn name(&self) -> &'static str {
         "skill_read_resource"

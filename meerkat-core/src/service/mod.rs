@@ -6,6 +6,9 @@
 pub mod transport;
 
 use crate::event::{AgentEvent, ScopedAgentEvent, StreamScopeFrame};
+use crate::time_compat::SystemTime;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use crate::types::{RunResult, SessionId, Usage};
 use crate::{
     AgentToolDispatcher, BudgetLimits, HookRunOverrides, OutputSchema, PeerMeta, Provider, Session,
@@ -14,7 +17,6 @@ use crate::{EventStream, StreamError};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::SystemTime;
 use tokio::sync::mpsc;
 
 /// Controls whether `create_session()` should execute an initial turn.
@@ -284,7 +286,8 @@ impl SessionView {
 ///
 /// All surfaces delegate to this trait. Implementations control persistence,
 /// compaction, and event logging behavior.
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait SessionService: Send + Sync {
     /// Create a new session and run the first turn.
     async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError>;

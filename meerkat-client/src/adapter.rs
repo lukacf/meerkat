@@ -1,5 +1,7 @@
 //! Adapter from LlmClient to AgentLlmClient.
 
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat_core::schema::{CompiledSchema, SchemaError};
@@ -71,7 +73,8 @@ fn fallback_raw_value() -> Box<serde_json::value::RawValue> {
     serde_json::value::RawValue::from_string("{}".to_string()).expect("static JSON is valid")
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AgentLlmClient for LlmClientAdapter {
     async fn stream_response(
         &self,

@@ -6,7 +6,11 @@ use meerkat_contracts::{
     CapabilitiesResponse, CapabilityEntry, CapabilityStatus, ContractVersion, build_capabilities,
 };
 use meerkat_core::{AgentEvent, Config};
+
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::mpsc;
+#[cfg(target_arch = "wasm32")]
+use tokio_with_wasm::alias::sync::mpsc;
 
 #[cfg(feature = "skills")]
 use meerkat_core::skills::{
@@ -99,10 +103,19 @@ where
     F: Fn(AgentEvent) + Send + 'static,
 {
     let (tx, mut rx) = mpsc::channel::<AgentEvent>(256);
+
+    #[cfg(not(target_arch = "wasm32"))]
     tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
             callback(event);
         }
     });
+    #[cfg(target_arch = "wasm32")]
+    tokio_with_wasm::alias::task::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            callback(event);
+        }
+    });
+
     tx
 }

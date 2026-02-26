@@ -2296,7 +2296,6 @@ dependencies = [
  "percent-encoding",
  "referencing",
  "regex-syntax",
- "reqwest",
  "serde",
  "serde_json",
  "uuid-simd",
@@ -2447,6 +2446,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio_with_wasm",
  "toml",
  "tracing",
  "which",
@@ -2460,6 +2460,7 @@ dependencies = [
  "async-trait",
  "axum",
  "futures",
+ "getrandom 0.3.4",
  "indexmap",
  "meerkat-core",
  "reqwest",
@@ -2469,6 +2470,7 @@ dependencies = [
  "slab",
  "thiserror 2.0.18",
  "tokio",
+ "tokio_with_wasm",
  "tracing",
 ]
 
@@ -2482,6 +2484,8 @@ dependencies = [
  "ciborium",
  "ed25519-dalek",
  "futures",
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
  "inventory",
  "meerkat-contracts",
  "meerkat-core",
@@ -2496,6 +2500,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
+ "tokio_with_wasm",
  "toml",
  "tracing",
  "uuid",
@@ -2524,8 +2529,10 @@ dependencies = [
  "chrono",
  "dirs",
  "futures",
+ "getrandom 0.3.4",
  "humantime-serde",
  "indexmap",
+ "js-sys",
  "jsonschema",
  "parking_lot",
  "schemars",
@@ -2535,9 +2542,11 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio_with_wasm",
  "toml",
  "tracing",
  "uuid",
+ "web-time",
 ]
 
 [[package]]
@@ -2555,6 +2564,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio_with_wasm",
  "tracing",
 ]
 
@@ -2661,6 +2671,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
+ "tokio_with_wasm",
  "toml",
  "tracing",
  "uuid",
@@ -2679,6 +2690,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio_with_wasm",
  "tracing",
  "uuid",
 ]
@@ -2777,6 +2789,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio_with_wasm",
  "tracing",
 ]
 
@@ -2798,6 +2811,7 @@ dependencies = [
  "strum",
  "tempfile",
  "tokio",
+ "tokio_with_wasm",
  "tracing",
  "urlencoding",
  "wiremock",
@@ -2816,6 +2830,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio_with_wasm",
  "toml",
  "tracing",
  "uuid",
@@ -2847,6 +2862,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio_with_wasm",
  "toml",
  "tracing",
  "uuid",
@@ -2857,12 +2873,30 @@ dependencies = [
 name = "meerkat-web-runtime"
 version = "0.4.0"
 dependencies = [
+ "async-trait",
  "flate2",
+ "futures",
+ "getrandom 0.3.4",
+ "js-sys",
+ "meerkat",
+ "meerkat-client",
+ "meerkat-comms",
+ "meerkat-core",
+ "meerkat-hooks",
+ "meerkat-mob",
+ "meerkat-mob-mcp",
+ "meerkat-session",
+ "meerkat-store",
+ "meerkat-tools",
+ "reqwest",
  "serde",
  "serde_json",
  "tar",
+ "tokio_with_wasm",
  "toml",
+ "tracing",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]
@@ -3471,7 +3505,6 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64",
  "bytes",
- "futures-channel",
  "futures-core",
  "futures-util",
  "http",
@@ -4208,6 +4241,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio_with_wasm"
+version = "0.8.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34e40fbbbd95441133fe9483f522db15dbfd26dc636164ebd8f2dd28759a6aa6"
+dependencies = [
+ "js-sys",
+ "tokio",
+ "tokio_with_wasm_proc",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
+name = "tokio_with_wasm_proc"
+version = "0.8.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d01145a2c788d6aae4cd653afec1e8332534d7d783d01897cefcafe4428de992"
+dependencies = [
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "toml"
 version = "0.8.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4590,6 +4647,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
+ "serde",
  "wasm-bindgen",
 ]
 

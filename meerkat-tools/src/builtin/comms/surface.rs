@@ -1,5 +1,7 @@
 //! Comms tool surface - provides comms tools as a ToolDispatcher
 
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use async_trait::async_trait;
 use meerkat_comms::{
     PubKey, Router, ToolContext, TrustedPeers, comms_tool_defs, handle_tools_call,
@@ -56,7 +58,8 @@ impl CommsToolSurface {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AgentToolDispatcher for CommsToolSurface {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         Arc::clone(&self.tool_defs)

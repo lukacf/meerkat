@@ -10,9 +10,12 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  quality:
-    name: Pre-merge quality and correctness checks
+  fmt-lint:
+    name: Format, lint, and static checks
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -24,11 +27,133 @@ jobs:
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
 
-      - name: Install cargo-deny
-        run: cargo install cargo-deny --locked
+      - name: Check formatting
+        run: make fmt-check
 
-      - name: Verify Rust/Cargo lock and toolchain
-        run: rustc --version && cargo --version
+      - name: Legacy surface gate
+        run: make legacy-surface-gate
 
-      - name: Run CI checks
-        run: make ci
+      - name: Verify version parity
+        run: make verify-version-parity
+
+      - name: Clippy (all features)
+        run: make lint
+
+      - name: Clippy feature matrix
+        run: make lint-feature-matrix
+
+      - name: Install cargo-machete
+        run: cargo install cargo-machete --locked
+
+      - name: Check for unused dependencies
+        run: cargo machete --with-metadata
+
+  test:
+    name: Test suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Full test suite (all features)
+        run: cargo nextest run --workspace --all-features
+
+      - name: Minimal build checks
+        run: |
+          cargo check -p meerkat-core
+          cargo check -p meerkat-client --no-default-features
+          cargo check -p meerkat-store --no-default-features
+          cargo check -p meerkat-tools --no-default-features
+          cargo check -p meerkat --no-default-features
+          cargo nextest run -p meerkat-core
+
+      - name: Feature matrix — library crates
+        run: |
+          cargo check -p meerkat-tools --no-default-features --features sub-agents
+          cargo check -p meerkat-tools --no-default-features --features comms
+          cargo check -p meerkat-tools --no-default-features --features mcp
+          cargo check -p meerkat-tools --no-default-features --features sub-agents,comms
+          cargo check -p meerkat-tools --no-default-features --features comms,mcp
+          cargo check -p meerkat --no-default-features --features openai,memory-store
+          cargo check -p meerkat --no-default-features --features gemini,jsonl-store
+          cargo check -p meerkat --features all-providers,comms,mcp,sub-agents
+          cargo nextest run -p meerkat --features all-providers,comms,mcp
+
+      - name: Feature matrix — surface crates
+        run: |
+          cargo check -p meerkat-rpc --no-default-features
+          cargo check -p meerkat-rpc --no-default-features --features comms,mcp
+          cargo check -p meerkat-rest --no-default-features
+          cargo check -p meerkat-rest --no-default-features --features comms
+          cargo check -p meerkat-mcp-server --no-default-features
+          cargo check -p meerkat-mcp-server --no-default-features --features comms
+          cargo check -p rkat --no-default-features --features session-store
+          cargo check -p rkat --no-default-features --features session-store,mcp
+          cargo nextest run -p rkat --no-default-features --features session-store,mcp --no-capture
+          cargo check -p rkat --no-default-features --features session-store,comms,mcp
+
+      - name: Surface modularity checks
+        run: scripts/check_surface_modularity.sh
+
+  audit:
+    name: Security audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+
+  beta:
+    name: Rust beta early warning
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (beta)
+        uses: dtolnay/rust-toolchain@beta
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: beta
+
+      - name: Build (beta)
+        run: cargo build --workspace --all-features
+
+      - name: Test (beta)
+        run: cargo test --workspace --all-features --all-targets
+
+  gate:
+    name: CI gate
+    if: always()
+    needs: [fmt-lint, test, audit]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check results
+        run: |
+          if [[ "${{ needs.fmt-lint.result }}" != "success" ]]; then
+            echo "fmt-lint failed: ${{ needs.fmt-lint.result }}"
+            exit 1
+          fi
+          if [[ "${{ needs.test.result }}" != "success" ]]; then
+            echo "test failed: ${{ needs.test.result }}"
+            exit 1
+          fi
+          if [[ "${{ needs.audit.result }}" != "success" ]]; then
+            echo "audit failed: ${{ needs.audit.result }}"
+            exit 1
+          fi
+          echo "All checks passed"

@@ -6,10 +6,11 @@ use crate::error::AgentError;
 use serde::{Deserialize, Serialize};
 
 /// States of the core agent loop
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LoopState {
     /// Waiting for LLM response
+    #[default]
     CallingLlm,
     /// No LLM work, waiting for operation completions
     WaitingForOps,
@@ -84,12 +85,6 @@ impl LoopState {
     /// Force a transition (use with caution)
     pub fn force_transition(&mut self, next: LoopState) {
         *self = next;
-    }
-}
-
-impl Default for LoopState {
-    fn default() -> Self {
-        Self::CallingLlm
     }
 }
 

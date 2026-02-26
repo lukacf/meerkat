@@ -1250,7 +1250,7 @@ async fn handle_run_command(
 ) -> anyhow::Result<()> {
     let (config, config_base_dir) = load_config(scope).await?;
 
-    let model = model.unwrap_or_else(|| config.agent.model.to_string());
+    let model = model.unwrap_or_else(|| config.agent.model.clone());
     let max_tokens = max_tokens.unwrap_or(config.agent.max_tokens_per_turn);
     let resolved_provider = provider
         .or_else(|| Provider::infer_from_model(&model))
@@ -2875,7 +2875,7 @@ async fn resume_session_with_llm_override(
     let model = stored_metadata
         .as_ref()
         .map(|meta| meta.model.clone())
-        .unwrap_or_else(|| config.agent.model.to_string());
+        .unwrap_or_else(|| config.agent.model.clone());
     let max_tokens = stored_metadata
         .as_ref()
         .map(|meta| meta.max_tokens)

@@ -1213,18 +1213,13 @@ impl From<CompactionRuntimeConfig> for crate::CompactionConfig {
 }
 
 /// Transport mode for comms runtime.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum CommsRuntimeMode {
+    #[default]
     Inproc,
     Tcp,
     Uds,
-}
-
-impl Default for CommsRuntimeMode {
-    fn default() -> Self {
-        Self::Inproc
-    }
 }
 
 /// LLM provider configuration

@@ -8,30 +8,20 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 /// Schema format versions supported by Meerkat.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SchemaFormat {
+    #[default]
     MeerkatV1,
 }
 
-impl Default for SchemaFormat {
-    fn default() -> Self {
-        Self::MeerkatV1
-    }
-}
-
 /// Compatibility mode for provider lowering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SchemaCompat {
+    #[default]
     Lossy,
     Strict,
-}
-
-impl Default for SchemaCompat {
-    fn default() -> Self {
-        Self::Lossy
-    }
 }
 
 /// Warnings emitted during schema lowering.

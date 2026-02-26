@@ -343,8 +343,8 @@ async fn integration_real_shell_not_installed() {
     {
         // On Unix, fallback to /bin/sh might succeed - both outcomes are valid
         // The explicit shell_path should prevent fallback though
-        if result.is_err() {
-            let err_msg = result.unwrap_err().to_string();
+        if let Err(err) = &result {
+            let err_msg = err.to_string();
             assert!(
                 err_msg.contains("not installed")
                     || err_msg.contains("Shell not installed")

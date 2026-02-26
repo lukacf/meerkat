@@ -912,9 +912,7 @@ async fn handle_meerkat_run(
         .await
         .map(|snapshot| snapshot.config)
         .unwrap_or_default();
-    let model = input
-        .model
-        .unwrap_or_else(|| config.agent.model.to_string());
+    let model = input.model.unwrap_or_else(|| config.agent.model.clone());
 
     // Build external tool dispatcher from MCP callback tools (if any)
     let external_tools: Option<Arc<dyn AgentToolDispatcher>> = if input.tools.is_empty() {
@@ -1068,7 +1066,7 @@ async fn handle_meerkat_resume(
     let model = input
         .model
         .or_else(|| stored_metadata.as_ref().map(|meta| meta.model.clone()))
-        .unwrap_or_else(|| config.agent.model.to_string());
+        .unwrap_or_else(|| config.agent.model.clone());
     let max_tokens = input
         .max_tokens
         .or_else(|| stored_metadata.as_ref().map(|meta| meta.max_tokens));

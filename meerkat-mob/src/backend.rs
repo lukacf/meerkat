@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 
 /// Supported mob member provisioning backends.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MobBackendKind {
+    #[default]
     Subagent,
     External,
 }
@@ -14,11 +15,5 @@ impl MobBackendKind {
             Self::Subagent => "subagent",
             Self::External => "external",
         }
-    }
-}
-
-impl Default for MobBackendKind {
-    fn default() -> Self {
-        Self::Subagent
     }
 }

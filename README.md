@@ -86,7 +86,7 @@ The agent loops autonomously -- calling tools, reading results, reasoning, calli
 
 **Sessions and memory.** Persistent sessions (JSONL or redb), automatic context compaction for long conversations, and semantic memory with HNSW indexing for recall across sessions.
 
-**Tools and integration.** Custom tool dispatchers, native MCP client for connecting external tool servers, JSON-schema-validated structured output, and built-in tools for task management, shell access, and more.
+**Tools and integration.** Custom tool dispatchers, native MCP client for connecting external tool servers, JSON-schema-validated structured output, and built-in tools for task management, shell access, and more. Live tool scoping lets you add, remove, or filter tools mid-session without restarting the agent.
 
 **Hooks and skills.** Eight hook points (pre/post LLM, pre/post tool, turn boundary, run lifecycle) with observe, rewrite, and guardrail semantics. Skills are composable knowledge packs that inject context and capabilities.
 

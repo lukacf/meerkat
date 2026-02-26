@@ -192,9 +192,10 @@ pub async fn setup_child_comms(
     );
 
     // Start listeners
-    runtime.start_listeners().await.map_err(|e| {
-        SubAgentRunnerError::CommsSetup(format!("Failed to start listeners: {e}"))
-    })?;
+    runtime
+        .start_listeners()
+        .await
+        .map_err(|e| SubAgentRunnerError::CommsSetup(format!("Failed to start listeners: {e}")))?;
 
     Ok((runtime, child_pubkey, child_addr))
 }

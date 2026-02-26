@@ -2228,7 +2228,9 @@ mod tests {
         let (sender, receiver) = mpsc::channel::<meerkat_core::AgentEvent>(16);
         {
             let mut entry = StreamRegistryEntry::reserved(sender, receiver);
-            entry.created_at = Instant::now().checked_sub(meerkat_core::time_compat::Duration::from_secs(60)).unwrap();
+            entry.created_at = Instant::now()
+                .checked_sub(meerkat_core::time_compat::Duration::from_secs(60))
+                .unwrap();
             runtime.interaction_stream_registry.lock().insert(id, entry);
         }
 

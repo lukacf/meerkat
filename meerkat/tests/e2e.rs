@@ -1339,9 +1339,7 @@ mod parallel_tools {
             || text_lower.contains("fail")
             || text_lower.contains("broken");
 
-        eprintln!(
-            "Mentions success: {mentions_success}, Mentions error: {mentions_error}"
-        );
+        eprintln!("Mentions success: {mentions_success}, Mentions error: {mentions_error}");
 
         // At minimum, the agent should complete and respond coherently
         assert!(!result.text.is_empty(), "Should have a response");

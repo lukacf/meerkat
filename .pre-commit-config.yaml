@@ -40,6 +40,17 @@ repos:
         args: ['--maxkb=1000']
         stages: [pre-push]
 
+  # On push: formatting check
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt --check
+        entry: cargo fmt --all -- --check
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages: [pre-push]
+
   # On push: full workspace clippy (compile check + lint)
   - repo: local
     hooks:

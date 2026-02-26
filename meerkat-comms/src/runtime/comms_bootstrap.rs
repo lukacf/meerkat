@@ -47,7 +47,9 @@ impl CommsBootstrap {
     pub fn for_child_inproc(name: String, parent_context: ParentCommsContext) -> Self {
         let mut config = CoreCommsConfig::with_name(&name);
         config.enabled = true;
-        config.inproc_namespace.clone_from(&parent_context.inproc_namespace);
+        config
+            .inproc_namespace
+            .clone_from(&parent_context.inproc_namespace);
         Self {
             config,
             #[cfg(not(target_arch = "wasm32"))]

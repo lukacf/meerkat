@@ -127,14 +127,16 @@ impl FilteredDispatcher {
         let allowed_names = match policy {
             ToolAccessPolicy::Inherit => all_names,
             ToolAccessPolicy::AllowList(allow) => {
-                let allow_set: HashSet<&str> = allow.iter().map(std::string::String::as_str).collect();
+                let allow_set: HashSet<&str> =
+                    allow.iter().map(std::string::String::as_str).collect();
                 all_names
                     .into_iter()
                     .filter(|n| allow_set.contains(n.as_str()))
                     .collect()
             }
             ToolAccessPolicy::DenyList(deny) => {
-                let deny_set: HashSet<&str> = deny.iter().map(std::string::String::as_str).collect();
+                let deny_set: HashSet<&str> =
+                    deny.iter().map(std::string::String::as_str).collect();
                 all_names
                     .into_iter()
                     .filter(|n| !deny_set.contains(n.as_str()))

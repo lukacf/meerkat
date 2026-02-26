@@ -2859,16 +2859,15 @@ async fn resume_session_with_llm_override(
             mob: config.tools.mob_enabled,
             active_skills: None,
         });
-    let host_mode_requested = stored_metadata
-        .as_ref()
-        .is_some_and(|meta| meta.host_mode);
+    let host_mode_requested = stored_metadata.as_ref().is_some_and(|meta| meta.host_mode);
     let host_mode = resolve_host_mode(host_mode_requested)?;
     let comms_name = stored_metadata
         .as_ref()
         .and_then(|meta| meta.comms_name.clone());
 
     let model = stored_metadata
-        .as_ref().map_or_else(|| config.agent.model.clone(), |meta| meta.model.clone());
+        .as_ref()
+        .map_or_else(|| config.agent.model.clone(), |meta| meta.model.clone());
     let max_tokens = stored_metadata
         .as_ref()
         .map_or(config.agent.max_tokens_per_turn, |meta| meta.max_tokens);
@@ -4026,8 +4025,10 @@ async fn hydrate_mob_state(
                 (meerkat_mob::MobState::Stopped, meerkat_mob::MobState::Running) => {
                     handle.resume().await.map_err(|e| anyhow::anyhow!("{e}"))?;
                 }
-                (meerkat_mob::MobState::Running | meerkat_mob::MobState::Stopped,
-meerkat_mob::MobState::Completed) => {
+                (
+                    meerkat_mob::MobState::Running | meerkat_mob::MobState::Stopped,
+                    meerkat_mob::MobState::Completed,
+                ) => {
                     handle
                         .complete()
                         .await

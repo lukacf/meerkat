@@ -37,14 +37,21 @@ impl LoopState {
 
     /// Validate a transition from this state to another
     pub fn can_transition_to(&self, next: &LoopState) -> bool {
-        use LoopState::{CallingLlm, WaitingForOps, DrainingEvents, Completed, ErrorRecovery, Cancelling};
+        use LoopState::{
+            CallingLlm, Cancelling, Completed, DrainingEvents, ErrorRecovery, WaitingForOps,
+        };
 
         matches!(
             (self, next),
-            (CallingLlm, WaitingForOps | DrainingEvents | Completed | ErrorRecovery | Cancelling)
-            | (WaitingForOps, DrainingEvents | Cancelling)
-            | (DrainingEvents | ErrorRecovery, CallingLlm | Completed | Cancelling)
-            | (Cancelling, Completed)
+            (
+                CallingLlm,
+                WaitingForOps | DrainingEvents | Completed | ErrorRecovery | Cancelling
+            ) | (WaitingForOps, DrainingEvents | Cancelling)
+                | (
+                    DrainingEvents | ErrorRecovery,
+                    CallingLlm | Completed | Cancelling
+                )
+                | (Cancelling, Completed)
         )
     }
 

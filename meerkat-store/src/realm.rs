@@ -318,7 +318,8 @@ pub async fn start_realm_lease_in(
         .map_err(StoreError::Io)?;
 
     let pid = std::process::id();
-    let resolved_instance = instance_id.map_or_else(|| format!("instance-{}", Uuid::now_v7()), ToOwned::to_owned);
+    let resolved_instance =
+        instance_id.map_or_else(|| format!("instance-{}", Uuid::now_v7()), ToOwned::to_owned);
     let lease_name = format!("{}.json", sanitize_instance_id(&resolved_instance));
     let lease_path = lease_dir.join(lease_name);
 

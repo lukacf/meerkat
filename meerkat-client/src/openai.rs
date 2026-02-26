@@ -1791,12 +1791,10 @@ mod tests {
             "status": "completed",
             "output": [{"type": "function_call", "call_id": "1", "name": "x", "arguments": "{}"}]
         });
-        let has_tools = response_tool["output"]
-            .as_array()
-            .is_some_and(|arr| {
-                arr.iter()
-                    .any(|item| item.get("type").and_then(|t| t.as_str()) == Some("function_call"))
-            });
+        let has_tools = response_tool["output"].as_array().is_some_and(|arr| {
+            arr.iter()
+                .any(|item| item.get("type").and_then(|t| t.as_str()) == Some("function_call"))
+        });
         assert!(has_tools);
 
         // completed without tool calls -> EndTurn
@@ -1804,12 +1802,10 @@ mod tests {
             "status": "completed",
             "output": [{"type": "message", "content": [{"type": "output_text", "text": "Hi"}]}]
         });
-        let has_tools = response_text["output"]
-            .as_array()
-            .is_some_and(|arr| {
-                arr.iter()
-                    .any(|item| item.get("type").and_then(|t| t.as_str()) == Some("function_call"))
-            });
+        let has_tools = response_text["output"].as_array().is_some_and(|arr| {
+            arr.iter()
+                .any(|item| item.get("type").and_then(|t| t.as_str()) == Some("function_call"))
+        });
         assert!(!has_tools);
     }
 

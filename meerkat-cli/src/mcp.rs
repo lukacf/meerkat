@@ -177,9 +177,7 @@ fn parse_env_vars(env: &[String]) -> anyhow::Result<HashMap<String, String>> {
     for e in env {
         let parts: Vec<&str> = e.splitn(2, '=').collect();
         if parts.len() != 2 {
-            anyhow::bail!(
-                "Invalid environment variable format: '{e}'. Expected KEY=VALUE"
-            );
+            anyhow::bail!("Invalid environment variable format: '{e}'. Expected KEY=VALUE");
         }
         env_map.insert(parts[0].to_string(), parts[1].to_string());
     }
@@ -221,7 +219,10 @@ pub async fn remove_server(name: String, scope: Option<McpScope>) -> anyhow::Res
                 anyhow::bail!(
                     "MCP server '{}' exists in multiple scopes: {:?}. Specify --scope to remove from a specific scope.",
                     name,
-                    scopes.iter().map(std::string::ToString::to_string).collect::<Vec<_>>()
+                    scopes
+                        .iter()
+                        .map(std::string::ToString::to_string)
+                        .collect::<Vec<_>>()
                 );
             }
             scopes[0]
@@ -540,7 +541,9 @@ mod tests {
         McpServerConfig::stdio(
             name,
             cmd,
-            args.into_iter().map(std::string::ToString::to_string).collect(),
+            args.into_iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
             HashMap::new(),
         )
     }

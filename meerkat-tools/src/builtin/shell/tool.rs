@@ -1254,10 +1254,7 @@ mod tests {
             let result = truncate_to_tail(mixed, max_chars);
             // Each character in result should be valid
             for c in result.chars() {
-                assert!(
-                    c.len_utf8() >= 1,
-                    "Character should be valid UTF-8: {c:?}"
-                );
+                assert!(c.len_utf8() >= 1, "Character should be valid UTF-8: {c:?}");
             }
         }
     }

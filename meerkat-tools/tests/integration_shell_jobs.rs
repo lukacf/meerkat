@@ -167,11 +167,10 @@ async fn integration_real_p1_shell_tool_shares_job_manager_with_job_control_tool
     let status_obj = final_status.get("status");
     // JobStatus is serialized with serde tag="status", so it looks like:
     // {"duration_secs": 0.0, "status": "cancelled"}
-    let is_cancelled = status_obj
-        .is_some_and(|s| {
-            // Check various serialization formats:
-            // 1. Direct string: "cancelled"
-            s.as_str() == Some("cancelled")
+    let is_cancelled = status_obj.is_some_and(|s| {
+        // Check various serialization formats:
+        // 1. Direct string: "cancelled"
+        s.as_str() == Some("cancelled")
                 // 2. Object with "Cancelled" key (enum variant)
                 || s.get("Cancelled").is_some()
                 // 3. Object with inner "status" field containing "cancelled" (serde tag format)
@@ -180,7 +179,7 @@ async fn integration_real_p1_shell_tool_shares_job_manager_with_job_control_tool
                 || s.as_object()
                     .and_then(|o| o.keys().next())
                     .is_some_and(|k| k.to_lowercase().contains("cancel"))
-        });
+    });
 
     assert!(
         is_cancelled,

@@ -1026,9 +1026,7 @@ async fn get_session(
         .read(&session_id)
         .await
         .map_err(|e| match e {
-            SessionError::NotFound { .. } => {
-                ApiError::NotFound(format!("Session not found: {id}"))
-            }
+            SessionError::NotFound { .. } => ApiError::NotFound(format!("Session not found: {id}")),
             _ => ApiError::Internal(format!("{e}")),
         })?;
 
@@ -1126,10 +1124,8 @@ async fn continue_session(
             let provider = req
                 .provider
                 .or_else(|| stored_metadata.as_ref().map(|meta| meta.provider));
-            let continue_host_mode_requested = host_mode_requested
-                || stored_metadata
-                    .as_ref()
-                    .is_some_and(|meta| meta.host_mode);
+            let continue_host_mode_requested =
+                host_mode_requested || stored_metadata.as_ref().is_some_and(|meta| meta.host_mode);
             let continue_host_mode = resolve_host_mode(continue_host_mode_requested)?;
             let comms_name = req.comms_name.clone().or_else(|| {
                 stored_metadata

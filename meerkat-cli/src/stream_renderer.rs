@@ -459,7 +459,10 @@ fn render_event(
             injection_bytes,
         } => {
             if !skills.is_empty() {
-                let names: Vec<String> = skills.iter().map(std::string::ToString::to_string).collect();
+                let names: Vec<String> = skills
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect();
                 chrome_line(
                     mux,
                     scope_id,

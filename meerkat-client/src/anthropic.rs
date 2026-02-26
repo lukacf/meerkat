@@ -315,7 +315,9 @@ impl AnthropicClient {
                 if thinking.get("type").and_then(|t| t.as_str()) == Some("adaptive") {
                     // Opus 4.6 adaptive thinking — pass through directly
                     body["thinking"] = serde_json::json!({"type": "adaptive"});
-                } else if let Some(budget) = thinking.get("budget_tokens").and_then(serde_json::Value::as_u64)
+                } else if let Some(budget) = thinking
+                    .get("budget_tokens")
+                    .and_then(serde_json::Value::as_u64)
                 {
                     // Explicit enabled format with budget
                     body["thinking"] = serde_json::json!({
@@ -323,7 +325,10 @@ impl AnthropicClient {
                         "budget_tokens": budget
                     });
                 }
-            } else if let Some(budget) = params.get("thinking_budget").and_then(serde_json::Value::as_u64) {
+            } else if let Some(budget) = params
+                .get("thinking_budget")
+                .and_then(serde_json::Value::as_u64)
+            {
                 // Legacy flat format
                 body["thinking"] = serde_json::json!({
                     "type": "enabled",

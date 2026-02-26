@@ -51,7 +51,8 @@ impl CommandInvocation {
             return String::new();
         }
 
-        let mut out = shlex::try_quote(&self.executable).map_or_else(|_| self.executable.clone(), std::borrow::Cow::into_owned);
+        let mut out = shlex::try_quote(&self.executable)
+            .map_or_else(|_| self.executable.clone(), std::borrow::Cow::into_owned);
 
         for arg in &self.arguments {
             out.push(' ');

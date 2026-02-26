@@ -105,9 +105,9 @@ impl FileTaskStore {
 
         // Ensure parent directory exists
         if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent).await.map_err(|e| {
-                TaskError::StorageError(format!("Failed to create directory: {e}"))
-            })?;
+            fs::create_dir_all(parent)
+                .await
+                .map_err(|e| TaskError::StorageError(format!("Failed to create directory: {e}")))?;
         }
 
         // Write to temp file first

@@ -2191,7 +2191,11 @@ impl MobActor {
             .definition
             .limits
             .as_ref()
-            .and_then(|limits| limits.cancel_grace_timeout_ms).map_or_else(|| std::time::Duration::from_secs(5), std::time::Duration::from_millis);
+            .and_then(|limits| limits.cancel_grace_timeout_ms)
+            .map_or_else(
+                || std::time::Duration::from_secs(5),
+                std::time::Duration::from_millis,
+            );
         tokio::spawn(async move {
             let completed = tokio::select! {
                 _ = &mut handle => true,

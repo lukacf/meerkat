@@ -293,10 +293,7 @@ async fn config_get_patch_roundtrip() {
 
     let get_resp = read_response(&mut reader).await;
     assert_eq!(get_resp["id"], 1);
-    assert!(
-        get_resp["error"].is_null(),
-        "config/get failed: {get_resp}"
-    );
+    assert!(get_resp["error"].is_null(), "config/get failed: {get_resp}");
     let initial_max_tokens = get_resp["result"]["config"]["max_tokens"].as_u64().unwrap();
 
     // Patch max_tokens

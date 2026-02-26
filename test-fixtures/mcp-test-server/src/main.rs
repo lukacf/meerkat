@@ -193,8 +193,14 @@ fn handle_request(request: &Value) -> Value {
                     })
                 }
                 "add" => {
-                    let a = arguments.get("a").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-                    let b = arguments.get("b").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+                    let a = arguments
+                        .get("a")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.0);
+                    let b = arguments
+                        .get("b")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.0);
                     json!({
                         "content": [{
                             "type": "text",

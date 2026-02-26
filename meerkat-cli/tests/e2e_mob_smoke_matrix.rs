@@ -133,12 +133,10 @@ impl SmokeHarness {
 
         let rkat = rkat_binary_path().ok_or("rkat binary not found")?;
         let api_key = anthropic_api_key().ok_or("anthropic api key missing")?;
-        let verbose = std::env::var("SMOKE_VERBOSE")
-            .ok()
-            .is_some_and(|value| {
-                let value = value.to_ascii_lowercase();
-                matches!(value.as_str(), "1" | "true" | "yes" | "on")
-            });
+        let verbose = std::env::var("SMOKE_VERBOSE").ok().is_some_and(|value| {
+            let value = value.to_ascii_lowercase();
+            matches!(value.as_str(), "1" | "true" | "yes" | "on")
+        });
         let provider = std::env::var("SMOKE_PROVIDER")
             .ok()
             .map(|value| value.trim().to_string())
@@ -2014,7 +2012,8 @@ async fn e2e_smoke_12_mixed_backend_and_verbose_observability()
         .join("\n");
 
     let artifact_dir = std::env::var("SMOKE_ARTIFACT_DIR")
-        .ok().map_or_else(|| harness.project_dir.join(".rkat"), PathBuf::from);
+        .ok()
+        .map_or_else(|| harness.project_dir.join(".rkat"), PathBuf::from);
     tokio::fs::create_dir_all(&artifact_dir).await?;
     let artifact_path = artifact_dir.join("phase3_mixed_verbose_observability.log");
     tokio::fs::write(

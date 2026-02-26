@@ -504,12 +504,13 @@ function drainAllEvents(mod: RuntimeModule, turn: number): number {
     try {
       const raw = mod.poll_subscription(sub.handle);
       const events: any[] = JSON.parse(raw);
-      if (events.length > 0) console.log(`[${sub.meerkatId}] ${events.length} events:`, events.map(e => e.type));
+      // Uncomment for debugging: if (events.length > 0) console.log(`[${sub.meerkatId}] ${events.length} events`);
       for (const event of events) {
         // Outgoing comms: agent used send_message tool
+        // AgentEvent::ToolCallRequested { id, name, args }
         if (event.type === "tool_call_requested" && event.name === "send_message") {
           try {
-            const args = typeof event.arguments === "string" ? JSON.parse(event.arguments) : event.arguments;
+            const args = typeof event.args === "string" ? JSON.parse(event.args) : event.args;
             const to = args.to || args.peer || "";
             const content = args.content || args.message || "";
             const ch = dmChannel(sub.meerkatId, to);
@@ -519,16 +520,16 @@ function drainAllEvents(mod: RuntimeModule, turn: number): number {
             }
           } catch { /* skip parse errors */ }
         }
-        // Agent's text output (reasoning, analysis)
-        if (event.type === "text_complete" && event.text) {
-          // Show in the agent's own faction ops channel as context
+        // Agent's text output — AgentEvent::TextComplete { content }
+        if (event.type === "text_complete" && event.content) {
           const ch = `${sub.team[0]}-plan-op` as ChannelId;
-          // Only show planner/operator text, not ambassador (ambassador output goes to DMs)
           if (sub.role === "planner" || sub.role === "operator") {
-            pushMessage({ channel: ch, role: sub.role, faction: sub.team, content: event.text.slice(0, 500), turn });
+            pushMessage({ channel: ch, role: sub.role, faction: sub.team, content: event.content.slice(0, 500), turn });
             count++;
           }
         }
+        // Count ANY event for quiescence detection (even text_delta)
+        count++;
       }
     } catch { /* poll error */ }
   }

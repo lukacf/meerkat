@@ -350,6 +350,24 @@ Comms supports `inproc`, TCP, and UDS. Inproc registry is namespace-segmented; M
 
 **Silent comms intents**: `AgentBuildConfig.silent_comms_intents` configures request intents that are injected into session context without triggering an LLM turn. Mob meerkats default to `["mob.peer_added", "mob.peer_retired"]`.
 
+### Tool scoping
+
+Tool visibility can change during a session without restarting the agent. All changes are staged then atomically applied at the turn boundary.
+
+- **External filters** — allow-list or deny-list staged via `ToolScopeHandle`, applied at `CallingLlm` boundary. Persisted in session metadata (`tool_scope_external_filter`).
+- **Per-turn overlay** — `TurnToolOverlay` on `StartTurnRequest.flow_tool_overlay`. Ephemeral, used by mob flow steps to restrict tools per step.
+- **Live MCP mutation** — `mcp/add`, `mcp/remove`, `mcp/reload` stage server changes on the `McpRouter`. Applied at next turn boundary. Removals drain in-flight calls before finalizing.
+- **Composition** — most-restrictive wins (allow-lists intersect, deny-lists union, deny beats allow).
+- **Agent awareness** — `ToolConfigChanged` event emitted + `[SYSTEM NOTICE]` injected into conversation on any change.
+
+Surface availability:
+
+| Surface | Live MCP | Tool filter | Status |
+|---------|----------|-------------|--------|
+| JSON-RPC | `mcp/add`, `mcp/remove`, `mcp/reload` | Via session runtime | Fully wired |
+| REST | `POST /sessions/{id}/mcp/*` | — | Routes registered (placeholder) |
+| CLI | `rkat mcp add/remove --session --live-server-url` | — | Delegates to REST |
+
 ### Memory
 
 Semantic memory (`memory_search`) and compaction integrate through the same session/runtime pipeline.

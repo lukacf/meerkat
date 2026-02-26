@@ -259,10 +259,10 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
         let bridge_handle = match entry.runtime_mode {
             crate::MobRuntimeMode::AutonomousHost => {
                 if flow_tool_overlay.is_some() {
-                    tracing::debug!(
-                        target = %target,
-                        "flow tool overlay provided for autonomous host dispatch; overlay is not applied on injector path"
-                    );
+                    return Err(MobError::Internal(format!(
+                        "flow tool overlay cannot be enforced for autonomous host member '{target}'; \
+                         use turn_driven runtime mode for steps with allowed_tools/blocked_tools"
+                    )));
                 }
                 let session_id = entry.member_ref.session_id().ok_or_else(|| {
                     MobError::Internal(format!(

@@ -6200,7 +6200,7 @@ async fn test_flow_dispatch_autonomous_mode_uses_injector_and_avoids_non_host_st
 }
 
 #[tokio::test]
-async fn test_flow_dispatch_autonomous_mode_with_overlay_keeps_injector_path() {
+async fn test_flow_dispatch_autonomous_mode_with_overlay_rejects() {
     let mut definition = sample_definition_with_dispatch_mode(DispatchMode::OneToOne);
     let flow = definition
         .flows
@@ -6213,7 +6213,7 @@ async fn test_flow_dispatch_autonomous_mode_with_overlay_keeps_injector_path() {
     step.allowed_tools = Some(vec!["alpha".to_string()]);
     step.blocked_tools = Some(vec!["beta".to_string()]);
 
-    let (handle, service) = create_test_mob(definition).await;
+    let (handle, _service) = create_test_mob(definition).await;
     handle
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
@@ -6223,27 +6223,15 @@ async fn test_flow_dispatch_autonomous_mode_with_overlay_keeps_injector_path() {
         .await
         .expect("spawn worker");
 
-    let baseline_non_host_start_turn = service
-        .start_turn_call_count()
-        .saturating_sub(service.host_mode_start_turn_call_count());
-
     let run_id = handle
         .run_flow(FlowId::from("dispatch"), serde_json::json!({}))
         .await
         .expect("run flow");
     let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(2)).await;
-    assert_eq!(terminal.status, MobRunStatus::Completed);
-
-    let non_host_start_turn = service
-        .start_turn_call_count()
-        .saturating_sub(service.host_mode_start_turn_call_count());
     assert_eq!(
-        non_host_start_turn, baseline_non_host_start_turn,
-        "autonomous flow dispatch should avoid non-host start_turn even when overlay is present"
-    );
-    assert!(
-        service.inject_call_count() > 0,
-        "autonomous flow dispatch should continue using injector routing"
+        terminal.status,
+        MobRunStatus::Failed,
+        "flow should fail because tool overlay cannot be enforced for autonomous host members"
     );
 }
 

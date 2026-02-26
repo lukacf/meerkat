@@ -19,7 +19,7 @@ interface TurnDecision { order: OrderSet; reasoning: string }
 type ChannelId =
   | "n-plan-op" | "s-plan-op" | "e-plan-op"       // planner↔operator
   | "n-plan-amb" | "s-plan-amb" | "e-plan-amb"     // planner↔ambassador
-  | "n-s-diplo" | "n-e-diplo" | "s-e-diplo"        // ambassador↔ambassador
+  | "e-n-diplo" | "e-s-diplo" | "n-s-diplo"        // ambassador↔ambassador (alphabetical sort)
   | "narrator";
 type MessageRole = "planner" | "operator" | "ambassador" | "narrator" | "system";
 interface ChatMessage { channel: ChannelId; role: MessageRole; faction: Team | "neutral"; content: string; turn: number }
@@ -31,9 +31,9 @@ const CHANNELS: { id: ChannelId; label: string; icon: string }[] = [
   { id: "n-plan-amb", label: "N: Plan\u2194Amb", icon: "\u{1F4E8}" },
   { id: "s-plan-amb", label: "S: Plan\u2194Amb", icon: "\u{1F4E8}" },
   { id: "e-plan-amb", label: "E: Plan\u2194Amb", icon: "\u{1F4E8}" },
+  { id: "e-n-diplo",  label: "N\u2194E Diplo",   icon: "\u{1F91D}" },
+  { id: "e-s-diplo",  label: "S\u2194E Diplo",   icon: "\u{1F91D}" },
   { id: "n-s-diplo",  label: "N\u2194S Diplo",   icon: "\u{1F91D}" },
-  { id: "n-e-diplo",  label: "N\u2194E Diplo",   icon: "\u{1F91D}" },
-  { id: "s-e-diplo",  label: "S\u2194E Diplo",   icon: "\u{1F91D}" },
   { id: "narrator",   label: "#narrator",         icon: "\u{1F4DC}" },
 ];
 

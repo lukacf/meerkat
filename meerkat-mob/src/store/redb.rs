@@ -861,7 +861,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_redb_event_store_clear_and_prune_large_keyset() {
+    #[ignore] // integration_real: hits real redb with large keyset (~19s)
+    async fn integration_real_redb_event_store_clear_and_prune_large_keyset() {
         let (_dir, path) = temp_db_path();
         let store = RedbMobEventStore::open(&path).unwrap();
         let now = Utc::now();

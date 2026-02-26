@@ -31,9 +31,9 @@ def _resolve_schema_ref(root: dict[str, Any], ref: str) -> dict[str, Any]:
 
 def _python_type_from_schema(root: dict[str, Any], field_schema: Any) -> tuple[str, bool]:
     """Return (python_type, optional)."""
-    if field_schema is True or field_schema is False:
-        return ("Any", True)
-    if not isinstance(field_schema, dict):
+    if field_schema is True:
+        return ("Any", False)
+    if field_schema is False or not isinstance(field_schema, dict):
         return ("Any", True)
     if "$ref" in field_schema:
         resolved = _resolve_schema_ref(root, str(field_schema["$ref"]))
@@ -60,14 +60,14 @@ def _python_type_from_schema(root: dict[str, Any], field_schema: Any) -> tuple[s
         case "object":
             return ("dict[str, Any]", optional)
         case _:
-            return ("Any", True or optional)
+            return ("Any", optional)
 
 
 def _typescript_type_from_schema(root: dict[str, Any], field_schema: Any) -> tuple[str, bool]:
     """Return (typescript_type, optional)."""
-    if field_schema is True or field_schema is False:
-        return ("unknown", True)
-    if not isinstance(field_schema, dict):
+    if field_schema is True:
+        return ("unknown", False)
+    if field_schema is False or not isinstance(field_schema, dict):
         return ("unknown", True)
     if "$ref" in field_schema:
         resolved = _resolve_schema_ref(root, str(field_schema["$ref"]))

@@ -600,6 +600,16 @@ impl SessionRuntime {
         let adapter = self.mcp_adapter_for_session(session_id).await?;
         match server_name {
             Some(name) => {
+                // Validate server exists before staging to avoid deferred failures
+                // at the next turn boundary.
+                let active = adapter.active_server_names().await;
+                if !active.iter().any(|n| n == &name) {
+                    return Err(RpcError {
+                        code: error::INVALID_PARAMS,
+                        message: format!("MCP server '{name}' is not registered on this session"),
+                        data: None,
+                    });
+                }
                 adapter
                     .stage_reload(McpReloadTarget::ServerName(name))
                     .await

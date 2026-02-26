@@ -52,7 +52,7 @@ export interface SkillsParams {
 
 export interface McpAddParams {
   persisted?: boolean;
-  server_config?: unknown;
+  server_config: unknown;
   server_name: string;
   session_id: string;
 }

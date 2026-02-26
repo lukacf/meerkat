@@ -1898,6 +1898,8 @@ fn realm_store_path(manifest: &meerkat_store::RealmManifest, scope: &RuntimeScop
         #[cfg(feature = "jsonl-store")]
         RealmBackend::Jsonl => paths.sessions_jsonl_dir,
         RealmBackend::Redb => paths.root,
+        #[cfg(not(feature = "jsonl-store"))]
+        _ => paths.root,
     }
 }
 
@@ -2542,6 +2544,7 @@ async fn run_agent(
     tracing::info!("Using provider: {:?}, model: {}", provider, model);
 
     // Apply --comms-listen-tcp override to the config
+    #[allow(unused_mut)]
     let mut config = config.clone();
     #[cfg(feature = "comms")]
     if let Some(ref addr) = comms_overrides.listen_tcp {

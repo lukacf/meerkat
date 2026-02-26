@@ -1151,14 +1151,14 @@ pub async fn wire_cross_mob(
     let name_b = format!("{mob_b}/{}/{meerkat_b}", entry_b.profile);
 
     let spec_b = meerkat_core::comms::TrustedPeerSpec::new(
-        name_b,
+        &name_b,
         key_b.clone(),
-        format!("inproc://{meerkat_b}"),
+        format!("inproc://{name_b}"),
     ).map_err(|e| err_str("wire_error", e))?;
     let spec_a = meerkat_core::comms::TrustedPeerSpec::new(
-        name_a,
+        &name_a,
         key_a,
-        format!("inproc://{meerkat_a}"),
+        format!("inproc://{name_a}"),
     ).map_err(|e| err_str("wire_error", e))?;
 
     comms_a

@@ -221,6 +221,23 @@ impl InprocRegistry {
         Some((peer.pubkey, peer.sender.clone()))
     }
 
+    /// Look up an inproc peer by name across ALL namespaces.
+    ///
+    /// Used for cross-mob communication: when a trusted peer's inproc address
+    /// is known but the peer is registered in a different namespace. Searches
+    /// all namespaces and returns the first match.
+    pub fn get_by_name_any_namespace(&self, name: &str) -> Option<(PubKey, InboxSender)> {
+        let state = self.state.read();
+        for namespace_state in state.namespaces.values() {
+            if let Some(&pubkey) = namespace_state.names.get(name) {
+                if let Some(peer) = namespace_state.peers.get(&pubkey) {
+                    return Some((peer.pubkey, peer.sender.clone()));
+                }
+            }
+        }
+        None
+    }
+
     /// Look up an inproc peer by pubkey.
     pub fn get_by_pubkey(&self, pubkey: &PubKey) -> Option<InboxSender> {
         self.get_by_pubkey_in_namespace(DEFAULT_NAMESPACE, pubkey)
@@ -325,6 +342,44 @@ impl InprocRegistry {
             kind,
             sign_envelope,
         )
+    }
+
+    /// Send a message to an inproc peer, searching ALL namespaces.
+    ///
+    /// Used as a fallback for cross-mob communication when the recipient is
+    /// in a different namespace (realm) than the sender. The peer must exist
+    /// in at least one namespace.
+    pub fn send_cross_namespace(
+        &self,
+        from_keypair: &Keypair,
+        to_name: &str,
+        kind: MessageKind,
+        sign_envelope: bool,
+    ) -> Result<uuid::Uuid, InprocSendError> {
+        let (to_pubkey, sender) = self
+            .get_by_name_any_namespace(to_name)
+            .ok_or_else(|| InprocSendError::PeerNotFound(to_name.to_string()))?;
+
+        let mut envelope = Envelope {
+            id: Uuid::new_v4(),
+            from: from_keypair.public_key(),
+            to: to_pubkey,
+            kind,
+            sig: Signature::new([0u8; 64]),
+        };
+        if sign_envelope {
+            envelope.sign(from_keypair);
+        }
+
+        let envelope_id = envelope.id;
+        sender
+            .send(InboxItem::External { envelope })
+            .map_err(|err| match err {
+                InboxError::Closed => InprocSendError::InboxClosed,
+                InboxError::Full => InprocSendError::InboxFull,
+            })?;
+
+        Ok(envelope_id)
     }
 
     /// Send a message directly to an inproc peer within a namespace.

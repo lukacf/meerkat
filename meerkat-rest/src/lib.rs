@@ -33,10 +33,7 @@ use meerkat::{
     PersistentSessionService, Session, SessionId, SessionService,
     encode_llm_client_override_for_service,
 };
-use meerkat_contracts::{
-    McpAddParams, McpLiveOpResponse, McpReloadParams, McpRemoveParams, SessionLocator,
-    format_session_ref,
-};
+use meerkat_contracts::{SessionLocator, format_session_ref};
 use meerkat_core::service::{
     CreateSessionRequest as SvcCreateSessionRequest, InitialTurnPolicy, SessionBuildOptions,
     SessionError, StartTurnRequest as SvcStartTurnRequest,
@@ -390,9 +387,6 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}", get(get_session))
         .route("/sessions/{id}/messages", post(continue_session))
         .route("/sessions/{id}/events", get(session_events))
-        .route("/sessions/{id}/mcp/add", post(mcp_add))
-        .route("/sessions/{id}/mcp/remove", post(mcp_remove))
-        .route("/sessions/{id}/mcp/reload", post(mcp_reload))
         .route("/comms/send", post(comms_send))
         .route("/comms/peers", get(comms_peers))
         // BRIDGE(M11→M12): Legacy event push endpoint.
@@ -1218,39 +1212,6 @@ async fn continue_session(
     }
 }
 
-/// Live MCP add — not yet implemented on the REST surface.
-async fn mcp_add(
-    State(_state): State<AppState>,
-    Path(_id): Path<String>,
-    Json(_req): Json<McpAddParams>,
-) -> Result<Json<McpLiveOpResponse>, ApiError> {
-    Err(ApiError::NotImplemented(
-        "Live MCP operations are not yet supported on the REST surface; use the JSON-RPC surface instead".to_string(),
-    ))
-}
-
-/// Live MCP remove — not yet implemented on the REST surface.
-async fn mcp_remove(
-    State(_state): State<AppState>,
-    Path(_id): Path<String>,
-    Json(_req): Json<McpRemoveParams>,
-) -> Result<Json<McpLiveOpResponse>, ApiError> {
-    Err(ApiError::NotImplemented(
-        "Live MCP operations are not yet supported on the REST surface; use the JSON-RPC surface instead".to_string(),
-    ))
-}
-
-/// Live MCP reload — not yet implemented on the REST surface.
-async fn mcp_reload(
-    State(_state): State<AppState>,
-    Path(_id): Path<String>,
-    Json(_req): Json<McpReloadParams>,
-) -> Result<Json<McpLiveOpResponse>, ApiError> {
-    Err(ApiError::NotImplemented(
-        "Live MCP operations are not yet supported on the REST surface; use the JSON-RPC surface instead".to_string(),
-    ))
-}
-
 /// SSE endpoint for streaming session events
 async fn session_events(
     State(state): State<AppState>,
@@ -1331,7 +1292,6 @@ pub enum ApiError {
     Internal(String),
     ServiceUnavailable(String),
     Gone(String),
-    NotImplemented(String),
 }
 
 impl IntoResponse for ApiError {
@@ -1351,7 +1311,6 @@ impl IntoResponse for ApiError {
                 (StatusCode::SERVICE_UNAVAILABLE, "SERVICE_UNAVAILABLE", msg)
             }
             ApiError::Gone(msg) => (StatusCode::GONE, "GONE", msg),
-            ApiError::NotImplemented(msg) => (StatusCode::NOT_IMPLEMENTED, "NOT_IMPLEMENTED", msg),
         };
 
         let body = Json(ErrorResponse {
@@ -1367,11 +1326,8 @@ impl IntoResponse for ApiError {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use axum::body::Body;
-    use axum::http::{Request, StatusCode};
     use std::path::PathBuf;
     use tempfile::TempDir;
-    use tower::ServiceExt;
 
     fn hooks_override_fixture() -> HookRunOverrides {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1654,106 +1610,5 @@ mod tests {
             response.session_ref.as_deref().expect("session_ref"),
             format_session_ref("test-realm", &session_id)
         );
-    }
-
-    #[tokio::test]
-    async fn test_mcp_add_returns_not_implemented() {
-        let temp = TempDir::new().expect("temp");
-        let state = AppState::load_from(temp.path().to_path_buf())
-            .await
-            .expect("state");
-        let req = McpAddParams {
-            session_id: "01234567-89ab-cdef-0123-456789abcdef".to_string(),
-            server_name: "filesystem".to_string(),
-            server_config: json!({"cmd":"npx"}),
-            persisted: false,
-        };
-        let result = mcp_add(
-            State(state),
-            Path("01234567-89ab-cdef-0123-456789abcdef".to_string()),
-            Json(req),
-        )
-        .await;
-        assert!(matches!(result, Err(ApiError::NotImplemented(_))));
-    }
-
-    #[tokio::test]
-    async fn test_mcp_remove_returns_not_implemented() {
-        let temp = TempDir::new().expect("temp");
-        let state = AppState::load_from(temp.path().to_path_buf())
-            .await
-            .expect("state");
-        let req = McpRemoveParams {
-            session_id: "01234567-89ab-cdef-0123-456789abcdef".to_string(),
-            server_name: "filesystem".to_string(),
-            persisted: false,
-        };
-        let result = mcp_remove(
-            State(state),
-            Path("01234567-89ab-cdef-0123-456789abcdef".to_string()),
-            Json(req),
-        )
-        .await;
-        assert!(matches!(result, Err(ApiError::NotImplemented(_))));
-    }
-
-    #[tokio::test]
-    async fn test_mcp_reload_returns_not_implemented() {
-        let temp = TempDir::new().expect("temp");
-        let state = AppState::load_from(temp.path().to_path_buf())
-            .await
-            .expect("state");
-        let req = McpReloadParams {
-            session_id: "01234567-89ab-cdef-0123-456789abcdef".to_string(),
-            server_name: Some("filesystem".to_string()),
-            persisted: false,
-        };
-
-        let result = mcp_reload(
-            State(state),
-            Path("01234567-89ab-cdef-0123-456789abcdef".to_string()),
-            Json(req),
-        )
-        .await;
-        assert!(matches!(result, Err(ApiError::NotImplemented(_))));
-    }
-
-    #[tokio::test]
-    async fn test_mcp_routes_registered() {
-        let temp = TempDir::new().expect("temp");
-        let app = router(
-            AppState::load_from(temp.path().to_path_buf())
-                .await
-                .expect("state"),
-        );
-
-        let valid_id = "01234567-89ab-cdef-0123-456789abcdef";
-
-        let add_req = Request::builder()
-            .method("POST")
-            .uri(format!("/sessions/{valid_id}/mcp/add"))
-            .header("content-type", "application/json")
-            .body(Body::from("{}"))
-            .expect("request");
-        let add_resp = app.clone().oneshot(add_req).await.expect("response");
-        assert_ne!(add_resp.status(), StatusCode::NOT_FOUND);
-
-        let remove_req = Request::builder()
-            .method("POST")
-            .uri(format!("/sessions/{valid_id}/mcp/remove"))
-            .header("content-type", "application/json")
-            .body(Body::from("{}"))
-            .expect("request");
-        let remove_resp = app.clone().oneshot(remove_req).await.expect("response");
-        assert_ne!(remove_resp.status(), StatusCode::NOT_FOUND);
-
-        let reload_req = Request::builder()
-            .method("POST")
-            .uri(format!("/sessions/{valid_id}/mcp/reload"))
-            .header("content-type", "application/json")
-            .body(Body::from("{}"))
-            .expect("request");
-        let reload_resp = app.oneshot(reload_req).await.expect("response");
-        assert_ne!(reload_resp.status(), StatusCode::NOT_FOUND);
     }
 }

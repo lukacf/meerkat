@@ -17,31 +17,46 @@ export function drainAllEvents(mod: RuntimeModule, session: MatchSession, turn: 
   let events = 0;
   const errors: string[] = [];
   const buffered: Array<{ sub: (typeof session.subs)[number]; env: any }> = [];
+  let warnedMalformedEnvelope = false;
   for (const sub of session.subs) {
     try {
       const raw = mod.poll_subscription(sub.handle);
       const parsed: any[] = JSON.parse(raw);
       for (const event of parsed) {
+        if (
+          event == null
+          || typeof event.timestamp_ms !== "number"
+          || typeof event.source_id !== "string"
+          || typeof event.seq !== "number"
+          || typeof event.event_id !== "string"
+          || event.payload == null
+        ) {
+          if (!warnedMalformedEnvelope) {
+            warnedMalformedEnvelope = true;
+            console.warn("Skipping malformed event envelope from poll_subscription", event);
+          }
+          continue;
+        }
         buffered.push({ sub, env: event });
       }
     } catch { /* poll error */ }
   }
   buffered.sort((a, b) => {
-    const ta = Number(a.env?.timestamp_ms ?? 0);
-    const tb = Number(b.env?.timestamp_ms ?? 0);
+    const ta = a.env.timestamp_ms;
+    const tb = b.env.timestamp_ms;
     if (ta !== tb) return ta - tb;
-    const sa = String(a.env?.source_id ?? "");
-    const sb = String(b.env?.source_id ?? "");
+    const sa = a.env.source_id;
+    const sb = b.env.source_id;
     if (sa !== sb) return sa < sb ? -1 : 1;
-    const qa = Number(a.env?.seq ?? 0);
-    const qb = Number(b.env?.seq ?? 0);
+    const qa = a.env.seq;
+    const qb = b.env.seq;
     if (qa !== qb) return qa - qb;
-    const ia = String(a.env?.event_id ?? "");
-    const ib = String(b.env?.event_id ?? "");
+    const ia = a.env.event_id;
+    const ib = b.env.event_id;
     return ia < ib ? -1 : ia > ib ? 1 : 0;
   });
   for (const { sub, env } of buffered) {
-    const event = env?.payload ?? env;
+    const event = env.payload;
     events++;
     if (event.type === "run_failed" && event.error) {
       errors.push(`${sub.meerkatId}: ${event.error}`);

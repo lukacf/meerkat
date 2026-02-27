@@ -41,7 +41,7 @@ use meerkat_core::service::{
 };
 use meerkat_core::{
     Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore, FileConfigStore,
-    HookRunOverrides, Provider, RealmSelection, RuntimeBootstrap, SessionTooling,
+    HookRunOverrides, Provider, RealmSelection, RuntimeBootstrap, SessionTooling, agent_event_type,
     format_verbose_event,
 };
 use meerkat_store::{RealmBackend, RealmOrigin};
@@ -1321,16 +1321,12 @@ async fn session_events(
                         continue;
                     }
 
+                    let event_type = agent_event_type(&payload.event.payload);
                     let json = serde_json::to_value(&payload.event).unwrap_or_else(|_| {
                         json!({
                             "payload": {"type": "unknown"}
                         })
                     });
-                    let event_type = json
-                        .get("payload")
-                        .and_then(|v| v.get("type"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("agent_event");
 
                     let event = Event::default()
                         .event(event_type)

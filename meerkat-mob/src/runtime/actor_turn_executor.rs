@@ -107,55 +107,51 @@ impl ActorFlowTurnExecutor {
     }
 
     fn spawn_subscription_bridge(
-        mut events: tokio::sync::mpsc::Receiver<AgentEvent>,
+        events: tokio::sync::mpsc::Receiver<AgentEvent>,
         completion_tx: oneshot::Sender<FlowTurnOutcome>,
         scoped_event_tx: Option<mpsc::Sender<ScopedAgentEvent>>,
         scoped_frame: Option<StreamScopeFrame>,
     ) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
-            let mut completion_tx = Some(completion_tx);
-            while let Some(payload) = events.recv().await {
-                if let (Some(tx), Some(frame)) = (&scoped_event_tx, &scoped_frame) {
-                    let scoped = ScopedAgentEvent::new(vec![frame.clone()], payload.clone());
-                    let _ = tx.send(scoped).await;
-                }
-                match payload {
-                    AgentEvent::RunCompleted { result, .. }
-                    | AgentEvent::InteractionComplete { result, .. } => {
-                        if let Some(tx) = completion_tx.take() {
-                            let _ = tx.send(FlowTurnOutcome::Completed { output: result });
-                        }
-                        return;
-                    }
-                    AgentEvent::RunFailed { error, .. }
-                    | AgentEvent::InteractionFailed { error, .. } => {
-                        if let Some(tx) = completion_tx.take() {
-                            let _ = tx.send(FlowTurnOutcome::Failed { reason: error });
-                        }
-                        return;
-                    }
-                    _ => {}
-                }
-            }
-
-            if let Some(tx) = completion_tx {
-                let _ = tx.send(FlowTurnOutcome::Failed {
-                    reason: "turn event stream closed before terminal outcome".to_string(),
-                });
-            }
-        })
+        // Autonomous-host injector subscriptions still emit raw AgentEvent.
+        Self::spawn_subscription_bridge_impl(
+            events,
+            completion_tx,
+            scoped_event_tx,
+            scoped_frame,
+            |payload| payload,
+        )
     }
 
     fn spawn_subscription_bridge_enveloped(
-        mut events: tokio::sync::mpsc::Receiver<EventEnvelope<AgentEvent>>,
+        events: tokio::sync::mpsc::Receiver<EventEnvelope<AgentEvent>>,
         completion_tx: oneshot::Sender<FlowTurnOutcome>,
         scoped_event_tx: Option<mpsc::Sender<ScopedAgentEvent>>,
         scoped_frame: Option<StreamScopeFrame>,
     ) -> tokio::task::JoinHandle<()> {
+        Self::spawn_subscription_bridge_impl(
+            events,
+            completion_tx,
+            scoped_event_tx,
+            scoped_frame,
+            |event| event.payload,
+        )
+    }
+
+    fn spawn_subscription_bridge_impl<E, F>(
+        mut events: tokio::sync::mpsc::Receiver<E>,
+        completion_tx: oneshot::Sender<FlowTurnOutcome>,
+        scoped_event_tx: Option<mpsc::Sender<ScopedAgentEvent>>,
+        scoped_frame: Option<StreamScopeFrame>,
+        mut extract_payload: F,
+    ) -> tokio::task::JoinHandle<()>
+    where
+        E: Send + 'static,
+        F: FnMut(E) -> AgentEvent + Send + 'static,
+    {
         tokio::spawn(async move {
             let mut completion_tx = Some(completion_tx);
             while let Some(event) = events.recv().await {
-                let payload = event.payload.clone();
+                let payload = extract_payload(event);
                 if let (Some(tx), Some(frame)) = (&scoped_event_tx, &scoped_frame) {
                     let scoped = ScopedAgentEvent::new(vec![frame.clone()], payload.clone());
                     let _ = tx.send(scoped).await;

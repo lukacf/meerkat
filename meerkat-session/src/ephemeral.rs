@@ -218,7 +218,6 @@ pub struct EphemeralSessionService<B: SessionAgentBuilder> {
     /// Notified when a new session handle is stored. Used by CLI --stdin
     /// to avoid polling for the session to appear.
     session_registered: tokio::sync::Notify,
-    event_seq: Arc<RwLock<IndexMap<String, u64>>>,
 }
 
 impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
@@ -230,7 +229,6 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             max_sessions,
             session_capacity: Arc::new(Semaphore::new(max_sessions)),
             session_registered: tokio::sync::Notify::new(),
-            event_seq: Arc::new(RwLock::new(IndexMap::new())),
         }
     }
 
@@ -436,7 +434,6 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                 interrupt_notify: interrupt_notify.clone(),
                 session_event_tx: session_event_tx.clone(),
             },
-            self.event_seq.clone(),
         ));
 
         // Store the handle
@@ -695,18 +692,14 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
 ///
 /// The `turn_lock` is released after each turn completes, allowing the next
 /// `start_turn` call to proceed.
-async fn stamp_event_envelope(
-    event_seq: &Arc<RwLock<IndexMap<String, u64>>>,
+fn stamp_event_envelope(
+    next_seq: &mut u64,
     source_id: &str,
     event: AgentEvent,
 ) -> EventEnvelope<AgentEvent> {
-    let seq = {
-        let mut map = event_seq.write().await;
-        let entry = map.entry(source_id.to_string()).or_insert(0);
-        *entry += 1;
-        *entry
-    };
-    EventEnvelope::new(source_id, seq, None, event)
+    *next_seq += 1;
+    // mob_id is optional and only set when a surface/runtime has mob context.
+    EventEnvelope::new(source_id, *next_seq, None, event)
 }
 
 async fn session_task<A: SessionAgent>(
@@ -715,8 +708,8 @@ async fn session_task<A: SessionAgent>(
     mut agent_event_rx: mpsc::Receiver<AgentEvent>,
     mut commands: mpsc::Receiver<SessionCommand>,
     control: SessionTaskControl,
-    event_seq: Arc<RwLock<IndexMap<String, u64>>>,
 ) {
+    let mut next_seq: u64 = 0;
     while let Some(cmd) = commands.recv().await {
         match cmd {
             SessionCommand::StartTurn {
@@ -778,7 +771,7 @@ async fn session_task<A: SessionAgent>(
                                 }
                             }
                             Some(event) = agent_event_rx.recv() => {
-                                let envelope = stamp_event_envelope(&event_seq, &source_id, event).await;
+                                let envelope = stamp_event_envelope(&mut next_seq, &source_id, event);
                                 let _ = control.session_event_tx.send(envelope.clone());
                                 if event_stream_open
                                     && let Some(ref tx) = event_tx
@@ -797,7 +790,7 @@ async fn session_task<A: SessionAgent>(
 
                     // Drain any remaining events
                     while let Ok(event) = agent_event_rx.try_recv() {
-                        let envelope = stamp_event_envelope(&event_seq, &source_id, event).await;
+                        let envelope = stamp_event_envelope(&mut next_seq, &source_id, event);
                         let _ = control.session_event_tx.send(envelope.clone());
                         if event_stream_open
                             && let Some(ref tx) = event_tx

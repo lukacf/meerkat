@@ -87,7 +87,7 @@ pub use config_store::{
 pub use error::{AgentError, ToolError};
 pub use event::{
     AgentEvent, BudgetType, EventEnvelope, ScopedAgentEvent, StreamScopeFrame,
-    ToolConfigChangeOperation, ToolConfigChangedPayload, VerboseEventConfig,
+    ToolConfigChangeOperation, ToolConfigChangedPayload, VerboseEventConfig, agent_event_type,
     compare_event_envelopes, format_verbose_event, format_verbose_event_with_config,
 };
 pub use event_injector::{

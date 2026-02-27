@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::cmp::Ordering;
 
 /// Canonical event envelope for stream transport and ordering.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventEnvelope<T> {
     pub event_id: uuid::Uuid,
     pub source_id: String,
@@ -24,10 +24,10 @@ pub struct EventEnvelope<T> {
 impl<T> EventEnvelope<T> {
     /// Create a new envelope with a UUIDv7 id and current wall-clock timestamp.
     pub fn new(source_id: impl Into<String>, seq: u64, mob_id: Option<String>, payload: T) -> Self {
-        let timestamp_ms = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        let timestamp_ms = match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+            Ok(duration) => duration.as_millis() as u64,
+            Err(_) => u64::MAX,
+        };
         Self {
             event_id: uuid::Uuid::now_v7(),
             source_id: source_id.into(),
@@ -36,6 +36,43 @@ impl<T> EventEnvelope<T> {
             timestamp_ms,
             payload,
         }
+    }
+}
+
+/// Canonical serialized event kind for SSE/RPC discriminators.
+pub fn agent_event_type(event: &AgentEvent) -> &'static str {
+    match event {
+        AgentEvent::RunStarted { .. } => "run_started",
+        AgentEvent::RunCompleted { .. } => "run_completed",
+        AgentEvent::RunFailed { .. } => "run_failed",
+        AgentEvent::HookStarted { .. } => "hook_started",
+        AgentEvent::HookCompleted { .. } => "hook_completed",
+        AgentEvent::HookFailed { .. } => "hook_failed",
+        AgentEvent::HookDenied { .. } => "hook_denied",
+        AgentEvent::HookRewriteApplied { .. } => "hook_rewrite_applied",
+        AgentEvent::HookPatchPublished { .. } => "hook_patch_published",
+        AgentEvent::TurnStarted { .. } => "turn_started",
+        AgentEvent::ReasoningDelta { .. } => "reasoning_delta",
+        AgentEvent::ReasoningComplete { .. } => "reasoning_complete",
+        AgentEvent::TextDelta { .. } => "text_delta",
+        AgentEvent::TextComplete { .. } => "text_complete",
+        AgentEvent::ToolCallRequested { .. } => "tool_call_requested",
+        AgentEvent::ToolResultReceived { .. } => "tool_result_received",
+        AgentEvent::TurnCompleted { .. } => "turn_completed",
+        AgentEvent::ToolExecutionStarted { .. } => "tool_execution_started",
+        AgentEvent::ToolExecutionCompleted { .. } => "tool_execution_completed",
+        AgentEvent::ToolExecutionTimedOut { .. } => "tool_execution_timed_out",
+        AgentEvent::CompactionStarted { .. } => "compaction_started",
+        AgentEvent::CompactionCompleted { .. } => "compaction_completed",
+        AgentEvent::CompactionFailed { .. } => "compaction_failed",
+        AgentEvent::BudgetWarning { .. } => "budget_warning",
+        AgentEvent::Retrying { .. } => "retrying",
+        AgentEvent::SkillsResolved { .. } => "skills_resolved",
+        AgentEvent::SkillResolutionFailed { .. } => "skill_resolution_failed",
+        AgentEvent::InteractionComplete { .. } => "interaction_complete",
+        AgentEvent::InteractionFailed { .. } => "interaction_failed",
+        AgentEvent::StreamTruncated { .. } => "stream_truncated",
+        AgentEvent::ToolConfigChanged { .. } => "tool_config_changed",
     }
 }
 

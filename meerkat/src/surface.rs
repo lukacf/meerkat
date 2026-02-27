@@ -16,8 +16,12 @@ use tokio_with_wasm::alias::sync::mpsc;
 use meerkat_core::skills::{
     SkillDocument, SkillError, SkillFilter, SkillId, SkillIntrospectionEntry, SkillRuntime,
 };
+#[cfg(feature = "mcp")]
+use std::collections::HashMap;
 #[cfg(feature = "skills")]
 use std::sync::Arc;
+#[cfg(feature = "mcp")]
+use std::sync::{Mutex, OnceLock};
 
 /// Build a [`CapabilitiesResponse`] with status resolved against config.
 ///
@@ -196,7 +200,7 @@ pub async fn emit_mcp_lifecycle_events(
     use meerkat_core::event::ToolConfigChangedPayload;
     use meerkat_mcp::McpLifecycleAction;
 
-    static MCP_EVENT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static MCP_EVENT_SEQ_BY_SOURCE: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
 
     for action in actions {
         let (operation, target, status) = match action {
@@ -228,9 +232,16 @@ pub async fn emit_mcp_lifecycle_events(
             persisted: false,
             applied_at_turn: Some(turn_number),
         };
-        let seq = MCP_EVENT_SEQ
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            .saturating_add(1);
+        let seq = {
+            let map = MCP_EVENT_SEQ_BY_SOURCE.get_or_init(|| Mutex::new(HashMap::new()));
+            let mut guard = match map.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let entry = guard.entry(source_id.to_string()).or_insert(0);
+            *entry += 1;
+            *entry
+        };
         let _ = event_tx
             .send(meerkat_core::EventEnvelope::new(
                 source_id,

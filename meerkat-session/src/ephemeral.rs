@@ -346,8 +346,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     ) -> Result<
         tokio::sync::broadcast::Receiver<EventEnvelope<AgentEvent>>,
         meerkat_core::comms::StreamError,
-    >
-    {
+    > {
         let sessions = self.sessions.read().await;
         let handle = sessions
             .get(id)

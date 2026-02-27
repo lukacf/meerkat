@@ -237,7 +237,7 @@ pub async fn emit_mcp_lifecycle_events(
                 seq,
                 None,
                 AgentEvent::ToolConfigChanged {
-                payload: payload.clone(),
+                    payload: payload.clone(),
                 },
             ))
             .await;

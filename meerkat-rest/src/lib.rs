@@ -34,11 +34,11 @@ use meerkat::{
     encode_llm_client_override_for_service,
 };
 use meerkat_contracts::{SessionLocator, format_session_ref};
+use meerkat_core::EventEnvelope;
 use meerkat_core::service::{
     CreateSessionRequest as SvcCreateSessionRequest, InitialTurnPolicy, SessionBuildOptions,
     SessionError, StartTurnRequest as SvcStartTurnRequest,
 };
-use meerkat_core::EventEnvelope;
 use meerkat_core::{
     Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore, FileConfigStore,
     HookRunOverrides, Provider, RealmSelection, RuntimeBootstrap, SessionTooling,

@@ -16,8 +16,8 @@ use meerkat_core::service::{
 };
 use meerkat_core::{
     AgentEvent, Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigRuntimeError,
-    ConfigStore, EventEnvelope, FileConfigStore, HookRunOverrides, Provider, RealmSelection, RuntimeBootstrap,
-    Session, ToolCallView, format_verbose_event,
+    ConfigStore, EventEnvelope, FileConfigStore, HookRunOverrides, Provider, RealmSelection,
+    RuntimeBootstrap, Session, ToolCallView, format_verbose_event,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

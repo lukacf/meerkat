@@ -5,9 +5,9 @@
 use crate::hooks::{HookPatch, HookPatchEnvelope, HookPoint, HookReasonCode};
 use crate::time_compat::SystemTime;
 use crate::types::{SessionId, StopReason, Usage};
-use std::cmp::Ordering;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::cmp::Ordering;
 
 /// Canonical event envelope for stream transport and ordering.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,12 +23,7 @@ pub struct EventEnvelope<T> {
 
 impl<T> EventEnvelope<T> {
     /// Create a new envelope with a UUIDv7 id and current wall-clock timestamp.
-    pub fn new(
-        source_id: impl Into<String>,
-        seq: u64,
-        mob_id: Option<String>,
-        payload: T,
-    ) -> Self {
+    pub fn new(source_id: impl Into<String>, seq: u64, mob_id: Option<String>, payload: T) -> Self {
         let timestamp_ms = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()

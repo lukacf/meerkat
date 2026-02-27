@@ -88,8 +88,7 @@ pub use error::{AgentError, ToolError};
 pub use event::{
     AgentEvent, BudgetType, EventEnvelope, ScopedAgentEvent, StreamScopeFrame,
     ToolConfigChangeOperation, ToolConfigChangedPayload, VerboseEventConfig,
-    compare_event_envelopes, format_verbose_event,
-    format_verbose_event_with_config,
+    compare_event_envelopes, format_verbose_event, format_verbose_event_with_config,
 };
 pub use event_injector::{
     EventInjector, EventInjectorError, InteractionSubscription, SubscribableInjector,

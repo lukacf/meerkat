@@ -5,8 +5,8 @@
 
 pub mod transport;
 
-use crate::event::{AgentEvent, ScopedAgentEvent, StreamScopeFrame};
 use crate::event::EventEnvelope;
+use crate::event::{AgentEvent, ScopedAgentEvent, StreamScopeFrame};
 use crate::time_compat::SystemTime;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;

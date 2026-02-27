@@ -19,10 +19,10 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use meerkat_core::ConfigStore;
+use meerkat_core::EventEnvelope;
 #[cfg(feature = "comms")]
 use meerkat_core::comms::StreamScope;
 use meerkat_core::event::AgentEvent;
-use meerkat_core::EventEnvelope;
 use meerkat_core::types::SessionId;
 
 use crate::error;

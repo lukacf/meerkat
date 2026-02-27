@@ -966,7 +966,9 @@ impl MobSessionService for MockSessionService {
                 "session {session_id}"
             )));
         }
-        Ok(Box::pin(futures::stream::empty::<EventEnvelope<AgentEvent>>()))
+        Ok(Box::pin(
+            futures::stream::empty::<EventEnvelope<AgentEvent>>(),
+        ))
     }
 
     fn supports_persistent_sessions(&self) -> bool {

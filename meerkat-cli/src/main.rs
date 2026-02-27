@@ -2505,8 +2505,7 @@ async fn run_agent(
         let policy = stream_policy
             .clone()
             .ok_or_else(|| anyhow::anyhow!("internal stream policy missing"))?;
-        let (primary_tx, mut primary_rx) =
-            mpsc::channel::<EventEnvelope<AgentEvent>>(100);
+        let (primary_tx, mut primary_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
         let (scoped_tx, scoped_rx) = mpsc::channel::<ScopedAgentEvent>(200);
         let bridge_scoped_tx = scoped_tx.clone();
         let scope_path_for_bridge = primary_scope_path.clone();

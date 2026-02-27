@@ -2,8 +2,8 @@
 
 use meerkat::AgentBuildConfig;
 use meerkat_contracts::SkillsParams;
-use meerkat_core::event::AgentEvent;
 use meerkat_core::EventEnvelope;
+use meerkat_core::event::AgentEvent;
 use meerkat_core::skills::{SkillKey, SkillRef};
 use meerkat_core::{HookRunOverrides, OutputSchema, Provider};
 use serde::{Deserialize, Serialize};
@@ -222,7 +222,8 @@ pub async fn handle_create(
 
     // Set up event forwarding. The spawned task exits naturally when `event_tx`
     // is dropped at the end of the turn (the session task holds the only sender).
-    let (event_tx, mut event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(NOTIFICATION_CHANNEL_CAPACITY);
+    let (event_tx, mut event_rx) =
+        mpsc::channel::<EventEnvelope<AgentEvent>>(NOTIFICATION_CHANNEL_CAPACITY);
     let sink = notification_sink.clone();
     let sid_clone = session_id.clone();
     tokio::spawn(async move {

@@ -20,8 +20,8 @@ use meerkat::{
     AgentBuildConfig, AgentFactory, FactoryAgentBuilder, PersistentSessionService, SessionStore,
 };
 use meerkat_client::LlmClient;
-use meerkat_core::event::AgentEvent;
 use meerkat_core::EventEnvelope;
+use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{CreateSessionRequest, SessionError, SessionService, StartTurnRequest};
 use meerkat_core::skills::{SkillError, SourceIdentityRegistry};
 use meerkat_core::types::{RunResult, SessionId};

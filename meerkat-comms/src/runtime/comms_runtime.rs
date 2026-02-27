@@ -103,6 +103,8 @@ struct InteractionStream {
     id: Uuid,
     receiver: Option<Receiver<meerkat_core::AgentEvent>>,
     registry: InteractionStreamRegistry,
+    source_id: String,
+    seq: u64,
 }
 
 struct ResolvedPeer {
@@ -134,7 +136,7 @@ impl InteractionStream {
 }
 
 impl Stream for InteractionStream {
-    type Item = meerkat_core::AgentEvent;
+    type Item = meerkat_core::EventEnvelope<meerkat_core::AgentEvent>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
@@ -144,7 +146,13 @@ impl Stream for InteractionStream {
                     this.finish();
                     Poll::Ready(None)
                 }
-                other => other,
+                Poll::Ready(Some(event)) => {
+                    this.seq = this.seq.saturating_add(1);
+                    let envelope =
+                        meerkat_core::EventEnvelope::new(&this.source_id, this.seq, None, event);
+                    Poll::Ready(Some(envelope))
+                }
+                Poll::Pending => Poll::Pending,
             },
             None => Poll::Ready(None),
         }
@@ -262,6 +270,8 @@ impl CoreCommsRuntime for CommsRuntime {
                             id,
                             receiver: Some(receiver),
                             registry: self.interaction_stream_registry.clone(),
+                            source_id: format!("interaction:{id}"),
+                            seq: 0,
                         }))
                     }
                     ReservationState::Attached => Err(StreamError::AlreadyAttached(interaction_id)),

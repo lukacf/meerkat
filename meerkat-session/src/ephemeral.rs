@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 use indexmap::IndexMap;
-use meerkat_core::event::AgentEvent;
+use meerkat_core::event::{AgentEvent, EventEnvelope};
 use meerkat_core::service::{
     CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService, SessionSummary,
     SessionUsage, SessionView, StartTurnRequest, TurnToolOverlay,
@@ -62,7 +62,7 @@ enum SessionCommand {
     StartTurn {
         prompt: String,
         host_mode: bool,
-        event_tx: Option<mpsc::Sender<AgentEvent>>,
+        event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
         result_tx: oneshot::Sender<Result<RunResult, meerkat_core::error::AgentError>>,
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
         flow_tool_overlay: Option<TurnToolOverlay>,
@@ -105,7 +105,7 @@ struct SessionHandle {
     /// Wakes the running turn loop when an interrupt is requested.
     interrupt_notify: Arc<tokio::sync::Notify>,
     /// Broadcast channel for session-wide event subscription.
-    session_event_tx: tokio::sync::broadcast::Sender<AgentEvent>,
+    session_event_tx: tokio::sync::broadcast::Sender<EventEnvelope<AgentEvent>>,
 }
 
 struct SessionTaskControl {
@@ -114,7 +114,7 @@ struct SessionTaskControl {
     turn_lock: Arc<AtomicBool>,
     interrupt_requested: Arc<AtomicBool>,
     interrupt_notify: Arc<tokio::sync::Notify>,
-    session_event_tx: tokio::sync::broadcast::Sender<AgentEvent>,
+    session_event_tx: tokio::sync::broadcast::Sender<EventEnvelope<AgentEvent>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -341,8 +341,10 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     pub async fn subscribe_session_events_raw(
         &self,
         id: &SessionId,
-    ) -> Result<tokio::sync::broadcast::Receiver<AgentEvent>, meerkat_core::comms::StreamError>
-    {
+    ) -> Result<
+        tokio::sync::broadcast::Receiver<EventEnvelope<AgentEvent>>,
+        meerkat_core::comms::StreamError,
+    > {
         let sessions = self.sessions.read().await;
         let handle = sessions
             .get(id)
@@ -412,7 +414,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             total_tokens: 0,
         });
         let (session_event_tx, session_event_rx) =
-            tokio::sync::broadcast::channel::<AgentEvent>(EVENT_CHANNEL_CAPACITY);
+            tokio::sync::broadcast::channel::<EventEnvelope<AgentEvent>>(EVENT_CHANNEL_CAPACITY);
         drop(session_event_rx);
         let interrupt_requested = Arc::new(AtomicBool::new(false));
         let interrupt_notify = Arc::new(tokio::sync::Notify::new());
@@ -690,6 +692,16 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
 ///
 /// The `turn_lock` is released after each turn completes, allowing the next
 /// `start_turn` call to proceed.
+fn stamp_event_envelope(
+    next_seq: &mut u64,
+    source_id: &str,
+    event: AgentEvent,
+) -> EventEnvelope<AgentEvent> {
+    *next_seq += 1;
+    // mob_id is optional and only set when a surface/runtime has mob context.
+    EventEnvelope::new(source_id, *next_seq, None, event)
+}
+
 async fn session_task<A: SessionAgent>(
     mut agent: A,
     agent_event_tx: mpsc::Sender<AgentEvent>,
@@ -697,6 +709,8 @@ async fn session_task<A: SessionAgent>(
     mut commands: mpsc::Receiver<SessionCommand>,
     control: SessionTaskControl,
 ) {
+    let mut next_seq: u64 = 0;
+    let source_id = format!("session:{}", agent.session_id());
     while let Some(cmd) = commands.recv().await {
         match cmd {
             SessionCommand::StartTurn {
@@ -757,10 +771,11 @@ async fn session_task<A: SessionAgent>(
                                 }
                             }
                             Some(event) = agent_event_rx.recv() => {
-                                let _ = control.session_event_tx.send(event.clone());
+                                let envelope = stamp_event_envelope(&mut next_seq, &source_id, event);
+                                let _ = control.session_event_tx.send(envelope.clone());
                                 if event_stream_open
                                     && let Some(ref tx) = event_tx
-                                    && tx.send(event).await.is_err()
+                                    && tx.send(envelope).await.is_err()
                                 {
                                     event_stream_open = false;
                                     tracing::warn!("session event stream receiver dropped; continuing without streaming events");
@@ -775,10 +790,11 @@ async fn session_task<A: SessionAgent>(
 
                     // Drain any remaining events
                     while let Ok(event) = agent_event_rx.try_recv() {
-                        let _ = control.session_event_tx.send(event.clone());
+                        let envelope = stamp_event_envelope(&mut next_seq, &source_id, event);
+                        let _ = control.session_event_tx.send(envelope.clone());
                         if event_stream_open
                             && let Some(ref tx) = event_tx
-                            && tx.send(event).await.is_err()
+                            && tx.send(envelope).await.is_err()
                         {
                             event_stream_open = false;
                             tracing::warn!(

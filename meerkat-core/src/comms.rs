@@ -4,7 +4,7 @@
 //! controls. It intentionally stays transport-agnostic and keeps names stable for
 //! the host and SDK surface migration work.
 
-use crate::event::AgentEvent;
+use crate::event::{AgentEvent, EventEnvelope};
 use crate::interaction::{InteractionId, ResponseStatus};
 use futures::Stream;
 use serde::{Deserialize, Serialize};
@@ -459,8 +459,8 @@ pub enum StreamScope {
     Interaction(InteractionId),
 }
 
-/// Typed stream over agent events.
-pub type EventStream = Pin<Box<dyn Stream<Item = AgentEvent> + Send>>;
+/// Typed stream over enveloped agent events.
+pub type EventStream = Pin<Box<dyn Stream<Item = EventEnvelope<AgentEvent>> + Send>>;
 
 /// Errors for stream attachment and lookup.
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]

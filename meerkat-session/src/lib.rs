@@ -36,7 +36,8 @@ pub use ephemeral::{EphemeralSessionService, SessionAgent, SessionAgentBuilder, 
 
 /// Type alias for the raw broadcast receiver used by event subscriptions.
 /// Exported for WASM surface which needs synchronous `try_recv()`.
-pub type BroadcastEventReceiver = tokio::sync::broadcast::Receiver<meerkat_core::AgentEvent>;
+pub type BroadcastEventReceiver =
+    tokio::sync::broadcast::Receiver<meerkat_core::EventEnvelope<meerkat_core::AgentEvent>>;
 
 #[cfg(feature = "session-compaction")]
 pub use compactor::DefaultCompactor;

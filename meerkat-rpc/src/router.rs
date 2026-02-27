@@ -19,6 +19,7 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use meerkat_core::ConfigStore;
+use meerkat_core::EventEnvelope;
 #[cfg(feature = "comms")]
 use meerkat_core::comms::StreamScope;
 use meerkat_core::event::AgentEvent;
@@ -50,7 +51,7 @@ impl NotificationSink {
     }
 
     /// Emit an agent event as a JSON-RPC notification.
-    pub async fn emit_event(&self, session_id: &SessionId, event: &AgentEvent) {
+    pub async fn emit_event(&self, session_id: &SessionId, event: &EventEnvelope<AgentEvent>) {
         let params = serde_json::json!({
             "session_id": session_id.to_string(),
             "event": event,
@@ -67,7 +68,7 @@ impl NotificationSink {
         stream_id: &Uuid,
         scope: &StreamScopeState,
         sequence: u64,
-        event: &AgentEvent,
+        event: &EventEnvelope<AgentEvent>,
     ) {
         let params = serde_json::json!({
             "stream_id": stream_id.to_string(),

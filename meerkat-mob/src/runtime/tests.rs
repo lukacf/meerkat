@@ -22,7 +22,7 @@ use meerkat_core::comms::{
     TrustedPeerSpec,
 };
 use meerkat_core::error::ToolError;
-use meerkat_core::event::AgentEvent;
+use meerkat_core::event::{AgentEvent, EventEnvelope};
 use meerkat_core::interaction::InteractionId;
 use meerkat_core::service::{
     CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService, SessionSummary,
@@ -752,18 +752,28 @@ impl SessionService for MockSessionService {
                 }
                 if fail_flow_turn_global || fail_flow_turn_session {
                     let _ = event_tx
-                        .send(AgentEvent::RunFailed {
-                            session_id,
-                            error: "mock flow turn failure".to_string(),
-                        })
+                        .send(EventEnvelope::new(
+                            format!("session:{session_id}"),
+                            1,
+                            None,
+                            AgentEvent::RunFailed {
+                                session_id,
+                                error: "mock flow turn failure".to_string(),
+                            },
+                        ))
                         .await;
                 } else {
                     let _ = event_tx
-                        .send(AgentEvent::RunCompleted {
-                            session_id,
-                            result: completed_result,
-                            usage: Usage::default(),
-                        })
+                        .send(EventEnvelope::new(
+                            format!("session:{session_id}"),
+                            1,
+                            None,
+                            AgentEvent::RunCompleted {
+                                session_id,
+                                result: completed_result,
+                                usage: Usage::default(),
+                            },
+                        ))
                         .await;
                 }
             });
@@ -956,7 +966,9 @@ impl MobSessionService for MockSessionService {
                 "session {session_id}"
             )));
         }
-        Ok(Box::pin(futures::stream::empty::<AgentEvent>()))
+        Ok(Box::pin(
+            futures::stream::empty::<EventEnvelope<AgentEvent>>(),
+        ))
     }
 
     fn supports_persistent_sessions(&self) -> bool {

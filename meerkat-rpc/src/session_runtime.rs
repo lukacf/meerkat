@@ -20,6 +20,7 @@ use meerkat::{
     AgentBuildConfig, AgentFactory, FactoryAgentBuilder, PersistentSessionService, SessionStore,
 };
 use meerkat_client::LlmClient;
+use meerkat_core::EventEnvelope;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{CreateSessionRequest, SessionError, SessionService, StartTurnRequest};
 use meerkat_core::skills::{SkillError, SourceIdentityRegistry};
@@ -289,7 +290,7 @@ impl SessionRuntime {
         &self,
         session_id: &SessionId,
         prompt: String,
-        event_tx: mpsc::Sender<AgentEvent>,
+        event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
     ) -> Result<RunResult, RpcError> {
         #[allow(unused_mut)]
@@ -705,7 +706,7 @@ impl SessionRuntime {
     async fn apply_mcp_boundary(
         &self,
         session_id: &SessionId,
-        event_tx: &mpsc::Sender<AgentEvent>,
+        event_tx: &mpsc::Sender<EventEnvelope<AgentEvent>>,
         prompt: &mut String,
     ) -> Result<(), RpcError> {
         let (adapter, turn_number, drain_task_running, lifecycle_tx, mut queued_actions) = {
@@ -730,7 +731,7 @@ impl SessionRuntime {
 
         if !queued_actions.is_empty() {
             let drained = std::mem::take(&mut queued_actions);
-            self.emit_mcp_lifecycle_actions(event_tx, prompt, turn_number, drained)
+            self.emit_mcp_lifecycle_actions(session_id, event_tx, prompt, turn_number, drained)
                 .await;
         }
 
@@ -753,7 +754,7 @@ impl SessionRuntime {
             return Ok(());
         }
 
-        self.emit_mcp_lifecycle_actions(event_tx, prompt, turn_number, queued_actions)
+        self.emit_mcp_lifecycle_actions(session_id, event_tx, prompt, turn_number, queued_actions)
             .await;
         Ok(())
     }
@@ -802,12 +803,21 @@ impl SessionRuntime {
     #[cfg(feature = "mcp")]
     async fn emit_mcp_lifecycle_actions(
         &self,
-        event_tx: &mpsc::Sender<AgentEvent>,
+        session_id: &SessionId,
+        event_tx: &mpsc::Sender<EventEnvelope<AgentEvent>>,
         prompt: &mut String,
         turn_number: u32,
         actions: Vec<McpLifecycleAction>,
     ) {
-        meerkat::surface::emit_mcp_lifecycle_events(event_tx, prompt, turn_number, actions).await;
+        let source_id = format!("session:{session_id}");
+        meerkat::surface::emit_mcp_lifecycle_events(
+            event_tx,
+            &source_id,
+            prompt,
+            turn_number,
+            actions,
+        )
+        .await;
     }
 }
 
@@ -1012,11 +1022,11 @@ mod tests {
 
     #[cfg(feature = "mcp")]
     fn collect_tool_config_events(
-        event_rx: &mut mpsc::Receiver<AgentEvent>,
+        event_rx: &mut mpsc::Receiver<EventEnvelope<AgentEvent>>,
     ) -> Vec<ToolConfigChangedPayload> {
         let mut out = Vec::new();
         while let Ok(event) = event_rx.try_recv() {
-            if let AgentEvent::ToolConfigChanged { payload } = event {
+            if let AgentEvent::ToolConfigChanged { payload } = event.payload {
                 out.push(payload);
             }
         }
@@ -1194,7 +1204,7 @@ mod tests {
         // Check that we got a RunStarted event
         let has_run_started = events
             .iter()
-            .any(|e| matches!(e, AgentEvent::RunStarted { .. }));
+            .any(|e| matches!(e.payload, AgentEvent::RunStarted { .. }));
         assert!(has_run_started, "Should have received a RunStarted event");
     }
 

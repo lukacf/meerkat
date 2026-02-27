@@ -9,6 +9,7 @@ use crate::ids::{MeerkatId, RunId, StepId};
 use crate::tokio;
 use async_trait::async_trait;
 use futures::FutureExt;
+use meerkat_core::EventEnvelope;
 use meerkat_core::event::{AgentEvent, ScopedAgentEvent, StreamScopeFrame};
 use meerkat_core::service::{StartTurnRequest, TurnToolOverlay};
 use std::collections::BTreeMap;
@@ -106,19 +107,56 @@ impl ActorFlowTurnExecutor {
     }
 
     fn spawn_subscription_bridge(
-        mut events: tokio::sync::mpsc::Receiver<AgentEvent>,
+        events: tokio::sync::mpsc::Receiver<AgentEvent>,
         completion_tx: oneshot::Sender<FlowTurnOutcome>,
         scoped_event_tx: Option<mpsc::Sender<ScopedAgentEvent>>,
         scoped_frame: Option<StreamScopeFrame>,
     ) -> tokio::task::JoinHandle<()> {
+        // Autonomous-host injector subscriptions still emit raw AgentEvent.
+        Self::spawn_subscription_bridge_impl(
+            events,
+            completion_tx,
+            scoped_event_tx,
+            scoped_frame,
+            |payload| payload,
+        )
+    }
+
+    fn spawn_subscription_bridge_enveloped(
+        events: tokio::sync::mpsc::Receiver<EventEnvelope<AgentEvent>>,
+        completion_tx: oneshot::Sender<FlowTurnOutcome>,
+        scoped_event_tx: Option<mpsc::Sender<ScopedAgentEvent>>,
+        scoped_frame: Option<StreamScopeFrame>,
+    ) -> tokio::task::JoinHandle<()> {
+        Self::spawn_subscription_bridge_impl(
+            events,
+            completion_tx,
+            scoped_event_tx,
+            scoped_frame,
+            |event| event.payload,
+        )
+    }
+
+    fn spawn_subscription_bridge_impl<E, F>(
+        mut events: tokio::sync::mpsc::Receiver<E>,
+        completion_tx: oneshot::Sender<FlowTurnOutcome>,
+        scoped_event_tx: Option<mpsc::Sender<ScopedAgentEvent>>,
+        scoped_frame: Option<StreamScopeFrame>,
+        mut extract_payload: F,
+    ) -> tokio::task::JoinHandle<()>
+    where
+        E: Send + 'static,
+        F: FnMut(E) -> AgentEvent + Send + 'static,
+    {
         tokio::spawn(async move {
             let mut completion_tx = Some(completion_tx);
             while let Some(event) = events.recv().await {
+                let payload = extract_payload(event);
                 if let (Some(tx), Some(frame)) = (&scoped_event_tx, &scoped_frame) {
-                    let scoped = ScopedAgentEvent::new(vec![frame.clone()], event.clone());
+                    let scoped = ScopedAgentEvent::new(vec![frame.clone()], payload.clone());
                     let _ = tx.send(scoped).await;
                 }
-                match event {
+                match payload {
                     AgentEvent::RunCompleted { result, .. }
                     | AgentEvent::InteractionComplete { result, .. } => {
                         if let Some(tx) = completion_tx.take() {
@@ -293,8 +331,8 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                 )
             }
             crate::MobRuntimeMode::TurnDriven => {
-                let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(8);
-                let bridge_handle = Self::spawn_subscription_bridge(
+                let (event_tx, event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(8);
+                let bridge_handle = Self::spawn_subscription_bridge_enveloped(
                     event_rx,
                     completion_tx,
                     scoped_event_tx,

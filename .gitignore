@@ -20,6 +20,7 @@
 # Cargo.lock
 .claude/ralph-loop.local.md
 .claude/skills/rct-development
+.claude/worktrees/
 
 # Temporary files
 nohup.out

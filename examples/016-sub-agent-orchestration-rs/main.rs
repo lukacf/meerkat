@@ -18,8 +18,7 @@
 use std::sync::Arc;
 
 use meerkat::{
-    AgentBuilder, AgentFactory, AnthropicClient,
-    create_dispatcher_with_builtins, BuiltinToolConfig,
+    AgentBuilder, AgentFactory, AnthropicClient, BuiltinToolConfig, create_dispatcher_with_builtins,
 };
 use meerkat_store::{JsonlStore, StoreAdapter};
 
@@ -28,7 +27,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| "Set ANTHROPIC_API_KEY to run this example")?;
 
-    let store_dir = tempfile::tempdir()?.into_path().join("sessions");
+    let _tmp = tempfile::tempdir()?;
+    let store_dir = _tmp.path().join("sessions");
     std::fs::create_dir_all(&store_dir)?;
 
     let factory = AgentFactory::new(store_dir.clone());
@@ -40,11 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(StoreAdapter::new(store));
 
     // Enable built-in tools which include sub-agent spawning
-    let config = BuiltinToolConfig {
-        enable_sub_agents: true,
-        ..Default::default()
-    };
-
+    let config = BuiltinToolConfig::default();
     let tools = create_dispatcher_with_builtins(&factory, config, None, None, None).await?;
 
     let mut agent = AgentBuilder::new()

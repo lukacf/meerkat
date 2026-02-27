@@ -16,8 +16,7 @@
 use std::sync::Arc;
 
 use meerkat::{
-    AgentBuilder, AgentEvent, AgentFactory, AnthropicClient,
-    spawn_event_logger, EventLoggerConfig,
+    AgentBuilder, AgentEvent, AgentFactory, AnthropicClient, EventLoggerConfig, spawn_event_logger,
 };
 use meerkat_store::{JsonlStore, StoreAdapter};
 use meerkat_tools::EmptyToolDispatcher;
@@ -28,7 +27,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| "Set ANTHROPIC_API_KEY to run this example")?;
 
-    let store_dir = tempfile::tempdir()?.into_path().join("sessions");
+    let _tmp = tempfile::tempdir()?;
+    let store_dir = _tmp.path().join("sessions");
     std::fs::create_dir_all(&store_dir)?;
 
     let factory = AgentFactory::new(store_dir.clone());
@@ -49,10 +49,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --- Option A: Use the built-in event logger (simplest) ---
     println!("=== Streaming with built-in logger ===\n");
     let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(256);
-    let logger_handle = spawn_event_logger(event_rx, EventLoggerConfig {
-        verbose: false,
-        stream: true, // Print text deltas to stdout in real time
-    });
+    let logger_handle = spawn_event_logger(
+        event_rx,
+        EventLoggerConfig {
+            verbose: false,
+            stream: true, // Print text deltas to stdout in real time
+        },
+    );
 
     let result = agent
         .run_with_events(

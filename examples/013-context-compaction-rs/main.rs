@@ -12,14 +12,13 @@
 //!
 //! ## Run
 //! ```bash
-//! This is a reference implementation. For runnable examples, see meerkat/examples/.
+//! ANTHROPIC_API_KEY=... cargo run --example 013-context-compaction --features jsonl-store,session-compaction
 //! ```
 
 use std::sync::Arc;
 
-use meerkat::{
-    AgentBuilder, AgentEvent, AgentFactory, AnthropicClient,
-};
+use meerkat::{AgentBuilder, AgentEvent, AgentFactory, AnthropicClient, DefaultCompactor};
+use meerkat_core::compact::CompactionConfig;
 use meerkat_store::{JsonlStore, StoreAdapter};
 use meerkat_tools::EmptyToolDispatcher;
 use tokio::sync::mpsc;
@@ -29,7 +28,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| "Set ANTHROPIC_API_KEY to run this example")?;
 
-    let store_dir = tempfile::tempdir()?.into_path().join("sessions");
+    let _tmp = tempfile::tempdir()?;
+    let store_dir = _tmp.path().join("sessions");
     std::fs::create_dir_all(&store_dir)?;
 
     let factory = AgentFactory::new(store_dir.clone());
@@ -40,56 +40,81 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     store.init().await?;
     let store = Arc::new(StoreAdapter::new(store));
 
-    // Build agent — compaction is wired in via the session service in production.
-    // Here we demonstrate the concept and configuration.
+    // ── Configure the compactor ────────────────────────────────────────────
+    //
+    // We set a LOW token threshold (2000) so compaction triggers during this
+    // short demo. In production you'd use a much higher value (e.g. 100_000).
+    let compaction_config = CompactionConfig {
+        auto_compact_threshold: 2000,
+        recent_turn_budget: 2,
+        max_summary_tokens: 1024,
+        min_turns_between_compactions: 2,
+    };
+    let compactor = Arc::new(DefaultCompactor::new(compaction_config));
+
+    println!("=== Context Compaction Demo ===");
+    println!("Compaction threshold: 2000 tokens (low for demo purposes)");
+    println!("Recent turns preserved: 2\n");
+
+    // Build agent with the compactor wired in.
     let mut agent = AgentBuilder::new()
         .model("claude-sonnet-4-5")
         .system_prompt(
             "You are a patient tutor. Build on previous conversation context. \
-             Always reference earlier topics when relevant.",
+             Always reference earlier topics when relevant. Give thorough, \
+             detailed explanations with code examples.",
         )
         .max_tokens_per_turn(1024)
+        .compactor(compactor)
         .build(Arc::new(llm), Arc::new(EmptyToolDispatcher), store)
         .await;
 
-    // Simulate a long conversation that would trigger compaction
+    // Simulate a long conversation that will trigger compaction.
+    // Each prompt asks for detailed explanations to accumulate tokens quickly.
     let topics = [
-        "Explain Rust's ownership model. Keep it concise.",
-        "Now explain how lifetimes relate to what you just said about ownership.",
-        "How do smart pointers like Box, Rc, and Arc fit into this picture?",
+        "Explain Rust's ownership model in detail with code examples.",
+        "Now explain how lifetimes relate to what you just said about ownership. Include examples.",
+        "How do smart pointers like Box, Rc, and Arc fit into this picture? Show code.",
         "Give me a practical example combining ownership, lifetimes, and Arc.",
         "Summarize everything we've discussed about Rust's memory model.",
     ];
 
     let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(256);
 
-    // Monitor for compaction events
+    // Monitor for compaction events — these will fire when the compactor
+    // detects that accumulated tokens exceed our 2000-token threshold.
     let monitor = tokio::spawn(async move {
         while let Some(event) = event_rx.recv().await {
-            if let AgentEvent::CompactionStarted { .. } = &event {
-                println!("[COMPACTION] Context compaction triggered!");
-            }
-            if let AgentEvent::CompactionCompleted { .. } = &event {
-                println!("[COMPACTION] Compaction completed — context window refreshed.");
+            match &event {
+                AgentEvent::CompactionStarted { .. } => {
+                    println!("\n[COMPACTION] Context compaction triggered!");
+                }
+                AgentEvent::CompactionCompleted { .. } => {
+                    println!("[COMPACTION] Compaction completed — context window refreshed.\n");
+                }
+                _ => {}
             }
         }
     });
 
     for (i, topic) in topics.iter().enumerate() {
         println!("\n=== Turn {} ===", i + 1);
-        println!("User: {}\n", topic);
+        println!("User: {topic}\n");
 
-        let result = if i == 0 {
-            agent.run(topic.to_string()).await?
-        } else {
-            agent.run(topic.to_string()).await?
-        };
+        let result = agent
+            .run_with_events(topic.to_string(), event_tx.clone())
+            .await?;
 
         println!("Assistant: {}", &result.text[..result.text.len().min(200)]);
         if result.text.len() > 200 {
             println!("...");
         }
-        println!("(tokens so far: {})", result.usage.total_tokens());
+        println!(
+            "(input tokens: {}, output tokens: {}, total: {})",
+            result.usage.input_tokens,
+            result.usage.output_tokens,
+            result.usage.total_tokens()
+        );
     }
 
     drop(event_tx);
@@ -99,7 +124,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n\n=== Compaction Configuration Reference ===\n");
     println!(
-        r#"# .rkat/config.toml
+        r"# .rkat/config.toml
 
 [compaction]
 # Trigger compaction when cumulative tokens exceed this threshold
@@ -124,7 +149,7 @@ preserve_most_recent_n = 2
 #
 # The result: agents that can run indefinitely without losing important
 # context or exceeding the LLM's context window.
-"#
+"
     );
 
     Ok(())

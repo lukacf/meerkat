@@ -1,21 +1,20 @@
 # 009 — Budget & Retry Policies (Rust)
 
-Production guardrails: token budgets, turn limits, time caps, and retry
-policies for resilient agent execution.
+Production guardrails: token budgets, time caps, and retry policies for
+resilient agent execution.
 
 ## Concepts
-- `BudgetLimits` — hard caps on tokens, turns, tool calls, and wall time
+- `BudgetLimits` — hard caps on tokens, tool calls, and duration
 - `RetryPolicy` — exponential backoff for transient LLM failures (429, 500)
 - `BudgetPool` — share a budget across multiple agents (not shown, see 016)
-- Error handling for `AgentError::BudgetExhausted`
+- Error handling for `AgentError::TokenBudgetExceeded` / `ToolCallBudgetExceeded`
 
 ## Budget Types
 | Limit | Description |
 |-------|-------------|
-| `max_total_tokens` | Hard cap on cumulative token usage |
-| `max_turns` | Max agent loop iterations |
+| `max_tokens` | Hard cap on cumulative token usage |
 | `max_tool_calls` | Max tool invocations |
-| `max_wall_time` | Wall clock timeout |
+| `max_duration` | Wall clock timeout |
 
 ## Retry Strategy
 ```

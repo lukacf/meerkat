@@ -26,7 +26,7 @@ echo "=== 2. Create a session and continue it ==="
 SESSION_OUTPUT=$($RKAT run "Remember: my favorite color is blue." 2>&1)
 echo "$SESSION_OUTPUT"
 # Extract session ID from output (rkat prints it to stderr)
-SESSION_ID=$(echo "$SESSION_OUTPUT" | grep -oP 'Session: \K[a-f0-9-]+' || true)
+SESSION_ID=$(echo "$SESSION_OUTPUT" | sed -n 's/.*Session: \([a-f0-9-]*\).*/\1/p' | head -1)
 
 if [ -n "$SESSION_ID" ]; then
     echo ""

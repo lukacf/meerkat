@@ -16,7 +16,8 @@
 
 use async_trait::async_trait;
 use meerkat::{
-    AgentBuilder, AgentFactory, AgentToolDispatcher, AnthropicClient, ToolDef, ToolError, ToolResult,
+    AgentBuilder, AgentFactory, AgentToolDispatcher, AnthropicClient, ToolDef, ToolError,
+    ToolResult,
 };
 use meerkat_core::ToolCallView;
 use meerkat_store::{JsonlStore, StoreAdapter};
@@ -102,7 +103,11 @@ impl AgentToolDispatcher for WeatherAndConvertDispatcher {
                     "condition": "partly cloudy",
                     "humidity": 65,
                 });
-                Ok(ToolResult::new(call.id.to_string(), result.to_string(), false))
+                Ok(ToolResult::new(
+                    call.id.to_string(),
+                    result.to_string(),
+                    false,
+                ))
             }
 
             "convert_units" => {
@@ -132,7 +137,11 @@ impl AgentToolDispatcher for WeatherAndConvertDispatcher {
                     "converted": result,
                     "to": args.to,
                 });
-                Ok(ToolResult::new(call.id.to_string(), output.to_string(), false))
+                Ok(ToolResult::new(
+                    call.id.to_string(),
+                    output.to_string(),
+                    false,
+                ))
             }
 
             _ => Err(ToolError::not_found(call.name)),
@@ -147,7 +156,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| "Set ANTHROPIC_API_KEY to run this example")?;
 
-    let store_dir = tempfile::tempdir()?.into_path().join("sessions");
+    let _tmp = tempfile::tempdir()?;
+    let store_dir = _tmp.path().join("sessions");
     std::fs::create_dir_all(&store_dir)?;
 
     let factory = AgentFactory::new(store_dir.clone());

@@ -18,14 +18,12 @@
 
 use async_trait::async_trait;
 use meerkat::{
-    AgentBuilder, AgentEvent, AgentFactory, AgentToolDispatcher, AnthropicClient,
-    BudgetLimits, BuiltinToolConfig, ToolDef, ToolError, ToolResult,
-    create_dispatcher_with_builtins,
-    spawn_event_logger, EventLoggerConfig,
+    AgentBuilder, AgentEvent, AgentFactory, AgentToolDispatcher, AnthropicClient, BudgetLimits,
+    BuiltinToolConfig, EventLoggerConfig, ToolDef, ToolError, ToolResult,
+    create_dispatcher_with_builtins, spawn_event_logger,
 };
 use meerkat_core::ToolCallView;
 use meerkat_store::{JsonlStore, StoreAdapter};
-use meerkat_tools::CompositeDispatcher;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
@@ -40,7 +38,7 @@ struct SearchDocsArgs {
     query: String,
     /// Maximum results to return
     #[serde(default = "default_limit")]
-    limit: usize,
+    _limit: usize,
 }
 
 fn default_limit() -> usize {
@@ -93,7 +91,11 @@ impl AgentToolDispatcher for DomainTools {
                     ],
                     "total": 3
                 });
-                Ok(ToolResult::new(call.id.to_string(), results.to_string(), false))
+                Ok(ToolResult::new(
+                    call.id.to_string(),
+                    results.to_string(),
+                    false,
+                ))
             }
             "create_ticket" => {
                 let args: CreateTicketArgs = call
@@ -107,7 +109,11 @@ impl AgentToolDispatcher for DomainTools {
                     "status": "open",
                     "created_at": "2026-02-21T00:00:00Z"
                 });
-                Ok(ToolResult::new(call.id.to_string(), ticket.to_string(), false))
+                Ok(ToolResult::new(
+                    call.id.to_string(),
+                    ticket.to_string(),
+                    false,
+                ))
             }
             _ => Err(ToolError::not_found(call.name)),
         }
@@ -122,7 +128,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|_| "Set ANTHROPIC_API_KEY to run this example")?;
 
     // ── 1. Set up storage ──────────────────────────────────────────────────
-    let store_dir = tempfile::tempdir()?.into_path().join("sessions");
+    let _tmp = tempfile::tempdir()?;
+    let store_dir = _tmp.path().join("sessions");
     std::fs::create_dir_all(&store_dir)?;
 
     let factory = AgentFactory::new(store_dir.clone());
@@ -135,24 +142,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 2. Build tool dispatcher (builtins + domain tools) ─────────────────
     let builtin_config = BuiltinToolConfig::default();
-    let builtin_tools =
-        create_dispatcher_with_builtins(&factory, builtin_config, None, None, None).await?;
+    let domain_tools: Arc<dyn AgentToolDispatcher> = Arc::new(DomainTools);
 
-    let domain_tools = Arc::new(DomainTools);
-
-    // Compose: builtins + domain tools in one dispatcher
-    let composite = CompositeDispatcher::new(vec![builtin_tools, domain_tools]);
-    let tools: Arc<dyn AgentToolDispatcher> = Arc::new(composite);
+    // Compose: builtins + domain tools via the external dispatcher slot
+    let tools =
+        create_dispatcher_with_builtins(&factory, builtin_config, None, Some(domain_tools), None)
+            .await?;
 
     // ── 3. Configure budget ────────────────────────────────────────────────
-    let budget = BudgetLimits::builder()
-        .max_total_tokens(50_000)
-        .max_turns(20)
-        .max_tool_calls(50)
-        .build();
+    let budget = BudgetLimits::unlimited()
+        .with_max_tokens(50_000)
+        .with_max_tool_calls(50);
 
     // ── 4. Build the agent ─────────────────────────────────────────────────
-    let skill_content = r#"
+    let skill_content = r"
 ## Role
 You are a full-stack support agent for a software product.
 
@@ -171,7 +174,7 @@ You are a full-stack support agent for a software product.
 
 ## Tone
 Professional, concise, action-oriented. Always provide next steps.
-"#;
+";
 
     let system_prompt = format!(
         "You are a production support agent.\n\n<skill>\n{}\n</skill>",
@@ -182,7 +185,7 @@ Professional, concise, action-oriented. Always provide next steps.
         .model("claude-sonnet-4-5")
         .system_prompt(&system_prompt)
         .max_tokens_per_turn(2048)
-        .budget_limits(budget)
+        .budget(budget)
         .build(Arc::new(llm), tools, store)
         .await;
 
@@ -190,10 +193,13 @@ Professional, concise, action-oriented. Always provide next steps.
     println!("=== Full-Stack Agent: Production Support ===\n");
 
     let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(256);
-    let logger = spawn_event_logger(event_rx, EventLoggerConfig {
-        verbose: true,
-        stream: false,
-    });
+    let logger = spawn_event_logger(
+        event_rx,
+        EventLoggerConfig {
+            verbose: true,
+            stream: false,
+        },
+    );
 
     let result = agent
         .run_with_events(
@@ -219,14 +225,14 @@ Professional, concise, action-oriented. Always provide next steps.
 
     println!("\n\n=== Full-Stack Agent Architecture ===\n");
     println!(
-        r#"This example combines every Meerkat feature:
+        r"This example combines every Meerkat feature:
 
 ┌────────────────────────────────────────────────────────────┐
 │                    FULL-STACK AGENT                          │
 │                                                            │
 │  Model:     claude-sonnet-4-5                              │
 │  Skills:    support-agent (inline)                         │
-│  Budget:    50K tokens / 20 turns / 50 tool calls          │
+│  Budget:    50K tokens / 50 tool calls                      │
 │                                                            │
 │  Tools:                                                    │
 │  ├── Built-in: task_create, task_list, task_update, wait   │
@@ -248,7 +254,7 @@ Production checklist:
   ✓ CompositeDispatcher merges builtin + domain tools
   ✓ Structured output for programmatic parsing
   ✓ MCP for external tool servers (add via config)
-"#
+"
     );
 
     Ok(())

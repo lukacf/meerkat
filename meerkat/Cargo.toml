@@ -46,6 +46,8 @@ futures = { workspace = true }
 async-trait = { workspace = true }
 schemars = { workspace = true }
 which = { workspace = true }
+indexmap = { workspace = true }
+meerkat-mob = { workspace = true }
 # meerkat-mcp-server is NOT a dependency — it depends on us (no circular dep).
 # Binaries (rkat, meerkat-rest) depend on it directly.
 
@@ -101,6 +103,88 @@ required-features = ["jsonl-store"]
 [[example]]
 name = "multi_turn_tools"
 path = "examples/multi_turn_tools.rs"
+required-features = ["jsonl-store"]
+
+# ── Reference examples (examples/ at workspace root) ────────────────────────
+
+[[example]]
+name = "001-hello-meerkat"
+path = "../examples/001-hello-meerkat-rs/main.rs"
+required-features = ["jsonl-store"]
+
+[[example]]
+name = "005-streaming-events"
+path = "../examples/005-streaming-events-rs/main.rs"
+required-features = ["jsonl-store"]
+
+[[example]]
+name = "006-custom-tools"
+path = "../examples/006-custom-tools-rs/main.rs"
+required-features = ["jsonl-store"]
+
+[[example]]
+name = "009-budget-and-retry"
+path = "../examples/009-budget-and-retry-rs/main.rs"
+required-features = ["jsonl-store"]
+
+[[example]]
+name = "011-hooks-guardrails"
+path = "../examples/011-hooks-guardrails-rs/main.rs"
+required-features = ["jsonl-store"]
+
+[[example]]
+name = "012-skills-loading"
+path = "../examples/012-skills-loading-rs/main.rs"
+required-features = ["jsonl-store", "skills"]
+
+[[example]]
+name = "013-context-compaction"
+path = "../examples/013-context-compaction-rs/main.rs"
+required-features = ["jsonl-store", "session-compaction"]
+
+[[example]]
+name = "014-semantic-memory"
+path = "../examples/014-semantic-memory-rs/main.rs"
+required-features = ["jsonl-store", "memory-store-session"]
+
+[[example]]
+name = "015-session-persistence"
+path = "../examples/015-session-persistence-rs/main.rs"
+required-features = ["jsonl-store"]
+
+[[example]]
+name = "016-sub-agent-orchestration"
+path = "../examples/016-sub-agent-orchestration-rs/main.rs"
+required-features = ["jsonl-store"]
+
+[[example]]
+name = "017-mob-coding-swarm"
+path = "../examples/017-mob-coding-swarm-rs/main.rs"
+required-features = ["comms"]
+
+[[example]]
+name = "018-mob-research-team"
+path = "../examples/018-mob-research-team-rs/main.rs"
+required-features = ["comms"]
+
+[[example]]
+name = "019-mob-pipeline"
+path = "../examples/019-mob-pipeline-rs/main.rs"
+required-features = ["comms"]
+
+[[example]]
+name = "020-comms-peer-messaging"
+path = "../examples/020-comms-peer-messaging-rs/main.rs"
+required-features = ["jsonl-store", "comms"]
+
+[[example]]
+name = "024-host-mode-event-mesh"
+path = "../examples/024-host-mode-event-mesh-rs/main.rs"
+required-features = ["jsonl-store"]
+
+[[example]]
+name = "025-full-stack-agent"
+path = "../examples/025-full-stack-agent-rs/main.rs"
 required-features = ["jsonl-store"]
 
 [[test]]

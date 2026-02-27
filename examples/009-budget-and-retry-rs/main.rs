@@ -17,9 +17,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use meerkat::{
-    AgentBuilder, AgentFactory, AnthropicClient, BudgetLimits, RetryPolicy,
-};
+use meerkat::{AgentBuilder, AgentFactory, AnthropicClient, BudgetLimits, RetryPolicy};
 use meerkat_store::{JsonlStore, StoreAdapter};
 use meerkat_tools::EmptyToolDispatcher;
 
@@ -28,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| "Set ANTHROPIC_API_KEY to run this example")?;
 
-    let store_dir = tempfile::tempdir()?.into_path().join("sessions");
+    let store_dir = tempfile::tempdir()?.keep().join("sessions");
     std::fs::create_dir_all(&store_dir)?;
 
     let factory = AgentFactory::new(store_dir.clone());
@@ -42,22 +40,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Example 1: Token budget ──
 
     println!("=== Example 1: Token budget ===\n");
-    let budget = BudgetLimits::builder()
-        .max_total_tokens(2000)     // Hard cap on total tokens
-        .max_turns(5)               // Max agent loop iterations
-        .max_tool_calls(10)         // Max tool invocations
-        .build();
+    let budget = BudgetLimits::unlimited()
+        .with_max_tokens(2000) // Hard cap on total tokens
+        .with_max_tool_calls(10); // Max tool invocations
 
     let mut agent = AgentBuilder::new()
         .model("claude-sonnet-4-5")
         .system_prompt("You are a concise assistant. Keep responses under 100 words.")
         .max_tokens_per_turn(512)
-        .budget_limits(budget)
-        .build(
-            Arc::new(llm),
-            Arc::new(EmptyToolDispatcher),
-            store.clone(),
-        )
+        .budget(budget)
+        .build(Arc::new(llm), Arc::new(EmptyToolDispatcher), store.clone())
         .await;
 
     let result = agent
@@ -71,32 +63,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n=== Example 2: Retry policy ===\n");
 
-    let retry = RetryPolicy::builder()
-        .max_retries(3)                                    // Retry up to 3 times
-        .initial_backoff(Duration::from_millis(500))       // Start at 500ms
-        .max_backoff(Duration::from_secs(10))              // Cap at 10s
-        .backoff_multiplier(2.0)                           // Double each time
-        .build();
+    let retry = RetryPolicy::new()
+        .with_max_retries(3) // Retry up to 3 times
+        .with_initial_delay(Duration::from_millis(500)) // Start at 500ms
+        .with_max_delay(Duration::from_secs(10)) // Cap at 10s
+        .with_multiplier(2.0); // Double each time
 
-    println!("Retry policy: {:?}", retry);
+    println!("Retry policy: {retry:?}");
     println!("Retries are automatic — transient 429/500 errors trigger backoff.");
 
     // ── Example 3: Budget exhaustion handling ──
 
     println!("\n=== Example 3: Tight budget (will be exhausted) ===\n");
 
-    let tight_budget = BudgetLimits::builder()
-        .max_total_tokens(100)  // Very tight budget
-        .max_turns(1)
-        .build();
+    let tight_budget = BudgetLimits::unlimited().with_max_tokens(100); // Very tight budget
 
-    let store2_dir = tempfile::tempdir()?.into_path().join("sessions");
+    let _tmp2 = tempfile::tempdir()?;
+    let store2_dir = _tmp2.path().join("sessions");
     std::fs::create_dir_all(&store2_dir)?;
     let factory2 = AgentFactory::new(store2_dir.clone());
-    let client2 = Arc::new(AnthropicClient::new(
-        std::env::var("ANTHROPIC_API_KEY")?,
-    )?);
-    let llm2 = factory2.build_llm_adapter(client2, "claude-sonnet-4-5").await;
+    let client2 = Arc::new(AnthropicClient::new(std::env::var("ANTHROPIC_API_KEY")?)?);
+    let llm2 = factory2
+        .build_llm_adapter(client2, "claude-sonnet-4-5")
+        .await;
     let store2 = Arc::new(JsonlStore::new(store2_dir));
     store2.init().await?;
     let store2 = Arc::new(StoreAdapter::new(store2));
@@ -104,7 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut agent2 = AgentBuilder::new()
         .model("claude-sonnet-4-5")
         .max_tokens_per_turn(50)
-        .budget_limits(tight_budget)
+        .budget(tight_budget)
         .build(Arc::new(llm2), Arc::new(EmptyToolDispatcher), store2)
         .await;
 
@@ -113,11 +102,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
     {
         Ok(result) => {
-            println!("Response (truncated): {}...", &result.text[..result.text.len().min(100)]);
-            println!("Stop reason: {:?}", result.stop_reason);
+            println!(
+                "Response (truncated): {}...",
+                &result.text[..result.text.len().min(100)]
+            );
+            println!("Turns: {}", result.turns);
         }
         Err(e) => {
-            println!("Budget exhausted (expected): {}", e);
+            println!("Budget exhausted (expected): {e}");
             println!("This is how you catch runaway agents in production.");
         }
     }

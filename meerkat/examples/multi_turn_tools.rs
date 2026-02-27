@@ -186,7 +186,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create components - tools maintain state across turns
     let client = Arc::new(AnthropicClient::new(api_key)?);
-    let llm = factory.build_llm_adapter(client, "claude-sonnet-4").await;
+    let llm = factory.build_llm_adapter(client, "claude-sonnet-4-5").await;
 
     let store = Arc::new(JsonlStore::new(store_dir));
     store.init().await?;
@@ -196,7 +196,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Build the agent
     let mut agent = AgentBuilder::new()
-        .model("claude-sonnet-4")
+        .model("claude-sonnet-4-5")
         .system_prompt(
             "You are a helpful assistant with access to tools for calculations and note-taking. \
              Use tools to help the user with their requests. When asked to perform calculations \

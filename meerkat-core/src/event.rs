@@ -3,9 +3,55 @@
 //! These events form the streaming API for consumers.
 
 use crate::hooks::{HookPatch, HookPatchEnvelope, HookPoint, HookReasonCode};
+use crate::time_compat::SystemTime;
 use crate::types::{SessionId, StopReason, Usage};
+use std::cmp::Ordering;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// Canonical event envelope for stream transport and ordering.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventEnvelope<T> {
+    pub event_id: uuid::Uuid,
+    pub source_id: String,
+    pub seq: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mob_id: Option<String>,
+    pub timestamp_ms: u64,
+    pub payload: T,
+}
+
+impl<T> EventEnvelope<T> {
+    /// Create a new envelope with a UUIDv7 id and current wall-clock timestamp.
+    pub fn new(
+        source_id: impl Into<String>,
+        seq: u64,
+        mob_id: Option<String>,
+        payload: T,
+    ) -> Self {
+        let timestamp_ms = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        Self {
+            event_id: uuid::Uuid::now_v7(),
+            source_id: source_id.into(),
+            seq,
+            mob_id,
+            timestamp_ms,
+            payload,
+        }
+    }
+}
+
+/// Deterministic total ordering comparator for event envelopes.
+pub fn compare_event_envelopes<T>(a: &EventEnvelope<T>, b: &EventEnvelope<T>) -> Ordering {
+    a.timestamp_ms
+        .cmp(&b.timestamp_ms)
+        .then_with(|| a.source_id.cmp(&b.source_id))
+        .then_with(|| a.seq.cmp(&b.seq))
+        .then_with(|| a.event_id.cmp(&b.event_id))
+}
 
 /// Payload for tool configuration change notifications.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -642,5 +688,38 @@ mod tests {
             ScopedAgentEvent::scope_id_from_path(&mob_sub),
             "mob:planner/sub:op_2"
         );
+    }
+
+    #[test]
+    fn test_event_envelope_roundtrip() {
+        let envelope = EventEnvelope::new(
+            "session:sid_test",
+            7,
+            Some("mob_1".to_string()),
+            AgentEvent::TextDelta {
+                delta: "hello".to_string(),
+            },
+        );
+        let value = serde_json::to_value(&envelope).expect("serialize envelope");
+        let parsed: EventEnvelope<AgentEvent> =
+            serde_json::from_value(value).expect("deserialize envelope");
+        assert_eq!(parsed.source_id, "session:sid_test");
+        assert_eq!(parsed.seq, 7);
+        assert_eq!(parsed.mob_id.as_deref(), Some("mob_1"));
+        assert!(parsed.timestamp_ms > 0);
+        assert!(matches!(
+            parsed.payload,
+            AgentEvent::TextDelta { delta } if delta == "hello"
+        ));
+    }
+
+    #[test]
+    fn test_compare_event_envelopes_total_order() {
+        let mut a = EventEnvelope::new("a", 1, None, AgentEvent::TurnStarted { turn_number: 1 });
+        let mut b = EventEnvelope::new("a", 2, None, AgentEvent::TurnStarted { turn_number: 2 });
+        a.timestamp_ms = 10;
+        b.timestamp_ms = 10;
+        assert_eq!(compare_event_envelopes(&a, &b), Ordering::Less);
+        assert_eq!(compare_event_envelopes(&b, &a), Ordering::Greater);
     }
 }

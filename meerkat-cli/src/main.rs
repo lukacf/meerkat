@@ -15,8 +15,8 @@ use meerkat_core::service::{
     CreateSessionRequest, SessionBuildOptions, SessionQuery, SessionService,
 };
 use meerkat_core::{
-    AgentEvent, RealmConfig, RealmLocator, RealmSelection, SchemaCompat, ScopedAgentEvent,
-    StreamScopeFrame, format_verbose_event,
+    AgentEvent, EventEnvelope, RealmConfig, RealmLocator, RealmSelection, SchemaCompat,
+    ScopedAgentEvent, StreamScopeFrame, format_verbose_event,
 };
 use meerkat_core::{
     Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore, FileConfigStore,
@@ -97,12 +97,12 @@ fn parse_skill_ref_arg(s: &str) -> Result<SkillRef, String> {
 
 /// Spawn a task that handles verbose event output.
 fn spawn_verbose_event_handler(
-    mut agent_event_rx: mpsc::Receiver<AgentEvent>,
+    mut agent_event_rx: mpsc::Receiver<EventEnvelope<AgentEvent>>,
     verbose: bool,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(event) = agent_event_rx.recv().await {
-            if verbose && let Some(line) = format_verbose_event(&event) {
+            if verbose && let Some(line) = format_verbose_event(&event.payload) {
                 eprintln!("{line}");
             }
         }
@@ -2494,7 +2494,7 @@ async fn run_agent(
     // Create event channels:
     // - primary AgentEvent channel for the running session turn
     // - optional scoped stream path for mux/focus attribution
-    let mut event_tx: Option<mpsc::Sender<AgentEvent>> = None;
+    let mut event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>> = None;
     let mut scoped_event_tx: Option<mpsc::Sender<ScopedAgentEvent>> = None;
     let mut verbose_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut stream_task: Option<tokio::task::JoinHandle<stream_renderer::StreamRenderSummary>> =
@@ -2505,13 +2505,14 @@ async fn run_agent(
         let policy = stream_policy
             .clone()
             .ok_or_else(|| anyhow::anyhow!("internal stream policy missing"))?;
-        let (primary_tx, mut primary_rx) = mpsc::channel::<AgentEvent>(100);
+        let (primary_tx, mut primary_rx) =
+            mpsc::channel::<EventEnvelope<AgentEvent>>(100);
         let (scoped_tx, scoped_rx) = mpsc::channel::<ScopedAgentEvent>(200);
         let bridge_scoped_tx = scoped_tx.clone();
         let scope_path_for_bridge = primary_scope_path.clone();
         primary_to_scoped_bridge_task = Some(tokio::spawn(async move {
             while let Some(event) = primary_rx.recv().await {
-                let scoped = ScopedAgentEvent::new(scope_path_for_bridge.clone(), event);
+                let scoped = ScopedAgentEvent::new(scope_path_for_bridge.clone(), event.payload);
                 if bridge_scoped_tx.send(scoped).await.is_err() {
                     break;
                 }
@@ -2522,7 +2523,7 @@ async fn run_agent(
         scoped_event_tx = Some(scoped_tx);
         stream_task = Some(spawn_scoped_event_handler(scoped_rx, policy));
     } else if verbose {
-        let (tx, rx) = mpsc::channel::<AgentEvent>(100);
+        let (tx, rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
         event_tx = Some(tx);
         verbose_task = Some(spawn_verbose_event_handler(rx, verbose));
     }
@@ -2960,7 +2961,7 @@ async fn resume_session_with_llm_override(
     let external_tools = compose_external_tool_dispatchers(mob_external_tools, mcp_external_tools)?;
 
     let (event_tx, event_task) = if verbose {
-        let (tx, rx) = mpsc::channel::<AgentEvent>(100);
+        let (tx, rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
         (Some(tx), Some(spawn_verbose_event_handler(rx, true)))
     } else {
         (None, None)

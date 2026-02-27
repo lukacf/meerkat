@@ -186,7 +186,8 @@ pub async fn validate_reload_target(
 /// Both RPC and REST call this at turn boundaries.
 #[cfg(feature = "mcp")]
 pub async fn emit_mcp_lifecycle_events(
-    event_tx: &mpsc::Sender<AgentEvent>,
+    event_tx: &mpsc::Sender<meerkat_core::EventEnvelope<AgentEvent>>,
+    source_id: &str,
     prompt: &mut String,
     turn_number: u32,
     actions: Vec<meerkat_mcp::McpLifecycleAction>,
@@ -194,6 +195,8 @@ pub async fn emit_mcp_lifecycle_events(
     use meerkat_core::event::ToolConfigChangeOperation;
     use meerkat_core::event::ToolConfigChangedPayload;
     use meerkat_mcp::McpLifecycleAction;
+
+    static MCP_EVENT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
     for action in actions {
         let (operation, target, status) = match action {
@@ -225,10 +228,18 @@ pub async fn emit_mcp_lifecycle_events(
             persisted: false,
             applied_at_turn: Some(turn_number),
         };
+        let seq = MCP_EVENT_SEQ
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .saturating_add(1);
         let _ = event_tx
-            .send(AgentEvent::ToolConfigChanged {
+            .send(meerkat_core::EventEnvelope::new(
+                source_id,
+                seq,
+                None,
+                AgentEvent::ToolConfigChanged {
                 payload: payload.clone(),
-            })
+                },
+            ))
             .await;
         if status == "forced" {
             if !prompt.is_empty() {

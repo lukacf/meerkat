@@ -498,7 +498,7 @@ async fn test_subscribe_session_events_available_before_first_turn() {
         .expect("stream closed unexpectedly");
     assert!(
         matches!(
-            first,
+            first.payload,
             AgentEvent::RunStarted { .. } | AgentEvent::RunCompleted { .. }
         ),
         "expected run lifecycle event, got: {first:?}"

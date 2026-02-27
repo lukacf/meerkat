@@ -38,6 +38,7 @@ use meerkat_core::service::{
     CreateSessionRequest as SvcCreateSessionRequest, InitialTurnPolicy, SessionBuildOptions,
     SessionError, StartTurnRequest as SvcStartTurnRequest,
 };
+use meerkat_core::EventEnvelope;
 use meerkat_core::{
     Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore, FileConfigStore,
     HookRunOverrides, Provider, RealmSelection, RuntimeBootstrap, SessionTooling,
@@ -114,7 +115,7 @@ pub struct AppState {
 #[derive(Debug, Clone)]
 pub struct SessionEvent {
     session_id: SessionId,
-    event: AgentEvent,
+    event: EventEnvelope<AgentEvent>,
 }
 
 impl AppState {
@@ -892,14 +893,14 @@ fn apply_patch_preview(config: &Config, patch: Value) -> Result<Config, ApiError
 /// Spawn a task that forwards events from an mpsc receiver to the broadcast channel,
 /// optionally logging verbose events. Returns the join handle.
 fn spawn_event_forwarder(
-    mut event_rx: mpsc::Receiver<AgentEvent>,
+    mut event_rx: mpsc::Receiver<EventEnvelope<AgentEvent>>,
     broadcast_tx: broadcast::Sender<SessionEvent>,
     session_id: SessionId,
     verbose: bool,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(event) = event_rx.recv().await {
-            if verbose && let Some(line) = format_verbose_event(&event) {
+            if verbose && let Some(line) = format_verbose_event(&event.payload) {
                 tracing::info!("{}", line);
             }
             let _ = broadcast_tx.send(SessionEvent {
@@ -986,7 +987,7 @@ async fn create_session(
     let session_id = pre_session.id().clone();
 
     // Set up event forwarding: caller channel -> broadcast
-    let (caller_event_tx, caller_event_rx) = mpsc::channel::<AgentEvent>(100);
+    let (caller_event_tx, caller_event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
     let forward_task = spawn_event_forwarder(
         caller_event_rx,
         state.event_tx.clone(),
@@ -1124,7 +1125,7 @@ async fn continue_session(
     let session_id = body_session_id;
 
     // Set up event forwarding: caller channel -> broadcast
-    let (caller_event_tx, caller_event_rx) = mpsc::channel::<AgentEvent>(100);
+    let (caller_event_tx, caller_event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
     let forward_task = spawn_event_forwarder(
         caller_event_rx,
         state.event_tx.clone(),
@@ -1322,11 +1323,12 @@ async fn session_events(
 
                     let json = serde_json::to_value(&payload.event).unwrap_or_else(|_| {
                         json!({
-                            "type": "unknown"
+                            "payload": {"type": "unknown"}
                         })
                     });
                     let event_type = json
-                        .get("type")
+                        .get("payload")
+                        .and_then(|v| v.get("type"))
                         .and_then(|v| v.as_str())
                         .unwrap_or("agent_event");
 
@@ -1365,7 +1367,7 @@ async fn session_events(
 async fn apply_mcp_boundary(
     state: &AppState,
     session_id: &SessionId,
-    event_tx: &mpsc::Sender<AgentEvent>,
+    event_tx: &mpsc::Sender<EventEnvelope<AgentEvent>>,
     prompt: &mut String,
 ) -> Result<(), ApiError> {
     let (adapter, turn_number, drain_task_running, lifecycle_tx, mut queued_actions) = {
@@ -1391,7 +1393,15 @@ async fn apply_mcp_boundary(
     // Emit events for queued actions from the background drain task.
     if !queued_actions.is_empty() {
         let drained = std::mem::take(&mut queued_actions);
-        meerkat::surface::emit_mcp_lifecycle_events(event_tx, prompt, turn_number, drained).await;
+        let source_id = format!("session:{session_id}");
+        meerkat::surface::emit_mcp_lifecycle_events(
+            event_tx,
+            &source_id,
+            prompt,
+            turn_number,
+            drained,
+        )
+        .await;
     }
 
     // Apply staged operations — fail the turn on error.
@@ -1411,8 +1421,15 @@ async fn apply_mcp_boundary(
 
     queued_actions.extend(delta.lifecycle_actions);
     if !queued_actions.is_empty() {
-        meerkat::surface::emit_mcp_lifecycle_events(event_tx, prompt, turn_number, queued_actions)
-            .await;
+        let source_id = format!("session:{session_id}");
+        meerkat::surface::emit_mcp_lifecycle_events(
+            event_tx,
+            &source_id,
+            prompt,
+            turn_number,
+            queued_actions,
+        )
+        .await;
     }
 
     Ok(())

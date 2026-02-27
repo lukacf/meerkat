@@ -16,7 +16,7 @@ use meerkat_core::service::{
 };
 use meerkat_core::{
     AgentEvent, Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigRuntimeError,
-    ConfigStore, FileConfigStore, HookRunOverrides, Provider, RealmSelection, RuntimeBootstrap,
+    ConfigStore, EventEnvelope, FileConfigStore, HookRunOverrides, Provider, RealmSelection, RuntimeBootstrap,
     Session, ToolCallView, format_verbose_event,
 };
 use schemars::JsonSchema;
@@ -548,10 +548,12 @@ pub struct ToolResultInput {
     pub is_error: bool,
 }
 
-pub type EventNotifier = Arc<dyn Fn(&str, &AgentEvent) + Send + Sync>;
+pub type EventNotifier = Arc<dyn Fn(&str, &EventEnvelope<AgentEvent>) + Send + Sync>;
+type EventEnvelopeSender = mpsc::Sender<EventEnvelope<AgentEvent>>;
+type EventEnvelopeReceiver = mpsc::Receiver<EventEnvelope<AgentEvent>>;
 
 fn spawn_event_forwarder(
-    mut rx: mpsc::Receiver<AgentEvent>,
+    mut rx: EventEnvelopeReceiver,
     session_id: String,
     verbose: bool,
     notifier: Option<EventNotifier>,
@@ -566,7 +568,7 @@ fn spawn_event_forwarder(
                 continue;
             }
 
-            if let Some(line) = format_verbose_event(&event) {
+            if let Some(line) = format_verbose_event(&event.payload) {
                 tracing::info!("{}", line);
             }
         }
@@ -576,10 +578,7 @@ fn spawn_event_forwarder(
 fn maybe_event_channel(
     verbose: bool,
     stream: bool,
-) -> (
-    Option<mpsc::Sender<AgentEvent>>,
-    Option<mpsc::Receiver<AgentEvent>>,
-) {
+) -> (Option<EventEnvelopeSender>, Option<EventEnvelopeReceiver>) {
     if !verbose && !stream {
         return (None, None);
     }

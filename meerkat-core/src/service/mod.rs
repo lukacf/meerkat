@@ -6,6 +6,7 @@
 pub mod transport;
 
 use crate::event::{AgentEvent, ScopedAgentEvent, StreamScopeFrame};
+use crate::event::EventEnvelope;
 use crate::time_compat::SystemTime;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -87,7 +88,7 @@ pub struct CreateSessionRequest {
     /// Max tokens per LLM turn.
     pub max_tokens: Option<u32>,
     /// Channel for streaming events during the turn.
-    pub event_tx: Option<mpsc::Sender<AgentEvent>>,
+    pub event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
     /// Run in host mode: process prompt then stay alive for comms messages.
     /// This is a session-level property applied to all turns.
     pub host_mode: bool,
@@ -220,7 +221,7 @@ pub struct StartTurnRequest {
     /// User prompt for this turn.
     pub prompt: String,
     /// Channel for streaming events during the turn.
-    pub event_tx: Option<mpsc::Sender<AgentEvent>>,
+    pub event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
     /// Run this turn in host mode.
     pub host_mode: bool,
     /// Canonical SkillKeys to resolve and inject for this turn.

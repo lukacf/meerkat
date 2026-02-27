@@ -131,7 +131,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()
         .map_err(|e| format!("Invalid host:port combination: {e}"))?;
 
-    // Build router with middleware
+    // Build router with middleware. Keep a clone for shutdown cleanup.
+    #[cfg(feature = "mcp")]
+    let shutdown_state = state.clone();
     let app = router(state)
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive());
@@ -143,6 +145,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+
+    // Shut down all live MCP adapters to close connections cleanly.
+    #[cfg(feature = "mcp")]
+    meerkat_rest::shutdown_all_mcp_sessions(&shutdown_state).await;
 
     tracing::info!("Server shutdown complete");
     Ok(())

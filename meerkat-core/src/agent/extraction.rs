@@ -11,6 +11,10 @@ use serde_json::{Value, json};
 
 use super::{Agent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
 
+/// Default prompt for the structured output extraction turn.
+pub const DEFAULT_EXTRACTION_PROMPT: &str = "Provide the final output as valid JSON matching \
+    the required schema. Output ONLY the JSON, no additional text or markdown formatting.";
+
 impl<C, T, S> Agent<C, T, S>
 where
     C: AgentLlmClient + ?Sized + 'static,
@@ -50,10 +54,16 @@ where
             Some(compiled.warnings.clone())
         };
 
+        let extraction_prompt = self
+            .config
+            .extraction_prompt
+            .as_deref()
+            .unwrap_or(DEFAULT_EXTRACTION_PROMPT);
+
         for attempt in 0..max_attempts {
             // Add extraction prompt
             let prompt = if attempt == 0 {
-                "Based on our conversation, provide the final output as valid JSON matching the required schema. Output ONLY the JSON, no additional text or markdown formatting.".to_string()
+                extraction_prompt.to_string()
             } else {
                 format!(
                     "The previous output was invalid: {last_error}. Please provide valid JSON matching the schema. Output ONLY the JSON, no additional text."

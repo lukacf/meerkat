@@ -23,7 +23,8 @@ pub use protocol::Protocol;
 pub use session_locator::{SessionLocator, SessionLocatorError, format_session_ref};
 pub use version::ContractVersion;
 pub use wire::{
-    CommsParams, CoreCreateParams, HookParams, SkillEntry, SkillInspectResponse, SkillListResponse,
-    SkillsParams, StructuredOutputParams, WireEvent, WireRunResult, WireSessionInfo,
-    WireSessionSummary, WireUsage,
+    CommsParams, CoreCreateParams, HookParams, McpAddParams, McpLiveOpResponse, McpLiveOpStatus,
+    McpLiveOperation, McpReloadParams, McpRemoveParams, SkillEntry, SkillInspectResponse,
+    SkillListResponse, SkillsParams, StructuredOutputParams, WireEvent, WireRunResult,
+    WireSessionInfo, WireSessionSummary, WireUsage,
 };

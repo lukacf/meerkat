@@ -70,6 +70,20 @@ Meerkat ships with tool categories you enable per-agent. Nothing is on by defaul
 
 Shell tools support allow/deny list security policies. Sub-agent tools enforce concurrency limits and prevent recursive spawning. See the [built-in tools reference](/reference/builtin-tools) for parameter details.
 
+## Tool scoping
+
+Tool visibility can change during a session without restarting the agent. Changes are **staged** then **atomically applied** at the turn boundary — the LLM never sees a tool list change mid-stream.
+
+**External filters.** Callers can stage an allow-list or deny-list filter via the session API (RPC `mcp/add`, `mcp/remove`, REST endpoints, or programmatically through `ToolScopeHandle`). The filter is persisted in session metadata and survives resume.
+
+**Per-turn overlays.** Mob flow steps can restrict tools for a single turn via `TurnToolOverlay` (allow + deny). The overlay is ephemeral — it's cleared after the turn completes.
+
+**Live MCP mutation.** MCP servers can be added or removed from a running session. Additions connect the server and register its tools; removals drain in-flight calls before finalizing. Both are staged and applied at the next turn boundary.
+
+**Composition rule:** Most-restrictive wins. Multiple allow-lists intersect, multiple deny-lists union, and deny always beats allow. The agent receives a `[SYSTEM NOTICE]` in the conversation when its tool set changes.
+
+See the [built-in tools reference](/reference/builtin-tools) for the mechanical details of factory flags and per-build overrides.
+
 ## Composition
 
 Tools from different sources (custom, MCP, built-in) are composed into a single dispatcher. The agent sees one flat tool list regardless of where each tool comes from. Hooks can intercept tool calls before and after execution for guardrails, audit, or argument rewriting.

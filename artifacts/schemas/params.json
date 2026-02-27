@@ -50,6 +50,76 @@
     "title": "CommsParams",
     "type": "object"
   },
+  "McpAddParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Request payload for `mcp/add`.",
+    "properties": {
+      "persisted": {
+        "default": false,
+        "type": "boolean"
+      },
+      "server_config": true,
+      "server_name": {
+        "type": "string"
+      },
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id",
+      "server_name",
+      "server_config"
+    ],
+    "title": "McpAddParams",
+    "type": "object"
+  },
+  "McpReloadParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Request payload for optional `mcp/reload`.",
+    "properties": {
+      "persisted": {
+        "default": false,
+        "type": "boolean"
+      },
+      "server_name": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id"
+    ],
+    "title": "McpReloadParams",
+    "type": "object"
+  },
+  "McpRemoveParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Request payload for `mcp/remove`.",
+    "properties": {
+      "persisted": {
+        "default": false,
+        "type": "boolean"
+      },
+      "server_name": {
+        "type": "string"
+      },
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id",
+      "server_name"
+    ],
+    "title": "McpRemoveParams",
+    "type": "object"
+  },
   "SkillsParams": {
     "$defs": {
       "SkillKey": {

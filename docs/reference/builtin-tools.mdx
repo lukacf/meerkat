@@ -74,6 +74,58 @@ Capabilities are registered via the `inventory` crate in `meerkat-tools/src/lib.
 - **SubAgents** (`CapabilityId::SubAgents`): `agent_spawn`, `agent_fork`, `agent_status`, `agent_cancel`, `agent_list`. Requires `sub-agents` feature.
 </Accordion>
 
+## Runtime tool scoping
+
+Beyond static factory flags and per-build overrides, tool visibility can be changed at runtime during a live session. See [Tool scoping](/concepts/tools#tool-scoping) for the conceptual overview.
+
+<Accordion title="ToolScope lifecycle">
+`ToolScope` (in `meerkat-core`) manages runtime tool visibility. It holds the base tool set from the dispatcher, an active external filter, and an optional per-turn overlay.
+
+**Staging:** External callers stage filter updates via `ToolScopeHandle::stage_external_filter(filter)`. The staged filter is NOT applied immediately — the current turn is unaffected.
+
+**Boundary apply:** At the start of each `CallingLlm` loop iteration, `tool_scope.apply_staged(dispatcher_tools)` atomically promotes the staged filter to active, prunes stale tool names, and returns the visible tool set. A `ToolConfigChanged` event is emitted and a `[SYSTEM NOTICE]` is injected into the conversation.
+
+**Filter types:**
+- `ToolFilter::All` — no restriction (default)
+- `ToolFilter::Allow(set)` — only listed tools are visible
+- `ToolFilter::Deny(set)` — listed tools are hidden
+
+**Composition:** Most-restrictive wins. Multiple allow-lists intersect, multiple deny-lists union, deny beats allow.
+
+**Persistence:** The active external filter is stored in session metadata under `tool_scope_external_filter` and restored on session resume.
+
+**Source:** `meerkat-core/src/tool_scope.rs`
+</Accordion>
+
+<Accordion title="Live MCP server mutation">
+MCP servers can be added or removed from a running session. Operations are staged on the `McpRouter` and applied at the next turn boundary.
+
+| Surface | Method | Status |
+|---------|--------|--------|
+| JSON-RPC | `mcp/add`, `mcp/remove`, `mcp/reload` | Fully wired (staged) |
+| REST | `POST /sessions/{id}/mcp/add\|remove\|reload` | Routes registered (placeholder) |
+| CLI | `rkat mcp add/remove --session <id> --live-server-url <url>` | Delegates to REST |
+
+Servers being removed transition through `Active → Removing (draining) → Removed` to allow in-flight tool calls to complete before finalization.
+
+**Source:** `meerkat-mcp/src/router.rs`, `meerkat-rpc/src/handlers/mcp.rs`
+</Accordion>
+
+<Accordion title="Per-turn flow tool overlay">
+Mob flow steps can restrict tools for a single turn via `TurnToolOverlay`:
+
+```rust
+TurnToolOverlay {
+    allowed_tools: Option<Vec<String>>,  // allow-list for this turn
+    blocked_tools: Option<Vec<String>>,  // deny-list for this turn
+}
+```
+
+Set on `StartTurnRequest.flow_tool_overlay` by the flow engine. Ephemeral — cleared after the turn completes. Composes with the external filter using most-restrictive semantics.
+
+**Source:** `meerkat-core/src/service/mod.rs`, `meerkat-mob/src/runtime/flow.rs`
+</Accordion>
+
 ## Task tools
 
 Task tools provide structured work tracking. They are enabled by default when builtins are on. Tasks are persisted via `TaskStore` (either `FileTaskStore` on disk or `MemoryTaskStore` in-memory).

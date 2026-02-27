@@ -333,6 +333,24 @@ class StreamTruncated(Event):
     reason: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class ToolConfigChangedPayload:
+    """Payload for tool configuration change notifications."""
+
+    operation: str = ""
+    target: str = ""
+    status: str = ""
+    persisted: bool = False
+    applied_at_turn: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ToolConfigChanged(Event):
+    """Live tool configuration changed for this session."""
+
+    payload: ToolConfigChangedPayload = field(default_factory=ToolConfigChangedPayload)
+
+
 # ---------------------------------------------------------------------------
 # Scoped streaming attribution
 # ---------------------------------------------------------------------------
@@ -397,6 +415,7 @@ _EVENT_MAP: dict[str, type[Event]] = {
     "interaction_complete": InteractionComplete,
     "interaction_failed": InteractionFailed,
     "stream_truncated": StreamTruncated,
+    "tool_config_changed": ToolConfigChanged,
 }
 
 
@@ -436,6 +455,25 @@ def parse_event(raw: dict[str, Any]) -> Event:
     for f in cls.__dataclass_fields__:
         if f == "usage":
             kwargs["usage"] = _parse_usage(raw.get("usage"))
+        elif f == "payload" and cls is ToolConfigChanged:
+            payload_raw = raw.get("payload", {})
+            if isinstance(payload_raw, dict):
+                applied_at_turn_raw = payload_raw.get("applied_at_turn")
+                applied_at_turn: int | None
+                if isinstance(applied_at_turn_raw, int):
+                    applied_at_turn = applied_at_turn_raw
+                else:
+                    applied_at_turn = None
+                persisted_raw = payload_raw.get("persisted", False)
+                kwargs["payload"] = ToolConfigChangedPayload(
+                    operation=str(payload_raw.get("operation", "")),
+                    target=str(payload_raw.get("target", "")),
+                    status=str(payload_raw.get("status", "")),
+                    persisted=persisted_raw if isinstance(persisted_raw, bool) else False,
+                    applied_at_turn=applied_at_turn,
+                )
+            else:
+                kwargs["payload"] = ToolConfigChangedPayload()
         elif f in raw:
             kwargs[f] = raw[f]
     return cls(**kwargs)

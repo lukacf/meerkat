@@ -225,6 +225,19 @@ pub struct StartTurnRequest {
     pub host_mode: bool,
     /// Canonical SkillKeys to resolve and inject for this turn.
     pub skill_references: Option<Vec<crate::skills::SkillKey>>,
+    /// Optional per-turn flow tool overlay (ephemeral, non-persistent).
+    pub flow_tool_overlay: Option<TurnToolOverlay>,
+}
+
+/// Ephemeral per-turn tool overlay for flow-dispatched turns.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnToolOverlay {
+    /// Optional allow-list for this turn.
+    #[serde(default)]
+    pub allowed_tools: Option<Vec<String>>,
+    /// Optional deny-list for this turn.
+    #[serde(default)]
+    pub blocked_tools: Option<Vec<String>>,
 }
 
 /// Query parameters for listing sessions.

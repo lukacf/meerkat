@@ -119,3 +119,124 @@ where
 
     tx
 }
+
+// ---------------------------------------------------------------------------
+// Live MCP surface helpers (shared across RPC, REST)
+// ---------------------------------------------------------------------------
+
+/// Build a canonical [`McpLiveOpResponse`] for a staged operation.
+///
+/// All surfaces use this to ensure identical response shaping — operation,
+/// server name, persisted handling, and `applied_at_turn` semantics.
+#[cfg(feature = "mcp")]
+pub fn mcp_live_response(
+    session_id: String,
+    operation: meerkat_contracts::McpLiveOperation,
+    server_name: Option<String>,
+) -> meerkat_contracts::McpLiveOpResponse {
+    meerkat_contracts::McpLiveOpResponse {
+        session_id,
+        operation,
+        server_name,
+        status: meerkat_contracts::McpLiveOpStatus::Staged,
+        persisted: false,
+        applied_at_turn: None,
+    }
+}
+
+/// Resolve the `persisted` flag from a caller request.
+///
+/// Config persistence is not yet implemented — if the caller sends
+/// `persisted=true` we log a warning and always return `false`.
+/// All surfaces call this to avoid semantic drift.
+#[cfg(feature = "mcp")]
+pub fn resolve_persisted(operation: &str, persisted: bool) -> bool {
+    if persisted {
+        tracing::warn!(
+            operation,
+            "caller sent persisted=true but config persistence is not yet implemented; \
+             responding with persisted=false"
+        );
+    }
+    false
+}
+
+/// Validate that a reload target exists in the adapter's active server set.
+///
+/// Returns `Ok(())` if the server is active, or an error message suitable
+/// for returning to the caller.
+#[cfg(feature = "mcp")]
+pub async fn validate_reload_target(
+    adapter: &meerkat_mcp::McpRouterAdapter,
+    server_name: &str,
+) -> Result<(), String> {
+    let active = adapter.active_server_names().await;
+    if active.iter().any(|n| n == server_name) {
+        Ok(())
+    } else {
+        Err(format!(
+            "MCP server '{server_name}' is not registered on this session"
+        ))
+    }
+}
+
+/// Emit [`AgentEvent::ToolConfigChanged`] events for a batch of lifecycle actions.
+///
+/// Also appends `[system-notice]` lines to `prompt` for forced removals.
+/// Both RPC and REST call this at turn boundaries.
+#[cfg(feature = "mcp")]
+pub async fn emit_mcp_lifecycle_events(
+    event_tx: &mpsc::Sender<AgentEvent>,
+    prompt: &mut String,
+    turn_number: u32,
+    actions: Vec<meerkat_mcp::McpLifecycleAction>,
+) {
+    use meerkat_core::event::ToolConfigChangeOperation;
+    use meerkat_core::event::ToolConfigChangedPayload;
+    use meerkat_mcp::McpLifecycleAction;
+
+    for action in actions {
+        let (operation, target, status) = match action {
+            McpLifecycleAction::Activated { server } => (
+                ToolConfigChangeOperation::Add,
+                server,
+                "applied".to_string(),
+            ),
+            McpLifecycleAction::Reloaded { server } => (
+                ToolConfigChangeOperation::Reload,
+                server,
+                "applied".to_string(),
+            ),
+            McpLifecycleAction::RemovingStarted { server } => (
+                ToolConfigChangeOperation::Remove,
+                server,
+                "draining".to_string(),
+            ),
+            McpLifecycleAction::Removed { server, degraded } => (
+                ToolConfigChangeOperation::Remove,
+                server,
+                if degraded { "forced" } else { "applied" }.to_string(),
+            ),
+        };
+        let payload = ToolConfigChangedPayload {
+            operation,
+            target: target.clone(),
+            status: status.clone(),
+            persisted: false,
+            applied_at_turn: Some(turn_number),
+        };
+        let _ = event_tx
+            .send(AgentEvent::ToolConfigChanged {
+                payload: payload.clone(),
+            })
+            .await;
+        if status == "forced" {
+            if !prompt.is_empty() {
+                prompt.push('\n');
+            }
+            prompt.push_str(&format!(
+                "[system-notice] MCP server '{target}' removal forced after drain timeout."
+            ));
+        }
+    }
+}

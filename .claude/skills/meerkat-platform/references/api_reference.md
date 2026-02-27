@@ -106,6 +106,9 @@ Core endpoints:
 - `GET /health`
 - `GET /capabilities`
 - `GET|PUT|PATCH /config`
+- `POST /sessions/{id}/mcp/add` — stage live MCP server add (placeholder)
+- `POST /sessions/{id}/mcp/remove` — stage live MCP server remove (placeholder)
+- `POST /sessions/{id}/mcp/reload` — stage live MCP server reload (placeholder)
 - `POST /comms/send` (feature-gated)
 - `GET /comms/peers` (feature-gated)
 
@@ -160,6 +163,9 @@ Core methods:
 - `skills/list` — list skills with provenance (active + shadowed)
 - `skills/inspect` — inspect a skill's full body by ID
 - `capabilities/get`
+- `mcp/add` — stage live MCP server add for a session (feature-gated)
+- `mcp/remove` — stage live MCP server remove (feature-gated)
+- `mcp/reload` — stage live MCP server reload (feature-gated)
 - `comms/send` (feature-gated)
 - `comms/peers` (feature-gated)
 - `comms/stream_open` / `comms/stream_close` (feature-gated)

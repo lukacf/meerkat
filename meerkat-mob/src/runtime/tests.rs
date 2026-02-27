@@ -26,11 +26,14 @@ use meerkat_core::event::AgentEvent;
 use meerkat_core::interaction::InteractionId;
 use meerkat_core::service::{
     CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService, SessionSummary,
-    SessionUsage, SessionView, StartTurnRequest,
+    SessionUsage, SessionView, StartTurnRequest, TurnToolOverlay,
 };
-use meerkat_core::types::{RunResult, SessionId, ToolCallView, ToolResult, Usage};
+use meerkat_core::types::{
+    AssistantBlock, RunResult, SessionId, StopReason, ToolCallView, ToolDef, ToolResult, Usage,
+};
 use meerkat_core::{
-    EventInjector, EventInjectorError, InteractionSubscription, PlainEventSource,
+    Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, EventInjector,
+    EventInjectorError, InteractionSubscription, LlmStreamResult, PlainEventSource,
     SubscribableInjector,
 };
 use meerkat_session::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
@@ -301,6 +304,7 @@ struct MockSessionService {
     flow_turn_fail: std::sync::atomic::AtomicBool,
     flow_turn_fail_sessions: RwLock<HashSet<SessionId>>,
     flow_turn_completed_result: RwLock<String>,
+    flow_turn_overlays: RwLock<Vec<(SessionId, Option<meerkat_core::service::TurnToolOverlay>)>>,
 }
 
 impl MockSessionService {
@@ -334,6 +338,7 @@ impl MockSessionService {
             flow_turn_fail: std::sync::atomic::AtomicBool::new(false),
             flow_turn_fail_sessions: RwLock::new(HashSet::new()),
             flow_turn_completed_result: RwLock::new("\"Turn completed\"".to_string()),
+            flow_turn_overlays: RwLock::new(Vec::new()),
         }
     }
 
@@ -493,6 +498,12 @@ impl MockSessionService {
 
     async fn set_flow_turn_completed_result(&self, result: impl Into<String>) {
         *self.flow_turn_completed_result.write().await = result.into();
+    }
+
+    async fn recorded_flow_turn_overlays(
+        &self,
+    ) -> Vec<(SessionId, Option<meerkat_core::service::TurnToolOverlay>)> {
+        self.flow_turn_overlays.read().await.clone()
     }
 
     async fn trusted_peer_names(&self, session_id: &SessionId) -> Vec<String> {
@@ -672,6 +683,10 @@ impl SessionService for MockSessionService {
         id: &SessionId,
         req: StartTurnRequest,
     ) -> Result<RunResult, SessionError> {
+        self.flow_turn_overlays
+            .write()
+            .await
+            .push((id.clone(), req.flow_tool_overlay.clone()));
         self.start_turn_calls.fetch_add(1, Ordering::Relaxed);
         if req.host_mode {
             self.host_mode_start_turn_calls
@@ -1369,6 +1384,8 @@ fn flow_step(role: impl Into<crate::ids::ProfileName>, message: &str) -> FlowSte
         expected_schema_ref: None,
         branch: None,
         depends_on_mode: DependencyMode::All,
+        allowed_tools: None,
+        blocked_tools: None,
     }
 }
 
@@ -1848,6 +1865,13 @@ impl SessionAgent for PersistentMockAgent {
 
     fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
 
+    fn set_flow_tool_overlay(
+        &mut self,
+        _overlay: Option<meerkat_core::service::TurnToolOverlay>,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        Ok(())
+    }
+
     fn cancel(&mut self) {}
 
     fn session_id(&self) -> SessionId {
@@ -1901,6 +1925,205 @@ async fn create_test_mob_with_persistent_service(definition: MobDefinition) -> M
         .expect("create mob with persistent session service")
 }
 
+#[derive(Default)]
+struct OverlayProbeSessionStore;
+
+#[async_trait]
+impl AgentSessionStore for OverlayProbeSessionStore {
+    async fn save(&self, _session: &Session) -> Result<(), meerkat_core::error::AgentError> {
+        Ok(())
+    }
+
+    async fn load(&self, _id: &str) -> Result<Option<Session>, meerkat_core::error::AgentError> {
+        Ok(None)
+    }
+}
+
+struct OverlayProbeDispatcher {
+    tools: Arc<[Arc<ToolDef>]>,
+}
+
+impl OverlayProbeDispatcher {
+    fn new() -> Self {
+        let tools: Vec<Arc<ToolDef>> = ["alpha", "beta"]
+            .iter()
+            .map(|name| {
+                let input_schema = serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                });
+                Arc::new(ToolDef {
+                    name: (*name).to_string(),
+                    description: format!("{name} tool"),
+                    input_schema,
+                })
+            })
+            .collect();
+        Self {
+            tools: tools.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl AgentToolDispatcher for OverlayProbeDispatcher {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        Arc::clone(&self.tools)
+    }
+
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        Err(ToolError::not_found(call.name))
+    }
+}
+
+struct OverlayProbeLlmClient {
+    provider_visible_tools: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+}
+
+#[async_trait]
+impl AgentLlmClient for OverlayProbeLlmClient {
+    async fn stream_response(
+        &self,
+        _messages: &[meerkat_core::types::Message],
+        tools: &[Arc<ToolDef>],
+        _max_tokens: u32,
+        _temperature: Option<f32>,
+        _provider_params: Option<&serde_json::Value>,
+    ) -> Result<LlmStreamResult, meerkat_core::error::AgentError> {
+        self.provider_visible_tools
+            .lock()
+            .expect("provider_visible_tools lock poisoned")
+            .push(tools.iter().map(|tool| tool.name.clone()).collect());
+        Ok(LlmStreamResult::new(
+            vec![AssistantBlock::Text {
+                text: "{}".to_string(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+            Usage::default(),
+        ))
+    }
+
+    fn provider(&self) -> &'static str {
+        "overlay-probe"
+    }
+}
+
+type OverlayProbeInnerAgent =
+    Agent<OverlayProbeLlmClient, OverlayProbeDispatcher, OverlayProbeSessionStore>;
+
+struct OverlayProbeSessionAgent {
+    agent: OverlayProbeInnerAgent,
+}
+
+#[async_trait]
+impl SessionAgent for OverlayProbeSessionAgent {
+    async fn run_with_events(
+        &mut self,
+        prompt: String,
+        event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
+    ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        self.agent.run_with_events(prompt, event_tx).await
+    }
+
+    async fn run_host_mode(
+        &mut self,
+        prompt: String,
+    ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        self.agent.run_host_mode(prompt).await
+    }
+
+    fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillKey>>) {
+        self.agent.pending_skill_references = refs;
+    }
+
+    fn set_flow_tool_overlay(
+        &mut self,
+        overlay: Option<TurnToolOverlay>,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        self.agent
+            .set_flow_tool_overlay(overlay)
+            .map_err(|error| meerkat_core::error::AgentError::ConfigError(error.to_string()))
+    }
+
+    fn cancel(&mut self) {
+        self.agent.cancel();
+    }
+
+    fn session_id(&self) -> SessionId {
+        self.agent.session().id().clone()
+    }
+
+    fn snapshot(&self) -> SessionSnapshot {
+        let session = self.agent.session();
+        SessionSnapshot {
+            created_at: session.created_at(),
+            updated_at: session.updated_at(),
+            message_count: session.messages().len(),
+            total_tokens: session.total_tokens(),
+            usage: session.total_usage(),
+            last_assistant_text: session.last_assistant_text(),
+        }
+    }
+
+    fn session_clone(&self) -> Session {
+        self.agent.session().clone()
+    }
+}
+
+struct OverlayProbeSessionAgentBuilder {
+    provider_visible_tools: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+}
+
+#[async_trait]
+impl SessionAgentBuilder for OverlayProbeSessionAgentBuilder {
+    type Agent = OverlayProbeSessionAgent;
+
+    async fn build_agent(
+        &self,
+        req: &CreateSessionRequest,
+        _event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
+    ) -> Result<Self::Agent, SessionError> {
+        let mut builder = AgentBuilder::new().model(req.model.clone());
+        if let Some(max_tokens) = req.max_tokens {
+            builder = builder.max_tokens_per_turn(max_tokens);
+        }
+        if let Some(system_prompt) = &req.system_prompt {
+            builder = builder.system_prompt(system_prompt.clone());
+        }
+
+        let client = Arc::new(OverlayProbeLlmClient {
+            provider_visible_tools: Arc::clone(&self.provider_visible_tools),
+        });
+        let tools = Arc::new(OverlayProbeDispatcher::new());
+        let store = Arc::new(OverlayProbeSessionStore);
+        let agent = builder.build(client, tools, store).await;
+
+        Ok(OverlayProbeSessionAgent { agent })
+    }
+}
+
+async fn create_test_mob_with_overlay_probe_service(
+    definition: MobDefinition,
+) -> (MobHandle, Arc<std::sync::Mutex<Vec<Vec<String>>>>) {
+    let provider_visible_tools = Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
+    let session_service = Arc::new(meerkat_session::EphemeralSessionService::new(
+        OverlayProbeSessionAgentBuilder {
+            provider_visible_tools: Arc::clone(&provider_visible_tools),
+        },
+        16,
+    ));
+
+    let handle = MobBuilder::new(definition, MobStorage::in_memory())
+        .with_session_service(session_service)
+        .allow_ephemeral_sessions(true)
+        .create()
+        .await
+        .expect("create mob with overlay probe session service");
+
+    (handle, provider_visible_tools)
+}
+
 // -----------------------------------------------------------------------
 // P1-T03: MobBuilder + MobHandle + MobActor wiring
 // -----------------------------------------------------------------------
@@ -1933,7 +2156,11 @@ async fn test_mob_builder_runs_with_shared_redb_storage_bundle() {
         .await
         .expect("run flow");
     let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
-    assert_eq!(terminal.status, MobRunStatus::Completed);
+    assert_eq!(
+        terminal.status,
+        MobRunStatus::Completed,
+        "flow should complete for runtime overlay probe: {terminal:?}"
+    );
 }
 
 #[tokio::test]
@@ -2705,6 +2932,171 @@ async fn test_mob_flow_tools_reject_invalid_run_id_arguments() {
     assert!(
         matches!(error, ToolError::InvalidArguments { .. }),
         "flow status should surface invalid run_id as invalid arguments"
+    );
+}
+
+#[tokio::test]
+async fn test_flow_step_tool_overlay_is_step_scoped() {
+    let mut definition = sample_definition_with_single_step_flow(2_000, 8);
+    let worker = definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .expect("worker profile exists");
+    worker.tools.mob = true;
+
+    let flow = definition
+        .flows
+        .get_mut(&flow_id("demo"))
+        .expect("demo flow exists");
+    let step = flow
+        .steps
+        .get_mut(&step_id("start"))
+        .expect("start step exists");
+    step.allowed_tools = Some(vec!["alpha".to_string(), "beta".to_string()]);
+    step.blocked_tools = Some(vec!["beta".to_string()]);
+
+    let (handle, service) = create_test_mob(definition).await;
+    let sid = handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-overlay"),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn worker")
+        .session_id()
+        .expect("session-backed")
+        .clone();
+
+    let started = service
+        .dispatch_external_tool(
+            &sid,
+            "mob_run_flow",
+            serde_json::json!({
+                "flow_id": "demo",
+                "params": {}
+            }),
+        )
+        .await
+        .expect("start flow");
+    let started_json: serde_json::Value =
+        serde_json::from_str(&started.content).expect("run payload json");
+    let run_id = started_json["run_id"]
+        .as_str()
+        .expect("run_id string")
+        .parse::<RunId>()
+        .expect("run_id parse");
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(5)).await;
+    assert!(
+        terminal.status == MobRunStatus::Completed,
+        "flow failed; failure ledger: {:?}",
+        terminal.failure_ledger
+    );
+
+    service
+        .start_turn(
+            &sid,
+            StartTurnRequest {
+                prompt: "non-flow turn".to_string(),
+                event_tx: None,
+                host_mode: false,
+                skill_references: None,
+                flow_tool_overlay: None,
+            },
+        )
+        .await
+        .expect("plain start_turn after flow");
+
+    let overlays = service
+        .recorded_flow_turn_overlays()
+        .await
+        .into_iter()
+        .filter(|(session_id, _)| session_id == &sid)
+        .map(|(_, overlay)| overlay)
+        .collect::<Vec<_>>();
+
+    assert_eq!(overlays.len(), 2, "expected flow turn + plain turn");
+    assert_eq!(
+        overlays[0],
+        Some(TurnToolOverlay {
+            allowed_tools: Some(vec!["alpha".to_string(), "beta".to_string()]),
+            blocked_tools: Some(vec!["beta".to_string()]),
+        }),
+        "flow step turn should pass flow overlay"
+    );
+    assert_eq!(
+        overlays[1], None,
+        "overlay must not persist into unrelated turns"
+    );
+}
+
+#[tokio::test]
+async fn test_flow_step_tool_overlay_changes_runtime_visible_tools_and_restores_baseline() {
+    let mut definition = sample_definition_with_single_step_flow(2_000, 8);
+    let flow = definition
+        .flows
+        .get_mut(&flow_id("demo"))
+        .expect("demo flow exists");
+    let step = flow
+        .steps
+        .get_mut(&step_id("start"))
+        .expect("start step exists");
+    step.allowed_tools = Some(vec!["alpha".to_string(), "beta".to_string()]);
+    step.blocked_tools = Some(vec!["beta".to_string()]);
+
+    let (handle, provider_visible_tools) =
+        create_test_mob_with_overlay_probe_service(definition).await;
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-runtime-overlay"),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn worker");
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run demo flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert!(
+        terminal.status == MobRunStatus::Completed,
+        "flow failed; failure ledger: {:?}",
+        terminal.failure_ledger
+    );
+
+    handle
+        .internal_turn(
+            MeerkatId::from("w-runtime-overlay"),
+            "baseline after flow".to_string(),
+        )
+        .await
+        .expect("run baseline turn");
+
+    let seen = provider_visible_tools
+        .lock()
+        .expect("provider_visible_tools lock poisoned")
+        .clone();
+    assert_eq!(
+        seen.len(),
+        2,
+        "expected one provider call for flow and one for baseline"
+    );
+    assert_eq!(
+        seen[0],
+        vec!["alpha".to_string()],
+        "flow step overlay should restrict provider-visible tools"
+    );
+    assert_eq!(
+        seen[1],
+        vec!["alpha".to_string(), "beta".to_string()],
+        "next non-flow turn should restore baseline visible tools"
     );
 }
 
@@ -5804,6 +6196,42 @@ async fn test_flow_dispatch_autonomous_mode_uses_injector_and_avoids_non_host_st
     assert!(
         service.inject_call_count() > 0,
         "autonomous flow dispatch should use injector routing"
+    );
+}
+
+#[tokio::test]
+async fn test_flow_dispatch_autonomous_mode_with_overlay_rejects() {
+    let mut definition = sample_definition_with_dispatch_mode(DispatchMode::OneToOne);
+    let flow = definition
+        .flows
+        .get_mut(&flow_id("dispatch"))
+        .expect("dispatch flow exists");
+    let step = flow
+        .steps
+        .get_mut(&step_id("dispatch"))
+        .expect("dispatch step exists");
+    step.allowed_tools = Some(vec!["alpha".to_string()]);
+    step.blocked_tools = Some(vec!["beta".to_string()]);
+
+    let (handle, _service) = create_test_mob(definition).await;
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+
+    let run_id = handle
+        .run_flow(FlowId::from("dispatch"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(2)).await;
+    assert_eq!(
+        terminal.status,
+        MobRunStatus::Failed,
+        "flow should fail because tool overlay cannot be enforced for autonomous host members"
     );
 }
 

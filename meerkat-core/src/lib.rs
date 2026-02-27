@@ -48,6 +48,7 @@ pub mod skills_config;
 pub mod state;
 pub mod sub_agent;
 pub mod time_compat;
+pub mod tool_scope;
 pub mod turn_boundary;
 pub mod types;
 
@@ -85,8 +86,9 @@ pub use config_store::{
 };
 pub use error::{AgentError, ToolError};
 pub use event::{
-    AgentEvent, BudgetType, ScopedAgentEvent, StreamScopeFrame, VerboseEventConfig,
-    format_verbose_event, format_verbose_event_with_config,
+    AgentEvent, BudgetType, ScopedAgentEvent, StreamScopeFrame, ToolConfigChangeOperation,
+    ToolConfigChangedPayload, VerboseEventConfig, format_verbose_event,
+    format_verbose_event_with_config,
 };
 pub use event_injector::{
     EventInjector, EventInjectorError, InteractionSubscription, SubscribableInjector,
@@ -121,11 +123,15 @@ pub use schema::{
 };
 pub use service::{
     CreateSessionRequest, SessionBuildOptions, SessionError, SessionInfo, SessionQuery,
-    SessionService, SessionSummary, SessionUsage, SessionView, StartTurnRequest,
+    SessionService, SessionSummary, SessionUsage, SessionView, StartTurnRequest, TurnToolOverlay,
 };
 pub use session::{SESSION_VERSION, Session, SessionMeta, SessionMetadata, SessionTooling};
 pub use state::LoopState;
 pub use sub_agent::{SubAgentCommsInfo, SubAgentCompletion, SubAgentInfo, SubAgentManager};
+pub use tool_scope::{
+    ComposedToolFilter, EXTERNAL_TOOL_FILTER_METADATA_KEY, ToolFilter, ToolScope, ToolScopeHandle,
+    ToolScopeRevision, ToolScopeStageError,
+};
 pub use turn_boundary::{TurnBoundaryHook, TurnBoundaryMessage};
 pub use types::{
     ArtifactRef, AssistantBlock, AssistantMessage, BlockAssistantMessage, Message, OutputSchema,

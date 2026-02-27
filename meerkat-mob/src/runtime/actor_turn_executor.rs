@@ -10,7 +10,7 @@ use crate::tokio;
 use async_trait::async_trait;
 use futures::FutureExt;
 use meerkat_core::event::{AgentEvent, ScopedAgentEvent, StreamScopeFrame};
-use meerkat_core::service::StartTurnRequest;
+use meerkat_core::service::{StartTurnRequest, TurnToolOverlay};
 use std::collections::BTreeMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -237,6 +237,7 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
         _step_id: &StepId,
         target: &MeerkatId,
         message: String,
+        flow_tool_overlay: Option<TurnToolOverlay>,
     ) -> Result<FlowTurnTicket, MobError> {
         let entry = self
             .handle
@@ -257,6 +258,12 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
         };
         let bridge_handle = match entry.runtime_mode {
             crate::MobRuntimeMode::AutonomousHost => {
+                if flow_tool_overlay.is_some() {
+                    return Err(MobError::Internal(format!(
+                        "flow tool overlay cannot be enforced for autonomous host member '{target}'; \
+                         use turn_driven runtime mode for steps with allowed_tools/blocked_tools"
+                    )));
+                }
                 let session_id = entry.member_ref.session_id().ok_or_else(|| {
                     MobError::Internal(format!(
                         "autonomous flow dispatch requires session-backed member ref for '{target}'"
@@ -303,6 +310,7 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                             event_tx: Some(event_tx),
                             host_mode: false,
                             skill_references: None,
+                            flow_tool_overlay,
                         },
                     )
                     .await

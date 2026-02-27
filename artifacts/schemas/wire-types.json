@@ -27,6 +27,88 @@
     "title": "ContractVersion",
     "type": "object"
   },
+  "McpLiveOpResponse": {
+    "$defs": {
+      "McpLiveOpStatus": {
+        "description": "Shared status for live MCP operations.",
+        "enum": [
+          "staged",
+          "applied",
+          "rejected"
+        ],
+        "type": "string"
+      },
+      "McpLiveOperation": {
+        "description": "Shared operation kind for live MCP operations.",
+        "enum": [
+          "add",
+          "remove",
+          "reload"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for live MCP operations.",
+    "properties": {
+      "applied_at_turn": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "operation": {
+        "$ref": "#/$defs/McpLiveOperation"
+      },
+      "persisted": {
+        "type": "boolean"
+      },
+      "server_name": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "session_id": {
+        "type": "string"
+      },
+      "status": {
+        "$ref": "#/$defs/McpLiveOpStatus"
+      }
+    },
+    "required": [
+      "session_id",
+      "operation",
+      "status",
+      "persisted"
+    ],
+    "title": "McpLiveOpResponse",
+    "type": "object"
+  },
+  "McpLiveOpStatus": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Shared status for live MCP operations.",
+    "enum": [
+      "staged",
+      "applied",
+      "rejected"
+    ],
+    "title": "McpLiveOpStatus",
+    "type": "string"
+  },
+  "McpLiveOperation": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Shared operation kind for live MCP operations.",
+    "enum": [
+      "add",
+      "remove",
+      "reload"
+    ],
+    "title": "McpLiveOperation",
+    "type": "string"
+  },
   "WireUsage": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Canonical token usage for wire protocol.",

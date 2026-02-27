@@ -11,6 +11,9 @@ pub enum McpError {
     #[error("Tool not found: {0}")]
     ToolNotFound(String),
 
+    #[error("Server '{server}' is not accepting new calls (state: {state})")]
+    ServerUnavailable { server: String, state: String },
+
     #[error("Protocol error: {message}")]
     ProtocolError { message: String },
 

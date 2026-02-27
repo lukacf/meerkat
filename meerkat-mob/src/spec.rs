@@ -307,6 +307,8 @@ mod tests {
             expected_schema_ref: None,
             branch: None,
             depends_on_mode: DependencyMode::All,
+            allowed_tools: None,
+            blocked_tools: None,
         }
     }
 

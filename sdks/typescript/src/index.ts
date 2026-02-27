@@ -52,6 +52,12 @@ export {
 
 // Contract version
 export { CONTRACT_VERSION } from "./generated/types.js";
+export type {
+  McpAddParams,
+  McpRemoveParams,
+  McpReloadParams,
+  McpLiveOpResponse,
+} from "./generated/types.js";
 
 // Typed events — discriminated union and all interfaces
 export type {
@@ -88,6 +94,9 @@ export type {
   InteractionCompleteEvent,
   InteractionFailedEvent,
   StreamTruncatedEvent,
+  ToolConfigChangedEvent,
+  ToolConfigChangedPayload,
+  ToolConfigChangeOperation,
   UnknownEvent,
   StopReason,
   BudgetType,

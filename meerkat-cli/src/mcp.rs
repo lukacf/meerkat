@@ -59,6 +59,65 @@ fn transport_label(kind: McpTransportKind) -> &'static str {
     }
 }
 
+/// Build MCP server config from CLI transport arguments.
+pub fn build_server_config(
+    name: String,
+    transport: Option<McpTransportKind>,
+    url: Option<String>,
+    headers: Vec<String>,
+    command: Vec<String>,
+    env: Vec<String>,
+) -> anyhow::Result<McpServerConfig> {
+    let server = match (transport, url, command.is_empty()) {
+        // Explicit stdio transport
+        (Some(McpTransportKind::Stdio), _, false) => {
+            let env_map = parse_env_vars(&env)?;
+            McpServerConfig::stdio(name, command[0].clone(), command[1..].to_vec(), env_map)
+        }
+        // Explicit stdio but no command
+        (Some(McpTransportKind::Stdio), _, true) => {
+            anyhow::bail!(
+                "Stdio transport requires a command. Usage: rkat mcp add <name> -t stdio -- <command> [args...]"
+            );
+        }
+        // Explicit HTTP transport
+        (Some(McpTransportKind::StreamableHttp), Some(url), _) => {
+            let header_map = parse_headers(&headers)?;
+            McpServerConfig::streamable_http(name, url, header_map)
+        }
+        // Explicit SSE transport
+        (Some(McpTransportKind::Sse), Some(url), _) => {
+            let header_map = parse_headers(&headers)?;
+            McpServerConfig::sse(name, url, header_map)
+        }
+        // HTTP/SSE without URL
+        (Some(McpTransportKind::StreamableHttp | McpTransportKind::Sse), None, _) => {
+            anyhow::bail!(
+                "HTTP/SSE transport requires --url. Usage: rkat mcp add <name> -t http --url <url>"
+            );
+        }
+        // URL provided, no explicit transport - default to streamable-http
+        (None, Some(url), _) => {
+            let header_map = parse_headers(&headers)?;
+            McpServerConfig::streamable_http(name, url, header_map)
+        }
+        // Command provided, no explicit transport - default to stdio
+        (None, None, false) => {
+            let env_map = parse_env_vars(&env)?;
+            McpServerConfig::stdio(name, command[0].clone(), command[1..].to_vec(), env_map)
+        }
+        // Nothing provided
+        (None, None, true) => {
+            anyhow::bail!(
+                "Either command or URL is required.\n\
+                 Stdio: rkat mcp add <name> -- <command> [args...]\n\
+                 HTTP:  rkat mcp add <name> --url <url>"
+            );
+        }
+    };
+    Ok(server)
+}
+
 /// Add an MCP server to the configuration
 pub async fn add_server(
     name: String,
@@ -82,64 +141,7 @@ pub async fn add_server(
         );
     }
 
-    // Determine transport type and build server config
-    let server = match (transport, url, command.is_empty()) {
-        // Explicit stdio transport
-        (Some(McpTransportKind::Stdio), _, false) => {
-            let env_map = parse_env_vars(&env)?;
-            McpServerConfig::stdio(
-                name.clone(),
-                command[0].clone(),
-                command[1..].to_vec(),
-                env_map,
-            )
-        }
-        // Explicit stdio but no command
-        (Some(McpTransportKind::Stdio), _, true) => {
-            anyhow::bail!(
-                "Stdio transport requires a command. Usage: rkat mcp add <name> -t stdio -- <command> [args...]"
-            );
-        }
-        // Explicit HTTP transport
-        (Some(McpTransportKind::StreamableHttp), Some(url), _) => {
-            let header_map = parse_headers(&headers)?;
-            McpServerConfig::streamable_http(name.clone(), url, header_map)
-        }
-        // Explicit SSE transport
-        (Some(McpTransportKind::Sse), Some(url), _) => {
-            let header_map = parse_headers(&headers)?;
-            McpServerConfig::sse(name.clone(), url, header_map)
-        }
-        // HTTP/SSE without URL
-        (Some(McpTransportKind::StreamableHttp | McpTransportKind::Sse), None, _) => {
-            anyhow::bail!(
-                "HTTP/SSE transport requires --url. Usage: rkat mcp add <name> -t http --url <url>"
-            );
-        }
-        // URL provided, no explicit transport - default to streamable-http
-        (None, Some(url), _) => {
-            let header_map = parse_headers(&headers)?;
-            McpServerConfig::streamable_http(name.clone(), url, header_map)
-        }
-        // Command provided, no explicit transport - default to stdio
-        (None, None, false) => {
-            let env_map = parse_env_vars(&env)?;
-            McpServerConfig::stdio(
-                name.clone(),
-                command[0].clone(),
-                command[1..].to_vec(),
-                env_map,
-            )
-        }
-        // Nothing provided
-        (None, None, true) => {
-            anyhow::bail!(
-                "Either command or URL is required.\n\
-                 Stdio: rkat mcp add <name> -- <command> [args...]\n\
-                 HTTP:  rkat mcp add <name> --url <url>"
-            );
-        }
-    };
+    let server = build_server_config(name.clone(), transport, url, headers, command, env)?;
 
     // Get the file path for this scope
     let path = match scope {
@@ -528,6 +530,130 @@ fn remove_server_from_file(path: &Path, name: &str) -> anyhow::Result<()> {
 
     // Write back
     fs::write(path, doc.to_string())?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Live MCP operations via REST
+// ---------------------------------------------------------------------------
+
+/// POST a live MCP operation to the REST server.
+async fn post_live_op(
+    base_url: &str,
+    session_id: &str,
+    operation: &str,
+    body: serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    let url = format!("{base_url}/sessions/{session_id}/mcp/{operation}");
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to connect to REST server at {base_url}: {e}"))?;
+
+    let status = resp.status();
+    let body_text = resp
+        .text()
+        .await
+        .unwrap_or_else(|_| "failed to read response body".to_string());
+
+    if status.is_success() {
+        let parsed: serde_json::Value = serde_json::from_str(&body_text)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON response: {e}"))?;
+        // Check for rejected status — the server accepted the request but
+        // the operation was rejected by the MCP adapter.
+        if parsed.get("status").and_then(|s| s.as_str()) == Some("rejected") {
+            let server = parsed
+                .get("server_name")
+                .and_then(|s| s.as_str())
+                .unwrap_or("unknown");
+            anyhow::bail!("Live MCP {operation} was rejected by server for '{server}'");
+        }
+        return Ok(parsed);
+    }
+
+    // Parse the error body for structured error messages.
+    let error_code = serde_json::from_str::<serde_json::Value>(&body_text)
+        .ok()
+        .and_then(|v| v.get("code").and_then(|c| c.as_str()).map(String::from));
+    let error_msg = serde_json::from_str::<serde_json::Value>(&body_text)
+        .ok()
+        .and_then(|v| v.get("error").and_then(|c| c.as_str()).map(String::from))
+        .unwrap_or_else(|| body_text.clone());
+
+    match (status.as_u16(), error_code.as_deref()) {
+        (404, Some("NOT_FOUND")) => {
+            anyhow::bail!("Session '{session_id}' not found on server: {error_msg}")
+        }
+        (404, _) => {
+            anyhow::bail!(
+                "Server does not support live MCP; ensure rkat-rest was built with --features mcp"
+            )
+        }
+        (409, _) => {
+            anyhow::bail!(
+                "Session exists but was created without live MCP support \
+                 (recreate session or restart server): {error_msg}"
+            )
+        }
+        _ => anyhow::bail!("Live MCP {operation} failed (HTTP {status}): {error_msg}"),
+    }
+}
+
+/// Stage a live MCP server addition on a running session via REST.
+#[allow(clippy::too_many_arguments)]
+pub async fn live_add_server(
+    base_url: &str,
+    session_id: &str,
+    name: String,
+    transport: Option<meerkat_core::mcp_config::McpTransportKind>,
+    url: Option<String>,
+    headers: Vec<String>,
+    command: Vec<String>,
+    env: Vec<String>,
+) -> anyhow::Result<()> {
+    let config = build_server_config(name.clone(), transport, url, headers, command, env)?;
+    let server_config = serde_json::to_value(&config)?;
+    // Remove the name from the config — the REST endpoint expects it separately.
+    let mut config_obj = server_config;
+    if let Some(obj) = config_obj.as_object_mut() {
+        obj.remove("name");
+    }
+
+    let body = serde_json::json!({
+        "session_id": session_id,
+        "server_name": name,
+        "server_config": config_obj,
+    });
+
+    let result = post_live_op(base_url, session_id, "add", body).await?;
+    let status = result
+        .get("status")
+        .and_then(|s| s.as_str())
+        .unwrap_or("unknown");
+    println!("MCP server '{name}' {status} on session {session_id}");
+    Ok(())
+}
+
+/// Stage a live MCP server removal on a running session via REST.
+pub async fn live_remove_server(
+    base_url: &str,
+    session_id: &str,
+    name: String,
+) -> anyhow::Result<()> {
+    let body = serde_json::json!({
+        "session_id": session_id,
+        "server_name": name,
+    });
+
+    let result = post_live_op(base_url, session_id, "remove", body).await?;
+    let status = result
+        .get("status")
+        .and_then(|s| s.as_str())
+        .unwrap_or("unknown");
+    println!("MCP server '{name}' removal {status} on session {session_id}");
     Ok(())
 }
 

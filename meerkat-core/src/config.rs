@@ -258,6 +258,9 @@ impl Config {
         if other.agent.max_tokens_per_turn != AgentConfig::default().max_tokens_per_turn {
             self.agent.max_tokens_per_turn = other.agent.max_tokens_per_turn;
         }
+        if other.agent.extraction_prompt.is_some() {
+            self.agent.extraction_prompt = other.agent.extraction_prompt;
+        }
 
         // Provider config
         self.provider = other.provider;
@@ -849,6 +852,13 @@ pub struct AgentConfig {
     /// Maximum retries for structured output validation failures.
     #[serde(default = "default_structured_output_retries")]
     pub structured_output_retries: u32,
+    /// Custom prompt for the structured output extraction turn.
+    ///
+    /// When `output_schema` is set, this prompt is sent as a user message
+    /// after the agentic loop to elicit schema-valid JSON. Defaults to a
+    /// built-in prompt if `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extraction_prompt: Option<String>,
 }
 
 impl Default for AgentConfig {
@@ -871,6 +881,7 @@ impl Default for AgentConfig {
             provider_params: None,
             output_schema: None,
             structured_output_retries: default_structured_output_retries(),
+            extraction_prompt: None,
         }
     }
 }
@@ -1775,6 +1786,36 @@ mod tests {
         // CLI should win over defaults
         assert_eq!(config.agent.model, "cli-model");
         assert_eq!(config.budget.max_tokens, Some(50000));
+    }
+
+    #[test]
+    fn test_merge_extraction_prompt_survives_layering() {
+        let mut base = Config::default();
+        assert!(base.agent.extraction_prompt.is_none());
+
+        // Merge from TOML config file
+        let toml = r#"
+[agent]
+extraction_prompt = "Return JSON only."
+"#;
+        base.merge_toml_str(toml).expect("merge toml");
+        assert_eq!(
+            base.agent.extraction_prompt.as_deref(),
+            Some("Return JSON only.")
+        );
+
+        // A second merge without the field should preserve it
+        let toml2 = r#"
+[agent]
+model = "custom-model"
+"#;
+        base.merge_toml_str(toml2).expect("merge toml2");
+        assert_eq!(
+            base.agent.extraction_prompt.as_deref(),
+            Some("Return JSON only."),
+            "extraction_prompt must survive merge when absent in later layer"
+        );
+        assert_eq!(base.agent.model, "custom-model");
     }
 
     #[test]

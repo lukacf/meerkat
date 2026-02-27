@@ -1,8 +1,12 @@
 """Conformance tests for Meerkat Python SDK types and events."""
 
+import pytest
+
 from meerkat import (
     CONTRACT_VERSION,
     Capability,
+    McpAddParams,
+    McpLiveOpResponse,
     MeerkatClient,
     RunResult,
     SchemaWarning,
@@ -27,6 +31,7 @@ from meerkat.events import (
     Retrying,
     RunCompleted,
     RunStarted,
+    ToolConfigChanged,
     TextDelta,
     ToolCallRequested,
     ToolExecutionCompleted,
@@ -157,6 +162,19 @@ def test_session_info():
     assert info.message_count == 5
 
 
+def test_live_mcp_contract_types_exported():
+    add = McpAddParams(session_id="s1", server_name="filesystem", persisted=False)
+    response = McpLiveOpResponse(
+        session_id="s1",
+        operation="remove",
+        status="staged",
+        persisted=False,
+        applied_at_turn=5,
+    )
+    assert add.server_name == "filesystem"
+    assert response.applied_at_turn == 5
+
+
 def test_capability_available():
     cap = Capability(id="sessions", description="Session lifecycle", status="Available")
     assert cap.available is True
@@ -253,6 +271,71 @@ def test_parse_turn_started():
     assert event.turn_number == 3
 
 
+def test_parse_tool_config_changed():
+    raw = {
+        "type": "tool_config_changed",
+        "payload": {
+            "operation": "remove",
+            "target": "filesystem",
+            "status": "staged",
+            "persisted": False,
+            "applied_at_turn": 7,
+        },
+    }
+    event = parse_event(raw)
+    assert isinstance(event, ToolConfigChanged)
+    assert event.payload.operation == "remove"
+    assert event.payload.target == "filesystem"
+    assert event.payload.status == "staged"
+    assert event.payload.persisted is False
+    assert event.payload.applied_at_turn == 7
+
+
+def test_parse_tool_config_changed_with_malformed_payload():
+    raw = {
+        "type": "tool_config_changed",
+        "payload": "not-an-object",
+    }
+    event = parse_event(raw)
+    assert isinstance(event, ToolConfigChanged)
+    assert event.payload.operation == ""
+    assert event.payload.target == ""
+    assert event.payload.status == ""
+    assert event.payload.persisted is False
+    assert event.payload.applied_at_turn is None
+
+
+def test_parse_tool_config_changed_with_bad_applied_at_turn():
+    raw = {
+        "type": "tool_config_changed",
+        "payload": {
+            "operation": "add",
+            "target": "filesystem",
+            "status": "staged",
+            "persisted": True,
+            "applied_at_turn": "oops",
+        },
+    }
+    event = parse_event(raw)
+    assert isinstance(event, ToolConfigChanged)
+    assert event.payload.applied_at_turn is None
+
+
+def test_parse_tool_config_changed_with_non_boolean_persisted():
+    raw = {
+        "type": "tool_config_changed",
+        "payload": {
+            "operation": "add",
+            "target": "filesystem",
+            "status": "staged",
+            "persisted": "false",
+        },
+    }
+    event = parse_event(raw)
+    assert isinstance(event, ToolConfigChanged)
+    assert event.payload.persisted is False
+
+
 def test_parse_turn_completed_with_usage():
     raw = {
         "type": "turn_completed",
@@ -327,6 +410,69 @@ def test_parse_retrying():
     assert isinstance(event, Retrying)
     assert event.attempt == 2
     assert event.delay_ms == 2000
+
+
+@pytest.mark.asyncio
+async def test_client_mcp_methods_send_expected_rpc_calls():
+    client = MeerkatClient()
+    calls = []
+
+    async def fake_request(method, params):
+        calls.append((method, params))
+        return {
+            "session_id": params["session_id"],
+            "operation": method.split("/")[1],
+            "status": "staged",
+            "persisted": params.get("persisted", False),
+            "server_name": params.get("server_name"),
+            "applied_at_turn": None,
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    add = await client.mcp_add("s1", "filesystem", {"cmd": "npx"})
+    remove = await client.mcp_remove("s1", "filesystem", persisted=True)
+    reload = await client.mcp_reload("s1", server_name="filesystem")
+
+    assert add.operation == "add"
+    assert remove.operation == "remove"
+    assert reload.operation == "reload"
+    assert [m for m, _ in calls] == ["mcp/add", "mcp/remove", "mcp/reload"]
+
+
+@pytest.mark.asyncio
+async def test_client_mcp_methods_propagate_request_failures():
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        raise MeerkatError("TRANSPORT", "boom")
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError, match="boom"):
+        await client.mcp_add("s1", "filesystem", {"cmd": "npx"})
+    with pytest.raises(MeerkatError, match="boom"):
+        await client.mcp_remove("s1", "filesystem")
+    with pytest.raises(MeerkatError, match="boom"):
+        await client.mcp_reload("s1", server_name="filesystem")
+
+
+@pytest.mark.asyncio
+async def test_client_mcp_methods_reject_malformed_response():
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {
+            "session_id": "s1",
+            "operation": "add",
+            "status": "staged",
+            "persisted": "false",
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError, match="persisted must be boolean"):
+        await client.mcp_add("s1", "filesystem", {"cmd": "npx"})
 
 
 # ---------------------------------------------------------------------------

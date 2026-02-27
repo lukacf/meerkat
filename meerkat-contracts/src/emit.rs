@@ -24,6 +24,9 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
     let wire_types = serde_json::json!({
         "WireUsage": schema_for!(crate::wire::WireUsage),
         "ContractVersion": schema_for!(crate::version::ContractVersion),
+        "McpLiveOpStatus": schema_for!(crate::wire::McpLiveOpStatus),
+        "McpLiveOperation": schema_for!(crate::wire::McpLiveOperation),
+        "McpLiveOpResponse": schema_for!(crate::wire::McpLiveOpResponse),
     });
     fs::write(
         output_dir.join("wire-types.json"),
@@ -34,6 +37,9 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
     let params = serde_json::json!({
         "CommsParams": schema_for!(crate::wire::CommsParams),
         "SkillsParams": schema_for!(crate::wire::SkillsParams),
+        "McpAddParams": schema_for!(crate::wire::McpAddParams),
+        "McpRemoveParams": schema_for!(crate::wire::McpRemoveParams),
+        "McpReloadParams": schema_for!(crate::wire::McpReloadParams),
     });
     fs::write(
         output_dir.join("params.json"),
@@ -70,7 +76,26 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
     let events = serde_json::json!({
         "WireEvent": {
             "description": "Event envelope: session_id, sequence, event (AgentEvent), contract_version",
-            "note": "AgentEvent is a large enum; full JSON Schema requires schemars derives on meerkat-core types"
+            "note": "AgentEvent is a large enum; full JSON Schema requires schemars derives on meerkat-core types",
+            "known_payloads": {
+                "tool_config_changed": {
+                    "type": "object",
+                    "required": ["payload"],
+                    "properties": {
+                        "payload": {
+                            "type": "object",
+                            "required": ["operation", "target", "status", "persisted"],
+                            "properties": {
+                                "operation": {"type": "string", "enum": ["add", "remove", "reload"]},
+                                "target": {"type": "string"},
+                                "status": {"type": "string"},
+                                "persisted": {"type": "boolean"},
+                                "applied_at_turn": {"type": ["integer", "null"], "minimum": 0},
+                            }
+                        }
+                    }
+                }
+            }
         }
     });
     fs::write(
@@ -93,6 +118,24 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
             {"name": "config/get", "description": "Read config"},
             {"name": "config/set", "description": "Replace config"},
             {"name": "config/patch", "description": "Merge-patch config"},
+            {
+                "name": "mcp/add",
+                "description": "Stage live MCP server add for a session",
+                "params_type": "McpAddParams",
+                "result_type": "McpLiveOpResponse"
+            },
+            {
+                "name": "mcp/remove",
+                "description": "Stage live MCP server remove for a session",
+                "params_type": "McpRemoveParams",
+                "result_type": "McpLiveOpResponse"
+            },
+            {
+                "name": "mcp/reload",
+                "description": "Optional skeleton for live MCP reload",
+                "params_type": "McpReloadParams",
+                "result_type": "McpLiveOpResponse"
+            },
         ],
         "notifications": [
             {"name": "session/event", "description": "AgentEvent payload during turns"},
@@ -116,6 +159,18 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
             "/sessions/{id}": {"get": {"summary": "Get session details"}},
             "/sessions/{id}/messages": {"post": {"summary": "Continue session with new message"}},
             "/sessions/{id}/events": {"get": {"summary": "SSE event stream"}},
+            "/sessions/{id}/mcp/add": {"post": {
+                "summary": "Stage live MCP server addition",
+                "description": "Requires mcp_live capability. Check GET /capabilities.",
+            }},
+            "/sessions/{id}/mcp/remove": {"post": {
+                "summary": "Stage live MCP server removal",
+                "description": "Requires mcp_live capability. Check GET /capabilities.",
+            }},
+            "/sessions/{id}/mcp/reload": {"post": {
+                "summary": "Stage live MCP server reload",
+                "description": "Requires mcp_live capability. Check GET /capabilities.",
+            }},
             "/capabilities": {"get": {"summary": "Get runtime capabilities"}},
             "/config": {
                 "get": {"summary": "Get config"},

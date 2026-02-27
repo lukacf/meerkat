@@ -43,6 +43,24 @@
     {
       "description": "Merge-patch config",
       "name": "config/patch"
+    },
+    {
+      "description": "Stage live MCP server add for a session",
+      "name": "mcp/add",
+      "params_type": "McpAddParams",
+      "result_type": "McpLiveOpResponse"
+    },
+    {
+      "description": "Stage live MCP server remove for a session",
+      "name": "mcp/remove",
+      "params_type": "McpRemoveParams",
+      "result_type": "McpLiveOpResponse"
+    },
+    {
+      "description": "Optional skeleton for live MCP reload",
+      "name": "mcp/reload",
+      "params_type": "McpReloadParams",
+      "result_type": "McpLiveOpResponse"
     }
   ],
   "notifications": [

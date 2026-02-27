@@ -39,6 +39,7 @@ from .session import Session, _normalize_skill_ref
 from .streaming import EventStream, _StdoutDispatcher
 from .types import (
     Capability,
+    McpLiveOpResponse,
     RunResult,
     SchemaWarning,
     SessionInfo,
@@ -367,7 +368,78 @@ class MeerkatClient:
             params["expected_generation"] = expected_generation
         return await self._request("config/patch", params)
 
+    async def mcp_add(
+        self,
+        session_id: str,
+        server_name: str,
+        server_config: dict[str, Any],
+        *,
+        persisted: bool = False,
+    ) -> McpLiveOpResponse:
+        raw = await self._request(
+            "mcp/add",
+            {
+                "session_id": session_id,
+                "server_name": server_name,
+                "server_config": server_config,
+                "persisted": persisted,
+            },
+        )
+        return self._parse_mcp_live_response(raw)
+
+    async def mcp_remove(
+        self,
+        session_id: str,
+        server_name: str,
+        *,
+        persisted: bool = False,
+    ) -> McpLiveOpResponse:
+        raw = await self._request(
+            "mcp/remove",
+            {
+                "session_id": session_id,
+                "server_name": server_name,
+                "persisted": persisted,
+            },
+        )
+        return self._parse_mcp_live_response(raw)
+
+    async def mcp_reload(
+        self,
+        session_id: str,
+        *,
+        server_name: str | None = None,
+        persisted: bool = False,
+    ) -> McpLiveOpResponse:
+        payload: dict[str, Any] = {
+            "session_id": session_id,
+            "persisted": persisted,
+        }
+        if server_name is not None:
+            payload["server_name"] = server_name
+        raw = await self._request("mcp/reload", payload)
+        return self._parse_mcp_live_response(raw)
+
     # -- Skills -------------------------------------------------------------
+
+    @staticmethod
+    def _parse_mcp_live_response(raw: dict[str, Any]) -> McpLiveOpResponse:
+        session_id = raw.get("session_id")
+        operation = raw.get("operation")
+        status = raw.get("status")
+        persisted = raw.get("persisted")
+        if not isinstance(session_id, str) or not session_id:
+            raise MeerkatError("INVALID_RESPONSE", "Invalid mcp response: missing session_id")
+        if operation not in {"add", "remove", "reload"}:
+            raise MeerkatError("INVALID_RESPONSE", "Invalid mcp response: invalid operation")
+        if not isinstance(status, str) or not status:
+            raise MeerkatError("INVALID_RESPONSE", "Invalid mcp response: missing status")
+        if not isinstance(persisted, bool):
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                "Invalid mcp response: persisted must be boolean",
+            )
+        return McpLiveOpResponse(**raw)
 
     async def list_skills(self) -> list[dict[str, Any]]:
         result = await self._request("skills/list", {})

@@ -220,7 +220,10 @@ pub use meerkat_tools::{FileTaskStore, ensure_rkat_dir, find_project_root};
 
 // Re-export MCP client
 #[cfg(feature = "mcp")]
-pub use meerkat_mcp::{McpConnection, McpError, McpRouter, McpServerConfig};
+pub use meerkat_mcp::{
+    McpApplyDelta, McpConnection, McpError, McpLifecycleAction, McpReloadTarget, McpRouter,
+    McpRouterAdapter, McpServerConfig, McpServerLifecycleState,
+};
 
 // Skill types re-exports
 pub use meerkat_core::skills::{

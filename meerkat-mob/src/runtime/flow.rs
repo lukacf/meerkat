@@ -19,6 +19,7 @@ use crate::store::{MobEventStore, MobRunStore};
 use chrono::Utc;
 use futures::stream::{FuturesUnordered, StreamExt};
 use indexmap::IndexMap;
+use meerkat_core::service::TurnToolOverlay;
 use meerkat_core::time_compat::{Duration, Instant};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, VecDeque};
@@ -291,6 +292,7 @@ impl FlowEngine {
             let mut target_successes: Vec<(MeerkatId, Value)> = Vec::new();
             let mut failure_reasons: Vec<String> = Vec::new();
             let mut in_flight = FuturesUnordered::new();
+            let flow_tool_overlay = step_tool_overlay(&step);
 
             for target in targets {
                 if cancel.is_cancelled() {
@@ -307,6 +309,7 @@ impl FlowEngine {
                 let step_id_for_target = step_id.clone();
                 let target_for_task = target.clone();
                 let prompt_for_task = prompt.clone();
+                let flow_tool_overlay_for_task = flow_tool_overlay.clone();
                 in_flight.push(async move {
                     let result = engine
                         .execute_target_with_retries(
@@ -314,6 +317,7 @@ impl FlowEngine {
                             &step_id_for_target,
                             &target_for_task,
                             &prompt_for_task,
+                            flow_tool_overlay_for_task,
                             step_timeout,
                             max_step_retries,
                         )
@@ -504,12 +508,14 @@ impl FlowEngine {
         supervisor.force_reset().await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute_target_with_retries(
         &self,
         run_id: &RunId,
         step_id: &StepId,
         target: &MeerkatId,
         prompt: &str,
+        flow_tool_overlay: Option<TurnToolOverlay>,
         step_timeout: Duration,
         max_retries: u32,
     ) -> Result<TargetExecutionResult, MobError> {
@@ -532,7 +538,13 @@ impl FlowEngine {
 
             let ticket = self
                 .executor
-                .dispatch(run_id, step_id, target, prompt.to_string())
+                .dispatch(
+                    run_id,
+                    step_id,
+                    target,
+                    prompt.to_string(),
+                    flow_tool_overlay.clone(),
+                )
                 .await?;
 
             match self
@@ -882,6 +894,16 @@ enum TargetExecutionResult {
     Completed(Value),
     Failed(String),
     Canceled,
+}
+
+fn step_tool_overlay(step: &FlowStepSpec) -> Option<TurnToolOverlay> {
+    if step.allowed_tools.is_none() && step.blocked_tools.is_none() {
+        return None;
+    }
+    Some(TurnToolOverlay {
+        allowed_tools: step.allowed_tools.clone(),
+        blocked_tools: step.blocked_tools.clone(),
+    })
 }
 
 fn parse_output_value(raw: &str, step_id: &StepId, target: &MeerkatId) -> Result<Value, String> {

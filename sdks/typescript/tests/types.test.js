@@ -228,6 +228,75 @@ describe("Typed Events", () => {
       assert.equal(event.event.type, "text_delta");
     }
   });
+
+  it("should parse tool_config_changed payload", () => {
+    const event = parseEvent({
+      type: "tool_config_changed",
+      payload: {
+        operation: "remove",
+        target: "filesystem",
+        status: "staged",
+        persisted: false,
+        applied_at_turn: 7,
+      },
+    });
+    assert.equal(event.type, "tool_config_changed");
+    if (event.type === "tool_config_changed") {
+      assert.equal(event.payload.operation, "remove");
+      assert.equal(event.payload.target, "filesystem");
+      assert.equal(event.payload.status, "staged");
+      assert.equal(event.payload.persisted, false);
+      assert.equal(event.payload.applied_at_turn, 7);
+    }
+  });
+
+  it("should tolerate malformed tool_config_changed payload", () => {
+    const event = parseEvent({
+      type: "tool_config_changed",
+      payload: "not-an-object",
+    });
+    assert.equal(event.type, "tool_config_changed");
+    if (event.type === "tool_config_changed") {
+      assert.equal(event.payload.operation, "reload");
+      assert.equal(event.payload.target, "");
+      assert.equal(event.payload.status, "");
+      assert.equal(event.payload.persisted, false);
+      assert.equal(event.payload.applied_at_turn, undefined);
+    }
+  });
+
+  it("should ignore malformed applied_at_turn in tool_config_changed", () => {
+    const event = parseEvent({
+      type: "tool_config_changed",
+      payload: {
+        operation: "add",
+        target: "filesystem",
+        status: "staged",
+        persisted: true,
+        applied_at_turn: "oops",
+      },
+    });
+    assert.equal(event.type, "tool_config_changed");
+    if (event.type === "tool_config_changed") {
+      assert.equal(event.payload.applied_at_turn, undefined);
+    }
+  });
+
+  it("should treat non-boolean persisted in tool_config_changed as false", () => {
+    const event = parseEvent({
+      type: "tool_config_changed",
+      payload: {
+        operation: "add",
+        target: "filesystem",
+        status: "staged",
+        persisted: "false",
+      },
+    });
+    assert.equal(event.type, "tool_config_changed");
+    if (event.type === "tool_config_changed") {
+      assert.equal(event.payload.persisted, false);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -350,5 +419,77 @@ describe("RunResult parsing", () => {
     };
     const result = MeerkatClient.parseRunResult(raw);
     assert.equal(result.skillDiagnostics, undefined);
+  });
+});
+
+describe("Live MCP methods", () => {
+  it("mcpAdd/mcpRemove/mcpReload send correct RPC methods and payloads", async () => {
+    const client = new MeerkatClient();
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      return {
+        session_id: params.session_id,
+        operation: method.split("/")[1],
+        status: "staged",
+        persisted: params.persisted ?? false,
+      };
+    };
+
+    await client.mcpAdd({
+      session_id: "s1",
+      server_name: "filesystem",
+      server_config: { cmd: "npx" },
+      persisted: false,
+    });
+    await client.mcpRemove({
+      session_id: "s1",
+      server_name: "filesystem",
+      persisted: true,
+    });
+    await client.mcpReload({
+      session_id: "s1",
+      server_name: "filesystem",
+      persisted: false,
+    });
+
+    assert.deepEqual(calls.map((c) => c.method), ["mcp/add", "mcp/remove", "mcp/reload"]);
+    assert.equal(calls[0].params.server_name, "filesystem");
+    assert.equal(calls[1].params.persisted, true);
+  });
+
+  it("propagates transport/request failures for mcp methods", async () => {
+    const client = new MeerkatClient();
+    client.request = async () => {
+      throw new MeerkatError("TRANSPORT", "boom");
+    };
+
+    await assert.rejects(
+      () => client.mcpAdd({ session_id: "s1", server_name: "fs", server_config: {} }),
+      /boom/,
+    );
+    await assert.rejects(
+      () => client.mcpRemove({ session_id: "s1", server_name: "fs", persisted: false }),
+      /boom/,
+    );
+    await assert.rejects(
+      () => client.mcpReload({ session_id: "s1", persisted: false }),
+      /boom/,
+    );
+  });
+
+  it("rejects malformed mcp response payloads", async () => {
+    const client = new MeerkatClient();
+    client.request = async () => ({
+      session_id: "s1",
+      operation: "add",
+      status: "staged",
+      persisted: "false",
+    });
+
+    await assert.rejects(
+      () => client.mcpAdd({ session_id: "s1", server_name: "fs", server_config: {} }),
+      /persisted must be boolean/,
+    );
   });
 });

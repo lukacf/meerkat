@@ -49,6 +49,11 @@ impl MobMcpState {
         }
     }
 
+    /// Access the underlying session service.
+    pub fn session_service(&self) -> &dyn MobSessionService {
+        &*self.session_service
+    }
+
     pub async fn mob_create_definition(
         &self,
         definition: MobDefinition,

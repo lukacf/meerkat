@@ -221,6 +221,27 @@ impl InprocRegistry {
         Some((peer.pubkey, peer.sender.clone()))
     }
 
+    /// Look up an inproc peer by name AND pubkey across ALL namespaces.
+    ///
+    /// Constrains the match by pubkey to avoid ambiguity when multiple
+    /// namespaces contain peers with the same name but different keys.
+    pub fn get_by_name_and_pubkey_any_namespace(
+        &self,
+        name: &str,
+        expected_pubkey: &PubKey,
+    ) -> Option<(PubKey, InboxSender)> {
+        let state = self.state.read();
+        for namespace_state in state.namespaces.values() {
+            if let Some(&pubkey) = namespace_state.names.get(name)
+                && pubkey == *expected_pubkey
+                && let Some(peer) = namespace_state.peers.get(&pubkey)
+            {
+                return Some((peer.pubkey, peer.sender.clone()));
+            }
+        }
+        None
+    }
+
     /// Look up an inproc peer by pubkey.
     pub fn get_by_pubkey(&self, pubkey: &PubKey) -> Option<InboxSender> {
         self.get_by_pubkey_in_namespace(DEFAULT_NAMESPACE, pubkey)
@@ -325,6 +346,46 @@ impl InprocRegistry {
             kind,
             sign_envelope,
         )
+    }
+
+    /// Send a message to an inproc peer, searching ALL namespaces.
+    ///
+    /// Used as a fallback for cross-mob communication when the recipient is
+    /// in a different namespace (realm) than the sender. The lookup is
+    /// constrained by `expected_pubkey` to prevent misdelivery when multiple
+    /// namespaces contain peers with the same name but different identities.
+    pub fn send_cross_namespace(
+        &self,
+        from_keypair: &Keypair,
+        to_name: &str,
+        expected_pubkey: &PubKey,
+        kind: MessageKind,
+        sign_envelope: bool,
+    ) -> Result<uuid::Uuid, InprocSendError> {
+        let (to_pubkey, sender) = self
+            .get_by_name_and_pubkey_any_namespace(to_name, expected_pubkey)
+            .ok_or_else(|| InprocSendError::PeerNotFound(to_name.to_string()))?;
+
+        let mut envelope = Envelope {
+            id: Uuid::new_v4(),
+            from: from_keypair.public_key(),
+            to: to_pubkey,
+            kind,
+            sig: Signature::new([0u8; 64]),
+        };
+        if sign_envelope {
+            envelope.sign(from_keypair);
+        }
+
+        let envelope_id = envelope.id;
+        sender
+            .send(InboxItem::External { envelope })
+            .map_err(|err| match err {
+                InboxError::Closed => InprocSendError::InboxClosed,
+                InboxError::Full => InprocSendError::InboxFull,
+            })?;
+
+        Ok(envelope_id)
     }
 
     /// Send a message directly to an inproc peer within a namespace.
@@ -838,5 +899,67 @@ mod tests {
         let peers = registry.peers();
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].meta, PeerMeta::default());
+    }
+
+    /// Regression: send_cross_namespace must reject delivery when the resolved
+    /// peer's pubkey doesn't match the expected pubkey. Without the pubkey
+    /// guard, a name collision across namespaces can misdeliver messages.
+    #[test]
+    fn test_send_cross_namespace_rejects_pubkey_mismatch() {
+        let registry = InprocRegistry::new();
+        let sender_kp = make_keypair();
+
+        // Register "ambassador" in namespace "mob:alpha" with key A
+        let key_a = make_keypair();
+        let (_inbox_a, sender_a) = Inbox::new();
+        registry.register_with_meta_in_namespace(
+            "mob:alpha",
+            "ambassador",
+            key_a.public_key(),
+            sender_a,
+            PeerMeta::default(),
+        );
+
+        // Register "ambassador" (same name!) in namespace "mob:beta" with key B
+        let key_b = make_keypair();
+        let (_inbox_b, sender_b) = Inbox::new();
+        registry.register_with_meta_in_namespace(
+            "mob:beta",
+            "ambassador",
+            key_b.public_key(),
+            sender_b,
+            PeerMeta::default(),
+        );
+
+        // Send cross-namespace expecting key A → should succeed (matches alpha)
+        let result_a = registry.send_cross_namespace(
+            &sender_kp,
+            "ambassador",
+            &key_a.public_key(),
+            MessageKind::Request {
+                intent: "test".into(),
+                params: serde_json::json!({}),
+            },
+            false,
+        );
+        assert!(result_a.is_ok(), "should deliver when pubkey matches");
+
+        // Send cross-namespace with an unrelated key that doesn't match
+        // either registered "ambassador". The pubkey guard must reject it.
+        let unrelated_key = make_keypair();
+        let result_mismatch = registry.send_cross_namespace(
+            &sender_kp,
+            "ambassador",
+            &unrelated_key.public_key(),
+            MessageKind::Request {
+                intent: "test".into(),
+                params: serde_json::json!({}),
+            },
+            false,
+        );
+        assert!(
+            matches!(result_mismatch, Err(InprocSendError::PeerNotFound(_))),
+            "must reject when resolved pubkey doesn't match expected: {result_mismatch:?}"
+        );
     }
 }

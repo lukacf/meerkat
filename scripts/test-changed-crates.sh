@@ -63,5 +63,7 @@ for crate_dir in $CHANGED_CRATES; do
 done
 if [ -n "$LIB_FLAGS" ]; then
   # shellcheck disable=SC2086
-  cargo nextest run $LIB_FLAGS --lib
+  # --no-tests=pass: crates with zero unit tests (e.g. meerkat-web-runtime)
+  # return exit code 4, which would fail under set -e.
+  cargo nextest run $LIB_FLAGS --lib --no-tests=pass
 fi

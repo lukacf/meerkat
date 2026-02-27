@@ -491,4 +491,104 @@ mod tests {
         assert_eq!(result.text, "override");
         Ok(())
     }
+
+    // ── Per-agent provider resolution via Config.providers.api_keys ──
+    //
+    // These tests verify the architectural invariant that per-agent provider
+    // agnosticity works via Config — the same code path used by WASM when
+    // default_llm_client is NOT set.
+
+    /// Helper: build a request with the given model (deferred — no initial turn).
+    fn make_session_request(model: &str) -> CreateSessionRequest {
+        CreateSessionRequest {
+            model: model.to_string(),
+            prompt: "test".to_string(),
+            system_prompt: None,
+            max_tokens: None,
+            event_tx: None,
+            host_mode: false,
+            skill_references: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            build: None,
+        }
+    }
+
+    /// When Config.providers.api_keys is populated and default_llm_client is None,
+    /// build_agent() resolves the correct provider per-model from the Config map.
+    /// This is the WASM code path after the default_llm_client fix.
+    #[tokio::test]
+    async fn test_config_api_keys_resolve_different_providers_per_model() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let mut config = Config::default();
+        config.providers.api_keys = Some(std::collections::HashMap::from([
+            ("anthropic".into(), "test-anthropic-key".into()),
+            ("openai".into(), "test-openai-key".into()),
+            ("gemini".into(), "test-gemini-key".into()),
+        ]));
+        let builder = FactoryAgentBuilder::new(factory, config);
+
+        let (tx1, _rx1) = mpsc::channel(8);
+        builder
+            .build_agent(&make_session_request("claude-sonnet-4-5"), tx1)
+            .await
+            .map_err(|e| format!("anthropic model should build: {e}"))?;
+
+        let (tx2, _rx2) = mpsc::channel(8);
+        builder
+            .build_agent(&make_session_request("gpt-5.2"), tx2)
+            .await
+            .map_err(|e| format!("openai model should build: {e}"))?;
+
+        let (tx3, _rx3) = mpsc::channel(8);
+        builder
+            .build_agent(&make_session_request("gemini-3-flash-preview"), tx3)
+            .await
+            .map_err(|e| format!("gemini model should build: {e}"))?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_default_llm_client_takes_precedence_over_config_keys() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let config = Config::default();
+        let mut builder = FactoryAgentBuilder::new(factory, config);
+        builder.default_llm_client = Some(Arc::new(MockLlmClient {
+            delta: "from-default",
+        }));
+
+        let (tx, _rx) = mpsc::channel(8);
+        let mut agent = builder
+            .build_agent(&make_session_request("claude-sonnet-4-5"), tx)
+            .await
+            .map_err(|e| format!("build failed: {e}"))?;
+
+        let (run_tx, _run_rx) = mpsc::channel(8);
+        let result = SessionAgent::run_with_events(&mut agent, "hello".into(), run_tx)
+            .await
+            .map_err(|e| format!("run failed: {e}"))?;
+        assert_eq!(result.text, "from-default");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_unknown_model_prefix_fails_even_with_config_keys() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let mut config = Config::default();
+        config.providers.api_keys = Some(std::collections::HashMap::from([(
+            "anthropic".into(),
+            "test-key".into(),
+        )]));
+        let builder = FactoryAgentBuilder::new(factory, config);
+
+        let (tx, _rx) = mpsc::channel(8);
+        let result = builder
+            .build_agent(&make_session_request("llama-3.1-70b"), tx)
+            .await;
+        assert!(result.is_err(), "unknown model prefix should fail");
+        Ok(())
+    }
 }

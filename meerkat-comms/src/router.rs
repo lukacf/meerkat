@@ -201,15 +201,32 @@ impl Router {
                 }
                 PeerAddr::Inproc(_) => {
                     let registry = InprocRegistry::global();
-                    registry
-                        .send_with_signature_in_namespace(
-                            inproc_namespace,
-                            &self.keypair,
-                            peer_name,
-                            envelope.kind,
-                            self.require_peer_auth,
-                        )
-                        .map_err(map_inproc_send_error)
+                    match registry.send_with_signature_in_namespace(
+                        inproc_namespace,
+                        &self.keypair,
+                        peer_name,
+                        envelope.kind.clone(),
+                        self.require_peer_auth,
+                    ) {
+                        Ok(uuid) => Ok(uuid),
+                        Err(InprocSendError::PeerNotFound(_)) => {
+                            tracing::debug!(
+                                peer = peer_name,
+                                namespace = inproc_namespace,
+                                "same-namespace lookup failed, falling back to cross-namespace send"
+                            );
+                            registry
+                                .send_cross_namespace(
+                                    &self.keypair,
+                                    peer_name,
+                                    &peer.pubkey,
+                                    envelope.kind,
+                                    self.require_peer_auth,
+                                )
+                                .map_err(map_inproc_send_error)
+                        }
+                        Err(other) => Err(map_inproc_send_error(other)),
+                    }
                 }
             }
         }
@@ -222,15 +239,32 @@ impl Router {
                 ))),
                 PeerAddr::Inproc(_) => {
                     let registry = InprocRegistry::global();
-                    registry
-                        .send_with_signature_in_namespace(
-                            inproc_namespace,
-                            &self.keypair,
-                            peer_name,
-                            envelope.kind,
-                            self.require_peer_auth,
-                        )
-                        .map_err(map_inproc_send_error)
+                    match registry.send_with_signature_in_namespace(
+                        inproc_namespace,
+                        &self.keypair,
+                        peer_name,
+                        envelope.kind.clone(),
+                        self.require_peer_auth,
+                    ) {
+                        Ok(uuid) => Ok(uuid),
+                        Err(InprocSendError::PeerNotFound(_)) => {
+                            tracing::debug!(
+                                peer = peer_name,
+                                namespace = inproc_namespace,
+                                "same-namespace lookup failed, falling back to cross-namespace send"
+                            );
+                            registry
+                                .send_cross_namespace(
+                                    &self.keypair,
+                                    peer_name,
+                                    &peer.pubkey,
+                                    envelope.kind,
+                                    self.require_peer_auth,
+                                )
+                                .map_err(map_inproc_send_error)
+                        }
+                        Err(other) => Err(map_inproc_send_error(other)),
+                    }
                 }
             }
         }

@@ -12,6 +12,28 @@ use meerkat_client::{
     LlmClientFactory, LlmProvider, ProviderResolver,
 };
 use meerkat_core::service::{CreateSessionRequest, SessionBuildOptions};
+
+/// Default system prompt for wasm32 builds.
+/// Mirrors `meerkat_core::prompt::DEFAULT_SYSTEM_PROMPT` which is gated
+/// behind `#[cfg(not(target_arch = "wasm32"))]` due to filesystem deps.
+#[cfg(target_arch = "wasm32")]
+const DEFAULT_WASM_SYSTEM_PROMPT: &str = r"You are an autonomous agent. Your task is to accomplish the user's goal by systematically using the tools available to you.
+
+# Core Behavior
+- Break complex tasks into steps and execute them one by one.
+- Use tools to gather information, take actions, and verify results.
+- When multiple tool calls are independent, execute them in parallel.
+- If a tool call fails, analyze the error and try alternative approaches.
+- Continue working until the task is complete or you determine it cannot be completed.
+
+# Decision Making
+- Act on the information you have. Make reasonable assumptions when necessary.
+- If critical information is missing and no tool can provide it, state what you need and why.
+- Prioritize correctness over speed. Verify your work when possible.
+
+# Output
+- When the task is complete, provide a clear summary of what was accomplished.
+- If the task cannot be completed, explain what blocked progress and what was attempted.";
 use meerkat_core::{
     Agent, AgentBuilder, AgentEvent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
     BudgetLimits, Config, HookRunOverrides, OutputSchema, Provider, ScopedAgentEvent, Session,
@@ -1482,7 +1504,7 @@ impl AgentFactory {
             // No AGENTS.md or system_prompt_file on wasm32 (no filesystem).
             let base = per_request_prompt
                 .or_else(|| config.agent.system_prompt.clone())
-                .unwrap_or_else(|| "You are an autonomous agent. Your task is to accomplish the user's goal by systematically using the tools available to you.".to_string());
+                .unwrap_or_else(|| DEFAULT_WASM_SYSTEM_PROMPT.to_string());
             let mut prompt = base;
             for section in &extra_sections {
                 if !section.is_empty() {

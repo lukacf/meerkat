@@ -630,6 +630,7 @@ mod tests {
                         backend: None,
                         runtime_mode: MobRuntimeMode::AutonomousHost,
                         max_inline_peer_notifications: None,
+                        output_schema: None,
                     },
                 );
                 m

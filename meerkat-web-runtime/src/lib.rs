@@ -43,9 +43,12 @@ pub mod tokio {
     pub use tokio_with_wasm::alias::*;
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub use ::tokio;
+
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
@@ -54,6 +57,22 @@ use meerkat::AgentBuildConfig;
 use meerkat_core::Config;
 use meerkat_mob::{FlowId, MeerkatId, MobDefinition, MobId, RunId};
 use meerkat_mob_mcp::MobMcpState;
+
+// ═══════════════════════════════════════════════════════════
+// Tracing → browser console (wasm32 only)
+// ═══════════════════════════════════════════════════════════
+
+#[cfg(target_arch = "wasm32")]
+fn init_tracing() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        tracing_wasm::set_as_global_default();
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn init_tracing() {}
 
 // ═══════════════════════════════════════════════════════════
 // Constants
@@ -127,9 +146,19 @@ fn default_max_tokens() -> u32 {
 
 #[derive(Debug, Deserialize)]
 struct Credentials {
-    api_key: String,
+    /// Backward-compat single key (treated as anthropic fallback).
+    #[serde(default)]
+    api_key: Option<String>,
+    /// Per-provider API keys — preferred over `api_key`.
+    #[serde(default)]
+    anthropic_api_key: Option<String>,
+    #[serde(default)]
+    openai_api_key: Option<String>,
+    #[serde(default)]
+    gemini_api_key: Option<String>,
     #[serde(default = "default_model")]
     model: Option<String>,
+    /// Optional custom base URL — mapped to the default model's provider.
     #[serde(default)]
     base_url: Option<String>,
 }
@@ -140,9 +169,19 @@ fn default_model() -> Option<String> {
 
 #[derive(Debug, Deserialize)]
 struct RuntimeConfig {
-    api_key: String,
+    /// Backward-compat single key (treated as anthropic fallback).
+    #[serde(default)]
+    api_key: Option<String>,
+    /// Per-provider API keys — preferred over `api_key`.
+    #[serde(default)]
+    anthropic_api_key: Option<String>,
+    #[serde(default)]
+    openai_api_key: Option<String>,
+    #[serde(default)]
+    gemini_api_key: Option<String>,
     #[serde(default = "default_model")]
     model: Option<String>,
+    /// Optional custom base URL — mapped to the default model's provider.
     #[serde(default)]
     base_url: Option<String>,
     #[serde(default = "default_max_sessions")]
@@ -200,14 +239,89 @@ thread_local! {
 // RuntimeState — service-based infrastructure
 // ═══════════════════════════════════════════════════════════
 
+type WasmSessionService = meerkat::EphemeralSessionService<meerkat::FactoryAgentBuilder>;
+
 struct RuntimeState {
     mob_state: Arc<MobMcpState>,
+    /// Concrete session service — needed for subscribe_session_events_raw.
+    session_service: Arc<WasmSessionService>,
     #[allow(dead_code)]
     model: String,
-    #[allow(dead_code)]
-    api_key: String,
-    #[allow(dead_code)]
-    base_url: Option<String>,
+}
+
+/// Resolve per-provider API keys into a `Config.providers.api_keys` map.
+///
+/// `api_key` is the backward-compat single key (treated as anthropic fallback).
+/// Per-provider fields take precedence when set. Empty/whitespace-only keys are
+/// treated as missing so callers get a fast failure instead of a deferred auth error.
+fn build_provider_api_keys(
+    api_key: Option<&str>,
+    anthropic_api_key: Option<&str>,
+    openai_api_key: Option<&str>,
+    gemini_api_key: Option<&str>,
+) -> Result<HashMap<String, String>, JsValue> {
+    // Treat blank keys as absent so misconfigured init fails fast.
+    fn non_blank(s: Option<&str>) -> Option<&str> {
+        match s {
+            Some(v) if !v.trim().is_empty() => Some(v),
+            _ => None,
+        }
+    }
+
+    let mut keys = HashMap::new();
+    // Per-provider keys take precedence; api_key is anthropic fallback.
+    let anthropic = non_blank(anthropic_api_key).or(non_blank(api_key));
+    if let Some(k) = anthropic {
+        keys.insert("anthropic".into(), k.to_string());
+    }
+    if let Some(k) = non_blank(openai_api_key) {
+        keys.insert("openai".into(), k.to_string());
+    }
+    if let Some(k) = non_blank(gemini_api_key) {
+        keys.insert("gemini".into(), k.to_string());
+    }
+    if keys.is_empty() {
+        return Err(err_js(
+            "invalid_config",
+            "at least one API key must be provided (api_key, anthropic_api_key, openai_api_key, or gemini_api_key)",
+        ));
+    }
+    Ok(keys)
+}
+
+/// Infer the provider name from a model string.
+///
+/// Delegates to the canonical `Provider::infer_from_model` in meerkat-core.
+/// Returns `None` for unrecognized models (caller should error, not default).
+fn infer_provider_name(model: &str) -> Option<&'static str> {
+    meerkat_core::Provider::infer_from_model(model).map(|p| p.as_str())
+}
+
+/// Build the shared service infrastructure from a Config populated with provider keys.
+fn build_service_infrastructure(
+    config: Config,
+    max_sessions: usize,
+) -> Result<(Arc<WasmSessionService>, Arc<MobMcpState>), JsValue> {
+    let factory = meerkat::AgentFactory::minimal();
+    let mut builder = meerkat::FactoryAgentBuilder::new(factory, config);
+
+    // NO default_llm_client — build_agent() resolves the correct provider per-model
+    // from Config.providers.api_keys. This is architecturally correct: per-agent
+    // provider agnosticity works the same way on WASM as on all other surfaces.
+
+    let tools = build_wasm_tool_dispatcher().map_err(|e| err_str("tool_error", e))?;
+    builder.default_tool_dispatcher = Some(tools);
+    let store: Arc<dyn meerkat_core::AgentSessionStore> = Arc::new(
+        meerkat_store::StoreAdapter::new(Arc::new(meerkat_store::MemoryStore::new())),
+    );
+    builder.default_session_store = Some(store);
+
+    let service = Arc::new(meerkat::EphemeralSessionService::new(builder, max_sessions));
+    let session_service = service.clone();
+    let mob_state = Arc::new(MobMcpState::new(
+        service as Arc<dyn meerkat_mob::MobSessionService>,
+    ));
+    Ok((session_service, mob_state))
 }
 
 thread_local! {
@@ -472,62 +586,60 @@ fn build_wasm_tool_dispatcher() -> Result<Arc<dyn meerkat_core::AgentToolDispatc
 /// Primary bootstrap: parse a mobpack and create service infrastructure.
 ///
 /// `mobpack_bytes`: tar.gz mobpack archive.
-/// `credentials_json`: `{ "api_key": "sk-ant-...", "model"?: "claude-sonnet-4-5", "base_url"?: "..." }`
+/// `credentials_json`: `{ "api_key": "sk-...", "anthropic_api_key"?: "...", "openai_api_key"?: "...", "gemini_api_key"?: "...", "model"?: "claude-sonnet-4-5" }`
 ///
 /// Stores an `EphemeralSessionService<FactoryAgentBuilder>` and a `MobMcpState`
 /// in a `thread_local! RuntimeState` for subsequent mob/comms calls.
 #[wasm_bindgen]
 pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsValue, JsValue> {
+    init_tracing();
     let _parsed = parse_mobpack(mobpack_bytes).map_err(|e| err_str("invalid_mobpack", e))?;
     let creds: Credentials =
         serde_json::from_str(credentials_json).map_err(|e| err_str("invalid_credentials", e))?;
 
-    if creds.api_key.is_empty() {
-        return Err(err_js("invalid_credentials", "api_key must not be empty"));
-    }
+    let api_keys = build_provider_api_keys(
+        creds.api_key.as_deref(),
+        creds.anthropic_api_key.as_deref(),
+        creds.openai_api_key.as_deref(),
+        creds.gemini_api_key.as_deref(),
+    )?;
 
     let model = creds
         .model
         .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
 
-    // Create the service infrastructure.
-    let factory = meerkat::AgentFactory::minimal();
+    let providers: Vec<String> = api_keys.keys().cloned().collect();
     let mut config = Config::default();
     config.agent.model.clone_from(&model);
-    let mut builder = meerkat::FactoryAgentBuilder::new(factory, config);
+    config.providers.api_keys = Some(api_keys);
+    // Map single base_url to the default model's inferred provider.
+    if let Some(url) = &creds.base_url
+        && !url.trim().is_empty()
+    {
+        if let Some(provider) = infer_provider_name(&model) {
+            config.providers.base_urls = Some(HashMap::from([(provider.to_string(), url.clone())]));
+        } else {
+            tracing::warn!(
+                model = &*model,
+                "base_url ignored: cannot infer provider from model"
+            );
+        }
+    }
 
-    // Inject the default LLM client so all sessions built through the service
-    // use the provided credentials.
-    let llm_client = create_llm_client(&model, &creds.api_key, creds.base_url.as_deref())
-        .map_err(|e| err_str("provider_error", e))?;
-    builder.default_llm_client = Some(llm_client);
-
-    // Set default tool dispatcher + session store so mob-spawned sessions
-    // inherit them without needing explicit overrides in CreateSessionRequest.
-    let tools = build_wasm_tool_dispatcher().map_err(|e| err_str("tool_error", e))?;
-    builder.default_tool_dispatcher = Some(tools);
-    let store: Arc<dyn meerkat_core::AgentSessionStore> = Arc::new(
-        meerkat_store::StoreAdapter::new(Arc::new(meerkat_store::MemoryStore::new())),
-    );
-    builder.default_session_store = Some(store);
-
-    let service = Arc::new(meerkat::EphemeralSessionService::new(builder, MAX_SESSIONS));
-    let mob_state = Arc::new(MobMcpState::new(
-        service as Arc<dyn meerkat_mob::MobSessionService>,
-    ));
+    let (session_service, mob_state) = build_service_infrastructure(config, MAX_SESSIONS)?;
 
     RUNTIME_STATE.with(|cell| {
         *cell.borrow_mut() = Some(RuntimeState {
             mob_state,
+            session_service,
             model: model.clone(),
-            api_key: creds.api_key.clone(),
-            base_url: creds.base_url.clone(),
         });
     });
 
     let result = serde_json::json!({
         "status": "initialized",
         "model": model,
+        "providers": providers,
     });
     Ok(JsValue::from_str(&result.to_string()))
 }
@@ -538,48 +650,50 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
 
 /// Advanced bare-bones bootstrap without a mobpack.
 ///
-/// `config_json`: `{ "api_key": "sk-ant-...", "model"?: "claude-sonnet-4-5", "max_sessions"?: 64 }`
+/// `config_json`: `{ "api_key"?: "sk-...", "anthropic_api_key"?: "...", "openai_api_key"?: "...", "gemini_api_key"?: "...", "model"?: "claude-sonnet-4-5", "max_sessions"?: 64 }`
 #[wasm_bindgen]
 pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
+    init_tracing();
     let rt_config: RuntimeConfig =
         serde_json::from_str(config_json).map_err(|e| err_str("invalid_config", e))?;
 
-    if rt_config.api_key.is_empty() {
-        return Err(err_js("invalid_config", "api_key must not be empty"));
-    }
+    let api_keys = build_provider_api_keys(
+        rt_config.api_key.as_deref(),
+        rt_config.anthropic_api_key.as_deref(),
+        rt_config.openai_api_key.as_deref(),
+        rt_config.gemini_api_key.as_deref(),
+    )?;
 
     let model = rt_config
         .model
         .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
     let max_sessions = rt_config.max_sessions;
 
-    let factory = meerkat::AgentFactory::minimal();
+    let providers: Vec<String> = api_keys.keys().cloned().collect();
     let mut config = Config::default();
     config.agent.model.clone_from(&model);
-    let mut builder = meerkat::FactoryAgentBuilder::new(factory, config);
+    config.providers.api_keys = Some(api_keys);
+    // Map single base_url to the default model's inferred provider.
+    if let Some(url) = &rt_config.base_url
+        && !url.trim().is_empty()
+    {
+        if let Some(provider) = infer_provider_name(&model) {
+            config.providers.base_urls = Some(HashMap::from([(provider.to_string(), url.clone())]));
+        } else {
+            tracing::warn!(
+                model = &*model,
+                "base_url ignored: cannot infer provider from model"
+            );
+        }
+    }
 
-    let llm_client = create_llm_client(&model, &rt_config.api_key, rt_config.base_url.as_deref())
-        .map_err(|e| err_str("provider_error", e))?;
-    builder.default_llm_client = Some(llm_client);
-
-    let tools = build_wasm_tool_dispatcher().map_err(|e| err_str("tool_error", e))?;
-    builder.default_tool_dispatcher = Some(tools);
-    let store: Arc<dyn meerkat_core::AgentSessionStore> = Arc::new(
-        meerkat_store::StoreAdapter::new(Arc::new(meerkat_store::MemoryStore::new())),
-    );
-    builder.default_session_store = Some(store);
-
-    let service = Arc::new(meerkat::EphemeralSessionService::new(builder, max_sessions));
-    let mob_state = Arc::new(MobMcpState::new(
-        service as Arc<dyn meerkat_mob::MobSessionService>,
-    ));
+    let (session_service, mob_state) = build_service_infrastructure(config, max_sessions)?;
 
     RUNTIME_STATE.with(|cell| {
         *cell.borrow_mut() = Some(RuntimeState {
             mob_state,
+            session_service,
             model: model.clone(),
-            api_key: rt_config.api_key.clone(),
-            base_url: rt_config.base_url.clone(),
         });
     });
 
@@ -587,6 +701,7 @@ pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
         "status": "initialized",
         "model": model,
         "max_sessions": max_sessions,
+        "providers": providers,
     });
     Ok(JsValue::from_str(&result.to_string()))
 }
@@ -654,7 +769,11 @@ pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<u32, Js
     let handle = REGISTRY.with(|cell| {
         let mut registry = cell.borrow_mut();
         let handle = registry.next_handle;
-        registry.next_handle = registry.next_handle.saturating_add(1);
+        registry.next_handle = registry.next_handle.wrapping_add(1);
+        // Skip 0 (reserved) and any colliding handle.
+        while registry.next_handle == 0 || registry.sessions.contains_key(&registry.next_handle) {
+            registry.next_handle = registry.next_handle.wrapping_add(1);
+        }
 
         let session = RuntimeSession {
             handle,
@@ -987,7 +1106,13 @@ pub async fn mob_spawn(mob_id: &str, specs_json: &str) -> Result<JsValue, JsValu
         .map(|r| match r {
             Ok(member_ref) => serde_json::json!({
                 "status": "ok",
-                "member_ref": serde_json::to_value(&member_ref).unwrap_or(serde_json::Value::Null),
+                "member_ref": match serde_json::to_value(&member_ref) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to serialize member_ref");
+                        serde_json::Value::Null
+                    }
+                },
             }),
             Err(e) => serde_json::json!({
                 "status": "error",
@@ -1053,6 +1178,99 @@ pub async fn mob_list_members(mob_id: &str) -> Result<JsValue, JsValue> {
     let members = mob_state.mob_list_members(&id).await.map_err(err_mob)?;
     let json = serde_json::to_string(&members).map_err(|e| err_str("serialize_error", e))?;
     Ok(JsValue::from_str(&json))
+}
+
+/// Wire bidirectional comms trust between meerkats in DIFFERENT mobs.
+///
+/// Unlike `mob_wire` (which is intra-mob), this establishes peer trust across
+/// mob boundaries by accessing each member's comms runtime through the shared
+/// session service. Both members must have comms enabled.
+#[wasm_bindgen]
+pub async fn wire_cross_mob(
+    mob_a: &str,
+    meerkat_a: &str,
+    mob_b: &str,
+    meerkat_b: &str,
+) -> Result<(), JsValue> {
+    let mob_state = with_mob_state(Ok)?;
+
+    // Get session IDs from both mobs' rosters
+    let members_a = mob_state
+        .mob_list_members(&MobId::from(mob_a))
+        .await
+        .map_err(err_mob)?;
+    let entry_a = members_a
+        .iter()
+        .find(|m| m.meerkat_id == MeerkatId::from(meerkat_a))
+        .ok_or_else(|| err_js("not_found", &format!("{meerkat_a} not in {mob_a}")))?;
+
+    let members_b = mob_state
+        .mob_list_members(&MobId::from(mob_b))
+        .await
+        .map_err(err_mob)?;
+    let entry_b = members_b
+        .iter()
+        .find(|m| m.meerkat_id == MeerkatId::from(meerkat_b))
+        .ok_or_else(|| err_js("not_found", &format!("{meerkat_b} not in {mob_b}")))?;
+
+    let sid_a = entry_a
+        .member_ref
+        .session_id()
+        .ok_or_else(|| err_js("no_session", meerkat_a))?;
+    let sid_b = entry_b
+        .member_ref
+        .session_id()
+        .ok_or_else(|| err_js("no_session", meerkat_b))?;
+
+    // Get comms runtimes from the shared session service
+    let svc = RUNTIME_STATE.with(|cell| {
+        let borrow = cell.borrow();
+        let state = borrow
+            .as_ref()
+            .ok_or_else(|| err_js("not_initialized", ""))?;
+        Ok::<_, JsValue>(state.session_service.clone())
+    })?;
+
+    let comms_a = svc
+        .comms_runtime(sid_a)
+        .await
+        .ok_or_else(|| err_js("no_comms", &format!("{meerkat_a} has no comms runtime")))?;
+    let comms_b = svc
+        .comms_runtime(sid_b)
+        .await
+        .ok_or_else(|| err_js("no_comms", &format!("{meerkat_b} has no comms runtime")))?;
+
+    let key_a = comms_a
+        .public_key()
+        .ok_or_else(|| err_js("no_key", meerkat_a))?;
+    let key_b = comms_b
+        .public_key()
+        .ok_or_else(|| err_js("no_key", meerkat_b))?;
+
+    // Build peer specs with full mob/profile/meerkat addressing
+    let name_a = format!("{mob_a}/{}/{meerkat_a}", entry_a.profile);
+    let name_b = format!("{mob_b}/{}/{meerkat_b}", entry_b.profile);
+
+    let spec_b = meerkat_core::comms::TrustedPeerSpec::new(
+        &name_b,
+        key_b.clone(),
+        format!("inproc://{name_b}"),
+    )
+    .map_err(|e| err_str("wire_error", e))?;
+    let spec_a =
+        meerkat_core::comms::TrustedPeerSpec::new(&name_a, key_a, format!("inproc://{name_a}"))
+            .map_err(|e| err_str("wire_error", e))?;
+
+    comms_a
+        .add_trusted_peer(spec_b)
+        .await
+        .map_err(|e| err_str("wire_error", e))?;
+    comms_b
+        .add_trusted_peer(spec_a)
+        .await
+        .map_err(|e| err_str("wire_error", e))?;
+
+    Ok(())
 }
 
 /// Send an external message to a spawned meerkat.
@@ -1127,31 +1345,158 @@ pub async fn mob_cancel_flow(mob_id: &str, run_id: &str) -> Result<(), JsValue> 
 }
 
 // ═══════════════════════════════════════════════════════════
-// Comms Exports (placeholder)
+// Event Streaming — subscribe to individual meerkat sessions
 // ═══════════════════════════════════════════════════════════
 
-/// List peers for a session (placeholder).
+/// Per-subscription state: raw broadcast receiver for synchronous try_recv.
 ///
-/// Returns JSON array. Currently returns empty array — will be wired
-/// when sessions route through SessionService.
-#[wasm_bindgen]
-pub async fn comms_peers(_session_id: &str) -> Result<JsValue, JsValue> {
-    // Placeholder: comms peer discovery will be wired when sessions
-    // go through the service-based path with comms runtime access.
-    Ok(JsValue::from_str("[]"))
+/// On wasm32, the broadcast channel is from the real `tokio` crate (not
+/// tokio_with_wasm) since `tokio::sync` is platform-independent. The
+/// `EphemeralSessionService` creates the broadcast channel from the real
+/// tokio sync primitives.
+struct EventSubscription {
+    /// Raw broadcast receiver — polled with try_recv() in poll_subscription.
+    /// RefCell because poll_subscription takes &self but try_recv needs &mut.
+    rx: std::cell::RefCell<meerkat_session::BroadcastEventReceiver>,
 }
 
-/// Send a comms command for a session (placeholder).
+#[derive(Default)]
+struct SubscriptionRegistry {
+    next_handle: u32,
+    subscriptions: BTreeMap<u32, EventSubscription>,
+}
+
+thread_local! {
+    static SUBSCRIPTIONS: RefCell<SubscriptionRegistry> = const { RefCell::new(SubscriptionRegistry {
+        next_handle: 1,
+        subscriptions: BTreeMap::new(),
+    }) };
+}
+
+/// Subscribe to a mob member's session event stream.
 ///
-/// Returns JSON result. Currently returns a stub — will be wired
-/// when sessions route through SessionService.
+/// Returns a subscription handle. Use `poll_subscription(handle)` to drain
+/// buffered events. Each call returns all events since the last poll.
+///
+/// The subscription captures ALL agent activity: text deltas, tool calls
+/// (including comms send_message/peers), turn completions, etc.
 #[wasm_bindgen]
-pub async fn comms_send(_session_id: &str, _params_json: &str) -> Result<JsValue, JsValue> {
-    // Placeholder: comms send will be wired when sessions
-    // go through the service-based path with comms runtime access.
-    let result = serde_json::json!({
-        "status": "not_implemented",
-        "message": "comms_send will be wired when sessions use SessionService",
+pub async fn mob_member_subscribe(mob_id: &str, meerkat_id: &str) -> Result<u32, JsValue> {
+    let mob_state = with_mob_state(Ok)?;
+    let mob_id_typed = MobId::from(mob_id);
+    let mid = MeerkatId::from(meerkat_id);
+
+    // Get the member's session_id from the mob roster.
+    let members = mob_state
+        .mob_list_members(&mob_id_typed)
+        .await
+        .map_err(err_mob)?;
+    let entry = members
+        .iter()
+        .find(|m| m.meerkat_id == mid)
+        .ok_or_else(|| {
+            err_js(
+                "member_not_found",
+                &format!("meerkat '{meerkat_id}' not in mob '{mob_id}'"),
+            )
+        })?;
+
+    let session_id = entry
+        .member_ref
+        .session_id()
+        .ok_or_else(|| {
+            err_js(
+                "no_session",
+                &format!("meerkat '{meerkat_id}' has no session"),
+            )
+        })?
+        .clone();
+
+    // Get a raw broadcast receiver via the concrete EphemeralSessionService.
+    // This avoids the async EventStream wrapper — we use synchronous try_recv()
+    // in poll_subscription, which works reliably on wasm32.
+    let rx = RUNTIME_STATE.with(|cell| {
+        let borrow = cell.borrow();
+        let state = borrow
+            .as_ref()
+            .ok_or_else(|| err_js("not_initialized", "runtime not initialized"))?;
+        // We stored the concrete service in RuntimeState for exactly this purpose.
+        // subscribe_session_events_raw returns the raw broadcast::Receiver.
+        Ok::<_, JsValue>(state.session_service.clone())
+    })?;
+    let raw_rx = rx
+        .subscribe_session_events_raw(&session_id)
+        .await
+        .map_err(|e| err_str("subscribe_error", e))?;
+
+    let handle = SUBSCRIPTIONS.with(|cell| {
+        let mut registry = cell.borrow_mut();
+        let h = registry.next_handle;
+        registry.next_handle = registry.next_handle.wrapping_add(1);
+        while registry.next_handle == 0
+            || registry.subscriptions.contains_key(&registry.next_handle)
+        {
+            registry.next_handle = registry.next_handle.wrapping_add(1);
+        }
+        registry.subscriptions.insert(
+            h,
+            EventSubscription {
+                rx: std::cell::RefCell::new(raw_rx),
+            },
+        );
+        h
     });
-    Ok(JsValue::from_str(&result.to_string()))
+
+    Ok(handle)
+}
+
+/// Poll a subscription for new events.
+///
+/// Returns a JSON array of `AgentEvent` objects. Drains all buffered events
+/// since the last poll. Non-blocking: returns `[]` if no new events.
+#[wasm_bindgen]
+pub fn poll_subscription(handle: u32) -> Result<String, JsValue> {
+    SUBSCRIPTIONS.with(|cell| {
+        let registry = cell.borrow();
+        let sub = registry.subscriptions.get(&handle).ok_or_else(|| {
+            err_js(
+                "invalid_handle",
+                &format!("unknown subscription handle: {handle}"),
+            )
+        })?;
+
+        // Drain all available events via synchronous try_recv.
+        use crate::tokio::sync::broadcast::error::TryRecvError;
+        let mut events: Vec<serde_json::Value> = Vec::new();
+        let mut rx = sub.rx.borrow_mut();
+        loop {
+            match rx.try_recv() {
+                Ok(event) => match serde_json::to_value(&event) {
+                    Ok(val) => events.push(val),
+                    Err(e) => tracing::warn!(error = %e, "failed to serialize agent event"),
+                },
+                Err(TryRecvError::Lagged(n)) => {
+                    tracing::warn!(skipped = n, "subscription lagged");
+                    continue;
+                }
+                Err(TryRecvError::Empty | TryRecvError::Closed) => break,
+            }
+        }
+        serde_json::to_string(&events).map_err(|e| err_str("serialize_error", e))
+    })
+}
+
+/// Close a subscription and free resources.
+#[wasm_bindgen]
+pub fn close_subscription(handle: u32) -> Result<(), JsValue> {
+    SUBSCRIPTIONS.with(|cell| {
+        let mut registry = cell.borrow_mut();
+        registry.subscriptions.remove(&handle).ok_or_else(|| {
+            err_js(
+                "invalid_handle",
+                &format!("unknown subscription handle: {handle}"),
+            )
+        })?;
+        Ok(())
+    })
 }

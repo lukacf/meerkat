@@ -322,8 +322,9 @@ impl MobActor {
         let member_ref_cloned = member_ref.clone();
         let provisioner = self.provisioner.clone();
         let loop_id = meerkat_id.clone();
+        let log_id = meerkat_id.clone();
         let handle = tokio::spawn(async move {
-            provisioner
+            let result = provisioner
                 .start_turn(
                     &member_ref_cloned,
                     meerkat_core::service::StartTurnRequest {
@@ -334,7 +335,19 @@ impl MobActor {
                         flow_tool_overlay: None,
                     },
                 )
-                .await
+                .await;
+            match &result {
+                Ok(()) => tracing::info!(
+                    meerkat_id = %log_id,
+                    "autonomous host loop exited normally"
+                ),
+                Err(error) => tracing::error!(
+                    meerkat_id = %log_id,
+                    error = %error,
+                    "autonomous host loop failed"
+                ),
+            }
+            result
         });
 
         tokio::task::yield_now().await;

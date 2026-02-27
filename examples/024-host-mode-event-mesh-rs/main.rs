@@ -55,7 +55,7 @@ This enables:
 
     // ── Build a basic agent to demonstrate the concept ─────────────────────
 
-    let store_dir = tempfile::tempdir()?.into_path().join("sessions");
+    let store_dir = tempfile::tempdir()?.keep().join("sessions");
     std::fs::create_dir_all(&store_dir)?;
 
     let factory = AgentFactory::new(store_dir.clone());
@@ -89,8 +89,7 @@ This enables:
     // ── Event mesh architecture ────────────────────────────────────────────
 
     println!("=== Event Mesh Architecture ===\n");
-    println!(
-        r#"The event mesh connects agents, external systems, and users:
+    println!("{}", r#"The event mesh connects agents, external systems, and users:
 
 ┌──────────────────────────────────────────────────────────────┐
 │                       EVENT MESH                              │

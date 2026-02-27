@@ -23,7 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Mob: Research Team ===\n");
 
     let prefab = Prefab::ResearchTeam;
-    let definition = prefab.definition();
+    let _definition = prefab.definition();
 
     println!("Template:\n{}\n", prefab.toml_template());
 

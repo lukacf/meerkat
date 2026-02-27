@@ -26,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| "Set ANTHROPIC_API_KEY to run this example")?;
 
-    let store_dir = tempfile::tempdir()?.into_path().join("sessions");
+    let store_dir = tempfile::tempdir()?.keep().join("sessions");
     std::fs::create_dir_all(&store_dir)?;
 
     let factory = AgentFactory::new(store_dir.clone());
@@ -83,7 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tight_budget = BudgetLimits::unlimited()
         .with_max_tokens(100);  // Very tight budget
 
-    let store2_dir = tempfile::tempdir()?.into_path().join("sessions");
+    let store2_dir = tempfile::tempdir()?.keep().join("sessions");
     std::fs::create_dir_all(&store2_dir)?;
     let factory2 = AgentFactory::new(store2_dir.clone());
     let client2 = Arc::new(AnthropicClient::new(
@@ -97,7 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut agent2 = AgentBuilder::new()
         .model("claude-sonnet-4-5")
         .max_tokens_per_turn(50)
-        .budget_limits(tight_budget)
+        .budget(tight_budget)
         .build(Arc::new(llm2), Arc::new(EmptyToolDispatcher), store2)
         .await;
 

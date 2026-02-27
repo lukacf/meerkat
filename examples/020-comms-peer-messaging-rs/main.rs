@@ -21,8 +21,6 @@ use std::sync::Arc;
 use meerkat::{
     AgentBuilder, AgentFactory, AnthropicClient,
 };
-#[cfg(feature = "comms")]
-use meerkat::CommsRuntime;
 use meerkat_store::{JsonlStore, StoreAdapter};
 use meerkat_tools::EmptyToolDispatcher;
 
@@ -66,7 +64,7 @@ Transport modes:
 
     // ── Build a basic agent to show the concept ────────────────────────────
 
-    let store_dir = tempfile::tempdir()?.into_path().join("sessions");
+    let store_dir = tempfile::tempdir()?.keep().join("sessions");
     std::fs::create_dir_all(&store_dir)?;
 
     let factory = AgentFactory::new(store_dir.clone());
@@ -100,8 +98,7 @@ Transport modes:
     // ── Configuration reference ────────────────────────────────────────────
 
     println!("\n\n=== Comms Configuration ===\n");
-    println!(
-        r#"# .rkat/config.toml
+    println!("{}", r#"# .rkat/config.toml
 
 [comms]
 mode = "tcp"                        # inproc | tcp | uds
@@ -130,8 +127,7 @@ const result = await client.createSession({
 #   1. Static config (trusted_peers in config)
 #   2. In-process registry (for mobs)
 #   3. Environment-based discovery
-"#
-    );
+"#);
 
     Ok(())
 }

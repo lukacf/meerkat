@@ -18,9 +18,8 @@
 use std::sync::Arc;
 
 use meerkat::{
-    AgentBuilder, AgentFactory, AnthropicClient, Config,
-    HookCapability, HookEntryConfig, HookExecutionMode, HookId, HookPoint,
-    HookRuntimeConfig, HooksConfig,
+    AgentBuilder, AgentFactory, AnthropicClient, HookCapability, HookEntryConfig,
+    HookExecutionMode, HookId, HookPoint, HookRuntimeConfig, HooksConfig,
     create_default_hook_engine,
 };
 use meerkat_store::{JsonlStore, StoreAdapter};
@@ -31,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| "Set ANTHROPIC_API_KEY to run this example")?;
 
-    let store_dir = tempfile::tempdir()?.into_path().join("sessions");
+    let store_dir = tempfile::tempdir()?.keep().join("sessions");
     std::fs::create_dir_all(&store_dir)?;
 
     let factory = AgentFactory::new(store_dir.clone());
@@ -68,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Hook 2: Content filter on tool calls
             HookEntryConfig {
                 id: HookId::new("tool-filter"),
-                point: HookPoint::PreToolDispatch,
+                point: HookPoint::PreToolExecution,
                 mode: HookExecutionMode::Foreground,
                 capability: HookCapability::Observe,
                 runtime: HookRuntimeConfig::new(

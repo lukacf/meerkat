@@ -28,7 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| "Set ANTHROPIC_API_KEY to run this example")?;
 
-    let store_dir = tempfile::tempdir()?.into_path().join("sessions");
+    let store_dir = tempfile::tempdir()?.keep().join("sessions");
     std::fs::create_dir_all(&store_dir)?;
 
     let factory = AgentFactory::new(store_dir.clone());
@@ -106,62 +106,49 @@ fn process_items(items: Vec<String>) -> Vec<String> {
     // ── Skill configuration reference ──────────────────────────────────────
 
     println!("\n\n=== Skill Configuration Reference ===\n");
-    println!(
-        r#"Skills can be loaded from multiple sources:
-
-# .rkat/config.toml
-
-# 1. Inline skill
-[[skills]]
-id = "code-reviewer"
-source = "inline"
-content = """
-## Role
-You are a code reviewer...
-"""
-
-# 2. File-based skill
-[[skills]]
-id = "api-designer"
-source = "path"
-path = ".rkat/skills/api-designer.md"
-
-# 3. Git-based skill (fetched at runtime)
-[[skills]]
-id = "security-auditor"
-source = "git"
-url = "https://github.com/org/skills.git"
-path = "security/auditor.md"
-
-# 4. HTTP-based skill (fetched at runtime)
-[[skills]]
-id = "compliance-checker"
-source = "http"
-url = "https://skills.example.com/compliance.md"
-
-# Reference skills in CLI:
-#   rkat run --skill code-reviewer "Review this file..."
-#   rkat run --skill code-reviewer --skill security-auditor "Audit this..."
-
-# Reference skills in Python SDK (canonical):
-#   client.create_session(
-#       "...",
-#       skill_refs=[{
-#           "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
-#           "skill_name": "code-reviewer"
-#       }]
-#   )
-#
-# Reference skills in TypeScript SDK (canonical):
-#   client.createSession({
-#       prompt: "...",
-#       skill_refs: [{
-#           source_uuid: "dc256086-0d2f-4f61-a307-320d4148107f",
-#           skill_name: "code-reviewer"
-#       }]
-#   })
-"#
-    );
+    print!("{}", concat!(
+        "Skills can be loaded from multiple sources:\n",
+        "\n",
+        "# .rkat/config.toml\n",
+        "\n",
+        "# 1. Inline skill\n",
+        "[[skills]]\n",
+        "id = \"code-reviewer\"\n",
+        "source = \"inline\"\n",
+        "content = \"\"\"\n",
+        "## Role\n",
+        "You are a code reviewer...\n",
+        "\"\"\"\n",
+        "\n",
+        "# 2. File-based skill\n",
+        "[[skills]]\n",
+        "id = \"api-designer\"\n",
+        "source = \"path\"\n",
+        "path = \".rkat/skills/api-designer.md\"\n",
+        "\n",
+        "# 3. Git-based skill (fetched at runtime)\n",
+        "[[skills]]\n",
+        "id = \"security-auditor\"\n",
+        "source = \"git\"\n",
+        "url = \"https://github.com/org/skills.git\"\n",
+        "path = \"security/auditor.md\"\n",
+        "\n",
+        "# 4. HTTP-based skill (fetched at runtime)\n",
+        "[[skills]]\n",
+        "id = \"compliance-checker\"\n",
+        "source = \"http\"\n",
+        "url = \"https://skills.example.com/compliance.md\"\n",
+        "\n",
+        "# Reference skills in CLI:\n",
+        "#   rkat run --skill code-reviewer \"Review this file...\"\n",
+        "#   rkat run --skill code-reviewer --skill security-auditor \"Audit this...\"\n",
+        "\n",
+        "# Reference skills in Python SDK (canonical):\n",
+        "#   client.create_session(\"...\", skill_refs=[SkillKey(...)])\n",
+        "#\n",
+        "# Reference skills in TypeScript SDK (canonical):\n",
+        "#   client.createSession({ prompt: \"...\", skillRefs: [{ sourceUuid, skillName }] })\n",
+    ));
 
     Ok(())
 }

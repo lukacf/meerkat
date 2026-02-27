@@ -2435,6 +2435,7 @@ dependencies = [
  "meerkat-hooks",
  "meerkat-mcp",
  "meerkat-memory",
+ "meerkat-mob",
  "meerkat-session",
  "meerkat-skills",
  "meerkat-store",

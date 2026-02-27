@@ -38,7 +38,7 @@ struct SearchDocsArgs {
     query: String,
     /// Maximum results to return
     #[serde(default = "default_limit")]
-    limit: usize,
+    _limit: usize,
 }
 
 fn default_limit() -> usize {
@@ -120,7 +120,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|_| "Set ANTHROPIC_API_KEY to run this example")?;
 
     // ── 1. Set up storage ──────────────────────────────────────────────────
-    let store_dir = tempfile::tempdir()?.into_path().join("sessions");
+    let store_dir = tempfile::tempdir()?.keep().join("sessions");
     std::fs::create_dir_all(&store_dir)?;
 
     let factory = AgentFactory::new(store_dir.clone());

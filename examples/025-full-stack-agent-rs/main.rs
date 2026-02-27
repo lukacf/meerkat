@@ -18,14 +18,12 @@
 
 use async_trait::async_trait;
 use meerkat::{
-    AgentBuilder, AgentEvent, AgentFactory, AgentToolDispatcher, AnthropicClient,
-    BudgetLimits, BuiltinToolConfig, ToolDef, ToolError, ToolResult,
-    create_dispatcher_with_builtins,
-    spawn_event_logger, EventLoggerConfig,
+    AgentBuilder, AgentEvent, AgentFactory, AgentToolDispatcher, AnthropicClient, BudgetLimits,
+    BuiltinToolConfig, EventLoggerConfig, ToolDef, ToolError, ToolResult,
+    create_dispatcher_with_builtins, spawn_event_logger,
 };
 use meerkat_core::ToolCallView;
 use meerkat_store::{JsonlStore, StoreAdapter};
-use meerkat_tools::CompositeDispatcher;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
@@ -135,21 +133,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 2. Build tool dispatcher (builtins + domain tools) ─────────────────
     let builtin_config = BuiltinToolConfig::default();
-    let builtin_tools =
-        create_dispatcher_with_builtins(&factory, builtin_config, None, None, None).await?;
+    let domain_tools: Arc<dyn AgentToolDispatcher> = Arc::new(DomainTools);
 
-    let domain_tools = Arc::new(DomainTools);
-
-    // Compose: builtins + domain tools in one dispatcher
-    let composite = CompositeDispatcher::new(vec![builtin_tools, domain_tools]);
-    let tools: Arc<dyn AgentToolDispatcher> = Arc::new(composite);
+    // Compose: builtins + domain tools via the external dispatcher slot
+    let tools =
+        create_dispatcher_with_builtins(&factory, builtin_config, None, Some(domain_tools), None)
+            .await?;
 
     // ── 3. Configure budget ────────────────────────────────────────────────
-    let budget = BudgetLimits::builder()
-        .max_total_tokens(50_000)
-        .max_turns(20)
-        .max_tool_calls(50)
-        .build();
+    let budget = BudgetLimits::unlimited()
+        .with_max_tokens(50_000)
+        .with_max_tool_calls(50);
 
     // ── 4. Build the agent ─────────────────────────────────────────────────
     let skill_content = r#"
@@ -182,7 +176,7 @@ Professional, concise, action-oriented. Always provide next steps.
         .model("claude-sonnet-4-5")
         .system_prompt(&system_prompt)
         .max_tokens_per_turn(2048)
-        .budget_limits(budget)
+        .budget(budget)
         .build(Arc::new(llm), tools, store)
         .await;
 
@@ -226,7 +220,7 @@ Professional, concise, action-oriented. Always provide next steps.
 │                                                            │
 │  Model:     claude-sonnet-4-5                              │
 │  Skills:    support-agent (inline)                         │
-│  Budget:    50K tokens / 20 turns / 50 tool calls          │
+│  Budget:    50K tokens / 50 tool calls                      │
 │                                                            │
 │  Tools:                                                    │
 │  ├── Built-in: task_create, task_list, task_update, wait   │

@@ -94,7 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .max_tokens_per_turn(1024);
 
     if let Some(engine) = hook_engine {
-        builder = builder.hook_engine(engine);
+        builder = builder.with_hook_engine(engine);
     }
 
     let mut agent = builder

@@ -79,11 +79,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("\n=== Turn {} ===", i + 1);
         println!("User: {}\n", topic);
 
-        let result = if i == 0 {
-            agent.run(topic.to_string()).await?
-        } else {
-            agent.run(topic.to_string()).await?
-        };
+        let result = agent
+            .run_with_events(topic.to_string(), event_tx.clone())
+            .await?;
 
         println!("Assistant: {}", &result.text[..result.text.len().min(200)]);
         if result.text.len() > 200 {

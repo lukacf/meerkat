@@ -40,11 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(StoreAdapter::new(store));
 
     // Enable built-in tools which include sub-agent spawning
-    let config = BuiltinToolConfig {
-        enable_sub_agents: true,
-        ..Default::default()
-    };
-
+    let config = BuiltinToolConfig::default();
     let tools = create_dispatcher_with_builtins(&factory, config, None, None, None).await?;
 
     let mut agent = AgentBuilder::new()

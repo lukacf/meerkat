@@ -17,9 +17,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use meerkat::{
-    AgentBuilder, AgentFactory, AnthropicClient, BudgetLimits, RetryPolicy,
-};
+use meerkat::{AgentBuilder, AgentFactory, AnthropicClient, BudgetLimits, RetryPolicy};
 use meerkat_store::{JsonlStore, StoreAdapter};
 use meerkat_tools::EmptyToolDispatcher;
 
@@ -42,17 +40,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Example 1: Token budget ──
 
     println!("=== Example 1: Token budget ===\n");
-    let budget = BudgetLimits::builder()
-        .max_total_tokens(2000)     // Hard cap on total tokens
-        .max_turns(5)               // Max agent loop iterations
-        .max_tool_calls(10)         // Max tool invocations
-        .build();
+    let budget = BudgetLimits::unlimited()
+        .with_max_tokens(2000)       // Hard cap on total tokens
+        .with_max_tool_calls(10);    // Max tool invocations
 
     let mut agent = AgentBuilder::new()
         .model("claude-sonnet-4-5")
         .system_prompt("You are a concise assistant. Keep responses under 100 words.")
         .max_tokens_per_turn(512)
-        .budget_limits(budget)
+        .budget(budget)
         .build(
             Arc::new(llm),
             Arc::new(EmptyToolDispatcher),
@@ -71,12 +67,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n=== Example 2: Retry policy ===\n");
 
-    let retry = RetryPolicy::builder()
-        .max_retries(3)                                    // Retry up to 3 times
-        .initial_backoff(Duration::from_millis(500))       // Start at 500ms
-        .max_backoff(Duration::from_secs(10))              // Cap at 10s
-        .backoff_multiplier(2.0)                           // Double each time
-        .build();
+    let retry = RetryPolicy::new()
+        .with_max_retries(3)                               // Retry up to 3 times
+        .with_initial_delay(Duration::from_millis(500))    // Start at 500ms
+        .with_max_delay(Duration::from_secs(10))           // Cap at 10s
+        .with_multiplier(2.0);                             // Double each time
 
     println!("Retry policy: {:?}", retry);
     println!("Retries are automatic — transient 429/500 errors trigger backoff.");
@@ -85,10 +80,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n=== Example 3: Tight budget (will be exhausted) ===\n");
 
-    let tight_budget = BudgetLimits::builder()
-        .max_total_tokens(100)  // Very tight budget
-        .max_turns(1)
-        .build();
+    let tight_budget = BudgetLimits::unlimited()
+        .with_max_tokens(100);  // Very tight budget
 
     let store2_dir = tempfile::tempdir()?.into_path().join("sessions");
     std::fs::create_dir_all(&store2_dir)?;
@@ -114,7 +107,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         Ok(result) => {
             println!("Response (truncated): {}...", &result.text[..result.text.len().min(100)]);
-            println!("Stop reason: {:?}", result.stop_reason);
+            println!("Turns: {}", result.turns);
         }
         Err(e) => {
             println!("Budget exhausted (expected): {}", e);

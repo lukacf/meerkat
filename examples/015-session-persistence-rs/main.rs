@@ -68,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Load session from disk (simulating a restart)
-    let loaded = jsonl_store.load(&session_id.parse()?).await?;
+    let loaded = jsonl_store.load(&session_id).await?;
     if let Some(session) = loaded {
         println!(
             "\nLoaded session {} with {} messages",

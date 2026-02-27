@@ -7,29 +7,76 @@
 //! ## What you'll learn
 //! - The research team prefab pattern
 //! - Custom profiles with specialized skills
-//! - Diverge/converge coordination (explore then synthesize)
-//! - Task board for tracking research hypotheses
+//! - Spawning multiple agents from a definition
+//! - Running turns on specific agents and reading mob events
+//! - Task board usage for tracking research items
 //!
 //! ## Run
 //! ```bash
-//! This is a reference implementation. For runnable examples, see meerkat/examples/.
+//! ANTHROPIC_API_KEY=... cargo run --example 018-mob-research-team --features comms
 //! ```
 
-use meerkat_mob::{MobDefinition, Prefab, validate_definition};
+use std::sync::Arc;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // ── Research Team Prefab ───────────────────────────────────────────────
+use meerkat::{AgentFactory, Config, build_ephemeral_service};
+use meerkat_mob::{
+    MeerkatId, MobBuilder, MobDefinition, MobEventKind, MobStorage, Prefab, ProfileName,
+    validate_definition,
+};
 
-    println!("=== Mob: Research Team ===\n");
+/// Format a mob event kind into a short human-readable label.
+fn event_label(kind: &MobEventKind) -> &'static str {
+    match kind {
+        MobEventKind::MobCreated { .. } => "MobCreated",
+        MobEventKind::MobCompleted => "MobCompleted",
+        MobEventKind::MobReset => "MobReset",
+        MobEventKind::MeerkatSpawned { .. } => "MeerkatSpawned",
+        MobEventKind::MeerkatRetired { .. } => "MeerkatRetired",
+        MobEventKind::PeersWired { .. } => "PeersWired",
+        MobEventKind::PeersUnwired { .. } => "PeersUnwired",
+        MobEventKind::TaskCreated { .. } => "TaskCreated",
+        MobEventKind::TaskUpdated { .. } => "TaskUpdated",
+        MobEventKind::FlowStarted { .. } => "FlowStarted",
+        MobEventKind::FlowCompleted { .. } => "FlowCompleted",
+        MobEventKind::FlowFailed { .. } => "FlowFailed",
+        MobEventKind::FlowCanceled { .. } => "FlowCanceled",
+        MobEventKind::StepCompleted { .. } => "StepCompleted",
+        _ => "Other",
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // ── Check for API key ────────────────────────────────────────────────────
+    if std::env::var("ANTHROPIC_API_KEY").is_err() {
+        eprintln!("ANTHROPIC_API_KEY is required to run this example.");
+        eprintln!("Set it and re-run:");
+        eprintln!("  ANTHROPIC_API_KEY=sk-... cargo run --example 018-mob-research-team --features comms");
+        std::process::exit(1);
+    }
+
+    // ── Part 1: Explore the research team prefab ─────────────────────────────
+    println!("=== Mob: Research Team (Prefab) ===\n");
 
     let prefab = Prefab::ResearchTeam;
-    let _definition = prefab.definition();
+    let prefab_def = prefab.definition();
 
-    println!("Template:\n{}\n", prefab.toml_template());
+    println!("Prefab ID: {}", prefab_def.id);
+    println!("Profiles:");
+    for (name, profile) in &prefab_def.profiles {
+        println!(
+            "  {} -- model: {}, peer_description: {}",
+            name, profile.model, profile.peer_description,
+        );
+    }
+    println!(
+        "Auto-wire orchestrator: {}",
+        prefab_def.wiring.auto_wire_orchestrator
+    );
 
-    // ── Custom Research Team ───────────────────────────────────────────────
+    // ── Part 2: Custom research team definition (TOML) ───────────────────────
 
-    println!("=== Custom Research Team Definition ===\n");
+    println!("\n=== Custom Research Team Definition (from TOML) ===\n");
 
     let custom = r#"
 [mob]
@@ -39,7 +86,7 @@ orchestrator = "lead-analyst"
 [profiles.lead-analyst]
 model = "claude-opus-4-6"
 skills = ["research-lead"]
-peer_description = "Lead analyst — defines research questions, synthesizes findings"
+peer_description = "Lead analyst -- defines research questions, synthesizes findings"
 external_addressable = true
 
 [profiles.lead-analyst.tools]
@@ -51,7 +98,7 @@ mob_tasks = true
 [profiles.market-researcher]
 model = "claude-sonnet-4-5"
 skills = ["market-analysis"]
-peer_description = "Market researcher — competitive analysis, market sizing"
+peer_description = "Market researcher -- competitive analysis, market sizing"
 
 [profiles.market-researcher.tools]
 builtins = true
@@ -61,19 +108,9 @@ mob_tasks = true
 [profiles.tech-researcher]
 model = "claude-sonnet-4-5"
 skills = ["tech-analysis"]
-peer_description = "Technology researcher — technical feasibility, architecture"
+peer_description = "Technology researcher -- technical feasibility, architecture"
 
 [profiles.tech-researcher.tools]
-builtins = true
-comms = true
-mob_tasks = true
-
-[profiles.user-researcher]
-model = "claude-sonnet-4-5"
-skills = ["user-research"]
-peer_description = "User researcher — personas, pain points, adoption barriers"
-
-[profiles.user-researcher.tools]
 builtins = true
 comms = true
 mob_tasks = true
@@ -93,72 +130,164 @@ Run structured market research with synthesis.
 
 ## Coordination Pattern
 1. Define research questions across domains
-2. Spawn domain researchers (market, tech, user)
-3. Create tasks for each research question
-4. Monitor progress, unblock researchers
-5. Converge: synthesize findings into recommendations
-6. Produce final report with evidence and confidence levels
+2. Spawn domain researchers (market, tech)
+3. Monitor progress, unblock researchers
+4. Converge: synthesize findings into recommendations
 """
 
 [skills.market-analysis]
 source = "inline"
-content = "Analyze market dynamics, competitive landscape, TAM/SAM/SOM, and growth trajectories. Provide sourced data points."
+content = "Analyze market dynamics, competitive landscape, TAM/SAM/SOM, and growth trajectories."
 
 [skills.tech-analysis]
 source = "inline"
-content = "Evaluate technical feasibility, architecture options, scalability constraints, and build-vs-buy decisions."
-
-[skills.user-research]
-source = "inline"
-content = "Define user personas, map pain points, identify adoption barriers, and recommend user acquisition strategies."
+content = "Evaluate technical feasibility, architecture options, scalability constraints."
 "#;
 
     let custom_def = MobDefinition::from_toml(custom)?;
     println!("Mob: {}", custom_def.id);
     println!("Profiles ({}):", custom_def.profiles.len());
     for (name, profile) in &custom_def.profiles {
-        println!("  {} — {}", name, profile.peer_description);
+        println!("  {} -- {}", name, profile.peer_description);
     }
 
     let diagnostics = validate_definition(&custom_def);
     if diagnostics.is_empty() {
-        println!("\nValidation: PASSED");
+        println!("Validation: PASSED");
     } else {
         for d in &diagnostics {
             println!("  {:?}: {}", d.severity, d.message);
         }
     }
 
-    // ── Research coordination pattern ──────────────────────────────────────
+    // ── Part 3: Create and run a real research team mob ──────────────────────
 
-    println!("\n\n=== Research Team Coordination Pattern ===\n");
+    println!("\n=== Live Mob Execution ===\n");
+
+    // Set up infrastructure.
+    let temp_dir = tempfile::tempdir()?;
+    let store_path = temp_dir.path().join("sessions");
+    std::fs::create_dir_all(&store_path)?;
+
+    let factory = AgentFactory::new(&store_path).comms(true);
+    let config = Config::default();
+    let session_service = Arc::new(build_ephemeral_service(factory, config, 16));
+
+    // Create the mob using the custom definition above.
+    let storage = MobStorage::in_memory();
+    let handle = MobBuilder::new(custom_def, storage)
+        .with_session_service(session_service)
+        .allow_ephemeral_sessions(true)
+        .create()
+        .await?;
+
     println!(
-        r#"The diverge/converge pattern:
-
-Phase 1: DIVERGE (parallel exploration)
-┌─────────────┐
-│ Lead Analyst │──→ "Research Question: Is there a market for X?"
-└──────┬──────┘
-       │ mob.spawn()
-       ├───→ Market Researcher  ──→ task: "Analyze TAM/SAM for X"
-       ├───→ Tech Researcher    ──→ task: "Evaluate technical feasibility of X"
-       └───→ User Researcher    ──→ task: "Identify target personas for X"
-
-Phase 2: CONVERGE (synthesis)
-       ┌─── Market findings ────┐
-       ├─── Tech findings ──────┤
-       └─── User findings ──────┘
-                    ↓
-         ┌─────────────────┐
-         │   Lead Analyst   │ ──→ "Final Report: Market Analysis for X"
-         │   Synthesizes    │     (confidence: HIGH, evidence: 12 sources)
-         └─────────────────┘
-
-Role wiring allows researchers to cross-reference:
-  market-researcher ←→ tech-researcher (share findings)
-  All researchers ←→ lead-analyst (report progress)
-"#
+        "Mob '{}' created (status: {:?})",
+        handle.mob_id(),
+        handle.status()
     );
+
+    // Spawn the lead analyst and two researchers.
+    println!("\nSpawning team...");
+
+    let lead_ref = handle
+        .spawn(
+            ProfileName::from("lead-analyst"),
+            MeerkatId::from("lead-1"),
+            Some("You are the lead analyst coordinating this research team.".to_string()),
+        )
+        .await?;
+    println!("  Spawned lead-1 (lead-analyst): {lead_ref:?}");
+
+    let market_ref = handle
+        .spawn(
+            ProfileName::from("market-researcher"),
+            MeerkatId::from("market-1"),
+            Some("You are a market researcher on this team.".to_string()),
+        )
+        .await?;
+    println!("  Spawned market-1 (market-researcher): {market_ref:?}");
+
+    let tech_ref = handle
+        .spawn(
+            ProfileName::from("tech-researcher"),
+            MeerkatId::from("tech-1"),
+            Some("You are a technology researcher on this team.".to_string()),
+        )
+        .await?;
+    println!("  Spawned tech-1 (tech-researcher): {tech_ref:?}");
+
+    // Wire the team: lead <-> market, lead <-> tech, market <-> tech.
+    handle
+        .wire(MeerkatId::from("lead-1"), MeerkatId::from("market-1"))
+        .await?;
+    handle
+        .wire(MeerkatId::from("lead-1"), MeerkatId::from("tech-1"))
+        .await?;
+    handle
+        .wire(MeerkatId::from("market-1"), MeerkatId::from("tech-1"))
+        .await?;
+    println!("  Wired all team members");
+
+    // Show the roster.
+    let members = handle.list_members().await;
+    println!("\nRoster ({} members):", members.len());
+    for m in &members {
+        println!(
+            "  {} (profile: {}, wired_to: {:?})",
+            m.meerkat_id, m.profile, m.wired_to
+        );
+    }
+
+    // Create a task on the shared task board.
+    let task_id = handle
+        .task_create(
+            "Market sizing for AI code assistants".to_string(),
+            "Research the total addressable market for AI-powered code assistant tools.".to_string(),
+            vec![],
+        )
+        .await?;
+    println!("\nCreated task: {task_id}");
+
+    // Send a research question to the lead analyst (live LLM call).
+    println!("\nSending research question to lead analyst (live LLM call)...");
+    handle
+        .send_message(
+            MeerkatId::from("lead-1"),
+            "Briefly outline 3 key research questions about the market for AI code assistants. \
+             Keep your response to 3-4 sentences total. Do NOT use any tools -- \
+             just provide the questions in plain text."
+                .to_string(),
+        )
+        .await?;
+
+    // Wait for the LLM turn to complete.
+    println!("Waiting for response...");
+    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+
+    // Show task board.
+    let tasks = handle.task_list().await?;
+    println!("\nTask board ({} tasks):", tasks.len());
+    for task in &tasks {
+        println!(
+            "  [{}] {} -- status: {:?}",
+            task.id, task.subject, task.status
+        );
+    }
+
+    // Poll mob events.
+    let events = handle.poll_events(0, 50).await?;
+    println!("\nMob events ({} total):", events.len());
+    for event in &events {
+        println!("  cursor={}: {}", event.cursor, event_label(&event.kind));
+    }
+
+    // Final status.
+    println!("\nFinal mob status: {:?}", handle.status());
+
+    // Clean up.
+    handle.retire_all().await?;
+    println!("All members retired.");
 
     Ok(())
 }

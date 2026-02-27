@@ -46,7 +46,10 @@ futures = { workspace = true }
 async-trait = { workspace = true }
 schemars = { workspace = true }
 which = { workspace = true }
+indexmap = { workspace = true }
 meerkat-mob = { workspace = true }
+meerkat-memory = { workspace = true }
+meerkat-skills = { workspace = true }
 # meerkat-mcp-server is NOT a dependency — it depends on us (no circular dep).
 # Binaries (rkat, meerkat-rest) depend on it directly.
 
@@ -134,17 +137,17 @@ required-features = ["jsonl-store"]
 [[example]]
 name = "012-skills-loading"
 path = "../examples/012-skills-loading-rs/main.rs"
-required-features = ["jsonl-store"]
+required-features = ["jsonl-store", "skills"]
 
 [[example]]
 name = "013-context-compaction"
 path = "../examples/013-context-compaction-rs/main.rs"
-required-features = ["jsonl-store"]
+required-features = ["jsonl-store", "session-compaction"]
 
 [[example]]
 name = "014-semantic-memory"
 path = "../examples/014-semantic-memory-rs/main.rs"
-required-features = ["jsonl-store"]
+required-features = ["jsonl-store", "memory-store-session"]
 
 [[example]]
 name = "015-session-persistence"
@@ -159,14 +162,17 @@ required-features = ["jsonl-store"]
 [[example]]
 name = "017-mob-coding-swarm"
 path = "../examples/017-mob-coding-swarm-rs/main.rs"
+required-features = ["comms"]
 
 [[example]]
 name = "018-mob-research-team"
 path = "../examples/018-mob-research-team-rs/main.rs"
+required-features = ["comms"]
 
 [[example]]
 name = "019-mob-pipeline"
 path = "../examples/019-mob-pipeline-rs/main.rs"
+required-features = ["comms"]
 
 [[example]]
 name = "020-comms-peer-messaging"

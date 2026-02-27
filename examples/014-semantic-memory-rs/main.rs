@@ -1,27 +1,37 @@
-//! # 014 — Semantic Memory (Rust)
+//! # 014 -- Semantic Memory (Rust)
 //!
 //! Semantic memory lets agents store and retrieve information across sessions.
 //! Unlike session history (which is per-conversation), memory persists and
 //! is searchable via similarity matching.
 //!
+//! ## What this example actually does
+//! - Creates a `SimpleMemoryStore` (in-memory keyword-matching implementation)
+//! - Wraps it in a `MemorySearchDispatcher` to expose the `memory_search` tool
+//! - Composes the memory tool into the agent's tool dispatcher via `ToolGatewayBuilder`
+//! - Wires the memory store into the `AgentBuilder` so compaction can index into it
+//! - Pre-seeds the memory store with facts (simulating prior compaction indexing)
+//! - Asks the agent to recall those facts using the `memory_search` tool
+//!
 //! ## What you'll learn
-//! - Indexing text into the memory store
-//! - Searching memory by semantic similarity
-//! - How memory integrates with the agent loop
-//! - Choosing between `HnswMemoryStore` and `SimpleMemoryStore`
+//! - Wiring a `MemoryStore` into an agent
+//! - How `MemorySearchDispatcher` exposes `memory_search` as a tool
+//! - How `ToolGatewayBuilder` composes multiple dispatchers
+//! - The difference between `SimpleMemoryStore` (test) and `HnswMemoryStore` (production)
 //!
 //! ## Run
 //! ```bash
-//! This is a reference implementation. For runnable examples, see meerkat/examples/.
+//! ANTHROPIC_API_KEY=... cargo run --example 014-semantic-memory --features jsonl-store,memory-store-session
 //! ```
 
 use std::sync::Arc;
 
 use meerkat::{
-    AgentBuilder, AgentFactory, AnthropicClient,
+    AgentBuilder, AgentFactory, AnthropicClient, ToolGatewayBuilder,
 };
+use meerkat_core::memory::{MemoryMetadata, MemoryStore as _};
+use meerkat_core::types::SessionId;
+use meerkat_memory::{MemorySearchDispatcher, SimpleMemoryStore};
 use meerkat_store::{JsonlStore, StoreAdapter};
-use meerkat_tools::EmptyToolDispatcher;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -39,78 +49,143 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     store.init().await?;
     let store = Arc::new(StoreAdapter::new(store));
 
-    // Build agent with memory-aware system prompt.
-    // In production, the MemoryStore is wired into the agent via AgentFactory.build_agent().
+    // ── Step 1: Create the memory store ──────────────────────────────────────
+    //
+    // SimpleMemoryStore is an in-memory implementation that uses keyword matching.
+    // For production, use HnswMemoryStore which provides true vector-embedding
+    // similarity search backed by hnsw_rs + redb persistence.
+
+    let memory_store = Arc::new(SimpleMemoryStore::new());
+
+    // ── Step 2: Pre-seed memory with facts ───────────────────────────────────
+    //
+    // In normal operation, memory is populated during context compaction:
+    // when the agent loop compacts old messages to save context space,
+    // the discarded text is indexed into the memory store. Here we simulate
+    // that by directly indexing some facts.
+
+    let now = std::time::SystemTime::now();
+    let prior_session = SessionId::new();
+
+    let facts = [
+        "Our team uses Rust for all backend services, Python for data pipelines, \
+         and TypeScript for the frontend.",
+        "Deployment target is Kubernetes on AWS EKS. We deploy on Tuesdays and Thursdays.",
+        "CI uses GitHub Actions. The staging environment is at staging.example.com.",
+        "The database is PostgreSQL 16 with pgvector for embeddings.",
+        "Team lead is Alice. Backend lead is Bob. Frontend lead is Carol.",
+    ];
+
+    for (i, fact) in facts.iter().enumerate() {
+        let metadata = MemoryMetadata {
+            session_id: prior_session.clone(),
+            turn: Some(i as u32 + 1),
+            indexed_at: now,
+        };
+        memory_store.index(fact, metadata).await?;
+    }
+
+    println!("Indexed {} facts into SimpleMemoryStore\n", facts.len());
+
+    // ── Step 3: Create the memory search tool dispatcher ─────────────────────
+    //
+    // MemorySearchDispatcher wraps a MemoryStore and exposes it as the
+    // `memory_search` tool. The agent can call this tool with a natural
+    // language query and get back scored results.
+
+    let memory_dispatcher = MemorySearchDispatcher::new(
+        Arc::clone(&memory_store) as Arc<dyn meerkat_core::memory::MemoryStore>,
+    );
+
+    // ── Step 4: Compose tool dispatchers ─────────────────────────────────────
+    //
+    // ToolGatewayBuilder merges multiple dispatchers into one. Here we combine
+    // an empty base dispatcher with the memory search dispatcher. In a real
+    // agent, the base would be a CompositeDispatcher with shell tools, tasks, etc.
+
+    let base_tools: Arc<dyn meerkat_core::AgentToolDispatcher> =
+        Arc::new(meerkat_tools::EmptyToolDispatcher);
+
+    let gateway = ToolGatewayBuilder::new()
+        .add_dispatcher(base_tools)
+        .add_dispatcher(Arc::new(memory_dispatcher))
+        .build()?;
+
+    // ── Step 5: Build the agent with memory wired in ─────────────────────────
+    //
+    // Two things are wired:
+    //   1. `.memory_store()` on AgentBuilder -- so the agent loop can index
+    //      discarded messages during compaction
+    //   2. The ToolGateway containing MemorySearchDispatcher -- so the agent
+    //      can call `memory_search` to retrieve indexed content
+
     let mut agent = AgentBuilder::new()
         .model("claude-sonnet-4-5")
         .system_prompt(
-            "You are an assistant with long-term memory. When the user teaches you \
-             something, remember it. When they ask about past conversations, recall \
-             from your memory.",
+            "You are a helpful assistant with access to a semantic memory store.\n\n\
+             You have a `memory_search` tool that searches your long-term memory.\n\
+             Your memory contains facts from earlier conversations that were \
+             compacted away. When the user asks about things you don't see in \
+             the current conversation, use `memory_search` to look them up.\n\n\
+             Always use the memory_search tool when asked about team details, \
+             infrastructure, or deployment information.",
         )
         .max_tokens_per_turn(1024)
-        .build(Arc::new(llm), Arc::new(EmptyToolDispatcher), store)
+        .memory_store(Arc::clone(&memory_store) as Arc<dyn meerkat_core::memory::MemoryStore>)
+        .build(Arc::new(llm), Arc::new(gateway), store)
         .await;
 
-    // ── Simulate memory-augmented conversations ────────────────────────────
+    // ── Step 6: Ask the agent to recall from memory ──────────────────────────
 
-    println!("=== Session 1: Teaching the agent ===\n");
+    println!("=== Asking the agent to recall from semantic memory ===\n");
     let result = agent
         .run(
-            "Remember this: Our team uses Rust for all backend services, \
-             Python for data pipelines, and TypeScript for the frontend. \
-             Our deployment target is Kubernetes on AWS EKS."
+            "What programming languages does our team use? \
+             And what database do we run? Search your memory to find out."
                 .to_string(),
         )
         .await?;
     println!("Agent: {}\n", result.text);
 
-    println!("=== Session 1, Turn 2: Teaching more ===\n");
+    println!("=== Asking about deployment schedule ===\n");
     let result = agent
         .run(
-            "Also remember: Our CI uses GitHub Actions. We deploy on Tuesdays \
-             and Thursdays. The staging environment is at staging.example.com."
-                .to_string(),
+            "When do we deploy and where? Check your memory.".to_string(),
         )
         .await?;
     println!("Agent: {}\n", result.text);
 
-    println!("=== Session 1, Turn 3: Recalling ===\n");
-    let result = agent
-        .run("What languages does our team use and where do we deploy?".to_string())
-        .await?;
-    println!("Agent: {}\n", result.text);
+    // ── Architecture reference ───────────────────────────────────────────────
 
-    // ── Memory configuration reference ─────────────────────────────────────
-
-    println!("=== Semantic Memory Configuration Reference ===\n");
+    println!("=== Semantic Memory Architecture ===\n");
     println!(
-        r#"# Enable memory in .rkat/config.toml:
+        r#"Memory data flow:
 
-[tools]
-memory = true  # Gives the agent memory_store and memory_search tools
+  Agent Loop
+    |
+    |-- (compaction) --> MemoryStore::index()  --> stored entries
+    |
+    |-- (tool call)  --> memory_search tool
+                           |
+                           v
+                         MemoryStore::search()  --> scored results
 
-# Memory architecture:
-#
-# ┌──────────────┐     ┌─────────────────┐     ┌──────────────┐
-# │  Agent Loop   │────→│  MemoryStore    │────→│  HNSW Index  │
-# │              │     │  trait           │     │  (redb)      │
-# │ memory_store │     │                 │     │              │
-# │ memory_search│     │ - index_text()  │     │ Similarity   │
-# └──────────────┘     │ - search()      │     │ search via   │
-#                      └─────────────────┘     │ embeddings   │
-#                                              └──────────────┘
-#
-# Two implementations:
-#   - HnswMemoryStore: Production-grade, persistent (hnsw_rs + redb)
-#   - SimpleMemoryStore: In-memory, for tests and development
-#
-# Memory is indexed per-session and searchable across sessions.
-# The agent can explicitly store and retrieve information using tools.
-#
-# CLI usage:
-#   rkat run --memory "Remember: the API key rotates monthly"
-#   rkat session <id> "What did I tell you about the API key?"
+Two implementations:
+  - SimpleMemoryStore: In-memory, keyword matching (this example)
+  - HnswMemoryStore:   Persistent, vector embeddings (hnsw_rs + redb)
+
+Wiring in the factory (AgentFactory::build_agent):
+  1. Creates HnswMemoryStore from .rkat/memory/ directory
+  2. Passes it to AgentBuilder::memory_store() for compaction indexing
+  3. Wraps it in MemorySearchDispatcher for the memory_search tool
+  4. Composes into ToolGateway alongside other dispatchers
+
+Enable via config:
+  [tools]
+  memory = true  # Gives the agent memory_search tool + compaction indexing
+
+CLI usage:
+  rkat run --memory "What did I tell you about the API key?"
 "#
     );
 

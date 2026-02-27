@@ -234,7 +234,7 @@ impl GeminiClient {
                 })?;
                 body["generationConfig"]["responseMimeType"] =
                     Value::String("application/json".to_string());
-                body["generationConfig"]["responseSchema"] = compiled.schema;
+                body["generationConfig"]["responseJsonSchema"] = compiled.schema;
             }
         }
 
@@ -259,52 +259,14 @@ impl GeminiClient {
         Ok(body)
     }
 
-    /// Sanitize JSON Schema for Gemini
+    /// Normalize schema for Gemini tool declarations.
     ///
-    /// Gemini's API has a restricted JSON Schema support. This function removes
-    /// or transforms unsupported constructs:
-    /// - Removes: $defs, $ref, $schema, additionalProperties, oneOf, anyOf
-    /// - Converts array types like ["string", "null"] to just "string"
+    /// We intentionally avoid destructive keyword stripping. Recent Gemini schema
+    /// support accepts a broad JSON Schema subset, and unsupported keywords are
+    /// ignored server-side. Preserving the caller schema avoids silent semantic
+    /// loss (e.g. dropping `anyOf` or `additionalProperties`).
     fn sanitize_schema_for_gemini(schema: &Value) -> Value {
-        match schema {
-            Value::Object(map) => {
-                let mut sanitized = serde_json::Map::new();
-                for (key, value) in map {
-                    // Skip unsupported JSON Schema constructs
-                    if key == "$defs"
-                        || key == "$ref"
-                        || key == "$schema"
-                        || key == "additionalProperties"
-                        || key == "oneOf"
-                        || key == "anyOf"
-                        || key == "allOf"
-                    {
-                        continue;
-                    }
-
-                    // Special handling for "type" field - Gemini doesn't support array types
-                    if key == "type"
-                        && let Value::Array(types) = value
-                    {
-                        // Find the first non-null type
-                        let primary_type = types
-                            .iter()
-                            .find(|t| t.as_str() != Some("null"))
-                            .cloned()
-                            .unwrap_or_else(|| Value::String("string".to_string()));
-                        sanitized.insert(key.clone(), primary_type);
-                        continue;
-                    }
-
-                    sanitized.insert(key.clone(), Self::sanitize_schema_for_gemini(value));
-                }
-                Value::Object(sanitized)
-            }
-            Value::Array(arr) => {
-                Value::Array(arr.iter().map(Self::sanitize_schema_for_gemini).collect())
-            }
-            other => other.clone(),
-        }
+        schema.clone()
     }
 
     /// Parse streaming response line
@@ -312,15 +274,15 @@ impl GeminiClient {
         serde_json::from_str(line).ok()
     }
 
-    /// Compile an output schema with provider-specific Gemini lowering.
+    /// Compile an output schema for Gemini structured outputs.
     ///
-    /// In lossy mode, strips unsupported keywords and emits warnings.
-    /// In strict mode, returns an error if unsupported features are found.
+    /// Uses `responseJsonSchema` without destructive lowering so schema
+    /// semantics are preserved.
     fn compile_schema_for_gemini(
         output_schema: &OutputSchema,
     ) -> Result<CompiledSchema, SchemaError> {
-        let (schema, warnings) =
-            sanitize_for_gemini(output_schema.schema.as_value(), Provider::Gemini);
+        let schema = output_schema.schema.as_value().clone();
+        let warnings = validate_gemini_response_json_schema(&schema, Provider::Gemini);
 
         if output_schema.compat == SchemaCompat::Strict && !warnings.is_empty() {
             return Err(SchemaError::UnsupportedFeatures {
@@ -333,78 +295,99 @@ impl GeminiClient {
     }
 }
 
-// ============================================================================
-// Gemini schema sanitization (moved from meerkat-core/src/schema.rs)
-// ============================================================================
-
-fn sanitize_for_gemini(schema: &Value, provider: Provider) -> (Value, Vec<SchemaWarning>) {
+fn validate_gemini_response_json_schema(schema: &Value, provider: Provider) -> Vec<SchemaWarning> {
     let mut warnings = Vec::new();
-    let sanitized = sanitize_gemini_value(schema, provider, "", &mut warnings);
-    (sanitized, warnings)
+    inspect_gemini_json_schema_node(schema, "", provider, &mut warnings);
+    warnings
 }
 
-fn sanitize_gemini_value(
+fn inspect_gemini_json_schema_node(
     value: &Value,
-    provider: Provider,
     path: &str,
+    provider: Provider,
     warnings: &mut Vec<SchemaWarning>,
-) -> Value {
+) {
     match value {
         Value::Object(obj) => {
-            let mut sanitized = serde_json::Map::new();
-            for (key, value) in obj {
-                if is_gemini_unsupported_key(key) {
+            for key in obj.keys() {
+                if !is_gemini_supported_schema_keyword(key) {
                     warnings.push(SchemaWarning {
                         provider,
                         path: join_path(path, key),
-                        message: format!("Removed unsupported keyword '{key}'"),
+                        message: format!(
+                            "Keyword '{key}' may be ignored by Gemini responseJsonSchema"
+                        ),
                     });
-                    continue;
                 }
-
-                if key == "type"
-                    && let Value::Array(types) = value
-                {
-                    let primary = types
-                        .iter()
-                        .find(|t| t.as_str() != Some("null"))
-                        .cloned()
-                        .unwrap_or_else(|| Value::String("string".to_string()));
-                    warnings.push(SchemaWarning {
-                            provider,
-                            path: join_path(path, key),
-                            message: "Collapsed array type to a single type; nullable/union semantics may be lost for Gemini".to_string(),
-                        });
-                    sanitized.insert(key.clone(), primary);
-                    continue;
-                }
-
-                let next = join_path(path, key);
-                sanitized.insert(
-                    key.clone(),
-                    sanitize_gemini_value(value, provider, &next, warnings),
-                );
             }
-            Value::Object(sanitized)
+
+            for (key, child) in obj {
+                match key.as_str() {
+                    // Map values are schemas keyed by arbitrary names.
+                    "properties" | "$defs" => {
+                        inspect_schema_map(child, &join_path(path, key), provider, warnings);
+                    }
+                    _ => inspect_gemini_json_schema_node(
+                        child,
+                        &join_path(path, key),
+                        provider,
+                        warnings,
+                    ),
+                }
+            }
         }
-        Value::Array(items) => Value::Array(
-            items
-                .iter()
-                .enumerate()
-                .map(|(idx, item)| {
-                    let next = join_index(path, idx);
-                    sanitize_gemini_value(item, provider, &next, warnings)
-                })
-                .collect(),
-        ),
-        other => other.clone(),
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                inspect_gemini_json_schema_node(item, &join_index(path, index), provider, warnings);
+            }
+        }
+        _ => {}
     }
 }
 
-fn is_gemini_unsupported_key(key: &str) -> bool {
+fn inspect_schema_map(
+    value: &Value,
+    path: &str,
+    provider: Provider,
+    warnings: &mut Vec<SchemaWarning>,
+) {
+    match value {
+        Value::Object(map) => {
+            for (name, child) in map {
+                inspect_gemini_json_schema_node(child, &join_path(path, name), provider, warnings);
+            }
+        }
+        other => inspect_gemini_json_schema_node(other, path, provider, warnings),
+    }
+}
+
+fn is_gemini_supported_schema_keyword(key: &str) -> bool {
+    // Source: Gemini responseJsonSchema supported keyword subset in
+    // https://cloud.google.com/vertex-ai/generative-ai/docs/multimodal/control-generated-output#supported-schema-fields
     matches!(
         key,
-        "$defs" | "$ref" | "$schema" | "additionalProperties" | "oneOf" | "anyOf" | "allOf"
+        "$id"
+            | "$defs"
+            | "$ref"
+            | "$anchor"
+            | "type"
+            | "format"
+            | "title"
+            | "description"
+            | "enum"
+            | "items"
+            | "prefixItems"
+            | "minItems"
+            | "maxItems"
+            | "minimum"
+            | "maximum"
+            | "anyOf"
+            | "oneOf"
+            | "properties"
+            | "additionalProperties"
+            | "required"
+            | "propertyOrdering"
+            | "nullable"
     )
 }
 
@@ -958,27 +941,30 @@ mod tests {
             .get("generationConfig")
             .ok_or("missing generationConfig")?;
         assert_eq!(gen_config["responseMimeType"], "application/json");
-        assert!(gen_config.get("responseSchema").is_some());
+        assert!(gen_config.get("responseJsonSchema").is_some());
 
-        // Schema should be sanitized (no $defs, $ref, etc.)
-        let response_schema = &gen_config["responseSchema"];
-        assert!(response_schema.get("$defs").is_none());
-        assert!(response_schema.get("$ref").is_none());
+        let response_schema = &gen_config["responseJsonSchema"];
+        assert_eq!(response_schema["type"], "object");
+        assert!(response_schema.get("properties").is_some());
         Ok(())
     }
 
     #[test]
-    fn test_build_request_body_with_structured_output_sanitizes_schema()
+    fn test_build_request_body_with_structured_output_preserves_schema_keywords()
     -> Result<(), Box<dyn std::error::Error>> {
         let client = GeminiClient::new("test-key".to_string());
 
-        // Schema with $defs and $ref that should be removed
+        // Schema keywords supported by Gemini responseJsonSchema should be preserved.
         let schema = serde_json::json!({
             "type": "object",
             "$defs": {
                 "Address": {"type": "object"}
             },
             "$ref": "#/$defs/Address",
+            "anyOf": [
+                {"type": "object"},
+                {"type": "null"}
+            ],
             "properties": {
                 "name": {"type": "string"}
             },
@@ -998,26 +984,190 @@ mod tests {
         let gen_config = body
             .get("generationConfig")
             .ok_or("missing generationConfig")?;
-        let response_schema = &gen_config["responseSchema"];
-
-        // These should be stripped
-        assert!(
-            response_schema.get("$defs").is_none(),
-            "$defs should be removed"
-        );
-        assert!(
-            response_schema.get("$ref").is_none(),
-            "$ref should be removed"
-        );
-        assert!(
-            response_schema.get("additionalProperties").is_none(),
-            "additionalProperties should be removed"
-        );
+        let response_schema = &gen_config["responseJsonSchema"];
 
         // These should be preserved
+        assert!(response_schema.get("$defs").is_some());
+        assert_eq!(response_schema["$ref"], "#/$defs/Address");
+        assert!(response_schema.get("anyOf").is_some());
+        assert_eq!(response_schema["additionalProperties"], false);
         assert_eq!(response_schema["type"], "object");
         assert!(response_schema.get("properties").is_some());
         Ok(())
+    }
+
+    #[test]
+    fn test_compile_schema_for_gemini_strict_errors_on_unsupported_keywords() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "allOf": [
+                {"type": "object"}
+            ]
+        });
+
+        let output_schema = OutputSchema::new(schema)
+            .expect("valid schema")
+            .with_compat(SchemaCompat::Strict);
+        let err = GeminiClient::compile_schema_for_gemini(&output_schema)
+            .expect_err("strict mode should reject unsupported keywords");
+
+        match err {
+            SchemaError::UnsupportedFeatures { provider, warnings } => {
+                assert_eq!(provider, Provider::Gemini);
+                assert!(!warnings.is_empty());
+                assert!(
+                    warnings.iter().any(|w| w.path.contains("/allOf")),
+                    "expected warning path to include /allOf, got: {warnings:?}"
+                );
+            }
+            other => panic!("expected UnsupportedFeatures, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_compile_schema_for_gemini_lossy_keeps_schema_and_emits_warnings() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "allOf": [{"type": "object"}],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "pattern": "^[a-z]+$"
+                }
+            }
+        });
+        let output_schema = OutputSchema::new(schema).expect("valid schema");
+        let expected = output_schema.schema.as_value().clone();
+        let compiled = GeminiClient::compile_schema_for_gemini(&output_schema)
+            .expect("lossy mode should not error");
+
+        assert_eq!(compiled.schema, expected);
+        assert!(!compiled.warnings.is_empty());
+        assert!(
+            compiled.warnings.iter().any(|w| w.path.contains("/allOf")),
+            "expected /allOf warning"
+        );
+        assert!(
+            compiled
+                .warnings
+                .iter()
+                .any(|w| w.path.contains("/properties/name/pattern")),
+            "expected /properties/name/pattern warning"
+        );
+    }
+
+    #[test]
+    fn test_compile_schema_for_gemini_strict_accepts_supported_keywords() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "score": {"type": "number", "minimum": 0.0, "maximum": 1.0}
+                        },
+                        "required": ["id", "score"],
+                        "additionalProperties": false
+                    }
+                },
+                "choice": {
+                    "oneOf": [
+                        {"type": "string"},
+                        {"type": "null"}
+                    ]
+                }
+            },
+            "required": ["items", "choice"],
+            "additionalProperties": false
+        });
+        let output_schema = OutputSchema::new(schema)
+            .expect("valid schema")
+            .with_compat(SchemaCompat::Strict);
+        let compiled = GeminiClient::compile_schema_for_gemini(&output_schema)
+            .expect("strict mode should accept supported keywords");
+
+        assert!(compiled.warnings.is_empty());
+        assert_eq!(compiled.schema["type"], "object");
+    }
+
+    #[test]
+    fn test_compile_schema_for_gemini_warns_nested_unsupported_paths() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "nested": {
+                    "type": "object",
+                    "allOf": [
+                        {"type": "object", "properties": {"x": {"type": "string"}}}
+                    ],
+                    "properties": {
+                        "payload": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "patternProperties": {
+                                    "^k_": {"type": "integer"}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let output_schema = OutputSchema::new(schema).expect("valid schema");
+        let compiled = GeminiClient::compile_schema_for_gemini(&output_schema)
+            .expect("lossy mode should still compile");
+
+        let paths: Vec<String> = compiled.warnings.iter().map(|w| w.path.clone()).collect();
+        assert!(
+            paths.iter().any(|p| p.contains("/properties/nested/allOf")),
+            "expected warning at /properties/nested/allOf, got: {paths:?}"
+        );
+        assert!(
+            paths.iter().any(|p| {
+                p.contains("/properties/nested/properties/payload/items/patternProperties")
+            }),
+            "expected warning at nested patternProperties path, got: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn test_build_request_body_strict_compat_rejects_unsupported_schema() {
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-3-pro-preview",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_provider_param(
+            "structured_output",
+            serde_json::json!({
+                "schema": {
+                    "type": "object",
+                    "allOf": [{"type": "object"}]
+                },
+                "compat": "strict"
+            }),
+        );
+
+        let err = client
+            .build_request_body(&request)
+            .expect_err("strict compat should reject unsupported schema keywords");
+
+        match err {
+            LlmError::InvalidRequest { message } => {
+                assert!(
+                    message.contains("unsupported"),
+                    "unexpected message: {message}"
+                );
+                assert!(message.contains("Gemini"), "unexpected message: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1042,16 +1192,15 @@ mod tests {
             "responseMimeType should not be present"
         );
         assert!(
-            gen_config.get("responseSchema").is_none(),
-            "responseSchema should not be present"
+            gen_config.get("responseJsonSchema").is_none(),
+            "responseJsonSchema should not be present"
         );
         Ok(())
     }
 
-    /// Regression: Gemini doesn't support array types like `["string", "null"]`
-    /// The sanitizer should convert them to just "string".
+    /// Regression: tool schema normalization should preserve union type arrays.
     #[test]
-    fn test_sanitize_schema_converts_array_type_to_string() {
+    fn test_sanitize_schema_preserves_array_types() {
         let schema = serde_json::json!({
             "type": "object",
             "properties": {
@@ -1063,14 +1212,16 @@ mod tests {
 
         let sanitized = GeminiClient::sanitize_schema_for_gemini(&schema);
 
-        // Array types should be converted to their primary type
+        // Array types should be preserved
         assert_eq!(
-            sanitized["properties"]["age"]["type"], "integer",
-            "['integer', 'null'] should become 'integer'"
+            sanitized["properties"]["age"]["type"],
+            serde_json::json!(["integer", "null"]),
+            "['integer', 'null'] should be preserved"
         );
         assert_eq!(
-            sanitized["properties"]["email"]["type"], "string",
-            "['string', 'null'] should become 'string'"
+            sanitized["properties"]["email"]["type"],
+            serde_json::json!(["string", "null"]),
+            "['string', 'null'] should be preserved"
         );
         // Non-array types should be unchanged
         assert_eq!(
@@ -1079,10 +1230,9 @@ mod tests {
         );
     }
 
-    /// Regression: Gemini doesn't support oneOf/anyOf/allOf
-    /// The sanitizer should remove them.
+    /// Regression: tool schema normalization should preserve composition keywords.
     #[test]
-    fn test_sanitize_schema_removes_oneof_anyof_allof() {
+    fn test_sanitize_schema_preserves_oneof_anyof_allof() {
         let schema = serde_json::json!({
             "type": "object",
             "properties": {
@@ -1106,16 +1256,18 @@ mod tests {
 
         let sanitized = GeminiClient::sanitize_schema_for_gemini(&schema);
 
-        // oneOf, anyOf, allOf should be removed
         assert!(
-            sanitized["properties"]["status"].get("oneOf").is_none(),
-            "oneOf should be removed"
+            sanitized["properties"]["status"].get("oneOf").is_some(),
+            "oneOf should be preserved"
         );
         assert!(
-            sanitized["properties"]["value"].get("anyOf").is_none(),
-            "anyOf should be removed"
+            sanitized["properties"]["value"].get("anyOf").is_some(),
+            "anyOf should be preserved"
         );
-        assert!(sanitized.get("allOf").is_none(), "allOf should be removed");
+        assert!(
+            sanitized.get("allOf").is_some(),
+            "allOf should be preserved"
+        );
     }
 
     // =========================================================================

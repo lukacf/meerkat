@@ -122,4 +122,66 @@ mod tests {
         assert!(MeerkatSchema::new(json!("string")).is_err());
         assert!(MeerkatSchema::new(json!(42)).is_err());
     }
+
+    #[test]
+    fn test_normalize_recurses_nested_objects() -> Result<(), Box<dyn std::error::Error>> {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "profile": {
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string"}
+                    }
+                },
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object"
+                    }
+                },
+                "variant": {
+                    "anyOf": [
+                        {"type": "object"},
+                        {"type": "string"}
+                    ]
+                }
+            }
+        });
+
+        let schema = MeerkatSchema::new(schema)?;
+        let root = schema.as_value();
+
+        assert!(root.get("required").is_some());
+        assert!(root["properties"]["profile"].get("required").is_some());
+        assert!(
+            root["properties"]["items"]["items"]
+                .get("properties")
+                .is_some()
+        );
+        assert!(
+            root["properties"]["variant"]["anyOf"][0]
+                .get("required")
+                .is_some()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_normalize_preserves_existing_object_shape() -> Result<(), Box<dyn std::error::Error>> {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"}
+            },
+            "required": ["name"]
+        });
+
+        let schema = MeerkatSchema::new(schema)?;
+        let root = schema.as_value();
+
+        assert_eq!(root["required"], json!(["name"]));
+        assert_eq!(root["properties"]["name"]["type"], "string");
+        Ok(())
+    }
 }

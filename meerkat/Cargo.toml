@@ -48,8 +48,6 @@ schemars = { workspace = true }
 which = { workspace = true }
 indexmap = { workspace = true }
 meerkat-mob = { workspace = true }
-meerkat-memory = { workspace = true }
-meerkat-skills = { workspace = true }
 # meerkat-mcp-server is NOT a dependency — it depends on us (no circular dep).
 # Binaries (rkat, meerkat-rest) depend on it directly.
 

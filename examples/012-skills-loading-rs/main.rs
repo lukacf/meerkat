@@ -43,7 +43,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| "Set ANTHROPIC_API_KEY to run this example")?;
 
-    let store_dir = tempfile::tempdir()?.keep().join("sessions");
+    let _tmp = tempfile::tempdir()?;
+    let store_dir = _tmp.path().join("sessions");
     std::fs::create_dir_all(&store_dir)?;
 
     let factory = AgentFactory::new(store_dir.clone());
@@ -122,7 +123,8 @@ You are an API design consultant.
     // The skill ID is derived from the relative path within the root.
     // Example: root/.rkat/skills/security/auditor/SKILL.md -> id "security/auditor"
 
-    let skill_dir = tempfile::tempdir()?.keep();
+    let _skill_tmp = tempfile::tempdir()?;
+    let skill_dir = _skill_tmp.path().to_path_buf();
     let security_skill_dir = skill_dir.join("security").join("auditor");
     std::fs::create_dir_all(&security_skill_dir)?;
     std::fs::write(

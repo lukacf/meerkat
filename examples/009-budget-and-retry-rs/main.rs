@@ -78,7 +78,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let tight_budget = BudgetLimits::unlimited().with_max_tokens(100); // Very tight budget
 
-    let store2_dir = tempfile::tempdir()?.keep().join("sessions");
+    let _tmp2 = tempfile::tempdir()?;
+    let store2_dir = _tmp2.path().join("sessions");
     std::fs::create_dir_all(&store2_dir)?;
     let factory2 = AgentFactory::new(store2_dir.clone());
     let client2 = Arc::new(AnthropicClient::new(std::env::var("ANTHROPIC_API_KEY")?)?);

@@ -46,15 +46,8 @@ fn event_label(kind: &MobEventKind) -> &'static str {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // ── Check for API key ────────────────────────────────────────────────────
-    if std::env::var("ANTHROPIC_API_KEY").is_err() {
-        eprintln!("ANTHROPIC_API_KEY is required to run this example.");
-        eprintln!("Set it and re-run:");
-        eprintln!(
-            "  ANTHROPIC_API_KEY=sk-... cargo run --example 019-mob-pipeline --features comms"
-        );
-        std::process::exit(1);
-    }
+    let _api_key = std::env::var("ANTHROPIC_API_KEY")
+        .map_err(|_| "Set ANTHROPIC_API_KEY to run this example")?;
 
     // ── Part 1: Explore the pipeline prefab ──────────────────────────────────
     println!("=== Mob: Pipeline (Prefab) ===\n");
@@ -264,7 +257,14 @@ content = "Execute deployment: build release, run smoke tests. Report pass/fail.
         .await?;
 
     println!("Waiting for lint result...");
-    tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let ev = handle.poll_events(0, 1).await?;
+        if !ev.is_empty() || tokio::time::Instant::now() > deadline {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
 
     // Run the second stage: send a test request to the tester.
     println!("\n--- Stage 2: Test ---");
@@ -285,9 +285,21 @@ content = "Execute deployment: build release, run smoke tests. Report pass/fail.
         .await?;
 
     println!("Waiting for test result...");
-    tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+    let deadline2 = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    let cursor = handle
+        .poll_events(0, 100)
+        .await?
+        .last()
+        .map_or(0, |e| e.cursor);
+    loop {
+        let ev = handle.poll_events(cursor, 1).await?;
+        if !ev.is_empty() || tokio::time::Instant::now() > deadline2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
 
-    // Poll mob events.
+    // Poll all mob events.
     let events = handle.poll_events(0, 50).await?;
     println!("\nMob events ({} total):", events.len());
     for event in &events {

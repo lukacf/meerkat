@@ -47,15 +47,8 @@ fn event_label(kind: &MobEventKind) -> &'static str {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // ── Check for API key ────────────────────────────────────────────────────
-    if std::env::var("ANTHROPIC_API_KEY").is_err() {
-        eprintln!("ANTHROPIC_API_KEY is required to run this example.");
-        eprintln!("Set it and re-run:");
-        eprintln!(
-            "  ANTHROPIC_API_KEY=sk-... cargo run --example 018-mob-research-team --features comms"
-        );
-        std::process::exit(1);
-    }
+    let _api_key = std::env::var("ANTHROPIC_API_KEY")
+        .map_err(|_| "Set ANTHROPIC_API_KEY to run this example")?;
 
     // ── Part 1: Explore the research team prefab ─────────────────────────────
     println!("=== Mob: Research Team (Prefab) ===\n");
@@ -264,9 +257,16 @@ content = "Evaluate technical feasibility, architecture options, scalability con
         )
         .await?;
 
-    // Wait for the LLM turn to complete.
+    // Poll until we see mob events (with timeout).
     println!("Waiting for response...");
-    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let ev = handle.poll_events(0, 1).await?;
+        if !ev.is_empty() || tokio::time::Instant::now() > deadline {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
 
     // Show task board.
     let tasks = handle.task_list().await?;

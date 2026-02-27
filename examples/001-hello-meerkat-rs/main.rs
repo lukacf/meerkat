@@ -25,7 +25,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|_| "Set ANTHROPIC_API_KEY to run this example")?;
 
     // 1. Create a temporary session store
-    let store_dir = tempfile::tempdir()?.keep().join("sessions");
+    let _tmp = tempfile::tempdir()?;
+    let store_dir = _tmp.path().join("sessions");
     std::fs::create_dir_all(&store_dir)?;
 
     // 2. Wire up the LLM client via AgentFactory

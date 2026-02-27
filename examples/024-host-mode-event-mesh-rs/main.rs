@@ -36,6 +36,7 @@ use meerkat::{
     AgentEvent, AgentFactory, Config, CreateSessionRequest, EphemeralSessionService,
     FactoryAgentBuilder, SessionService, StartTurnRequest,
 };
+use meerkat_core::EventEnvelope;
 use meerkat_core::service::InitialTurnPolicy;
 use tokio::sync::mpsc;
 
@@ -78,7 +79,8 @@ task that owns the Agent exclusively (no mutex needed).
     // AgentFactory handles provider resolution, prompt assembly, and tool
     // dispatcher setup. The factory reads ANTHROPIC_API_KEY from the
     // environment to authenticate LLM calls.
-    let store_dir = tempfile::tempdir()?.keep().join("sessions");
+    let _tmp = tempfile::tempdir()?;
+    let store_dir = _tmp.path().join("sessions");
     std::fs::create_dir_all(&store_dir)?;
 
     let factory = AgentFactory::new(store_dir);
@@ -101,7 +103,7 @@ task that owns the Agent exclusively (no mutex needed).
 
     println!("--- Turn 1: Initial alert ---\n");
 
-    let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(256);
+    let (event_tx, event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(256);
     let event_collector = spawn_event_collector(event_rx);
 
     let result = service
@@ -136,7 +138,7 @@ task that owns the Agent exclusively (no mutex needed).
 
     println!("\n--- Turn 2: Monitoring event injected ---\n");
 
-    let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(256);
+    let (event_tx, event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(256);
     let event_collector = spawn_event_collector(event_rx);
 
     // start_turn injects a new prompt into the live session. The agent has
@@ -174,7 +176,7 @@ task that owns the Agent exclusively (no mutex needed).
 
     println!("--- Turn 3: Resolution event injected ---\n");
 
-    let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(256);
+    let (event_tx, event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(256);
     let event_collector = spawn_event_collector(event_rx);
 
     let result = service
@@ -279,12 +281,12 @@ Host mode is essential for:
 
 /// Spawn a task that collects events and returns them when the channel closes.
 fn spawn_event_collector(
-    mut event_rx: mpsc::Receiver<AgentEvent>,
+    mut event_rx: mpsc::Receiver<EventEnvelope<AgentEvent>>,
 ) -> tokio::task::JoinHandle<Vec<AgentEvent>> {
     tokio::spawn(async move {
         let mut events = Vec::new();
-        while let Some(event) = event_rx.recv().await {
-            events.push(event);
+        while let Some(envelope) = event_rx.recv().await {
+            events.push(envelope.payload);
         }
         events
     })

@@ -710,6 +710,7 @@ async fn session_task<A: SessionAgent>(
     control: SessionTaskControl,
 ) {
     let mut next_seq: u64 = 0;
+    let source_id = format!("session:{}", agent.session_id());
     while let Some(cmd) = commands.recv().await {
         match cmd {
             SessionCommand::StartTurn {
@@ -720,7 +721,6 @@ async fn session_task<A: SessionAgent>(
                 skill_references,
                 flow_tool_overlay,
             } => {
-                let source_id = format!("session:{}", agent.session_id());
                 agent.set_skill_references(skill_references);
                 if let Err(error) = agent.set_flow_tool_overlay(flow_tool_overlay) {
                     control.turn_lock.store(false, Ordering::Release);

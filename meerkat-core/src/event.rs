@@ -40,6 +40,9 @@ impl<T> EventEnvelope<T> {
 }
 
 /// Canonical serialized event kind for SSE/RPC discriminators.
+///
+/// Intentionally exhaustive: when a new `AgentEvent` variant is added, this
+/// match should fail to compile until that variant gets an explicit wire name.
 pub fn agent_event_type(event: &AgentEvent) -> &'static str {
     match event {
         AgentEvent::RunStarted { .. } => "run_started",

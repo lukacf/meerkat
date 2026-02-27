@@ -18,6 +18,8 @@ use meerkat_core::skills::{
 };
 #[cfg(feature = "mcp")]
 use std::collections::HashMap;
+#[cfg(feature = "mcp")]
+use std::collections::VecDeque;
 #[cfg(feature = "skills")]
 use std::sync::Arc;
 #[cfg(feature = "mcp")]
@@ -200,7 +202,15 @@ pub async fn emit_mcp_lifecycle_events(
     use meerkat_core::event::ToolConfigChangedPayload;
     use meerkat_mcp::McpLifecycleAction;
 
-    static MCP_EVENT_SEQ_BY_SOURCE: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    const MCP_SEQ_SOURCE_CAP: usize = 8192;
+
+    #[derive(Default)]
+    struct McpSeqState {
+        seq_by_source: HashMap<String, u64>,
+        source_order: VecDeque<String>,
+    }
+
+    static MCP_EVENT_SEQ_BY_SOURCE: OnceLock<Mutex<McpSeqState>> = OnceLock::new();
 
     for action in actions {
         let (operation, target, status) = match action {
@@ -233,12 +243,29 @@ pub async fn emit_mcp_lifecycle_events(
             applied_at_turn: Some(turn_number),
         };
         let seq = {
-            let map = MCP_EVENT_SEQ_BY_SOURCE.get_or_init(|| Mutex::new(HashMap::new()));
+            let map = MCP_EVENT_SEQ_BY_SOURCE.get_or_init(|| Mutex::new(McpSeqState::default()));
             let mut guard = match map.lock() {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            let entry = guard.entry(source_id.to_string()).or_insert(0);
+            if !guard.seq_by_source.contains_key(source_id) {
+                let source_key = source_id.to_string();
+                guard.source_order.push_back(source_key.clone());
+                guard.seq_by_source.insert(source_key, 0);
+
+                while guard.seq_by_source.len() > MCP_SEQ_SOURCE_CAP {
+                    if let Some(evicted) = guard.source_order.pop_front() {
+                        guard.seq_by_source.remove(&evicted);
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            let entry = guard
+                .seq_by_source
+                .entry(source_id.to_string())
+                .or_insert(0);
             *entry += 1;
             *entry
         };

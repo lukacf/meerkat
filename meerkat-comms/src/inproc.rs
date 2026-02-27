@@ -221,28 +221,10 @@ impl InprocRegistry {
         Some((peer.pubkey, peer.sender.clone()))
     }
 
-    /// Look up an inproc peer by name across ALL namespaces.
-    ///
-    /// Used for cross-mob communication: when a trusted peer's inproc address
-    /// is known but the peer is registered in a different namespace. Searches
-    /// all namespaces and returns the first match.
-    pub fn get_by_name_any_namespace(&self, name: &str) -> Option<(PubKey, InboxSender)> {
-        let state = self.state.read();
-        for namespace_state in state.namespaces.values() {
-            if let Some(&pubkey) = namespace_state.names.get(name)
-                && let Some(peer) = namespace_state.peers.get(&pubkey)
-            {
-                return Some((peer.pubkey, peer.sender.clone()));
-            }
-        }
-        None
-    }
-
     /// Look up an inproc peer by name AND pubkey across ALL namespaces.
     ///
-    /// Unlike [`get_by_name_any_namespace`], this constrains the match by
-    /// pubkey to avoid ambiguity when multiple namespaces contain peers with
-    /// the same name but different keys.
+    /// Constrains the match by pubkey to avoid ambiguity when multiple
+    /// namespaces contain peers with the same name but different keys.
     pub fn get_by_name_and_pubkey_any_namespace(
         &self,
         name: &str,

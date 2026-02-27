@@ -1,509 +1,94 @@
+// ═══════════════════════════════════════════════════════════
+// Mini Diplomacy Arena — 19th Century European Theatre
+// ═══════════════════════════════════════════════════════════
+
 import "./styles.css";
 
-// ═══════════════════════════════════════════════════════════
-// Types
-// ═══════════════════════════════════════════════════════════
-
-type Team = "north" | "south" | "east";
-const TEAMS: Team[] = ["north", "south", "east"];
-
-interface RegionState { id: string; controller: Team; defense: number; value: number }
-interface ArenaState {
-  turn: number; max_turns: number; regions: RegionState[];
-  scores: Record<Team, number>; winner?: Team | "draw";
-}
-interface OrderSet { team: Team; aggression: number; fortify: number; target_region: string }
-interface TurnDecision { order: OrderSet; reasoning: string }
-
-// ── DM Channels ──
-type ChannelId =
-  | "n-plan-op" | "s-plan-op" | "e-plan-op"       // planner↔operator
-  | "n-plan-amb" | "s-plan-amb" | "e-plan-amb"     // planner↔ambassador
-  | "e-n-diplo" | "e-s-diplo" | "n-s-diplo"        // ambassador↔ambassador (alphabetical sort)
-  | "narrator";
-type MessageRole = "planner" | "operator" | "ambassador" | "narrator" | "system";
-interface ChatMessage { channel: ChannelId; role: MessageRole; faction: Team | "neutral"; content: string; turn: number }
-
-const CHANNELS: { id: ChannelId; label: string; icon: string }[] = [
-  { id: "n-plan-op",  label: "N: Plan\u2194Op",  icon: "\u{1F9ED}" },
-  { id: "s-plan-op",  label: "S: Plan\u2194Op",  icon: "\u{1F9ED}" },
-  { id: "e-plan-op",  label: "E: Plan\u2194Op",  icon: "\u{1F9ED}" },
-  { id: "n-plan-amb", label: "N: Plan\u2194Amb", icon: "\u{1F4E8}" },
-  { id: "s-plan-amb", label: "S: Plan\u2194Amb", icon: "\u{1F4E8}" },
-  { id: "e-plan-amb", label: "E: Plan\u2194Amb", icon: "\u{1F4E8}" },
-  { id: "e-n-diplo",  label: "N\u2194E Diplo",   icon: "\u{1F91D}" },
-  { id: "e-s-diplo",  label: "S\u2194E Diplo",   icon: "\u{1F91D}" },
-  { id: "n-s-diplo",  label: "N\u2194S Diplo",   icon: "\u{1F91D}" },
-  { id: "narrator",   label: "#narrator",         icon: "\u{1F4DC}" },
-];
-
-// ── WASM Runtime ──
-interface RuntimeModule {
-  default: () => Promise<unknown>;
-  init_runtime_from_config: (configJson: string) => unknown;
-  mob_create: (definitionJson: string) => Promise<unknown>;
-  mob_spawn: (mobId: string, specsJson: string) => Promise<unknown>;
-  mob_wire: (mobId: string, a: string, b: string) => Promise<void>;
-  wire_cross_mob: (mobA: string, meerkatA: string, mobB: string, meerkatB: string) => Promise<void>;
-  mob_send_message: (mobId: string, meerkatId: string, message: string) => Promise<void>;
-  mob_run_flow: (mobId: string, flowId: string, paramsJson: string) => Promise<unknown>;
-  mob_flow_status: (mobId: string, runId: string) => Promise<unknown>;
-  mob_list_members: (mobId: string) => Promise<unknown>;
-  mob_member_subscribe: (mobId: string, meerkatId: string) => Promise<number>;
-  poll_subscription: (handle: number) => string;
-  close_subscription: (handle: number) => void;
-}
-
-interface AgentSub { meerkatId: string; handle: number; role: MessageRole; team: Team }
-interface FactionMob { team: Team; mobId: string }
-interface MatchSession {
-  factions: FactionMob[];
-  narratorMobId: string | null;
-  subs: AgentSub[];  // event subscriptions for all 9 agents
-  state: ArenaState;
-  messages: ChatMessage[];
-  running: boolean;
-  prevControllers: Map<string, Team>;
-  seenToolCallIds: Set<string>;  // dedup tool_call_requested events
-}
+import type { FactionMob, MatchSession, RuntimeModule, Team } from "./types";
+import { TEAMS, TEAM_LABELS } from "./types";
+import { getApiKeys, initApiKeyInputs } from "./config";
+import { defaultState, resolveOrders } from "./game";
+import { renderMap } from "./map";
+import { buildFactionDefinition, buildNarratorDefinition, serializeState } from "./agents";
+import { drainAllEvents, buildNarratorSummary } from "./events";
+import {
+  $, setSessionRef, setPhase, setStatus, setBadge, showBanner, showVictory,
+  renderScore, renderGrid, pushMessage, pushNarrator, parseJsResult, sleep,
+  initMapResize,
+} from "./ui";
 
 // ═══════════════════════════════════════════════════════════
-// Map Data
-// ═══════════════════════════════════════════════════════════
-
-interface TerritoryInfo { path: string; center: { x: number; y: number }; label: string }
-
-const MAP: Record<string, TerritoryInfo> = {
-  "north-capital":  { path: "M350,15 L390,10 L460,8 L520,14 L550,25 L540,60 L510,95 L450,110 L390,105 L355,80 L340,50 Z", center: { x: 450, y: 58 }, label: "North\nCapital" },
-  "north-harbor":   { path: "M140,75 L195,48 L250,35 L310,22 L350,15 L340,50 L355,80 L390,105 L340,130 L280,145 L220,150 L165,135 L130,110 Z", center: { x: 255, y: 88 }, label: "North\nHarbor" },
-  "north-ridge":    { path: "M550,25 L610,30 L680,50 L740,78 L760,110 L730,140 L670,150 L610,145 L560,130 L510,95 L540,60 Z", center: { x: 640, y: 95 }, label: "North\nRidge" },
-  "obsidian-gate":  { path: "M130,110 L165,135 L220,150 L280,145 L340,130 L390,105 L450,110 L440,155 L410,200 L350,225 L280,230 L210,220 L155,195 L120,160 Z", center: { x: 290, y: 170 }, label: "Obsidian\nGate" },
-  "crimson-pass":   { path: "M450,110 L510,95 L560,130 L610,145 L670,150 L660,195 L630,230 L570,250 L500,245 L440,230 L410,200 L440,155 Z", center: { x: 545, y: 180 }, label: "Crimson\nPass" },
-  "glass-frontier": { path: "M120,160 L155,195 L210,220 L280,230 L350,225 L410,200 L440,230 L430,280 L390,320 L320,340 L240,330 L170,305 L120,265 L100,220 Z", center: { x: 270, y: 270 }, label: "Glass\nFrontier" },
-  "ember-crossing": { path: "M670,150 L730,140 L760,110 L800,145 L830,195 L840,250 L820,300 L770,330 L710,335 L650,320 L610,285 L590,250 L630,230 L660,195 Z", center: { x: 720, y: 240 }, label: "Ember\nCrossing" },
-  "saffron-fields": { path: "M440,230 L500,245 L570,250 L590,250 L610,285 L650,320 L630,360 L570,385 L500,390 L430,380 L380,355 L390,320 L430,280 Z", center: { x: 510, y: 315 }, label: "Saffron\nFields" },
-  "southern-rail":  { path: "M100,220 L120,265 L170,305 L240,330 L320,340 L300,385 L260,420 L200,440 L140,430 L90,400 L65,350 L70,290 Z", center: { x: 175, y: 355 }, label: "Southern\nRail" },
-  "ash-basin":      { path: "M650,320 L710,335 L770,330 L820,300 L850,340 L855,395 L830,440 L780,465 L720,470 L660,455 L620,420 L600,385 L630,360 Z", center: { x: 740, y: 395 }, label: "Ash\nBasin" },
-  "mercury-delta":  { path: "M320,340 L390,320 L380,355 L430,380 L500,390 L480,430 L440,465 L380,485 L310,490 L250,475 L200,440 L260,420 L300,385 Z", center: { x: 355, y: 425 }, label: "Mercury\nDelta" },
-  "south-capital":  { path: "M500,390 L570,385 L630,360 L600,385 L620,420 L660,455 L640,490 L590,520 L530,535 L460,530 L400,510 L380,485 L440,465 L480,430 Z", center: { x: 530, y: 465 }, label: "South\nCapital" },
-};
-
-const EDGES: [string, string][] = [
-  ["north-capital", "north-harbor"], ["north-capital", "north-ridge"],
-  ["north-capital", "obsidian-gate"], ["north-capital", "crimson-pass"],
-  ["north-harbor", "obsidian-gate"], ["north-ridge", "crimson-pass"],
-  ["obsidian-gate", "crimson-pass"], ["obsidian-gate", "glass-frontier"],
-  ["crimson-pass", "ember-crossing"], ["glass-frontier", "saffron-fields"],
-  ["glass-frontier", "southern-rail"], ["ember-crossing", "saffron-fields"],
-  ["ember-crossing", "ash-basin"], ["southern-rail", "mercury-delta"],
-  ["saffron-fields", "mercury-delta"], ["saffron-fields", "south-capital"],
-  ["ash-basin", "south-capital"], ["mercury-delta", "south-capital"],
-  ["saffron-fields", "ash-basin"],
-];
-
-// ═══════════════════════════════════════════════════════════
-// Game Engine
-// ═══════════════════════════════════════════════════════════
-
-function defaultState(): ArenaState {
-  return {
-    turn: 1, max_turns: 10,
-    scores: { north: 0, south: 0, east: 0 },
-    regions: [
-      { id: "north-capital",  controller: "north", defense: 58, value: 3 },
-      { id: "north-harbor",   controller: "north", defense: 48, value: 2 },
-      { id: "north-ridge",    controller: "north", defense: 42, value: 2 },
-      { id: "obsidian-gate",  controller: "north", defense: 43, value: 3 },
-      { id: "south-capital",  controller: "south", defense: 56, value: 3 },
-      { id: "southern-rail",  controller: "south", defense: 47, value: 2 },
-      { id: "mercury-delta",  controller: "south", defense: 38, value: 2 },
-      { id: "ash-basin",      controller: "south", defense: 45, value: 3 },
-      { id: "crimson-pass",   controller: "east",  defense: 40, value: 3 },
-      { id: "ember-crossing", controller: "east",  defense: 44, value: 3 },
-      { id: "glass-frontier", controller: "east",  defense: 46, value: 4 },
-      { id: "saffron-fields", controller: "east",  defense: 40, value: 2 },
-    ],
-  };
-}
-
-function resolveOrders(state: ArenaState, orders: TurnDecision[]): ArenaState {
-  const newRegions = state.regions.map(r => ({ ...r }));
-  for (const decision of orders) {
-    const { order } = decision;
-    const target = newRegions.find(r => r.id === order.target_region);
-    if (!target || target.controller === order.team) continue;
-    const atkNoise = Math.floor(Math.random() * 12);
-    const defNoise = Math.floor(Math.random() * 8);
-    if (order.aggression + atkNoise > target.defense + defNoise) {
-      target.controller = order.team;
-      target.defense = Math.max(25, Math.floor(target.defense * 0.5) + Math.floor(order.fortify / 8));
-    } else {
-      target.defense = Math.min(100, target.defense + 2);
-    }
-    for (const r of newRegions) {
-      if (r.controller === order.team) { r.defense = Math.min(100, r.defense + Math.floor(order.fortify / 15)); break; }
-    }
-  }
-  const scores = { ...state.scores };
-  for (const team of TEAMS) scores[team] += newRegions.filter(r => r.controller === team).reduce((s, r) => s + r.value, 0);
-  const turn = state.turn + 1;
-  let winner: Team | "draw" | undefined;
-  if (turn > state.max_turns) {
-    const sorted = TEAMS.slice().sort((a, b) => scores[b] - scores[a]);
-    winner = scores[sorted[0]] > scores[sorted[1]] ? sorted[0] : "draw";
-  }
-  return { turn, max_turns: state.max_turns, regions: newRegions, scores, winner };
-}
-
-// ═══════════════════════════════════════════════════════════
-// Mob Definitions — autonomous agents with comms
-// ═══════════════════════════════════════════════════════════
-
-const GAME_RULES = `GAME: 3-faction territory war (North, South, East). 12 territories with defense (0-100) and value (2-4 pts).
-COMBAT: aggression + rand(0-12) vs defense + rand(0-8). Capture if greater. Fortify = 100 - aggression.
-SCORING: Each turn, factions earn sum of their territories' values. 10 turns total. Highest cumulative score wins.
-DIPLOMACY: 2v1 is decisive. Alliances, betrayals, and threats are critical to winning.`;
-
-function buildFactionDefinition(team: Team, model: string): object {
-  const T = team.toUpperCase();
-  const mobId = `diplomacy-${team}`;
-  const others = TEAMS.filter(t => t !== team);
-  const peerAddr = (role: string, t: Team = team) => `diplomacy-${t}/${role}/${t}-${role}`;
-
-  const plannerSkill = `You are the strategic PLANNER for ${T}. You are cunning, ruthless, and play to WIN.
-${GAME_RULES}
-
-YOUR PEERS (use these exact addresses with send_message):
-- Operator: ${peerAddr("operator")}
-- Ambassador: ${peerAddr("ambassador")}
-
-Do NOT act until you receive a turn message with game state.
-When you receive game state:
-1. Message your OPERATOR to debate strategy — target, aggression, risk.
-2. After agreeing, brief your AMBASSADOR with diplomatic objectives. Be specific about:
-   - What to PROPOSE to each foreign ambassador
-   - What to CONCEAL (never reveal your actual attack target to enemies!)
-   - What lies or misdirection to use (e.g. "we're attacking X" when you're really attacking Y)
-3. Wait for diplomatic intel from your ambassador.
-4. Adjust plan if needed, then tell your OPERATOR to finalize.
-Concise messages. Do not call peers().`;
-
-  const operatorSkill = `You are the military OPERATOR for ${T}. Cold, analytical, focused on winning.
-${GAME_RULES}
-
-YOUR PEERS (use these exact addresses with send_message):
-- Planner: ${peerAddr("planner")}
-
-Do NOT act until your planner messages you.
-When the planner discusses strategy:
-1. Run the combat math. Challenge weak plans. Push for high-probability attacks.
-2. Agree on target and aggression.
-3. When told to finalize, send your planner a message containing EXACTLY:
-   FINAL ORDER: target=<region-id> aggression=<0-100>
-Concise messages. Do not call peers().`;
-
-  const ambassadorSkill = `You are the diplomatic AMBASSADOR for ${T}. You are a master of deception and persuasion.
-${GAME_RULES}
-
-YOUR PEERS (use these exact addresses with send_message):
-- Planner (your boss): ${peerAddr("planner")}
-- Foreign ambassadors: ${others.map(t => `${t.toUpperCase()} → ${peerAddr("ambassador", t)}`).join(", ")}
-
-Do NOT act until your planner briefs you.
-
-CARDINAL RULES OF DIPLOMACY:
-- NEVER reveal your faction's actual attack target to foreign ambassadors.
-- NEVER share internal strategy discussions.
-- LIE freely. Promise alliances you won't keep. Claim you're attacking faction X when you're really hitting Y.
-- Use misdirection: "We're considering a defensive turn" when you're going all-out offense.
-- Gather intelligence: get the enemy to reveal THEIR plans while giving away nothing real.
-- Propose deals that benefit you more than them. Make them think it's mutual.
-
-When briefed by your planner:
-1. Contact foreign ambassadors. Pursue your planner's objectives using deception.
-2. Try to extract enemy intentions — who are they attacking? What alliances are they forming?
-3. Report back to your planner with intel and negotiation results.
-Concise messages. Do not call peers().`;
-
-  return {
-    id: mobId,
-    skills: {
-      [`${team}-planner-role`]: { source: "inline", content: plannerSkill },
-      [`${team}-operator-role`]: { source: "inline", content: operatorSkill },
-      [`${team}-ambassador-role`]: { source: "inline", content: ambassadorSkill },
-    },
-    profiles: {
-      planner: {
-        model, runtime_mode: "autonomous_host",
-        tools: { comms: true },
-        skills: [`${team}-planner-role`],
-        peer_description: `${T} strategic planner`,
-        external_addressable: true,
-      },
-      operator: {
-        model, runtime_mode: "autonomous_host",
-        tools: { comms: true },
-        skills: [`${team}-operator-role`],
-        peer_description: `${T} military operator`,
-        external_addressable: true,
-      },
-      ambassador: {
-        model, runtime_mode: "autonomous_host",
-        tools: { comms: true },
-        skills: [`${team}-ambassador-role`],
-        peer_description: `${T} diplomatic ambassador`,
-        external_addressable: true,
-      },
-    },
-    wiring: {},
-    flows: {},
-  };
-}
-
-function buildNarratorDefinition(model: string): object {
-  return {
-    id: "diplomacy-narrator",
-    profiles: {
-      narrator: {
-        model, runtime_mode: "turn_driven",
-        tools: { comms: true },
-        peer_description: "War correspondent narrator",
-        external_addressable: false,
-      },
-    },
-    flows: {
-      narrate: {
-        steps: {
-          summarize: {
-            role: "narrator",
-            message: `You are a dramatic, omniscient war correspondent who sees EVERYTHING — the secret war rooms, the whispered lies between diplomats, the private doubts of commanders. You know who lied to whom, who is planning betrayal, and what each faction REALLY discussed behind closed doors.
-
-Below is the COMPLETE intelligence from this turn: battle outcomes, private strategy discussions, diplomatic briefings, and the actual negotiations between ambassadors.
-
-{{params.summary}}
-
-Write 2-4 sentences of vivid, dramatic narrative. You can reveal dramatic irony — e.g. "North's ambassador smiled and promised peace, even as her generals sharpened their swords for Crimson Pass." Reference specific territories, betrayals, and secret plans. Make the reader feel the tension and treachery.
-CRITICAL: Output RAW JSON only. No markdown, no code fences, no backticks.
-{"narrative": "your narrative here"}`,
-            dispatch_mode: "one_to_one",
-          },
-        },
-      },
-    },
-  };
-}
-
-function serializeState(team: Team, state: ArenaState): string {
-  const ours = state.regions.filter(r => r.controller === team);
-  const enemies = state.regions.filter(r => r.controller !== team);
-  return JSON.stringify({
-    turn: state.turn, max_turns: state.max_turns, team,
-    scores: state.scores,
-    your_territories: ours.map(r => ({ id: r.id, defense: r.defense, value: r.value })),
-    enemy_territories: enemies.map(r => ({ id: r.id, controller: r.controller, defense: r.defense, value: r.value })),
-  });
-}
-
-// ═══════════════════════════════════════════════════════════
-// HTML
+// HTML Shell
 // ═══════════════════════════════════════════════════════════
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 app.innerHTML = `
 <div class="score-strip">
-  <div class="faction north"><span class="name">North</span><span class="pts" id="nPts">0</span></div>
-  <div class="faction east"><span class="name">East</span><span class="pts" id="ePts">0</span></div>
+  <div class="faction france"><span class="name">France</span><span class="pts" id="fPts">0</span></div>
+  <div class="faction prussia"><span class="name">Prussia</span><span class="pts" id="pPts">0</span></div>
   <div class="strip-center">
     <span class="turn-pill" id="turnPill">Turn 1 / 10</span>
     <span class="status-badge" id="statusBadge">Ready</span>
+    <button class="ctrl-btn primary" id="startBtn">Start</button>
+    <button class="ctrl-btn" id="pauseBtn">Pause</button>
+    <button class="ctrl-btn" id="stepBtn">Step</button>
+    <button class="ctrl-btn" id="exportBtn">Export</button>
   </div>
-  <div class="faction south"><span class="pts" id="sPts">0</span><span class="name">South</span></div>
+  <div class="faction russia"><span class="pts" id="rPts">0</span><span class="name">Russia</span></div>
   <button class="gear-btn" id="gearBtn" title="Settings">\u2699</button>
 </div>
-<div class="control-bar-wrap"><div class="n-fill" id="nFill" style="flex:1"></div><div class="e-fill" id="eFill" style="flex:1"></div><div class="s-fill" id="sFill" style="flex:1"></div></div>
-<div class="arena-layout">
-  <div class="map-stage" id="mapStage">
-    <svg id="mapSvg" viewBox="0 0 900 570" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg"></svg>
-    <div class="turn-banner" id="banner"><div class="phase" id="bannerPhase"></div><div class="detail" id="bannerDetail"></div></div>
-    <div class="victory-overlay" id="victory"><div class="victory-content" id="victoryInner"></div></div>
-    <div class="game-controls">
-      <button class="primary" id="startBtn">Start Campaign</button>
-      <button id="pauseBtn">Pause</button>
-      <button id="stepBtn">Step</button>
-      <span class="sep"></span>
-      <button id="exportBtn">Export</button>
+<div class="control-bar-wrap"><div class="f-fill" id="fFill" style="flex:1"></div><div class="p-fill" id="pFill" style="flex:1"></div><div class="r-fill" id="rFill" style="flex:1"></div></div>
+<div class="arena-layout" id="arenaLayout" data-phase="idle">
+  <div class="left-col">
+    <div class="map-stage" id="mapStage">
+      <svg id="mapSvg" viewBox="0 0 960 600" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg"></svg>
+      <div class="turn-banner" id="banner"><div class="phase" id="bannerPhase"></div><div class="detail" id="bannerDetail"></div></div>
+      <div class="victory-overlay" id="victory"><div class="victory-content" id="victoryInner"></div></div>
+    </div>
+    <div class="narrator-panel" id="narratorPanel">
+      <div class="narrator-header">\u{1F4DC} War Correspondent</div>
+      <div class="narrator-feed" id="narratorFeed">
+        <div class="narrator-entry"><em>Awaiting the first dispatches from the field...</em></div>
+      </div>
     </div>
   </div>
-  <div class="chat-panel" id="chatPanel">
-    <div class="channel-sidebar" id="channelSidebar"></div>
-    <div class="message-area" id="messageArea">
-      <div class="msg-header" id="msgHeader">#narrator</div>
-      <div class="msg-feed" id="msgFeed"></div>
-    </div>
+  <div class="right-col">
+    <div class="channel-grid" id="channelGrid"></div>
   </div>
 </div>
 <div class="settings-drawer" id="drawer">
   <button class="close-btn" id="closeDrawer">\u2715 Close</button>
-  <h3>Settings</h3>
-  <div class="setting"><label>API Key</label><input type="password" id="apiKey" placeholder="sk-ant-..." /></div>
-  <div class="setting"><label>Model</label><select id="modelSelect"><option value="claude-sonnet-4-5" selected>claude-sonnet-4-5</option><option value="claude-opus-4-6">claude-opus-4-6</option><option value="gpt-5.2">gpt-5.2</option><option value="gemini-3-flash-preview">gemini-3-flash-preview</option></select></div>
-  <p class="settings-note">Each faction is a mob of 3 autonomous agents (planner, operator, ambassador) communicating via comms. Ambassadors negotiate across factions. Sessions persist across turns.</p>
+  <h3>API Keys</h3>
+  <div class="setting"><label>Anthropic</label><input type="password" id="keyAnthropic" placeholder="sk-ant-..." /></div>
+  <div class="setting"><label>OpenAI</label><input type="password" id="keyOpenai" placeholder="sk-..." /></div>
+  <div class="setting"><label>Gemini</label><input type="password" id="keyGemini" placeholder="..." /></div>
+  <h3>Faction Models</h3>
+  <div class="setting"><label>France</label><select id="modelFrance"></select></div>
+  <div class="setting"><label>Prussia</label><select id="modelPrussia"></select></div>
+  <div class="setting"><label>Russia</label><select id="modelRussia"></select></div>
+  <div class="setting"><label>Narrator</label><select id="modelNarrator"></select></div>
+  <p class="settings-note">Each faction is a mob of 3 autonomous agents (planner, operator, ambassador). Enter API keys to unlock models for that provider. Per-faction model selection allows mixed-provider games.</p>
 </div>
-<p class="status-bar" id="statusLine">Open settings (\u2699) to configure API key, then start.</p>`;
+<div class="start-overlay" id="startOverlay">
+  <div class="start-content">
+    <h1>The Congress of Europe</h1>
+    <p class="start-subtitle">A Meerkat WASM Demo \u2014 9 Autonomous AI Agents</p>
+    <div class="start-desc">
+      <p>Three great European powers \u2014 <strong>France</strong>, <strong>Prussia</strong>, and <strong>Russia</strong> \u2014 contest 12 territories across the continent. Each faction deploys 3 autonomous agents (planner, operator, ambassador) that strategize, negotiate, deceive, and betray through real-time comms.</p>
+      <p>Powered by <strong>Meerkat</strong>'s WASM runtime: 4 mobs, 9 autonomous_host agents, cross-mob comms, structured output extraction, all running in your browser.</p>
+    </div>
+    <button class="start-big-btn" id="startBigBtn">Enter the War Room</button>
+    <p class="start-hint">Then configure API keys via \u2699 and press Start</p>
+  </div>
+</div>
+<p class="status-bar" id="statusLine">Open settings (\u2699) to configure API keys, then start.</p>`;
 
 // ═══════════════════════════════════════════════════════════
-// Refs + State
+// State
 // ═══════════════════════════════════════════════════════════
 
-const $ = <T extends Element>(id: string) => document.getElementById(id) as unknown as T;
 let runtime: RuntimeModule | null = null;
 let session: MatchSession | null = null;
-let bannerTimer: ReturnType<typeof setTimeout> | null = null;
-let activeChannel: ChannelId = "narrator";
-const unreadCounts: Record<ChannelId, number> = Object.fromEntries(CHANNELS.map(c => [c.id, 0])) as Record<ChannelId, number>;
-
-const apiKeyInput = $<HTMLInputElement>("apiKey");
-apiKeyInput.value = sessionStorage.getItem("api_key") ?? "";
-apiKeyInput.addEventListener("change", () => sessionStorage.setItem("api_key", apiKeyInput.value));
-
-function setStatus(msg: string): void { ($<HTMLParagraphElement>("statusLine")).textContent = msg; }
-function setBadge(text: string, thinking = false): void {
-  const el = $<HTMLSpanElement>("statusBadge");
-  el.textContent = text;
-  el.className = `status-badge${thinking ? " thinking" : ""}`;
-}
-function showBanner(phase: string, detail: string, ms: number): void {
-  if (bannerTimer) clearTimeout(bannerTimer);
-  ($<HTMLDivElement>("bannerPhase")).textContent = phase;
-  ($<HTMLDivElement>("bannerDetail")).textContent = detail;
-  ($<HTMLDivElement>("banner")).classList.add("visible");
-  bannerTimer = setTimeout(() => ($<HTMLDivElement>("banner")).classList.remove("visible"), ms);
-}
-function showVictory(winner: Team | "draw", state: ArenaState, narratorText?: string): void {
-  const title = winner === "draw" ? "DRAW" : `${winner.toUpperCase()} WINS`;
-  const narration = narratorText ? `<p class="victory-narration">${escapeHtml(narratorText)}</p>` : "";
-  ($<HTMLDivElement>("victoryInner")).innerHTML = `<h2 class="${winner}">${title}</h2>${narration}<p>After ${state.turn} turns.</p><div class="final"><span class="north">N:${state.scores.north}</span><span class="east">E:${state.scores.east}</span><span class="south">S:${state.scores.south}</span></div>`;
-  ($<HTMLDivElement>("victory")).classList.add("visible");
-}
-
-// ═══════════════════════════════════════════════════════════
-// Render
-// ═══════════════════════════════════════════════════════════
-
-const GRAD: Record<Team, [string, string]> = { north: ["#2a7ac4","#143a6a"], south: ["#c4522a","#6a2414"], east: ["#24a068","#146040"] };
-
-function renderMap(state: ArenaState, targets?: Record<Team, string>, captures?: Set<string>): void {
-  const ctrl = new Map(state.regions.map(r => [r.id, r.controller]));
-  let svg = `<defs>`;
-  for (const [t, [c1, c2]] of Object.entries(GRAD))
-    svg += `<linearGradient id="g${t[0].toUpperCase()}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${c1}" stop-opacity="0.85"/><stop offset="1" stop-color="${c2}" stop-opacity="0.7"/></linearGradient>`;
-  svg += `<filter id="glow" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="6" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
-  <filter id="terrainNoise"><feTurbulence type="fractalNoise" baseFrequency="0.04" numOctaves="3" result="n"/><feColorMatrix type="saturate" values="0" in="n" result="ng"/><feBlend in="SourceGraphic" in2="ng" mode="overlay" result="blended"/><feComposite in="blended" in2="SourceGraphic" operator="in"/></filter>
-  <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0 L0 0 0 40" fill="none" stroke="rgba(50,70,100,0.03)" stroke-width="0.5"/></pattern></defs>`;
-  svg += `<rect width="900" height="570" fill="url(#grid)"/>`;
-  for (const region of state.regions) {
-    const t = MAP[region.id]; if (!t) continue;
-    const lines = t.label.split("\n");
-    svg += `<g class="territory" data-region="${region.id}">`;
-    svg += `<path d="${t.path}" fill="url(#g${region.controller[0].toUpperCase()})" class="hex-bg" filter="url(#terrainNoise)"/>`;
-    svg += `<path d="${t.path}" class="hex-border ${region.controller}"/>`;
-    if (lines.length === 2) {
-      svg += `<text class="region-label" x="${t.center.x}" y="${t.center.y - 6}">${lines[0]}</text>`;
-      svg += `<text class="region-label" x="${t.center.x}" y="${t.center.y + 7}">${lines[1]}</text>`;
-    } else {
-      svg += `<text class="region-label" x="${t.center.x}" y="${t.center.y + 2}">${t.label}</text>`;
-    }
-    svg += `<text class="region-stats" x="${t.center.x}" y="${t.center.y + 20}">\u2694${region.defense} \u2605${region.value}</text>`;
-    svg += `</g>`;
-  }
-  for (const [a, b] of EDGES) {
-    if (ctrl.get(a) !== ctrl.get(b)) {
-      const pa = MAP[a], pb = MAP[b];
-      svg += `<line x1="${pa.center.x}" y1="${pa.center.y}" x2="${pb.center.x}" y2="${pb.center.y}" class="edge-front"/>`;
-    }
-  }
-  if (captures) for (const id of captures) {
-    const t = MAP[id], team = ctrl.get(id);
-    if (t && team) svg += `<path d="${t.path}" class="captured-flash to-${team}" filter="url(#glow)"/>`;
-  }
-  if (targets) for (const [team, rid] of Object.entries(targets)) {
-    const t = MAP[rid];
-    if (t) svg += `<circle cx="${t.center.x}" cy="${t.center.y}" r="28" class="target-ring ${team}"/>`;
-  }
-  ($<SVGSVGElement>("mapSvg")).innerHTML = svg;
-}
-
-function renderScore(state: ArenaState): void {
-  ($<HTMLSpanElement>("nPts")).textContent = String(state.scores.north);
-  ($<HTMLSpanElement>("sPts")).textContent = String(state.scores.south);
-  ($<HTMLSpanElement>("ePts")).textContent = String(state.scores.east);
-  ($<HTMLSpanElement>("turnPill")).textContent = `Turn ${state.turn} / ${state.max_turns}`;
-  const total = state.scores.north + state.scores.south + state.scores.east || 1;
-  ($<HTMLDivElement>("nFill")).style.flex = String(state.scores.north / total);
-  ($<HTMLDivElement>("sFill")).style.flex = String(state.scores.south / total);
-  ($<HTMLDivElement>("eFill")).style.flex = String(state.scores.east / total);
-}
-
-// ── Channel UI ──
-
-const ROLE_ICONS: Record<MessageRole, string> = {
-  planner: "\u{1F9ED}", operator: "\u{1F6E1}\uFE0F", ambassador: "\u{1F3F3}\uFE0F",
-  narrator: "\u{1F4DC}", system: "\u2699\uFE0F",
-};
-
-function pushMessage(msg: ChatMessage): void {
-  if (!session) return;
-  session.messages.push(msg);
-  if (msg.channel !== activeChannel) { unreadCounts[msg.channel]++; }
-  renderChannelSidebar();
-  if (msg.channel === activeChannel) renderMessages();
-}
-
-function selectChannel(ch: ChannelId): void {
-  activeChannel = ch;
-  unreadCounts[ch] = 0;
-  renderChannelSidebar();
-  renderMessages();
-}
-
-function renderChannelSidebar(): void {
-  const el = $<HTMLDivElement>("channelSidebar");
-  el.innerHTML = CHANNELS.map(ch => {
-    const active = ch.id === activeChannel ? " active" : "";
-    const unread = unreadCounts[ch.id] > 0 ? `<span class="unread-badge">${unreadCounts[ch.id]}</span>` : "";
-    return `<button class="ch-btn${active}" data-ch="${ch.id}">${ch.icon} ${ch.label}${unread}</button>`;
-  }).join("");
-  el.querySelectorAll(".ch-btn").forEach(btn => {
-    btn.addEventListener("click", () => selectChannel(btn.getAttribute("data-ch") as ChannelId));
-  });
-}
-
-function renderMessages(): void {
-  const header = $<HTMLDivElement>("msgHeader");
-  const feed = $<HTMLDivElement>("msgFeed");
-  const ch = CHANNELS.find(c => c.id === activeChannel);
-  header.textContent = ch ? `${ch.icon} ${ch.label}` : activeChannel;
-  const msgs = session ? session.messages.filter(m => m.channel === activeChannel) : [];
-  feed.innerHTML = msgs.map(m => {
-    const fClass = m.faction === "neutral" ? "" : ` ${m.faction}`;
-    const icon = ROLE_ICONS[m.role];
-    const roleLabel = m.role.charAt(0).toUpperCase() + m.role.slice(1);
-    const factionLabel = m.faction === "neutral" ? "" : ` [${m.faction.toUpperCase()}]`;
-    return `<div class="chat-msg${fClass}"><div class="msg-meta"><span class="msg-icon">${icon}</span><span class="msg-role">${roleLabel}${factionLabel}</span><span class="msg-turn">T${m.turn}</span></div><div class="msg-body">${escapeHtml(m.content)}</div></div>`;
-  }).join("");
-  feed.scrollTop = feed.scrollHeight;
-}
-
-function escapeHtml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-// ═══════════════════════════════════════════════════════════
-// Helpers
-// ═══════════════════════════════════════════════════════════
-
-function parseJsResult(val: unknown): string { return typeof val === "string" ? val : String(val); }
-function sleep(ms: number): Promise<void> { return new Promise(r => setTimeout(r, ms)); }
 
 async function loadRuntime(): Promise<RuntimeModule> {
   if (runtime) return runtime;
@@ -512,149 +97,6 @@ async function loadRuntime(): Promise<RuntimeModule> {
   await mod.default();
   runtime = mod;
   return mod;
-}
-
-/** Extract meerkat_id from a full peer address like "diplomacy-north/ambassador/north-ambassador" */
-function extractMeerkatId(peerAddress: string): string {
-  const parts = peerAddress.split("/");
-  return parts[parts.length - 1] || peerAddress;
-}
-
-/** Resolve meerkat_id or peer address → team. */
-function meerkatTeam(id: string): Team | null {
-  const mid = extractMeerkatId(id);
-  for (const t of TEAMS) if (mid.startsWith(t)) return t;
-  return null;
-}
-
-/** Resolve meerkat_id or peer address → role. */
-function meerkatRole(id: string): MessageRole {
-  const mid = extractMeerkatId(id);
-  if (mid.includes("planner")) return "planner";
-  if (mid.includes("operator")) return "operator";
-  if (mid.includes("ambassador")) return "ambassador";
-  return "system";
-}
-
-/** Map a (sender, receiver) pair to the correct DM channel. */
-function dmChannel(senderId: string, receiverId: string): ChannelId | null {
-  const sTeam = meerkatTeam(senderId);
-  const rTeam = meerkatTeam(receiverId);
-  if (!sTeam || !rTeam) return null;
-
-  const sRole = meerkatRole(senderId);
-  const rRole = meerkatRole(receiverId);
-
-  // Cross-faction: ambassador↔ambassador
-  if (sTeam !== rTeam) {
-    const sorted = [sTeam, rTeam].sort();
-    return `${sorted[0][0]}-${sorted[1][0]}-diplo` as ChannelId;
-  }
-
-  // Same faction: planner↔operator or planner↔ambassador
-  if ((sRole === "planner" && rRole === "operator") || (sRole === "operator" && rRole === "planner"))
-    return `${sTeam[0]}-plan-op` as ChannelId;
-  if ((sRole === "planner" && rRole === "ambassador") || (sRole === "ambassador" && rRole === "planner"))
-    return `${sTeam[0]}-plan-amb` as ChannelId;
-
-  return null;
-}
-
-// ═══════════════════════════════════════════════════════════
-// Event Streaming → DM Channels
-// ═══════════════════════════════════════════════════════════
-
-/** Result of polling agent events. */
-interface DrainResult { events: number; errors: string[] }
-
-/** Poll all agent subscriptions and push events to DM channels. */
-function drainAllEvents(mod: RuntimeModule, turn: number): DrainResult {
-  if (!session) return { events: 0, errors: [] };
-  let events = 0;
-  const errors: string[] = [];
-  for (const sub of session.subs) {
-    try {
-      const raw = mod.poll_subscription(sub.handle);
-      const parsed: any[] = JSON.parse(raw);
-      for (const event of parsed) {
-        events++;
-
-        // Detect agent run failures (e.g. 401 auth errors)
-        if (event.type === "run_failed" && event.error) {
-          errors.push(`${sub.meerkatId}: ${event.error}`);
-        }
-
-        // Outgoing comms: agent used "send" tool
-        if (event.type === "tool_call_requested" && event.name === "send") {
-          const callId = event.id;
-          if (callId && session.seenToolCallIds.has(callId)) continue;
-          if (callId) session.seenToolCallIds.add(callId);
-
-          try {
-            const args = typeof event.args === "string" ? JSON.parse(event.args) : event.args;
-            const to = args.to || "";
-            const body = args.body || "";
-            if (to && body) {
-              const ch = dmChannel(sub.meerkatId, to);
-              if (ch) {
-                pushMessage({ channel: ch, role: sub.role, faction: sub.team, content: body, turn });
-              }
-            }
-          } catch { /* skip parse errors */ }
-        }
-      }
-    } catch { /* poll error */ }
-  }
-  return { events, errors };
-}
-
-// ═══════════════════════════════════════════════════════════
-// Narrator Context Builder
-// ═══════════════════════════════════════════════════════════
-
-/** Build a rich summary for the narrator including all DM conversations from this turn. */
-function buildNarratorSummary(
-  sess: MatchSession, turn: number, decisions: TurnDecision[],
-  captures: Set<string>, newState: ArenaState,
-): string {
-  const turnMsgs = sess.messages.filter(m => m.turn === turn);
-  const sections: string[] = [];
-
-  // 1. Battle outcomes
-  sections.push("=== BATTLE OUTCOMES ===");
-  for (const d of decisions) {
-    const hit = captures.has(d.order.target_region) ? "CAPTURED" : "REPELLED";
-    sections.push(`${d.order.team.toUpperCase()} attacked ${d.order.target_region.replace(/-/g, " ")} (aggression ${d.order.aggression}) → ${hit}`);
-  }
-  if (captures.size > 0) sections.push(`Territories changed hands: ${[...captures].map(id => id.replace(/-/g, " ")).join(", ")}`);
-  sections.push(`Scores: ${TEAMS.map(t => `${t}=${newState.scores[t]}`).join(", ")}. Turn ${turn} of ${newState.max_turns}.`);
-
-  // 2. Per-channel conversation logs (truncate each message to keep context manageable)
-  const channelGroups: [string, ChannelId[]][] = [
-    ["INTERNAL STRATEGY (private — the public doesn't know these plans)", ["n-plan-op", "s-plan-op", "e-plan-op"]],
-    ["DIPLOMATIC BRIEFINGS (faction leaders instructing their ambassadors)", ["n-plan-amb", "s-plan-amb", "e-plan-amb"]],
-    ["DIPLOMATIC NEGOTIATIONS (what the ambassadors said to each other)", ["e-n-diplo", "e-s-diplo", "n-s-diplo"]],
-  ];
-
-  for (const [heading, channels] of channelGroups) {
-    const channelLines: string[] = [];
-    for (const chId of channels) {
-      const chMsgs = turnMsgs.filter(m => m.channel === chId);
-      if (chMsgs.length === 0) continue;
-      const label = CHANNELS.find(c => c.id === chId)?.label ?? chId;
-      channelLines.push(`--- ${label} ---`);
-      for (const m of chMsgs) {
-        const who = `${m.role.toUpperCase()} [${m.faction.toUpperCase()}]`;
-        channelLines.push(`${who}: ${m.content.slice(0, 250)}`);
-      }
-    }
-    if (channelLines.length > 0) {
-      sections.push(`\n=== ${heading} ===`);
-      sections.push(channelLines.join("\n"));
-    }
-  }
-
-  return sections.join("\n");
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -670,32 +112,26 @@ async function tick(): Promise<void> {
 
   try {
     setBadge("Agents working...", true);
-    setStatus(`Round ${turn}: Triggering planners — agents will deliberate, negotiate, and finalize autonomously...`);
-    showBanner(`Round ${turn}`, "Agents are deliberating and negotiating...", 8000);
+    setStatus(`Round ${turn}: Triggering planners \u2014 agents deliberate, negotiate, finalize...`);
+    setPhase("deliberation");
+    showBanner(`Round ${turn}`, "The powers deliberate and negotiate...", 8000);
 
-    // Trigger each planner with the game state.
-    // System prompts (from skills) already contain role instructions and peer addresses.
-    // We just inject the turn-specific game state.
     for (const f of session.factions) {
       const stateStr = serializeState(f.team, session.state);
       const prompt = `=== TURN ${turn} GAME STATE ===\n${stateStr}\n\nBegin: message your operator to discuss strategy, then brief your ambassador.`;
-      try {
-        await mod.mob_send_message(f.mobId, `${f.team}-planner`, prompt);
-      } catch (e) {
-        console.warn(`Failed to trigger ${f.team} planner:`, e);
-      }
+      try { await mod.mob_send_message(f.mobId, `${f.team}-planner`, prompt); }
+      catch (e) { console.warn(`Failed to trigger ${f.team} planner:`, e); }
     }
 
-    // Poll events until quiescence (agents done talking)
-    const MAX_WAIT_MS = 120_000; // 2 minutes max per turn
-    const QUIET_THRESHOLD = 8_000; // 8 seconds of silence = done
+    const MAX_WAIT_MS = 120_000;
+    const QUIET_THRESHOLD = 8_000;
     const deadline = Date.now() + MAX_WAIT_MS;
     let lastEventTime = Date.now();
     const allErrors: string[] = [];
 
     while (Date.now() < deadline && session.running) {
       await sleep(300);
-      const { events: newEvents, errors } = drainAllEvents(mod, turn);
+      const { events: newEvents, errors } = drainAllEvents(mod, session, turn);
       if (errors.length > 0) allErrors.push(...errors);
       if (newEvents > 0) {
         lastEventTime = Date.now();
@@ -706,22 +142,31 @@ async function tick(): Promise<void> {
     }
     if (!session.running) return;
 
-    // Abort if agents failed (e.g. invalid API key)
     const turnMsgs = session.messages.filter(m => m.turn === turn).length;
-    if (turnMsgs === 0 && allErrors.length > 0) {
-      session.running = false;
-      setBadge("Error");
-      const first = allErrors[0];
-      const hint = first.includes("401") || first.toLowerCase().includes("auth")
-        ? "Check your API key in settings." : "";
-      setStatus(`Agents failed: ${first} ${hint}`);
-      showBanner("Error", "LLM calls failed — check API key", 10000);
-      return;
+    if (allErrors.length > 0) {
+      // Detect which factions had errors
+      const failedFactions = new Set<string>();
+      for (const err of allErrors) {
+        for (const t of TEAMS) if (err.startsWith(`${t}-`)) failedFactions.add(TEAM_LABELS[t]);
+      }
+      const failedStr = failedFactions.size > 0 ? [...failedFactions].join(", ") : "Some agents";
+
+      if (turnMsgs === 0) {
+        // Total failure — no messages at all
+        session.running = false; setBadge("Error");
+        const first = allErrors[0];
+        const hint = first.includes("401") || first.toLowerCase().includes("auth") ? " Check API keys." : "";
+        setStatus(`All agents failed: ${first}${hint}`);
+        showBanner("Error", "LLM calls failed \u2014 check API keys", 10000);
+        return;
+      } else {
+        // Partial failure — some factions working, others not
+        setStatus(`Round ${turn}: ${turnMsgs} messages. WARNING: ${failedStr} had errors \u2014 ${allErrors[0].split(":").slice(1).join(":").trim()}`);
+      }
     }
 
     // ── Post-quiescence order extraction ──
-    // Ask each operator to send their final order via comms (so it appears in DM channel).
-    setStatus(`Round ${turn}: Extracting final orders from operators...`);
+    setStatus(`Round ${turn}: Extracting final orders...`);
     for (const f of session.factions) {
       const validTargets = session.state.regions.filter(r => r.controller !== f.team).map(r => r.id);
       const plannerAddr = `diplomacy-${f.team}/planner/${f.team}-planner`;
@@ -731,83 +176,55 @@ async function tick(): Promise<void> {
           `Valid targets: ${validTargets.join(", ")}. ` +
           `Your message MUST contain: FINAL ORDER: target=<region-id> aggression=<0-100>. ` +
           `Send it to: ${plannerAddr}`);
-      } catch (e) {
-        console.warn(`Failed to prompt ${f.team} operator for order:`, e);
-      }
+      } catch (e) { console.warn(`Failed to prompt ${f.team} operator for order:`, e); }
     }
-    // Give operators time to respond
     const extractDeadline = Date.now() + 20_000;
     while (Date.now() < extractDeadline && session.running) {
       await sleep(300);
-      const { events: n } = drainAllEvents(mod, turn);
+      const { events: n } = drainAllEvents(mod, session, turn);
       if (n > 0) lastEventTime = Date.now();
-      // Stop early once all 3 operators have produced FINAL ORDER
-      const allHaveOrders = session.factions.every(f => {
-        return session!.messages.some(
-          m => m.turn === turn && m.faction === f.team && m.role === "operator"
-            && /FINAL\s*ORDER/i.test(m.content)
-        );
-      });
+      const allHaveOrders = session.factions.every(f =>
+        session!.messages.some(m => m.turn === turn && m.faction === f.team && m.role === "operator" && /FINAL\s*ORDER/i.test(m.content))
+      );
       if (allHaveOrders) break;
       if (Date.now() - lastEventTime > 6_000) break;
     }
     if (!session.running) return;
 
-    // Parse orders from operator messages
-    const decisions: TurnDecision[] = [];
-    for (const f of session.factions) {
-      const opMsgs = session.messages.filter(
-        m => m.turn === turn && m.faction === f.team && m.role === "operator"
-      );
-      let order: OrderSet | null = null;
-      let reasoning = "";
-      // Search backwards for FINAL ORDER pattern
+    // Parse orders
+    const decisions = session.factions.map(f => {
+      const opMsgs = session!.messages.filter(m => m.turn === turn && m.faction === f.team && m.role === "operator");
       for (let i = opMsgs.length - 1; i >= 0; i--) {
-        const text = opMsgs[i].content;
-        const match = text.match(/FINAL\s*ORDER\s*:?\s*target\s*=\s*([\w-]+)\s*aggression\s*=\s*(\d+)/i);
+        const match = opMsgs[i].content.match(/FINAL\s*ORDER\s*:?\s*target\s*=\s*([\w-]+)\s*aggression\s*=\s*(\d+)/i);
         if (match) {
-          const validTargets = session.state.regions.filter(r => r.controller !== f.team).map(r => r.id);
+          const validTargets = session!.state.regions.filter(r => r.controller !== f.team).map(r => r.id);
           const aggression = Math.max(0, Math.min(100, parseInt(match[2], 10)));
-          order = {
-            team: f.team, aggression, fortify: 100 - aggression,
-            target_region: validTargets.includes(match[1]) ? match[1] : validTargets[0],
-          };
-          reasoning = text;
-          break;
+          return { order: { team: f.team, aggression, fortify: 100 - aggression,
+            target_region: validTargets.includes(match[1]) ? match[1] : validTargets[0] }, reasoning: opMsgs[i].content };
         }
       }
-      // Fallback: JSON extraction
-      if (!order) {
-        for (let i = opMsgs.length - 1; i >= 0; i--) {
-          try {
-            const jsonMatch = opMsgs[i].content.match(/\{[\s\S]*\}/);
-            if (jsonMatch) {
-              const parsed = JSON.parse(jsonMatch[0]);
-              const o = parsed.order || parsed;
-              if (o.target_region && o.aggression != null) {
-                const validTargets = session.state.regions.filter(r => r.controller !== f.team).map(r => r.id);
-                const aggression = Math.max(0, Math.min(100, Number(o.aggression) || 50));
-                order = { team: f.team, aggression, fortify: 100 - aggression,
-                  target_region: validTargets.includes(o.target_region) ? o.target_region : validTargets[0] };
-                reasoning = parsed.reasoning || opMsgs[i].content;
-                break;
-              }
+      for (let i = opMsgs.length - 1; i >= 0; i--) {
+        try {
+          const jsonMatch = opMsgs[i].content.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[0]);
+            const o = parsed.order || parsed;
+            if (o.target_region && o.aggression != null) {
+              const validTargets = session!.state.regions.filter(r => r.controller !== f.team).map(r => r.id);
+              return { order: { team: f.team, aggression: Math.max(0, Math.min(100, Number(o.aggression) || 50)), fortify: 100 - (Number(o.aggression) || 50),
+                target_region: validTargets.includes(o.target_region) ? o.target_region : validTargets[0] }, reasoning: opMsgs[i].content };
             }
-          } catch { /* skip parse errors */ }
-        }
+          }
+        } catch { /* skip */ }
       }
-      // Last resort fallback
-      if (!order) {
-        const validTargets = session.state.regions.filter(r => r.controller !== f.team).map(r => r.id);
-        order = { team: f.team, aggression: 50, fortify: 50, target_region: validTargets[0] };
-        reasoning = "Fallback: no clear order from operator.";
-      }
-      decisions.push({ order, reasoning });
-    }
+      const validTargets = session!.state.regions.filter(r => r.controller !== f.team).map(r => r.id);
+      return { order: { team: f.team, aggression: 50, fortify: 50, target_region: validTargets[0] }, reasoning: "Fallback." };
+    });
 
     // Resolve & Render
+    setPhase("resolution");
     const targets = Object.fromEntries(decisions.map(d => [d.order.team, d.order.target_region])) as Record<Team, string>;
-    showBanner(`Round ${turn}`, decisions.map(d => `${d.order.team}\u2192${d.order.target_region.replace(/-/g," ")}`).join(" \u2022 "), 2500);
+    showBanner(`Round ${turn}`, decisions.map(d => `${TEAM_LABELS[d.order.team]}\u2192${d.order.target_region.replace(/-/g," ")}`).join(" \u2022 "), 2500);
     renderMap(session.state, targets);
     await sleep(1500);
     if (!session.running) return;
@@ -822,12 +239,11 @@ async function tick(): Promise<void> {
     renderScore(newState);
     if (captures.size) showBanner("Territory Changed", [...captures].map(id => id.replace(/-/g," ")).join(", "), 2000);
 
-    // Narrator — run a flow to get dramatic narrative
+    // Narrator
     if (session.narratorMobId) {
       try {
         const summary = buildNarratorSummary(session, turn, decisions, captures, newState);
         const runId = parseJsResult(await mod.mob_run_flow(session.narratorMobId, "narrate", JSON.stringify({ summary })));
-        let narrativeFound = false;
         for (let i = 0; i < 40; i++) {
           await sleep(500);
           const raw = parseJsResult(await mod.mob_flow_status(session.narratorMobId, runId));
@@ -835,53 +251,32 @@ async function tick(): Promise<void> {
           try {
             const result = JSON.parse(raw);
             if (result.status === "completed") {
-              // Look in step_ledger for the summarize step's output
               const step = result.step_ledger?.find((s: any) => s.step_id === "summarize" && s.status === "completed");
-              const narrative = step?.output?.narrative;
+              const narrative = step?.output?.narrative ?? (typeof step?.output === "string" ? step.output : null);
               if (narrative) {
                 pushMessage({ channel: "narrator", role: "narrator", faction: "neutral", content: narrative, turn });
-                narrativeFound = true;
-              } else {
-                // Try raw output field (may be the full JSON)
-                const rawOut = step?.output;
-                if (typeof rawOut === "string") {
-                  pushMessage({ channel: "narrator", role: "narrator", faction: "neutral", content: rawOut, turn });
-                  narrativeFound = true;
-                }
+                pushNarrator(narrative, turn);
               }
               break;
             }
-            if (result.status !== "running" && result.status !== "pending") {
-              console.warn("Narrator flow ended with status:", result.status,
-                "failure_ledger:", JSON.stringify(result.failure_ledger));
-              break;
-            }
-          } catch (parseErr) {
-            console.warn("Narrator flow status parse error:", parseErr);
-          }
+            if (result.status !== "running" && result.status !== "pending") break;
+          } catch { /* parse error */ }
         }
-        if (!narrativeFound) {
-          console.warn("Narrator produced no output for turn", turn);
-        }
-      } catch (narratorErr) {
-        console.warn("Narrator error:", narratorErr);
-      }
+      } catch (e) { console.warn("Narrator error:", e); }
     }
 
-    setBadge("Live"); setStatus(`Round ${turn} resolved.`);
+    setBadge("Live"); setStatus(`Round ${turn} resolved.`); setPhase("idle");
     if (newState.winner) {
-      session.running = false;
-      await sleep(800);
+      session.running = false; await sleep(800);
       const lastNarrator = session.messages.filter(m => m.channel === "narrator" && m.role === "narrator").pop();
       showVictory(newState.winner, newState, lastNarrator?.content);
-      setBadge("Complete");
-      return;
+      setBadge("Complete"); return;
     }
     await sleep(2000);
     if (session.running) void tick();
   } catch (error) {
-    session.running = false; setBadge("Error");
-    setStatus(`Error: ${error instanceof Error ? error.message : String(error)}`);
+    if (session) session.running = false;
+    setBadge("Error"); setStatus(`Error: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -891,103 +286,97 @@ async function tick(): Promise<void> {
 
 async function startMatch(): Promise<void> {
   try {
-    ($<HTMLDivElement>("victory")).classList.remove("visible");
-    const apiKey = apiKeyInput.value.trim();
-    if (!apiKey) { setStatus("Enter API key in settings."); return; }
-    const model = ($<HTMLSelectElement>("modelSelect")).value;
-    setBadge("Loading...", true);
-    setStatus("Loading WASM runtime...");
+    $<HTMLDivElement>("victory").classList.remove("visible");
+    $<HTMLDivElement>("startOverlay").classList.add("hidden");
+    const keys = getApiKeys();
+    if (!keys.anthropic && !keys.openai && !keys.gemini) { setStatus("Enter at least one API key in settings."); return; }
+    const models: Record<Team | "narrator", string> = {
+      france: $<HTMLSelectElement>("modelFrance").value,
+      prussia: $<HTMLSelectElement>("modelPrussia").value,
+      russia: $<HTMLSelectElement>("modelRussia").value,
+      narrator: $<HTMLSelectElement>("modelNarrator").value,
+    };
+    if (!models.france || !models.prussia || !models.russia) { setStatus("Select models for all factions."); return; }
+
+    setBadge("Loading...", true); setStatus("Loading WASM runtime...");
     const mod = await loadRuntime();
 
-    setStatus("Initializing runtime...");
-    mod.init_runtime_from_config(JSON.stringify({ api_key: apiKey, model }));
+    setStatus("Initializing runtime with provider keys...");
+    const initConfig: Record<string, unknown> = {};
+    if (keys.anthropic) initConfig.anthropic_api_key = keys.anthropic;
+    if (keys.openai) initConfig.openai_api_key = keys.openai;
+    if (keys.gemini) initConfig.gemini_api_key = keys.gemini;
+    initConfig.model = models.france;
+    mod.init_runtime_from_config(JSON.stringify(initConfig));
 
     const factions: FactionMob[] = [];
-    const subs: AgentSub[] = [];
+    const subs: MatchSession["subs"] = [];
 
     for (const team of TEAMS) {
-      setStatus(`Creating ${team} faction mob (3 autonomous agents)...`);
-      const def = buildFactionDefinition(team, model);
+      setStatus(`Creating ${TEAM_LABELS[team]} faction (3 autonomous agents)...`);
+      const def = buildFactionDefinition(team, models[team]);
       const mobId = parseJsResult(await mod.mob_create(JSON.stringify(def)));
 
-      // Spawn all 3 agents as autonomous_host
       await mod.mob_spawn(mobId, JSON.stringify([
         { profile: "planner", meerkat_id: `${team}-planner`, runtime_mode: "autonomous_host" },
         { profile: "operator", meerkat_id: `${team}-operator`, runtime_mode: "autonomous_host" },
         { profile: "ambassador", meerkat_id: `${team}-ambassador`, runtime_mode: "autonomous_host" },
       ]));
-
-      // Explicit wiring: planner↔operator, planner↔ambassador
-      // (NOT operator↔ambassador — ambassador reports through planner)
       await mod.mob_wire(mobId, `${team}-planner`, `${team}-operator`);
       await mod.mob_wire(mobId, `${team}-planner`, `${team}-ambassador`);
 
-      // Subscribe to all 3 agents' event streams
       for (const role of ["planner", "operator", "ambassador"] as const) {
-        try {
-          const handle = await mod.mob_member_subscribe(mobId, `${team}-${role}`);
-          subs.push({ meerkatId: `${team}-${role}`, handle, role, team });
-        } catch (e) {
-          console.warn(`Failed to subscribe to ${team}-${role}:`, e);
-        }
+        try { subs.push({ meerkatId: `${team}-${role}`, handle: await mod.mob_member_subscribe(mobId, `${team}-${role}`), role, team }); }
+        catch (e) { console.warn(`Failed to subscribe to ${team}-${role}:`, e); }
       }
-
       factions.push({ team, mobId });
     }
 
-    // Wire ambassadors across mobs so they can discover each other via peers()
-    setStatus("Wiring cross-mob ambassador trust...");
+    setStatus("Wiring cross-faction ambassador trust...");
     for (let i = 0; i < factions.length; i++) {
       for (let j = i + 1; j < factions.length; j++) {
         const a = factions[i], b = factions[j];
-        try {
-          await mod.wire_cross_mob(
-            a.mobId, `${a.team}-ambassador`,
-            b.mobId, `${b.team}-ambassador`,
-          );
-        } catch (e) {
-          console.warn(`Cross-mob wire ${a.team}↔${b.team} failed:`, e);
-        }
+        try { await mod.wire_cross_mob(a.mobId, `${a.team}-ambassador`, b.mobId, `${b.team}-ambassador`); }
+        catch (e) { console.warn(`Cross-mob wire ${a.team}\u2194${b.team} failed:`, e); }
       }
     }
 
-    // Narrator mob (turn_driven, flow-based — just summarizes)
     let narratorMobId: string | null = null;
     try {
-      setStatus("Creating narrator...");
-      const narratorDef = buildNarratorDefinition(model);
-      narratorMobId = parseJsResult(await mod.mob_create(JSON.stringify(narratorDef)));
-      await mod.mob_spawn(narratorMobId, JSON.stringify([
-        { profile: "narrator", meerkat_id: "narrator", runtime_mode: "turn_driven" },
-      ]));
+      setStatus("Creating war correspondent...");
+      narratorMobId = parseJsResult(await mod.mob_create(JSON.stringify(buildNarratorDefinition(models.narrator))));
+      await mod.mob_spawn(narratorMobId, JSON.stringify([{ profile: "narrator", meerkat_id: "narrator", runtime_mode: "turn_driven" }]));
     } catch { /* narrator optional */ }
 
     const state = defaultState();
-    session = {
-      factions, narratorMobId, subs, state, messages: [], running: true,
-      prevControllers: new Map(state.regions.map(r => [r.id, r.controller])),
-      seenToolCallIds: new Set(),
-    };
+    session = { factions, narratorMobId, subs, state, messages: [], running: true,
+      prevControllers: new Map(state.regions.map(r => [r.id, r.controller])), seenToolCallIds: new Set() };
+    setSessionRef(session);
     renderMap(state); renderScore(state);
-    showBanner("Campaign Begins", "9 autonomous agents across 3 factions", 3000);
+    showBanner("The Campaign Begins", `${TEAMS.map(t => TEAM_LABELS[t]).join(", ")} \u2014 9 agents, 3 powers`, 3000);
     setBadge("Live"); setStatus("Campaign started.");
-    ($<HTMLDivElement>("drawer")).classList.remove("open");
+    $<HTMLDivElement>("drawer").classList.remove("open");
     await tick();
   } catch (e) { setBadge("Error"); setStatus(`Failed: ${e instanceof Error ? e.message : String(e)}`); }
 }
 
 // ═══════════════════════════════════════════════════════════
-// Event Handlers
+// Event Handlers + Init
 // ═══════════════════════════════════════════════════════════
 
+initApiKeyInputs();
+
 document.getElementById("startBtn")!.addEventListener("click", () => void startMatch());
+document.getElementById("startBigBtn")!.addEventListener("click", () => {
+  $<HTMLDivElement>("startOverlay").classList.add("hidden");
+});
 document.getElementById("pauseBtn")!.addEventListener("click", () => { if (!session) return; session.running = !session.running; (document.getElementById("pauseBtn") as HTMLButtonElement).textContent = session.running ? "Pause" : "Resume"; if (session.running) void tick(); });
 document.getElementById("stepBtn")!.addEventListener("click", () => { if (!session) return; session.running = true; (document.getElementById("pauseBtn") as HTMLButtonElement).textContent = "Resume"; const doStep = async () => { await tick(); if (session) session.running = false; (document.getElementById("pauseBtn") as HTMLButtonElement).textContent = "Resume"; }; void doStep(); });
 document.getElementById("exportBtn")!.addEventListener("click", () => { if (!session) return; const b = new Blob([JSON.stringify({state:session.state,messages:session.messages},null,2)],{type:"application/json"}); const a = document.createElement("a"); a.href = URL.createObjectURL(b); a.download = "replay.json"; a.click(); });
-document.getElementById("gearBtn")!.addEventListener("click", () => ($<HTMLDivElement>("drawer")).classList.toggle("open"));
-document.getElementById("closeDrawer")!.addEventListener("click", () => ($<HTMLDivElement>("drawer")).classList.remove("open"));
+document.getElementById("gearBtn")!.addEventListener("click", () => $<HTMLDivElement>("drawer").classList.toggle("open"));
+document.getElementById("closeDrawer")!.addEventListener("click", () => $<HTMLDivElement>("drawer").classList.remove("open"));
 
 renderMap(defaultState());
 renderScore(defaultState());
-renderChannelSidebar();
-renderMessages();
+renderGrid();
+initMapResize();

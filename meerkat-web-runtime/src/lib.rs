@@ -43,9 +43,12 @@ pub mod tokio {
     pub use tokio_with_wasm::alias::*;
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub use ::tokio;
+
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
@@ -143,9 +146,19 @@ fn default_max_tokens() -> u32 {
 
 #[derive(Debug, Deserialize)]
 struct Credentials {
-    api_key: String,
+    /// Backward-compat single key (treated as anthropic fallback).
+    #[serde(default)]
+    api_key: Option<String>,
+    /// Per-provider API keys — preferred over `api_key`.
+    #[serde(default)]
+    anthropic_api_key: Option<String>,
+    #[serde(default)]
+    openai_api_key: Option<String>,
+    #[serde(default)]
+    gemini_api_key: Option<String>,
     #[serde(default = "default_model")]
     model: Option<String>,
+    /// Optional custom base URL — mapped to the default model's provider.
     #[serde(default)]
     base_url: Option<String>,
 }
@@ -156,9 +169,19 @@ fn default_model() -> Option<String> {
 
 #[derive(Debug, Deserialize)]
 struct RuntimeConfig {
-    api_key: String,
+    /// Backward-compat single key (treated as anthropic fallback).
+    #[serde(default)]
+    api_key: Option<String>,
+    /// Per-provider API keys — preferred over `api_key`.
+    #[serde(default)]
+    anthropic_api_key: Option<String>,
+    #[serde(default)]
+    openai_api_key: Option<String>,
+    #[serde(default)]
+    gemini_api_key: Option<String>,
     #[serde(default = "default_model")]
     model: Option<String>,
+    /// Optional custom base URL — mapped to the default model's provider.
     #[serde(default)]
     base_url: Option<String>,
     #[serde(default = "default_max_sessions")]
@@ -224,10 +247,81 @@ struct RuntimeState {
     session_service: Arc<WasmSessionService>,
     #[allow(dead_code)]
     model: String,
-    #[allow(dead_code)]
-    api_key: String,
-    #[allow(dead_code)]
-    base_url: Option<String>,
+}
+
+/// Resolve per-provider API keys into a `Config.providers.api_keys` map.
+///
+/// `api_key` is the backward-compat single key (treated as anthropic fallback).
+/// Per-provider fields take precedence when set. Empty/whitespace-only keys are
+/// treated as missing so callers get a fast failure instead of a deferred auth error.
+fn build_provider_api_keys(
+    api_key: Option<&str>,
+    anthropic_api_key: Option<&str>,
+    openai_api_key: Option<&str>,
+    gemini_api_key: Option<&str>,
+) -> Result<HashMap<String, String>, JsValue> {
+    // Treat blank keys as absent so misconfigured init fails fast.
+    fn non_blank(s: Option<&str>) -> Option<&str> {
+        match s {
+            Some(v) if !v.trim().is_empty() => Some(v),
+            _ => None,
+        }
+    }
+
+    let mut keys = HashMap::new();
+    // Per-provider keys take precedence; api_key is anthropic fallback.
+    let anthropic = non_blank(anthropic_api_key).or(non_blank(api_key));
+    if let Some(k) = anthropic {
+        keys.insert("anthropic".into(), k.to_string());
+    }
+    if let Some(k) = non_blank(openai_api_key) {
+        keys.insert("openai".into(), k.to_string());
+    }
+    if let Some(k) = non_blank(gemini_api_key) {
+        keys.insert("gemini".into(), k.to_string());
+    }
+    if keys.is_empty() {
+        return Err(err_js(
+            "invalid_config",
+            "at least one API key must be provided (api_key, anthropic_api_key, openai_api_key, or gemini_api_key)",
+        ));
+    }
+    Ok(keys)
+}
+
+/// Infer the provider name from a model string.
+///
+/// Delegates to the canonical `Provider::infer_from_model` in meerkat-core.
+/// Returns `None` for unrecognized models (caller should error, not default).
+fn infer_provider_name(model: &str) -> Option<&'static str> {
+    meerkat_core::Provider::infer_from_model(model).map(|p| p.as_str())
+}
+
+/// Build the shared service infrastructure from a Config populated with provider keys.
+fn build_service_infrastructure(
+    config: Config,
+    max_sessions: usize,
+) -> Result<(Arc<WasmSessionService>, Arc<MobMcpState>), JsValue> {
+    let factory = meerkat::AgentFactory::minimal();
+    let mut builder = meerkat::FactoryAgentBuilder::new(factory, config);
+
+    // NO default_llm_client — build_agent() resolves the correct provider per-model
+    // from Config.providers.api_keys. This is architecturally correct: per-agent
+    // provider agnosticity works the same way on WASM as on all other surfaces.
+
+    let tools = build_wasm_tool_dispatcher().map_err(|e| err_str("tool_error", e))?;
+    builder.default_tool_dispatcher = Some(tools);
+    let store: Arc<dyn meerkat_core::AgentSessionStore> = Arc::new(
+        meerkat_store::StoreAdapter::new(Arc::new(meerkat_store::MemoryStore::new())),
+    );
+    builder.default_session_store = Some(store);
+
+    let service = Arc::new(meerkat::EphemeralSessionService::new(builder, max_sessions));
+    let session_service = service.clone();
+    let mob_state = Arc::new(MobMcpState::new(
+        service as Arc<dyn meerkat_mob::MobSessionService>,
+    ));
+    Ok((session_service, mob_state))
 }
 
 thread_local! {
@@ -492,7 +586,7 @@ fn build_wasm_tool_dispatcher() -> Result<Arc<dyn meerkat_core::AgentToolDispatc
 /// Primary bootstrap: parse a mobpack and create service infrastructure.
 ///
 /// `mobpack_bytes`: tar.gz mobpack archive.
-/// `credentials_json`: `{ "api_key": "sk-ant-...", "model"?: "claude-sonnet-4-5", "base_url"?: "..." }`
+/// `credentials_json`: `{ "api_key": "sk-...", "anthropic_api_key"?: "...", "openai_api_key"?: "...", "gemini_api_key"?: "...", "model"?: "claude-sonnet-4-5" }`
 ///
 /// Stores an `EphemeralSessionService<FactoryAgentBuilder>` and a `MobMcpState`
 /// in a `thread_local! RuntimeState` for subsequent mob/comms calls.
@@ -503,54 +597,49 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
     let creds: Credentials =
         serde_json::from_str(credentials_json).map_err(|e| err_str("invalid_credentials", e))?;
 
-    if creds.api_key.is_empty() {
-        return Err(err_js("invalid_credentials", "api_key must not be empty"));
-    }
+    let api_keys = build_provider_api_keys(
+        creds.api_key.as_deref(),
+        creds.anthropic_api_key.as_deref(),
+        creds.openai_api_key.as_deref(),
+        creds.gemini_api_key.as_deref(),
+    )?;
 
     let model = creds
         .model
         .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
 
-    // Create the service infrastructure.
-    let factory = meerkat::AgentFactory::minimal();
+    let providers: Vec<String> = api_keys.keys().cloned().collect();
     let mut config = Config::default();
     config.agent.model.clone_from(&model);
-    let mut builder = meerkat::FactoryAgentBuilder::new(factory, config);
+    config.providers.api_keys = Some(api_keys);
+    // Map single base_url to the default model's inferred provider.
+    if let Some(url) = &creds.base_url
+        && !url.trim().is_empty()
+    {
+        if let Some(provider) = infer_provider_name(&model) {
+            config.providers.base_urls = Some(HashMap::from([(provider.to_string(), url.clone())]));
+        } else {
+            tracing::warn!(
+                model = &*model,
+                "base_url ignored: cannot infer provider from model"
+            );
+        }
+    }
 
-    // Inject the default LLM client so all sessions built through the service
-    // use the provided credentials.
-    let llm_client = create_llm_client(&model, &creds.api_key, creds.base_url.as_deref())
-        .map_err(|e| err_str("provider_error", e))?;
-    builder.default_llm_client = Some(llm_client);
-
-    // Set default tool dispatcher + session store so mob-spawned sessions
-    // inherit them without needing explicit overrides in CreateSessionRequest.
-    let tools = build_wasm_tool_dispatcher().map_err(|e| err_str("tool_error", e))?;
-    builder.default_tool_dispatcher = Some(tools);
-    let store: Arc<dyn meerkat_core::AgentSessionStore> = Arc::new(
-        meerkat_store::StoreAdapter::new(Arc::new(meerkat_store::MemoryStore::new())),
-    );
-    builder.default_session_store = Some(store);
-
-    let service = Arc::new(meerkat::EphemeralSessionService::new(builder, MAX_SESSIONS));
-    let session_service = service.clone();
-    let mob_state = Arc::new(MobMcpState::new(
-        service as Arc<dyn meerkat_mob::MobSessionService>,
-    ));
+    let (session_service, mob_state) = build_service_infrastructure(config, MAX_SESSIONS)?;
 
     RUNTIME_STATE.with(|cell| {
         *cell.borrow_mut() = Some(RuntimeState {
             mob_state,
             session_service,
             model: model.clone(),
-            api_key: creds.api_key.clone(),
-            base_url: creds.base_url.clone(),
         });
     });
 
     let result = serde_json::json!({
         "status": "initialized",
         "model": model,
+        "providers": providers,
     });
     Ok(JsValue::from_str(&result.to_string()))
 }
@@ -561,51 +650,50 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
 
 /// Advanced bare-bones bootstrap without a mobpack.
 ///
-/// `config_json`: `{ "api_key": "sk-ant-...", "model"?: "claude-sonnet-4-5", "max_sessions"?: 64 }`
+/// `config_json`: `{ "api_key"?: "sk-...", "anthropic_api_key"?: "...", "openai_api_key"?: "...", "gemini_api_key"?: "...", "model"?: "claude-sonnet-4-5", "max_sessions"?: 64 }`
 #[wasm_bindgen]
 pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
     init_tracing();
     let rt_config: RuntimeConfig =
         serde_json::from_str(config_json).map_err(|e| err_str("invalid_config", e))?;
 
-    if rt_config.api_key.is_empty() {
-        return Err(err_js("invalid_config", "api_key must not be empty"));
-    }
+    let api_keys = build_provider_api_keys(
+        rt_config.api_key.as_deref(),
+        rt_config.anthropic_api_key.as_deref(),
+        rt_config.openai_api_key.as_deref(),
+        rt_config.gemini_api_key.as_deref(),
+    )?;
 
     let model = rt_config
         .model
         .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
     let max_sessions = rt_config.max_sessions;
 
-    let factory = meerkat::AgentFactory::minimal();
+    let providers: Vec<String> = api_keys.keys().cloned().collect();
     let mut config = Config::default();
     config.agent.model.clone_from(&model);
-    let mut builder = meerkat::FactoryAgentBuilder::new(factory, config);
+    config.providers.api_keys = Some(api_keys);
+    // Map single base_url to the default model's inferred provider.
+    if let Some(url) = &rt_config.base_url
+        && !url.trim().is_empty()
+    {
+        if let Some(provider) = infer_provider_name(&model) {
+            config.providers.base_urls = Some(HashMap::from([(provider.to_string(), url.clone())]));
+        } else {
+            tracing::warn!(
+                model = &*model,
+                "base_url ignored: cannot infer provider from model"
+            );
+        }
+    }
 
-    let llm_client = create_llm_client(&model, &rt_config.api_key, rt_config.base_url.as_deref())
-        .map_err(|e| err_str("provider_error", e))?;
-    builder.default_llm_client = Some(llm_client);
-
-    let tools = build_wasm_tool_dispatcher().map_err(|e| err_str("tool_error", e))?;
-    builder.default_tool_dispatcher = Some(tools);
-    let store: Arc<dyn meerkat_core::AgentSessionStore> = Arc::new(
-        meerkat_store::StoreAdapter::new(Arc::new(meerkat_store::MemoryStore::new())),
-    );
-    builder.default_session_store = Some(store);
-
-    let service = Arc::new(meerkat::EphemeralSessionService::new(builder, max_sessions));
-    let session_service = service.clone();
-    let mob_state = Arc::new(MobMcpState::new(
-        service as Arc<dyn meerkat_mob::MobSessionService>,
-    ));
+    let (session_service, mob_state) = build_service_infrastructure(config, max_sessions)?;
 
     RUNTIME_STATE.with(|cell| {
         *cell.borrow_mut() = Some(RuntimeState {
             mob_state,
             session_service,
             model: model.clone(),
-            api_key: rt_config.api_key.clone(),
-            base_url: rt_config.base_url.clone(),
         });
     });
 
@@ -613,6 +701,7 @@ pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
         "status": "initialized",
         "model": model,
         "max_sessions": max_sessions,
+        "providers": providers,
     });
     Ok(JsValue::from_str(&result.to_string()))
 }
@@ -680,7 +769,11 @@ pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<u32, Js
     let handle = REGISTRY.with(|cell| {
         let mut registry = cell.borrow_mut();
         let handle = registry.next_handle;
-        registry.next_handle = registry.next_handle.saturating_add(1);
+        registry.next_handle = registry.next_handle.wrapping_add(1);
+        // Skip 0 (reserved) and any colliding handle.
+        while registry.next_handle == 0 || registry.sessions.contains_key(&registry.next_handle) {
+            registry.next_handle = registry.next_handle.wrapping_add(1);
+        }
 
         let session = RuntimeSession {
             handle,
@@ -1013,7 +1106,13 @@ pub async fn mob_spawn(mob_id: &str, specs_json: &str) -> Result<JsValue, JsValu
         .map(|r| match r {
             Ok(member_ref) => serde_json::json!({
                 "status": "ok",
-                "member_ref": serde_json::to_value(&member_ref).unwrap_or(serde_json::Value::Null),
+                "member_ref": match serde_json::to_value(&member_ref) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to serialize member_ref");
+                        serde_json::Value::Null
+                    }
+                },
             }),
             Err(e) => serde_json::json!({
                 "status": "error",
@@ -1333,7 +1432,12 @@ pub async fn mob_member_subscribe(mob_id: &str, meerkat_id: &str) -> Result<u32,
     let handle = SUBSCRIPTIONS.with(|cell| {
         let mut registry = cell.borrow_mut();
         let h = registry.next_handle;
-        registry.next_handle = registry.next_handle.saturating_add(1);
+        registry.next_handle = registry.next_handle.wrapping_add(1);
+        while registry.next_handle == 0
+            || registry.subscriptions.contains_key(&registry.next_handle)
+        {
+            registry.next_handle = registry.next_handle.wrapping_add(1);
+        }
         registry.subscriptions.insert(
             h,
             EventSubscription {
@@ -1362,24 +1466,20 @@ pub fn poll_subscription(handle: u32) -> Result<String, JsValue> {
         })?;
 
         // Drain all available events via synchronous try_recv.
+        use crate::tokio::sync::broadcast::error::TryRecvError;
         let mut events: Vec<serde_json::Value> = Vec::new();
         let mut rx = sub.rx.borrow_mut();
         loop {
             match rx.try_recv() {
-                Ok(event) => {
-                    if let Ok(val) = serde_json::to_value(&event) {
-                        events.push(val);
-                    }
+                Ok(event) => match serde_json::to_value(&event) {
+                    Ok(val) => events.push(val),
+                    Err(e) => tracing::warn!(error = %e, "failed to serialize agent event"),
+                },
+                Err(TryRecvError::Lagged(n)) => {
+                    tracing::warn!(skipped = n, "subscription lagged");
+                    continue;
                 }
-                Err(e) => {
-                    // Lagged: skip missed events and retry
-                    let msg = format!("{e}");
-                    if msg.contains("lagged") {
-                        tracing::warn!("subscription lagged, skipping missed events");
-                        continue;
-                    }
-                    break; // Empty or Closed
-                }
+                Err(TryRecvError::Empty | TryRecvError::Closed) => break,
             }
         }
         serde_json::to_string(&events).map_err(|e| err_str("serialize_error", e))

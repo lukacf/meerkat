@@ -2894,6 +2894,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tar",
+ "tokio",
  "tokio_with_wasm",
  "toml",
  "tracing",

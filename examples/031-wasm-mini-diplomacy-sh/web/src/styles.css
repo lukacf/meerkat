@@ -1,486 +1,320 @@
-/* ── Mini Diplomacy Arena — 3 Faction Game ── */
+/* ── Mini Diplomacy Arena — 19th Century Parchment Theme ── */
 
 :root {
-  --bg: #070b12;
-  --panel: rgba(10, 16, 26, 0.88);
-  --border: rgba(100, 130, 170, 0.18);
-  --border-hi: rgba(160, 190, 230, 0.35);
-  --text: #e8edf5;
-  --dim: #7a8da6;
-  --muted: #4a5a72;
-  --north: #3b8ed6;
-  --north-lt: #60b0f4;
-  --north-dk: #1a4f8a;
-  --south: #d65a3b;
-  --south-lt: #f07850;
-  --south-dk: #8a2e1a;
-  --east: #2db87a;
-  --east-lt: #4dd89a;
-  --east-dk: #1a6a48;
-  --gold: #e8b84a;
-  --gold-dim: rgba(232, 184, 74, 0.4);
+  --bg: #2a2218;
+  --parchment: #e8dcc8;
+  --parchment-dk: #d4c8b0;
+  --parchment-lt: #f0e8d8;
+  --ink: #2a2018;
+  --ink-dim: #5a5040;
+  --ink-muted: #8a7a68;
+  --border: rgba(80, 60, 30, 0.3);
+  --border-heavy: rgba(80, 60, 30, 0.5);
+  --france: #2e5a8a;
+  --france-lt: #4a80b8;
+  --france-bg: rgba(46, 90, 138, 0.06);
+  --prussia: #8a7a28;
+  --prussia-lt: #b8a830;
+  --prussia-bg: rgba(138, 122, 40, 0.06);
+  --russia: #8a3030;
+  --russia-lt: #b84848;
+  --russia-bg: rgba(138, 48, 48, 0.06);
+  --gold: #9a7a20;
+  --gold-dim: rgba(154, 122, 32, 0.3);
 }
 
 * { box-sizing: border-box; margin: 0; }
-
 body {
-  color: var(--text);
-  font-family: "Space Grotesk", system-ui, sans-serif;
+  color: var(--ink);
+  font-family: "Playfair Display", Georgia, serif;
   background: var(--bg);
-  height: 100vh;
-  overflow: hidden;
+  height: 100vh; overflow: hidden;
 }
-
-/* Subtle radial vignette on the map background */
-.map-stage::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: radial-gradient(ellipse at 50% 45%, transparent 30%, rgba(4, 6, 12, 0.7) 100%);
-  pointer-events: none;
-  z-index: 1;
-}
-
 #app { height: 100vh; display: flex; flex-direction: column; }
 
-/* ── Score Strip ── */
-
+/* ═══ Score Strip + Controls ═══ */
 .score-strip {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 16px;
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-  gap: 8px;
-  z-index: 5;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 3px 12px; gap: 6px; flex-shrink: 0; z-index: 5;
+  background: var(--parchment-dk); border-bottom: 2px solid var(--border-heavy);
+  font-family: "Space Grotesk", sans-serif;
 }
+.faction { display: flex; align-items: center; gap: 5px; font-weight: 700; }
+.faction .pts { font-size: 18px; min-width: 22px; text-align: center; background: rgba(0,0,0,0.06); border-radius: 3px; padding: 0 3px; }
+.faction .name { font-size: 9px; text-transform: uppercase; letter-spacing: 0.12em; }
+.faction.france { color: var(--france); }
+.faction.prussia { color: var(--prussia); }
+.faction.russia { color: var(--russia); }
 
-.faction {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-family: "Chakra Petch", sans-serif;
-  font-weight: 700;
-}
+.strip-center { display: flex; align-items: center; gap: 5px; }
+.turn-pill { font-size: 10px; color: var(--gold); background: rgba(154,122,32,0.08); border: 1px solid rgba(154,122,32,0.2); border-radius: 12px; padding: 1px 8px; }
+.status-badge { font-size: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; padding: 1px 6px; border-radius: 3px; background: rgba(40,120,60,0.1); color: #3a8a4a; border: 1px solid rgba(40,120,60,0.2); }
+.status-badge.thinking { background: rgba(154,122,32,0.1); color: var(--gold); border-color: var(--gold-dim); animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 0%,100% { opacity: 0.6; } 50% { opacity: 1; } }
 
-.faction .pts {
-  font-size: 20px;
-  min-width: 28px;
-  text-align: center;
-  background: rgba(255, 255, 255, 0.05);
-  border-radius: 4px;
-  padding: 0 4px;
-}
-.faction .name { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
-.faction.north { color: var(--north-lt); }
-.faction.north .pts { background: rgba(59, 142, 214, 0.1); }
-.faction.south { color: var(--south-lt); }
-.faction.south .pts { background: rgba(214, 90, 59, 0.1); }
-.faction.east { color: var(--east-lt); }
-.faction.east .pts { background: rgba(45, 184, 122, 0.1); }
+.ctrl-btn { border-radius: 4px; border: 1px solid var(--border); padding: 4px 12px; background: rgba(255,255,255,0.3); color: var(--ink-dim); font-family: inherit; font-size: 11px; cursor: pointer; font-weight: 600; }
+.ctrl-btn:hover { background: rgba(255,255,255,0.5); color: var(--ink); }
+.ctrl-btn.primary { background: rgba(46,90,138,0.25); color: var(--france); border-color: rgba(46,90,138,0.4); font-weight: 700; font-size: 12px; }
+.gear-btn { background: none; border: 1px solid var(--border); border-radius: 3px; padding: 2px 6px; font-size: 12px; cursor: pointer; color: var(--ink-dim); }
 
-.strip-center {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
+.control-bar-wrap { height: 3px; display: flex; flex-shrink: 0; }
+.control-bar-wrap .f-fill { background: var(--france); transition: flex 0.8s ease; }
+.control-bar-wrap .p-fill { background: var(--prussia); transition: flex 0.8s ease; }
+.control-bar-wrap .r-fill { background: var(--russia); transition: flex 0.8s ease; }
 
-.turn-pill {
-  font-family: "Chakra Petch", sans-serif;
-  font-size: 12px;
-  color: var(--gold);
-  background: rgba(232, 184, 74, 0.1);
-  border: 1px solid rgba(232, 184, 74, 0.25);
-  border-radius: 20px;
-  padding: 3px 12px;
-  white-space: nowrap;
-}
+/* ═══ Arena Layout ═══ */
+.arena-layout { flex: 1; display: flex; overflow: hidden; }
+.left-col { display: flex; flex-direction: column; transition: flex 0.5s ease; }
+.right-col { display: flex; flex-direction: column; overflow: hidden; transition: flex 0.5s ease; }
 
-.status-badge {
-  font-size: 9px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-  padding: 2px 8px;
-  border-radius: 4px;
-  background: rgba(60, 200, 100, 0.15);
-  color: #5ed88a;
-  border: 1px solid rgba(60, 200, 100, 0.25);
-}
+/* Phase: deliberation — grid dominant but map still visible */
+.arena-layout[data-phase="deliberation"] .left-col { flex: 0.3; }
+.arena-layout[data-phase="deliberation"] .right-col { flex: 0.7; }
+/* Phase: resolution — map+narrator only, grid HIDDEN */
+.arena-layout[data-phase="resolution"] .left-col { flex: 1; }
+.arena-layout[data-phase="resolution"] .right-col { flex: 0; max-width: 0; overflow: hidden; }
+/* Phase: idle — balanced */
+.arena-layout[data-phase="idle"] .left-col { flex: 0.45; }
+.arena-layout[data-phase="idle"] .right-col { flex: 0.55; }
 
-.status-badge.thinking {
-  background: rgba(232, 184, 74, 0.15);
-  color: var(--gold);
-  border-color: var(--gold-dim);
-  animation: pulse 1.2s ease-in-out infinite;
-}
-
-@keyframes pulse {
-  0%, 100% { opacity: 0.6; }
-  50% { opacity: 1; }
-}
-
-.gear-btn {
-  background: none;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 4px 8px;
-  font-size: 14px;
-  cursor: pointer;
-  color: var(--dim);
-  transition: color 0.2s;
-}
-.gear-btn:hover { color: var(--text); border-color: var(--border-hi); }
-
-/* ── Control Bar ── */
-
-.control-bar-wrap { height: 4px; display: flex; flex-shrink: 0; }
-.control-bar-wrap .n-fill { background: var(--north); transition: flex 0.8s ease; }
-.control-bar-wrap .s-fill { background: var(--south); transition: flex 0.8s ease; }
-.control-bar-wrap .e-fill { background: var(--east); transition: flex 0.8s ease; }
-
-/* ── Arena Layout (map + chat side by side) ── */
-
-.arena-layout {
-  flex: 1;
-  display: flex;
-  overflow: hidden;
-}
-
+/* ═══ Map ═══ */
 .map-stage {
-  flex: 1;
-  position: relative;
-  overflow: hidden;
-  min-width: 0;
+  flex-shrink: 0; position: relative; overflow: hidden; background: #0c1520;
 }
+.map-stage > svg { position: absolute; inset: 0; width: 100%; height: 100%; }
 
-.map-stage > svg {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-}
+/* ═══ Narrator fills remaining space ═══ */
 
-/* ── Chat Panel (Slack-like) ── */
-
-.chat-panel {
-  width: 320px;
-  flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
-  border-left: 1px solid var(--border);
-  background: rgba(8, 12, 20, 0.95);
-}
-
-.channel-sidebar {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 8px 6px;
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-}
-
-.ch-btn {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  background: none;
-  border: none;
-  border-radius: 5px;
-  padding: 5px 8px;
-  font-family: inherit;
-  font-size: 12px;
-  color: var(--dim);
-  cursor: pointer;
-  text-align: left;
-  transition: background 0.15s, color 0.15s;
-}
-.ch-btn:hover { background: rgba(100, 130, 170, 0.08); color: var(--text); }
-.ch-btn.active { background: rgba(100, 130, 170, 0.14); color: var(--text); font-weight: 600; }
-
-.unread-badge {
-  margin-left: auto;
-  background: var(--gold);
-  color: #000;
-  font-size: 9px;
-  font-weight: 700;
-  border-radius: 8px;
-  padding: 1px 5px;
-  min-width: 14px;
-  text-align: center;
-}
-
-.message-area {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
+/* ═══ Narrator Panel (fills remaining space below map) ═══ */
+.narrator-panel {
+  flex: 1; min-height: 80px;
+  display: flex; flex-direction: column;
+  background: var(--parchment-lt); border-top: 2px solid var(--border-heavy);
   overflow: hidden;
 }
-
-.msg-header {
-  font-family: "Chakra Petch", sans-serif;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text);
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--border);
+.narrator-header {
+  font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em;
+  color: var(--gold); padding: 4px 10px; border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
-
-.msg-feed {
-  flex: 1;
-  overflow-y: auto;
-  padding: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+.narrator-feed {
+  flex: 1; overflow-y: auto; padding: 6px 10px;
+  display: flex; flex-direction: column; gap: 8px;
 }
-.msg-feed::-webkit-scrollbar { width: 4px; }
-.msg-feed::-webkit-scrollbar-thumb { background: rgba(100,130,170,0.3); border-radius: 2px; }
-
-.chat-msg {
-  border-radius: 6px;
-  padding: 6px 8px;
-  font-size: 12px;
-  line-height: 1.45;
-  background: rgba(15, 22, 34, 0.6);
-  border-left: 3px solid var(--muted);
+.narrator-feed::-webkit-scrollbar { width: 3px; }
+.narrator-feed::-webkit-scrollbar-thumb { background: rgba(80,60,30,0.3); }
+.narrator-entry {
+  font-style: italic; font-size: 12px; line-height: 1.6; color: var(--ink-dim);
+  padding: 6px 10px; border-left: 3px solid var(--gold-dim);
+  background: rgba(154,122,32,0.04); border-radius: 0 4px 4px 0;
 }
-.chat-msg.north { border-left-color: var(--north); }
-.chat-msg.south { border-left-color: var(--south); }
-.chat-msg.east { border-left-color: var(--east); }
-
-.msg-meta {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  margin-bottom: 3px;
-}
-.msg-icon { font-size: 13px; }
-.msg-role { font-size: 10px; font-weight: 600; color: var(--text); text-transform: uppercase; letter-spacing: 0.04em; }
-.msg-turn { margin-left: auto; font-size: 9px; color: var(--muted); }
-.msg-body { color: var(--dim); }
-
-/* SVG territory styles */
-.hex-bg { transition: fill 0.7s ease, opacity 0.5s ease; }
-.hex-border { fill: none; stroke-width: 1.8; stroke-linejoin: round; transition: stroke 0.7s ease; }
-.hex-border.north { stroke: var(--north-lt); }
-.hex-border.south { stroke: var(--south-lt); }
-.hex-border.east { stroke: var(--east-lt); }
-
-.territory:hover .hex-bg { opacity: 0.95; }
-.territory:hover .hex-border { stroke-width: 2.5; }
-.territory { cursor: default; }
-
-.region-label {
-  fill: #fff;
-  font-family: "Chakra Petch", sans-serif;
-  font-size: 11px;
-  font-weight: 600;
-  text-anchor: middle;
-  pointer-events: none;
-  text-transform: capitalize;
+.narrator-entry .narrator-turn {
+  font-style: normal; font-weight: 700; color: var(--gold);
+  font-size: 9px; text-transform: uppercase; margin-right: 6px;
+  display: inline-block; background: rgba(154,122,32,0.1);
+  padding: 0 4px; border-radius: 2px;
 }
 
-.region-stats {
-  fill: rgba(255,255,255,0.5);
-  font-size: 9.5px;
-  text-anchor: middle;
-  pointer-events: none;
+/* ═══ 3x3 Channel Grid ═══ */
+.channel-grid {
+  flex: 1; display: flex; flex-direction: column;
+  background: var(--parchment); overflow: hidden;
+}
+/* Row-based phase coloring — BOLD visual separation */
+.grid-row {
+  flex: 1; display: flex; min-height: 0;
+  border-bottom: 4px solid #8a7a58;
+}
+.grid-row:last-child { border-bottom: none; }
+
+/* Strategy — military khaki */
+.grid-row:nth-child(1) { background: #e0d4b8; }
+/* Briefings — diplomatic rose */
+.grid-row:nth-child(2) { background: #dcc8b8; }
+/* Negotiations — intrigue amber */
+.grid-row:nth-child(3) { background: #d4c4a0; }
+
+.row-label {
+  writing-mode: vertical-rl; text-orientation: mixed; transform: rotate(180deg);
+  font-family: "Space Grotesk", sans-serif;
+  font-size: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.12em;
+  color: #6a5a40; padding: 4px 3px;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0; width: 20px; border-right: 3px solid #8a7a58;
+  background: rgba(0,0,0,0.06);
 }
 
-.edge-front {
-  stroke: rgba(255, 200, 60, 0.3);
-  stroke-width: 2.5;
-  stroke-dasharray: 5 3;
-  stroke-linecap: round;
-  animation: frontPulse 2.5s ease-in-out infinite;
-  filter: drop-shadow(0 0 3px rgba(255, 200, 60, 0.15));
+.grid-cell {
+  flex: 1; display: flex; flex-direction: column;
+  border-right: 2px solid rgba(100,80,50,0.35);
+  min-width: 0; overflow: hidden; position: relative;
 }
-@keyframes frontPulse {
-  0%, 100% { opacity: 0.25; }
-  50% { opacity: 0.7; }
+.grid-cell:last-child { border-right: none; }
+
+.cell-header {
+  font-family: "Space Grotesk", sans-serif;
+  display: flex; align-items: center; gap: 4px;
+  padding: 3px 6px; flex-shrink: 0;
+  border-bottom: 1px solid rgba(100,80,50,0.25);
+  background: rgba(0,0,0,0.03);
+}
+.cell-title { font-size: 9px; font-weight: 700; color: var(--ink-dim); white-space: nowrap; }
+.cell-subtitle { font-size: 7px; color: var(--ink-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
+.cell-toggle {
+  font-size: 8px; background: none; border: 1px solid var(--border);
+  border-radius: 3px; padding: 1px 4px; cursor: pointer; color: var(--ink-muted);
+  flex-shrink: 0;
+}
+.cell-toggle:hover { background: rgba(80,60,30,0.1); color: var(--ink); }
+
+.cell-feed {
+  flex: 1; overflow-y: auto; padding: 4px;
+  display: flex; flex-direction: column; gap: 3px;
+}
+.cell-feed::-webkit-scrollbar { width: 2px; }
+.cell-feed::-webkit-scrollbar-thumb { background: rgba(80,60,30,0.3); }
+
+/* Column picker */
+.col-picker {
+  position: absolute; top: 24px; left: 0; right: 0; z-index: 20;
+  background: var(--parchment); border: 1px solid var(--border-heavy);
+  border-radius: 4px; max-height: 200px; overflow-y: auto;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+.picker-item {
+  display: block; width: 100%; text-align: left;
+  background: none; border: none; border-bottom: 1px solid rgba(80,60,30,0.1);
+  padding: 4px 6px; font-family: "Space Grotesk", sans-serif; font-size: 10px;
+  color: var(--ink-dim); cursor: pointer;
+}
+.picker-item:hover { background: rgba(80,60,30,0.08); color: var(--ink); }
+.picker-item.in-use { color: var(--ink-muted); font-style: italic; }
+
+/* ═══ iOS-style Chat Bubbles ═══ */
+.bubble {
+  border-radius: 12px; padding: 4px 8px;
+  font-family: "Space Grotesk", sans-serif;
+  font-size: 10px; font-weight: 400; line-height: 1.4;
+  max-width: 90%; word-wrap: break-word;
+}
+.bubble.left { align-self: flex-start; margin-right: auto; border-bottom-left-radius: 4px; }
+.bubble.right { align-self: flex-end; margin-left: auto; border-bottom-right-radius: 4px; }
+
+/* Faction-colored bubbles */
+.bubble.left.france { background: rgba(46,90,138,0.12); }
+.bubble.left.prussia { background: rgba(138,122,40,0.12); }
+.bubble.left.russia { background: rgba(138,48,48,0.12); }
+.bubble.right.france { background: rgba(46,90,138,0.18); }
+.bubble.right.prussia { background: rgba(138,122,40,0.18); }
+.bubble.right.russia { background: rgba(138,48,48,0.18); }
+.bubble.left { background: rgba(0,0,0,0.05); }
+.bubble.right { background: rgba(0,0,0,0.08); }
+
+/* No visual distinction needed — compact and verbose are separate views */
+
+.bubble-sender {
+  font-family: "Space Grotesk", sans-serif;
+  font-size: 8px; font-weight: 700; color: var(--ink-muted);
+  text-transform: uppercase; display: block; margin-bottom: 1px;
 }
 
-/* Target ring */
-.target-ring {
-  fill: none; stroke-width: 3; stroke-dasharray: 8 5;
-  opacity: 0;
-  animation: targetIn 0.3s ease forwards, targetSpin 1s linear infinite;
-}
-.target-ring.north { stroke: var(--north-lt); }
-.target-ring.south { stroke: var(--south-lt); }
-.target-ring.east { stroke: var(--east-lt); }
-@keyframes targetIn { to { opacity: 0.8; } }
-@keyframes targetSpin { to { stroke-dashoffset: -26; } }
+.bubble.verbose { max-width: 95%; padding: 5px 8px; }
+.bubble-head { display: flex; align-items: baseline; gap: 3px; margin-bottom: 2px; }
+.bubble-turn { margin-left: auto; font-family: "Space Grotesk", sans-serif; font-size: 7px; color: var(--ink-muted); }
+.bubble-body { font-size: 10px; line-height: 1.45; color: var(--ink); }
+.bubble-body strong { font-weight: 700; }
+.bubble-body em { font-style: italic; }
+.bubble-body ul, .bubble-body ol { margin: 1px 0; padding-left: 12px; }
+.bubble-body li { margin-bottom: 1px; }
 
-/* Capture flash — more dramatic with fill pulse */
-.captured-flash {
-  stroke-width: 3; opacity: 0;
-  animation: capFlash 1.4s ease-out forwards;
-}
-.captured-flash.to-north { fill: var(--north); stroke: var(--north-lt); }
-.captured-flash.to-south { fill: var(--south); stroke: var(--south-lt); }
-.captured-flash.to-east { fill: var(--east); stroke: var(--east-lt); }
-@keyframes capFlash {
-  0% { opacity: 0; stroke-width: 4; fill-opacity: 0.4; }
-  15% { opacity: 1; fill-opacity: 0.35; }
-  40% { fill-opacity: 0; }
-  100% { opacity: 0; stroke-width: 18; fill-opacity: 0; }
-}
+/* ═══ SVG Territory ═══ */
+.territory-path { transition: fill 0.7s ease; cursor: default; }
+.territory-path:hover { fill-opacity: 0.7; }
+.region-label { fill: rgba(255,255,255,0.85); font-family: "Playfair Display", serif; font-size: 10px; font-weight: 600; text-anchor: middle; pointer-events: none; }
+.region-stats { fill: rgba(255,255,255,0.45); font-family: "Space Grotesk", sans-serif; font-size: 8px; text-anchor: middle; pointer-events: none; }
+.edge-front { stroke: rgba(180,140,50,0.25); stroke-width: 1.5; stroke-dasharray: 4 3; animation: frontPulse 3s ease-in-out infinite; }
+.edge-sea { stroke: rgba(80,140,200,0.2); stroke-width: 1; stroke-dasharray: 6 5; animation: frontPulse 4s ease-in-out infinite; }
+@keyframes frontPulse { 0%,100% { opacity: 0.2; } 50% { opacity: 0.6; } }
+.target-ring { fill: none; stroke-width: 2; stroke-dasharray: 6 4; opacity: 0; animation: targetIn 0.3s ease forwards, targetSpin 1s linear infinite; }
+.target-ring.france { stroke: var(--france-lt); }
+.target-ring.prussia { stroke: var(--prussia-lt); }
+.target-ring.russia { stroke: var(--russia-lt); }
+@keyframes targetIn { to { opacity: 0.7; } }
+@keyframes targetSpin { to { stroke-dashoffset: -20; } }
+.captured-flash { stroke-width: 2; opacity: 0; animation: capFlash 1.4s ease-out forwards; }
+@keyframes capFlash { 0% { opacity: 0; fill-opacity: 0.4; } 15% { opacity: 1; fill-opacity: 0.3; } 40% { fill-opacity: 0; } 100% { opacity: 0; stroke-width: 12; } }
 
-/* ── Turn Banner ── */
-
-.turn-banner {
-  position: absolute; top: 50%; left: 50%;
-  transform: translate(-50%, -50%);
-  z-index: 12; pointer-events: none;
-  text-align: center;
-  opacity: 0; transition: opacity 0.35s ease;
-}
+/* ═══ Turn Banner ═══ */
+.turn-banner { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); z-index: 12; pointer-events: none; text-align: center; opacity: 0; transition: opacity 0.35s ease; }
 .turn-banner.visible { opacity: 1; }
+.turn-banner .phase { font-size: clamp(16px, 3vw, 28px); font-weight: 700; letter-spacing: 0.08em; color: #d4a840; text-shadow: 0 0 20px rgba(212,168,64,0.4); }
+.turn-banner .detail { font-family: "Space Grotesk", sans-serif; font-size: 11px; color: #e8e0d0; margin-top: 4px; background: rgba(10,8,5,0.8); border-radius: 4px; padding: 4px 12px; border: 1px solid rgba(120,90,40,0.3); }
 
-.turn-banner .phase {
-  font-family: "Chakra Petch", sans-serif;
-  font-size: clamp(16px, 3vw, 28px);
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-  color: var(--gold);
-  text-shadow: 0 0 20px rgba(232, 184, 74, 0.5);
-}
-
-.turn-banner .detail {
-  font-size: 13px; color: var(--text); margin-top: 6px;
-  background: rgba(7, 11, 18, 0.75);
-  backdrop-filter: blur(4px);
-  border-radius: 8px; padding: 8px 16px;
-  border: 1px solid var(--border);
-}
-
-/* ── Victory Overlay ── */
-
-.victory-overlay {
-  position: absolute; inset: 0; z-index: 20;
-  display: grid; place-items: center;
-  background: radial-gradient(ellipse at center, rgba(7, 11, 18, 0.7) 0%, rgba(4, 6, 10, 0.92) 100%);
-  backdrop-filter: blur(12px);
-  opacity: 0; pointer-events: none;
-  transition: opacity 0.8s ease;
-}
+/* ═══ Victory ═══ */
+.victory-overlay { position: absolute; inset: 0; z-index: 20; display: grid; place-items: center; background: radial-gradient(ellipse at center, rgba(42,34,24,0.8), rgba(20,16,10,0.95)); backdrop-filter: blur(8px); opacity: 0; pointer-events: none; transition: opacity 0.8s ease; }
 .victory-overlay.visible { opacity: 1; pointer-events: auto; }
-
 .victory-content { text-align: center; animation: vPop 0.8s ease; }
-.victory-content h2 {
-  font-family: "Chakra Petch", sans-serif;
-  font-size: clamp(36px, 6vw, 56px);
-  font-weight: 700; letter-spacing: 0.12em; margin-bottom: 8px;
-}
-.victory-content h2.north { color: var(--north-lt); text-shadow: 0 0 40px var(--north), 0 0 80px rgba(59, 142, 214, 0.3); }
-.victory-content h2.south { color: var(--south-lt); text-shadow: 0 0 40px var(--south), 0 0 80px rgba(214, 90, 59, 0.3); }
-.victory-content h2.east { color: var(--east-lt); text-shadow: 0 0 40px var(--east), 0 0 80px rgba(45, 184, 122, 0.3); }
-.victory-content h2.draw { color: var(--gold); text-shadow: 0 0 40px rgba(232, 184, 74, 0.6); }
-.victory-content p { font-size: 15px; color: var(--dim); }
-.victory-content .final {
-  margin-top: 12px; font-family: "Chakra Petch", sans-serif; font-size: 18px; color: var(--text);
-  display: flex; gap: 20px; justify-content: center;
-}
-.victory-content .final .north { color: var(--north-lt); }
-.victory-content .final .south { color: var(--south-lt); }
-.victory-content .final .east { color: var(--east-lt); }
-.victory-narration {
-  font-style: italic; color: var(--dim); font-size: 14px; line-height: 1.6;
-  max-width: 500px; margin: 16px auto; padding: 12px 20px;
-  border-left: 2px solid var(--gold-dim);
-  background: rgba(232, 184, 74, 0.04);
-  border-radius: 0 6px 6px 0;
-}
-@keyframes vPop {
-  0% { transform: scale(0.5); opacity: 0; }
-  60% { transform: scale(1.06); }
-  100% { transform: scale(1); opacity: 1; }
-}
+.victory-content h2 { font-size: clamp(28px, 5vw, 48px); font-weight: 700; letter-spacing: 0.06em; margin-bottom: 6px; color: var(--parchment); }
+.victory-content h2.france { color: var(--france-lt); }
+.victory-content h2.prussia { color: var(--prussia-lt); }
+.victory-content h2.russia { color: var(--russia-lt); }
+.victory-content h2.draw { color: var(--gold); }
+.victory-content p { font-size: 13px; color: var(--parchment-dk); }
+.victory-content .final { margin-top: 8px; font-family: "Space Grotesk", sans-serif; font-size: 14px; display: flex; gap: 14px; justify-content: center; color: var(--parchment); }
+.victory-narration { font-style: italic; color: var(--parchment-dk); font-size: 12px; line-height: 1.5; max-width: 420px; margin: 12px auto; padding: 8px 14px; border-left: 2px solid var(--gold-dim); border-radius: 0 4px 4px 0; }
+@keyframes vPop { 0% { transform: scale(0.5); opacity: 0; } 60% { transform: scale(1.04); } 100% { transform: scale(1); opacity: 1; } }
 
-/* (old dispatch panel removed — replaced by chat panel) */
-
-/* ── Floating Game Controls ── */
-
-.game-controls {
-  position: absolute; bottom: 14px; left: 50%;
-  transform: translateX(-50%); z-index: 10;
-  display: flex; align-items: center; gap: 5px;
-  background: var(--panel); border: 1px solid var(--border);
-  border-radius: 10px; padding: 5px 10px;
-  backdrop-filter: blur(8px);
-}
-
-.game-controls button {
-  border-radius: 6px; border: 1px solid var(--border);
-  padding: 5px 12px; background: rgba(15, 22, 34, 0.9);
-  color: var(--text); font-family: inherit; font-size: 12px;
-  cursor: pointer; transition: border-color 0.2s, transform 0.15s;
-}
-.game-controls button:hover { border-color: var(--border-hi); transform: translateY(-1px); }
-.game-controls button.primary {
-  background: linear-gradient(135deg, #2a5db0, #1e7bc4);
-  border-color: rgba(120,180,255,0.5); font-weight: 700;
-}
-
-.game-controls .sep { width: 1px; height: 20px; background: var(--border); margin: 0 4px; }
-
-/* ── Settings Drawer ── */
-
-.settings-drawer {
-  position: fixed; top: 0; right: 0;
-  width: 300px; height: 100%; z-index: 30;
-  background: rgba(10, 16, 26, 0.95);
-  border-left: 1px solid var(--border);
-  backdrop-filter: blur(12px);
-  padding: 16px; display: flex; flex-direction: column; gap: 12px;
-  transform: translateX(100%); transition: transform 0.3s ease;
-  overflow-y: auto;
-}
+/* ═══ Settings Drawer ═══ */
+.settings-drawer { position: fixed; top: 0; right: 0; width: 280px; height: 100%; z-index: 30; background: var(--parchment); border-left: 2px solid var(--border-heavy); padding: 12px; display: flex; flex-direction: column; gap: 8px; transform: translateX(100%); transition: transform 0.3s ease; overflow-y: auto; font-family: "Space Grotesk", sans-serif; color: var(--ink); }
 .settings-drawer.open { transform: translateX(0); }
+.settings-drawer h3 { font-family: "Playfair Display", serif; font-size: 13px; color: var(--gold); letter-spacing: 0.04em; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+.setting { display: flex; flex-direction: column; gap: 2px; }
+.setting label { font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-muted); }
+.setting select, .setting input { border-radius: 3px; border: 1px solid var(--border); padding: 4px 6px; background: rgba(255,255,255,0.5); color: var(--ink); font-family: inherit; font-size: 11px; }
+.settings-note { font-size: 9px; color: var(--ink-muted); line-height: 1.4; border-top: 1px solid var(--border); padding-top: 6px; }
+.close-btn { background: none; border: 1px solid var(--border); border-radius: 3px; padding: 3px 6px; color: var(--ink-dim); cursor: pointer; align-self: flex-end; font-size: 10px; }
 
-.settings-drawer h3 {
-  font-family: "Chakra Petch", sans-serif;
-  font-size: 14px; color: var(--gold);
-  text-transform: uppercase; letter-spacing: 0.08em;
+/* ═══ Start Screen Overlay ═══ */
+.start-overlay {
+  position: fixed; inset: 0; z-index: 25;
+  display: grid; place-items: center;
+  background: radial-gradient(ellipse at center, rgba(42,34,24,0.92), rgba(20,16,10,0.98));
+  backdrop-filter: blur(6px);
+  transition: opacity 0.5s ease;
+}
+.start-overlay.hidden { opacity: 0; pointer-events: none; }
+.start-content { text-align: center; max-width: 560px; padding: 24px; }
+.start-content h1 {
+  font-size: clamp(28px, 5vw, 48px); font-weight: 700;
+  color: var(--parchment); letter-spacing: 0.06em; margin-bottom: 4px;
+}
+.start-subtitle {
+  font-family: "Space Grotesk", sans-serif;
+  font-size: 13px; color: var(--gold); text-transform: uppercase;
+  letter-spacing: 0.1em; margin-bottom: 20px;
+}
+.start-desc {
+  text-align: left; color: var(--parchment-dk); font-size: 14px; line-height: 1.7;
+  margin-bottom: 24px;
+}
+.start-desc p { margin-bottom: 10px; }
+.start-desc strong { color: var(--parchment); }
+.start-big-btn {
+  font-family: "Playfair Display", serif;
+  font-size: 20px; font-weight: 700; letter-spacing: 0.06em;
+  padding: 12px 40px; border-radius: 6px;
+  background: linear-gradient(135deg, #3a6a3a, #2a5a2a);
+  color: var(--parchment); border: 2px solid rgba(100,160,100,0.4);
+  cursor: pointer; transition: transform 0.15s, box-shadow 0.15s;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+}
+.start-big-btn:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.5); }
+.start-hint {
+  font-family: "Space Grotesk", sans-serif;
+  font-size: 11px; color: rgba(232,220,200,0.4); margin-top: 12px;
 }
 
-.setting { display: flex; flex-direction: column; gap: 4px; }
-.setting label {
-  font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted);
-}
+/* ═══ Status Bar ═══ */
+.status-bar { font-family: "Space Grotesk", sans-serif; font-size: 9px; color: var(--ink-muted); padding: 2px 12px; border-top: 1px solid var(--border); flex-shrink: 0; background: var(--parchment-dk); }
 
-.setting select, .setting input {
-  border-radius: 6px; border: 1px solid var(--border);
-  padding: 6px 8px; background: rgba(15, 22, 34, 0.9);
-  color: var(--text); font-family: inherit; font-size: 12px;
-}
-
-.setting input::placeholder { color: var(--muted); }
-
-.settings-note { font-size: 11px; color: var(--muted); line-height: 1.5; border-top: 1px solid var(--border); padding-top: 10px; }
-
-.close-btn {
-  background: none; border: 1px solid var(--border);
-  border-radius: 6px; padding: 6px; color: var(--dim);
-  cursor: pointer; align-self: flex-end; font-size: 12px;
-}
-.close-btn:hover { color: var(--text); border-color: var(--border-hi); transform: none; }
-
-/* ── Status Bar ── */
-
-.status-bar {
-  font-size: 11px; color: var(--muted);
-  padding: 3px 16px; border-top: 1px solid var(--border);
-  flex-shrink: 0; background: var(--bg);
-}
-
-@media (max-width: 700px) {
-  .chat-panel { width: 200px; }
-  .faction .name { display: none; }
-}
+@media (max-width: 700px) { .faction .name { display: none; } .row-label { display: none; } }

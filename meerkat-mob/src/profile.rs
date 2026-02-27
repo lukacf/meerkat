@@ -86,7 +86,13 @@ pub struct Profile {
     ///
     /// When set, the agent session is configured with an [`OutputSchema`] that
     /// forces the LLM to respond with validated JSON conforming to this schema.
-    /// The value should be a valid JSON Schema object.
+    /// The value should be a valid JSON Schema object (root must be an object).
+    ///
+    /// **Note:** Validation is deferred to spawn time (`build_session_config`)
+    /// where `MeerkatSchema::new()` rejects invalid schemas. This is intentional:
+    /// `Profile` is a serializable template that may be persisted or transmitted
+    /// before any agent is spawned, and `MeerkatSchema` does not currently
+    /// implement `Eq` or validate on deserialization.
     #[serde(default)]
     pub output_schema: Option<serde_json::Value>,
 }

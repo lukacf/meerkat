@@ -350,6 +350,16 @@ Comms supports `inproc`, TCP, and UDS. Inproc registry is namespace-segmented; M
 
 **Silent comms intents**: `AgentBuildConfig.silent_comms_intents` configures request intents that are injected into session context without triggering an LLM turn. Mob meerkats default to `["mob.peer_added", "mob.peer_retired"]`.
 
+#### Structured output with comms (autonomous agents)
+
+In `autonomous_host` mode, agents run a continuous loop: wake on inbox → process (LLM calls + tool calls including `send`) → produce final text output → sleep. Key architectural points:
+
+- **`output_schema` constrains the agent's final text output**, not tool call arguments. It triggers an extraction turn after the agentic loop completes, calling the LLM with no tools and API-enforced structured output.
+- **Comms `send` tool body is free-text** (`Option<String>`). There is no schema enforcement on comms message content — agents communicate naturally.
+- **The extraction turn fires after each host-mode wake cycle.** So each time an agent processes inbox messages and sends replies, it then produces a structured JSON summary of what it did. This summary is API-enforced via `output_schema` on the profile.
+- **Use case**: Set `output_schema` on autonomous agent profiles to get structured turn summaries (e.g. `{headline: string, details: string}`) while letting agents communicate freely via `send`. The summaries power compact UI displays; the raw comms messages are available for detailed views.
+- **Event stream**: The structured output appears in `RunCompleted` events as a JSON string in the `result` field. Parse it to extract the schema-validated fields.
+
 ### Tool scoping
 
 Tool visibility can change during a session without restarting the agent. All changes are staged then atomically applied at the turn boundary.

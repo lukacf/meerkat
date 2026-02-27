@@ -34,6 +34,7 @@ meerkat-client = { workspace = true }
 meerkat-store = { workspace = true }
 meerkat-tools = { workspace = true }
 meerkat-comms = { workspace = true, optional = true }
+meerkat-mcp = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -53,8 +54,9 @@ subtle = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 
 [features]
-default = ["comms"]
+default = ["comms", "mcp"]
 comms = ["meerkat/comms", "dep:meerkat-comms"]
+mcp = ["meerkat/mcp", "dep:meerkat-mcp"]
 integration-real-tests = []
 
 [dev-dependencies]
@@ -68,6 +70,7 @@ ignored = [
     "async-trait",     # proc macro (derive)
     "hyper",           # dev-dependency used in tests
     "meerkat-comms",   # optional dep behind comms feature
+    "meerkat-mcp",     # optional dep behind mcp feature
     "meerkat-tools",   # used via meerkat facade re-exports
     "thiserror",       # proc macro (derive)
 ]

@@ -15,7 +15,8 @@
           "memory_store",
           "session_store",
           "session_compaction",
-          "skills"
+          "skills",
+          "mcp_live"
         ],
         "type": "string"
       }
@@ -106,7 +107,8 @@
           "memory_store",
           "session_store",
           "session_compaction",
-          "skills"
+          "skills",
+          "mcp_live"
         ],
         "type": "string"
       },

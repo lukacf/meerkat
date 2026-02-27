@@ -533,6 +533,130 @@ fn remove_server_from_file(path: &Path, name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Live MCP operations via REST
+// ---------------------------------------------------------------------------
+
+/// POST a live MCP operation to the REST server.
+async fn post_live_op(
+    base_url: &str,
+    session_id: &str,
+    operation: &str,
+    body: serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    let url = format!("{base_url}/sessions/{session_id}/mcp/{operation}");
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to connect to REST server at {base_url}: {e}"))?;
+
+    let status = resp.status();
+    let body_text = resp
+        .text()
+        .await
+        .unwrap_or_else(|_| "failed to read response body".to_string());
+
+    if status.is_success() {
+        let parsed: serde_json::Value = serde_json::from_str(&body_text)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON response: {e}"))?;
+        // Check for rejected status — the server accepted the request but
+        // the operation was rejected by the MCP adapter.
+        if parsed.get("status").and_then(|s| s.as_str()) == Some("rejected") {
+            let server = parsed
+                .get("server_name")
+                .and_then(|s| s.as_str())
+                .unwrap_or("unknown");
+            anyhow::bail!("Live MCP {operation} was rejected by server for '{server}'");
+        }
+        return Ok(parsed);
+    }
+
+    // Parse the error body for structured error messages.
+    let error_code = serde_json::from_str::<serde_json::Value>(&body_text)
+        .ok()
+        .and_then(|v| v.get("code").and_then(|c| c.as_str()).map(String::from));
+    let error_msg = serde_json::from_str::<serde_json::Value>(&body_text)
+        .ok()
+        .and_then(|v| v.get("error").and_then(|c| c.as_str()).map(String::from))
+        .unwrap_or_else(|| body_text.clone());
+
+    match (status.as_u16(), error_code.as_deref()) {
+        (404, Some("NOT_FOUND")) => {
+            anyhow::bail!("Session '{session_id}' not found on server: {error_msg}")
+        }
+        (404, _) => {
+            anyhow::bail!(
+                "Server does not support live MCP; ensure rkat-rest was built with --features mcp"
+            )
+        }
+        (409, _) => {
+            anyhow::bail!(
+                "Session exists but was created without live MCP support \
+                 (recreate session or restart server): {error_msg}"
+            )
+        }
+        _ => anyhow::bail!("Live MCP {operation} failed (HTTP {status}): {error_msg}"),
+    }
+}
+
+/// Stage a live MCP server addition on a running session via REST.
+#[allow(clippy::too_many_arguments)]
+pub async fn live_add_server(
+    base_url: &str,
+    session_id: &str,
+    name: String,
+    transport: Option<meerkat_core::mcp_config::McpTransportKind>,
+    url: Option<String>,
+    headers: Vec<String>,
+    command: Vec<String>,
+    env: Vec<String>,
+) -> anyhow::Result<()> {
+    let config = build_server_config(name.clone(), transport, url, headers, command, env)?;
+    let server_config = serde_json::to_value(&config)?;
+    // Remove the name from the config — the REST endpoint expects it separately.
+    let mut config_obj = server_config;
+    if let Some(obj) = config_obj.as_object_mut() {
+        obj.remove("name");
+    }
+
+    let body = serde_json::json!({
+        "session_id": session_id,
+        "server_name": name,
+        "server_config": config_obj,
+    });
+
+    let result = post_live_op(base_url, session_id, "add", body).await?;
+    let status = result
+        .get("status")
+        .and_then(|s| s.as_str())
+        .unwrap_or("unknown");
+    println!("MCP server '{name}' {status} on session {session_id}");
+    Ok(())
+}
+
+/// Stage a live MCP server removal on a running session via REST.
+pub async fn live_remove_server(
+    base_url: &str,
+    session_id: &str,
+    name: String,
+) -> anyhow::Result<()> {
+    let body = serde_json::json!({
+        "session_id": session_id,
+        "server_name": name,
+    });
+
+    let result = post_live_op(base_url, session_id, "remove", body).await?;
+    let status = result
+        .get("status")
+        .and_then(|s| s.as_str())
+        .unwrap_or("unknown");
+    println!("MCP server '{name}' removal {status} on session {session_id}");
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {

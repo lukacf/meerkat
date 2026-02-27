@@ -27,7 +27,7 @@ use meerkat_core::types::{RunResult, SessionId};
 #[cfg(feature = "mcp")]
 use meerkat_core::{AgentToolDispatcher, ToolGateway};
 use meerkat_core::{Config, ConfigStore, Session};
-#[cfg(feature = "mcp")]
+#[cfg(all(test, feature = "mcp"))]
 use meerkat_core::{ToolConfigChangeOperation, ToolConfigChangedPayload};
 use tokio::sync::{RwLock, mpsc};
 
@@ -807,50 +807,7 @@ impl SessionRuntime {
         turn_number: u32,
         actions: Vec<McpLifecycleAction>,
     ) {
-        for action in actions {
-            let (operation, target, status) = match action {
-                McpLifecycleAction::Activated { server } => (
-                    ToolConfigChangeOperation::Add,
-                    server,
-                    "applied".to_string(),
-                ),
-                McpLifecycleAction::Reloaded { server } => (
-                    ToolConfigChangeOperation::Reload,
-                    server,
-                    "applied".to_string(),
-                ),
-                McpLifecycleAction::RemovingStarted { server } => (
-                    ToolConfigChangeOperation::Remove,
-                    server,
-                    "draining".to_string(),
-                ),
-                McpLifecycleAction::Removed { server, degraded } => (
-                    ToolConfigChangeOperation::Remove,
-                    server,
-                    if degraded { "forced" } else { "applied" }.to_string(),
-                ),
-            };
-            let payload = ToolConfigChangedPayload {
-                operation,
-                target: target.clone(),
-                status: status.clone(),
-                persisted: false,
-                applied_at_turn: Some(turn_number),
-            };
-            let _ = event_tx
-                .send(AgentEvent::ToolConfigChanged {
-                    payload: payload.clone(),
-                })
-                .await;
-            if status == "forced" {
-                if !prompt.is_empty() {
-                    prompt.push('\n');
-                }
-                prompt.push_str(&format!(
-                    "[system-notice] MCP server '{target}' removal forced after drain timeout."
-                ));
-            }
-        }
+        meerkat::surface::emit_mcp_lifecycle_events(event_tx, prompt, turn_number, actions).await;
     }
 }
 

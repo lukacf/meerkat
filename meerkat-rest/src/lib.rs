@@ -52,6 +52,30 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 
+#[cfg(feature = "mcp")]
+use meerkat::{
+    AgentToolDispatcher, McpLifecycleAction, McpReloadTarget, McpRouter, McpRouterAdapter,
+};
+#[cfg(feature = "mcp")]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "mcp")]
+use std::time::Duration;
+#[cfg(feature = "mcp")]
+use tokio::sync::RwLock;
+
+// ---------------------------------------------------------------------------
+// Live MCP per-session state
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "mcp")]
+pub struct SessionMcpState {
+    pub(crate) adapter: Arc<McpRouterAdapter>,
+    pub(crate) turn_counter: u32,
+    pub(crate) lifecycle_tx: mpsc::UnboundedSender<McpLifecycleAction>,
+    pub(crate) lifecycle_rx: mpsc::UnboundedReceiver<McpLifecycleAction>,
+    pub(crate) drain_task_running: Arc<AtomicBool>,
+}
+
 /// Application state shared across handlers
 #[derive(Clone)]
 pub struct AppState {
@@ -82,6 +106,9 @@ pub struct AppState {
     pub config_runtime: Arc<meerkat_core::ConfigRuntime>,
     pub realm_lease: Arc<tokio::sync::Mutex<Option<meerkat_store::RealmLeaseGuard>>>,
     pub skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
+    /// Per-session MCP adapter state (live MCP mutation).
+    #[cfg(feature = "mcp")]
+    pub mcp_sessions: Arc<RwLock<std::collections::HashMap<SessionId, SessionMcpState>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -237,6 +264,8 @@ impl AppState {
             config_runtime,
             realm_lease: Arc::new(tokio::sync::Mutex::new(Some(lease))),
             skill_runtime,
+            #[cfg(feature = "mcp")]
+            mcp_sessions: Arc::new(RwLock::new(std::collections::HashMap::new())),
         })
     }
 }
@@ -382,7 +411,7 @@ pub struct ErrorResponse {
 
 /// Build the REST API router
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    let r = Router::new()
         .route("/sessions", post(create_session))
         .route("/sessions/{id}", get(get_session))
         .route("/sessions/{id}/messages", post(continue_session))
@@ -398,8 +427,15 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health_check))
         .route("/skills", get(list_skills))
         .route("/skills/{id}", get(inspect_skill))
-        .route("/capabilities", get(get_capabilities))
-        .with_state(state)
+        .route("/capabilities", get(get_capabilities));
+
+    #[cfg(feature = "mcp")]
+    let r = r
+        .route("/sessions/{id}/mcp/add", post(mcp_add))
+        .route("/sessions/{id}/mcp/remove", post(mcp_remove))
+        .route("/sessions/{id}/mcp/reload", post(mcp_reload));
+
+    r.with_state(state)
 }
 
 /// Health check endpoint
@@ -958,6 +994,29 @@ async fn create_session(
         req.verbose,
     );
 
+    // Create MCP adapter and compose with external tools.
+    #[cfg(feature = "mcp")]
+    let mcp_external_tools = {
+        let adapter = Arc::new(McpRouterAdapter::new(McpRouter::new()));
+        let adapter_dispatcher: Arc<dyn AgentToolDispatcher> = adapter.clone();
+        let (lifecycle_tx, lifecycle_rx) = mpsc::unbounded_channel();
+        let mcp_state = SessionMcpState {
+            adapter,
+            turn_counter: 0,
+            lifecycle_tx,
+            lifecycle_rx,
+            drain_task_running: Arc::new(AtomicBool::new(false)),
+        };
+        state
+            .mcp_sessions
+            .write()
+            .await
+            .insert(session_id.clone(), mcp_state);
+        Some(adapter_dispatcher)
+    };
+    #[cfg(not(feature = "mcp"))]
+    let mcp_external_tools: Option<Arc<dyn meerkat_core::AgentToolDispatcher>> = None;
+
     let current_generation = state.config_runtime.get().await.ok().map(|s| s.generation);
     let build = SessionBuildOptions {
         provider: req.provider,
@@ -969,7 +1028,7 @@ async fn create_session(
         resume_session: Some(pre_session),
         budget_limits: None,
         provider_params: None,
-        external_tools: None,
+        external_tools: mcp_external_tools,
         llm_client_override: state
             .llm_client_override
             .clone()
@@ -1010,7 +1069,12 @@ async fn create_session(
 
     match result {
         Ok(run_result) => Ok(Json(run_result_to_response(run_result, &state.realm_id))),
-        Err(err) => session_error_to_api_result(err, &session_id, &state.realm_id),
+        Err(err) => {
+            // Clean up MCP adapter state on session creation failure.
+            #[cfg(feature = "mcp")]
+            cleanup_mcp_session(&state, &session_id).await;
+            session_error_to_api_result(err, &session_id, &state.realm_id)
+        }
     }
 }
 
@@ -1071,9 +1135,15 @@ async fn continue_session(
     let host_mode_requested = req.host_mode;
     let host_mode = resolve_host_mode(host_mode_requested)?;
 
+    // Apply staged MCP operations at the turn boundary.
+    #[allow(unused_mut)]
+    let mut turn_prompt = req.prompt.clone();
+    #[cfg(feature = "mcp")]
+    apply_mcp_boundary(&state, &session_id, &caller_event_tx, &mut turn_prompt).await?;
+
     // First, try to start a turn on a live session in the service.
     let svc_req = SvcStartTurnRequest {
-        prompt: req.prompt.clone(),
+        prompt: turn_prompt,
         event_tx: Some(caller_event_tx.clone()),
         host_mode,
         skill_references: None,
@@ -1281,12 +1351,302 @@ async fn session_events(
     Ok(Sse::new(stream))
 }
 
+// ---------------------------------------------------------------------------
+// Live MCP handlers
+// ---------------------------------------------------------------------------
+
+/// Apply staged MCP operations at the turn boundary.
+///
+/// Mirrors RPC's `apply_mcp_boundary()`: drain queued lifecycle actions,
+/// call `apply_staged()`, spawn drain task if removals started, emit events.
+/// Returns an error if staged operations fail to apply — the caller should
+/// fail the turn to match RPC semantics.
+#[cfg(feature = "mcp")]
+async fn apply_mcp_boundary(
+    state: &AppState,
+    session_id: &SessionId,
+    event_tx: &mpsc::Sender<AgentEvent>,
+    prompt: &mut String,
+) -> Result<(), ApiError> {
+    let (adapter, turn_number, drain_task_running, lifecycle_tx, mut queued_actions) = {
+        let mut map = state.mcp_sessions.write().await;
+        let mcp_state = match map.get_mut(session_id) {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        mcp_state.turn_counter = mcp_state.turn_counter.saturating_add(1);
+        let mut queued = Vec::new();
+        while let Ok(action) = mcp_state.lifecycle_rx.try_recv() {
+            queued.push(action);
+        }
+        (
+            mcp_state.adapter.clone(),
+            mcp_state.turn_counter,
+            mcp_state.drain_task_running.clone(),
+            mcp_state.lifecycle_tx.clone(),
+            queued,
+        )
+    };
+
+    // Emit events for queued actions from the background drain task.
+    if !queued_actions.is_empty() {
+        let drained = std::mem::take(&mut queued_actions);
+        meerkat::surface::emit_mcp_lifecycle_events(event_tx, prompt, turn_number, drained).await;
+    }
+
+    // Apply staged operations — fail the turn on error.
+    let delta = adapter
+        .apply_staged()
+        .await
+        .map_err(|e| ApiError::Internal(format!("failed to apply staged MCP operations: {e}")))?;
+
+    // Spawn drain task if any removals started.
+    if delta
+        .lifecycle_actions
+        .iter()
+        .any(|a| matches!(a, McpLifecycleAction::RemovingStarted { .. }))
+    {
+        spawn_mcp_drain_task(adapter, drain_task_running, lifecycle_tx);
+    }
+
+    queued_actions.extend(delta.lifecycle_actions);
+    if !queued_actions.is_empty() {
+        meerkat::surface::emit_mcp_lifecycle_events(event_tx, prompt, turn_number, queued_actions)
+            .await;
+    }
+
+    Ok(())
+}
+
+/// Spawn a background task that monitors removing MCP servers.
+#[cfg(feature = "mcp")]
+fn spawn_mcp_drain_task(
+    adapter: Arc<McpRouterAdapter>,
+    task_running: Arc<AtomicBool>,
+    lifecycle_tx: mpsc::UnboundedSender<McpLifecycleAction>,
+) {
+    if task_running
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let delta = match adapter.progress_removals().await {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!("background MCP drain apply failed: {e}");
+                    break;
+                }
+            };
+            for action in delta.lifecycle_actions {
+                let _ = lifecycle_tx.send(action);
+            }
+            match adapter.has_removing_servers().await {
+                Ok(true) => continue,
+                Ok(false) => break,
+                Err(e) => {
+                    tracing::warn!("background MCP drain state check failed: {e}");
+                    break;
+                }
+            }
+        }
+        task_running.store(false, Ordering::Release);
+    });
+}
+
+/// Validate session existence and retrieve its MCP adapter.
+///
+/// Two-step validation:
+/// 1. Check session exists in the service (authoritative).
+/// 2. Check session has a live MCP adapter (runtime capability).
+#[cfg(feature = "mcp")]
+async fn resolve_mcp_adapter(
+    state: &AppState,
+    session_id: &SessionId,
+) -> Result<Arc<McpRouterAdapter>, ApiError> {
+    // Step 1: session must exist.
+    if state.session_service.read(session_id).await.is_err() {
+        return Err(ApiError::NotFound(format!(
+            "Session not found: {session_id}"
+        )));
+    }
+    // Step 2: session must have a live MCP adapter.
+    let map = state.mcp_sessions.read().await;
+    map.get(session_id)
+        .map(|s| s.adapter.clone())
+        .ok_or_else(|| {
+            ApiError::Conflict(
+                "Live MCP unavailable for this session. Recovery: create a new session \
+                 (live MCP adapters are attached at session creation time; sessions from \
+                 before the server started do not have them)."
+                    .to_string(),
+            )
+        })
+}
+
+/// Validate that path and body session IDs resolve to the same session.
+#[cfg(feature = "mcp")]
+fn validate_session_id_consistency(
+    path_id: &str,
+    body_id: &str,
+    state: &AppState,
+) -> Result<SessionId, ApiError> {
+    let path_sid = resolve_session_id_for_state(path_id, state)?;
+    let body_sid = resolve_session_id_for_state(body_id, state)?;
+    if path_sid != body_sid {
+        return Err(ApiError::BadRequest(format!(
+            "Session ID mismatch: path={path_id} body={body_id}"
+        )));
+    }
+    Ok(path_sid)
+}
+
+/// `POST /sessions/{id}/mcp/add` — stage a live MCP server addition.
+#[cfg(feature = "mcp")]
+async fn mcp_add(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<meerkat_contracts::McpAddParams>,
+) -> Result<Json<meerkat_contracts::McpLiveOpResponse>, ApiError> {
+    let session_id = validate_session_id_consistency(&id, &req.session_id, &state)?;
+    if req.server_name.trim().is_empty() {
+        return Err(ApiError::BadRequest(
+            "server_name cannot be empty".to_string(),
+        ));
+    }
+
+    meerkat::surface::resolve_persisted("mcp/add", req.persisted);
+
+    let adapter = resolve_mcp_adapter(&state, &session_id).await?;
+
+    // Inject the server name into the config object.
+    let mut server_config = req.server_config;
+    if let Some(obj) = server_config.as_object_mut() {
+        obj.insert(
+            "name".to_string(),
+            serde_json::Value::String(req.server_name.clone()),
+        );
+    }
+
+    let config: meerkat_core::McpServerConfig = serde_json::from_value(server_config)
+        .map_err(|e| ApiError::BadRequest(format!("invalid server_config: {e}")))?;
+
+    adapter
+        .stage_add(config)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    Ok(Json(meerkat::surface::mcp_live_response(
+        req.session_id,
+        meerkat_contracts::McpLiveOperation::Add,
+        Some(req.server_name),
+    )))
+}
+
+/// `POST /sessions/{id}/mcp/remove` — stage a live MCP server removal.
+#[cfg(feature = "mcp")]
+async fn mcp_remove(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<meerkat_contracts::McpRemoveParams>,
+) -> Result<Json<meerkat_contracts::McpLiveOpResponse>, ApiError> {
+    let session_id = validate_session_id_consistency(&id, &req.session_id, &state)?;
+    if req.server_name.trim().is_empty() {
+        return Err(ApiError::BadRequest(
+            "server_name cannot be empty".to_string(),
+        ));
+    }
+
+    meerkat::surface::resolve_persisted("mcp/remove", req.persisted);
+
+    let adapter = resolve_mcp_adapter(&state, &session_id).await?;
+    adapter
+        .stage_remove(req.server_name.clone())
+        .await
+        .map_err(ApiError::Internal)?;
+
+    Ok(Json(meerkat::surface::mcp_live_response(
+        req.session_id,
+        meerkat_contracts::McpLiveOperation::Remove,
+        Some(req.server_name),
+    )))
+}
+
+/// `POST /sessions/{id}/mcp/reload` — stage a live MCP server reload.
+#[cfg(feature = "mcp")]
+async fn mcp_reload(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<meerkat_contracts::McpReloadParams>,
+) -> Result<Json<meerkat_contracts::McpLiveOpResponse>, ApiError> {
+    let session_id = validate_session_id_consistency(&id, &req.session_id, &state)?;
+    if let Some(name) = req.server_name.as_ref()
+        && name.trim().is_empty()
+    {
+        return Err(ApiError::BadRequest(
+            "server_name cannot be empty".to_string(),
+        ));
+    }
+
+    meerkat::surface::resolve_persisted("mcp/reload", req.persisted);
+
+    let adapter = resolve_mcp_adapter(&state, &session_id).await?;
+    match req.server_name.as_ref() {
+        Some(name) => {
+            meerkat::surface::validate_reload_target(&adapter, name)
+                .await
+                .map_err(ApiError::BadRequest)?;
+            adapter
+                .stage_reload(McpReloadTarget::ServerName(name.clone()))
+                .await
+                .map_err(ApiError::Internal)?;
+        }
+        None => {
+            let names = adapter.active_server_names().await;
+            for name in names {
+                adapter
+                    .stage_reload(McpReloadTarget::ServerName(name))
+                    .await
+                    .map_err(ApiError::Internal)?;
+            }
+        }
+    }
+
+    Ok(Json(meerkat::surface::mcp_live_response(
+        req.session_id,
+        meerkat_contracts::McpLiveOperation::Reload,
+        req.server_name,
+    )))
+}
+
+/// Clean up MCP state for a session (failure cleanup, archive, shutdown).
+#[cfg(feature = "mcp")]
+async fn cleanup_mcp_session(state: &AppState, session_id: &SessionId) {
+    if let Some(mcp_state) = state.mcp_sessions.write().await.remove(session_id) {
+        mcp_state.adapter.shutdown().await;
+    }
+}
+
+/// Shut down all MCP adapters (called on server shutdown).
+#[cfg(feature = "mcp")]
+pub async fn shutdown_all_mcp_sessions(state: &AppState) {
+    let sessions: Vec<_> = state.mcp_sessions.write().await.drain().collect();
+    for (_, mcp_state) in sessions {
+        mcp_state.adapter.shutdown().await;
+    }
+}
+
 /// API error types
 #[derive(Debug)]
 pub enum ApiError {
     BadRequest(String),
     Unauthorized(String),
     NotFound(String),
+    Conflict(String),
     Configuration(String),
     Agent(String),
     Internal(String),
@@ -1300,6 +1660,7 @@ impl IntoResponse for ApiError {
             ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "BAD_REQUEST", msg),
             ApiError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED", msg),
             ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, "NOT_FOUND", msg),
+            ApiError::Conflict(msg) => (StatusCode::CONFLICT, "CONFLICT", msg),
             ApiError::Configuration(msg) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "CONFIGURATION_ERROR",
@@ -1610,5 +1971,180 @@ mod tests {
             response.session_ref.as_deref().expect("session_ref"),
             format_session_ref("test-realm", &session_id)
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Live MCP tests
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "mcp")]
+    mod mcp_tests {
+        use super::*;
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        async fn make_test_state() -> (AppState, TempDir) {
+            let temp = TempDir::new().unwrap();
+            let state = AppState::load_from(temp.path().to_path_buf())
+                .await
+                .unwrap();
+            (state, temp)
+        }
+
+        #[tokio::test]
+        async fn test_mcp_nonexistent_session_404() {
+            let (state, _temp) = make_test_state().await;
+            let fake_id = SessionId::new();
+            let app = router(state);
+            let body = serde_json::json!({
+                "session_id": fake_id.to_string(),
+                "server_name": "test-server",
+                "server_config": {"command": "echo", "args": ["hello"]}
+            });
+            let request = axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/sessions/{fake_id}/mcp/add"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        async fn test_mcp_add_empty_server_name_400() {
+            let (state, _temp) = make_test_state().await;
+            // Create a session first (even though it won't run an LLM call,
+            // the MCP adapter is attached at creation time).
+            let session_id = SessionId::new();
+            {
+                let mut map = state.mcp_sessions.write().await;
+                let adapter = Arc::new(McpRouterAdapter::new(McpRouter::new()));
+                let (tx, rx) = mpsc::unbounded_channel();
+                map.insert(
+                    session_id.clone(),
+                    SessionMcpState {
+                        adapter,
+                        turn_counter: 0,
+                        lifecycle_tx: tx,
+                        lifecycle_rx: rx,
+                        drain_task_running: Arc::new(AtomicBool::new(false)),
+                    },
+                );
+            }
+
+            let app = router(state);
+            let body = serde_json::json!({
+                "session_id": session_id.to_string(),
+                "server_name": "  ",
+                "server_config": {"command": "echo"}
+            });
+            let request = axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/sessions/{session_id}/mcp/add"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let error: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert!(
+                error["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("server_name cannot be empty")
+            );
+        }
+
+        #[tokio::test]
+        async fn test_mcp_routes_registered() {
+            // With mcp feature enabled, the routes should exist.
+            let (state, _temp) = make_test_state().await;
+            let fake_id = SessionId::new();
+            let app = router(state);
+
+            // POST to /sessions/X/mcp/add — route exists (will get 404 for missing session).
+            let body = serde_json::json!({
+                "session_id": fake_id.to_string(),
+                "server_name": "srv",
+                "server_config": {"command": "echo"}
+            });
+            let request = axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/sessions/{fake_id}/mcp/add"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            // 404 NOT_FOUND (session not found), not 405 (route not found).
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let error: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(error["code"].as_str().unwrap(), "NOT_FOUND");
+        }
+
+        #[tokio::test]
+        async fn test_mcp_response_shape() {
+            // Verify the response builder produces correct shape.
+            let resp = meerkat::surface::mcp_live_response(
+                "sid_123".to_string(),
+                meerkat_contracts::McpLiveOperation::Add,
+                Some("test-server".to_string()),
+            );
+            assert_eq!(resp.session_id, "sid_123");
+            assert_eq!(resp.operation, meerkat_contracts::McpLiveOperation::Add);
+            assert_eq!(resp.server_name, Some("test-server".to_string()));
+            assert_eq!(resp.status, meerkat_contracts::McpLiveOpStatus::Staged);
+            assert!(!resp.persisted);
+            assert!(resp.applied_at_turn.is_none());
+        }
+
+        #[test]
+        fn test_resolve_persisted_warns_and_returns_false() {
+            // persisted=true should always return false.
+            assert!(!meerkat::surface::resolve_persisted("test", true));
+            assert!(!meerkat::surface::resolve_persisted("test", false));
+        }
+
+        #[test]
+        fn test_conflict_error_is_409() {
+            let err = ApiError::Conflict("test conflict".to_string());
+            let response = err.into_response();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+        }
+    }
+
+    /// Verify MCP routes are NOT registered when the feature is off.
+    #[cfg(not(feature = "mcp"))]
+    mod mcp_feature_off_tests {
+        use super::*;
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        #[tokio::test]
+        async fn test_mcp_routes_not_registered_without_feature() {
+            let temp = TempDir::new().unwrap();
+            let state = AppState::load_from(temp.path().to_path_buf())
+                .await
+                .unwrap();
+            let app = router(state);
+
+            let body = serde_json::json!({
+                "session_id": "fake",
+                "server_name": "srv",
+                "server_config": {"command": "echo"}
+            });
+            let request = axum::http::Request::builder()
+                .method("POST")
+                .uri("/sessions/fake/mcp/add")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            // Should be 405 Method Not Allowed (route doesn't exist for POST).
+            assert_ne!(response.status(), StatusCode::OK);
+        }
     }
 }

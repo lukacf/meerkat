@@ -148,8 +148,6 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
 
     // REST OpenAPI — stub endpoint listing, not a full OpenAPI spec.
     // No request/response body schemas included.
-    // NOTE: MCP endpoints (/sessions/{id}/mcp/*) are omitted because they are
-    // hard-stubbed 501 on the REST surface. They exist only on the JSON-RPC surface.
     let rest_openapi = serde_json::json!({
         "openapi": "3.0.0",
         "info": {
@@ -161,6 +159,18 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
             "/sessions/{id}": {"get": {"summary": "Get session details"}},
             "/sessions/{id}/messages": {"post": {"summary": "Continue session with new message"}},
             "/sessions/{id}/events": {"get": {"summary": "SSE event stream"}},
+            "/sessions/{id}/mcp/add": {"post": {
+                "summary": "Stage live MCP server addition",
+                "description": "Requires mcp_live capability. Check GET /capabilities.",
+            }},
+            "/sessions/{id}/mcp/remove": {"post": {
+                "summary": "Stage live MCP server removal",
+                "description": "Requires mcp_live capability. Check GET /capabilities.",
+            }},
+            "/sessions/{id}/mcp/reload": {"post": {
+                "summary": "Stage live MCP server reload",
+                "description": "Requires mcp_live capability. Check GET /capabilities.",
+            }},
             "/capabilities": {"get": {"summary": "Get runtime capabilities"}},
             "/config": {
                 "get": {"summary": "Get config"},

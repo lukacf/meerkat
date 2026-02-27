@@ -41,6 +41,24 @@
         "summary": "SSE event stream"
       }
     },
+    "/sessions/{id}/mcp/add": {
+      "post": {
+        "description": "Requires mcp_live capability. Check GET /capabilities.",
+        "summary": "Stage live MCP server addition"
+      }
+    },
+    "/sessions/{id}/mcp/reload": {
+      "post": {
+        "description": "Requires mcp_live capability. Check GET /capabilities.",
+        "summary": "Stage live MCP server reload"
+      }
+    },
+    "/sessions/{id}/mcp/remove": {
+      "post": {
+        "description": "Requires mcp_live capability. Check GET /capabilities.",
+        "summary": "Stage live MCP server removal"
+      }
+    },
     "/sessions/{id}/messages": {
       "post": {
         "summary": "Continue session with new message"

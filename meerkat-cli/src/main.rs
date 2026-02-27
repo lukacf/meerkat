@@ -3664,46 +3664,68 @@ async fn handle_mcp_command(command: McpCommands) -> anyhow::Result<()> {
             command,
             session,
             live_server_url,
-            persist: _,
+            persist,
         } => {
             let transport = transport.map(|t| match t {
                 CliTransport::Stdio => McpTransportKind::Stdio,
                 CliTransport::Http => McpTransportKind::StreamableHttp,
                 CliTransport::Sse => McpTransportKind::Sse,
             });
-            if session.is_some() {
-                anyhow::bail!(
-                    "Live MCP operations via CLI are not yet supported. \
-                     Use the JSON-RPC surface (mcp/add method) or an SDK client instead."
-                );
+            if let Some(session_id) = session {
+                if persist {
+                    anyhow::bail!(
+                        "--persist is not yet supported for live MCP operations; \
+                         changes are runtime-only until the session ends"
+                    );
+                }
+                let base_url = live_server_url
+                    .ok_or_else(|| anyhow::anyhow!("--session requires --live-server-url"))?;
+                mcp::live_add_server(
+                    &base_url,
+                    &session_id,
+                    name,
+                    transport,
+                    url,
+                    headers,
+                    command,
+                    env,
+                )
+                .await
+            } else {
+                if live_server_url.is_some() {
+                    anyhow::bail!("--live-server-url requires --session");
+                }
+                // user flag means user scope, otherwise default to project
+                mcp::add_server(name, transport, url, headers, command, env, !user).await
             }
-            if live_server_url.is_some() {
-                anyhow::bail!("--live-server-url requires --session");
-            }
-            // user flag means user scope, otherwise default to project
-            mcp::add_server(name, transport, url, headers, command, env, !user).await
         }
         McpCommands::Remove {
             name,
             scope,
             session,
             live_server_url,
-            persist: _,
+            persist,
         } => {
             let scope = scope.map(|s| match s {
                 CliMcpScope::User => McpScope::User,
                 CliMcpScope::Project | CliMcpScope::Local => McpScope::Project,
             });
-            if session.is_some() {
-                anyhow::bail!(
-                    "Live MCP operations via CLI are not yet supported. \
-                     Use the JSON-RPC surface (mcp/remove method) or an SDK client instead."
-                );
+            if let Some(session_id) = session {
+                if persist {
+                    anyhow::bail!(
+                        "--persist is not yet supported for live MCP operations; \
+                         changes are runtime-only until the session ends"
+                    );
+                }
+                let base_url = live_server_url
+                    .ok_or_else(|| anyhow::anyhow!("--session requires --live-server-url"))?;
+                mcp::live_remove_server(&base_url, &session_id, name).await
+            } else {
+                if live_server_url.is_some() {
+                    anyhow::bail!("--live-server-url requires --session");
+                }
+                mcp::remove_server(name, scope).await
             }
-            if live_server_url.is_some() {
-                anyhow::bail!("--live-server-url requires --session");
-            }
-            mcp::remove_server(name, scope).await
         }
         McpCommands::List { scope, json } => {
             let scope = scope.map(|s| match s {
@@ -6022,7 +6044,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_mcp_add_live_session_not_yet_supported() {
+    async fn test_handle_mcp_add_live_session_requires_server_url() {
         let err = handle_mcp_command(McpCommands::Add {
             name: "srv".to_string(),
             transport: None,
@@ -6036,13 +6058,16 @@ mod tests {
             persist: false,
         })
         .await
-        .expect_err("live session should be rejected");
+        .expect_err("session without server url should be rejected");
 
-        assert!(err.to_string().contains("not yet supported"));
+        assert!(
+            err.to_string()
+                .contains("--session requires --live-server-url")
+        );
     }
 
     #[tokio::test]
-    async fn test_handle_mcp_remove_live_session_not_yet_supported() {
+    async fn test_handle_mcp_remove_live_session_requires_server_url() {
         let err = handle_mcp_command(McpCommands::Remove {
             name: "srv".to_string(),
             scope: None,
@@ -6051,9 +6076,12 @@ mod tests {
             persist: false,
         })
         .await
-        .expect_err("live session should be rejected");
+        .expect_err("session without server url should be rejected");
 
-        assert!(err.to_string().contains("not yet supported"));
+        assert!(
+            err.to_string()
+                .contains("--session requires --live-server-url")
+        );
     }
 
     #[test]

@@ -49,6 +49,7 @@ pub enum CapabilityId {
     SessionStore,
     SessionCompaction,
     Skills,
+    McpLive,
 }
 
 /// Where a capability applies.

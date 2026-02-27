@@ -8,18 +8,7 @@ use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 
-/// Log a warning when callers send persisted=true — config persistence is not
-/// yet implemented, so the response always returns `persisted: false`.
-#[cfg(feature = "mcp")]
-fn warn_if_persisted(operation: &str, persisted: bool) {
-    if persisted {
-        tracing::warn!(
-            operation,
-            "caller sent persisted=true but config persistence is not yet implemented; \
-             responding with persisted=false"
-        );
-    }
-}
+// Persisted handling and response building delegated to meerkat::surface helpers.
 
 /// Handle `mcp/add`.
 pub async fn handle_add(
@@ -54,7 +43,7 @@ pub async fn handle_add(
             return RpcResponse::error(id, error::INVALID_PARAMS, "server_name cannot be empty");
         }
 
-        warn_if_persisted("mcp/add", params.persisted);
+        meerkat::surface::resolve_persisted("mcp/add", params.persisted);
 
         if let Err(err) = runtime
             .mcp_stage_add(
@@ -67,14 +56,11 @@ pub async fn handle_add(
             return RpcResponse::error(id, err.code, err.message);
         }
 
-        let response = meerkat_contracts::McpLiveOpResponse {
-            session_id: params.session_id,
-            operation: meerkat_contracts::McpLiveOperation::Add,
-            server_name: Some(params.server_name),
-            status: meerkat_contracts::McpLiveOpStatus::Staged,
-            persisted: false,
-            applied_at_turn: None,
-        };
+        let response = meerkat::surface::mcp_live_response(
+            params.session_id,
+            meerkat_contracts::McpLiveOperation::Add,
+            Some(params.server_name),
+        );
         RpcResponse::success(id, response)
     }
 }
@@ -112,7 +98,7 @@ pub async fn handle_remove(
             return RpcResponse::error(id, error::INVALID_PARAMS, "server_name cannot be empty");
         }
 
-        warn_if_persisted("mcp/remove", params.persisted);
+        meerkat::surface::resolve_persisted("mcp/remove", params.persisted);
 
         if let Err(err) = runtime
             .mcp_stage_remove(&session_id, params.server_name.clone())
@@ -121,14 +107,11 @@ pub async fn handle_remove(
             return RpcResponse::error(id, err.code, err.message);
         }
 
-        let response = meerkat_contracts::McpLiveOpResponse {
-            session_id: params.session_id,
-            operation: meerkat_contracts::McpLiveOperation::Remove,
-            server_name: Some(params.server_name),
-            status: meerkat_contracts::McpLiveOpStatus::Staged,
-            persisted: false,
-            applied_at_turn: None,
-        };
+        let response = meerkat::surface::mcp_live_response(
+            params.session_id,
+            meerkat_contracts::McpLiveOperation::Remove,
+            Some(params.server_name),
+        );
         RpcResponse::success(id, response)
     }
 }
@@ -168,7 +151,7 @@ pub async fn handle_reload(
             return RpcResponse::error(id, error::INVALID_PARAMS, "server_name cannot be empty");
         }
 
-        warn_if_persisted("mcp/reload", params.persisted);
+        meerkat::surface::resolve_persisted("mcp/reload", params.persisted);
 
         if let Err(err) = runtime
             .mcp_stage_reload(&session_id, params.server_name.clone())
@@ -177,14 +160,11 @@ pub async fn handle_reload(
             return RpcResponse::error(id, err.code, err.message);
         }
 
-        let response = meerkat_contracts::McpLiveOpResponse {
-            session_id: params.session_id,
-            operation: meerkat_contracts::McpLiveOperation::Reload,
-            server_name: params.server_name,
-            status: meerkat_contracts::McpLiveOpStatus::Staged,
-            persisted: false,
-            applied_at_turn: None,
-        };
+        let response = meerkat::surface::mcp_live_response(
+            params.session_id,
+            meerkat_contracts::McpLiveOperation::Reload,
+            params.server_name,
+        );
         RpcResponse::success(id, response)
     }
 }

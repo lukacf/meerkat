@@ -20,6 +20,18 @@ pub use router::{
 // Re-export McpServerConfig from meerkat-core for backwards compatibility
 pub use meerkat_core::McpServerConfig;
 
+// Capability registration
+inventory::submit! {
+    meerkat_contracts::CapabilityRegistration {
+        id: meerkat_contracts::CapabilityId::McpLive,
+        description: "Live MCP server mutation (add/remove/reload on running sessions)",
+        scope: meerkat_contracts::CapabilityScope::Universal,
+        requires_feature: Some("mcp"),
+        prerequisites: &[],
+        status_resolver: None,
+    }
+}
+
 // Skill registration
 inventory::submit! {
     meerkat_skills::SkillRegistration {

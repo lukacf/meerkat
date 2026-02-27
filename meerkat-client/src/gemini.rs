@@ -246,7 +246,7 @@ impl GeminiClient {
                     serde_json::json!({
                         "name": t.name,
                         "description": t.description,
-                        "parameters": Self::sanitize_schema_for_gemini(&t.input_schema)
+                        "parameters": t.input_schema.clone()
                     })
                 })
                 .collect();
@@ -257,16 +257,6 @@ impl GeminiClient {
         }
 
         Ok(body)
-    }
-
-    /// Normalize schema for Gemini tool declarations.
-    ///
-    /// We intentionally avoid destructive keyword stripping. Recent Gemini schema
-    /// support accepts a broad JSON Schema subset, and unsupported keywords are
-    /// ignored server-side. Preserving the caller schema avoids silent semantic
-    /// loss (e.g. dropping `anyOf` or `additionalProperties`).
-    fn sanitize_schema_for_gemini(schema: &Value) -> Value {
-        schema.clone()
     }
 
     /// Parse streaming response line
@@ -364,6 +354,7 @@ fn inspect_schema_map(
 fn is_gemini_supported_schema_keyword(key: &str) -> bool {
     // Source: Gemini responseJsonSchema supported keyword subset in
     // https://cloud.google.com/vertex-ai/generative-ai/docs/multimodal/control-generated-output#supported-schema-fields
+    // Verified against docs on 2026-02-27.
     matches!(
         key,
         "$id"
@@ -374,6 +365,9 @@ fn is_gemini_supported_schema_keyword(key: &str) -> bool {
             | "format"
             | "title"
             | "description"
+            | "const"
+            | "default"
+            | "examples"
             | "enum"
             | "items"
             | "prefixItems"
@@ -1198,9 +1192,12 @@ mod tests {
         Ok(())
     }
 
-    /// Regression: tool schema normalization should preserve union type arrays.
+    /// Regression: tool schema in request body should preserve union type arrays.
     #[test]
-    fn test_sanitize_schema_preserves_array_types() {
+    fn test_tool_schema_preserves_array_types() -> Result<(), Box<dyn std::error::Error>> {
+        use meerkat_core::ToolDef;
+        use std::sync::Arc;
+
         let schema = serde_json::json!({
             "type": "object",
             "properties": {
@@ -1210,29 +1207,46 @@ mod tests {
             }
         });
 
-        let sanitized = GeminiClient::sanitize_schema_for_gemini(&schema);
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-3-pro-preview",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_tools(vec![Arc::new(ToolDef {
+            name: "test_tool".to_string(),
+            description: "test".to_string(),
+            input_schema: schema,
+        })]);
+        let body = client.build_request_body(&request)?;
+        let preserved = &body["tools"][0]["functionDeclarations"][0]["parameters"];
 
         // Array types should be preserved
         assert_eq!(
-            sanitized["properties"]["age"]["type"],
+            preserved["properties"]["age"]["type"],
             serde_json::json!(["integer", "null"]),
             "['integer', 'null'] should be preserved"
         );
         assert_eq!(
-            sanitized["properties"]["email"]["type"],
+            preserved["properties"]["email"]["type"],
             serde_json::json!(["string", "null"]),
             "['string', 'null'] should be preserved"
         );
         // Non-array types should be unchanged
         assert_eq!(
-            sanitized["properties"]["name"]["type"], "string",
+            preserved["properties"]["name"]["type"], "string",
             "'string' should remain 'string'"
         );
+        Ok(())
     }
 
-    /// Regression: tool schema normalization should preserve composition keywords.
+    /// Regression: tool schema in request body should preserve composition keywords.
     #[test]
-    fn test_sanitize_schema_preserves_oneof_anyof_allof() {
+    fn test_tool_schema_preserves_oneof_anyof_allof() -> Result<(), Box<dyn std::error::Error>> {
+        use meerkat_core::ToolDef;
+        use std::sync::Arc;
+
         let schema = serde_json::json!({
             "type": "object",
             "properties": {
@@ -1254,20 +1268,34 @@ mod tests {
             ]
         });
 
-        let sanitized = GeminiClient::sanitize_schema_for_gemini(&schema);
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-3-pro-preview",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_tools(vec![Arc::new(ToolDef {
+            name: "test_tool".to_string(),
+            description: "test".to_string(),
+            input_schema: schema,
+        })]);
+        let body = client.build_request_body(&request)?;
+        let preserved = &body["tools"][0]["functionDeclarations"][0]["parameters"];
 
         assert!(
-            sanitized["properties"]["status"].get("oneOf").is_some(),
+            preserved["properties"]["status"].get("oneOf").is_some(),
             "oneOf should be preserved"
         );
         assert!(
-            sanitized["properties"]["value"].get("anyOf").is_some(),
+            preserved["properties"]["value"].get("anyOf").is_some(),
             "anyOf should be preserved"
         );
         assert!(
-            sanitized.get("allOf").is_some(),
+            preserved.get("allOf").is_some(),
             "allOf should be preserved"
         );
+        Ok(())
     }
 
     // =========================================================================

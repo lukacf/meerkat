@@ -719,6 +719,9 @@ impl LlmClient for OpenAiClient {
 
     fn compile_schema(&self, output_schema: &OutputSchema) -> Result<CompiledSchema, SchemaError> {
         let mut schema = output_schema.schema.as_value().clone();
+        // OpenAI `strict` controls constrained decoding behavior for structured
+        // output. `compat` is only used for provider-lowering policies where
+        // warnings/errors may be emitted (e.g. Gemini keyword compatibility).
         if output_schema.strict {
             ensure_additional_properties_false(&mut schema);
         }
@@ -919,7 +922,7 @@ mod tests {
 
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-4.1-mini",
             vec![Message::User(UserMessage {
                 content: "test".to_string(),
             })],
@@ -1214,7 +1217,7 @@ mod tests {
     fn test_request_includes_temperature_for_supported_model() {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gpt-4o-mini",
+            "gpt-4.1-mini",
             vec![Message::User(UserMessage {
                 content: "test".to_string(),
             })],
@@ -1256,7 +1259,7 @@ mod tests {
 
         let tool_args = serde_json::json!({"city": "Tokyo", "units": "celsius"});
         let request = LlmRequest::new(
-            "gpt-4o-mini",
+            "gpt-5.2",
             vec![
                 Message::User(UserMessage {
                     content: "What's the weather?".to_string(),

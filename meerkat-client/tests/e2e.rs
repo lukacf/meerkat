@@ -432,7 +432,7 @@ async fn e2e_openai_stream() -> Result<(), Box<dyn std::error::Error>> {
     };
     let client = OpenAiClient::new(api_key);
     let request = LlmRequest::new(
-        "gpt-4o-mini",
+        "gpt-5.2",
         vec![Message::User(UserMessage {
             content: "Say 'Hello'".to_string(),
         })],
@@ -467,7 +467,7 @@ async fn e2e_openai_tool_use() -> Result<(), Box<dyn std::error::Error>> {
     };
     let client = OpenAiClient::new(api_key);
     let request = LlmRequest::new(
-        "gpt-4o-mini",
+        "gpt-5.2",
         vec![Message::User(UserMessage {
             content: "What's the weather in Tokyo?".to_string(),
         })],
@@ -603,7 +603,7 @@ async fn test_openai_auth_error() -> Result<(), Box<dyn std::error::Error>> {
     let client = OpenAiClient::new_with_base_url("invalid-key".to_string(), base_url);
 
     let request = LlmRequest::new(
-        "gpt-4o-mini",
+        "gpt-5.2",
         vec![Message::User(UserMessage {
             content: "test".to_string(),
         })],
@@ -760,7 +760,7 @@ async fn e2e_openai_structured_output() -> Result<(), Box<dyn std::error::Error>
     };
     let client = OpenAiClient::new(api_key);
     let request = LlmRequest::new(
-        "gpt-4o-mini",
+        "gpt-5.2",
         vec![Message::User(UserMessage {
             content: "Generate a person named Bob who is 25 years old.".to_string(),
         })],
@@ -789,7 +789,7 @@ async fn e2e_gemini_structured_output() -> Result<(), Box<dyn std::error::Error>
     };
     let client = GeminiClient::new(api_key);
     let request = LlmRequest::new(
-        "gemini-2.0-flash",
+        "gemini-3-flash-preview",
         vec![Message::User(UserMessage {
             content: "Generate a person named Carol who is 35 years old.".to_string(),
         })],
@@ -819,7 +819,7 @@ async fn e2e_openai_structured_output_strict_nested_schema()
     };
     let client = OpenAiClient::new(api_key);
     let request = LlmRequest::new(
-        "gpt-4o-mini",
+        "gpt-5.2",
         vec![Message::User(UserMessage {
             content: "Return JSON with person={name:'Dina',age:41} and tags=[{label:'runner'}]."
                 .to_string(),
@@ -895,7 +895,7 @@ async fn e2e_gemini_structured_output_rich_schema_keywords()
     };
     let client = GeminiClient::new(api_key);
     let request = LlmRequest::new(
-        "gemini-2.0-flash",
+        "gemini-3-flash-preview",
         vec![Message::User(UserMessage {
             content: "Return JSON: status='ok', payload={score:0.6, category:'test'}.".to_string(),
         })],

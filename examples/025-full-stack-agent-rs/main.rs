@@ -91,7 +91,11 @@ impl AgentToolDispatcher for DomainTools {
                     ],
                     "total": 3
                 });
-                Ok(ToolResult::new(call.id.to_string(), results.to_string(), false))
+                Ok(ToolResult::new(
+                    call.id.to_string(),
+                    results.to_string(),
+                    false,
+                ))
             }
             "create_ticket" => {
                 let args: CreateTicketArgs = call
@@ -105,7 +109,11 @@ impl AgentToolDispatcher for DomainTools {
                     "status": "open",
                     "created_at": "2026-02-21T00:00:00Z"
                 });
-                Ok(ToolResult::new(call.id.to_string(), ticket.to_string(), false))
+                Ok(ToolResult::new(
+                    call.id.to_string(),
+                    ticket.to_string(),
+                    false,
+                ))
             }
             _ => Err(ToolError::not_found(call.name)),
         }
@@ -146,7 +154,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_max_tool_calls(50);
 
     // ── 4. Build the agent ─────────────────────────────────────────────────
-    let skill_content = r#"
+    let skill_content = r"
 ## Role
 You are a full-stack support agent for a software product.
 
@@ -165,7 +173,7 @@ You are a full-stack support agent for a software product.
 
 ## Tone
 Professional, concise, action-oriented. Always provide next steps.
-"#;
+";
 
     let system_prompt = format!(
         "You are a production support agent.\n\n<skill>\n{}\n</skill>",
@@ -184,10 +192,13 @@ Professional, concise, action-oriented. Always provide next steps.
     println!("=== Full-Stack Agent: Production Support ===\n");
 
     let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(256);
-    let logger = spawn_event_logger(event_rx, EventLoggerConfig {
-        verbose: true,
-        stream: false,
-    });
+    let logger = spawn_event_logger(
+        event_rx,
+        EventLoggerConfig {
+            verbose: true,
+            stream: false,
+        },
+    );
 
     let result = agent
         .run_with_events(
@@ -213,7 +224,7 @@ Professional, concise, action-oriented. Always provide next steps.
 
     println!("\n\n=== Full-Stack Agent Architecture ===\n");
     println!(
-        r#"This example combines every Meerkat feature:
+        r"This example combines every Meerkat feature:
 
 ┌────────────────────────────────────────────────────────────┐
 │                    FULL-STACK AGENT                          │
@@ -242,7 +253,7 @@ Production checklist:
   ✓ CompositeDispatcher merges builtin + domain tools
   ✓ Structured output for programmatic parsing
   ✓ MCP for external tool servers (add via config)
-"#
+"
     );
 
     Ok(())

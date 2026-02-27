@@ -51,7 +51,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var("ANTHROPIC_API_KEY").is_err() {
         eprintln!("ANTHROPIC_API_KEY is required to run this example.");
         eprintln!("Set it and re-run:");
-        eprintln!("  ANTHROPIC_API_KEY=sk-... cargo run --example 018-mob-research-team --features comms");
+        eprintln!(
+            "  ANTHROPIC_API_KEY=sk-... cargo run --example 018-mob-research-team --features comms"
+        );
         std::process::exit(1);
     }
 
@@ -243,7 +245,8 @@ content = "Evaluate technical feasibility, architecture options, scalability con
     let task_id = handle
         .task_create(
             "Market sizing for AI code assistants".to_string(),
-            "Research the total addressable market for AI-powered code assistant tools.".to_string(),
+            "Research the total addressable market for AI-powered code assistant tools."
+                .to_string(),
             vec![],
         )
         .await?;

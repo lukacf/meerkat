@@ -16,9 +16,7 @@
 
 use std::sync::Arc;
 
-use meerkat::{
-    AgentBuilder, AgentFactory, AnthropicClient, SessionFilter, SessionStore,
-};
+use meerkat::{AgentBuilder, AgentFactory, AnthropicClient, SessionFilter, SessionStore};
 use meerkat_store::{JsonlStore, StoreAdapter};
 use meerkat_tools::EmptyToolDispatcher;
 
@@ -53,7 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .run("My project is called Phoenix. Remember that.".to_string())
         .await?;
     let session_id = result.session_id.clone();
-    println!("Created session: {}", session_id);
+    println!("Created session: {session_id}");
     println!("Response: {}\n", result.text);
 
     // Session is automatically saved to disk after each turn.
@@ -78,9 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Turn 2: Continue the persisted session
-    let result = agent
-        .run("What's my project called?".to_string())
-        .await?;
+    let result = agent.run("What's my project called?".to_string()).await?;
     println!("\nTurn 2 response: {}", result.text);
 
     // ── Storage backend comparison ─────────────────────────────────────────

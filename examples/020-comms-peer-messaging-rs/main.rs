@@ -213,7 +213,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let inbox = agent_b.comms_manager_mut().drain_messages();
     println!("Messages in Agent B's inbox: {}", inbox.len());
     for (i, msg) in inbox.iter().enumerate() {
-        println!("  Message {}: from={}, content={:?}", i + 1, msg.from_peer, msg.content);
+        println!(
+            "  Message {}: from={}, content={:?}",
+            i + 1,
+            msg.from_peer,
+            msg.content
+        );
     }
 
     if inbox.is_empty() {

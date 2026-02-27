@@ -27,16 +27,14 @@
 use std::sync::Arc;
 
 use indexmap::IndexMap;
-use meerkat::{
-    AgentBuilder, AgentFactory, AnthropicClient, SkillId, SkillRuntime, SkillScope,
-};
-use meerkat_core::skills::{SkillDescriptor, SkillDocument};
+use meerkat::{AgentBuilder, AgentFactory, AnthropicClient, SkillId, SkillRuntime, SkillScope};
 use meerkat_core::skills::SkillEngine as _;
+use meerkat_core::skills::{SkillDescriptor, SkillDocument};
+use meerkat_skills::source::SourceNode;
 use meerkat_skills::{
     CompositeSkillSource, DefaultSkillEngine, FilesystemSkillSource, InMemorySkillSource,
     NamedSource,
 };
-use meerkat_skills::source::SourceNode;
 use meerkat_store::{JsonlStore, StoreAdapter};
 use meerkat_tools::EmptyToolDispatcher;
 

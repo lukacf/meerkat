@@ -50,7 +50,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var("ANTHROPIC_API_KEY").is_err() {
         eprintln!("ANTHROPIC_API_KEY is required to run this example.");
         eprintln!("Set it and re-run:");
-        eprintln!("  ANTHROPIC_API_KEY=sk-... cargo run --example 019-mob-pipeline --features comms");
+        eprintln!(
+            "  ANTHROPIC_API_KEY=sk-... cargo run --example 019-mob-pipeline --features comms"
+        );
         std::process::exit(1);
     }
 
@@ -203,7 +205,11 @@ content = "Execute deployment: build release, run smoke tests. Report pass/fail.
     let stages = [
         ("linter", "lint-1", "You are the linting stage worker."),
         ("tester", "test-1", "You are the testing stage worker."),
-        ("deployer", "deploy-1", "You are the deployment stage worker."),
+        (
+            "deployer",
+            "deploy-1",
+            "You are the deployment stage worker.",
+        ),
     ];
 
     for (profile, id, msg) in &stages {
@@ -220,10 +226,7 @@ content = "Execute deployment: build release, run smoke tests. Report pass/fail.
     // Wire coordinator to all stages, and chain stages sequentially.
     for (_, id, _) in &stages {
         handle
-            .wire(
-                MeerkatId::from("coordinator-1"),
-                MeerkatId::from(*id),
-            )
+            .wire(MeerkatId::from("coordinator-1"), MeerkatId::from(*id))
             .await?;
     }
     // Chain: lint -> test -> deploy
@@ -277,7 +280,7 @@ content = "Execute deployment: build release, run smoke tests. Report pass/fail.
              #[test]\n\
              fn test_add() {\n    assert_eq!(add(2, 3), 5);\n}\n\
              ```"
-                .to_string(),
+            .to_string(),
         )
         .await?;
 

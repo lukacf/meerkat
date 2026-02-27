@@ -16,7 +16,8 @@
 
 use async_trait::async_trait;
 use meerkat::{
-    AgentBuilder, AgentFactory, AgentToolDispatcher, AnthropicClient, ToolDef, ToolError, ToolResult,
+    AgentBuilder, AgentFactory, AgentToolDispatcher, AnthropicClient, ToolDef, ToolError,
+    ToolResult,
 };
 use meerkat_core::ToolCallView;
 use meerkat_store::{JsonlStore, StoreAdapter};
@@ -102,7 +103,11 @@ impl AgentToolDispatcher for WeatherAndConvertDispatcher {
                     "condition": "partly cloudy",
                     "humidity": 65,
                 });
-                Ok(ToolResult::new(call.id.to_string(), result.to_string(), false))
+                Ok(ToolResult::new(
+                    call.id.to_string(),
+                    result.to_string(),
+                    false,
+                ))
             }
 
             "convert_units" => {
@@ -132,7 +137,11 @@ impl AgentToolDispatcher for WeatherAndConvertDispatcher {
                     "converted": result,
                     "to": args.to,
                 });
-                Ok(ToolResult::new(call.id.to_string(), output.to_string(), false))
+                Ok(ToolResult::new(
+                    call.id.to_string(),
+                    output.to_string(),
+                    false,
+                ))
             }
 
             _ => Err(ToolError::not_found(call.name)),

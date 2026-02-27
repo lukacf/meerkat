@@ -19,9 +19,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use meerkat::{
-    AgentBuilder, AgentEvent, AgentFactory, AgentToolDispatcher, AnthropicClient,
-    HookCapability, HookEntryConfig, HookExecutionMode, HookId, HookPoint,
-    HookRuntimeConfig, HooksConfig, ToolDef, ToolError, ToolResult,
+    AgentBuilder, AgentEvent, AgentFactory, AgentToolDispatcher, AnthropicClient, HookCapability,
+    HookEntryConfig, HookExecutionMode, HookId, HookPoint, HookRuntimeConfig, HooksConfig, ToolDef,
+    ToolError, ToolResult,
 };
 use meerkat_core::ToolCallView;
 use meerkat_hooks::{DefaultHookEngine, RuntimeHookResponse};
@@ -67,7 +67,11 @@ impl AgentToolDispatcher for WeatherDispatcher {
                     "unit": "celsius",
                     "condition": "partly cloudy",
                 });
-                Ok(ToolResult::new(call.id.to_string(), result.to_string(), false))
+                Ok(ToolResult::new(
+                    call.id.to_string(),
+                    result.to_string(),
+                    false,
+                ))
             }
             _ => Err(ToolError::not_found(call.name)),
         }
@@ -211,27 +215,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         while let Some(event) = event_rx.recv().await {
             match &event {
                 AgentEvent::HookStarted { hook_id, point } => {
-                    println!("  [EVENT] HookStarted: {} @ {:?}", hook_id, point);
+                    println!("  [EVENT] HookStarted: {hook_id} @ {point:?}");
                 }
                 AgentEvent::HookCompleted {
                     hook_id,
                     point,
                     duration_ms,
                 } => {
-                    println!(
-                        "  [EVENT] HookCompleted: {} @ {:?} ({}ms)",
-                        hook_id, point, duration_ms
-                    );
+                    println!("  [EVENT] HookCompleted: {hook_id} @ {point:?} ({duration_ms}ms)");
                 }
                 AgentEvent::HookFailed {
                     hook_id,
                     point,
                     error,
                 } => {
-                    println!(
-                        "  [EVENT] HookFailed: {} @ {:?}: {}",
-                        hook_id, point, error
-                    );
+                    println!("  [EVENT] HookFailed: {hook_id} @ {point:?}: {error}");
                 }
                 _ => {}
             }

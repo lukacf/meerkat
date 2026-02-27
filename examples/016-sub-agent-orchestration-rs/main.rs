@@ -18,8 +18,7 @@
 use std::sync::Arc;
 
 use meerkat::{
-    AgentBuilder, AgentFactory, AnthropicClient,
-    create_dispatcher_with_builtins, BuiltinToolConfig,
+    AgentBuilder, AgentFactory, AnthropicClient, BuiltinToolConfig, create_dispatcher_with_builtins,
 };
 use meerkat_store::{JsonlStore, StoreAdapter};
 

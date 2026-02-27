@@ -51,7 +51,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var("ANTHROPIC_API_KEY").is_err() {
         eprintln!("ANTHROPIC_API_KEY is required to run this example.");
         eprintln!("Set it and re-run:");
-        eprintln!("  ANTHROPIC_API_KEY=sk-... cargo run --example 017-mob-coding-swarm --features comms");
+        eprintln!(
+            "  ANTHROPIC_API_KEY=sk-... cargo run --example 017-mob-coding-swarm --features comms"
+        );
         std::process::exit(1);
     }
 
@@ -180,7 +182,11 @@ content = "Implement Rust services, APIs, and data models."
         .create()
         .await?;
 
-    println!("Mob '{}' created (status: {:?})", handle.mob_id(), handle.status());
+    println!(
+        "Mob '{}' created (status: {:?})",
+        handle.mob_id(),
+        handle.status()
+    );
 
     // Spawn an orchestrator (lead profile) and a worker.
     println!("\nSpawning agents...");

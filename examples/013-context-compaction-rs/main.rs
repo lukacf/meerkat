@@ -17,9 +17,7 @@
 
 use std::sync::Arc;
 
-use meerkat::{
-    AgentBuilder, AgentEvent, AgentFactory, AnthropicClient, DefaultCompactor,
-};
+use meerkat::{AgentBuilder, AgentEvent, AgentFactory, AnthropicClient, DefaultCompactor};
 use meerkat_core::compact::CompactionConfig;
 use meerkat_store::{JsonlStore, StoreAdapter};
 use meerkat_tools::EmptyToolDispatcher;
@@ -100,7 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for (i, topic) in topics.iter().enumerate() {
         println!("\n=== Turn {} ===", i + 1);
-        println!("User: {}\n", topic);
+        println!("User: {topic}\n");
 
         let result = agent
             .run_with_events(topic.to_string(), event_tx.clone())
@@ -125,7 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n\n=== Compaction Configuration Reference ===\n");
     println!(
-        r#"# .rkat/config.toml
+        r"# .rkat/config.toml
 
 [compaction]
 # Trigger compaction when cumulative tokens exceed this threshold
@@ -150,7 +148,7 @@ preserve_most_recent_n = 2
 #
 # The result: agents that can run indefinitely without losing important
 # context or exceeding the LLM's context window.
-"#
+"
     );
 
     Ok(())

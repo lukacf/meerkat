@@ -25,9 +25,7 @@
 
 use std::sync::Arc;
 
-use meerkat::{
-    AgentBuilder, AgentFactory, AnthropicClient, ToolGatewayBuilder,
-};
+use meerkat::{AgentBuilder, AgentFactory, AnthropicClient, ToolGatewayBuilder};
 use meerkat_core::memory::{MemoryMetadata, MemoryStore as _};
 use meerkat_core::types::SessionId;
 use meerkat_memory::{MemorySearchDispatcher, SimpleMemoryStore};
@@ -94,7 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // language query and get back scored results.
 
     let memory_dispatcher = MemorySearchDispatcher::new(
-        Arc::clone(&memory_store) as Arc<dyn meerkat_core::memory::MemoryStore>,
+        Arc::clone(&memory_store) as Arc<dyn meerkat_core::memory::MemoryStore>
     );
 
     // ── Step 4: Compose tool dispatchers ─────────────────────────────────────
@@ -149,9 +147,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("=== Asking about deployment schedule ===\n");
     let result = agent
-        .run(
-            "When do we deploy and where? Check your memory.".to_string(),
-        )
+        .run("When do we deploy and where? Check your memory.".to_string())
         .await?;
     println!("Agent: {}\n", result.text);
 

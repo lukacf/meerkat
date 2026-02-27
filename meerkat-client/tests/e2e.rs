@@ -432,7 +432,7 @@ async fn e2e_openai_stream() -> Result<(), Box<dyn std::error::Error>> {
     };
     let client = OpenAiClient::new(api_key);
     let request = LlmRequest::new(
-        "gpt-4o-mini",
+        "gpt-5.2",
         vec![Message::User(UserMessage {
             content: "Say 'Hello'".to_string(),
         })],
@@ -467,7 +467,7 @@ async fn e2e_openai_tool_use() -> Result<(), Box<dyn std::error::Error>> {
     };
     let client = OpenAiClient::new(api_key);
     let request = LlmRequest::new(
-        "gpt-4o-mini",
+        "gpt-5.2",
         vec![Message::User(UserMessage {
             content: "What's the weather in Tokyo?".to_string(),
         })],
@@ -603,7 +603,7 @@ async fn test_openai_auth_error() -> Result<(), Box<dyn std::error::Error>> {
     let client = OpenAiClient::new_with_base_url("invalid-key".to_string(), base_url);
 
     let request = LlmRequest::new(
-        "gpt-4o-mini",
+        "gpt-5.2",
         vec![Message::User(UserMessage {
             content: "test".to_string(),
         })],
@@ -640,6 +640,58 @@ fn person_schema() -> Value {
             "age": {"type": "integer"}
         },
         "required": ["name", "age"]
+    })
+}
+
+fn nested_profile_schema_without_additional_properties() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "person": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "age": {"type": "integer"}
+                },
+                "required": ["name", "age"]
+            },
+            "tags": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string"}
+                    },
+                    "required": ["label"]
+                }
+            }
+        },
+        "required": ["person", "tags"]
+    })
+}
+
+fn gemini_supported_rich_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "status": {
+                "oneOf": [
+                    {"type": "string"},
+                    {"type": "null"}
+                ]
+            },
+            "payload": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "score": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                    "category": {"type": "string"}
+                },
+                "required": ["score", "category"]
+            }
+        },
+        "required": ["status", "payload"],
+        "additionalProperties": false
     })
 }
 
@@ -708,7 +760,7 @@ async fn e2e_openai_structured_output() -> Result<(), Box<dyn std::error::Error>
     };
     let client = OpenAiClient::new(api_key);
     let request = LlmRequest::new(
-        "gpt-4o-mini",
+        "gpt-5.2",
         vec![Message::User(UserMessage {
             content: "Generate a person named Bob who is 25 years old.".to_string(),
         })],
@@ -737,7 +789,7 @@ async fn e2e_gemini_structured_output() -> Result<(), Box<dyn std::error::Error>
     };
     let client = GeminiClient::new(api_key);
     let request = LlmRequest::new(
-        "gemini-2.0-flash",
+        "gemini-3-flash-preview",
         vec![Message::User(UserMessage {
             content: "Generate a person named Carol who is 35 years old.".to_string(),
         })],
@@ -754,5 +806,115 @@ async fn e2e_gemini_structured_output() -> Result<(), Box<dyn std::error::Error>
     assert!(parsed.get("name").is_some(), "should have name field");
     assert!(parsed.get("age").is_some(), "should have age field");
 
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "integration-real: live API"]
+async fn e2e_openai_structured_output_strict_nested_schema()
+-> Result<(), Box<dyn std::error::Error>> {
+    let Some(api_key) = openai_api_key() else {
+        eprintln!("Skipping: missing OPENAI_API_KEY (or RKAT_OPENAI_API_KEY)");
+        return Ok(());
+    };
+    let client = OpenAiClient::new(api_key);
+    let request = LlmRequest::new(
+        "gpt-5.2",
+        vec![Message::User(UserMessage {
+            content: "Return JSON with person={name:'Dina',age:41} and tags=[{label:'runner'}]."
+                .to_string(),
+        })],
+    )
+    .with_provider_param(
+        "structured_output",
+        serde_json::json!({
+            "schema": nested_profile_schema_without_additional_properties(),
+            "strict": true
+        }),
+    );
+
+    let text = collect_stream_text(&client, &request).await?;
+    let parsed: Value = serde_json::from_str(&text)?;
+    assert!(parsed.get("person").is_some(), "should have person field");
+    assert!(
+        parsed["person"].get("name").is_some(),
+        "should have nested person.name"
+    );
+    assert!(
+        parsed["tags"].as_array().is_some_and(|arr| !arr.is_empty()),
+        "should have non-empty tags array"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "integration-real: live API"]
+async fn e2e_anthropic_structured_output_strict_nested_schema()
+-> Result<(), Box<dyn std::error::Error>> {
+    let Some(api_key) = anthropic_api_key() else {
+        eprintln!("Skipping: missing ANTHROPIC_API_KEY (or RKAT_ANTHROPIC_API_KEY)");
+        return Ok(());
+    };
+    let client = AnthropicClient::new(api_key)?;
+    let request = LlmRequest::new(
+        "claude-sonnet-4-5",
+        vec![Message::User(UserMessage {
+            content: "Return JSON with person={name:'Evan',age:29} and tags=[{label:'designer'}]."
+                .to_string(),
+        })],
+    )
+    .with_provider_param(
+        "structured_output",
+        serde_json::json!({
+            "schema": nested_profile_schema_without_additional_properties(),
+            "strict": true
+        }),
+    );
+
+    let text = collect_stream_text(&client, &request).await?;
+    let parsed: Value = serde_json::from_str(&text)?;
+    assert!(parsed.get("person").is_some(), "should have person field");
+    assert!(
+        parsed["person"].get("age").is_some(),
+        "should have nested person.age"
+    );
+    assert!(
+        parsed["tags"].as_array().is_some_and(|arr| !arr.is_empty()),
+        "should have non-empty tags array"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "integration-real: live API"]
+async fn e2e_gemini_structured_output_rich_schema_keywords()
+-> Result<(), Box<dyn std::error::Error>> {
+    let Some(api_key) = gemini_api_key() else {
+        eprintln!("Skipping: missing GOOGLE_API_KEY (or GEMINI_API_KEY/RKAT_GEMINI_API_KEY)");
+        return Ok(());
+    };
+    let client = GeminiClient::new(api_key);
+    let request = LlmRequest::new(
+        "gemini-3-flash-preview",
+        vec![Message::User(UserMessage {
+            content: "Return JSON: status='ok', payload={score:0.6, category:'test'}.".to_string(),
+        })],
+    )
+    .with_provider_param(
+        "structured_output",
+        serde_json::json!({
+            "schema": gemini_supported_rich_schema(),
+            "strict": true
+        }),
+    );
+
+    let text = collect_stream_text(&client, &request).await?;
+    let parsed: Value = serde_json::from_str(&text)?;
+    assert!(parsed.get("status").is_some(), "should have status");
+    assert!(parsed.get("payload").is_some(), "should have payload");
+    assert!(
+        parsed["payload"].get("score").is_some(),
+        "should have payload.score"
+    );
     Ok(())
 }

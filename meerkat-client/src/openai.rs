@@ -8,6 +8,7 @@ use crate::error::LlmError;
 use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream};
 use async_trait::async_trait;
 use futures::StreamExt;
+use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{AssistantBlock, Message, OutputSchema, ProviderMeta, StopReason, Usage};
 use serde::Deserialize;
 use serde_json::Value;
@@ -259,6 +260,35 @@ impl OpenAiClient {
         } else {
             None
         }
+    }
+}
+
+/// OpenAI strict JSON schema mode requires `additionalProperties: false` on
+/// object schemas. We preserve explicit caller values and only inject when
+/// missing.
+fn ensure_additional_properties_false(value: &mut Value) {
+    match value {
+        Value::Object(obj) => {
+            let is_object_type = match obj.get("type") {
+                Some(Value::String(t)) => t == "object",
+                Some(Value::Array(types)) => types.iter().any(|t| t.as_str() == Some("object")),
+                _ => obj.contains_key("properties") || obj.contains_key("required"),
+            };
+
+            if is_object_type && !obj.contains_key("additionalProperties") {
+                obj.insert("additionalProperties".to_string(), Value::Bool(false));
+            }
+
+            for child in obj.values_mut() {
+                ensure_additional_properties_false(child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items.iter_mut() {
+                ensure_additional_properties_false(item);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -686,6 +716,21 @@ impl LlmClient for OpenAiClient {
     async fn health_check(&self) -> Result<(), LlmError> {
         Ok(())
     }
+
+    fn compile_schema(&self, output_schema: &OutputSchema) -> Result<CompiledSchema, SchemaError> {
+        let mut schema = output_schema.schema.as_value().clone();
+        // OpenAI `strict` controls constrained decoding behavior for structured
+        // output. `compat` is only used for provider-lowering policies where
+        // warnings/errors may be emitted (e.g. Gemini keyword compatibility).
+        if output_schema.strict {
+            ensure_additional_properties_false(&mut schema);
+        }
+
+        Ok(CompiledSchema {
+            schema,
+            warnings: Vec::new(),
+        })
+    }
 }
 
 /// SSE event from OpenAI Responses API streaming
@@ -877,7 +922,7 @@ mod tests {
 
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gpt-5.2",
+            "gpt-4.1-mini",
             vec![Message::User(UserMessage {
                 content: "test".to_string(),
             })],
@@ -1172,7 +1217,7 @@ mod tests {
     fn test_request_includes_temperature_for_supported_model() {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gpt-4o-mini",
+            "gpt-4.1-mini",
             vec![Message::User(UserMessage {
                 content: "test".to_string(),
             })],
@@ -1214,7 +1259,7 @@ mod tests {
 
         let tool_args = serde_json::json!({"city": "Tokyo", "units": "celsius"});
         let request = LlmRequest::new(
-            "gpt-4o-mini",
+            "gpt-5.2",
             vec![
                 Message::User(UserMessage {
                     content: "What's the weather?".to_string(),
@@ -1339,6 +1384,250 @@ mod tests {
         assert!(
             body.get("text").is_none(),
             "text should not be present without structured_output"
+        );
+    }
+
+    #[test]
+    fn test_strict_structured_output_injects_additional_properties_recursively() {
+        let client = OpenAiClient::new("test-key".to_string());
+
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "profile": {
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string"}
+                    }
+                },
+                "addresses": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "street": {"type": "string"}
+                        }
+                    }
+                },
+                "choice": {
+                    "anyOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "kind": {"type": "string"}
+                            }
+                        },
+                        {"type": "string"}
+                    ]
+                }
+            },
+            "required": ["name", "profile", "addresses"]
+        });
+
+        let request = LlmRequest::new(
+            "gpt-5.2",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_provider_param(
+            "structured_output",
+            serde_json::json!({
+                "schema": schema,
+                "name": "person",
+                "strict": true
+            }),
+        );
+
+        let body = client.build_request_body(&request).expect("build request");
+        let compiled = &body["text"]["format"]["schema"];
+
+        assert_eq!(compiled["additionalProperties"], false);
+        assert_eq!(
+            compiled["properties"]["profile"]["additionalProperties"],
+            false
+        );
+        assert_eq!(
+            compiled["properties"]["addresses"]["items"]["additionalProperties"],
+            false
+        );
+        assert_eq!(
+            compiled["properties"]["choice"]["anyOf"][0]["additionalProperties"],
+            false
+        );
+    }
+
+    #[test]
+    fn test_strict_structured_output_preserves_explicit_additional_properties() {
+        let client = OpenAiClient::new("test-key".to_string());
+
+        let schema = serde_json::json!({
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+                "nested": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"},
+                    "properties": {
+                        "x": {"type": "string"}
+                    }
+                },
+                "auto": {
+                    "type": "object",
+                    "properties": {
+                        "y": {"type": "integer"}
+                    }
+                }
+            }
+        });
+
+        let request = LlmRequest::new(
+            "gpt-5.2",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_provider_param(
+            "structured_output",
+            serde_json::json!({
+                "schema": schema,
+                "strict": true
+            }),
+        );
+
+        let body = client.build_request_body(&request).expect("build request");
+        let compiled = &body["text"]["format"]["schema"];
+
+        assert_eq!(compiled["additionalProperties"], true);
+        assert_eq!(
+            compiled["properties"]["nested"]["additionalProperties"],
+            serde_json::json!({"type": "string"})
+        );
+        assert_eq!(
+            compiled["properties"]["auto"]["additionalProperties"],
+            false
+        );
+    }
+
+    #[test]
+    fn test_non_strict_structured_output_does_not_inject_additional_properties() {
+        let client = OpenAiClient::new("test-key".to_string());
+
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "nested": {
+                    "type": "object",
+                    "properties": {
+                        "x": {"type": "string"}
+                    }
+                }
+            }
+        });
+
+        let request = LlmRequest::new(
+            "gpt-5.2",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_provider_param(
+            "structured_output",
+            serde_json::json!({
+                "schema": schema,
+                "strict": false
+            }),
+        );
+
+        let body = client.build_request_body(&request).expect("build request");
+        let compiled = &body["text"]["format"]["schema"];
+
+        assert!(
+            compiled.get("additionalProperties").is_none(),
+            "root should not be modified in non-strict mode"
+        );
+        assert!(
+            compiled["properties"]["nested"]
+                .get("additionalProperties")
+                .is_none(),
+            "nested object should not be modified in non-strict mode"
+        );
+    }
+
+    #[test]
+    fn test_compile_schema_strict_handles_object_union_and_defs() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let schema = serde_json::json!({
+            "type": ["object", "null"],
+            "$defs": {
+                "Meta": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"}
+                    }
+                }
+            },
+            "properties": {
+                "meta": {"$ref": "#/$defs/Meta"},
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": ["object", "null"],
+                        "properties": {
+                            "value": {"type": "number"}
+                        }
+                    }
+                }
+            }
+        });
+        let output_schema = OutputSchema::new(schema).expect("valid schema").strict();
+        let compiled = client
+            .compile_schema(&output_schema)
+            .expect("compile should succeed");
+
+        assert!(compiled.warnings.is_empty());
+        assert_eq!(compiled.schema["additionalProperties"], false);
+        assert_eq!(
+            compiled.schema["$defs"]["Meta"]["additionalProperties"],
+            false
+        );
+        assert_eq!(
+            compiled.schema["properties"]["items"]["items"]["additionalProperties"],
+            false
+        );
+    }
+
+    #[test]
+    fn test_compile_schema_strict_keeps_explicit_additional_properties_forms() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let schema = serde_json::json!({
+            "type": "object",
+            "additionalProperties": {"type": "integer"},
+            "properties": {
+                "a": {"type": "string"},
+                "b": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "properties": {
+                        "x": {"type": "string"}
+                    }
+                }
+            }
+        });
+        let output_schema = OutputSchema::new(schema).expect("valid schema").strict();
+        let compiled = client
+            .compile_schema(&output_schema)
+            .expect("compile should succeed");
+
+        assert!(compiled.warnings.is_empty());
+        assert_eq!(
+            compiled.schema["additionalProperties"],
+            serde_json::json!({"type": "integer"})
+        );
+        assert_eq!(
+            compiled.schema["properties"]["b"]["additionalProperties"],
+            true
         );
     }
 

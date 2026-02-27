@@ -1421,7 +1421,101 @@ mod tests {
         Ok(())
     }
 
-    // AdditionalProperties handling is covered by core schema compiler tests.
+    #[test]
+    fn test_compile_schema_recursively_injects_additional_properties()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "profile": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"}
+                    }
+                },
+                "rows": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "col": {"type": "integer"}
+                        }
+                    }
+                },
+                "union": {
+                    "anyOf": [
+                        {
+                            "type": ["object", "null"],
+                            "properties": {
+                                "ok": {"type": "boolean"}
+                            }
+                        },
+                        {"type": "string"}
+                    ]
+                }
+            }
+        });
+
+        let output_schema = OutputSchema::new(schema)?.strict();
+        let compiled = client.compile_schema(&output_schema)?;
+
+        assert!(compiled.warnings.is_empty());
+        assert_eq!(compiled.schema["additionalProperties"], false);
+        assert_eq!(
+            compiled.schema["properties"]["profile"]["additionalProperties"],
+            false
+        );
+        assert_eq!(
+            compiled.schema["properties"]["rows"]["items"]["additionalProperties"],
+            false
+        );
+        assert_eq!(
+            compiled.schema["properties"]["union"]["anyOf"][0]["additionalProperties"],
+            false
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_compile_schema_preserves_explicit_additional_properties()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+        let schema = serde_json::json!({
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+                "nested": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"},
+                    "properties": {
+                        "x": {"type": "string"}
+                    }
+                },
+                "auto": {
+                    "type": "object",
+                    "properties": {
+                        "y": {"type": "number"}
+                    }
+                }
+            }
+        });
+
+        let output_schema = OutputSchema::new(schema)?;
+        let compiled = client.compile_schema(&output_schema)?;
+
+        assert!(compiled.warnings.is_empty());
+        assert_eq!(compiled.schema["additionalProperties"], true);
+        assert_eq!(
+            compiled.schema["properties"]["nested"]["additionalProperties"],
+            serde_json::json!({"type": "string"})
+        );
+        assert_eq!(
+            compiled.schema["properties"]["auto"]["additionalProperties"],
+            false
+        );
+        Ok(())
+    }
 
     // =========================================================================
     // Opus 4.6: Adaptive thinking & effort parameter tests

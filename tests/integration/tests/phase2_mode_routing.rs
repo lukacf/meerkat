@@ -10,8 +10,8 @@ use meerkat_core::event_injector::{
     EventInjector, EventInjectorError, InteractionSubscription, SubscribableInjector,
 };
 use meerkat_core::service::{
-    CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService, SessionSummary,
-    SessionServiceCommsExt, SessionUsage, SessionView, StartTurnRequest,
+    CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService,
+    SessionServiceCommsExt, SessionSummary, SessionUsage, SessionView, StartTurnRequest,
 };
 use meerkat_core::types::{RunResult, SessionId, Usage};
 use meerkat_core::{InteractionId, PlainEventSource};
@@ -171,7 +171,6 @@ impl SessionServiceCommsExt for MockSessionService {
             inject_calls: self.inject_calls.clone(),
         }))
     }
-
 }
 
 #[async_trait]

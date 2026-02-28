@@ -127,6 +127,7 @@ task that owns the Agent exclusively (no mutex needed).
             skill_references: None,
             initial_turn: InitialTurnPolicy::RunImmediately,
             build: None,
+            labels: None,
         })
         .await?;
 

@@ -64,6 +64,9 @@ pub(super) enum MobCommand {
         initial_message: Option<String>,
         runtime_mode: Option<crate::MobRuntimeMode>,
         backend: Option<MobBackendKind>,
+        context: Option<serde_json::Value>,
+        labels: Option<std::collections::BTreeMap<String, String>>,
+        resume_session_id: Option<meerkat_core::types::SessionId>,
         reply_tx: oneshot::Sender<Result<MemberRef, MobError>>,
     },
     SpawnProvisioned {

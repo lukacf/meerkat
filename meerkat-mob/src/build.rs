@@ -21,6 +21,7 @@ use std::sync::Arc;
 /// Mob-managed sessions are created with `host_mode=false` so spawn returns
 /// promptly from nested tool dispatch paths. Lifecycles are managed explicitly
 /// by mob runtime commands (`start_turn`, `retire`, etc.).
+#[allow(clippy::too_many_arguments)]
 pub async fn build_agent_config(
     mob_id: &MobId,
     profile_name: &ProfileName,
@@ -28,6 +29,8 @@ pub async fn build_agent_config(
     profile: &Profile,
     definition: &MobDefinition,
     external_tools: Option<Arc<dyn meerkat_core::AgentToolDispatcher>>,
+    context: Option<serde_json::Value>,
+    labels: Option<std::collections::BTreeMap<String, String>>,
 ) -> Result<AgentBuildConfig, MobError> {
     if !profile.tools.comms {
         return Err(MobError::WiringError(format!(
@@ -38,9 +41,17 @@ pub async fn build_agent_config(
     // Comms name: "{mob_id}/{profile}/{meerkat_id}"
     let comms_name = format!("{mob_id}/{profile_name}/{meerkat_id}");
 
-    // Peer metadata with labels for discovery
-    let peer_meta = PeerMeta::default()
-        .with_description(&profile.peer_description)
+    // Peer metadata with labels for discovery.
+    // Application labels are applied first, then mob standard labels
+    // overwrite on conflict.
+    let mut peer_meta = PeerMeta::default().with_description(&profile.peer_description);
+    if let Some(app_labels) = labels {
+        for (k, v) in app_labels {
+            peer_meta = peer_meta.with_label(&k, &v);
+        }
+    }
+    // Mob standard labels overwrite app labels on conflict
+    peer_meta = peer_meta
         .with_label("mob_id", mob_id.as_str())
         .with_label("role", profile_name.as_str())
         .with_label("meerkat_id", meerkat_id.as_str());
@@ -86,6 +97,9 @@ pub async fn build_agent_config(
     // External tools (mob tools, task tools, rust bundles composed externally)
     config.external_tools = external_tools;
 
+    // Opaque application context passed through to the agent build pipeline
+    config.app_context = context;
+
     // Structured output: convert JSON schema value to OutputSchema
     if let Some(schema_value) = &profile.output_schema {
         let schema = meerkat_core::MeerkatSchema::new(schema_value.clone()).map_err(|e| {
@@ -128,6 +142,7 @@ pub fn to_create_session_request(
         // during create_session so spawn does not block on LLM latency.
         initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
         build: Some(build_options),
+        labels: None,
     }
 }
 
@@ -264,6 +279,8 @@ mod tests {
             profile,
             &def,
             None,
+            None,
+            None,
         )
         .await
         .expect("build_agent_config");
@@ -281,6 +298,8 @@ mod tests {
             &MeerkatId::from("lead-1"),
             profile,
             &def,
+            None,
+            None,
             None,
         )
         .await
@@ -303,6 +322,8 @@ mod tests {
             &MeerkatId::from("w-1"),
             profile,
             &def,
+            None,
+            None,
             None,
         )
         .await
@@ -332,6 +353,8 @@ mod tests {
             profile,
             &def,
             None,
+            None,
+            None,
         )
         .await
         .expect("build_agent_config");
@@ -356,6 +379,8 @@ mod tests {
             lead,
             &def,
             None,
+            None,
+            None,
         )
         .await
         .expect("build_agent_config");
@@ -372,6 +397,8 @@ mod tests {
             &MeerkatId::from("w-1"),
             worker,
             &def,
+            None,
+            None,
             None,
         )
         .await
@@ -401,6 +428,8 @@ mod tests {
             worker,
             &def,
             None,
+            None,
+            None,
         )
         .await;
         assert!(
@@ -419,6 +448,8 @@ mod tests {
             &MeerkatId::from("lead-1"),
             lead,
             &def,
+            None,
+            None,
             None,
         )
         .await
@@ -445,6 +476,8 @@ mod tests {
             lead,
             &def,
             None,
+            None,
+            None,
         )
         .await
         .expect("build_agent_config");
@@ -469,6 +502,8 @@ mod tests {
             &MeerkatId::from("lead-1"),
             lead,
             &def,
+            None,
+            None,
             None,
         )
         .await
@@ -505,6 +540,8 @@ mod tests {
             lead,
             &def,
             None,
+            None,
+            None,
         )
         .await
         .expect("build_agent_config");
@@ -523,6 +560,8 @@ mod tests {
             lead,
             &def,
             None,
+            None,
+            None,
         )
         .await
         .expect("build_agent_config");
@@ -540,6 +579,8 @@ mod tests {
             &MeerkatId::from("lead-1"),
             lead,
             &def,
+            None,
+            None,
             None,
         )
         .await
@@ -570,6 +611,8 @@ mod tests {
             &MeerkatId::from("w-1"),
             worker,
             &def,
+            None,
+            None,
             None,
         )
         .await
@@ -612,6 +655,8 @@ mod tests {
             lead,
             &def,
             None,
+            None,
+            None,
         )
         .await
         .expect("build_agent_config should resolve path skill");
@@ -651,6 +696,8 @@ mod tests {
             lead,
             &def,
             None,
+            None,
+            None,
         )
         .await
         .expect_err("missing path skill should fail");
@@ -662,5 +709,95 @@ mod tests {
             }
             other => panic!("expected MobError::Internal, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_build_agent_config_passes_app_context() {
+        let def = sample_definition();
+        let lead = &def.profiles[&ProfileName::from("lead")];
+        let ctx = serde_json::json!({"key": "val"});
+        let config = build_agent_config(
+            &def.id,
+            &ProfileName::from("lead"),
+            &MeerkatId::from("lead-1"),
+            lead,
+            &def,
+            None,
+            Some(ctx.clone()),
+            None,
+        )
+        .await
+        .expect("build_agent_config");
+
+        assert_eq!(
+            config.app_context,
+            Some(ctx),
+            "app_context should be passed through to AgentBuildConfig"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_agent_config_none_context() {
+        let def = sample_definition();
+        let lead = &def.profiles[&ProfileName::from("lead")];
+        let config = build_agent_config(
+            &def.id,
+            &ProfileName::from("lead"),
+            &MeerkatId::from("lead-1"),
+            lead,
+            &def,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("build_agent_config");
+
+        assert_eq!(
+            config.app_context, None,
+            "app_context should be None when no context is provided"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_agent_config_app_labels_overwritten_by_mob_labels() {
+        let def = sample_definition();
+        let worker = &def.profiles[&ProfileName::from("worker")];
+        let mut app_labels = std::collections::BTreeMap::new();
+        app_labels.insert("faction".to_string(), "north".to_string());
+        // Attempt to override mob_id should be overwritten
+        app_labels.insert("mob_id".to_string(), "sneaky-override".to_string());
+
+        let config = build_agent_config(
+            &def.id,
+            &ProfileName::from("worker"),
+            &MeerkatId::from("w-1"),
+            worker,
+            &def,
+            None,
+            None,
+            Some(app_labels),
+        )
+        .await
+        .expect("build_agent_config");
+
+        let meta = config.peer_meta.as_ref().expect("peer_meta should be set");
+        // App label should be present
+        assert_eq!(
+            meta.labels.get("faction").map(String::as_str),
+            Some("north"),
+            "app labels should be present in peer_meta"
+        );
+        // Mob standard labels should overwrite the sneaky override
+        assert_eq!(
+            meta.labels.get("mob_id").map(String::as_str),
+            Some("test-mob"),
+            "mob standard labels must overwrite app labels on conflict"
+        );
+        assert_eq!(meta.labels.get("role").map(String::as_str), Some("worker"));
+        assert_eq!(
+            meta.labels.get("meerkat_id").map(String::as_str),
+            Some("w-1")
+        );
     }
 }

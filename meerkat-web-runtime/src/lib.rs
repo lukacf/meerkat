@@ -1093,6 +1093,9 @@ pub async fn mob_spawn(mob_id: &str, specs_json: &str) -> Result<JsValue, JsValu
             initial_message: s.initial_message,
             runtime_mode: s.runtime_mode,
             backend: s.backend,
+            context: None,
+            labels: None,
+            resume_session_id: None,
         })
         .collect();
 

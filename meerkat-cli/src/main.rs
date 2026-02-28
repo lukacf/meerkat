@@ -2665,6 +2665,7 @@ async fn resolve_flexible_session_id(
             .list(SessionQuery {
                 limit: Some(offset + 1),
                 offset: None,
+                labels: None,
             })
             .await
             .map_err(|e| anyhow::anyhow!("Failed to list sessions: {e}"))?;
@@ -2703,6 +2704,7 @@ async fn resolve_flexible_session_id(
         .list(SessionQuery {
             limit: None,
             offset: None,
+            labels: None,
         })
         .await
         .map_err(|e| anyhow::anyhow!("Failed to list sessions: {e}"))?;
@@ -2963,6 +2965,8 @@ async fn run_agent(
         checkpointer: None,
         silent_comms_intents: Vec::new(),
         max_inline_peer_notifications: None,
+        app_context: None,
+        additional_instructions: None,
     };
 
     // Route through SessionService::create_session()
@@ -2984,6 +2988,7 @@ async fn run_agent(
             meerkat_core::service::InitialTurnPolicy::Defer
         },
         build: Some(build),
+        labels: None,
     };
 
     // Warn if --stdin is used without --host (it has no effect)
@@ -3420,6 +3425,8 @@ async fn resume_session_with_llm_override(
         checkpointer: None,
         silent_comms_intents: Vec::new(),
         max_inline_peer_notifications: None,
+        app_context: None,
+        additional_instructions: None,
     };
 
     // Route through SessionService::create_session() with the resumed session
@@ -3445,6 +3452,7 @@ async fn resume_session_with_llm_override(
                 meerkat_core::service::InitialTurnPolicy::Defer
             },
             build: Some(build),
+            labels: None,
         })
         .await
         .map_err(session_err_to_anyhow)?;
@@ -3699,6 +3707,7 @@ async fn list_sessions(
     let query = SessionQuery {
         limit: Some(limit),
         offset,
+        labels: None,
     };
 
     let sessions = service
@@ -6384,6 +6393,7 @@ mod tests {
                     message_count: 0,
                     is_active: false,
                     last_assistant_text: None,
+                    labels: Default::default(),
                 },
                 billing: SessionUsage {
                     total_tokens: 0,
@@ -6405,6 +6415,7 @@ mod tests {
                     message_count: 0,
                     total_tokens: 0,
                     is_active: false,
+                    labels: Default::default(),
                 })
                 .collect())
         }
@@ -8463,6 +8474,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             build: Some(build),
+            labels: None,
         };
 
         service

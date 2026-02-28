@@ -2080,6 +2080,8 @@ async fn handle_meerkat_run(
         checkpointer: None,
         silent_comms_intents: Vec::new(),
         max_inline_peer_notifications: None,
+        app_context: None,
+        additional_instructions: None,
     };
 
     let req = CreateSessionRequest {
@@ -2092,6 +2094,7 @@ async fn handle_meerkat_run(
         skill_references,
         initial_turn: InitialTurnPolicy::RunImmediately,
         build: Some(build),
+        labels: None,
     };
 
     let result = state.service.create_session(req).await;
@@ -2277,6 +2280,8 @@ async fn handle_meerkat_resume(
         checkpointer: None,
         silent_comms_intents: Vec::new(),
         max_inline_peer_notifications: None,
+        app_context: None,
+        additional_instructions: None,
     };
 
     let needs_rebuild = existing_adapter.is_none()
@@ -2295,6 +2300,7 @@ async fn handle_meerkat_resume(
             skill_references,
             initial_turn: InitialTurnPolicy::RunImmediately,
             build: Some(build),
+            labels: None,
         };
         state.service.create_session(req).await
     } else {
@@ -2320,6 +2326,7 @@ async fn handle_meerkat_resume(
                     skill_references,
                     initial_turn: InitialTurnPolicy::RunImmediately,
                     build: Some(build),
+                    labels: None,
                 };
 
                 state.service.create_session(req).await

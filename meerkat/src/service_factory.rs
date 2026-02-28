@@ -476,6 +476,7 @@ mod tests {
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             build: Some(build),
+            labels: None,
         };
 
         let (build_event_tx, _build_event_rx) = mpsc::channel(8);
@@ -510,6 +511,7 @@ mod tests {
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             build: None,
+            labels: None,
         }
     }
 

@@ -401,6 +401,7 @@ fn create_req(prompt: &str) -> CreateSessionRequest {
         skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         build: None,
+        labels: None,
     }
 }
 
@@ -962,4 +963,134 @@ async fn test_interrupt_host_mode_returns_without_waiting_for_ack() {
     );
 
     let _ = host_turn.await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Session labels tests
+// ---------------------------------------------------------------------------
+
+fn create_req_with_labels(
+    prompt: &str,
+    labels: std::collections::BTreeMap<String, String>,
+) -> CreateSessionRequest {
+    CreateSessionRequest {
+        labels: Some(labels),
+        ..create_req(prompt)
+    }
+}
+
+#[tokio::test]
+async fn test_session_labels_set_at_creation_appear_in_read() {
+    let service = make_service(MockAgentBuilder::new());
+    let mut labels = std::collections::BTreeMap::new();
+    labels.insert("env".to_string(), "staging".to_string());
+    labels.insert("team".to_string(), "infra".to_string());
+
+    let result = service
+        .create_session(create_req_with_labels("Hello", labels.clone()))
+        .await
+        .unwrap();
+
+    let view = service.read(&result.session_id).await.unwrap();
+    assert_eq!(view.state.labels, labels);
+}
+
+#[tokio::test]
+async fn test_session_labels_appear_in_list() {
+    let service = make_service(MockAgentBuilder::new());
+    let mut labels = std::collections::BTreeMap::new();
+    labels.insert("env".to_string(), "prod".to_string());
+
+    let _ = service
+        .create_session(create_req_with_labels("Hello", labels.clone()))
+        .await
+        .unwrap();
+
+    let sessions = service.list(SessionQuery::default()).await.unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].labels, labels);
+}
+
+#[tokio::test]
+async fn test_session_list_label_filter() {
+    let service = make_service(MockAgentBuilder::new());
+
+    let mut labels_a = std::collections::BTreeMap::new();
+    labels_a.insert("env".to_string(), "prod".to_string());
+    labels_a.insert("team".to_string(), "frontend".to_string());
+
+    let mut labels_b = std::collections::BTreeMap::new();
+    labels_b.insert("env".to_string(), "staging".to_string());
+    labels_b.insert("team".to_string(), "backend".to_string());
+
+    let _ = service
+        .create_session(create_req_with_labels("A", labels_a.clone()))
+        .await
+        .unwrap();
+    let _ = service
+        .create_session(create_req_with_labels("B", labels_b.clone()))
+        .await
+        .unwrap();
+
+    // Filter by env=prod — should match only A
+    let mut filter = std::collections::BTreeMap::new();
+    filter.insert("env".to_string(), "prod".to_string());
+    let sessions = service
+        .list(SessionQuery {
+            labels: Some(filter),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(
+        sessions[0].labels.get("team").map(String::as_str),
+        Some("frontend")
+    );
+
+    // Filter by team=backend — should match only B
+    let mut filter = std::collections::BTreeMap::new();
+    filter.insert("team".to_string(), "backend".to_string());
+    let sessions = service
+        .list(SessionQuery {
+            labels: Some(filter),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(
+        sessions[0].labels.get("env").map(String::as_str),
+        Some("staging")
+    );
+
+    // Filter by env=prod AND team=backend — should match neither
+    let mut filter = std::collections::BTreeMap::new();
+    filter.insert("env".to_string(), "prod".to_string());
+    filter.insert("team".to_string(), "backend".to_string());
+    let sessions = service
+        .list(SessionQuery {
+            labels: Some(filter),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(sessions.is_empty());
+
+    // No filter — should return both
+    let sessions = service.list(SessionQuery::default()).await.unwrap();
+    assert_eq!(sessions.len(), 2);
+}
+
+#[tokio::test]
+async fn test_session_labels_empty_default() {
+    let service = make_service(MockAgentBuilder::new());
+    let result = service.create_session(create_req("Hello")).await.unwrap();
+
+    let view = service.read(&result.session_id).await.unwrap();
+    assert!(view.state.labels.is_empty());
+
+    let sessions = service.list(SessionQuery::default()).await.unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert!(sessions[0].labels.is_empty());
 }

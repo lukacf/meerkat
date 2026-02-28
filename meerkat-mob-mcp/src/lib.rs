@@ -156,6 +156,9 @@ impl MobMcpState {
                 initial_message: None,
                 runtime_mode,
                 backend,
+                context: None,
+                labels: None,
+                resume_session_id: None,
             },
         )
         .await
@@ -428,6 +431,7 @@ impl SessionService for LocalSessionService {
                 message_count: 0,
                 is_active: false,
                 last_assistant_text: None,
+                labels: Default::default(),
             },
             billing: SessionUsage {
                 total_tokens: 0,
@@ -449,6 +453,7 @@ impl SessionService for LocalSessionService {
                 message_count: 0,
                 total_tokens: 0,
                 is_active: false,
+                labels: Default::default(),
             })
             .collect())
     }
@@ -1291,6 +1296,7 @@ mod tests {
                     message_count: 0,
                     is_active: false,
                     last_assistant_text: None,
+                    labels: Default::default(),
                 },
                 billing: SessionUsage {
                     total_tokens: 0,
@@ -1312,6 +1318,7 @@ mod tests {
                     message_count: 0,
                     total_tokens: 0,
                     is_active: false,
+                    labels: Default::default(),
                 })
                 .collect())
         }

@@ -438,6 +438,8 @@ impl MobBuilder {
                 profile,
                 definition,
                 compose_external_tools_for_profile(profile, tool_bundles, tool_handle.clone())?,
+                None,
+                None,
             )
             .await?;
             // Resume reconciliation needs live comms runtimes, but this path is

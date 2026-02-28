@@ -38,6 +38,12 @@ pub struct SpawnMemberSpec {
     pub initial_message: Option<String>,
     pub runtime_mode: Option<crate::MobRuntimeMode>,
     pub backend: Option<MobBackendKind>,
+    /// Opaque application context passed through to the agent build pipeline.
+    pub context: Option<serde_json::Value>,
+    /// Application-defined labels for this member.
+    pub labels: Option<std::collections::BTreeMap<String, String>>,
+    /// Resume an existing session instead of creating a new one.
+    pub resume_session_id: Option<meerkat_core::types::SessionId>,
 }
 
 impl SpawnMemberSpec {
@@ -54,6 +60,9 @@ impl SpawnMemberSpec {
             initial_message,
             runtime_mode,
             backend,
+            context: None,
+            labels: None,
+            resume_session_id: None,
         }
     }
 }
@@ -314,6 +323,32 @@ impl MobHandle {
         runtime_mode: Option<crate::MobRuntimeMode>,
         backend: Option<MobBackendKind>,
     ) -> Result<MemberRef, MobError> {
+        self.spawn_inner(
+            profile_name,
+            meerkat_id,
+            initial_message,
+            runtime_mode,
+            backend,
+            None,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Internal spawn method that threads all parameters including context.
+    #[allow(clippy::too_many_arguments)]
+    async fn spawn_inner(
+        &self,
+        profile_name: ProfileName,
+        meerkat_id: MeerkatId,
+        initial_message: Option<String>,
+        runtime_mode: Option<crate::MobRuntimeMode>,
+        backend: Option<MobBackendKind>,
+        context: Option<serde_json::Value>,
+        labels: Option<std::collections::BTreeMap<String, String>>,
+        resume_session_id: Option<meerkat_core::types::SessionId>,
+    ) -> Result<MemberRef, MobError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(MobCommand::Spawn {
@@ -322,6 +357,9 @@ impl MobHandle {
                 initial_message,
                 runtime_mode,
                 backend,
+                context,
+                labels,
+                resume_session_id,
                 reply_tx,
             })
             .await
@@ -339,12 +377,15 @@ impl MobHandle {
         specs: Vec<SpawnMemberSpec>,
     ) -> Vec<Result<MemberRef, MobError>> {
         futures::future::join_all(specs.into_iter().map(|spec| {
-            self.spawn_with_options(
+            self.spawn_inner(
                 spec.profile_name,
                 spec.meerkat_id,
                 spec.initial_message,
                 spec.runtime_mode,
                 spec.backend,
+                spec.context,
+                spec.labels,
+                spec.resume_session_id,
             )
         }))
         .await

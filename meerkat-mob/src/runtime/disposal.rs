@@ -224,6 +224,7 @@ mod tests {
                 runtime_mode: crate::MobRuntimeMode::TurnDriven,
                 state: MemberState::Retiring,
                 wired_to: BTreeSet::new(),
+                labels: std::collections::BTreeMap::new(),
             },
             retiring_comms: None,
             retiring_key: None,

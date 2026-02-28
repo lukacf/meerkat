@@ -339,6 +339,7 @@ impl SessionRuntime {
                 skill_references: skill_references.clone(),
                 initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
                 build: Some(build),
+                labels: None,
             };
 
             let result = self

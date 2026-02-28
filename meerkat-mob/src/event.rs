@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 use meerkat_core::event::{AgentEvent, EventEnvelope};
 use meerkat_core::types::SessionId;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// A mob event with metadata assigned by the event store.
@@ -179,6 +180,8 @@ pub enum MobEventKindCompat {
         session_id: Option<SessionId>,
         #[serde(default)]
         member_ref: Option<MemberRef>,
+        #[serde(default)]
+        labels: BTreeMap<String, String>,
     },
     MeerkatRetired {
         meerkat_id: MeerkatId,
@@ -326,6 +329,7 @@ impl TryFrom<MobEventCompat> for MobEvent {
                 runtime_mode,
                 session_id,
                 member_ref,
+                labels,
             } => MobEventKind::MeerkatSpawned {
                 member_ref: upcast_member_ref(
                     "meerkat_spawned",
@@ -336,6 +340,7 @@ impl TryFrom<MobEventCompat> for MobEvent {
                 meerkat_id,
                 role,
                 runtime_mode,
+                labels,
             },
             MobEventKindCompat::MeerkatRetired {
                 meerkat_id,
@@ -495,6 +500,9 @@ pub enum MobEventKind {
         runtime_mode: MobRuntimeMode,
         /// Backend-neutral member identity created for this meerkat.
         member_ref: MemberRef,
+        /// Application-defined labels for this member.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        labels: BTreeMap<String, String>,
     },
     /// A meerkat was retired and its session archived.
     MeerkatRetired {
@@ -693,6 +701,7 @@ mod tests {
             role: ProfileName::from("worker"),
             runtime_mode: MobRuntimeMode::AutonomousHost,
             member_ref: MemberRef::from_session_id(SessionId::from_uuid(Uuid::nil())),
+            labels: BTreeMap::new(),
         });
     }
 

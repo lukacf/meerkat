@@ -1265,6 +1265,8 @@ async fn create_session(
         checkpointer: None,
         silent_comms_intents: Vec::new(),
         max_inline_peer_notifications: None,
+        app_context: None,
+        additional_instructions: None,
     };
 
     let svc_req = SvcCreateSessionRequest {
@@ -1277,6 +1279,7 @@ async fn create_session(
         skill_references,
         initial_turn: InitialTurnPolicy::RunImmediately,
         build: Some(build),
+        labels: None,
     };
 
     let result = state.session_service.create_session(svc_req).await;
@@ -1550,6 +1553,8 @@ async fn continue_session(
                 checkpointer: None,
                 silent_comms_intents: Vec::new(),
                 max_inline_peer_notifications: None,
+                app_context: None,
+                additional_instructions: None,
             };
 
             let svc_req = SvcCreateSessionRequest {
@@ -1562,6 +1567,7 @@ async fn continue_session(
                 skill_references,
                 initial_turn: InitialTurnPolicy::RunImmediately,
                 build: Some(build),
+                labels: None,
             };
 
             state

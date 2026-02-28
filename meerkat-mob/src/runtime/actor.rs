@@ -28,6 +28,7 @@ pub(super) struct PendingSpawn {
     meerkat_id: MeerkatId,
     prompt: String,
     runtime_mode: crate::MobRuntimeMode,
+    labels: std::collections::BTreeMap<String, String>,
     reply_tx: oneshot::Sender<Result<MemberRef, MobError>>,
 }
 
@@ -626,6 +627,9 @@ impl MobActor {
                     initial_message,
                     runtime_mode,
                     backend,
+                    context,
+                    labels,
+                    resume_session_id,
                     reply_tx,
                 } => {
                     if let Err(error) = self.require_state(&[MobState::Running, MobState::Creating])
@@ -639,6 +643,9 @@ impl MobActor {
                         initial_message,
                         runtime_mode,
                         backend,
+                        context,
+                        labels,
+                        resume_session_id,
                         reply_tx,
                     )
                     .await;
@@ -1003,6 +1010,7 @@ impl MobActor {
     /// P1-T04: spawn() creates a real session.
     ///
     /// Provisioning runs in parallel tasks; final actor commit stays serialized.
+    #[allow(clippy::too_many_arguments)]
     async fn enqueue_spawn(
         &mut self,
         profile_name: ProfileName,
@@ -1010,6 +1018,9 @@ impl MobActor {
         initial_message: Option<String>,
         runtime_mode: Option<crate::MobRuntimeMode>,
         backend: Option<MobBackendKind>,
+        context: Option<serde_json::Value>,
+        labels: Option<std::collections::BTreeMap<String, String>>,
+        resume_session_id: Option<meerkat_core::types::SessionId>,
         reply_tx: oneshot::Sender<Result<MemberRef, MobError>>,
     ) {
         let prepare_result = async {
@@ -1045,6 +1056,70 @@ impl MobActor {
                 .get(&profile_name)
                 .ok_or_else(|| MobError::ProfileNotFound(profile_name.clone()))?;
 
+            let selected_runtime_mode = runtime_mode.unwrap_or(profile.runtime_mode);
+
+            // ---------- Resume session fast-path ----------
+            // When resume_session_id is set, skip provisioning and go straight
+            // to finalization. The session must already exist and be usable.
+            if let Some(resume_id) = resume_session_id {
+                let member_ref = MemberRef::from_session_id(resume_id.clone());
+
+                // Validate the session exists and is active.
+                let is_active = self
+                    .provisioner
+                    .is_member_active(&member_ref)
+                    .await
+                    .map_err(|e| {
+                        MobError::Internal(format!(
+                            "resume session check failed for '{meerkat_id}': {e}"
+                        ))
+                    })?;
+                if !is_active.unwrap_or(false) {
+                    return Err(MobError::Internal(
+                        format!("resumed session '{resume_id}' not found or inactive for '{meerkat_id}'"),
+                    ));
+                }
+
+                // Validate event injector for autonomous mode.
+                if selected_runtime_mode == crate::MobRuntimeMode::AutonomousHost
+                    && self.provisioner.event_injector(&resume_id).await.is_none()
+                {
+                    return Err(MobError::Internal(format!(
+                        "resumed session '{resume_id}' has no event injector for autonomous '{meerkat_id}'"
+                    )));
+                }
+
+                // Validate comms if wiring rules exist.
+                let has_wiring = self.definition.wiring.auto_wire_orchestrator
+                    || !self.definition.wiring.role_wiring.is_empty();
+                if has_wiring
+                    && self
+                        .provisioner
+                        .comms_runtime(&member_ref)
+                        .await
+                        .is_none()
+                {
+                    return Err(MobError::Internal(format!(
+                        "resumed session '{resume_id}' has no comms runtime for '{meerkat_id}'"
+                    )));
+                }
+
+                let prompt = initial_message
+                    .clone()
+                    .unwrap_or_else(|| self.fallback_spawn_prompt(&profile_name, &meerkat_id));
+                let resolved_labels = labels.unwrap_or_default();
+
+                return Ok((
+                    profile_name,
+                    meerkat_id,
+                    prompt,
+                    selected_runtime_mode,
+                    resolved_labels,
+                    Some(member_ref),
+                    None,
+                ));
+            }
+
             let external_tools = self.external_tools_for_profile(profile)?;
             let mut config = build::build_agent_config(
                 &self.definition.id,
@@ -1053,6 +1128,8 @@ impl MobActor {
                 profile,
                 &self.definition,
                 external_tools,
+                context,
+                labels.clone(),
             )
             .await?;
             if let Some(ref client) = self.default_llm_client {
@@ -1066,36 +1143,74 @@ impl MobActor {
             let selected_backend = backend
                 .or(profile.backend)
                 .unwrap_or(self.definition.backend.default);
-            let selected_runtime_mode = runtime_mode.unwrap_or(profile.runtime_mode);
             let peer_name = format!("{}/{}/{}", self.definition.id, profile_name, meerkat_id);
             let provision_request = ProvisionMemberRequest {
                 create_session: req,
                 backend: selected_backend,
                 peer_name,
             };
+            let resolved_labels = labels.unwrap_or_default();
             Ok((
                 profile_name,
                 meerkat_id,
                 prompt,
                 selected_runtime_mode,
-                provision_request,
+                resolved_labels,
+                None::<MemberRef>,
+                Some(provision_request),
             ))
         }
         .await;
 
-        let (profile_name, meerkat_id, prompt, selected_runtime_mode, provision_request) =
-            match prepare_result {
-                Ok(prepared) => prepared,
-                Err(error) => {
-                    let _ = reply_tx.send(Err(error));
-                    return;
-                }
-            };
+        let (
+            profile_name,
+            meerkat_id,
+            prompt,
+            selected_runtime_mode,
+            resolved_labels,
+            resume_member_ref,
+            maybe_provision_request,
+        ) = match prepare_result {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let _ = reply_tx.send(Err(error));
+                return;
+            }
+        };
+
+        // ---------- Resume fast-path: skip async provisioning ----------
+        if let Some(member_ref) = resume_member_ref {
+            let provision =
+                PendingProvision::new(member_ref, meerkat_id.clone(), self.provisioner.clone());
+            // Go straight to finalization — no async provisioning task needed.
+            let result = self
+                .finalize_spawn_from_pending(
+                    &profile_name,
+                    &meerkat_id,
+                    selected_runtime_mode,
+                    prompt,
+                    resolved_labels,
+                    provision,
+                )
+                .await;
+            let _ = reply_tx.send(result);
+            return;
+        }
+
+        // Normal provisioning path — resume path already returned above.
+        let Some(provision_request) = maybe_provision_request else {
+            let _ = reply_tx.send(Err(MobError::Internal(
+                "provision_request missing for normal spawn path".into(),
+            )));
+            return;
+        };
+
         let pending = PendingSpawn {
             profile_name,
             meerkat_id,
             prompt,
             runtime_mode: selected_runtime_mode,
+            labels: resolved_labels,
             reply_tx,
         };
 
@@ -1207,6 +1322,7 @@ impl MobActor {
                 meerkat_id,
                 prompt,
                 runtime_mode,
+                labels,
                 reply_tx,
             } = pending;
             in_flight.push(async move {
@@ -1233,6 +1349,7 @@ impl MobActor {
                                 &meerkat_id,
                                 runtime_mode,
                                 prompt,
+                                labels,
                                 provision,
                             )
                             .await
@@ -1255,6 +1372,7 @@ impl MobActor {
         meerkat_id: &MeerkatId,
         runtime_mode: crate::MobRuntimeMode,
         prompt: String,
+        labels: std::collections::BTreeMap<String, String>,
         provision: PendingProvision,
     ) -> Result<MemberRef, MobError> {
         if let Err(append_error) = self
@@ -1267,6 +1385,7 @@ impl MobActor {
                     role: profile_name.clone(),
                     runtime_mode,
                     member_ref: provision.member_ref().clone(),
+                    labels: labels.clone(),
                 },
             })
             .await
@@ -1286,12 +1405,13 @@ impl MobActor {
 
         {
             let mut roster = self.roster.write().await;
-            let inserted = roster.add(
-                meerkat_id.clone(),
-                profile_name.clone(),
+            let inserted = roster.add(crate::roster::RosterAddEntry {
+                meerkat_id: meerkat_id.clone(),
+                profile: profile_name.clone(),
                 runtime_mode,
-                member_ref.clone(),
-            );
+                member_ref: member_ref.clone(),
+                labels,
+            });
             debug_assert!(
                 inserted,
                 "duplicate meerkat insert should be prevented before add()"
@@ -1489,6 +1609,9 @@ impl MobActor {
             profile_name,
             meerkat_id.clone(),
             initial_message,
+            None,
+            None,
+            None,
             None,
             None,
             spawn_reply_tx,
@@ -2119,6 +2242,9 @@ impl MobActor {
                         None,
                         spec.runtime_mode,
                         None,
+                        None,
+                        None,
+                        None,
                         spawn_reply_tx,
                     )
                     .await;
@@ -2703,6 +2829,7 @@ impl MobActor {
                 runtime_mode: crate::MobRuntimeMode::TurnDriven,
                 state: crate::roster::MemberState::Active,
                 wired_to: std::collections::BTreeSet::new(),
+                labels: std::collections::BTreeMap::new(),
             }),
             retiring_comms: spawned_comms.clone(),
             retiring_key: spawned_comms.as_ref().and_then(|c| c.public_key()),

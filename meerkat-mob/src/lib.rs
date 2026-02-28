@@ -64,7 +64,7 @@ pub use event::{
 pub use ids::{BranchId, FlowId, MeerkatId, MobId, ProfileName, RunId, StepId, TaskId};
 pub use prefab::Prefab;
 pub use profile::{Profile, ToolConfig};
-pub use roster::{MemberState, Roster, RosterEntry};
+pub use roster::{MemberState, Roster, RosterAddEntry, RosterEntry};
 pub use run::{
     FailureLedgerEntry, FlowContext, FlowRunConfig, MobRun, MobRunStatus, StepLedgerEntry,
     StepRunStatus,

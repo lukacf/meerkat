@@ -809,6 +809,7 @@ impl SessionService for MockSessionService {
                 message_count: 0,
                 is_active: false,
                 last_assistant_text: None,
+                labels: Default::default(),
             },
             billing: SessionUsage {
                 total_tokens: 0,
@@ -828,6 +829,7 @@ impl SessionService for MockSessionService {
                 message_count: 0,
                 total_tokens: 0,
                 is_active: false,
+                labels: Default::default(),
             })
             .collect())
     }
@@ -3472,6 +3474,7 @@ async fn test_resume_reconciles_orphaned_sessions() {
             host_mode: true,
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
+            labels: None,
         })
         .await
         .expect("create orphan");
@@ -6544,6 +6547,9 @@ async fn test_spawn_many_member_refs_returns_results_in_input_order() {
             initial_message: None,
             runtime_mode: None,
             backend: None,
+            context: None,
+            labels: None,
+            resume_session_id: None,
         },
         SpawnMemberSpec {
             profile_name: ProfileName::from("worker"),
@@ -6551,6 +6557,9 @@ async fn test_spawn_many_member_refs_returns_results_in_input_order() {
             initial_message: None,
             runtime_mode: None,
             backend: None,
+            context: None,
+            labels: None,
+            resume_session_id: None,
         },
         SpawnMemberSpec {
             profile_name: ProfileName::from("worker"),
@@ -6558,6 +6567,9 @@ async fn test_spawn_many_member_refs_returns_results_in_input_order() {
             initial_message: None,
             runtime_mode: None,
             backend: None,
+            context: None,
+            labels: None,
+            resume_session_id: None,
         },
     ];
 
@@ -6589,6 +6601,9 @@ async fn test_spawn_many_parallel_finalize_emits_single_worker_pair_wire_event()
             initial_message: None,
             runtime_mode: None,
             backend: None,
+            context: None,
+            labels: None,
+            resume_session_id: None,
         },
         SpawnMemberSpec {
             profile_name: ProfileName::from("worker"),
@@ -6596,6 +6611,9 @@ async fn test_spawn_many_parallel_finalize_emits_single_worker_pair_wire_event()
             initial_message: None,
             runtime_mode: None,
             backend: None,
+            context: None,
+            labels: None,
+            resume_session_id: None,
         },
     ];
 
@@ -8788,6 +8806,7 @@ impl SessionService for RealCommsSessionService {
                 message_count: 0,
                 is_active: false,
                 last_assistant_text: None,
+                labels: Default::default(),
             },
             billing: SessionUsage {
                 total_tokens: 0,
@@ -8807,6 +8826,7 @@ impl SessionService for RealCommsSessionService {
                 message_count: 0,
                 total_tokens: 0,
                 is_active: false,
+                labels: Default::default(),
             })
             .collect())
     }

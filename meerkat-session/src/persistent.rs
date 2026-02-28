@@ -11,12 +11,13 @@ use indexmap::IndexSet;
 #[allow(unused_imports)] // Used in read() fallback path
 use meerkat_core::Session;
 use meerkat_core::service::{
-    CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService,
-    SessionServiceCommsExt, SessionSummary, SessionUsage, SessionView, StartTurnRequest,
+    CreateSessionRequest, SESSION_LABELS_KEY, SessionError, SessionInfo, SessionQuery,
+    SessionService, SessionServiceCommsExt, SessionSummary, SessionUsage, SessionView,
+    StartTurnRequest,
 };
 use meerkat_core::types::{RunResult, SessionId};
 use meerkat_store::SessionStore;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -83,6 +84,20 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     /// mutual exclusion prevents a concurrent checkpoint from resurrecting
     /// the row.
     checkpointer_gates: Mutex<HashMap<SessionId, Arc<CheckpointerGate>>>,
+}
+
+/// Extract session labels from a metadata map.
+///
+/// Looks for `SESSION_LABELS_KEY` and deserializes the value as
+/// `BTreeMap<String, String>`. Returns an empty map on missing or
+/// malformed data.
+fn extract_labels_from_metadata(
+    metadata: &serde_json::Map<String, serde_json::Value>,
+) -> BTreeMap<String, String> {
+    metadata
+        .get(SESSION_LABELS_KEY)
+        .and_then(|v| serde_json::from_value::<BTreeMap<String, String>>(v.clone()).ok())
+        .unwrap_or_default()
 }
 
 impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
@@ -168,6 +183,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
                     .map_err(|e| SessionError::Store(Box::new(e)))?
                     .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
 
+                let labels = extract_labels_from_metadata(session.metadata());
                 Ok(SessionView {
                     state: SessionInfo {
                         session_id: session.id().clone(),
@@ -176,6 +192,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
                         message_count: session.messages().len(),
                         is_active: false,
                         last_assistant_text: session.last_assistant_text(),
+                        labels,
                     },
                     billing: SessionUsage {
                         total_tokens: session.total_tokens(),
@@ -201,6 +218,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
 
         for meta in stored {
             if !live_ids.contains(&meta.id) {
+                let labels = extract_labels_from_metadata(&meta.metadata);
                 summaries.push(SessionSummary {
                     session_id: meta.id,
                     created_at: meta.created_at,
@@ -208,8 +226,18 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
                     message_count: meta.message_count,
                     total_tokens: meta.total_tokens,
                     is_active: false,
+                    labels,
                 });
             }
+        }
+
+        // Filter by labels if specified (all k/v pairs must match).
+        if let Some(ref filter_labels) = query.labels {
+            summaries.retain(|s| {
+                filter_labels
+                    .iter()
+                    .all(|(k, v)| s.labels.get(k) == Some(v))
+            });
         }
 
         // Apply pagination

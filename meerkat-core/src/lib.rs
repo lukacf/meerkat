@@ -70,8 +70,8 @@ pub use peer_meta::PeerMeta;
 
 pub use config::{
     AgentConfig, BudgetConfig, CommsAuthMode, CommsRuntimeConfig, CommsRuntimeMode, Config,
-    ConfigDelta, ConfigScope, HookEntryConfig, HookRunOverrides, HookRuntimeConfig, HooksConfig,
-    LimitsConfig, ModelDefaults, PlainEventSource, ProviderConfig, ProviderSettings,
+    ConfigDelta, ConfigError, ConfigScope, HookEntryConfig, HookRunOverrides, HookRuntimeConfig,
+    HooksConfig, LimitsConfig, ModelDefaults, PlainEventSource, ProviderConfig, ProviderSettings,
     ResolvedSubAgentConfig, RetryConfig, ShellDefaults, StorageConfig, StoreConfig,
     SubAgentsConfig, ToolsConfig,
 };
@@ -123,7 +123,8 @@ pub use schema::{
 };
 pub use service::{
     CreateSessionRequest, SessionBuildOptions, SessionError, SessionInfo, SessionQuery,
-    SessionService, SessionSummary, SessionUsage, SessionView, StartTurnRequest, TurnToolOverlay,
+    SessionService, SessionServiceCommsExt, SessionSummary, SessionUsage, SessionView,
+    StartTurnRequest, TurnToolOverlay,
 };
 pub use session::{SESSION_VERSION, Session, SessionMeta, SessionMetadata, SessionTooling};
 pub use state::LoopState;

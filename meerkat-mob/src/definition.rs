@@ -792,7 +792,7 @@ id = "no-spawn-policy"
 
     #[test]
     fn test_mob_definition_event_router_defaults() {
-        let json = r#"{}"#;
+        let json = r"{}";
         let parsed: EventRouterConfig = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.buffer_size, 256);
         assert!(parsed.include_patterns.is_none());

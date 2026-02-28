@@ -4841,7 +4841,9 @@ async fn hydrate_mob_state(
                 .append(meerkat_mob::NewMobEvent {
                     mob_id: definition.id.clone(),
                     timestamp: None,
-                    kind: meerkat_mob::MobEventKind::MobCreated { definition: Box::new(definition) },
+                    kind: meerkat_mob::MobEventKind::MobCreated {
+                        definition: Box::new(definition),
+                    },
                 })
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;

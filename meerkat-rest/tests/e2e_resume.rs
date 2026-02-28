@@ -84,7 +84,7 @@ async fn inner_test_rest_resume_metadata() {
         config_runtime,
         realm_lease: Arc::new(tokio::sync::Mutex::new(None)),
         skill_runtime: None,
-        mob_state: Arc::new(meerkat_mob_mcp::MobMcpState::new_in_memory()),
+        mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
         #[cfg(feature = "mcp")]
         mcp_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
@@ -175,7 +175,7 @@ async fn inner_test_rest_resume_metadata() {
         config_runtime: config_runtime_resume,
         realm_lease: Arc::new(tokio::sync::Mutex::new(None)),
         skill_runtime: None,
-        mob_state: Arc::new(meerkat_mob_mcp::MobMcpState::new_in_memory()),
+        mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
         #[cfg(feature = "mcp")]
         mcp_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };

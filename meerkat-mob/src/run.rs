@@ -219,6 +219,8 @@ mod tests {
                 max_orphaned_turns: Some(8),
                 cancel_grace_timeout_ms: None,
             }),
+            spawn_policy: None,
+            event_router: None,
         }
     }
 

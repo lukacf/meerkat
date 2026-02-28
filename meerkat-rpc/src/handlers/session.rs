@@ -1,14 +1,17 @@
 //! `session/*` method handlers.
 
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
 use meerkat::AgentBuildConfig;
 use meerkat_contracts::SkillsParams;
 use meerkat_core::EventEnvelope;
 use meerkat_core::event::AgentEvent;
+use meerkat_core::service::SessionQuery;
 use meerkat_core::skills::{SkillKey, SkillRef};
 use meerkat_core::{BudgetLimits, HookRunOverrides, OutputSchema, Provider};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
-use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use super::{RpcResponseExt, parse_params, parse_session_id_for_runtime};
@@ -86,6 +89,15 @@ pub struct CreateSessionParams {
     /// Legacy compatibility refs to resolve and inject for the first turn.
     #[serde(default)]
     pub skill_references: Option<Vec<String>>,
+    /// Key-value labels attached to the session for filtering and metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<BTreeMap<String, String>>,
+    /// Additional instruction sections appended to the system prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_instructions: Option<Vec<String>>,
+    /// Opaque application context passed to custom session builders.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_context: Option<serde_json::Value>,
 }
 
 fn default_structured_output_retries() -> u32 {
@@ -103,6 +115,14 @@ fn canonical_skill_ids(
         skill_references,
     };
     params.canonical_skill_keys_with_registry(&runtime.skill_identity_registry())
+}
+
+/// Parameters for `session/list` (all optional).
+#[derive(Debug, Default, Deserialize)]
+pub struct ListSessionsParams {
+    /// Filter sessions by label key-value pairs (AND match).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<BTreeMap<String, String>>,
 }
 
 /// Parameters for `session/read`.
@@ -137,6 +157,8 @@ pub struct SessionInfoResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_ref: Option<String>,
     pub state: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
 }
 
 /// Result for `session/read`.
@@ -146,6 +168,8 @@ pub struct ReadSessionResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_ref: Option<String>,
     pub state: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -212,6 +236,8 @@ pub async fn handle_create(
     build_config.override_mob = params.enable_mob;
     build_config.budget_limits = params.budget_limits;
     build_config.provider_params = params.provider_params;
+    build_config.additional_instructions = params.additional_instructions;
+    build_config.app_context = params.app_context;
     build_config.preload_skills = params
         .preload_skills
         .map(|ids| ids.into_iter().map(meerkat_core::skills::SkillId).collect());
@@ -231,7 +257,7 @@ pub async fn handle_create(
     };
 
     // Create the session
-    let session_id = match runtime.create_session(build_config).await {
+    let session_id = match runtime.create_session(build_config, params.labels).await {
         Ok(sid) => sid,
         Err(rpc_err) => {
             return RpcResponse::error(id, rpc_err.code, rpc_err.message);
@@ -265,6 +291,7 @@ pub async fn handle_create(
                     event_tx_for_turn,
                     skill_refs_for_turn,
                     None,
+                    None,
                 )
                 .await
             {
@@ -296,7 +323,7 @@ pub async fn handle_create(
         }
     } else {
         match runtime
-            .start_turn(&session_id, params.prompt, event_tx, skill_refs, None)
+            .start_turn(&session_id, params.prompt, event_tx, skill_refs, None, None)
             .await
         {
             Ok(r) => r,
@@ -337,8 +364,32 @@ async fn await_comms_runtime_ready(
 }
 
 /// Handle `session/list`.
-pub async fn handle_list(id: Option<RpcId>, runtime: &SessionRuntime) -> RpcResponse {
-    let sessions = runtime.list_sessions().await;
+pub async fn handle_list(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    runtime: &SessionRuntime,
+) -> RpcResponse {
+    // All fields are optional, so missing params is fine.
+    let list_params: ListSessionsParams = match params {
+        Some(raw) => match serde_json::from_str(raw.get()) {
+            Ok(p) => p,
+            Err(e) => {
+                return RpcResponse::error(
+                    id,
+                    error::INVALID_PARAMS,
+                    format!("Invalid params: {e}"),
+                );
+            }
+        },
+        None => ListSessionsParams::default(),
+    };
+
+    let query = SessionQuery {
+        labels: list_params.labels,
+        ..Default::default()
+    };
+
+    let sessions = runtime.list_sessions(query).await;
     let result = ListSessionsResult {
         sessions: sessions
             .into_iter()
@@ -348,6 +399,7 @@ pub async fn handle_list(id: Option<RpcId>, runtime: &SessionRuntime) -> RpcResp
                     .realm_id()
                     .map(|realm| meerkat_contracts::format_session_ref(realm, &info.session_id)),
                 state: info.state.as_str().to_string(),
+                labels: info.labels,
             })
             .collect(),
     };
@@ -371,13 +423,14 @@ pub async fn handle_read(
     };
 
     match runtime.session_state(&session_id).await {
-        Some(state) => {
+        Some(info) => {
             let result = ReadSessionResult {
                 session_id: session_id.to_string(),
                 session_ref: runtime
                     .realm_id()
                     .map(|realm| meerkat_contracts::format_session_ref(realm, &session_id)),
-                state: state.as_str().to_string(),
+                state: info.state.as_str().to_string(),
+                labels: info.labels,
             };
             RpcResponse::success(id, result)
         }

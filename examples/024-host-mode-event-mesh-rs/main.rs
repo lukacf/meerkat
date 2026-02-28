@@ -158,6 +158,7 @@ task that owns the Agent exclusively (no mutex needed).
                 host_mode: false,
                 skill_references: None,
                 flow_tool_overlay: None,
+                additional_instructions: None,
             },
         )
         .await?;
@@ -192,6 +193,7 @@ task that owns the Agent exclusively (no mutex needed).
                 host_mode: false,
                 skill_references: None,
                 flow_tool_overlay: None,
+                additional_instructions: None,
             },
         )
         .await?;

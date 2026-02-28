@@ -179,7 +179,7 @@ impl MobBuilder {
                 mob_id: definition.id.clone(),
                 timestamp: None,
                 kind: MobEventKind::MobCreated {
-                    definition: definition_for_event,
+                    definition: Box::new(definition_for_event),
                 },
             })
             .await?;
@@ -242,7 +242,7 @@ impl MobBuilder {
             .iter()
             .rev()
             .find_map(|event| match &event.kind {
-                MobEventKind::MobCreated { definition } => Some(definition.clone()),
+                MobEventKind::MobCreated { definition } => Some(*definition.clone()),
                 _ => None,
             })
             .ok_or_else(|| {
@@ -547,6 +547,7 @@ impl MobBuilder {
                                 host_mode: false,
                                 skill_references: None,
                                 flow_tool_overlay: None,
+                                additional_instructions: None,
                             },
                         )
                         .await?;

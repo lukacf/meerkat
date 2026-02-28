@@ -109,6 +109,114 @@
     "title": "McpLiveOperation",
     "type": "string"
   },
+  "WireSessionInfo": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Canonical session info for wire protocol.",
+    "properties": {
+      "created_at": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "is_active": {
+        "type": "boolean"
+      },
+      "labels": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "type": "object"
+      },
+      "last_assistant_text": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "message_count": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "session_id": {
+        "type": "string"
+      },
+      "session_ref": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "updated_at": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "session_id",
+      "created_at",
+      "updated_at",
+      "message_count",
+      "is_active"
+    ],
+    "title": "WireSessionInfo",
+    "type": "object"
+  },
+  "WireSessionSummary": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Canonical session summary for wire protocol.",
+    "properties": {
+      "created_at": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "is_active": {
+        "type": "boolean"
+      },
+      "labels": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "type": "object"
+      },
+      "message_count": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "session_id": {
+        "type": "string"
+      },
+      "session_ref": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "total_tokens": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "updated_at": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "session_id",
+      "created_at",
+      "updated_at",
+      "message_count",
+      "total_tokens",
+      "is_active"
+    ],
+    "title": "WireSessionSummary",
+    "type": "object"
+  },
   "WireUsage": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Canonical token usage for wire protocol.",

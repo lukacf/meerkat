@@ -543,6 +543,21 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
     ) -> Result<RunResult, SessionError> {
         let (result_tx, result_rx) = oneshot::channel();
 
+        // Prepend additional instructions as system notices to the prompt.
+        let prompt = match &req.additional_instructions {
+            Some(instructions) if !instructions.is_empty() => {
+                let mut prefix = String::new();
+                for instruction in instructions {
+                    prefix.push_str("[SYSTEM NOTICE: ");
+                    prefix.push_str(instruction);
+                    prefix.push_str("]\n\n");
+                }
+                prefix.push_str(&req.prompt);
+                prefix
+            }
+            _ => req.prompt,
+        };
+
         {
             let sessions = self.sessions.read().await;
             let handle = sessions
@@ -556,7 +571,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             handle
                 .command_tx
                 .send(SessionCommand::StartTurn {
-                    prompt: req.prompt,
+                    prompt,
                     host_mode: req.host_mode,
                     event_tx: req.event_tx,
                     result_tx,

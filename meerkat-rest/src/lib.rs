@@ -51,6 +51,7 @@ use meerkat_store::{RealmBackend, RealmOrigin};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -370,6 +371,15 @@ pub struct CreateSessionRequest {
     /// Legacy compatibility skill refs for per-turn injection.
     #[serde(default)]
     pub skill_references: Option<Vec<String>>,
+    /// Optional key-value labels attached at session creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<BTreeMap<String, String>>,
+    /// Additional instruction sections appended to the system prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_instructions: Option<Vec<String>>,
+    /// Opaque application context passed through to custom builders.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_context: Option<Value>,
 }
 
 fn default_structured_output_retries() -> u32 {
@@ -446,6 +456,9 @@ pub struct ContinueSessionRequest {
     /// Optional per-turn flow tool overlay.
     #[serde(default)]
     pub flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
+    /// Additional instruction sections prepended as system notices to the prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_instructions: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -454,6 +467,10 @@ pub struct ListSessionsQuery {
     pub limit: Option<usize>,
     #[serde(default)]
     pub offset: Option<usize>,
+    /// Repeatable label filter: `?label=env%3Dprod&label=team%3Dinfra`.
+    /// Each value is parsed as `key=value` via `split_once('=')`.
+    #[serde(default)]
+    pub label: Option<Vec<String>>,
 }
 
 /// Session response — canonical wire type from contracts.
@@ -471,6 +488,8 @@ pub struct SessionDetailsResponse {
     pub updated_at: String,
     pub message_count: usize,
     pub total_tokens: u64,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
 }
 
 /// API error response
@@ -1265,8 +1284,8 @@ async fn create_session(
         checkpointer: None,
         silent_comms_intents: Vec::new(),
         max_inline_peer_notifications: None,
-        app_context: None,
-        additional_instructions: None,
+        app_context: req.app_context,
+        additional_instructions: req.additional_instructions,
     };
 
     let svc_req = SvcCreateSessionRequest {
@@ -1279,7 +1298,7 @@ async fn create_session(
         skill_references,
         initial_turn: InitialTurnPolicy::RunImmediately,
         build: Some(build),
-        labels: None,
+        labels: req.labels,
     };
 
     let result = state.session_service.create_session(svc_req).await;
@@ -1298,17 +1317,37 @@ async fn create_session(
     }
 }
 
+/// Parse repeatable `label` query params into a `BTreeMap`.
+///
+/// Each param is expected as `key=value`. Params without `=` are silently skipped.
+fn parse_label_filters(raw: Option<Vec<String>>) -> Option<BTreeMap<String, String>> {
+    let labels = raw?;
+    if labels.is_empty() {
+        return None;
+    }
+    let map: BTreeMap<String, String> = labels
+        .into_iter()
+        .filter_map(|s| {
+            let (k, v) = s.split_once('=')?;
+            Some((k.to_string(), v.to_string()))
+        })
+        .collect();
+    if map.is_empty() { None } else { Some(map) }
+}
+
 /// List sessions in the active realm.
 async fn list_sessions(
     State(state): State<AppState>,
     Query(query): Query<ListSessionsQuery>,
 ) -> Result<Json<Value>, ApiError> {
+    let label_filters = parse_label_filters(query.label);
+
     let sessions = state
         .session_service
         .list(meerkat_core::service::SessionQuery {
             limit: query.limit,
             offset: query.offset,
-            labels: None,
+            labels: label_filters,
         })
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to list sessions: {e}")))?;
@@ -1319,7 +1358,7 @@ async fn list_sessions(
             .map(|s| {
                 let created_at: DateTime<Utc> = s.created_at.into();
                 let updated_at: DateTime<Utc> = s.updated_at.into();
-                json!({
+                let mut entry = json!({
                     "session_id": s.session_id.to_string(),
                     "session_ref": format_session_ref(&state.realm_id, &s.session_id),
                     "created_at": created_at.to_rfc3339(),
@@ -1327,7 +1366,11 @@ async fn list_sessions(
                     "message_count": s.message_count,
                     "total_tokens": s.total_tokens,
                     "is_active": s.is_active
-                })
+                });
+                if !s.labels.is_empty() {
+                    entry["labels"] = json!(s.labels);
+                }
+                entry
             })
             .collect::<Vec<_>>()
     });
@@ -1361,6 +1404,7 @@ async fn get_session(
         updated_at: updated_at.to_rfc3339(),
         message_count: view.state.message_count,
         total_tokens: view.billing.total_tokens,
+        labels: view.state.labels,
     }))
 }
 
@@ -1455,6 +1499,7 @@ async fn continue_session(
         host_mode,
         skill_references: skill_references.clone(),
         flow_tool_overlay: req.flow_tool_overlay.clone(),
+        additional_instructions: req.additional_instructions.clone(),
     };
 
     let result = state.session_service.start_turn(&session_id, svc_req).await;

@@ -123,6 +123,8 @@ impl Prefab {
             topology: None,
             supervisor: None,
             limits: None,
+            spawn_policy: None,
+            event_router: None,
         }
     }
 

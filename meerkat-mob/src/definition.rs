@@ -225,6 +225,37 @@ pub struct LimitsSpec {
     pub cancel_grace_timeout_ms: Option<u64>,
 }
 
+/// Declarative spawn policy for automatic member provisioning.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum SpawnPolicyConfig {
+    /// No automatic spawning.
+    None,
+    /// Automatically spawn members based on profile map.
+    Auto {
+        /// Maps target identifiers to profile names for auto-spawn resolution.
+        profile_map: BTreeMap<String, ProfileName>,
+    },
+}
+
+/// Declarative event router configuration for mob-wide event aggregation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventRouterConfig {
+    /// Channel buffer size for the event router. Defaults to 256.
+    #[serde(default = "default_event_router_buffer_size")]
+    pub buffer_size: usize,
+    /// Event type patterns to include (if set, only matching events are routed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_patterns: Option<Vec<String>>,
+    /// Event type patterns to exclude (applied after include filter).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude_patterns: Option<Vec<String>>,
+}
+
+fn default_event_router_buffer_size() -> usize {
+    256
+}
+
 /// Complete mob definition.
 ///
 /// Describes profiles, MCP servers, wiring rules, and skill sources.
@@ -265,6 +296,12 @@ pub struct MobDefinition {
     /// Optional runtime limits for flows.
     #[serde(default)]
     pub limits: Option<LimitsSpec>,
+    /// Optional declarative spawn policy for automatic member provisioning.
+    #[serde(default)]
+    pub spawn_policy: Option<SpawnPolicyConfig>,
+    /// Optional declarative event router configuration.
+    #[serde(default)]
+    pub event_router: Option<EventRouterConfig>,
 }
 
 /// Helper struct for TOML deserialization of the `[mob]` section.
@@ -303,6 +340,10 @@ struct TomlDefinition {
     supervisor: Option<SupervisorSpec>,
     #[serde(default)]
     limits: Option<LimitsSpec>,
+    #[serde(default)]
+    spawn_policy: Option<SpawnPolicyConfig>,
+    #[serde(default)]
+    event_router: Option<EventRouterConfig>,
 }
 
 impl MobDefinition {
@@ -327,6 +368,8 @@ impl MobDefinition {
             topology: raw.topology,
             supervisor: raw.supervisor,
             limits: raw.limits,
+            spawn_policy: raw.spawn_policy,
+            event_router: raw.event_router,
         })
     }
 }
@@ -495,6 +538,8 @@ path = "skills/reviewer.md"
             topology: None,
             supervisor: None,
             limits: None,
+            spawn_policy: None,
+            event_router: None,
         };
         let json = serde_json::to_string_pretty(&def).unwrap();
         let parsed: MobDefinition = serde_json::from_str(&json).unwrap();
@@ -699,5 +744,94 @@ max_orphaned_turns = 8
         let encoded = serde_json::to_string(&definition).unwrap();
         let decoded: MobDefinition = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, definition);
+    }
+
+    #[test]
+    fn test_mob_definition_spawn_policy_auto_roundtrip() {
+        let mut profile_map = BTreeMap::new();
+        profile_map.insert("reviewer".to_string(), ProfileName::from("reviewer"));
+        profile_map.insert("worker".to_string(), ProfileName::from("worker"));
+
+        let policy = SpawnPolicyConfig::Auto {
+            profile_map: profile_map.clone(),
+        };
+        let json = serde_json::to_string(&policy).unwrap();
+        let parsed: SpawnPolicyConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, policy);
+    }
+
+    #[test]
+    fn test_mob_definition_spawn_policy_none_roundtrip() {
+        let policy = SpawnPolicyConfig::None;
+        let json = serde_json::to_string(&policy).unwrap();
+        let parsed: SpawnPolicyConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, policy);
+    }
+
+    #[test]
+    fn test_mob_definition_spawn_policy_default_omitted() {
+        let toml_str = r#"
+[mob]
+id = "no-spawn-policy"
+"#;
+        let def = MobDefinition::from_toml(toml_str).unwrap();
+        assert!(def.spawn_policy.is_none());
+    }
+
+    #[test]
+    fn test_mob_definition_event_router_roundtrip() {
+        let config = EventRouterConfig {
+            buffer_size: 512,
+            include_patterns: Some(vec!["text_*".to_string()]),
+            exclude_patterns: Some(vec!["debug_*".to_string()]),
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: EventRouterConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, config);
+    }
+
+    #[test]
+    fn test_mob_definition_event_router_defaults() {
+        let json = r#"{}"#;
+        let parsed: EventRouterConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.buffer_size, 256);
+        assert!(parsed.include_patterns.is_none());
+        assert!(parsed.exclude_patterns.is_none());
+    }
+
+    #[test]
+    fn test_mob_definition_with_spawn_policy_and_event_router() {
+        let toml_str = r#"
+[mob]
+id = "with-policy"
+
+[spawn_policy]
+mode = "auto"
+
+[spawn_policy.profile_map]
+reviewer = "reviewer"
+
+[event_router]
+buffer_size = 128
+include_patterns = ["text_complete"]
+"#;
+        let def = MobDefinition::from_toml(toml_str).unwrap();
+        assert!(def.spawn_policy.is_some());
+        match &def.spawn_policy {
+            Some(SpawnPolicyConfig::Auto { profile_map }) => {
+                assert_eq!(
+                    profile_map.get("reviewer"),
+                    Some(&ProfileName::from("reviewer"))
+                );
+            }
+            _ => panic!("expected Auto spawn policy"),
+        }
+        assert!(def.event_router.is_some());
+        let router = def.event_router.as_ref().unwrap();
+        assert_eq!(router.buffer_size, 128);
+        assert_eq!(
+            router.include_patterns,
+            Some(vec!["text_complete".to_string()])
+        );
     }
 }

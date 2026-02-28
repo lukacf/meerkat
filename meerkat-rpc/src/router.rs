@@ -195,7 +195,7 @@ impl MethodRouter {
                 )
                 .await
             }
-            "session/list" => handlers::session::handle_list(id, &self.runtime).await,
+            "session/list" => handlers::session::handle_list(id, params, &self.runtime).await,
             "session/read" => handlers::session::handle_read(id, params, &self.runtime).await,
             "session/archive" => handlers::session::handle_archive(id, params, &self.runtime).await,
             "turn/start" => {

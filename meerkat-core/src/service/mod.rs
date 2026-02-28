@@ -245,6 +245,8 @@ pub struct StartTurnRequest {
     pub skill_references: Option<Vec<crate::skills::SkillKey>>,
     /// Optional per-turn flow tool overlay (ephemeral, non-persistent).
     pub flow_tool_overlay: Option<TurnToolOverlay>,
+    /// Optional additional instructions prepended as system notices to the prompt.
+    pub additional_instructions: Option<Vec<String>>,
 }
 
 /// Ephemeral per-turn tool overlay for flow-dispatched turns.

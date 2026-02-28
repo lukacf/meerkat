@@ -27,6 +27,8 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "McpLiveOpStatus": schema_for!(crate::wire::McpLiveOpStatus),
         "McpLiveOperation": schema_for!(crate::wire::McpLiveOperation),
         "McpLiveOpResponse": schema_for!(crate::wire::McpLiveOpResponse),
+        "WireSessionInfo": schema_for!(crate::wire::WireSessionInfo),
+        "WireSessionSummary": schema_for!(crate::wire::WireSessionSummary),
     });
     fs::write(
         output_dir.join("wire-types.json"),
@@ -35,6 +37,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
 
     // Params (only contracts-owned param types)
     let params = serde_json::json!({
+        "CoreCreateParams": schema_for!(crate::wire::CoreCreateParams),
         "CommsParams": schema_for!(crate::wire::CommsParams),
         "SkillsParams": schema_for!(crate::wire::SkillsParams),
         "McpAddParams": schema_for!(crate::wire::McpAddParams),

@@ -458,6 +458,7 @@ async fn test_create_session_can_defer_initial_turn() {
                 flow_tool_overlay: None,
                 prompt: "now run".to_string(),
                 event_tx: None,
+                additional_instructions: None,
             },
         )
         .await
@@ -488,6 +489,7 @@ async fn test_subscribe_session_events_available_before_first_turn() {
                 flow_tool_overlay: None,
                 prompt: "trigger".to_string(),
                 event_tx: None,
+                additional_instructions: None,
             },
         )
         .await
@@ -527,6 +529,7 @@ async fn test_start_turn_on_existing_session() {
                 flow_tool_overlay: None,
                 prompt: "Follow up".to_string(),
                 event_tx: None,
+                additional_instructions: None,
             },
         )
         .await
@@ -632,6 +635,7 @@ async fn test_turn_on_archived_session_returns_not_found() {
                 flow_tool_overlay: None,
                 prompt: "After archive".to_string(),
                 event_tx: None,
+                additional_instructions: None,
             },
         )
         .await;
@@ -666,6 +670,7 @@ async fn test_concurrent_turns_return_busy() {
                     flow_tool_overlay: None,
                     prompt: "Slow".to_string(),
                     event_tx: None,
+                    additional_instructions: None,
                 },
             )
             .await
@@ -684,6 +689,7 @@ async fn test_concurrent_turns_return_busy() {
                 flow_tool_overlay: None,
                 prompt: "Fast".to_string(),
                 event_tx: None,
+                additional_instructions: None,
             },
         )
         .await;
@@ -718,6 +724,7 @@ async fn test_interrupt_cancels_inflight_turn() {
                     flow_tool_overlay: None,
                     prompt: "Slow".to_string(),
                     event_tx: None,
+                    additional_instructions: None,
                 },
             )
             .await
@@ -769,6 +776,7 @@ async fn test_flow_tool_overlay_is_cleared_after_canceled_turn() {
                     flow_tool_overlay: Some(overlay),
                     prompt: "Slow with overlay".to_string(),
                     event_tx: None,
+                    additional_instructions: None,
                 },
             )
             .await
@@ -823,6 +831,7 @@ async fn test_flow_tool_overlay_enforced_by_runtime_and_resets_next_turn() {
                 }),
                 prompt: "overlayed turn".to_string(),
                 event_tx: None,
+                additional_instructions: None,
             },
         )
         .await
@@ -837,6 +846,7 @@ async fn test_flow_tool_overlay_enforced_by_runtime_and_resets_next_turn() {
                 flow_tool_overlay: None,
                 prompt: "baseline turn".to_string(),
                 event_tx: None,
+                additional_instructions: None,
             },
         )
         .await
@@ -890,6 +900,7 @@ async fn test_start_turn_returns_error_when_overlay_clear_fails() {
                 }),
                 prompt: "overlay clear fails".to_string(),
                 event_tx: None,
+                additional_instructions: None,
             },
         )
         .await;
@@ -948,6 +959,7 @@ async fn test_interrupt_host_mode_returns_without_waiting_for_ack() {
                     flow_tool_overlay: None,
                     prompt: "host turn".to_string(),
                     event_tx: None,
+                    additional_instructions: None,
                 },
             )
             .await

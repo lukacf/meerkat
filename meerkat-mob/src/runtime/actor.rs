@@ -177,6 +177,7 @@ impl MobActor {
                                 host_mode: false,
                                 skill_references: None,
                                 flow_tool_overlay: None,
+                                additional_instructions: None,
                             },
                         )
                         .await
@@ -337,6 +338,7 @@ impl MobActor {
                         host_mode: true,
                         skill_references: None,
                         flow_tool_overlay: None,
+                        additional_instructions: None,
                     },
                 )
                 .await;
@@ -2021,7 +2023,7 @@ impl MobActor {
                     mob_id: mob_id.clone(),
                     timestamp: None,
                     kind: MobEventKind::MobCreated {
-                        definition: self.definition.as_ref().clone(),
+                        definition: Box::new(self.definition.as_ref().clone()),
                     },
                 },
                 NewMobEvent {
@@ -2329,6 +2331,7 @@ impl MobActor {
                     host_mode: false,
                     skill_references: None,
                     flow_tool_overlay: None,
+                    additional_instructions: None,
                 };
                 self.provisioner.start_turn(&entry.member_ref, req).await
             }

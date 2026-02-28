@@ -24,7 +24,7 @@ use meerkat_mcp::{McpReloadTarget, McpRouter};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(feature = "mob")]
@@ -144,6 +144,15 @@ pub struct MeerkatRunInput {
     /// Legacy compatibility skill refs for per-turn injection.
     #[serde(default)]
     pub skill_references: Option<Vec<String>>,
+    /// Key-value labels attached at session creation (e.g. workflow tagging).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<BTreeMap<String, String>>,
+    /// Additional system-level instructions prepended to the prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_instructions: Option<Vec<String>>,
+    /// Opaque application context forwarded to the agent build pipeline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_context: Option<serde_json::Value>,
 }
 
 fn default_structured_output_retries() -> u32 {
@@ -668,6 +677,9 @@ pub struct MeerkatResumeInput {
     /// Optional per-turn tool overlay.
     #[serde(default)]
     pub flow_tool_overlay: Option<TurnToolOverlayInput>,
+    /// Additional system-level instructions prepended to the prompt for this turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_instructions: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -681,6 +693,9 @@ pub struct MeerkatSessionListInput {
     pub limit: Option<usize>,
     #[serde(default)]
     pub offset: Option<usize>,
+    /// Filter sessions by labels (all specified k/v pairs must match).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1520,7 +1535,7 @@ async fn handle_meerkat_sessions(
     let query = meerkat_core::service::SessionQuery {
         limit: input.limit,
         offset: input.offset,
-        labels: None,
+        labels: input.labels,
     };
     let sessions = state
         .service
@@ -1529,7 +1544,7 @@ async fn handle_meerkat_sessions(
         .map_err(|e| format!("Failed to list sessions: {e}"))?;
     let payload = json!({
         "sessions": sessions.into_iter().map(|s| {
-            json!({
+            let mut entry = json!({
                 "session_id": s.session_id.to_string(),
                 "session_ref": meerkat_contracts::format_session_ref(&state.realm_id, &s.session_id),
                 "created_at": s.created_at,
@@ -1537,7 +1552,14 @@ async fn handle_meerkat_sessions(
                 "message_count": s.message_count,
                 "total_tokens": s.total_tokens,
                 "is_active": s.is_active
-            })
+            });
+            if !s.labels.is_empty()
+                && let Some(obj) = entry.as_object_mut()
+                && let Ok(labels_val) = serde_json::to_value(&s.labels)
+            {
+                obj.insert("labels".to_string(), labels_val);
+            }
+            entry
         }).collect::<Vec<_>>()
     });
     Ok(wrap_tool_payload(payload))
@@ -2081,8 +2103,8 @@ async fn handle_meerkat_run(
         checkpointer: None,
         silent_comms_intents: Vec::new(),
         max_inline_peer_notifications: None,
-        app_context: None,
-        additional_instructions: None,
+        app_context: input.app_context.clone(),
+        additional_instructions: input.additional_instructions.clone(),
     };
 
     let req = CreateSessionRequest {
@@ -2095,7 +2117,7 @@ async fn handle_meerkat_run(
         skill_references,
         initial_turn: InitialTurnPolicy::RunImmediately,
         build: Some(build),
-        labels: None,
+        labels: input.labels,
     };
 
     let result = state.service.create_session(req).await;
@@ -2282,7 +2304,7 @@ async fn handle_meerkat_resume(
         silent_comms_intents: Vec::new(),
         max_inline_peer_notifications: None,
         app_context: None,
-        additional_instructions: None,
+        additional_instructions: input.additional_instructions.clone(),
     };
 
     let needs_rebuild = existing_adapter.is_none()
@@ -2313,6 +2335,7 @@ async fn handle_meerkat_resume(
             host_mode,
             skill_references: skill_references.clone(),
             flow_tool_overlay: input.flow_tool_overlay.clone().map(Into::into),
+            additional_instructions: input.additional_instructions.clone(),
         };
         match state.service.start_turn(&session_id, turn_req).await {
             Ok(run_result) => Ok(run_result),
@@ -3030,6 +3053,9 @@ mod tests {
                 preload_skills: None,
                 skill_refs: None,
                 skill_references: None,
+                labels: None,
+                additional_instructions: None,
+                app_context: None,
             },
             None,
         )

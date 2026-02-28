@@ -169,16 +169,7 @@ impl MobMcpState {
         mob_id: &MobId,
         spec: SpawnMemberSpec,
     ) -> Result<meerkat_mob::MemberRef, MobError> {
-        self.handle_for(mob_id)
-            .await?
-            .spawn_with_options(
-                spec.profile_name,
-                spec.meerkat_id,
-                spec.initial_message,
-                spec.runtime_mode,
-                spec.backend,
-            )
-            .await
+        self.handle_for(mob_id).await?.spawn_spec(spec).await
     }
 
     pub async fn mob_spawn_many(
@@ -288,6 +279,30 @@ impl MobMcpState {
 
     pub async fn mob_cancel_flow(&self, mob_id: &MobId, run_id: RunId) -> Result<(), MobError> {
         self.handle_for(mob_id).await?.cancel_flow(run_id).await
+    }
+
+    pub async fn mob_respawn(
+        &self,
+        mob_id: &MobId,
+        meerkat_id: MeerkatId,
+        initial_message: Option<String>,
+    ) -> Result<(), MobError> {
+        self.handle_for(mob_id)
+            .await?
+            .respawn(meerkat_id, initial_message)
+            .await
+    }
+
+    pub async fn mob_inject_and_subscribe(
+        &self,
+        mob_id: &MobId,
+        meerkat_id: MeerkatId,
+        message: String,
+    ) -> Result<meerkat_core::InteractionSubscription, MobError> {
+        self.handle_for(mob_id)
+            .await?
+            .inject_and_subscribe(meerkat_id, message)
+            .await
     }
 
     async fn handle_for(&self, mob_id: &MobId) -> Result<MobHandle, MobError> {
@@ -561,7 +576,7 @@ impl MobMcpDispatcher {
                 "meerkat_spawn",
                 &format!("Spawn one or more meerkats. Required: mob_id, specs[].profile, specs[].meerkat_id. \
                      Optional per-spec: backend=subagent|external, runtime_mode=autonomous_host|turn_driven, \
-                     initial_message. {COMMON}"),
+                     initial_message, resume_session_id, labels (key-value map), context (opaque JSON). {COMMON}"),
                 json!({
                     "type":"object",
                     "properties":{
@@ -575,7 +590,10 @@ impl MobMcpDispatcher {
                                     "meerkat_id":{"type":"string"},
                                     "initial_message":{"type":"string"},
                                     "backend":{"type":"string","enum":["subagent","external"]},
-                                    "runtime_mode":{"type":"string","enum":["autonomous_host","turn_driven"]}
+                                    "runtime_mode":{"type":"string","enum":["autonomous_host","turn_driven"]},
+                                    "resume_session_id":{"type":"string"},
+                                    "labels":{"type":"object","additionalProperties":{"type":"string"}},
+                                    "context":{}
                                 },
                                 "required":["profile","meerkat_id"]
                             }
@@ -603,6 +621,20 @@ impl MobMcpDispatcher {
             tool(
                 "meerkat_message",
                 &format!("Send an external message to a spawned meerkat. Required: mob_id, meerkat_id, message. {COMMON}"),
+                json!({"type":"object","properties":{"mob_id":{"type":"string"},"meerkat_id":{"type":"string"},"message":{"type":"string"}},"required":["mob_id","meerkat_id","message"]}),
+            ),
+            tool(
+                "mob_respawn",
+                &format!("Retire and re-spawn a meerkat with the same profile. \
+                     Required: mob_id, meerkat_id. Optional: initial_message. \
+                     Returns once retire completes and respawn is enqueued. {COMMON}"),
+                json!({"type":"object","properties":{"mob_id":{"type":"string"},"meerkat_id":{"type":"string"},"initial_message":{"type":"string"}},"required":["mob_id","meerkat_id"]}),
+            ),
+            tool(
+                "mob_inject_and_subscribe",
+                &format!("Inject a message into an autonomous meerkat and get a subscription for \
+                     interaction-scoped events (request-reply). Required: mob_id, meerkat_id, message. \
+                     Returns interaction_id. Only works for autonomous_host members. {COMMON}"),
                 json!({"type":"object","properties":{"mob_id":{"type":"string"},"meerkat_id":{"type":"string"},"message":{"type":"string"}},"required":["mob_id","meerkat_id","message"]}),
             ),
         ]
@@ -662,6 +694,12 @@ struct MobSpawnMeerkatArgs {
     backend: Option<MobBackendKind>,
     #[serde(default)]
     runtime_mode: Option<MobRuntimeMode>,
+    #[serde(default)]
+    resume_session_id: Option<String>,
+    #[serde(default)]
+    labels: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    context: Option<serde_json::Value>,
 }
 #[derive(Deserialize)]
 struct SpawnManyMeerkatsArgs {
@@ -705,6 +743,19 @@ struct EventsArgs {
     after_cursor: u64,
     #[serde(default = "default_limit")]
     limit: usize,
+}
+#[derive(Deserialize)]
+struct RespawnArgs {
+    mob_id: String,
+    meerkat_id: String,
+    #[serde(default)]
+    initial_message: Option<String>,
+}
+#[derive(Deserialize)]
+struct InjectAndSubscribeArgs {
+    mob_id: String,
+    meerkat_id: String,
+    message: String,
 }
 fn default_limit() -> usize {
     100
@@ -878,15 +929,29 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .specs
                     .into_iter()
                     .map(|spec| {
-                        SpawnMemberSpec::from_wire(
-                            spec.profile,
-                            spec.meerkat_id,
-                            spec.initial_message,
-                            spec.runtime_mode,
-                            spec.backend,
-                        )
+                        let resume_session_id = spec
+                            .resume_session_id
+                            .map(|s| {
+                                SessionId::parse(&s).map_err(|e| {
+                                    ToolError::invalid_arguments(
+                                        call.name,
+                                        format!("invalid resume_session_id: {e}"),
+                                    )
+                                })
+                            })
+                            .transpose()?;
+                        Ok(SpawnMemberSpec {
+                            profile_name: ProfileName::from(spec.profile),
+                            meerkat_id: MeerkatId::from(spec.meerkat_id),
+                            initial_message: spec.initial_message,
+                            runtime_mode: spec.runtime_mode,
+                            backend: spec.backend,
+                            context: spec.context,
+                            labels: spec.labels,
+                            resume_session_id,
+                        })
                     })
-                    .collect::<Vec<_>>();
+                    .collect::<Result<Vec<_>, ToolError>>()?;
                 // Single-spec fast path returns flat member_ref; multi-spec returns results array.
                 if specs.len() == 1 {
                     // SAFETY: len checked above
@@ -986,6 +1051,47 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .await
                     .map_err(|e| map_mob_err(call, e))?;
                 encode(call, json!({"ok": true}))
+            }
+            "mob_respawn" => {
+                let args: RespawnArgs = call
+                    .parse_args()
+                    .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+                let meerkat_id_str = args.meerkat_id;
+                self.state
+                    .mob_respawn(
+                        &MobId::from(args.mob_id),
+                        MeerkatId::from(meerkat_id_str.as_str()),
+                        args.initial_message,
+                    )
+                    .await
+                    .map_err(|e| map_mob_err(call, e))?;
+                encode(
+                    call,
+                    json!({
+                        "meerkat_id": meerkat_id_str,
+                        "status": "respawn_enqueued"
+                    }),
+                )
+            }
+            "mob_inject_and_subscribe" => {
+                let args: InjectAndSubscribeArgs = call
+                    .parse_args()
+                    .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+                let subscription = self
+                    .state
+                    .mob_inject_and_subscribe(
+                        &MobId::from(args.mob_id),
+                        MeerkatId::from(args.meerkat_id),
+                        args.message,
+                    )
+                    .await
+                    .map_err(|e| map_mob_err(call, e))?;
+                encode(
+                    call,
+                    json!({
+                        "interaction_id": subscription.id.to_string()
+                    }),
+                )
             }
             _ => Err(ToolError::not_found(call.name)),
         };
@@ -1390,11 +1496,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dispatcher_exposes_12_tools() {
+    async fn test_dispatcher_exposes_14_tools() {
         let svc = Arc::new(MockSessionSvc::new());
         let state = Arc::new(MobMcpState::new(svc));
         let d = MobMcpDispatcher::new(state);
-        assert_eq!(d.tools().len(), 12);
+        assert_eq!(d.tools().len(), 14);
     }
 
     fn flow_enabled_definition() -> MobDefinition {

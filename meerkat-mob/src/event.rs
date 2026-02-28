@@ -167,7 +167,7 @@ pub struct MobEventCompat {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MobEventKindCompat {
     MobCreated {
-        definition: MobDefinition,
+        definition: Box<MobDefinition>,
     },
     MobCompleted,
     MobReset,
@@ -483,7 +483,7 @@ pub enum MobEventKind {
     /// Mob was created with the given definition.
     MobCreated {
         /// Full mob definition (serializable form, excluding runtime-only state).
-        definition: MobDefinition,
+        definition: Box<MobDefinition>,
     },
     /// Mob reached terminal completed state.
     MobCompleted,
@@ -668,6 +668,8 @@ mod tests {
             topology: None,
             supervisor: None,
             limits: None,
+            spawn_policy: None,
+            event_router: None,
         }
     }
 
@@ -680,7 +682,7 @@ mod tests {
     #[test]
     fn test_mob_created_roundtrip() {
         roundtrip(&MobEventKind::MobCreated {
-            definition: sample_definition(),
+            definition: Box::new(sample_definition()),
         });
     }
 

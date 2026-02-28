@@ -1273,6 +1273,7 @@ mod scenario_09_session_service {
             host_mode: false,
             skill_references: None,
             flow_tool_overlay: None,
+            additional_instructions: None,
         };
 
         let turn_result = service

@@ -1305,6 +1305,8 @@ fn sample_definition() -> MobDefinition {
         topology: None,
         supervisor: None,
         limits: None,
+        spawn_policy: None,
+        event_router: None,
     }
 }
 
@@ -2409,7 +2411,7 @@ depends_on_mode = "any"
             mob_id: definition.id.clone(),
             timestamp: None,
             kind: MobEventKind::MobCreated {
-                definition: definition.clone(),
+                definition: Box::new(definition.clone()),
             },
         })
         .await
@@ -2449,7 +2451,7 @@ message = "x"
             mob_id: definition.id.clone(),
             timestamp: None,
             kind: MobEventKind::MobCreated {
-                definition: definition.clone(),
+                definition: Box::new(definition.clone()),
             },
         })
         .await
@@ -3025,6 +3027,7 @@ async fn test_flow_step_tool_overlay_is_step_scoped() {
                 host_mode: false,
                 skill_references: None,
                 flow_tool_overlay: None,
+                additional_instructions: None,
             },
         )
         .await
@@ -3935,7 +3938,7 @@ async fn test_for_resume_rejects_non_persistent_session_service_by_default() {
             mob_id: MobId::from("test-mob"),
             timestamp: None,
             kind: MobEventKind::MobCreated {
-                definition: sample_definition(),
+                definition: Box::new(sample_definition()),
             },
         })
         .await
@@ -3964,7 +3967,7 @@ async fn test_for_resume_allows_ephemeral_session_service_when_opted_in() {
             mob_id: MobId::from("test-mob"),
             timestamp: None,
             kind: MobEventKind::MobCreated {
-                definition: sample_definition(),
+                definition: Box::new(sample_definition()),
             },
         })
         .await
@@ -6466,7 +6469,7 @@ async fn test_mob_created_definition_roundtrips_through_json() {
     if let MobEventKind::MobCreated { definition } = &events[0].kind {
         let json = serde_json::to_string(definition).expect("serialize");
         let parsed: MobDefinition = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(*definition, parsed);
+        assert_eq!(**definition, parsed);
     }
 }
 

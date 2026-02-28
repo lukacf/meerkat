@@ -12,6 +12,7 @@ pub mod config;
 pub mod event;
 pub mod initialize;
 pub mod mcp;
+#[cfg(feature = "mob")]
 pub mod mob;
 pub mod session;
 pub mod skills;

@@ -38,9 +38,6 @@ pub fn handle_initialize(id: Option<RpcId>) -> RpcResponse {
                 "session/archive".to_string(),
                 "turn/start".to_string(),
                 "turn/interrupt".to_string(),
-                "mob/prefabs".to_string(),
-                "mob/tools".to_string(),
-                "mob/call".to_string(),
                 "config/get".to_string(),
                 "config/set".to_string(),
                 "config/patch".to_string(),
@@ -48,6 +45,12 @@ pub fn handle_initialize(id: Option<RpcId>) -> RpcResponse {
                 "skills/list".to_string(),
                 "skills/inspect".to_string(),
             ];
+            #[cfg(feature = "mob")]
+            {
+                m.push("mob/prefabs".to_string());
+                m.push("mob/tools".to_string());
+                m.push("mob/call".to_string());
+            }
             #[cfg(feature = "mcp")]
             {
                 m.push("mcp/add".to_string());

@@ -9,8 +9,8 @@ use indexmap::IndexMap;
 use meerkat_core::event::{AgentEvent, EventEnvelope};
 use meerkat_core::service::{
     CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService,
-    SessionServiceCommsExt, SessionServiceMcpExt, SessionSummary, SessionUsage, SessionView,
-    StartTurnRequest, TurnToolOverlay,
+    SessionServiceCommsExt, SessionSummary, SessionUsage, SessionView, StartTurnRequest,
+    TurnToolOverlay,
 };
 use meerkat_core::time_compat::SystemTime;
 use meerkat_core::types::{RunResult, SessionId, Usage};
@@ -702,10 +702,6 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceCommsExt for EphemeralSessi
         EphemeralSessionService::<B>::event_injector(self, session_id).await
     }
 }
-
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-impl<B: SessionAgentBuilder + 'static> SessionServiceMcpExt for EphemeralSessionService<B> {}
 
 // ---------------------------------------------------------------------------
 // Session task

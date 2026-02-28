@@ -130,6 +130,7 @@ pub struct MethodRouter {
     config_store: Arc<dyn ConfigStore>,
     notification_sink: NotificationSink,
     skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
+    #[cfg(feature = "mob")]
     mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
     #[cfg(feature = "comms")]
     active_streams: Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
@@ -147,6 +148,7 @@ impl MethodRouter {
             config_store,
             notification_sink,
             skill_runtime: None,
+            #[cfg(feature = "mob")]
             mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
             #[cfg(feature = "comms")]
             active_streams: Arc::new(Mutex::new(HashMap::new())),
@@ -201,8 +203,11 @@ impl MethodRouter {
                     .await
             }
             "turn/interrupt" => handlers::turn::handle_interrupt(id, params, &self.runtime).await,
+            #[cfg(feature = "mob")]
             "mob/prefabs" => handlers::mob::handle_prefabs(id).await,
+            #[cfg(feature = "mob")]
             "mob/tools" => handlers::mob::handle_tools(id).await,
+            #[cfg(feature = "mob")]
             "mob/call" => handlers::mob::handle_call(id, params, &self.mob_state).await,
             #[cfg(feature = "comms")]
             "comms/send" => handlers::comms::handle_send(id, params, &self.runtime).await,
@@ -707,9 +712,18 @@ mod tests {
         assert!(method_names.contains(&"initialize"));
         assert!(method_names.contains(&"session/create"));
         assert!(method_names.contains(&"turn/start"));
-        assert!(method_names.contains(&"mob/prefabs"));
-        assert!(method_names.contains(&"mob/tools"));
-        assert!(method_names.contains(&"mob/call"));
+        #[cfg(feature = "mob")]
+        {
+            assert!(method_names.contains(&"mob/prefabs"));
+            assert!(method_names.contains(&"mob/tools"));
+            assert!(method_names.contains(&"mob/call"));
+        }
+        #[cfg(not(feature = "mob"))]
+        {
+            assert!(!method_names.contains(&"mob/prefabs"));
+            assert!(!method_names.contains(&"mob/tools"));
+            assert!(!method_names.contains(&"mob/call"));
+        }
         assert!(method_names.contains(&"config/get"));
         #[cfg(feature = "comms")]
         {
@@ -718,6 +732,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "mob")]
     #[tokio::test]
     async fn mob_prefabs_returns_prefab_templates() {
         let (router, _notif_rx) = test_router().await;
@@ -755,6 +770,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "mob")]
     #[tokio::test]
     async fn mob_tools_and_call_flow_work() {
         let (router, _notif_rx) = test_router().await;

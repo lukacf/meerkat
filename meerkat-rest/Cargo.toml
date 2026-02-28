@@ -33,8 +33,8 @@ meerkat-contracts = { workspace = true }
 meerkat-client = { workspace = true }
 meerkat-store = { workspace = true }
 meerkat-tools = { workspace = true }
-meerkat-mob = { workspace = true }
-meerkat-mob-mcp = { workspace = true }
+meerkat-mob = { workspace = true, optional = true }
+meerkat-mob-mcp = { workspace = true, optional = true }
 meerkat-comms = { workspace = true, optional = true }
 meerkat-mcp = { workspace = true, optional = true }
 serde = { workspace = true }
@@ -59,6 +59,7 @@ clap = { workspace = true, features = ["derive"] }
 default = ["comms", "mcp"]
 comms = ["meerkat/comms", "dep:meerkat-comms"]
 mcp = ["meerkat/mcp", "dep:meerkat-mcp"]
+mob = ["dep:meerkat-mob", "dep:meerkat-mob-mcp"]
 integration-real-tests = []
 
 [dev-dependencies]
@@ -73,6 +74,8 @@ ignored = [
     "hyper",           # dev-dependency used in tests
     "meerkat-comms",   # optional dep behind comms feature
     "meerkat-mcp",     # optional dep behind mcp feature
+    "meerkat-mob",     # optional dep behind mob feature
+    "meerkat-mob-mcp", # optional dep behind mob feature
     "meerkat-tools",   # used via meerkat facade re-exports
     "thiserror",       # proc macro (derive)
 ]

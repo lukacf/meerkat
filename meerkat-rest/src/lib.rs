@@ -111,6 +111,7 @@ pub struct AppState {
     pub realm_lease: Arc<tokio::sync::Mutex<Option<meerkat_store::RealmLeaseGuard>>>,
     pub skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
     /// Shared in-process mob lifecycle state for protocol mob operations.
+    #[cfg(feature = "mob")]
     pub mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
     /// Per-session MCP adapter state (live MCP mutation).
     #[cfg(feature = "mcp")]
@@ -270,6 +271,7 @@ impl AppState {
             config_runtime,
             realm_lease: Arc::new(tokio::sync::Mutex::new(Some(lease))),
             skill_runtime,
+            #[cfg(feature = "mob")]
             mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
             #[cfg(feature = "mcp")]
             mcp_sessions: Arc::new(RwLock::new(std::collections::HashMap::new())),
@@ -489,9 +491,6 @@ pub fn router(state: AppState) -> Router {
         .route("/comms/send", post(comms_send))
         .route("/comms/peers", get(comms_peers))
         .route("/comms/stream", get(comms_stream))
-        .route("/mob/prefabs", get(mob_prefabs))
-        .route("/mob/tools", get(mob_tools))
-        .route("/mob/call", post(mob_call))
         // BRIDGE(M11→M12): Legacy event push endpoint.
         .route("/sessions/{id}/event", post(push_event))
         .route(
@@ -502,6 +501,12 @@ pub fn router(state: AppState) -> Router {
         .route("/skills", get(list_skills))
         .route("/skills/{id}", get(inspect_skill))
         .route("/capabilities", get(get_capabilities));
+
+    #[cfg(feature = "mob")]
+    let r = r
+        .route("/mob/prefabs", get(mob_prefabs))
+        .route("/mob/tools", get(mob_tools))
+        .route("/mob/call", post(mob_call));
 
     #[cfg(feature = "mcp")]
     let r = r
@@ -518,6 +523,7 @@ async fn health_check() -> &'static str {
 }
 
 /// GET /mob/prefabs — list built-in mob prefab templates.
+#[cfg(feature = "mob")]
 async fn mob_prefabs() -> Json<Value> {
     let prefabs: Vec<Value> = meerkat_mob::Prefab::all()
         .into_iter()
@@ -532,11 +538,13 @@ async fn mob_prefabs() -> Json<Value> {
 }
 
 /// GET /mob/tools — list protocol-callable mob lifecycle tools.
+#[cfg(feature = "mob")]
 async fn mob_tools() -> Json<Value> {
     Json(json!({ "tools": meerkat_mob_mcp::tools_list() }))
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg(feature = "mob")]
 struct MobCallRequest {
     name: String,
     #[serde(default)]
@@ -544,6 +552,7 @@ struct MobCallRequest {
 }
 
 /// POST /mob/call — invoke a mob lifecycle tool.
+#[cfg(feature = "mob")]
 async fn mob_call(
     State(state): State<AppState>,
     Json(req): Json<MobCallRequest>,
@@ -828,7 +837,9 @@ async fn comms_stream(
     _state: State<AppState>,
     _req: axum::extract::Query<CommsStreamRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    Err(ApiError::NotFound("comms feature not enabled".to_string()))
+    Err::<Sse<futures::stream::Empty<Result<Event, Infallible>>>, ApiError>(ApiError::NotFound(
+        "comms feature not enabled".to_string(),
+    ))
 }
 
 /// Push an external event to a session's inbox.
@@ -2349,6 +2360,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "mob")]
     #[tokio::test]
     async fn test_mob_prefabs_handler_returns_builtin_prefabs() {
         let Json(result) = mob_prefabs().await;
@@ -2366,6 +2378,7 @@ mod tests {
         assert!(keys.contains(&"pipeline"));
     }
 
+    #[cfg(feature = "mob")]
     #[tokio::test]
     async fn test_mob_prefabs_route_returns_json() {
         use axum::body::Body;
@@ -2397,6 +2410,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "mob")]
     #[tokio::test]
     async fn test_mob_tools_and_call_routes_work() {
         use axum::body::Body;

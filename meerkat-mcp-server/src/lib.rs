@@ -27,6 +27,8 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(feature = "mob")]
+use std::sync::OnceLock;
 use tokio::sync::mpsc;
 
 use futures::StreamExt;
@@ -343,6 +345,7 @@ pub struct MeerkatMcpState {
     expose_paths: bool,
     config_runtime: Arc<meerkat_core::ConfigRuntime>,
     skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
+    #[cfg(feature = "mob")]
     mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
     mcp_adapters: Arc<Mutex<HashMap<String, Arc<meerkat_mcp::McpRouterAdapter>>>>,
     session_event_streams: Arc<Mutex<HashMap<String, Arc<SessionEventStreamHandle>>>>,
@@ -453,6 +456,7 @@ impl MeerkatMcpState {
             expose_paths,
             config_runtime,
             skill_runtime,
+            #[cfg(feature = "mob")]
             mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
             mcp_adapters: Arc::new(Mutex::new(HashMap::new())),
             session_event_streams: Arc::new(Mutex::new(HashMap::new())),
@@ -518,6 +522,7 @@ impl MeerkatMcpState {
             expose_paths: false,
             config_runtime,
             skill_runtime: None,
+            #[cfg(feature = "mob")]
             mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
             mcp_adapters: Arc::new(Mutex::new(HashMap::new())),
             session_event_streams: Arc::new(Mutex::new(HashMap::new())),
@@ -724,6 +729,9 @@ pub struct MeerkatSessionEventStreamReadInput {
     pub stream_id: String,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    /// Disable timeout and wait indefinitely for the next event.
+    #[serde(default)]
+    pub no_timeout: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -780,6 +788,9 @@ pub struct MeerkatCommsStreamReadInput {
     pub stream_id: String,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    /// Disable timeout and wait indefinitely for the next event.
+    #[serde(default)]
+    pub no_timeout: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -917,10 +928,10 @@ fn format_agent_result(
     }
 }
 
-/// Returns the list of tools exposed by this MCP server
-pub fn tools_list() -> Vec<Value> {
-    #[cfg(feature = "comms")]
-    let mut tools = vec![
+const DEFAULT_STREAM_READ_TIMEOUT_MS: u64 = 5_000;
+
+fn base_tools_list() -> Vec<Value> {
+    vec![
         json!({
             "name": "meerkat_run",
             "description": "Run a new Meerkat agent with the given prompt. Returns the agent's response. If tools are provided and the agent requests a tool call, the response will include pending_tool_calls that must be fulfilled via meerkat_resume.",
@@ -1009,104 +1020,12 @@ pub fn tools_list() -> Vec<Value> {
             "description": "Close a previously opened session-level event stream.",
             "inputSchema": meerkat_tools::schema_for::<MeerkatSessionEventStreamCloseInput>()
         }),
-    ];
+    ]
+}
 
-    #[cfg(not(feature = "comms"))]
-    let tools = vec![
-        json!({
-            "name": "meerkat_run",
-            "description": "Run a new Meerkat agent with the given prompt. Returns the agent's response. If tools are provided and the agent requests a tool call, the response will include pending_tool_calls that must be fulfilled via meerkat_resume.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatRunInput>()
-        }),
-        json!({
-            "name": "meerkat_resume",
-            "description": "Resume an existing Meerkat session. Use this to continue a conversation or provide tool results for pending tool calls.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatResumeInput>()
-        }),
-        json!({
-            "name": "meerkat_config",
-            "description": "Get or update Meerkat config for this MCP server instance.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatConfigInput>()
-        }),
-        json!({
-            "name": "meerkat_capabilities",
-            "description": "Get the list of capabilities available in this Meerkat runtime.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        }),
-        json!({
-            "name": "meerkat_skills",
-            "description": "List or inspect available skills. Use action 'list' to see all skills, or 'inspect' with a skill_id to see its full content.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatSkillsInput>()
-        }),
-        json!({
-            "name": "meerkat_mob_prefabs",
-            "description": "List built-in mob prefab templates.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        }),
-        json!({
-            "name": "meerkat_read",
-            "description": "Read current session state.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionIdInput>()
-        }),
-        json!({
-            "name": "meerkat_sessions",
-            "description": "List sessions in the active realm.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionListInput>()
-        }),
-        json!({
-            "name": "meerkat_interrupt",
-            "description": "Interrupt an in-flight turn for a session.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionIdInput>()
-        }),
-        json!({
-            "name": "meerkat_archive",
-            "description": "Archive (remove) a session.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionIdInput>()
-        }),
-        json!({
-            "name": "meerkat_mcp_add",
-            "description": "Stage a live MCP server add operation on an active session.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatMcpAddInput>()
-        }),
-        json!({
-            "name": "meerkat_mcp_remove",
-            "description": "Stage a live MCP server removal on an active session.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatMcpRemoveInput>()
-        }),
-        json!({
-            "name": "meerkat_mcp_reload",
-            "description": "Stage a live MCP server reload on an active session.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatMcpReloadInput>()
-        }),
-        json!({
-            "name": "meerkat_event_stream_open",
-            "description": "Open a session-level agent event stream.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionEventStreamOpenInput>()
-        }),
-        json!({
-            "name": "meerkat_event_stream_read",
-            "description": "Read the next item from an open session-level event stream.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionEventStreamReadInput>()
-        }),
-        json!({
-            "name": "meerkat_event_stream_close",
-            "description": "Close a previously opened session-level event stream.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionEventStreamCloseInput>()
-        }),
-    ];
-
-    tools.extend(meerkat_mob_mcp::tools_list());
-
-    #[cfg(feature = "comms")]
-    tools.extend([
+#[cfg(feature = "comms")]
+fn comms_tools_list() -> Vec<Value> {
+    vec![
         json!({
             "name": "meerkat_comms_send",
             "description": "Send a canonical comms command to a session.",
@@ -1132,17 +1051,43 @@ pub fn tools_list() -> Vec<Value> {
             "description": "Close a previously opened comms stream.",
             "inputSchema": meerkat_tools::schema_for::<MeerkatCommsStreamCloseInput>()
         }),
-    ]);
+    ]
+}
+
+/// Returns the list of tools exposed by this MCP server
+pub fn tools_list() -> Vec<Value> {
+    let mut tools = base_tools_list();
+
+    #[cfg(feature = "mob")]
+    tools.extend(meerkat_mob_mcp::tools_list());
+
+    #[cfg(not(feature = "mob"))]
+    tools.retain(|tool| tool["name"] != "meerkat_mob_prefabs");
+
+    #[cfg(feature = "comms")]
+    tools.extend(comms_tools_list());
 
     tools
 }
 
-fn is_mob_tool_name(name: &str) -> bool {
-    meerkat_mob_mcp::tools_list().iter().any(|tool| {
-        tool.get("name")
-            .and_then(Value::as_str)
-            .is_some_and(|candidate| candidate == name)
+#[cfg(feature = "mob")]
+fn mob_tool_names() -> &'static HashSet<String> {
+    static MOB_TOOL_NAMES: OnceLock<HashSet<String>> = OnceLock::new();
+    MOB_TOOL_NAMES.get_or_init(|| {
+        meerkat_mob_mcp::tools_list()
+            .into_iter()
+            .filter_map(|tool| {
+                tool.get("name")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            })
+            .collect()
     })
+}
+
+#[cfg(feature = "mob")]
+fn is_mob_tool_name(name: &str) -> bool {
+    mob_tool_names().contains(name)
 }
 
 /// Handle a tools/call request
@@ -1191,6 +1136,7 @@ pub async fn handle_tools_call_with_notifier(
                 .await
                 .map_err(ToolCallError::internal)
         }
+        #[cfg(feature = "mob")]
         "meerkat_mob_prefabs" => handle_meerkat_mob_prefabs()
             .await
             .map_err(ToolCallError::internal),
@@ -1310,6 +1256,7 @@ pub async fn handle_tools_call_with_notifier(
                 .await
                 .map_err(ToolCallError::internal)
         }
+        #[cfg(feature = "mob")]
         _ if is_mob_tool_name(tool_name) => {
             match meerkat_mob_mcp::handle_tools_call(&state.mob_state, tool_name, arguments).await {
                 Ok(value) => Ok(wrap_tool_payload(value)),
@@ -1392,6 +1339,7 @@ async fn handle_meerkat_capabilities(state: &MeerkatMcpState) -> Result<Value, S
     serde_json::to_value(&response).map_err(|e| format!("Serialization failed: {e}"))
 }
 
+#[cfg(feature = "mob")]
 async fn handle_meerkat_mob_prefabs() -> Result<Value, String> {
     let prefabs: Vec<Value> = meerkat_mob::Prefab::all()
         .into_iter()
@@ -1743,21 +1691,29 @@ async fn handle_meerkat_event_stream_read(
         .cloned()
         .ok_or_else(|| format!("Stream not found: {}", input.stream_id))?;
 
-    let timeout_ms = input.timeout_ms.unwrap_or(0);
+    let timeout_ms = if input.no_timeout {
+        None
+    } else {
+        Some(input.timeout_ms.unwrap_or(DEFAULT_STREAM_READ_TIMEOUT_MS))
+    };
     let next_event = {
         let mut stream = handle.stream.lock().await;
-        if timeout_ms == 0 {
-            stream.next().await
-        } else {
-            match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), stream.next())
+        match timeout_ms {
+            None => stream.next().await,
+            Some(timeout_ms) => {
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(timeout_ms),
+                    stream.next(),
+                )
                 .await
-            {
-                Ok(item) => item,
-                Err(_) => {
-                    return Ok(wrap_tool_payload(json!({
-                        "stream_id": input.stream_id,
-                        "status": "timeout"
-                    })));
+                {
+                    Ok(item) => item,
+                    Err(_) => {
+                        return Ok(wrap_tool_payload(json!({
+                            "stream_id": input.stream_id,
+                            "status": "timeout"
+                        })));
+                    }
                 }
             }
         }
@@ -1970,21 +1926,29 @@ async fn handle_meerkat_comms_stream_read(
         .cloned()
         .ok_or_else(|| format!("Stream not found: {}", input.stream_id))?;
 
-    let timeout_ms = input.timeout_ms.unwrap_or(0);
+    let timeout_ms = if input.no_timeout {
+        None
+    } else {
+        Some(input.timeout_ms.unwrap_or(DEFAULT_STREAM_READ_TIMEOUT_MS))
+    };
     let next_event = {
         let mut stream = handle.stream.lock().await;
-        if timeout_ms == 0 {
-            stream.next().await
-        } else {
-            match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), stream.next())
+        match timeout_ms {
+            None => stream.next().await,
+            Some(timeout_ms) => {
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(timeout_ms),
+                    stream.next(),
+                )
                 .await
-            {
-                Ok(item) => item,
-                Err(_) => {
-                    return Ok(wrap_tool_payload(json!({
-                        "stream_id": input.stream_id,
-                        "status": "timeout"
-                    })));
+                {
+                    Ok(item) => item,
+                    Err(_) => {
+                        return Ok(wrap_tool_payload(json!({
+                            "stream_id": input.stream_id,
+                            "status": "timeout"
+                        })));
+                    }
                 }
             }
         }
@@ -2491,7 +2455,28 @@ impl AgentToolDispatcher for MpcToolDispatcher {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use futures::stream;
     use std::path::PathBuf;
+    use tokio::time::{Duration, timeout};
+
+    fn unwrap_payload(value: Value) -> Value {
+        if value.get("content").is_none() {
+            return value;
+        }
+        let raw = value["content"][0]["text"]
+            .as_str()
+            .expect("wrapped MCP payload text");
+        serde_json::from_str(raw).expect("wrapped payload JSON")
+    }
+
+    async fn state_with_persisted_session() -> (MeerkatMcpState, String) {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store.clone()).await;
+        let session = Session::new();
+        let session_id = session.id().to_string();
+        store.save(&session).await.expect("persisted session");
+        (state, session_id)
+    }
 
     fn hooks_override_fixture() -> HookRunOverrides {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -2595,19 +2580,27 @@ mod tests {
     #[test]
     fn test_tools_list_schema() {
         let tools = tools_list();
-        let mob_tools = meerkat_mob_mcp::tools_list();
-        #[cfg(feature = "comms")]
-        assert_eq!(tools.len(), 21 + mob_tools.len());
-        #[cfg(not(feature = "comms"))]
-        assert_eq!(tools.len(), 16 + mob_tools.len());
+        #[cfg(all(feature = "comms", feature = "mob"))]
+        assert_eq!(tools.len(), 21 + meerkat_mob_mcp::tools_list().len());
+        #[cfg(all(not(feature = "comms"), feature = "mob"))]
+        assert_eq!(tools.len(), 16 + meerkat_mob_mcp::tools_list().len());
+        #[cfg(all(feature = "comms", not(feature = "mob")))]
+        assert_eq!(tools.len(), 20);
+        #[cfg(all(not(feature = "comms"), not(feature = "mob")))]
+        assert_eq!(tools.len(), 15);
 
         let tool_names: Vec<&str> = tools
             .iter()
             .filter_map(|tool| tool["name"].as_str())
             .collect();
+        let find_tool = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .expect("tool should be present")
+        };
 
-        let run_tool = &tools[0];
-        assert_eq!(run_tool["name"], "meerkat_run");
+        let run_tool = find_tool("meerkat_run");
         assert!(run_tool["inputSchema"]["properties"]["prompt"].is_object());
         assert!(run_tool["inputSchema"]["properties"]["verbose"].is_object());
         assert!(
@@ -2621,54 +2614,60 @@ mod tests {
                 .is_some()
         );
 
-        let resume_tool = &tools[1];
-        assert_eq!(resume_tool["name"], "meerkat_resume");
+        let resume_tool = find_tool("meerkat_resume");
         assert!(resume_tool["inputSchema"]["properties"]["session_id"].is_object());
         assert!(resume_tool["inputSchema"]["properties"]["verbose"].is_object());
 
-        let config_tool = &tools[2];
-        assert_eq!(config_tool["name"], "meerkat_config");
+        let config_tool = find_tool("meerkat_config");
         assert!(config_tool["inputSchema"]["properties"]["action"].is_object());
 
-        let capabilities_tool = &tools[3];
+        let capabilities_tool = find_tool("meerkat_capabilities");
         assert_eq!(capabilities_tool["name"], "meerkat_capabilities");
-
-        let mob_prefabs_tool = &tools[5];
-        assert_eq!(mob_prefabs_tool["name"], "meerkat_mob_prefabs");
-        assert_eq!(mob_prefabs_tool["inputSchema"]["type"], "object");
-        assert!(
-            mob_prefabs_tool["inputSchema"]["properties"]
-                .as_object()
-                .is_some_and(serde_json::Map::is_empty)
-        );
-
-        let read_tool = &tools[6];
+        let read_tool = find_tool("meerkat_read");
         assert_eq!(read_tool["name"], "meerkat_read");
-        let sessions_tool = &tools[7];
+        let sessions_tool = find_tool("meerkat_sessions");
         assert_eq!(sessions_tool["name"], "meerkat_sessions");
-        let interrupt_tool = &tools[8];
+        let interrupt_tool = find_tool("meerkat_interrupt");
         assert_eq!(interrupt_tool["name"], "meerkat_interrupt");
-        let archive_tool = &tools[9];
+        let archive_tool = find_tool("meerkat_archive");
         assert_eq!(archive_tool["name"], "meerkat_archive");
-        let mcp_add_tool = &tools[10];
+        let mcp_add_tool = find_tool("meerkat_mcp_add");
         assert_eq!(mcp_add_tool["name"], "meerkat_mcp_add");
-        let mcp_remove_tool = &tools[11];
+        let mcp_remove_tool = find_tool("meerkat_mcp_remove");
         assert_eq!(mcp_remove_tool["name"], "meerkat_mcp_remove");
-        let mcp_reload_tool = &tools[12];
+        let mcp_reload_tool = find_tool("meerkat_mcp_reload");
         assert_eq!(mcp_reload_tool["name"], "meerkat_mcp_reload");
-        let event_stream_open_tool = &tools[13];
+        let event_stream_open_tool = find_tool("meerkat_event_stream_open");
         assert_eq!(event_stream_open_tool["name"], "meerkat_event_stream_open");
-        let event_stream_read_tool = &tools[14];
+        let event_stream_read_tool = find_tool("meerkat_event_stream_read");
         assert_eq!(event_stream_read_tool["name"], "meerkat_event_stream_read");
-        let event_stream_close_tool = &tools[15];
+        let event_stream_close_tool = find_tool("meerkat_event_stream_close");
         assert_eq!(
             event_stream_close_tool["name"],
             "meerkat_event_stream_close"
         );
-        assert!(tool_names.contains(&"meerkat_mob_prefabs"));
-        assert!(tool_names.contains(&"mob_create"));
-        assert!(tool_names.contains(&"mob_list"));
-        assert!(tool_names.contains(&"mob_lifecycle"));
+
+        #[cfg(feature = "mob")]
+        {
+            let mob_prefabs_tool = find_tool("meerkat_mob_prefabs");
+            assert_eq!(mob_prefabs_tool["inputSchema"]["type"], "object");
+            assert!(
+                mob_prefabs_tool["inputSchema"]["properties"]
+                    .as_object()
+                    .is_some_and(serde_json::Map::is_empty)
+            );
+            assert!(tool_names.contains(&"meerkat_mob_prefabs"));
+            assert!(tool_names.contains(&"mob_create"));
+            assert!(tool_names.contains(&"mob_list"));
+            assert!(tool_names.contains(&"mob_lifecycle"));
+        }
+        #[cfg(not(feature = "mob"))]
+        {
+            assert!(!tool_names.contains(&"meerkat_mob_prefabs"));
+            assert!(!tool_names.contains(&"mob_create"));
+            assert!(!tool_names.contains(&"mob_list"));
+            assert!(!tool_names.contains(&"mob_lifecycle"));
+        }
 
         #[cfg(feature = "comms")]
         {
@@ -2696,6 +2695,8 @@ mod tests {
         assert!(names.contains(&"meerkat_event_stream_open"));
         assert!(names.contains(&"meerkat_event_stream_read"));
         assert!(names.contains(&"meerkat_event_stream_close"));
+        #[cfg(not(feature = "mob"))]
+        assert!(!names.contains(&"meerkat_mob_prefabs"));
     }
 
     #[test]
@@ -3056,6 +3057,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "mob")]
     #[tokio::test]
     async fn test_handle_tools_call_mob_prefabs_returns_prefabs() {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
@@ -3092,5 +3094,237 @@ mod tests {
             .expect_err("unknown tool must error");
         assert_eq!(err.code, -32601);
         assert!(err.message.contains("Unknown tool"));
+    }
+
+    #[tokio::test]
+    async fn test_mcp_handlers_sessions_read_list_interrupt_archive() {
+        let (state, session_id) = state_with_persisted_session().await;
+
+        let listed = handle_tools_call(&state, "meerkat_sessions", &json!({}))
+            .await
+            .expect("sessions list call should succeed");
+        let listed_payload = unwrap_payload(listed);
+        let sessions = listed_payload["sessions"]
+            .as_array()
+            .expect("sessions should be an array");
+        assert!(
+            sessions
+                .iter()
+                .any(|entry| entry["session_id"] == json!(session_id)),
+            "persisted session should appear in list"
+        );
+
+        let read = handle_tools_call(&state, "meerkat_read", &json!({ "session_id": session_id }))
+            .await
+            .expect("read call should succeed");
+        let read_payload = unwrap_payload(read);
+        assert_eq!(
+            read_payload["session_id"],
+            read_payload["state"]["session_id"]
+        );
+
+        let interrupt_err = handle_tools_call(
+            &state,
+            "meerkat_interrupt",
+            &json!({ "session_id": read_payload["session_id"] }),
+        )
+        .await
+        .expect_err("interrupt should fail for non-running persisted session");
+        assert!(
+            interrupt_err
+                .message
+                .contains("Failed to interrupt session")
+        );
+
+        let archived = handle_tools_call(
+            &state,
+            "meerkat_archive",
+            &json!({ "session_id": read_payload["session_id"] }),
+        )
+        .await
+        .expect("archive call should succeed");
+        let archived_payload = unwrap_payload(archived);
+        assert_eq!(archived_payload["archived"], true);
+    }
+
+    #[tokio::test]
+    async fn test_mcp_handlers_add_remove_reload_require_registered_adapter() {
+        let (state, session_id) = state_with_persisted_session().await;
+
+        let err = handle_tools_call(
+            &state,
+            "meerkat_mcp_add",
+            &json!({
+                "session_id": session_id,
+                "server_name": "demo",
+                "server_config": {"command": "cat", "args": [], "env": {}}
+            }),
+        )
+        .await
+        .expect_err("mcp add should fail without adapter registration");
+        assert!(err.message.contains("Live MCP unavailable"));
+    }
+
+    #[tokio::test]
+    async fn test_mcp_handlers_add_remove_reload_after_adapter_registration() {
+        let (state, session_id) = state_with_persisted_session().await;
+        let parsed = meerkat::SessionId::parse(&session_id).expect("valid session id");
+        state
+            .upsert_mcp_adapter(
+                &parsed,
+                Arc::new(meerkat_mcp::McpRouterAdapter::new(McpRouter::new())),
+            )
+            .await;
+
+        let add = handle_tools_call(
+            &state,
+            "meerkat_mcp_add",
+            &json!({
+                "session_id": session_id,
+                "server_name": "demo",
+                "server_config": {"command": "cat", "args": [], "env": {}}
+            }),
+        )
+        .await
+        .expect("mcp add should succeed");
+        let add_payload = unwrap_payload(add);
+        assert_eq!(add_payload["operation"], "add");
+        assert_eq!(add_payload["status"], "staged");
+
+        let remove = handle_tools_call(
+            &state,
+            "meerkat_mcp_remove",
+            &json!({
+                "session_id": add_payload["session_id"],
+                "server_name": "demo"
+            }),
+        )
+        .await
+        .expect("mcp remove should succeed");
+        let remove_payload = unwrap_payload(remove);
+        assert_eq!(remove_payload["operation"], "remove");
+        assert_eq!(remove_payload["status"], "staged");
+
+        let reload = handle_tools_call(
+            &state,
+            "meerkat_mcp_reload",
+            &json!({
+                "session_id": remove_payload["session_id"],
+                "server_name": "demo"
+            }),
+        )
+        .await
+        .expect("mcp reload should succeed");
+        let reload_payload = unwrap_payload(reload);
+        assert_eq!(reload_payload["operation"], "reload");
+        assert_eq!(reload_payload["status"], "staged");
+    }
+
+    #[tokio::test]
+    async fn test_event_stream_open_missing_session_errors() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        let missing_id = meerkat::SessionId::new().to_string();
+        let err = handle_tools_call(
+            &state,
+            "meerkat_event_stream_open",
+            &json!({ "session_id": missing_id }),
+        )
+        .await
+        .expect_err("open should fail for missing session");
+        assert!(err.message.contains("Failed to open session event stream"));
+    }
+
+    #[tokio::test]
+    async fn test_event_stream_read_default_timeout_and_close_behavior() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        let stream_id = "stream-timeout-default".to_string();
+        let pending_stream: meerkat_core::EventStream = Box::pin(stream::pending());
+        state.session_event_streams.lock().await.insert(
+            stream_id.clone(),
+            Arc::new(SessionEventStreamHandle {
+                stream: Mutex::new(pending_stream),
+            }),
+        );
+
+        let read = handle_tools_call(
+            &state,
+            "meerkat_event_stream_read",
+            &json!({ "stream_id": stream_id }),
+        )
+        .await
+        .expect("read should complete with timeout");
+        let read_payload = unwrap_payload(read);
+        assert_eq!(read_payload["status"], "timeout");
+
+        let closed = handle_tools_call(
+            &state,
+            "meerkat_event_stream_close",
+            &json!({ "stream_id": "stream-timeout-default" }),
+        )
+        .await
+        .expect("close should succeed");
+        let close_payload = unwrap_payload(closed);
+        assert_eq!(close_payload["closed"], true);
+    }
+
+    #[tokio::test]
+    async fn test_event_stream_read_no_timeout_opt_in_blocks() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        let stream_id = "stream-no-timeout".to_string();
+        let pending_stream: meerkat_core::EventStream = Box::pin(stream::pending());
+        state.session_event_streams.lock().await.insert(
+            stream_id.clone(),
+            Arc::new(SessionEventStreamHandle {
+                stream: Mutex::new(pending_stream),
+            }),
+        );
+
+        let result = timeout(
+            Duration::from_millis(50),
+            handle_tools_call(
+                &state,
+                "meerkat_event_stream_read",
+                &json!({ "stream_id": stream_id, "no_timeout": true }),
+            ),
+        )
+        .await;
+        assert!(result.is_err(), "no_timeout should allow blocking reads");
+    }
+
+    #[tokio::test]
+    async fn test_event_stream_read_empty_stream_reports_closed_and_removes_entry() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        let stream_id = "stream-closed".to_string();
+        let empty_stream: meerkat_core::EventStream = Box::pin(stream::empty());
+        state.session_event_streams.lock().await.insert(
+            stream_id.clone(),
+            Arc::new(SessionEventStreamHandle {
+                stream: Mutex::new(empty_stream),
+            }),
+        );
+
+        let read = handle_tools_call(
+            &state,
+            "meerkat_event_stream_read",
+            &json!({ "stream_id": stream_id }),
+        )
+        .await
+        .expect("read should succeed");
+        let read_payload = unwrap_payload(read);
+        assert_eq!(read_payload["status"], "closed");
+
+        let close = handle_tools_call(
+            &state,
+            "meerkat_event_stream_close",
+            &json!({ "stream_id": "stream-closed" }),
+        )
+        .await
+        .expect("close should succeed");
+        let close_payload = unwrap_payload(close);
+        assert_eq!(close_payload["closed"], false);
     }
 }

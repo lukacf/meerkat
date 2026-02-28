@@ -76,21 +76,27 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn handle_prefabs_returns_expected_shape() {
+    async fn handle_prefabs_returns_expected_shape() -> Result<(), Box<dyn std::error::Error>> {
         let resp = handle_prefabs(Some(RpcId::Num(7))).await;
         assert!(resp.error.is_none());
         assert_eq!(resp.id, Some(RpcId::Num(7)));
-        let raw = resp.result.expect("result payload");
-        let value: serde_json::Value =
-            serde_json::from_str(raw.get()).expect("valid response JSON");
-        let prefabs = value["prefabs"]
-            .as_array()
-            .expect("prefabs should be an array");
+        let result = resp.result.as_ref();
+        assert!(result.is_some(), "result payload should exist");
+        let Some(raw) = result else {
+            return Ok(());
+        };
+        let value: serde_json::Value = serde_json::from_str(raw.get())?;
+        let prefabs = value["prefabs"].as_array();
+        assert!(prefabs.is_some(), "prefabs should be an array");
+        let Some(prefabs) = prefabs else {
+            return Ok(());
+        };
         assert!(prefabs.iter().all(|entry| entry["key"].is_string()));
         assert!(
             prefabs
                 .iter()
                 .all(|entry| entry["toml_template"].is_string())
         );
+        Ok(())
     }
 }

@@ -6755,54 +6755,55 @@ mod tests {
 
     #[cfg(feature = "comms")]
     #[test]
-    fn test_parse_comms_send_payload_input_defaults() {
+    fn test_parse_comms_send_payload_input_defaults() -> Result<(), Box<dyn std::error::Error>> {
         let session_id = SessionId::new();
         let cmd = parse_comms_send_payload(r#"{"kind":"input","body":"hello"}"#, &session_id)
             .expect("input payload should parse");
-        match cmd {
-            CommsCommand::Input {
-                session_id: parsed_id,
-                body,
-                source,
-                stream,
-                allow_self_session,
-            } => {
-                assert_eq!(parsed_id, session_id);
-                assert_eq!(body, "hello");
-                assert_eq!(source, meerkat_core::comms::InputSource::Rpc);
-                assert_eq!(stream, meerkat_core::comms::InputStreamMode::None);
-                assert!(!allow_self_session);
-            }
-            other => panic!("unexpected command parsed: {other:?}"),
-        }
+        let CommsCommand::Input {
+            session_id: parsed_id,
+            body,
+            source,
+            stream,
+            allow_self_session,
+        } = cmd
+        else {
+            return Err("unexpected command parsed for input payload".into());
+        };
+        assert_eq!(parsed_id, session_id);
+        assert_eq!(body, "hello");
+        assert_eq!(source, meerkat_core::comms::InputSource::Rpc);
+        assert_eq!(stream, meerkat_core::comms::InputStreamMode::None);
+        assert!(!allow_self_session);
+        Ok(())
     }
 
     #[cfg(feature = "comms")]
     #[test]
-    fn test_parse_comms_send_payload_peer_request_reserve_interaction() {
+    fn test_parse_comms_send_payload_peer_request_reserve_interaction()
+    -> Result<(), Box<dyn std::error::Error>> {
         let session_id = SessionId::new();
         let cmd = parse_comms_send_payload(
             r#"{"kind":"peer_request","to":"agent-b","intent":"help","params":{"topic":"x"},"stream":"reserve_interaction"}"#,
             &session_id,
         )
         .expect("peer request payload should parse");
-        match cmd {
-            CommsCommand::PeerRequest {
-                to,
-                intent,
-                params,
-                stream,
-            } => {
-                assert_eq!(to.to_string(), "agent-b");
-                assert_eq!(intent, "help");
-                assert_eq!(params["topic"], "x");
-                assert_eq!(
-                    stream,
-                    meerkat_core::comms::InputStreamMode::ReserveInteraction
-                );
-            }
-            other => panic!("unexpected command parsed: {other:?}"),
-        }
+        let CommsCommand::PeerRequest {
+            to,
+            intent,
+            params,
+            stream,
+        } = cmd
+        else {
+            return Err("unexpected command parsed for peer_request payload".into());
+        };
+        assert_eq!(to.to_string(), "agent-b");
+        assert_eq!(intent, "help");
+        assert_eq!(params["topic"], "x");
+        assert_eq!(
+            stream,
+            meerkat_core::comms::InputStreamMode::ReserveInteraction
+        );
+        Ok(())
     }
 
     #[cfg(feature = "comms")]

@@ -2639,7 +2639,7 @@ mod tests {
         assert!(
             mob_prefabs_tool["inputSchema"]["properties"]
                 .as_object()
-                .is_some_and(|props| props.is_empty())
+                .is_some_and(serde_json::Map::is_empty)
         );
 
         let read_tool = &tools[6];

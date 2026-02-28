@@ -1,0 +1,3 @@
+web/public/webcm.*
+web/node_modules/
+web/dist/

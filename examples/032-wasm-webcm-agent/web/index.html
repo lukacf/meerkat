@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Meerkat WebCM Agent</title>
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>Meerkat WebCM Agent</h1>
+      <span class="subtitle">LLM agent with a Linux VM in your browser</span>
+    </header>
+
+    <div id="setup" class="panel">
+      <input type="password" id="api-key" placeholder="Anthropic API key" />
+      <button id="boot-btn">Boot VM</button>
+      <span id="status">Ready</span>
+    </div>
+
+    <div id="workspace" class="hidden">
+      <div id="terminal-pane">
+        <div class="pane-header">Terminal (Alpine Linux VM)</div>
+        <div id="terminal"></div>
+      </div>
+      <div id="chat-pane">
+        <div class="pane-header">Agent</div>
+        <div id="messages"></div>
+        <div id="input-row">
+          <input type="text" id="prompt" placeholder="Ask the agent to do something..." />
+          <button id="send-btn">Send</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

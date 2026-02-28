@@ -281,9 +281,9 @@ jobs:
             meerkat-mob-mcp
             rkat
           )
-          tmp_cfg="$(mktemp)"
-          scripts/generate-patch-config.sh "$GITHUB_WORKSPACE" > "$tmp_cfg"
           for c in "${crates[@]}"; do
+            tmp_cfg="$(mktemp)"
+            scripts/generate-patch-config.sh "$GITHUB_WORKSPACE" "$c" > "$tmp_cfg"
             if [[ "$DRY_RUN" == "true" ]]; then
               cargo publish -p "$c" --locked --dry-run --config "$tmp_cfg"
             else
@@ -299,8 +299,8 @@ jobs:
                 exit $rc
               fi
             fi
+            rm -f "$tmp_cfg"
           done
-          rm -f "$tmp_cfg"
 
       - name: Publish Python SDK
         env:

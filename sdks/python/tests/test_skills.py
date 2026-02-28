@@ -4,7 +4,7 @@ import warnings
 
 import pytest
 
-from meerkat import SkillKey
+from meerkat import MeerkatClient, SkillKey
 from meerkat.session import Session, _normalize_skill_ref
 from meerkat.types import RunResult, Usage
 
@@ -69,12 +69,21 @@ class _MockClient:
         if not self.has_capability(cap):
             raise RuntimeError(f"Missing capability: {cap}")
 
-    async def _start_turn(self, session_id, prompt, *, skill_refs=None, skill_references=None):
+    async def _start_turn(
+        self,
+        session_id,
+        prompt,
+        *,
+        skill_refs=None,
+        skill_references=None,
+        flow_tool_overlay=None,
+    ):
         self._calls.append({
             "session_id": session_id,
             "prompt": prompt,
             "skill_refs": skill_refs,
             "skill_references": skill_references,
+            "flow_tool_overlay": flow_tool_overlay,
         })
         return RunResult(
             session_id=session_id,
@@ -156,3 +165,35 @@ async def test_session_peers_returns_peer_list():
         {"id": "peer-a", "name": "alpha"},
         {"id": "peer-b", "name": "beta"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_client_list_mob_prefabs_calls_rpc_method():
+    client = object.__new__(MeerkatClient)
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_request(method, params):
+        calls.append((method, params))
+        return {
+            "prefabs": [
+                {"key": "coding_swarm", "toml_template": 'id = "coding_swarm"'},
+                {"key": "pipeline", "toml_template": 'id = "pipeline"'},
+            ]
+        }
+
+    client._request = fake_request  # type: ignore[attr-defined]
+    prefabs = await MeerkatClient.list_mob_prefabs(client)
+    assert [entry["key"] for entry in prefabs] == ["coding_swarm", "pipeline"]
+    assert calls == [("mob/prefabs", {})]
+
+
+@pytest.mark.asyncio
+async def test_client_list_mob_prefabs_propagates_errors():
+    client = object.__new__(MeerkatClient)
+
+    async def fake_request(_method, _params):
+        raise RuntimeError("transport down")
+
+    client._request = fake_request  # type: ignore[attr-defined]
+    with pytest.raises(RuntimeError, match="transport down"):
+        await MeerkatClient.list_mob_prefabs(client)

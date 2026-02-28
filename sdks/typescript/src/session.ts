@@ -20,9 +20,9 @@
  */
 
 import type { AgentEvent } from "./events.js";
-import type { RunResult, SkillRef } from "./types.js";
+import type { RunResult, SkillRef, TurnToolOverlay } from "./types.js";
 import type { MeerkatClient } from "./client.js";
-import type { EventStream } from "./streaming.js";
+import type { CommsEventStream, EventStream } from "./streaming.js";
 
 export class Session {
   /** @internal */
@@ -89,7 +89,11 @@ export class Session {
   /** Run another turn on this session (non-streaming). */
   async turn(
     prompt: string,
-    options?: { skillRefs?: SkillRef[]; skillReferences?: string[] },
+    options?: {
+      skillRefs?: SkillRef[];
+      skillReferences?: string[];
+      flowToolOverlay?: TurnToolOverlay;
+    },
   ): Promise<RunResult> {
     const result = await this._client._startTurn(
       this._id,
@@ -114,7 +118,11 @@ export class Session {
    */
   stream(
     prompt: string,
-    options?: { skillRefs?: SkillRef[]; skillReferences?: string[] },
+    options?: {
+      skillRefs?: SkillRef[];
+      skillReferences?: string[];
+      flowToolOverlay?: TurnToolOverlay;
+    },
   ): EventStream {
     return this._client._startTurnStreaming(
       this._id,
@@ -163,6 +171,12 @@ export class Session {
   async peers(): Promise<Array<Record<string, unknown>>> {
     const result = await this._client._peers(this._id);
     return (result.peers ?? []) as Array<Record<string, unknown>>;
+  }
+
+  async openCommsStream(
+    options?: { scope?: "session" | "interaction"; interactionId?: string },
+  ): Promise<CommsEventStream> {
+    return this._client.openCommsStream(this._id, options);
   }
 
   toString(): string {

@@ -493,3 +493,37 @@ describe("Live MCP methods", () => {
     );
   });
 });
+
+describe("Mob prefab methods", () => {
+  it("listMobPrefabs/list_mob_prefabs send mob/prefabs and return prefabs", async () => {
+    const client = new MeerkatClient();
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      return {
+        prefabs: [
+          { key: "coding_swarm", toml_template: "id = \"coding_swarm\"" },
+          { key: "pipeline", toml_template: "id = \"pipeline\"" },
+        ],
+      };
+    };
+
+    const first = await client.listMobPrefabs();
+    const second = await client.list_mob_prefabs();
+
+    assert.equal(calls.length, 2);
+    assert.deepEqual(calls.map((call) => call.method), ["mob/prefabs", "mob/prefabs"]);
+    assert.deepEqual(first.map((p) => p.key), ["coding_swarm", "pipeline"]);
+    assert.deepEqual(second.map((p) => p.key), ["coding_swarm", "pipeline"]);
+  });
+
+  it("listMobPrefabs propagates request failures", async () => {
+    const client = new MeerkatClient();
+    client.request = async () => {
+      throw new MeerkatError("TRANSPORT", "boom");
+    };
+
+    await assert.rejects(() => client.listMobPrefabs(), /boom/);
+    await assert.rejects(() => client.list_mob_prefabs(), /boom/);
+  });
+});

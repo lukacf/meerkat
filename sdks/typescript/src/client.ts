@@ -45,7 +45,7 @@ import {
   type McpRemoveParams,
 } from "./generated/types.js";
 import { Session } from "./session.js";
-import { EventStream, AsyncQueue } from "./streaming.js";
+import { CommsEventStream, EventStream, AsyncQueue } from "./streaming.js";
 import type {
   Capability,
   RunResult,
@@ -55,6 +55,7 @@ import type {
   SkillKey,
   SkillRef,
   SkillRuntimeDiagnostics,
+  TurnToolOverlay,
   Usage,
 } from "./types.js";
 
@@ -128,6 +129,7 @@ export class MeerkatClient {
     { resolve: (value: Record<string, unknown>) => void; reject: (reason: unknown) => void }
   >();
   private eventQueues = new Map<string, AsyncQueue<Record<string, unknown> | null>>();
+  private commsStreamQueues = new Map<string, AsyncQueue<Record<string, unknown> | null>>();
   private rl: ReadlineInterface | null = null;
 
   constructor(rkatPath = "rkat-rpc") {
@@ -200,6 +202,10 @@ export class MeerkatClient {
       queue.put(null);
     }
     this.eventQueues.clear();
+    for (const [, queue] of this.commsStreamQueues) {
+      queue.put(null);
+    }
+    this.commsStreamQueues.clear();
   }
 
   // -- Session lifecycle --------------------------------------------------
@@ -385,13 +391,26 @@ export class MeerkatClient {
     return this.request("skills/inspect", params);
   }
 
+  async listMobPrefabs(): Promise<Array<Record<string, unknown>>> {
+    const result = await this.request("mob/prefabs", {});
+    return (result.prefabs as Array<Record<string, unknown>>) ?? [];
+  }
+
+  async list_mob_prefabs(): Promise<Array<Record<string, unknown>>> {
+    return this.listMobPrefabs();
+  }
+
   // -- Internal methods used by Session -----------------------------------
 
   /** @internal */
   async _startTurn(
     sessionId: string,
     prompt: string,
-    options?: { skillRefs?: SkillRef[]; skillReferences?: string[] },
+    options?: {
+      skillRefs?: SkillRef[];
+      skillReferences?: string[];
+      flowToolOverlay?: TurnToolOverlay;
+    },
   ): Promise<RunResult> {
     const params: Record<string, unknown> = { session_id: sessionId, prompt };
     const wireRefs = skillRefsToWire(options?.skillRefs);
@@ -401,6 +420,12 @@ export class MeerkatClient {
     if (options?.skillReferences) {
       params.skill_references = options.skillReferences;
     }
+    if (options?.flowToolOverlay) {
+      params.flow_tool_overlay = {
+        allowed_tools: options.flowToolOverlay.allowedTools,
+        blocked_tools: options.flowToolOverlay.blockedTools,
+      };
+    }
     const raw = await this.request("turn/start", params);
     return MeerkatClient.parseRunResult(raw);
   }
@@ -409,7 +434,11 @@ export class MeerkatClient {
   _startTurnStreaming(
     sessionId: string,
     prompt: string,
-    options?: { skillRefs?: SkillRef[]; skillReferences?: string[] },
+    options?: {
+      skillRefs?: SkillRef[];
+      skillReferences?: string[];
+      flowToolOverlay?: TurnToolOverlay;
+    },
     session?: Session,
   ): EventStream {
     if (!this.process?.stdin) {
@@ -430,6 +459,12 @@ export class MeerkatClient {
     }
     if (options?.skillReferences) {
       params.skill_references = options.skillReferences;
+    }
+    if (options?.flowToolOverlay) {
+      params.flow_tool_overlay = {
+        allowed_tools: options.flowToolOverlay.allowedTools,
+        blocked_tools: options.flowToolOverlay.blockedTools,
+      };
     }
 
     const rpcRequest = { jsonrpc: "2.0", id: requestId, method: "turn/start", params };
@@ -469,6 +504,36 @@ export class MeerkatClient {
     return this.request("comms/peers", { session_id: sessionId });
   }
 
+  async openCommsStream(
+    sessionId: string,
+    options?: { scope?: "session" | "interaction"; interactionId?: string },
+  ): Promise<CommsEventStream> {
+    const scope = options?.scope ?? "session";
+    const params: Record<string, unknown> = { session_id: sessionId, scope };
+    if (options?.interactionId) {
+      params.interaction_id = options.interactionId;
+    }
+    const opened = await this.request("comms/stream_open", params);
+    const streamId = String(opened.stream_id ?? "");
+    if (!streamId) {
+      throw new MeerkatError("INVALID_RESPONSE", "Missing stream_id in comms/stream_open response");
+    }
+    const queue = new AsyncQueue<Record<string, unknown> | null>();
+    this.commsStreamQueues.set(streamId, queue);
+    return new CommsEventStream({
+      streamId,
+      eventQueue: queue,
+      onClose: async (id: string) => {
+        await this.request("comms/stream_close", { stream_id: id });
+        const q = this.commsStreamQueues.get(id);
+        if (q) {
+          q.put(null);
+        }
+        this.commsStreamQueues.delete(id);
+      },
+    });
+  }
+
   // -- Transport ----------------------------------------------------------
 
   private handleLine(line: string): void {
@@ -496,6 +561,15 @@ export class MeerkatClient {
         }
       }
     } else if ("method" in data) {
+      if (data.method === "comms/stream_event") {
+        const params = (data.params ?? {}) as Record<string, unknown>;
+        const streamId = String(params.stream_id ?? "");
+        const queue = this.commsStreamQueues.get(streamId);
+        if (queue) {
+          queue.put(params);
+        }
+        return;
+      }
       const params = (data.params ?? {}) as Record<string, unknown>;
       const sessionId = String(params.session_id ?? "");
       const event = params.event as Record<string, unknown> | undefined;
@@ -673,9 +747,11 @@ export class MeerkatClient {
     if (options.enableShell) params.enable_shell = true;
     if (options.enableSubagents) params.enable_subagents = true;
     if (options.enableMemory) params.enable_memory = true;
+    if (options.enableMob) params.enable_mob = true;
     if (options.hostMode) params.host_mode = true;
     if (options.commsName) params.comms_name = options.commsName;
     if (options.peerMeta != null) params.peer_meta = options.peerMeta;
+    if (options.budgetLimits != null) params.budget_limits = options.budgetLimits;
     if (options.providerParams) params.provider_params = options.providerParams;
     if (options.preloadSkills != null) params.preload_skills = options.preloadSkills;
     const wireRefs = skillRefsToWire(options.skillRefs);

@@ -2614,12 +2614,14 @@ dependencies = [
  "async-trait",
  "clap",
  "dirs",
+ "futures",
  "meerkat",
  "meerkat-client",
  "meerkat-comms",
  "meerkat-contracts",
  "meerkat-core",
  "meerkat-mcp",
+ "meerkat-mob",
  "meerkat-store",
  "meerkat-tools",
  "rmcp",
@@ -2628,6 +2630,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -2736,6 +2739,7 @@ dependencies = [
  "meerkat-contracts",
  "meerkat-core",
  "meerkat-mcp",
+ "meerkat-mob",
  "meerkat-store",
  "meerkat-tools",
  "serde",
@@ -2764,6 +2768,7 @@ dependencies = [
  "meerkat-client",
  "meerkat-contracts",
  "meerkat-core",
+ "meerkat-mob",
  "meerkat-store",
  "serde",
  "serde_json",

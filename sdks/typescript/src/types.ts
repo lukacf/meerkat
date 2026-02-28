@@ -53,6 +53,12 @@ export interface SkillKey {
 /** A skill reference — either a {@link SkillKey} or a legacy string. */
 export type SkillRef = SkillKey | string;
 
+/** Ephemeral per-turn tool visibility overlay. */
+export interface TurnToolOverlay {
+  readonly allowedTools?: readonly string[];
+  readonly blockedTools?: readonly string[];
+}
+
 /** Result of an agent session creation or turn. */
 export interface RunResult {
   readonly sessionId: string;
@@ -97,9 +103,11 @@ export interface SessionOptions {
   enableShell?: boolean;
   enableSubagents?: boolean;
   enableMemory?: boolean;
+  enableMob?: boolean;
   hostMode?: boolean;
   commsName?: string;
   peerMeta?: Record<string, unknown>;
+  budgetLimits?: Record<string, unknown>;
   providerParams?: Record<string, unknown>;
   preloadSkills?: string[];
   skillRefs?: SkillRef[];

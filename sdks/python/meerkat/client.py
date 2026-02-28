@@ -36,7 +36,7 @@ from .errors import CapabilityUnavailableError, MeerkatError
 from .events import Usage
 from .generated.types import CONTRACT_VERSION
 from .session import Session, _normalize_skill_ref
-from .streaming import EventStream, _StdoutDispatcher
+from .streaming import CommsEventStream, EventStream, _StdoutDispatcher
 from .types import (
     Capability,
     McpLiveOpResponse,
@@ -201,9 +201,11 @@ class MeerkatClient:
         enable_shell: bool = False,
         enable_subagents: bool = False,
         enable_memory: bool = False,
+        enable_mob: bool = False,
         host_mode: bool = False,
         comms_name: str | None = None,
         peer_meta: dict[str, Any] | None = None,
+        budget_limits: dict[str, Any] | None = None,
         provider_params: dict[str, Any] | None = None,
         preload_skills: list[str] | None = None,
         skill_refs: list[SkillRef] | None = None,
@@ -225,9 +227,11 @@ class MeerkatClient:
             structured_output_retries=structured_output_retries,
             hooks_override=hooks_override, enable_builtins=enable_builtins,
             enable_shell=enable_shell, enable_subagents=enable_subagents,
-            enable_memory=enable_memory, host_mode=host_mode,
+            enable_memory=enable_memory, enable_mob=enable_mob,
+            host_mode=host_mode,
             comms_name=comms_name, peer_meta=peer_meta,
-            provider_params=provider_params, preload_skills=preload_skills,
+            budget_limits=budget_limits, provider_params=provider_params,
+            preload_skills=preload_skills,
             skill_refs=skill_refs, skill_references=skill_references,
         )
         raw = await self._request("session/create", params)
@@ -249,9 +253,11 @@ class MeerkatClient:
         enable_shell: bool = False,
         enable_subagents: bool = False,
         enable_memory: bool = False,
+        enable_mob: bool = False,
         host_mode: bool = False,
         comms_name: str | None = None,
         peer_meta: dict[str, Any] | None = None,
+        budget_limits: dict[str, Any] | None = None,
         provider_params: dict[str, Any] | None = None,
         preload_skills: list[str] | None = None,
         skill_refs: list[SkillRef] | None = None,
@@ -277,9 +283,11 @@ class MeerkatClient:
             structured_output_retries=structured_output_retries,
             hooks_override=hooks_override, enable_builtins=enable_builtins,
             enable_shell=enable_shell, enable_subagents=enable_subagents,
-            enable_memory=enable_memory, host_mode=host_mode,
+            enable_memory=enable_memory, enable_mob=enable_mob,
+            host_mode=host_mode,
             comms_name=comms_name, peer_meta=peer_meta,
-            provider_params=provider_params, preload_skills=preload_skills,
+            budget_limits=budget_limits, provider_params=provider_params,
+            preload_skills=preload_skills,
             skill_refs=skill_refs, skill_references=skill_references,
         )
         self._request_id += 1
@@ -456,6 +464,10 @@ class MeerkatClient:
             params["source"] = source
         return await self._request("skills/inspect", params)
 
+    async def list_mob_prefabs(self) -> list[dict[str, Any]]:
+        result = await self._request("mob/prefabs", {})
+        return result.get("prefabs", [])
+
     # -- Internal methods used by Session ----------------------------------
 
     async def _start_turn(
@@ -465,6 +477,7 @@ class MeerkatClient:
         *,
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
+        flow_tool_overlay: dict[str, Any] | None = None,
     ) -> RunResult:
         params: dict[str, Any] = {"session_id": session_id, "prompt": prompt}
         wire_refs = _skill_refs_to_wire(skill_refs)
@@ -472,6 +485,8 @@ class MeerkatClient:
             params["skill_refs"] = wire_refs
         if skill_references is not None:
             params["skill_references"] = skill_references
+        if flow_tool_overlay is not None:
+            params["flow_tool_overlay"] = flow_tool_overlay
         raw = await self._request("turn/start", params)
         return self._parse_run_result(raw)
 
@@ -482,6 +497,7 @@ class MeerkatClient:
         *,
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
+        flow_tool_overlay: dict[str, Any] | None = None,
         _session: Session | None = None,
     ) -> EventStream:
         if not self._dispatcher or not self._process or not self._process.stdin:
@@ -496,6 +512,8 @@ class MeerkatClient:
             params["skill_refs"] = wire_refs
         if skill_references is not None:
             params["skill_references"] = skill_references
+        if flow_tool_overlay is not None:
+            params["flow_tool_overlay"] = flow_tool_overlay
         request = {"jsonrpc": "2.0", "id": request_id, "method": "turn/start", "params": params}
         data = (json.dumps(request) + "\n").encode()
         return EventStream(
@@ -520,6 +538,37 @@ class MeerkatClient:
 
     async def _peers(self, session_id: str) -> dict[str, Any]:
         return await self._request("comms/peers", {"session_id": session_id})
+
+    async def open_comms_stream(
+        self,
+        session_id: str,
+        *,
+        scope: str = "session",
+        interaction_id: str | None = None,
+    ) -> CommsEventStream:
+        if not self._dispatcher:
+            raise MeerkatError("NOT_CONNECTED", "Client not connected")
+
+        params: dict[str, Any] = {"session_id": session_id, "scope": scope}
+        if interaction_id is not None:
+            params["interaction_id"] = interaction_id
+        opened = await self._request("comms/stream_open", params)
+        stream_id = str(opened.get("stream_id", ""))
+        if not stream_id:
+            raise MeerkatError("INVALID_RESPONSE", "Missing stream_id in comms/stream_open response")
+
+        queue = self._dispatcher.subscribe_comms_stream(stream_id)
+        return CommsEventStream(
+            stream_id=stream_id,
+            event_queue=queue,
+            dispatcher=self._dispatcher,
+            closer=self._close_comms_stream,
+        )
+
+    async def _close_comms_stream(self, stream_id: str) -> None:
+        await self._request("comms/stream_close", {"stream_id": stream_id})
+        if self._dispatcher:
+            self._dispatcher.unsubscribe_comms_stream(stream_id)
 
     # -- Transport ---------------------------------------------------------
 
@@ -710,9 +759,11 @@ class MeerkatClient:
         enable_shell: bool = False,
         enable_subagents: bool = False,
         enable_memory: bool = False,
+        enable_mob: bool = False,
         host_mode: bool = False,
         comms_name: str | None = None,
         peer_meta: dict[str, Any] | None = None,
+        budget_limits: dict[str, Any] | None = None,
         provider_params: dict[str, Any] | None = None,
         preload_skills: list[str] | None = None,
         skill_refs: list[SkillRef] | None = None,
@@ -741,12 +792,16 @@ class MeerkatClient:
             params["enable_subagents"] = True
         if enable_memory:
             params["enable_memory"] = True
+        if enable_mob:
+            params["enable_mob"] = True
         if host_mode:
             params["host_mode"] = True
         if comms_name:
             params["comms_name"] = comms_name
         if peer_meta is not None:
             params["peer_meta"] = peer_meta
+        if budget_limits is not None:
+            params["budget_limits"] = budget_limits
         if provider_params:
             params["provider_params"] = provider_params
         if preload_skills is not None:

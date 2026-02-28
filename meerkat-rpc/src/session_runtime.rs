@@ -292,6 +292,7 @@ impl SessionRuntime {
         prompt: String,
         event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
+        flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
     ) -> Result<RunResult, RpcError> {
         #[allow(unused_mut)]
         let mut turn_prompt = prompt;
@@ -355,7 +356,7 @@ impl SessionRuntime {
             event_tx: Some(event_tx),
             host_mode: false,
             skill_references,
-            flow_tool_overlay: None,
+            flow_tool_overlay,
         };
 
         self.service
@@ -1059,7 +1060,7 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::channel(100);
 
         let result = runtime
-            .start_turn(&session_id, "Hello".to_string(), event_tx, None)
+            .start_turn(&session_id, "Hello".to_string(), event_tx, None, None)
             .await
             .unwrap();
 
@@ -1095,7 +1096,7 @@ mod tests {
 
         let turn_handle = tokio::spawn(async move {
             runtime_clone
-                .start_turn(&sid_clone, "Hello".to_string(), event_tx, None)
+                .start_turn(&sid_clone, "Hello".to_string(), event_tx, None, None)
                 .await
         });
 
@@ -1142,7 +1143,7 @@ mod tests {
         let sid_clone = session_id.clone();
         let _turn_handle = tokio::spawn(async move {
             runtime_clone
-                .start_turn(&sid_clone, "First".to_string(), event_tx1, None)
+                .start_turn(&sid_clone, "First".to_string(), event_tx1, None, None)
                 .await
         });
 
@@ -1162,7 +1163,7 @@ mod tests {
         // Try to start a second turn
         let (event_tx2, _rx2) = mpsc::channel(100);
         let result = runtime
-            .start_turn(&session_id, "Second".to_string(), event_tx2, None)
+            .start_turn(&session_id, "Second".to_string(), event_tx2, None, None)
             .await;
 
         assert!(result.is_err(), "Second turn should fail");
@@ -1185,7 +1186,7 @@ mod tests {
         let (event_tx, mut event_rx) = mpsc::channel(100);
 
         let _result = runtime
-            .start_turn(&session_id, "Hello".to_string(), event_tx, None)
+            .start_turn(&session_id, "Hello".to_string(), event_tx, None, None)
             .await
             .unwrap();
 
@@ -1330,7 +1331,7 @@ mod tests {
 
         let (event_tx, _event_rx) = mpsc::channel(32);
         let first = runtime
-            .start_turn(&session_id, "hello".to_string(), event_tx, None)
+            .start_turn(&session_id, "hello".to_string(), event_tx, None, None)
             .await;
         assert!(
             first.is_err(),
@@ -1339,7 +1340,7 @@ mod tests {
 
         let (event_tx, _event_rx) = mpsc::channel(32);
         let second = runtime
-            .start_turn(&session_id, "hello again".to_string(), event_tx, None)
+            .start_turn(&session_id, "hello again".to_string(), event_tx, None, None)
             .await;
         assert!(
             second.is_ok(),
@@ -1364,7 +1365,7 @@ mod tests {
 
         let (event_tx, mut event_rx) = mpsc::channel(64);
         runtime
-            .start_turn(&session_id, "turn add".to_string(), event_tx, None)
+            .start_turn(&session_id, "turn add".to_string(), event_tx, None, None)
             .await
             .expect("turn add should apply staged add");
         let add_events = collect_tool_config_events(&mut event_rx);
@@ -1380,7 +1381,7 @@ mod tests {
             .expect("stage reload");
         let (event_tx, mut event_rx) = mpsc::channel(64);
         runtime
-            .start_turn(&session_id, "turn reload".to_string(), event_tx, None)
+            .start_turn(&session_id, "turn reload".to_string(), event_tx, None, None)
             .await
             .expect("turn reload should apply staged reload");
         let reload_events = collect_tool_config_events(&mut event_rx);
@@ -1396,7 +1397,7 @@ mod tests {
             .expect("stage remove");
         let (event_tx, mut event_rx) = mpsc::channel(64);
         runtime
-            .start_turn(&session_id, "turn remove".to_string(), event_tx, None)
+            .start_turn(&session_id, "turn remove".to_string(), event_tx, None, None)
             .await
             .expect("turn remove should apply staged remove");
         let remove_events = collect_tool_config_events(&mut event_rx);
@@ -1424,7 +1425,7 @@ mod tests {
 
         let (event_tx, _event_rx) = mpsc::channel(64);
         runtime
-            .start_turn(&session_id, "turn add".to_string(), event_tx, None)
+            .start_turn(&session_id, "turn add".to_string(), event_tx, None, None)
             .await
             .expect("add boundary");
 
@@ -1448,7 +1449,7 @@ mod tests {
 
         let (event_tx, mut event_rx) = mpsc::channel(128);
         runtime
-            .start_turn(&session_id, "turn remove".to_string(), event_tx, None)
+            .start_turn(&session_id, "turn remove".to_string(), event_tx, None, None)
             .await
             .expect("remove boundary");
         let first_turn_events = collect_tool_config_events(&mut event_rx);
@@ -1466,6 +1467,7 @@ mod tests {
                 &session_id,
                 "turn after timeout".to_string(),
                 event_tx,
+                None,
                 None,
             )
             .await
@@ -1498,7 +1500,13 @@ mod tests {
             .expect("stage add draining server");
         let (event_tx, _event_rx) = mpsc::channel(64);
         runtime
-            .start_turn(&session_id, "turn add first".to_string(), event_tx, None)
+            .start_turn(
+                &session_id,
+                "turn add first".to_string(),
+                event_tx,
+                None,
+                None,
+            )
             .await
             .expect("add first server at boundary");
 
@@ -1521,7 +1529,13 @@ mod tests {
             .expect("stage remove");
         let (event_tx, mut event_rx) = mpsc::channel(128);
         runtime
-            .start_turn(&session_id, "turn remove first".to_string(), event_tx, None)
+            .start_turn(
+                &session_id,
+                "turn remove first".to_string(),
+                event_tx,
+                None,
+                None,
+            )
             .await
             .expect("remove starts draining");
         let first_turn_events = collect_tool_config_events(&mut event_rx);
@@ -1552,6 +1566,7 @@ mod tests {
                 &session_id,
                 "turn apply staged add".to_string(),
                 event_tx,
+                None,
                 None,
             )
             .await
@@ -1586,7 +1601,7 @@ mod tests {
             .expect("stage add");
         let (event_tx, _event_rx) = mpsc::channel(64);
         runtime
-            .start_turn(&session_id, "turn add".to_string(), event_tx, None)
+            .start_turn(&session_id, "turn add".to_string(), event_tx, None, None)
             .await
             .expect("add boundary");
 
@@ -1609,7 +1624,7 @@ mod tests {
             .expect("stage remove");
         let (event_tx, _event_rx) = mpsc::channel(64);
         runtime
-            .start_turn(&session_id, "turn remove".to_string(), event_tx, None)
+            .start_turn(&session_id, "turn remove".to_string(), event_tx, None, None)
             .await
             .expect("remove boundary");
 
@@ -1634,6 +1649,7 @@ mod tests {
                 &session_id,
                 "turn failing apply".to_string(),
                 event_tx,
+                None,
                 None,
             )
             .await;

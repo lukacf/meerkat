@@ -199,6 +199,7 @@ impl MethodRouter {
                     .await
             }
             "turn/interrupt" => handlers::turn::handle_interrupt(id, params, &self.runtime).await,
+            "mob/prefabs" => handlers::mob::handle_prefabs(id).await,
             #[cfg(feature = "comms")]
             "comms/send" => handlers::comms::handle_send(id, params, &self.runtime).await,
             #[cfg(feature = "comms")]
@@ -702,12 +703,80 @@ mod tests {
         assert!(method_names.contains(&"initialize"));
         assert!(method_names.contains(&"session/create"));
         assert!(method_names.contains(&"turn/start"));
+        assert!(method_names.contains(&"mob/prefabs"));
         assert!(method_names.contains(&"config/get"));
         #[cfg(feature = "comms")]
         {
             assert!(method_names.contains(&"comms/stream_open"));
             assert!(method_names.contains(&"comms/stream_close"));
         }
+    }
+
+    #[tokio::test]
+    async fn mob_prefabs_returns_prefab_templates() {
+        let (router, _notif_rx) = test_router().await;
+        let req = make_request_no_params("mob/prefabs");
+
+        let resp = router.dispatch(req).await.unwrap();
+        let result = result_value(&resp);
+        let prefabs = result["prefabs"]
+            .as_array()
+            .expect("prefabs should be an array");
+        assert!(
+            prefabs.len() >= 4,
+            "expected built-in prefabs, got {}",
+            prefabs.len()
+        );
+
+        let keys: Vec<&str> = prefabs
+            .iter()
+            .filter_map(|entry| entry["key"].as_str())
+            .collect();
+        assert!(keys.contains(&"coding_swarm"));
+        assert!(keys.contains(&"code_review"));
+        assert!(keys.contains(&"research_team"));
+        assert!(keys.contains(&"pipeline"));
+
+        for entry in prefabs {
+            assert!(entry["key"].is_string());
+            let template = entry["toml_template"]
+                .as_str()
+                .expect("toml_template should be a string");
+            assert!(
+                template.contains("id ="),
+                "template should look like TOML definition"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn turn_start_accepts_flow_tool_overlay() {
+        let (router, _notif_rx) = test_router().await;
+        let create_req = make_request("session/create", serde_json::json!({"prompt":"Hello"}));
+        let create_resp = router.dispatch(create_req).await.unwrap();
+        let created = result_value(&create_resp);
+        let session_id = created["session_id"]
+            .as_str()
+            .expect("session_id")
+            .to_string();
+
+        let turn_req = make_request(
+            "turn/start",
+            serde_json::json!({
+                "session_id": session_id,
+                "prompt": "continue with overlay",
+                "flow_tool_overlay": {
+                    "allowed_tools": [],
+                    "blocked_tools": []
+                }
+            }),
+        );
+        let turn_resp = router.dispatch(turn_req).await.unwrap();
+        let turned = result_value(&turn_resp);
+        assert_eq!(
+            turned["session_id"].as_str().expect("session id"),
+            created["session_id"].as_str().expect("session id")
+        );
     }
 
     #[cfg(feature = "comms")]

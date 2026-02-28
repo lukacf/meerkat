@@ -5,6 +5,7 @@
 //! - POST /sessions/:id/messages - Continue an existing session
 //! - POST /comms/send - Send a canonical comms command
 //! - GET /comms/peers - List peers visible to a session
+//! - GET /mob/prefabs - List built-in mob prefab templates
 //! - POST /sessions/:id/event - (legacy) Push an external event to a session
 //! - GET /sessions/:id - Get session details
 //! - GET /sessions/:id/events - SSE stream for agent events
@@ -18,7 +19,7 @@ pub mod webhook;
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{
         IntoResponse, Response,
@@ -27,13 +28,15 @@ use axum::{
     routing::{get, post},
 };
 use chrono::{DateTime, Utc};
+#[cfg(feature = "comms")]
+use futures::StreamExt;
 use futures::stream::Stream;
 use meerkat::{
     AgentEvent, AgentFactory, FactoryAgentBuilder, LlmClient, OutputSchema,
     PersistentSessionService, Session, SessionId, SessionService,
     encode_llm_client_override_for_service,
 };
-use meerkat_contracts::{SessionLocator, format_session_ref};
+use meerkat_contracts::{SessionLocator, SkillsParams, format_session_ref};
 use meerkat_core::EventEnvelope;
 use meerkat_core::service::{
     CreateSessionRequest as SvcCreateSessionRequest, InitialTurnPolicy, SessionBuildOptions,
@@ -344,10 +347,55 @@ pub struct CreateSessionRequest {
     /// Enable semantic memory. Omit to use factory defaults.
     #[serde(default)]
     pub enable_memory: Option<bool>,
+    /// Enable mob tools. Omit to use factory defaults.
+    #[serde(default)]
+    pub enable_mob: Option<bool>,
+    /// Explicit budget limits for this run.
+    #[serde(default)]
+    pub budget_limits: Option<meerkat_core::BudgetLimits>,
+    /// Provider-specific parameters (for example reasoning config).
+    #[serde(default)]
+    pub provider_params: Option<Value>,
+    /// Skills to preload into the system prompt.
+    #[serde(default)]
+    pub preload_skills: Option<Vec<String>>,
+    /// Structured refs for per-turn skill injection.
+    #[serde(default)]
+    pub skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
+    /// Legacy compatibility skill refs for per-turn injection.
+    #[serde(default)]
+    pub skill_references: Option<Vec<String>>,
 }
 
 fn default_structured_output_retries() -> u32 {
     2
+}
+
+async fn canonical_skill_keys_for_state(
+    state: &AppState,
+    skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
+    skill_references: Option<Vec<String>>,
+) -> Result<Option<Vec<meerkat_core::skills::SkillKey>>, ApiError> {
+    let params = SkillsParams {
+        preload_skills: None,
+        skill_refs,
+        skill_references,
+    };
+
+    let snapshot = state
+        .config_runtime
+        .get()
+        .await
+        .map_err(config_runtime_err_to_api)?;
+    let registry = snapshot
+        .config
+        .skills
+        .build_source_identity_registry()
+        .map_err(|e| ApiError::BadRequest(format!("Invalid skill_refs: {e}")))?;
+
+    params
+        .canonical_skill_keys_with_registry(&registry)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid skill_refs: {e}")))
 }
 
 /// Continue session request
@@ -384,6 +432,23 @@ pub struct ContinueSessionRequest {
     /// Optional run-scoped hook overrides.
     #[serde(default)]
     pub hooks_override: Option<HookRunOverrides>,
+    /// Structured refs for per-turn skill injection.
+    #[serde(default)]
+    pub skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
+    /// Legacy compatibility refs for per-turn skill injection.
+    #[serde(default)]
+    pub skill_references: Option<Vec<String>>,
+    /// Optional per-turn flow tool overlay.
+    #[serde(default)]
+    pub flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListSessionsQuery {
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub offset: Option<usize>,
 }
 
 /// Session response — canonical wire type from contracts.
@@ -413,12 +478,15 @@ pub struct ErrorResponse {
 /// Build the REST API router
 pub fn router(state: AppState) -> Router {
     let r = Router::new()
-        .route("/sessions", post(create_session))
-        .route("/sessions/{id}", get(get_session))
+        .route("/sessions", get(list_sessions).post(create_session))
+        .route("/sessions/{id}", get(get_session).delete(archive_session))
+        .route("/sessions/{id}/interrupt", post(interrupt_session))
         .route("/sessions/{id}/messages", post(continue_session))
         .route("/sessions/{id}/events", get(session_events))
         .route("/comms/send", post(comms_send))
         .route("/comms/peers", get(comms_peers))
+        .route("/comms/stream", get(comms_stream))
+        .route("/mob/prefabs", get(mob_prefabs))
         // BRIDGE(M11→M12): Legacy event push endpoint.
         .route("/sessions/{id}/event", post(push_event))
         .route(
@@ -442,6 +510,20 @@ pub fn router(state: AppState) -> Router {
 /// Health check endpoint
 async fn health_check() -> &'static str {
     "ok"
+}
+
+/// GET /mob/prefabs — list built-in mob prefab templates.
+async fn mob_prefabs() -> Json<Value> {
+    let prefabs: Vec<Value> = meerkat_mob::Prefab::all()
+        .into_iter()
+        .map(|prefab| {
+            json!({
+                "key": prefab.key(),
+                "toml_template": prefab.toml_template(),
+            })
+        })
+        .collect();
+    Json(json!({ "prefabs": prefabs }))
 }
 
 /// Canonical comms send request body.
@@ -475,6 +557,15 @@ pub struct CommsSendRequest {
 #[derive(Debug, Deserialize)]
 pub struct CommsPeersRequest {
     pub session_id: String,
+}
+
+/// Canonical comms stream request query.
+#[derive(Debug, Deserialize)]
+pub struct CommsStreamRequest {
+    pub session_id: String,
+    pub scope: String,
+    #[serde(default)]
+    pub interaction_id: Option<String>,
 }
 
 /// POST /comms/send — dispatch a canonical comms command.
@@ -636,6 +727,72 @@ async fn comms_peers(
         .collect();
 
     Ok(Json(json!({ "peers": entries })))
+}
+
+/// GET /comms/stream — SSE stream of comms scoped events.
+#[cfg(feature = "comms")]
+async fn comms_stream(
+    State(state): State<AppState>,
+    axum::extract::Query(req): axum::extract::Query<CommsStreamRequest>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    let session_id = resolve_session_id_for_state(&req.session_id, &state)?;
+
+    let comms = state
+        .session_service
+        .comms_runtime(&session_id)
+        .await
+        .ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "Session not found or comms not enabled: {session_id}"
+            ))
+        })?;
+
+    let scope = match req.scope.as_str() {
+        "session" => meerkat_core::comms::StreamScope::Session(session_id.clone()),
+        "interaction" => {
+            let raw = req.interaction_id.as_deref().ok_or_else(|| {
+                ApiError::BadRequest("scope 'interaction' requires interaction_id".into())
+            })?;
+            let interaction_id = uuid::Uuid::parse_str(raw)
+                .map_err(|_| ApiError::BadRequest(format!("Invalid interaction_id: {raw}")))?;
+            meerkat_core::comms::StreamScope::Interaction(meerkat_core::InteractionId(
+                interaction_id,
+            ))
+        }
+        other => {
+            return Err(ApiError::BadRequest(format!(
+                "Unknown stream scope: {other}"
+            )));
+        }
+    };
+
+    let mut stream = comms
+        .stream(scope)
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+
+    let stream = async_stream::stream! {
+        yield Ok(Event::default().event("stream_opened").data("{}"));
+
+        while let Some(envelope) = stream.next().await {
+            let event_type = agent_event_type(&envelope.payload);
+            let event = Event::default()
+                .event(event_type)
+                .data(serde_json::to_string(&envelope).unwrap_or_default());
+            yield Ok(event);
+        }
+
+        yield Ok(Event::default().event("done").data("{}"));
+    };
+
+    Ok(Sse::new(stream))
+}
+
+#[cfg(not(feature = "comms"))]
+async fn comms_stream(
+    _state: State<AppState>,
+    _req: axum::extract::Query<CommsStreamRequest>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    Err(ApiError::NotFound("comms feature not enabled".to_string()))
 }
 
 /// Push an external event to a session's inbox.
@@ -980,6 +1137,12 @@ async fn create_session(
     let host_mode = resolve_host_mode(req.host_mode)?;
     let model = req.model.unwrap_or_else(|| state.default_model.clone());
     let max_tokens = req.max_tokens.unwrap_or(state.max_tokens);
+    let skill_references = canonical_skill_keys_for_state(
+        &state,
+        req.skill_refs.clone(),
+        req.skill_references.clone(),
+    )
+    .await?;
 
     // Pre-create a session to claim the session_id (needed for CallbackPending handling
     // and event forwarding before the service call returns).
@@ -1027,8 +1190,8 @@ async fn create_session(
         comms_name: req.comms_name.clone(),
         peer_meta: req.peer_meta.clone(),
         resume_session: Some(pre_session),
-        budget_limits: None,
-        provider_params: None,
+        budget_limits: req.budget_limits,
+        provider_params: req.provider_params,
         external_tools: mcp_external_tools,
         llm_client_override: state
             .llm_client_override
@@ -1040,8 +1203,10 @@ async fn create_session(
         override_shell: req.enable_shell,
         override_subagents: req.enable_subagents,
         override_memory: req.enable_memory,
-        override_mob: None,
-        preload_skills: None,
+        override_mob: req.enable_mob,
+        preload_skills: req
+            .preload_skills
+            .map(|ids| ids.into_iter().map(meerkat_core::skills::SkillId).collect()),
         realm_id: Some(state.realm_id.clone()),
         instance_id: state.instance_id.clone(),
         backend: Some(state.backend.clone()),
@@ -1058,7 +1223,7 @@ async fn create_session(
         max_tokens: Some(max_tokens),
         event_tx: Some(caller_event_tx),
         host_mode,
-        skill_references: None,
+        skill_references,
         initial_turn: InitialTurnPolicy::RunImmediately,
         build: Some(build),
     };
@@ -1077,6 +1242,42 @@ async fn create_session(
             session_error_to_api_result(err, &session_id, &state.realm_id)
         }
     }
+}
+
+/// List sessions in the active realm.
+async fn list_sessions(
+    State(state): State<AppState>,
+    Query(query): Query<ListSessionsQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let sessions = state
+        .session_service
+        .list(meerkat_core::service::SessionQuery {
+            limit: query.limit,
+            offset: query.offset,
+        })
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to list sessions: {e}")))?;
+
+    let payload = json!({
+        "sessions": sessions
+            .into_iter()
+            .map(|s| {
+                let created_at: DateTime<Utc> = s.created_at.into();
+                let updated_at: DateTime<Utc> = s.updated_at.into();
+                json!({
+                    "session_id": s.session_id.to_string(),
+                    "session_ref": format_session_ref(&state.realm_id, &s.session_id),
+                    "created_at": created_at.to_rfc3339(),
+                    "updated_at": updated_at.to_rfc3339(),
+                    "message_count": s.message_count,
+                    "total_tokens": s.total_tokens,
+                    "is_active": s.is_active
+                })
+            })
+            .collect::<Vec<_>>()
+    });
+
+    Ok(Json(payload))
 }
 
 /// Get session details
@@ -1108,6 +1309,50 @@ async fn get_session(
     }))
 }
 
+/// Interrupt an in-flight turn on a session.
+async fn interrupt_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let session_id = resolve_session_id_for_state(&id, &state)?;
+    match state.session_service.interrupt(&session_id).await {
+        Ok(()) | Err(SessionError::NotRunning { .. }) => Ok(Json(json!({
+            "session_id": session_id.to_string(),
+            "interrupted": true
+        }))),
+        Err(SessionError::NotFound { .. }) => {
+            Err(ApiError::NotFound(format!("Session not found: {id}")))
+        }
+        Err(e) => Err(ApiError::Internal(format!(
+            "Failed to interrupt session: {e}"
+        ))),
+    }
+}
+
+/// Archive (remove) a session.
+async fn archive_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let session_id = resolve_session_id_for_state(&id, &state)?;
+    match state.session_service.archive(&session_id).await {
+        Ok(()) => {
+            #[cfg(feature = "mcp")]
+            cleanup_mcp_session(&state, &session_id).await;
+            Ok(Json(json!({
+                "session_id": session_id.to_string(),
+                "archived": true
+            })))
+        }
+        Err(SessionError::NotFound { .. }) => {
+            Err(ApiError::NotFound(format!("Session not found: {id}")))
+        }
+        Err(e) => Err(ApiError::Internal(format!(
+            "Failed to archive session: {e}"
+        ))),
+    }
+}
+
 /// Continue an existing session
 async fn continue_session(
     State(state): State<AppState>,
@@ -1135,6 +1380,12 @@ async fn continue_session(
 
     let host_mode_requested = req.host_mode;
     let host_mode = resolve_host_mode(host_mode_requested)?;
+    let skill_references = canonical_skill_keys_for_state(
+        &state,
+        req.skill_refs.clone(),
+        req.skill_references.clone(),
+    )
+    .await?;
 
     // Apply staged MCP operations at the turn boundary.
     #[allow(unused_mut)]
@@ -1147,8 +1398,8 @@ async fn continue_session(
         prompt: turn_prompt,
         event_tx: Some(caller_event_tx.clone()),
         host_mode,
-        skill_references: None,
-        flow_tool_overlay: None,
+        skill_references: skill_references.clone(),
+        flow_tool_overlay: req.flow_tool_overlay.clone(),
     };
 
     let result = state.session_service.start_turn(&session_id, svc_req).await;
@@ -1257,7 +1508,7 @@ async fn continue_session(
                 max_tokens: Some(max_tokens),
                 event_tx: Some(caller_event_tx.clone()),
                 host_mode: continue_host_mode,
-                skill_references: None,
+                skill_references,
                 initial_turn: InitialTurnPolicy::RunImmediately,
                 build: Some(build),
             };
@@ -1983,6 +2234,54 @@ mod tests {
         assert_eq!(
             response.session_ref.as_deref().expect("session_ref"),
             format_session_ref("test-realm", &session_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mob_prefabs_handler_returns_builtin_prefabs() {
+        let Json(result) = mob_prefabs().await;
+        let prefabs = result["prefabs"]
+            .as_array()
+            .expect("prefabs should be an array");
+        assert!(prefabs.len() >= 4);
+        let keys: Vec<&str> = prefabs
+            .iter()
+            .filter_map(|entry| entry["key"].as_str())
+            .collect();
+        assert!(keys.contains(&"coding_swarm"));
+        assert!(keys.contains(&"code_review"));
+        assert!(keys.contains(&"research_team"));
+        assert!(keys.contains(&"pipeline"));
+    }
+
+    #[tokio::test]
+    async fn test_mob_prefabs_route_returns_json() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let app = router(state);
+
+        let request = axum::http::Request::builder()
+            .method("GET")
+            .uri("/mob/prefabs")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        let prefabs = payload["prefabs"]
+            .as_array()
+            .expect("prefabs should be an array");
+        assert!(
+            prefabs
+                .iter()
+                .all(|entry| entry["toml_template"].is_string())
         );
     }
 

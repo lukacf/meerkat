@@ -38,10 +38,13 @@ pub fn handle_initialize(id: Option<RpcId>) -> RpcResponse {
                 "session/archive".to_string(),
                 "turn/start".to_string(),
                 "turn/interrupt".to_string(),
+                "mob/prefabs".to_string(),
                 "config/get".to_string(),
                 "config/set".to_string(),
                 "config/patch".to_string(),
                 "capabilities/get".to_string(),
+                "skills/list".to_string(),
+                "skills/inspect".to_string(),
             ];
             #[cfg(feature = "mcp")]
             {

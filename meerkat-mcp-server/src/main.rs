@@ -5,6 +5,7 @@ use meerkat_core::{RealmConfig, RealmSelection, RuntimeBootstrap};
 use meerkat_store::RealmBackend;
 use serde_json::{Value, json};
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[derive(Parser, Debug)]
@@ -83,7 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let stdin = io::stdin();
-    let mut stdout = io::stdout();
+    let stdout = Arc::new(tokio::sync::Mutex::new(io::stdout()));
     let mut reader = BufReader::new(stdin).lines();
 
     while let Some(line) = reader.next_line().await? {
@@ -103,8 +104,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "message": format!("Parse error: {e}")
                     }
                 });
-                stdout.write_all(format!("{error}\n").as_bytes()).await?;
-                stdout.flush().await?;
+                let mut out = stdout.lock().await;
+                out.write_all(format!("{error}\n").as_bytes()).await?;
+                out.flush().await?;
                 continue;
             }
         };
@@ -114,15 +116,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        let response = handle_request(&state, &request).await;
-        stdout.write_all(format!("{response}\n").as_bytes()).await?;
-        stdout.flush().await?;
+        let response = handle_request(&state, &request, Arc::clone(&stdout)).await;
+        let mut out = stdout.lock().await;
+        out.write_all(format!("{response}\n").as_bytes()).await?;
+        out.flush().await?;
     }
 
     Ok(())
 }
 
-async fn handle_request(state: &meerkat_mcp_server::MeerkatMcpState, request: &Value) -> Value {
+async fn handle_request(
+    state: &meerkat_mcp_server::MeerkatMcpState,
+    request: &Value,
+    stdout: Arc<tokio::sync::Mutex<io::Stdout>>,
+) -> Value {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
@@ -160,7 +167,42 @@ async fn handle_request(state: &meerkat_mcp_server::MeerkatMcpState, request: &V
                 .cloned()
                 .unwrap_or_else(|| json!({}));
 
-            match meerkat_mcp_server::handle_tools_call(state, name, &arguments).await {
+            let notifier_stdout = Arc::clone(&stdout);
+            let notifier: meerkat_mcp_server::EventNotifier = Arc::new(move |session_id, event| {
+                let session_id = session_id.to_string();
+                let event_value = serde_json::to_value(event).unwrap_or_else(|_| {
+                    json!({
+                        "error": "failed_to_serialize_event"
+                    })
+                });
+                let notification = json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/message",
+                    "params": {
+                        "level": "info",
+                        "data": {
+                            "source": "meerkat",
+                            "session_id": session_id,
+                            "event": event_value
+                        }
+                    }
+                });
+                let notifier_stdout = Arc::clone(&notifier_stdout);
+                tokio::spawn(async move {
+                    let mut out = notifier_stdout.lock().await;
+                    let _ = out.write_all(format!("{notification}\n").as_bytes()).await;
+                    let _ = out.flush().await;
+                });
+            });
+
+            match meerkat_mcp_server::handle_tools_call_with_notifier(
+                state,
+                name,
+                &arguments,
+                Some(notifier),
+            )
+            .await
+            {
                 Ok(result) => json!({
                     "jsonrpc": "2.0",
                     "id": id,

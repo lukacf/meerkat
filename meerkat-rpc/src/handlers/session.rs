@@ -5,7 +5,7 @@ use meerkat_contracts::SkillsParams;
 use meerkat_core::EventEnvelope;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::skills::{SkillKey, SkillRef};
-use meerkat_core::{HookRunOverrides, OutputSchema, Provider};
+use meerkat_core::{BudgetLimits, HookRunOverrides, OutputSchema, Provider};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use std::sync::Arc;
@@ -68,6 +68,12 @@ pub struct CreateSessionParams {
     /// Enable semantic memory (memory_search tool + compaction indexing).
     #[serde(default)]
     pub enable_memory: bool,
+    /// Enable mob tools.
+    #[serde(default)]
+    pub enable_mob: bool,
+    /// Explicit budget limits for this session.
+    #[serde(default)]
+    pub budget_limits: Option<BudgetLimits>,
     /// Provider-specific parameters (e.g., thinking config).
     #[serde(default)]
     pub provider_params: Option<serde_json::Value>,
@@ -193,6 +199,8 @@ pub async fn handle_create(
     build_config.peer_meta = params.peer_meta;
     build_config.override_subagents = Some(params.enable_subagents);
     build_config.override_memory = Some(params.enable_memory);
+    build_config.override_mob = Some(params.enable_mob);
+    build_config.budget_limits = params.budget_limits;
     build_config.provider_params = params.provider_params;
     build_config.preload_skills = params
         .preload_skills
@@ -246,6 +254,7 @@ pub async fn handle_create(
                     prompt_for_turn,
                     event_tx_for_turn,
                     skill_refs_for_turn,
+                    None,
                 )
                 .await
             {
@@ -277,7 +286,7 @@ pub async fn handle_create(
         }
     } else {
         match runtime
-            .start_turn(&session_id, params.prompt, event_tx, skill_refs)
+            .start_turn(&session_id, params.prompt, event_tx, skill_refs, None)
             .await
         {
             Ok(r) => r,

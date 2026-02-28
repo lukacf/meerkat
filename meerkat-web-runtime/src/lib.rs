@@ -30,6 +30,8 @@
 //! - `mob_unwire(mob_id, a, b)`
 //! - `mob_list_members(mob_id)` → JSON
 //! - `mob_send_message(mob_id, meerkat_id, message)`
+//! - `mob_respawn(mob_id, meerkat_id, initial_message?)` — retire + re-spawn same profile
+//! - `mob_inject_and_subscribe(mob_id, meerkat_id, message)` → interaction_id
 //! - `mob_run_flow(mob_id, flow_id, params_json)` → run_id
 //! - `mob_flow_status(mob_id, run_id)` → JSON
 //! - `mob_cancel_flow(mob_id, run_id)`
@@ -134,6 +136,15 @@ struct SessionConfig {
     /// Whether this session runs in host mode (enables comms tools).
     #[serde(default)]
     host_mode: bool,
+    /// Application-defined labels (flow through mob spawn, not used at create_session level).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<BTreeMap<String, String>>,
+    /// Additional instruction sections appended to the system prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_instructions: Option<Vec<String>>,
+    /// Opaque application context passed through to the agent build pipeline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_context: Option<serde_json::Value>,
 }
 
 fn default_max_tokens() -> u32 {
@@ -762,6 +773,8 @@ pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<u32, Js
         build_config.comms_name = Some(name);
         build_config.host_mode = config.host_mode;
     }
+    build_config.additional_instructions = config.additional_instructions.clone();
+    build_config.app_context = config.app_context.clone();
 
     // Create a minimal Config for the factory.
     let meerkat_config = Config::default();
@@ -793,6 +806,14 @@ pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<u32, Js
     Ok(handle)
 }
 
+/// Per-turn options parsed from `options_json`.
+#[derive(Debug, Default, Deserialize)]
+struct TurnOptions {
+    /// Additional instruction sections appended for this turn only.
+    #[serde(default)]
+    additional_instructions: Option<Vec<String>>,
+}
+
 /// Run a turn through the real meerkat agent loop via AgentFactory::build_agent().
 ///
 /// Returns JSON: `{ "text", "usage", "status", "session_id", "turns", "tool_calls" }`
@@ -801,13 +822,14 @@ pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<u32, Js
 /// Only rejects (Err) for infrastructure errors (session not found, build failure).
 /// Agent-level errors (LLM failure, timeout) resolve with `status: "failed"` + `error` field.
 #[wasm_bindgen]
-pub async fn start_turn(
-    handle: u32,
-    prompt: &str,
-    _options_json: &str,
-) -> Result<JsValue, JsValue> {
+pub async fn start_turn(handle: u32, prompt: &str, options_json: &str) -> Result<JsValue, JsValue> {
+    let options: TurnOptions = if options_json.is_empty() || options_json == "{}" {
+        TurnOptions::default()
+    } else {
+        serde_json::from_str(options_json).map_err(|e| err_str("invalid_options", e))?
+    };
     // Extract what we need from the session (release borrow quickly).
-    let (build_config, config, run_id) = REGISTRY
+    let (mut build_config, config, run_id) = REGISTRY
         .with(|cell| {
             let mut registry = cell.borrow_mut();
             let session = registry
@@ -824,6 +846,11 @@ pub async fn start_turn(
             bc.llm_client_override = session.build_config_template.llm_client_override.clone();
             bc.comms_name = session.build_config_template.comms_name.clone();
             bc.host_mode = session.build_config_template.host_mode;
+            bc.additional_instructions = session
+                .build_config_template
+                .additional_instructions
+                .clone();
+            bc.app_context = session.build_config_template.app_context.clone();
 
             // Rebuild tools + store fresh each turn (they're cheap, avoids ownership issues).
             bc.tool_dispatcher_override = session
@@ -839,6 +866,11 @@ pub async fn start_turn(
             Ok((bc, session.config.clone(), run_id))
         })
         .map_err(|e: String| err_str("session_not_found", e))?;
+
+    // Apply per-turn options (override session-level values when present).
+    if options.additional_instructions.is_some() {
+        build_config.additional_instructions = options.additional_instructions;
+    }
 
     // Build the agent through AgentFactory::build_agent() — same pipeline as all surfaces.
     let factory = meerkat::AgentFactory::minimal();
@@ -1093,9 +1125,12 @@ pub async fn mob_spawn(mob_id: &str, specs_json: &str) -> Result<JsValue, JsValu
             initial_message: s.initial_message,
             runtime_mode: s.runtime_mode,
             backend: s.backend,
-            context: None,
-            labels: None,
-            resume_session_id: None,
+            context: s.context,
+            labels: s.labels,
+            resume_session_id: s.resume_session_id.map(|id| {
+                meerkat_core::SessionId::parse(&id)
+                    .unwrap_or_else(|_| meerkat_core::SessionId::new())
+            }),
         })
         .collect();
 
@@ -1138,6 +1173,15 @@ struct SpawnSpecInput {
     runtime_mode: Option<meerkat_mob::MobRuntimeMode>,
     #[serde(default)]
     backend: Option<meerkat_mob::MobBackendKind>,
+    /// Resume an existing session instead of creating a new one.
+    #[serde(default)]
+    resume_session_id: Option<String>,
+    /// Application-defined labels for this member.
+    #[serde(default)]
+    labels: Option<BTreeMap<String, String>>,
+    /// Opaque application context passed through to the agent build pipeline.
+    #[serde(default)]
+    context: Option<serde_json::Value>,
 }
 
 /// Retire a meerkat from a mob.
@@ -1290,6 +1334,49 @@ pub async fn mob_send_message(
         .mob_send_message(&id, mid, message.to_string())
         .await
         .map_err(err_mob)
+}
+
+/// Retire and re-spawn a meerkat with the same profile.
+///
+/// Returns JSON: `{ "meerkat_id", "status": "respawn_enqueued" }`
+#[wasm_bindgen]
+pub async fn mob_respawn(
+    mob_id: &str,
+    meerkat_id: &str,
+    initial_message: Option<String>,
+) -> Result<JsValue, JsValue> {
+    let mob_state = with_mob_state(Ok)?;
+    let id = MobId::from(mob_id);
+    let mid = MeerkatId::from(meerkat_id);
+    mob_state
+        .mob_respawn(&id, mid, initial_message)
+        .await
+        .map_err(err_mob)?;
+    let result = serde_json::json!({
+        "meerkat_id": meerkat_id,
+        "status": "respawn_enqueued",
+    });
+    Ok(JsValue::from_str(&result.to_string()))
+}
+
+/// Inject a message and subscribe for interaction-scoped events.
+///
+/// Returns JSON: `{ "interaction_id": "..." }`
+#[wasm_bindgen]
+pub async fn mob_inject_and_subscribe(
+    mob_id: &str,
+    meerkat_id: &str,
+    message: &str,
+) -> Result<JsValue, JsValue> {
+    let mob_state = with_mob_state(Ok)?;
+    let id = MobId::from(mob_id);
+    let mid = MeerkatId::from(meerkat_id);
+    let subscription = mob_state
+        .mob_inject_and_subscribe(&id, mid, message.to_string())
+        .await
+        .map_err(err_mob)?;
+    let result = serde_json::json!({ "interaction_id": subscription.id.to_string() });
+    Ok(JsValue::from_str(&result.to_string()))
 }
 
 /// Start a configured flow run.

@@ -1542,26 +1542,16 @@ async fn handle_meerkat_sessions(
         .list(query)
         .await
         .map_err(|e| format!("Failed to list sessions: {e}"))?;
-    let payload = json!({
-        "sessions": sessions.into_iter().map(|s| {
-            let mut entry = json!({
-                "session_id": s.session_id.to_string(),
-                "session_ref": meerkat_contracts::format_session_ref(&state.realm_id, &s.session_id),
-                "created_at": s.created_at,
-                "updated_at": s.updated_at,
-                "message_count": s.message_count,
-                "total_tokens": s.total_tokens,
-                "is_active": s.is_active
-            });
-            if !s.labels.is_empty()
-                && let Some(obj) = entry.as_object_mut()
-                && let Ok(labels_val) = serde_json::to_value(&s.labels)
-            {
-                obj.insert("labels".to_string(), labels_val);
-            }
-            entry
-        }).collect::<Vec<_>>()
-    });
+    let wire_sessions: Vec<meerkat_contracts::WireSessionSummary> = sessions
+        .into_iter()
+        .map(|s| {
+            let session_ref = meerkat_contracts::format_session_ref(&state.realm_id, &s.session_id);
+            let mut wire = meerkat_contracts::WireSessionSummary::from(s);
+            wire.session_ref = Some(session_ref);
+            wire
+        })
+        .collect();
+    let payload = json!({ "sessions": wire_sessions });
     Ok(wrap_tool_payload(payload))
 }
 

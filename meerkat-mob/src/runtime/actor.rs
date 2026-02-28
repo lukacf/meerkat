@@ -1104,16 +1104,16 @@ impl MobActor {
             }
 
             let external_tools = self.external_tools_for_profile(profile)?;
-            let mut config = build::build_agent_config(
-                &self.definition.id,
-                &profile_name,
-                &meerkat_id,
+            let mut config = build::build_agent_config(build::BuildAgentConfigParams {
+                mob_id: &self.definition.id,
+                profile_name: &profile_name,
+                meerkat_id: &meerkat_id,
                 profile,
-                &self.definition,
+                definition: &self.definition,
                 external_tools,
                 context,
-                labels.clone(),
-            )
+                labels: labels.clone(),
+            })
             .await?;
             if let Some(ref client) = self.default_llm_client {
                 config.llm_client_override = Some(client.clone());
@@ -2241,14 +2241,30 @@ impl MobActor {
                     let target_id = meerkat_id.clone();
                     self.lifecycle_tasks.spawn(async move {
                         if let Ok(Ok(_)) = spawn_reply_rx.await {
-                            let (reply_tx, _reply_rx) = oneshot::channel();
+                            let (reply_tx, reply_rx) = oneshot::channel();
                             let _ = command_tx
                                 .send(MobCommand::ExternalTurn {
-                                    meerkat_id: target_id,
+                                    meerkat_id: target_id.clone(),
                                     message,
                                     reply_tx,
                                 })
                                 .await;
+                            match reply_rx.await {
+                                Ok(Ok(())) => {}
+                                Ok(Err(e)) => {
+                                    tracing::error!(
+                                        meerkat_id = %target_id,
+                                        error = %e,
+                                        "deferred delivery after auto-spawn failed"
+                                    );
+                                }
+                                Err(_) => {
+                                    tracing::error!(
+                                        meerkat_id = %target_id,
+                                        "deferred delivery channel dropped before response"
+                                    );
+                                }
+                            }
                         }
                     });
                     return Ok(());

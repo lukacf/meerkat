@@ -431,16 +431,20 @@ impl MobBuilder {
                 .profiles
                 .get(&entry.profile)
                 .ok_or_else(|| MobError::ProfileNotFound(entry.profile.clone()))?;
-            let mut config = build::build_agent_config(
-                &definition.id,
-                &entry.profile,
-                &entry.meerkat_id,
+            let mut config = build::build_agent_config(build::BuildAgentConfigParams {
+                mob_id: &definition.id,
+                profile_name: &entry.profile,
+                meerkat_id: &entry.meerkat_id,
                 profile,
                 definition,
-                compose_external_tools_for_profile(profile, tool_bundles, tool_handle.clone())?,
-                None,
-                None,
-            )
+                external_tools: compose_external_tools_for_profile(
+                    profile,
+                    tool_bundles,
+                    tool_handle.clone(),
+                )?,
+                context: None,
+                labels: None,
+            })
             .await?;
             // Resume reconciliation needs live comms runtimes, but this path is
             // infrastructure restoration and should not consume provider quota.

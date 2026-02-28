@@ -94,10 +94,20 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
 fn extract_labels_from_metadata(
     metadata: &serde_json::Map<String, serde_json::Value>,
 ) -> BTreeMap<String, String> {
-    metadata
-        .get(SESSION_LABELS_KEY)
-        .and_then(|v| serde_json::from_value::<BTreeMap<String, String>>(v.clone()).ok())
-        .unwrap_or_default()
+    match metadata.get(SESSION_LABELS_KEY) {
+        Some(v) => match serde_json::from_value::<BTreeMap<String, String>>(v.clone()) {
+            Ok(labels) => labels,
+            Err(e) => {
+                tracing::warn!(
+                    key = SESSION_LABELS_KEY,
+                    error = %e,
+                    "failed to deserialize session labels from metadata"
+                );
+                BTreeMap::new()
+            }
+        },
+        None => BTreeMap::new(),
+    }
 }
 
 impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
@@ -117,6 +127,12 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         &self,
         mut req: CreateSessionRequest,
     ) -> Result<RunResult, SessionError> {
+        // Capture labels before req is consumed — labels live on the
+        // SessionHandle in the ephemeral service, but export_session()
+        // returns a raw Session without them. We inject labels into the
+        // persisted session's metadata so they survive restarts.
+        let req_labels = req.labels.clone();
+
         // Inject a checkpointer for all sessions — the agent only calls it
         // inside the host-mode loop, so non-host sessions pay zero cost.
         // This must be unconditional because mob agents create sessions with
@@ -149,6 +165,24 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         checkpointer
             .last_saved_len
             .store(saved_len, std::sync::atomic::Ordering::Release);
+
+        // Inject labels into the persisted session metadata so they survive
+        // restarts. Labels are stored on SessionHandle.labels in-memory but
+        // export_session() returns a raw Session without them.
+        if let Some(ref labels) = req_labels
+            && !labels.is_empty()
+            && let Ok(Some(mut session)) = self.store.load(&result.session_id).await
+            && let Ok(labels_value) = serde_json::to_value(labels)
+        {
+            session.set_metadata(SESSION_LABELS_KEY, labels_value);
+            if let Err(e) = self.store.save(&session).await {
+                tracing::warn!(
+                    session_id = %result.session_id,
+                    error = %e,
+                    "failed to persist session labels"
+                );
+            }
+        }
 
         Ok(result)
     }

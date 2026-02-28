@@ -1319,20 +1319,22 @@ async fn create_session(
 
 /// Parse repeatable `label` query params into a `BTreeMap`.
 ///
-/// Each param is expected as `key=value`. Params without `=` are silently skipped.
-fn parse_label_filters(raw: Option<Vec<String>>) -> Option<BTreeMap<String, String>> {
-    let labels = raw?;
-    if labels.is_empty() {
-        return None;
+/// Each param is expected as `key=value`. Returns an error for params without `=`.
+fn parse_label_filters(
+    raw: Option<Vec<String>>,
+) -> Result<Option<BTreeMap<String, String>>, String> {
+    let labels = match raw {
+        Some(l) if !l.is_empty() => l,
+        _ => return Ok(None),
+    };
+    let mut map = BTreeMap::new();
+    for s in labels {
+        let (k, v) = s
+            .split_once('=')
+            .ok_or_else(|| format!("malformed label filter, expected key=value: {s}"))?;
+        map.insert(k.to_string(), v.to_string());
     }
-    let map: BTreeMap<String, String> = labels
-        .into_iter()
-        .filter_map(|s| {
-            let (k, v) = s.split_once('=')?;
-            Some((k.to_string(), v.to_string()))
-        })
-        .collect();
-    if map.is_empty() { None } else { Some(map) }
+    Ok(if map.is_empty() { None } else { Some(map) })
 }
 
 /// List sessions in the active realm.
@@ -1340,7 +1342,7 @@ async fn list_sessions(
     State(state): State<AppState>,
     Query(query): Query<ListSessionsQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let label_filters = parse_label_filters(query.label);
+    let label_filters = parse_label_filters(query.label).map_err(ApiError::BadRequest)?;
 
     let sessions = state
         .session_service

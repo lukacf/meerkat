@@ -13,6 +13,18 @@ use meerkat_core::PeerMeta;
 use meerkat_core::service::CreateSessionRequest;
 use std::sync::Arc;
 
+/// Parameters for building an agent config from a mob profile.
+pub struct BuildAgentConfigParams<'a> {
+    pub mob_id: &'a MobId,
+    pub profile_name: &'a ProfileName,
+    pub meerkat_id: &'a MeerkatId,
+    pub profile: &'a Profile,
+    pub definition: &'a MobDefinition,
+    pub external_tools: Option<Arc<dyn meerkat_core::AgentToolDispatcher>>,
+    pub context: Option<serde_json::Value>,
+    pub labels: Option<std::collections::BTreeMap<String, String>>,
+}
+
 /// Build an [`AgentBuildConfig`] from a mob profile.
 ///
 /// This is the first step in the construction chain:
@@ -21,17 +33,20 @@ use std::sync::Arc;
 /// Mob-managed sessions are created with `host_mode=false` so spawn returns
 /// promptly from nested tool dispatch paths. Lifecycles are managed explicitly
 /// by mob runtime commands (`start_turn`, `retire`, etc.).
-#[allow(clippy::too_many_arguments)]
 pub async fn build_agent_config(
-    mob_id: &MobId,
-    profile_name: &ProfileName,
-    meerkat_id: &MeerkatId,
-    profile: &Profile,
-    definition: &MobDefinition,
-    external_tools: Option<Arc<dyn meerkat_core::AgentToolDispatcher>>,
-    context: Option<serde_json::Value>,
-    labels: Option<std::collections::BTreeMap<String, String>>,
+    params: BuildAgentConfigParams<'_>,
 ) -> Result<AgentBuildConfig, MobError> {
+    let BuildAgentConfigParams {
+        mob_id,
+        profile_name,
+        meerkat_id,
+        profile,
+        definition,
+        external_tools,
+        context,
+        labels,
+    } = params;
+
     if !profile.tools.comms {
         return Err(MobError::WiringError(format!(
             "profile '{profile_name}' has tools.comms=false; mob meerkats require comms=true"
@@ -274,16 +289,16 @@ mod tests {
     async fn test_build_agent_config_non_host_mode() {
         let def = sample_definition();
         let profile = &def.profiles[&ProfileName::from("lead")];
-        let config = build_agent_config(
-            &def.id,
-            &ProfileName::from("lead"),
-            &MeerkatId::from("lead-1"),
+        let config = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &ProfileName::from("lead"),
+            meerkat_id: &MeerkatId::from("lead-1"),
             profile,
-            &def,
-            None,
-            None,
-            None,
-        )
+            definition: &def,
+            external_tools: None,
+            context: None,
+            labels: None,
+        })
         .await
         .expect("build_agent_config");
 
@@ -294,16 +309,16 @@ mod tests {
     async fn test_build_agent_config_comms_name() {
         let def = sample_definition();
         let profile = &def.profiles[&ProfileName::from("lead")];
-        let config = build_agent_config(
-            &def.id,
-            &ProfileName::from("lead"),
-            &MeerkatId::from("lead-1"),
+        let config = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &ProfileName::from("lead"),
+            meerkat_id: &MeerkatId::from("lead-1"),
             profile,
-            &def,
-            None,
-            None,
-            None,
-        )
+            definition: &def,
+            external_tools: None,
+            context: None,
+            labels: None,
+        })
         .await
         .expect("build_agent_config");
 
@@ -318,16 +333,16 @@ mod tests {
     async fn test_build_agent_config_peer_meta_labels() {
         let def = sample_definition();
         let profile = &def.profiles[&ProfileName::from("worker")];
-        let config = build_agent_config(
-            &def.id,
-            &ProfileName::from("worker"),
-            &MeerkatId::from("w-1"),
+        let config = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &ProfileName::from("worker"),
+            meerkat_id: &MeerkatId::from("w-1"),
             profile,
-            &def,
-            None,
-            None,
-            None,
-        )
+            definition: &def,
+            external_tools: None,
+            context: None,
+            labels: None,
+        })
         .await
         .expect("build_agent_config");
 
@@ -348,16 +363,16 @@ mod tests {
     async fn test_build_agent_config_realm_id() {
         let def = sample_definition();
         let profile = &def.profiles[&ProfileName::from("lead")];
-        let config = build_agent_config(
-            &def.id,
-            &ProfileName::from("lead"),
-            &MeerkatId::from("lead-1"),
+        let config = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &ProfileName::from("lead"),
+            meerkat_id: &MeerkatId::from("lead-1"),
             profile,
-            &def,
-            None,
-            None,
-            None,
-        )
+            definition: &def,
+            external_tools: None,
+            context: None,
+            labels: None,
+        })
         .await
         .expect("build_agent_config");
 
@@ -374,16 +389,16 @@ mod tests {
 
         // Lead profile has builtins=true, shell=true, memory=false
         let lead = &def.profiles[&ProfileName::from("lead")];
-        let config = build_agent_config(
-            &def.id,
-            &ProfileName::from("lead"),
-            &MeerkatId::from("lead-1"),
-            lead,
-            &def,
-            None,
-            None,
-            None,
-        )
+        let config = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &ProfileName::from("lead"),
+            meerkat_id: &MeerkatId::from("lead-1"),
+            profile: lead,
+            definition: &def,
+            external_tools: None,
+            context: None,
+            labels: None,
+        })
         .await
         .expect("build_agent_config");
         assert_eq!(config.override_builtins, Some(true));
@@ -393,16 +408,16 @@ mod tests {
 
         // Worker profile has builtins=true, shell=false, memory=false
         let worker = &def.profiles[&ProfileName::from("worker")];
-        let config = build_agent_config(
-            &def.id,
-            &ProfileName::from("worker"),
-            &MeerkatId::from("w-1"),
-            worker,
-            &def,
-            None,
-            None,
-            None,
-        )
+        let config = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &ProfileName::from("worker"),
+            meerkat_id: &MeerkatId::from("w-1"),
+            profile: worker,
+            definition: &def,
+            external_tools: None,
+            context: None,
+            labels: None,
+        })
         .await
         .expect("build_agent_config");
         assert_eq!(config.override_builtins, Some(true));
@@ -423,16 +438,16 @@ mod tests {
             .get(&ProfileName::from("worker"))
             .expect("worker profile");
 
-        let result = build_agent_config(
-            &def.id,
-            &ProfileName::from("worker"),
-            &MeerkatId::from("w-1"),
-            worker,
-            &def,
-            None,
-            None,
-            None,
-        )
+        let result = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &ProfileName::from("worker"),
+            meerkat_id: &MeerkatId::from("w-1"),
+            profile: worker,
+            definition: &def,
+            external_tools: None,
+            context: None,
+            labels: None,
+        })
         .await;
         assert!(
             matches!(result, Err(MobError::WiringError(_))),
@@ -444,16 +459,16 @@ mod tests {
     async fn test_build_agent_config_system_prompt_includes_skills() {
         let def = sample_definition();
         let lead = &def.profiles[&ProfileName::from("lead")];
-        let config = build_agent_config(
-            &def.id,
-            &ProfileName::from("lead"),
-            &MeerkatId::from("lead-1"),
-            lead,
-            &def,
-            None,
-            None,
-            None,
-        )
+        let config = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &ProfileName::from("lead"),
+            meerkat_id: &MeerkatId::from("lead-1"),
+            profile: lead,
+            definition: &def,
+            external_tools: None,
+            context: None,
+            labels: None,
+        })
         .await
         .expect("build_agent_config");
 
@@ -471,16 +486,16 @@ mod tests {
     async fn test_build_agent_config_preloads_mob_communication_skill() {
         let def = sample_definition();
         let lead = &def.profiles[&ProfileName::from("lead")];
-        let config = build_agent_config(
-            &def.id,
-            &ProfileName::from("lead"),
-            &MeerkatId::from("lead-1"),
-            lead,
-            &def,
-            None,
-            None,
-            None,
-        )
+        let config = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &ProfileName::from("lead"),
+            meerkat_id: &MeerkatId::from("lead-1"),
+            profile: lead,
+            definition: &def,
+            external_tools: None,
+            context: None,
+            labels: None,
+        })
         .await
         .expect("build_agent_config");
 
@@ -498,16 +513,16 @@ mod tests {
     async fn test_build_agent_config_sets_silent_comms_intents() {
         let def = sample_definition();
         let lead = &def.profiles[&ProfileName::from("lead")];
-        let config = build_agent_config(
-            &def.id,
-            &ProfileName::from("lead"),
-            &MeerkatId::from("lead-1"),
-            lead,
-            &def,
-            None,
-            None,
-            None,
-        )
+        let config = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &ProfileName::from("lead"),
+            meerkat_id: &MeerkatId::from("lead-1"),
+            profile: lead,
+            definition: &def,
+            external_tools: None,
+            context: None,
+            labels: None,
+        })
         .await
         .expect("build_agent_config");
 
@@ -535,16 +550,16 @@ mod tests {
             .expect("lead profile")
             .max_inline_peer_notifications = Some(15);
         let lead = &def.profiles[&lead_key];
-        let config = build_agent_config(
-            &def.id,
-            &lead_key,
-            &MeerkatId::from("lead-1"),
-            lead,
-            &def,
-            None,
-            None,
-            None,
-        )
+        let config = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &lead_key,
+            meerkat_id: &MeerkatId::from("lead-1"),
+            profile: lead,
+            definition: &def,
+            external_tools: None,
+            context: None,
+            labels: None,
+        })
         .await
         .expect("build_agent_config");
 
@@ -555,16 +570,16 @@ mod tests {
     async fn test_build_agent_config_model() {
         let def = sample_definition();
         let lead = &def.profiles[&ProfileName::from("lead")];
-        let config = build_agent_config(
-            &def.id,
-            &ProfileName::from("lead"),
-            &MeerkatId::from("lead-1"),
-            lead,
-            &def,
-            None,
-            None,
-            None,
-        )
+        let config = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &ProfileName::from("lead"),
+            meerkat_id: &MeerkatId::from("lead-1"),
+            profile: lead,
+            definition: &def,
+            external_tools: None,
+            context: None,
+            labels: None,
+        })
         .await
         .expect("build_agent_config");
 
@@ -575,16 +590,16 @@ mod tests {
     async fn test_to_create_session_request() {
         let def = sample_definition();
         let lead = &def.profiles[&ProfileName::from("lead")];
-        let config = build_agent_config(
-            &def.id,
-            &ProfileName::from("lead"),
-            &MeerkatId::from("lead-1"),
-            lead,
-            &def,
-            None,
-            None,
-            None,
-        )
+        let config = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &ProfileName::from("lead"),
+            meerkat_id: &MeerkatId::from("lead-1"),
+            profile: lead,
+            definition: &def,
+            external_tools: None,
+            context: None,
+            labels: None,
+        })
         .await
         .expect("build_agent_config");
 
@@ -607,16 +622,16 @@ mod tests {
     async fn test_to_create_session_request_worker() {
         let def = sample_definition();
         let worker = &def.profiles[&ProfileName::from("worker")];
-        let config = build_agent_config(
-            &def.id,
-            &ProfileName::from("worker"),
-            &MeerkatId::from("w-1"),
-            worker,
-            &def,
-            None,
-            None,
-            None,
-        )
+        let config = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &ProfileName::from("worker"),
+            meerkat_id: &MeerkatId::from("w-1"),
+            profile: worker,
+            definition: &def,
+            external_tools: None,
+            context: None,
+            labels: None,
+        })
         .await
         .expect("build_agent_config");
 
@@ -650,16 +665,16 @@ mod tests {
             .get(&ProfileName::from("lead"))
             .expect("lead profile");
 
-        let config = build_agent_config(
-            &def.id,
-            &ProfileName::from("lead"),
-            &MeerkatId::from("lead-1"),
-            lead,
-            &def,
-            None,
-            None,
-            None,
-        )
+        let config = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &ProfileName::from("lead"),
+            meerkat_id: &MeerkatId::from("lead-1"),
+            profile: lead,
+            definition: &def,
+            external_tools: None,
+            context: None,
+            labels: None,
+        })
         .await
         .expect("build_agent_config should resolve path skill");
 
@@ -691,16 +706,16 @@ mod tests {
             .get(&ProfileName::from("lead"))
             .expect("lead profile");
 
-        let err = build_agent_config(
-            &def.id,
-            &ProfileName::from("lead"),
-            &MeerkatId::from("lead-1"),
-            lead,
-            &def,
-            None,
-            None,
-            None,
-        )
+        let err = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &ProfileName::from("lead"),
+            meerkat_id: &MeerkatId::from("lead-1"),
+            profile: lead,
+            definition: &def,
+            external_tools: None,
+            context: None,
+            labels: None,
+        })
         .await
         .expect_err("missing path skill should fail");
 
@@ -718,16 +733,16 @@ mod tests {
         let def = sample_definition();
         let lead = &def.profiles[&ProfileName::from("lead")];
         let ctx = serde_json::json!({"key": "val"});
-        let config = build_agent_config(
-            &def.id,
-            &ProfileName::from("lead"),
-            &MeerkatId::from("lead-1"),
-            lead,
-            &def,
-            None,
-            Some(ctx.clone()),
-            None,
-        )
+        let config = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &ProfileName::from("lead"),
+            meerkat_id: &MeerkatId::from("lead-1"),
+            profile: lead,
+            definition: &def,
+            external_tools: None,
+            context: Some(ctx.clone()),
+            labels: None,
+        })
         .await
         .expect("build_agent_config");
 
@@ -742,16 +757,16 @@ mod tests {
     async fn test_build_agent_config_none_context() {
         let def = sample_definition();
         let lead = &def.profiles[&ProfileName::from("lead")];
-        let config = build_agent_config(
-            &def.id,
-            &ProfileName::from("lead"),
-            &MeerkatId::from("lead-1"),
-            lead,
-            &def,
-            None,
-            None,
-            None,
-        )
+        let config = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &ProfileName::from("lead"),
+            meerkat_id: &MeerkatId::from("lead-1"),
+            profile: lead,
+            definition: &def,
+            external_tools: None,
+            context: None,
+            labels: None,
+        })
         .await
         .expect("build_agent_config");
 
@@ -770,16 +785,16 @@ mod tests {
         // Attempt to override mob_id should be overwritten
         app_labels.insert("mob_id".to_string(), "sneaky-override".to_string());
 
-        let config = build_agent_config(
-            &def.id,
-            &ProfileName::from("worker"),
-            &MeerkatId::from("w-1"),
-            worker,
-            &def,
-            None,
-            None,
-            Some(app_labels),
-        )
+        let config = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &ProfileName::from("worker"),
+            meerkat_id: &MeerkatId::from("w-1"),
+            profile: worker,
+            definition: &def,
+            external_tools: None,
+            context: None,
+            labels: Some(app_labels),
+        })
         .await
         .expect("build_agent_config");
 

@@ -593,7 +593,7 @@ impl MobMcpDispatcher {
                                     "runtime_mode":{"type":"string","enum":["autonomous_host","turn_driven"]},
                                     "resume_session_id":{"type":"string"},
                                     "labels":{"type":"object","additionalProperties":{"type":"string"}},
-                                    "context":{}
+                                    "context":{"type":"object"}
                                 },
                                 "required":["profile","meerkat_id"]
                             }

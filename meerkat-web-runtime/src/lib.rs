@@ -36,6 +36,12 @@
 //! - `mob_flow_status(mob_id, run_id)` → JSON
 //! - `mob_cancel_flow(mob_id, run_id)`
 //!
+//! ### Event Streaming
+//! - `mob_member_subscribe(mob_id, meerkat_id)` → handle (per-member)
+//! - `mob_subscribe_events(mob_id)` → handle (mob-wide)
+//! - `poll_subscription(handle)` → JSON events
+//! - `close_subscription(handle)`
+//!
 //! ### Comms (placeholder)
 //! - `comms_peers(session_id)` → JSON
 //! - `comms_send(session_id, params_json)` → JSON
@@ -1117,9 +1123,18 @@ pub async fn mob_spawn(mob_id: &str, specs_json: &str) -> Result<JsValue, JsValu
     let specs: Vec<SpawnSpecInput> =
         serde_json::from_str(specs_json).map_err(|e| err_str("invalid_specs", e))?;
 
-    let spawn_specs: Vec<meerkat_mob::SpawnMemberSpec> = specs
-        .into_iter()
-        .map(|s| meerkat_mob::SpawnMemberSpec {
+    let mut spawn_specs = Vec::with_capacity(specs.len());
+    for s in specs {
+        let resume_session_id = match s.resume_session_id {
+            Some(id) => Some(meerkat_core::SessionId::parse(&id).map_err(|_| {
+                err_js(
+                    "invalid_resume_session_id",
+                    &format!("invalid session ID: {id}"),
+                )
+            })?),
+            None => None,
+        };
+        spawn_specs.push(meerkat_mob::SpawnMemberSpec {
             profile_name: meerkat_mob::ProfileName::from(s.profile.as_str()),
             meerkat_id: MeerkatId::from(s.meerkat_id.as_str()),
             initial_message: s.initial_message,
@@ -1127,12 +1142,9 @@ pub async fn mob_spawn(mob_id: &str, specs_json: &str) -> Result<JsValue, JsValu
             backend: s.backend,
             context: s.context,
             labels: s.labels,
-            resume_session_id: s.resume_session_id.map(|id| {
-                meerkat_core::SessionId::parse(&id)
-                    .unwrap_or_else(|_| meerkat_core::SessionId::new())
-            }),
-        })
-        .collect();
+            resume_session_id,
+        });
+    }
 
     let results = mob_state
         .mob_spawn_many(&id, spawn_specs)
@@ -1438,16 +1450,18 @@ pub async fn mob_cancel_flow(mob_id: &str, run_id: &str) -> Result<(), JsValue> 
 // Event Streaming — subscribe to individual meerkat sessions
 // ═══════════════════════════════════════════════════════════
 
-/// Per-subscription state: raw broadcast receiver for synchronous try_recv.
-///
-/// On wasm32, the broadcast channel is from the real `tokio` crate (not
-/// tokio_with_wasm) since `tokio::sync` is platform-independent. The
-/// `EphemeralSessionService` creates the broadcast channel from the real
-/// tokio sync primitives.
+/// Subscription inner type: per-member broadcast or mob-wide mpsc.
+enum SubscriptionInner {
+    /// Per-member session broadcast receiver.
+    Member(std::cell::RefCell<meerkat_session::BroadcastEventReceiver>),
+    /// Mob-wide attributed event receiver from the event router.
+    /// The entire handle is stored to keep the router task alive (Drop cancels it).
+    MobWide(std::cell::RefCell<meerkat_mob::MobEventRouterHandle>),
+}
+
+/// Per-subscription state wrapping the inner receiver.
 struct EventSubscription {
-    /// Raw broadcast receiver — polled with try_recv() in poll_subscription.
-    /// RefCell because poll_subscription takes &self but try_recv needs &mut.
-    rx: std::cell::RefCell<meerkat_session::BroadcastEventReceiver>,
+    inner: SubscriptionInner,
 }
 
 #[derive(Default)]
@@ -1531,7 +1545,46 @@ pub async fn mob_member_subscribe(mob_id: &str, meerkat_id: &str) -> Result<u32,
         registry.subscriptions.insert(
             h,
             EventSubscription {
-                rx: std::cell::RefCell::new(raw_rx),
+                inner: SubscriptionInner::Member(std::cell::RefCell::new(raw_rx)),
+            },
+        );
+        h
+    });
+
+    Ok(handle)
+}
+
+/// Subscribe to mob-wide events (all members, continuously updated).
+///
+/// Returns a subscription handle. Use `poll_subscription(handle)` to drain
+/// buffered events. Each call returns all events since the last poll.
+///
+/// Unlike `mob_member_subscribe` which streams a single member's agent events,
+/// this streams [`AttributedEvent`]s tagged with source meerkat_id and profile
+/// for every member in the mob, automatically tracking roster changes.
+#[wasm_bindgen]
+pub async fn mob_subscribe_events(mob_id: &str) -> Result<u32, JsValue> {
+    let mob_state = with_mob_state(Ok)?;
+    let mob_id_typed = MobId::from(mob_id);
+
+    let router_handle = mob_state
+        .subscribe_mob_events(&mob_id_typed)
+        .await
+        .map_err(err_mob)?;
+
+    let handle = SUBSCRIPTIONS.with(|cell| {
+        let mut registry = cell.borrow_mut();
+        let h = registry.next_handle;
+        registry.next_handle = registry.next_handle.wrapping_add(1);
+        while registry.next_handle == 0
+            || registry.subscriptions.contains_key(&registry.next_handle)
+        {
+            registry.next_handle = registry.next_handle.wrapping_add(1);
+        }
+        registry.subscriptions.insert(
+            h,
+            EventSubscription {
+                inner: SubscriptionInner::MobWide(std::cell::RefCell::new(router_handle)),
             },
         );
         h
@@ -1542,8 +1595,13 @@ pub async fn mob_member_subscribe(mob_id: &str, meerkat_id: &str) -> Result<u32,
 
 /// Poll a subscription for new events.
 ///
-/// Returns a JSON array of `AgentEvent` objects. Drains all buffered events
+/// Returns a JSON array of event objects. Drains all buffered events
 /// since the last poll. Non-blocking: returns `[]` if no new events.
+///
+/// For per-member subscriptions (`mob_member_subscribe`), returns
+/// `EventEnvelope<AgentEvent>` objects. For mob-wide subscriptions
+/// (`mob_subscribe_events`), returns `AttributedEvent` objects with
+/// `source`, `profile`, and `envelope` fields.
 #[wasm_bindgen]
 pub fn poll_subscription(handle: u32) -> Result<String, JsValue> {
     SUBSCRIPTIONS.with(|cell| {
@@ -1555,21 +1613,35 @@ pub fn poll_subscription(handle: u32) -> Result<String, JsValue> {
             )
         })?;
 
-        // Drain all available events via synchronous try_recv.
-        use crate::tokio::sync::broadcast::error::TryRecvError;
         let mut events: Vec<serde_json::Value> = Vec::new();
-        let mut rx = sub.rx.borrow_mut();
-        loop {
-            match rx.try_recv() {
-                Ok(event) => match serde_json::to_value(&event) {
-                    Ok(val) => events.push(val),
-                    Err(e) => tracing::warn!(error = %e, "failed to serialize agent event"),
-                },
-                Err(TryRecvError::Lagged(n)) => {
-                    tracing::warn!(skipped = n, "subscription lagged");
-                    continue;
+        match &sub.inner {
+            SubscriptionInner::Member(rx_cell) => {
+                use crate::tokio::sync::broadcast::error::TryRecvError;
+                let mut rx = rx_cell.borrow_mut();
+                loop {
+                    match rx.try_recv() {
+                        Ok(event) => match serde_json::to_value(&event) {
+                            Ok(val) => events.push(val),
+                            Err(e) => tracing::warn!(error = %e, "failed to serialize agent event"),
+                        },
+                        Err(TryRecvError::Lagged(n)) => {
+                            tracing::warn!(skipped = n, "subscription lagged");
+                            continue;
+                        }
+                        Err(TryRecvError::Empty | TryRecvError::Closed) => break,
+                    }
                 }
-                Err(TryRecvError::Empty | TryRecvError::Closed) => break,
+            }
+            SubscriptionInner::MobWide(handle_cell) => {
+                let mut router_handle = handle_cell.borrow_mut();
+                while let Ok(attributed) = router_handle.event_rx.try_recv() {
+                    match serde_json::to_value(&attributed) {
+                        Ok(val) => events.push(val),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "failed to serialize attributed event");
+                        }
+                    }
+                }
             }
         }
         serde_json::to_string(&events).map_err(|e| err_str("serialize_error", e))

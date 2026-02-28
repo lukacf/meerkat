@@ -50,6 +50,8 @@ pub fn handle_initialize(id: Option<RpcId>) -> RpcResponse {
                 m.push("mob/prefabs".to_string());
                 m.push("mob/tools".to_string());
                 m.push("mob/call".to_string());
+                m.push("mob/stream_open".to_string());
+                m.push("mob/stream_close".to_string());
             }
             #[cfg(feature = "mcp")]
             {

@@ -1124,6 +1124,13 @@ enum MobCommands {
     },
     /// Show JSON status for a flow run.
     FlowStatus { mob_id: String, run_id: String },
+    /// Stream mob events to stdout as JSON lines.
+    Events {
+        mob_id: String,
+        /// Stream events for a specific member only.
+        #[arg(long)]
+        member: Option<String>,
+    },
     /// Destroy a mob.
     Destroy { mob_id: String },
     /// Web deployment commands.
@@ -5320,6 +5327,53 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
             save_mob_registry(scope, &registry).await?;
             println!("{}", render_flow_status_json(resolved)?);
+            Ok(())
+        }
+        MobCommands::Events { mob_id, member } => {
+            use futures::StreamExt;
+            let mob_id_typed = meerkat_mob::MobId::from(mob_id.as_str());
+            if let Some(member_id) = member {
+                let meerkat_id = meerkat_mob::MeerkatId::from(member_id.as_str());
+                let mut stream = state
+                    .subscribe_agent_events(&mob_id_typed, &meerkat_id)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                loop {
+                    tokio::select! {
+                        item = stream.next() => {
+                            match item {
+                                Some(envelope) => {
+                                    let json = serde_json::to_string(&envelope)
+                                        .map_err(|e| anyhow::anyhow!("serialize error: {e}"))?;
+                                    println!("{json}");
+                                }
+                                None => break,
+                            }
+                        }
+                        _ = tokio::signal::ctrl_c() => break,
+                    }
+                }
+            } else {
+                let mut router_handle = state
+                    .subscribe_mob_events(&mob_id_typed)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                loop {
+                    tokio::select! {
+                        item = router_handle.event_rx.recv() => {
+                            match item {
+                                Some(attributed) => {
+                                    let json = serde_json::to_string(&attributed)
+                                        .map_err(|e| anyhow::anyhow!("serialize error: {e}"))?;
+                                    println!("{json}");
+                                }
+                                None => break,
+                            }
+                        }
+                        _ = tokio::signal::ctrl_c() => break,
+                    }
+                }
+            }
             Ok(())
         }
         MobCommands::Destroy { mob_id } => {

@@ -358,6 +358,8 @@ pub struct MeerkatMcpState {
     mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
     mcp_adapters: Arc<Mutex<HashMap<String, Arc<meerkat_mcp::McpRouterAdapter>>>>,
     session_event_streams: Arc<Mutex<HashMap<String, Arc<SessionEventStreamHandle>>>>,
+    #[cfg(feature = "mob")]
+    mob_event_streams: Arc<Mutex<HashMap<String, Arc<MobEventStreamInner>>>>,
     #[cfg(feature = "comms")]
     comms_streams: Arc<Mutex<HashMap<String, Arc<CommsStreamHandle>>>>,
     _realm_lease: Option<meerkat_store::RealmLeaseGuard>,
@@ -365,6 +367,14 @@ pub struct MeerkatMcpState {
 
 struct SessionEventStreamHandle {
     stream: Mutex<meerkat_core::EventStream>,
+}
+
+#[cfg(feature = "mob")]
+enum MobEventStreamInner {
+    /// Per-member agent event stream.
+    Member(Mutex<meerkat_core::comms::EventStream>),
+    /// Mob-wide attributed event stream.
+    MobWide(Mutex<meerkat_mob::MobEventRouterHandle>),
 }
 
 #[cfg(feature = "comms")]
@@ -469,6 +479,8 @@ impl MeerkatMcpState {
             mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
             mcp_adapters: Arc::new(Mutex::new(HashMap::new())),
             session_event_streams: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(feature = "mob")]
+            mob_event_streams: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(feature = "comms")]
             comms_streams: Arc::new(Mutex::new(HashMap::new())),
             _realm_lease: Some(lease),
@@ -535,6 +547,8 @@ impl MeerkatMcpState {
             mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
             mcp_adapters: Arc::new(Mutex::new(HashMap::new())),
             session_event_streams: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(feature = "mob")]
+            mob_event_streams: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(feature = "comms")]
             comms_streams: Arc::new(Mutex::new(HashMap::new())),
             _realm_lease: None,
@@ -751,6 +765,31 @@ pub struct MeerkatSessionEventStreamReadInput {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MeerkatSessionEventStreamCloseInput {
+    pub stream_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MeerkatMobEventStreamOpenInput {
+    /// The mob to subscribe to.
+    pub mob_id: String,
+    /// Optional member ID. If provided, subscribes to that member's agent events only.
+    /// If absent, subscribes to all mob-wide attributed events.
+    #[serde(default)]
+    pub member_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MeerkatMobEventStreamReadInput {
+    pub stream_id: String,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    /// Disable timeout and wait indefinitely for the next event.
+    #[serde(default)]
+    pub no_timeout: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MeerkatMobEventStreamCloseInput {
     pub stream_id: String,
 }
 
@@ -1038,6 +1077,27 @@ fn base_tools_list() -> Vec<Value> {
     ]
 }
 
+#[cfg(feature = "mob")]
+fn mob_event_stream_tools_list() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "meerkat_mob_event_stream_open",
+            "description": "Open a mob-level event stream. If member_id is provided, streams that member's agent events. Otherwise streams all mob-wide attributed events.",
+            "inputSchema": meerkat_tools::schema_for::<MeerkatMobEventStreamOpenInput>()
+        }),
+        json!({
+            "name": "meerkat_mob_event_stream_read",
+            "description": "Read the next event from an open mob event stream (optional timeout).",
+            "inputSchema": meerkat_tools::schema_for::<MeerkatMobEventStreamReadInput>()
+        }),
+        json!({
+            "name": "meerkat_mob_event_stream_close",
+            "description": "Close a previously opened mob event stream.",
+            "inputSchema": meerkat_tools::schema_for::<MeerkatMobEventStreamCloseInput>()
+        }),
+    ]
+}
+
 #[cfg(feature = "comms")]
 fn comms_tools_list() -> Vec<Value> {
     vec![
@@ -1075,6 +1135,9 @@ pub fn tools_list() -> Vec<Value> {
 
     #[cfg(feature = "mob")]
     tools.extend(meerkat_mob_mcp::tools_list());
+
+    #[cfg(feature = "mob")]
+    tools.extend(mob_event_stream_tools_list());
 
     #[cfg(not(feature = "mob"))]
     tools.retain(|tool| tool["name"] != "meerkat_mob_prefabs");
@@ -1228,6 +1291,34 @@ pub async fn handle_tools_call_with_notifier(
                     ToolCallError::invalid_params(format!("Invalid arguments: {e}"))
                 })?;
             handle_meerkat_event_stream_close(state, input)
+                .await
+                .map_err(ToolCallError::internal)
+        }
+        #[cfg(feature = "mob")]
+        "meerkat_mob_event_stream_open" => {
+            let input: MeerkatMobEventStreamOpenInput = serde_json::from_value(arguments.clone())
+                .map_err(|e| {
+                ToolCallError::invalid_params(format!("Invalid arguments: {e}"))
+            })?;
+            handle_meerkat_mob_event_stream_open(state, input)
+                .await
+                .map_err(ToolCallError::internal)
+        }
+        #[cfg(feature = "mob")]
+        "meerkat_mob_event_stream_read" => {
+            let input: MeerkatMobEventStreamReadInput = serde_json::from_value(arguments.clone())
+                .map_err(|e| {
+                ToolCallError::invalid_params(format!("Invalid arguments: {e}"))
+            })?;
+            handle_meerkat_mob_event_stream_read(state, input)
+                .await
+                .map_err(ToolCallError::internal)
+        }
+        #[cfg(feature = "mob")]
+        "meerkat_mob_event_stream_close" => {
+            let input: MeerkatMobEventStreamCloseInput = serde_json::from_value(arguments.clone())
+                .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
+            handle_meerkat_mob_event_stream_close(state, input)
                 .await
                 .map_err(ToolCallError::internal)
         }
@@ -1762,6 +1853,175 @@ async fn handle_meerkat_event_stream_close(
 ) -> Result<Value, String> {
     let removed = state
         .session_event_streams
+        .lock()
+        .await
+        .remove(&input.stream_id);
+    Ok(wrap_tool_payload(json!({
+        "stream_id": input.stream_id,
+        "closed": removed.is_some()
+    })))
+}
+
+#[cfg(feature = "mob")]
+async fn handle_meerkat_mob_event_stream_open(
+    state: &MeerkatMcpState,
+    input: MeerkatMobEventStreamOpenInput,
+) -> Result<Value, String> {
+    let mob_id = meerkat_mob::MobId::from(input.mob_id.as_str());
+    let stream_id = meerkat::SessionId::new().to_string();
+
+    let inner = if let Some(member_id) = &input.member_id {
+        let meerkat_id = meerkat_mob::MeerkatId::from(member_id.as_str());
+        let stream = state
+            .mob_state
+            .subscribe_agent_events(&mob_id, &meerkat_id)
+            .await
+            .map_err(|e| format!("Failed to subscribe to member events: {e}"))?;
+        MobEventStreamInner::Member(Mutex::new(stream))
+    } else {
+        let router_handle = state
+            .mob_state
+            .subscribe_mob_events(&mob_id)
+            .await
+            .map_err(|e| format!("Failed to subscribe to mob events: {e}"))?;
+        MobEventStreamInner::MobWide(Mutex::new(router_handle))
+    };
+
+    state
+        .mob_event_streams
+        .lock()
+        .await
+        .insert(stream_id.clone(), Arc::new(inner));
+
+    Ok(wrap_tool_payload(json!({
+        "stream_id": stream_id,
+        "mob_id": input.mob_id,
+        "member_id": input.member_id,
+    })))
+}
+
+#[cfg(feature = "mob")]
+async fn handle_meerkat_mob_event_stream_read(
+    state: &MeerkatMcpState,
+    input: MeerkatMobEventStreamReadInput,
+) -> Result<Value, String> {
+    let handle = state
+        .mob_event_streams
+        .lock()
+        .await
+        .get(&input.stream_id)
+        .cloned()
+        .ok_or_else(|| format!("Mob event stream not found: {}", input.stream_id))?;
+
+    let timeout_ms = if input.no_timeout {
+        None
+    } else {
+        Some(input.timeout_ms.unwrap_or(DEFAULT_STREAM_READ_TIMEOUT_MS))
+    };
+
+    match handle.as_ref() {
+        MobEventStreamInner::Member(stream_mutex) => {
+            let next_event = {
+                let mut stream = stream_mutex.lock().await;
+                match timeout_ms {
+                    None => stream.next().await,
+                    Some(ms) => {
+                        match tokio::time::timeout(
+                            std::time::Duration::from_millis(ms),
+                            stream.next(),
+                        )
+                        .await
+                        {
+                            Ok(item) => item,
+                            Err(_) => {
+                                return Ok(wrap_tool_payload(json!({
+                                    "stream_id": input.stream_id,
+                                    "status": "timeout"
+                                })));
+                            }
+                        }
+                    }
+                }
+            };
+            match next_event {
+                Some(envelope) => {
+                    let event_json = serde_json::to_value(&envelope)
+                        .map_err(|e| format!("Failed to serialize event: {e}"))?;
+                    Ok(wrap_tool_payload(json!({
+                        "stream_id": input.stream_id,
+                        "status": "event",
+                        "event": event_json
+                    })))
+                }
+                None => {
+                    state
+                        .mob_event_streams
+                        .lock()
+                        .await
+                        .remove(&input.stream_id);
+                    Ok(wrap_tool_payload(json!({
+                        "stream_id": input.stream_id,
+                        "status": "closed"
+                    })))
+                }
+            }
+        }
+        MobEventStreamInner::MobWide(router_mutex) => {
+            let next_event = {
+                let mut router_handle = router_mutex.lock().await;
+                match timeout_ms {
+                    None => router_handle.event_rx.recv().await,
+                    Some(ms) => {
+                        match tokio::time::timeout(
+                            std::time::Duration::from_millis(ms),
+                            router_handle.event_rx.recv(),
+                        )
+                        .await
+                        {
+                            Ok(item) => item,
+                            Err(_) => {
+                                return Ok(wrap_tool_payload(json!({
+                                    "stream_id": input.stream_id,
+                                    "status": "timeout"
+                                })));
+                            }
+                        }
+                    }
+                }
+            };
+            match next_event {
+                Some(attributed) => {
+                    let event_json = serde_json::to_value(&attributed)
+                        .map_err(|e| format!("Failed to serialize attributed event: {e}"))?;
+                    Ok(wrap_tool_payload(json!({
+                        "stream_id": input.stream_id,
+                        "status": "event",
+                        "event": event_json
+                    })))
+                }
+                None => {
+                    state
+                        .mob_event_streams
+                        .lock()
+                        .await
+                        .remove(&input.stream_id);
+                    Ok(wrap_tool_payload(json!({
+                        "stream_id": input.stream_id,
+                        "status": "closed"
+                    })))
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "mob")]
+async fn handle_meerkat_mob_event_stream_close(
+    state: &MeerkatMcpState,
+    input: MeerkatMobEventStreamCloseInput,
+) -> Result<Value, String> {
+    let removed = state
+        .mob_event_streams
         .lock()
         .await
         .remove(&input.stream_id);
@@ -2602,9 +2862,9 @@ mod tests {
     fn test_tools_list_schema() {
         let tools = tools_list();
         #[cfg(all(feature = "comms", feature = "mob"))]
-        assert_eq!(tools.len(), 21 + meerkat_mob_mcp::tools_list().len());
+        assert_eq!(tools.len(), 24 + meerkat_mob_mcp::tools_list().len());
         #[cfg(all(not(feature = "comms"), feature = "mob"))]
-        assert_eq!(tools.len(), 16 + meerkat_mob_mcp::tools_list().len());
+        assert_eq!(tools.len(), 19 + meerkat_mob_mcp::tools_list().len());
         #[cfg(all(feature = "comms", not(feature = "mob")))]
         assert_eq!(tools.len(), 20);
         #[cfg(all(not(feature = "comms"), not(feature = "mob")))]
@@ -2681,6 +2941,9 @@ mod tests {
             assert!(tool_names.contains(&"mob_create"));
             assert!(tool_names.contains(&"mob_list"));
             assert!(tool_names.contains(&"mob_lifecycle"));
+            assert!(tool_names.contains(&"meerkat_mob_event_stream_open"));
+            assert!(tool_names.contains(&"meerkat_mob_event_stream_read"));
+            assert!(tool_names.contains(&"meerkat_mob_event_stream_close"));
         }
         #[cfg(not(feature = "mob"))]
         {
@@ -2688,6 +2951,9 @@ mod tests {
             assert!(!tool_names.contains(&"mob_create"));
             assert!(!tool_names.contains(&"mob_list"));
             assert!(!tool_names.contains(&"mob_lifecycle"));
+            assert!(!tool_names.contains(&"meerkat_mob_event_stream_open"));
+            assert!(!tool_names.contains(&"meerkat_mob_event_stream_read"));
+            assert!(!tool_names.contains(&"meerkat_mob_event_stream_close"));
         }
 
         #[cfg(feature = "comms")]

@@ -28,7 +28,7 @@ use axum::{
     routing::{get, post},
 };
 use chrono::{DateTime, Utc};
-#[cfg(feature = "comms")]
+#[cfg(any(feature = "comms", feature = "mob"))]
 use futures::StreamExt;
 use futures::stream::Stream;
 use meerkat::{
@@ -525,7 +525,8 @@ pub fn router(state: AppState) -> Router {
     let r = r
         .route("/mob/prefabs", get(mob_prefabs))
         .route("/mob/tools", get(mob_tools))
-        .route("/mob/call", post(mob_call));
+        .route("/mob/call", post(mob_call))
+        .route("/mob/{id}/events", get(mob_event_stream));
 
     #[cfg(feature = "mcp")]
     let r = r
@@ -580,6 +581,84 @@ async fn mob_call(
         .await
         .map_err(|e| ApiError::BadRequest(e.message))?;
     Ok(Json(result))
+}
+
+/// Query parameters for `GET /mob/{id}/events`.
+#[derive(Debug, Deserialize)]
+#[cfg(feature = "mob")]
+struct MobEventStreamQuery {
+    /// Subscribe to a single member's agent events. If absent, subscribes
+    /// to the mob-wide event bus covering all members.
+    #[serde(default)]
+    member: Option<String>,
+}
+
+/// GET /mob/{id}/events — SSE stream of mob or per-member agent events.
+///
+/// If `?member=<meerkat_id>` is provided, streams that member's session
+/// events. Otherwise streams the mob-wide event bus which merges all
+/// member events tagged with [`AttributedEvent`] attribution.
+#[cfg(feature = "mob")]
+async fn mob_event_stream(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<MobEventStreamQuery>,
+) -> Result<Sse<std::pin::Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>>, ApiError>
+{
+    let mob_id = meerkat_mob::MobId::from(id.as_str());
+
+    let stream: std::pin::Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> =
+        if let Some(member) = query.member {
+            // Per-member agent event stream.
+            let meerkat_id = meerkat_mob::MeerkatId::from(member.as_str());
+            let mut event_stream = state
+                .mob_state
+                .subscribe_agent_events(&mob_id, &meerkat_id)
+                .await
+                .map_err(|e| ApiError::NotFound(e.to_string()))?;
+
+            Box::pin(async_stream::stream! {
+                yield Ok(Event::default().event("stream_opened").data(
+                    serde_json::to_string(&json!({
+                        "mob_id": id,
+                        "member": member,
+                    })).unwrap_or_default(),
+                ));
+
+                while let Some(envelope) = event_stream.next().await {
+                    let event_type = agent_event_type(&envelope.payload);
+                    let data = serde_json::to_string(&envelope).unwrap_or_default();
+                    yield Ok(Event::default().event(event_type).data(data));
+                }
+
+                yield Ok(Event::default().event("done").data("{}"));
+            })
+        } else {
+            // Mob-wide event stream (all members, continuously updated).
+            let mut handle = state
+                .mob_state
+                .subscribe_mob_events(&mob_id)
+                .await
+                .map_err(|e| ApiError::NotFound(e.to_string()))?;
+
+            Box::pin(async_stream::stream! {
+                yield Ok(Event::default().event("stream_opened").data(
+                    serde_json::to_string(&json!({
+                        "mob_id": id,
+                    })).unwrap_or_default(),
+                ));
+
+                while let Some(attributed) = handle.event_rx.recv().await {
+                    let event_type = agent_event_type(&attributed.envelope.payload);
+                    let data = serde_json::to_string(&attributed).unwrap_or_default();
+                    yield Ok(Event::default().event(event_type).data(data));
+                }
+
+                yield Ok(Event::default().event("done").data("{}"));
+            })
+        };
+
+    Ok(Sse::new(stream))
 }
 
 /// Canonical comms send request body.
@@ -1354,30 +1433,17 @@ async fn list_sessions(
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to list sessions: {e}")))?;
 
-    let payload = json!({
-        "sessions": sessions
-            .into_iter()
-            .map(|s| {
-                let created_at: DateTime<Utc> = s.created_at.into();
-                let updated_at: DateTime<Utc> = s.updated_at.into();
-                let mut entry = json!({
-                    "session_id": s.session_id.to_string(),
-                    "session_ref": format_session_ref(&state.realm_id, &s.session_id),
-                    "created_at": created_at.to_rfc3339(),
-                    "updated_at": updated_at.to_rfc3339(),
-                    "message_count": s.message_count,
-                    "total_tokens": s.total_tokens,
-                    "is_active": s.is_active
-                });
-                if !s.labels.is_empty() {
-                    entry["labels"] = json!(s.labels);
-                }
-                entry
-            })
-            .collect::<Vec<_>>()
-    });
+    let wire_sessions: Vec<meerkat_contracts::WireSessionSummary> = sessions
+        .into_iter()
+        .map(|s| {
+            let session_ref = format_session_ref(&state.realm_id, &s.session_id);
+            let mut wire = meerkat_contracts::WireSessionSummary::from(s);
+            wire.session_ref = Some(session_ref);
+            wire
+        })
+        .collect();
 
-    Ok(Json(payload))
+    Ok(Json(json!({ "sessions": wire_sessions })))
 }
 
 /// Get session details

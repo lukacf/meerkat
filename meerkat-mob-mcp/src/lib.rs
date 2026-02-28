@@ -305,7 +305,30 @@ impl MobMcpState {
             .await
     }
 
-    async fn handle_for(&self, mob_id: &MobId) -> Result<MobHandle, MobError> {
+    /// Subscribe to mob-wide events (all members, continuously updated).
+    pub async fn subscribe_mob_events(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<meerkat_mob::MobEventRouterHandle, MobError> {
+        Ok(self.handle_for(mob_id).await?.subscribe_mob_events())
+    }
+
+    /// Subscribe to agent-level events for a specific member.
+    pub async fn subscribe_agent_events(
+        &self,
+        mob_id: &MobId,
+        meerkat_id: &MeerkatId,
+    ) -> Result<meerkat_core::comms::EventStream, MobError> {
+        self.handle_for(mob_id)
+            .await?
+            .subscribe_agent_events(meerkat_id)
+            .await
+    }
+
+    /// Look up the [`MobHandle`] for a given mob ID.
+    ///
+    /// Returns `MobError::Internal` if the mob is not found.
+    pub async fn handle_for(&self, mob_id: &MobId) -> Result<MobHandle, MobError> {
         self.mobs
             .read()
             .await

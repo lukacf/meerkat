@@ -66,6 +66,7 @@ pub use meerkat_core::{
     // Config
     Config,
     ConfigDelta,
+    ConfigError,
     ContextStrategy,
     ForkBranch,
     ForkBudgetPolicy,
@@ -142,6 +143,13 @@ pub use meerkat_core::{
     WorkKind,
 };
 
+// Config store types (filesystem-dependent — not available on wasm32)
+#[cfg(not(target_arch = "wasm32"))]
+pub use meerkat_core::{
+    ConfigEnvelope, ConfigResolvedPaths, ConfigRuntime, ConfigRuntimeError, ConfigSnapshot,
+    ConfigStore, ConfigStoreMetadata, FileConfigStore, MemoryConfigStore, TaggedConfigStore,
+};
+
 // Re-export comms types from meerkat_comms
 #[cfg(feature = "comms")]
 pub use meerkat_comms::agent::{CommsContent, CommsMessage, CommsStatus};
@@ -153,6 +161,8 @@ pub use meerkat_core::{
     PeerDirectorySource, PeerName, SendAndStreamError, SendError, SendReceipt, StreamError,
     StreamScope,
 };
+#[cfg(feature = "comms")]
+pub use meerkat_core::SessionServiceCommsExt;
 
 // Re-export client types
 pub use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest, LlmResponse};

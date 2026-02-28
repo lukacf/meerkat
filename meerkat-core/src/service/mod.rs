@@ -21,9 +21,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-/// Metadata key used to store session labels in the `Session.metadata` map.
-pub const SESSION_LABELS_KEY: &str = "session_labels";
-
 /// Controls whether `create_session()` should execute an initial turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitialTurnPolicy {
@@ -152,6 +149,10 @@ pub struct SessionBuildOptions {
     pub max_inline_peer_notifications: Option<i32>,
     /// Opaque application context passed through to custom `SessionAgentBuilder`
     /// implementations. Not consumed by the standard build pipeline.
+    ///
+    /// Uses `Value` rather than `Box<RawValue>` because `SessionBuildOptions`
+    /// must be `Clone` and `Box<RawValue>` does not implement `Clone`.
+    /// Same tradeoff as `provider_params`.
     pub app_context: Option<serde_json::Value>,
     /// Additional instruction sections appended to the system prompt after skill
     /// assembly, before tool instructions. Order preserved.

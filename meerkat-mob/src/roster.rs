@@ -225,13 +225,14 @@ impl Roster {
     }
 
     /// Find all active members matching a label key-value pair.
-    pub fn find_all_by_label(&self, key: &str, value: &str) -> Vec<&RosterEntry> {
-        self.entries
-            .values()
-            .filter(|e| {
-                e.state == MemberState::Active && e.labels.get(key).is_some_and(|v| v == value)
-            })
-            .collect()
+    pub fn find_all_by_label<'a>(
+        &'a self,
+        key: &'a str,
+        value: &'a str,
+    ) -> impl Iterator<Item = &'a RosterEntry> {
+        self.entries.values().filter(move |e| {
+            e.state == MemberState::Active && e.labels.get(key).is_some_and(|v| v == value)
+        })
     }
 
     /// Look up the session ID for a meerkat by its ID.
@@ -985,7 +986,7 @@ mod tests {
                 m
             },
         });
-        let found = roster.find_all_by_label("tier", "1");
+        let found: Vec<_> = roster.find_all_by_label("tier", "1").collect();
         assert_eq!(found.len(), 2);
     }
 
@@ -1005,7 +1006,7 @@ mod tests {
         });
         roster.mark_retiring(&MeerkatId::from("a"));
         assert!(roster.find_by_label("faction", "north").is_none());
-        assert!(roster.find_all_by_label("faction", "north").is_empty());
+        assert_eq!(roster.find_all_by_label("faction", "north").count(), 0);
     }
 
     #[test]

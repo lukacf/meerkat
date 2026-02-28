@@ -11,9 +11,8 @@ use indexmap::IndexSet;
 #[allow(unused_imports)] // Used in read() fallback path
 use meerkat_core::Session;
 use meerkat_core::service::{
-    CreateSessionRequest, SESSION_LABELS_KEY, SessionError, SessionInfo, SessionQuery,
-    SessionService, SessionServiceCommsExt, SessionSummary, SessionUsage, SessionView,
-    StartTurnRequest,
+    CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService,
+    SessionServiceCommsExt, SessionSummary, SessionUsage, SessionView, StartTurnRequest,
 };
 use meerkat_core::types::{RunResult, SessionId};
 use meerkat_store::SessionStore;
@@ -21,6 +20,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use crate::SESSION_LABELS_KEY;
 use crate::ephemeral::{EphemeralSessionService, SessionAgentBuilder};
 
 /// Shared gate between the checkpointer and archive.

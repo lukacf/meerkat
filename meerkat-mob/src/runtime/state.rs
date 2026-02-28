@@ -59,14 +59,7 @@ impl std::fmt::Display for MobState {
 /// Commands sent from [`MobHandle`] to the [`MobActor`] for serialized processing.
 pub(super) enum MobCommand {
     Spawn {
-        profile_name: ProfileName,
-        meerkat_id: MeerkatId,
-        initial_message: Option<String>,
-        runtime_mode: Option<crate::MobRuntimeMode>,
-        backend: Option<MobBackendKind>,
-        context: Option<serde_json::Value>,
-        labels: Option<std::collections::BTreeMap<String, String>>,
-        resume_session_id: Option<meerkat_core::types::SessionId>,
+        spec: super::handle::SpawnMemberSpec,
         reply_tx: oneshot::Sender<Result<MemberRef, MobError>>,
     },
     SpawnProvisioned {

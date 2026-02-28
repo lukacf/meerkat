@@ -621,34 +621,13 @@ impl MobActor {
                 break;
             };
             match cmd {
-                MobCommand::Spawn {
-                    profile_name,
-                    meerkat_id,
-                    initial_message,
-                    runtime_mode,
-                    backend,
-                    context,
-                    labels,
-                    resume_session_id,
-                    reply_tx,
-                } => {
+                MobCommand::Spawn { spec, reply_tx } => {
                     if let Err(error) = self.require_state(&[MobState::Running, MobState::Creating])
                     {
                         let _ = reply_tx.send(Err(error));
                         continue;
                     }
-                    self.enqueue_spawn(
-                        profile_name,
-                        meerkat_id,
-                        initial_message,
-                        runtime_mode,
-                        backend,
-                        context,
-                        labels,
-                        resume_session_id,
-                        reply_tx,
-                    )
-                    .await;
+                    self.enqueue_spawn(spec, reply_tx).await;
                 }
                 MobCommand::SpawnProvisioned {
                     spawn_ticket,
@@ -1010,19 +989,21 @@ impl MobActor {
     /// P1-T04: spawn() creates a real session.
     ///
     /// Provisioning runs in parallel tasks; final actor commit stays serialized.
-    #[allow(clippy::too_many_arguments)]
     async fn enqueue_spawn(
         &mut self,
-        profile_name: ProfileName,
-        meerkat_id: MeerkatId,
-        initial_message: Option<String>,
-        runtime_mode: Option<crate::MobRuntimeMode>,
-        backend: Option<MobBackendKind>,
-        context: Option<serde_json::Value>,
-        labels: Option<std::collections::BTreeMap<String, String>>,
-        resume_session_id: Option<meerkat_core::types::SessionId>,
+        spec: super::handle::SpawnMemberSpec,
         reply_tx: oneshot::Sender<Result<MemberRef, MobError>>,
     ) {
+        let super::handle::SpawnMemberSpec {
+            profile_name,
+            meerkat_id,
+            initial_message,
+            runtime_mode,
+            backend,
+            context,
+            labels,
+            resume_session_id,
+        } = spec;
         let prepare_result = async {
             if meerkat_id
                 .as_str()
@@ -1606,14 +1587,16 @@ impl MobActor {
         // The spawn result is delivered via MeerkatSpawned event.
         let (spawn_reply_tx, spawn_reply_rx) = oneshot::channel();
         self.enqueue_spawn(
-            profile_name,
-            meerkat_id.clone(),
-            initial_message,
-            None,
-            None,
-            None,
-            None,
-            None,
+            super::handle::SpawnMemberSpec {
+                profile_name,
+                meerkat_id: meerkat_id.clone(),
+                initial_message,
+                runtime_mode: None,
+                backend: None,
+                context: None,
+                labels: None,
+                resume_session_id: None,
+            },
             spawn_reply_tx,
         )
         .await;
@@ -2237,14 +2220,16 @@ impl MobActor {
                 {
                     let (spawn_reply_tx, spawn_reply_rx) = oneshot::channel();
                     self.enqueue_spawn(
-                        spec.profile,
-                        meerkat_id.clone(),
-                        None,
-                        spec.runtime_mode,
-                        None,
-                        None,
-                        None,
-                        None,
+                        super::handle::SpawnMemberSpec {
+                            profile_name: spec.profile,
+                            meerkat_id: meerkat_id.clone(),
+                            initial_message: None,
+                            runtime_mode: spec.runtime_mode,
+                            backend: None,
+                            context: None,
+                            labels: None,
+                            resume_session_id: None,
+                        },
                         spawn_reply_tx,
                     )
                     .await;

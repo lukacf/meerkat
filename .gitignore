@@ -45,3 +45,4 @@ node_modules/
 # TypeScript SDK build output
 sdks/typescript/dist/
 sdks/typescript/package-lock.json
+/target-mcp/

@@ -1308,6 +1308,7 @@ async fn list_sessions(
         .list(meerkat_core::service::SessionQuery {
             limit: query.limit,
             offset: query.offset,
+            labels: None,
         })
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to list sessions: {e}")))?;

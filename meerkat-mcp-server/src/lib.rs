@@ -1520,6 +1520,7 @@ async fn handle_meerkat_sessions(
     let query = meerkat_core::service::SessionQuery {
         limit: input.limit,
         offset: input.offset,
+        labels: None,
     };
     let sessions = state
         .service

@@ -335,6 +335,33 @@ pub trait SessionService: Send + Sync {
     }
 }
 
+/// Optional comms/control-plane extension for `SessionService`.
+///
+/// Base lifecycle operations stay on `SessionService`; advanced surfaces
+/// (RPC/REST/mob orchestration) can use this trait when they need direct
+/// access to comms runtime and injector handles.
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+pub trait SessionServiceCommsExt: SessionService {
+    /// Get the comms runtime for a session, if available.
+    async fn comms_runtime(
+        &self,
+        _session_id: &SessionId,
+    ) -> Option<Arc<dyn crate::agent::CommsRuntime>> {
+        None
+    }
+
+    /// Get the subscribable event injector for a session, if available.
+    async fn event_injector(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<dyn crate::SubscribableInjector>> {
+        self.comms_runtime(session_id)
+            .await
+            .and_then(|runtime| runtime.event_injector())
+    }
+}
+
 /// Extension trait for `Arc<dyn SessionService>` to allow calling methods directly.
 impl dyn SessionService {
     /// Wrap self in an Arc.

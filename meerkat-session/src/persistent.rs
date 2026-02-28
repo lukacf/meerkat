@@ -11,8 +11,8 @@ use indexmap::IndexSet;
 #[allow(unused_imports)] // Used in read() fallback path
 use meerkat_core::Session;
 use meerkat_core::service::{
-    CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService, SessionSummary,
-    SessionUsage, SessionView, StartTurnRequest,
+    CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService,
+    SessionServiceCommsExt, SessionSummary, SessionUsage, SessionView, StartTurnRequest,
 };
 use meerkat_core::types::{RunResult, SessionId};
 use meerkat_store::SessionStore;
@@ -275,6 +275,23 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         id: &SessionId,
     ) -> Result<meerkat_core::comms::EventStream, meerkat_core::comms::StreamError> {
         self.inner.subscribe_session_events(id).await
+    }
+}
+
+#[async_trait]
+impl<B: SessionAgentBuilder + 'static> SessionServiceCommsExt for PersistentSessionService<B> {
+    async fn comms_runtime(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<std::sync::Arc<dyn meerkat_core::agent::CommsRuntime>> {
+        self.inner.comms_runtime(session_id).await
+    }
+
+    async fn event_injector(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<std::sync::Arc<dyn meerkat_core::SubscribableInjector>> {
+        self.inner.event_injector(session_id).await
     }
 }
 

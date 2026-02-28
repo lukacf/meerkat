@@ -25,7 +25,7 @@
 export { MeerkatClient } from "./client.js";
 export type { ConnectOptions } from "./client.js";
 export { Session } from "./session.js";
-export { EventStream } from "./streaming.js";
+export { CommsEventStream, EventStream } from "./streaming.js";
 
 // Domain types (clean, Wire-free public names)
 export type {

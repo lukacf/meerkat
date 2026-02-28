@@ -25,8 +25,9 @@ use meerkat_core::error::ToolError;
 use meerkat_core::event::{AgentEvent, EventEnvelope};
 use meerkat_core::interaction::InteractionId;
 use meerkat_core::service::{
-    CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService, SessionSummary,
-    SessionUsage, SessionView, StartTurnRequest, TurnToolOverlay,
+    CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService,
+    SessionServiceCommsExt, SessionSummary, SessionUsage, SessionView, StartTurnRequest,
+    TurnToolOverlay,
 };
 use meerkat_core::types::{
     AssistantBlock, RunResult, SessionId, StopReason, ToolCallView, ToolDef, ToolResult, Usage,
@@ -912,7 +913,7 @@ impl SubscribableInjector for CountingInjector {
 }
 
 #[async_trait]
-impl MobSessionService for MockSessionService {
+impl SessionServiceCommsExt for MockSessionService {
     async fn comms_runtime(&self, session_id: &SessionId) -> Option<Arc<dyn CoreCommsRuntime>> {
         if self
             .missing_comms_sessions
@@ -956,7 +957,10 @@ impl MobSessionService for MockSessionService {
             completed_result,
         }))
     }
+}
 
+#[async_trait]
+impl MobSessionService for MockSessionService {
     async fn subscribe_session_events(
         &self,
         session_id: &SessionId,
@@ -8819,14 +8823,17 @@ impl SessionService for RealCommsSessionService {
 }
 
 #[async_trait]
-impl MobSessionService for RealCommsSessionService {
+impl SessionServiceCommsExt for RealCommsSessionService {
     async fn comms_runtime(&self, session_id: &SessionId) -> Option<Arc<dyn CoreCommsRuntime>> {
         let sessions = self.sessions.read().await;
         sessions
             .get(session_id)
             .map(|c| Arc::clone(c) as Arc<dyn CoreCommsRuntime>)
     }
+}
 
+#[async_trait]
+impl MobSessionService for RealCommsSessionService {
     fn supports_persistent_sessions(&self) -> bool {
         true
     }

@@ -413,6 +413,78 @@ def test_parse_retrying():
 
 
 @pytest.mark.asyncio
+async def test_client_comms_send_and_peers_call_expected_rpc_methods():
+    client = MeerkatClient()
+    calls = []
+
+    async def fake_request(method, params):
+        calls.append((method, params))
+        if method == "comms/peers":
+            return {"peers": [{"name": "agent-a"}]}
+        return {"kind": "peer_message_sent", "acked": True}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    send_receipt = await client.send("s1", kind="peer_message", to="agent-a", body="hello")
+    peers = await client.peers("s1")
+
+    assert send_receipt["kind"] == "peer_message_sent"
+    assert peers["peers"] == [{"name": "agent-a"}]
+    assert [m for m, _ in calls] == ["comms/send", "comms/peers"]
+
+
+@pytest.mark.asyncio
+async def test_client_send_and_stream_sends_then_opens_interaction_stream():
+    client = MeerkatClient()
+    calls = []
+
+    async def fake_send(session_id, **kwargs):
+        calls.append(("send", session_id, kwargs))
+        return {
+            "kind": "input_accepted",
+            "interaction_id": "i-42",
+            "stream_reserved": True,
+        }
+
+    class DummyStream:
+        def __init__(self, stream_id):
+            self.stream_id = stream_id
+
+    async def fake_open_stream(session_id, *, scope="session", interaction_id=None):
+        calls.append(("open", session_id, scope, interaction_id))
+        return DummyStream("stream-42")
+
+    client.send = fake_send  # type: ignore[method-assign]
+    client.open_comms_stream = fake_open_stream  # type: ignore[method-assign]
+
+    receipt, stream = await client.send_and_stream(
+        "s1",
+        kind="input",
+        body="hello",
+        source="rpc",
+        stream="reserve_interaction",
+    )
+
+    assert receipt["interaction_id"] == "i-42"
+    assert stream.stream_id == "stream-42"
+    assert calls[0][0] == "send"
+    assert calls[1] == ("open", "s1", "interaction", "i-42")
+
+
+@pytest.mark.asyncio
+async def test_client_send_and_stream_rejects_missing_reserved_interaction():
+    client = MeerkatClient()
+
+    async def fake_send(_session_id, **_kwargs):
+        return {"kind": "peer_message_sent", "acked": True}
+
+    client.send = fake_send  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError, match="missing interaction_id"):
+        await client.send_and_stream("s1", kind="peer_message", to="agent-a", body="hello")
+
+
+@pytest.mark.asyncio
 async def test_client_mcp_methods_send_expected_rpc_calls():
     client = MeerkatClient()
     calls = []

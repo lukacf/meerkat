@@ -4,7 +4,7 @@ import warnings
 
 import pytest
 
-from meerkat import SkillKey
+from meerkat import MeerkatClient, SkillKey
 from meerkat.session import Session, _normalize_skill_ref
 from meerkat.types import RunResult, Usage
 
@@ -61,6 +61,7 @@ class _MockClient:
         self._calls: list[dict] = []
         self._send_calls: list[dict] = []
         self._peers_calls: list[str] = []
+        self._send_and_stream_calls: list[dict] = []
 
     def has_capability(self, cap: str) -> bool:
         return cap == "skills"
@@ -69,12 +70,21 @@ class _MockClient:
         if not self.has_capability(cap):
             raise RuntimeError(f"Missing capability: {cap}")
 
-    async def _start_turn(self, session_id, prompt, *, skill_refs=None, skill_references=None):
+    async def _start_turn(
+        self,
+        session_id,
+        prompt,
+        *,
+        skill_refs=None,
+        skill_references=None,
+        flow_tool_overlay=None,
+    ):
         self._calls.append({
             "session_id": session_id,
             "prompt": prompt,
             "skill_refs": skill_refs,
             "skill_references": skill_references,
+            "flow_tool_overlay": flow_tool_overlay,
         })
         return RunResult(
             session_id=session_id,
@@ -94,6 +104,21 @@ class _MockClient:
                 {"id": "peer-b", "name": "beta"},
             ]
         }
+
+    async def send_and_stream(self, session_id, **kwargs):
+        self._send_and_stream_calls.append({"session_id": session_id, "kwargs": kwargs})
+
+        class _DummyStream:
+            stream_id = "stream-1"
+
+        return (
+            {
+                "kind": "input_accepted",
+                "interaction_id": "i-1",
+                "stream_reserved": True,
+            },
+            _DummyStream(),
+        )
 
 
 def _make_session() -> tuple[Session, _MockClient]:
@@ -156,3 +181,100 @@ async def test_session_peers_returns_peer_list():
         {"id": "peer-a", "name": "alpha"},
         {"id": "peer-b", "name": "beta"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_session_send_and_stream_routes_to_client_method():
+    session, client = _make_session()
+    receipt, stream = await session.send_and_stream(
+        kind="input",
+        body="hello",
+        source="rpc",
+        stream="reserve_interaction",
+    )
+
+    assert receipt["interaction_id"] == "i-1"
+    assert stream.stream_id == "stream-1"
+    assert len(client._send_and_stream_calls) == 1
+    assert client._send_and_stream_calls[0]["session_id"] == "s-1"
+
+
+@pytest.mark.asyncio
+async def test_client_list_mob_prefabs_calls_rpc_method():
+    client = object.__new__(MeerkatClient)
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_request(method, params):
+        calls.append((method, params))
+        return {
+            "prefabs": [
+                {"key": "coding_swarm", "toml_template": 'id = "coding_swarm"'},
+                {"key": "pipeline", "toml_template": 'id = "pipeline"'},
+            ]
+        }
+
+    client._request = fake_request  # type: ignore[attr-defined]
+    prefabs = await MeerkatClient.list_mob_prefabs(client)
+    assert [entry["key"] for entry in prefabs] == ["coding_swarm", "pipeline"]
+    assert calls == [("mob/prefabs", {})]
+
+
+@pytest.mark.asyncio
+async def test_client_list_mob_tools_and_call_tool():
+    client = object.__new__(MeerkatClient)
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_request(method, params):
+        calls.append((method, params))
+        if method == "mob/tools":
+            return {"tools": [{"name": "mob_create"}]}
+        if method == "mob/call":
+            return {"ok": True, "mob_id": "m1"}
+        return {}
+
+    client._request = fake_request  # type: ignore[attr-defined]
+    tools = await MeerkatClient.list_mob_tools(client)
+    result = await MeerkatClient.call_mob_tool(
+        client,
+        "mob_create",
+        {"prefab": "coding_swarm"},
+    )
+    assert tools == [{"name": "mob_create"}]
+    assert result["mob_id"] == "m1"
+    assert calls == [
+        ("mob/tools", {}),
+        ("mob/call", {"name": "mob_create", "arguments": {"prefab": "coding_swarm"}}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_set_config_returns_envelope():
+    client = object.__new__(MeerkatClient)
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_request(method, params):
+        calls.append((method, params))
+        return {"config": {"agent": {"model": "x"}}, "generation": 7}
+
+    client._request = fake_request  # type: ignore[attr-defined]
+    envelope = await MeerkatClient.set_config(
+        client,
+        {"agent": {"model": "x"}},
+        expected_generation=6,
+    )
+    assert envelope["generation"] == 7
+    assert calls == [
+        ("config/set", {"config": {"agent": {"model": "x"}}, "expected_generation": 6})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_client_list_mob_prefabs_propagates_errors():
+    client = object.__new__(MeerkatClient)
+
+    async def fake_request(_method, _params):
+        raise RuntimeError("transport down")
+
+    client._request = fake_request  # type: ignore[attr-defined]
+    with pytest.raises(RuntimeError, match="transport down"):
+        await MeerkatClient.list_mob_prefabs(client)

@@ -189,4 +189,111 @@ describe("Skills v2.1", () => {
     assert.deepEqual(peers, [{ id: "peer-a" }, { id: "peer-b" }]);
     assert.deepEqual(calls, ["s-1"]);
   });
+
+  it("Session.sendAndStream delegates to client.sendAndStream", async () => {
+    const calls = [];
+    const mockClient = {
+      async sendAndStream(sessionId, command) {
+        calls.push({ sessionId, command });
+        return {
+          receipt: { kind: "input_accepted", interaction_id: "i-1", stream_reserved: true },
+          stream: { streamId: "stream-1" },
+        };
+      },
+    };
+
+    const session = new Session(mockClient, {
+      sessionId: "s-1", text: "init", turns: 0, toolCalls: 0,
+      usage: { inputTokens: 0, outputTokens: 0 },
+    });
+
+    const result = await session.sendAndStream({
+      kind: "input",
+      body: "hello",
+      source: "rpc",
+      stream: "reserve_interaction",
+    });
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].sessionId, "s-1");
+    assert.equal(result.stream.streamId, "stream-1");
+  });
+});
+
+describe("Client parity", () => {
+  it("createSessionStreaming buffers early events before session id is bound", async () => {
+    const client = new MeerkatClient();
+    client.process = { stdin: { write() {} } };
+
+    let resolveResponse;
+    client.registerRequest = () =>
+      new Promise((resolve) => {
+        resolveResponse = resolve;
+      });
+
+    const stream = client.createSessionStreaming("hello");
+    client.handleLine(
+      JSON.stringify({
+        method: "session/event",
+        params: {
+          session_id: "s-early",
+          event: { type: "text_delta", delta: "early" },
+        },
+      }),
+    );
+    resolveResponse({
+      session_id: "s-early",
+      text: "done",
+      turns: 1,
+      tool_calls: 0,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+
+    const [text, result] = await stream.collectText();
+    assert.equal(text, "early");
+    assert.equal(result.sessionId, "s-early");
+  });
+
+  it("setConfig returns the config envelope response", async () => {
+    const client = new MeerkatClient();
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      return { config: { agent: { model: "x" } }, generation: 3 };
+    };
+
+    const response = await client.setConfig({ agent: { model: "x" } }, { expectedGeneration: 2 });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].method, "config/set");
+    assert.equal(calls[0].params.expected_generation, 2);
+    assert.equal(response.generation, 3);
+  });
+
+  it("listMobTools/callMobTool route through mob RPC methods", async () => {
+    const client = new MeerkatClient();
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      if (method === "mob/tools") {
+        return { tools: [{ name: "mob_create" }] };
+      }
+      if (method === "mob/call") {
+        return { ok: true, mob_id: "m1" };
+      }
+      return {};
+    };
+
+    const tools = await client.listMobTools();
+    const result = await client.callMobTool("mob_create", { prefab: "coding_swarm" });
+
+    assert.deepEqual(tools, [{ name: "mob_create" }]);
+    assert.equal(result.mob_id, "m1");
+    assert.deepEqual(calls, [
+      { method: "mob/tools", params: {} },
+      {
+        method: "mob/call",
+        params: { name: "mob_create", arguments: { prefab: "coding_swarm" } },
+      },
+    ]);
+  });
 });

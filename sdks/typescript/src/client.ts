@@ -45,7 +45,7 @@ import {
   type McpRemoveParams,
 } from "./generated/types.js";
 import { Session } from "./session.js";
-import { EventStream, AsyncQueue } from "./streaming.js";
+import { CommsEventStream, EventStream, AsyncQueue } from "./streaming.js";
 import type {
   Capability,
   RunResult,
@@ -55,6 +55,7 @@ import type {
   SkillKey,
   SkillRef,
   SkillRuntimeDiagnostics,
+  TurnToolOverlay,
   Usage,
 } from "./types.js";
 
@@ -128,6 +129,10 @@ export class MeerkatClient {
     { resolve: (value: Record<string, unknown>) => void; reject: (reason: unknown) => void }
   >();
   private eventQueues = new Map<string, AsyncQueue<Record<string, unknown> | null>>();
+  private commsStreamQueues = new Map<string, AsyncQueue<Record<string, unknown> | null>>();
+  private pendingStreamQueue: AsyncQueue<Record<string, unknown> | null> | null = null;
+  private pendingStreamRequestId: number | null = null;
+  private unmatchedStreamBuffer = new Map<string, Record<string, unknown>[]>();
   private rl: ReadlineInterface | null = null;
 
   constructor(rkatPath = "rkat-rpc") {
@@ -200,6 +205,16 @@ export class MeerkatClient {
       queue.put(null);
     }
     this.eventQueues.clear();
+    for (const [, queue] of this.commsStreamQueues) {
+      queue.put(null);
+    }
+    this.commsStreamQueues.clear();
+    if (this.pendingStreamQueue) {
+      this.pendingStreamQueue.put(null);
+      this.pendingStreamQueue = null;
+      this.pendingStreamRequestId = null;
+      this.unmatchedStreamBuffer.clear();
+    }
   }
 
   // -- Session lifecycle --------------------------------------------------
@@ -242,15 +257,31 @@ export class MeerkatClient {
     this.requestId++;
     const requestId = this.requestId;
 
+    if (this.pendingStreamQueue) {
+      throw new MeerkatError(
+        "INVALID_STATE",
+        "Only one createSessionStreaming request can be pending at a time",
+      );
+    }
     const queue = new AsyncQueue<Record<string, unknown> | null>();
+    this.pendingStreamQueue = queue;
+    this.pendingStreamRequestId = requestId;
     const responsePromise = this.registerRequest(requestId);
 
     // When response arrives, bind the queue to the session_id
     const wrappedPromise = responsePromise.then((result) => {
       const sid = String(result.session_id ?? "");
       if (sid) {
+        const buffered = this.unmatchedStreamBuffer.get(sid) ?? [];
+        for (const evt of buffered) {
+          queue.put(evt);
+        }
+        this.unmatchedStreamBuffer.delete(sid);
         this.eventQueues.set(sid, queue);
       }
+      this.pendingStreamQueue = null;
+      this.pendingStreamRequestId = null;
+      this.unmatchedStreamBuffer.clear();
       return result;
     });
 
@@ -317,12 +348,12 @@ export class MeerkatClient {
   async setConfig(
     config: Record<string, unknown>,
     options?: { expectedGeneration?: number },
-  ): Promise<void> {
+  ): Promise<Record<string, unknown>> {
     const params: Record<string, unknown> = { config };
     if (options?.expectedGeneration !== undefined) {
       params.expected_generation = options.expectedGeneration;
     }
-    await this.request("config/set", params);
+    return this.request("config/set", params);
   }
 
   async patchConfig(
@@ -385,13 +416,41 @@ export class MeerkatClient {
     return this.request("skills/inspect", params);
   }
 
+  async listMobPrefabs(): Promise<Array<Record<string, unknown>>> {
+    const result = await this.request("mob/prefabs", {});
+    return (result.prefabs as Array<Record<string, unknown>>) ?? [];
+  }
+
+  async list_mob_prefabs(): Promise<Array<Record<string, unknown>>> {
+    return this.listMobPrefabs();
+  }
+
+  async listMobTools(): Promise<Array<Record<string, unknown>>> {
+    const result = await this.request("mob/tools", {});
+    return (result.tools as Array<Record<string, unknown>>) ?? [];
+  }
+
+  async callMobTool(
+    name: string,
+    argumentsPayload?: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.request("mob/call", {
+      name,
+      arguments: argumentsPayload ?? {},
+    });
+  }
+
   // -- Internal methods used by Session -----------------------------------
 
   /** @internal */
   async _startTurn(
     sessionId: string,
     prompt: string,
-    options?: { skillRefs?: SkillRef[]; skillReferences?: string[] },
+    options?: {
+      skillRefs?: SkillRef[];
+      skillReferences?: string[];
+      flowToolOverlay?: TurnToolOverlay;
+    },
   ): Promise<RunResult> {
     const params: Record<string, unknown> = { session_id: sessionId, prompt };
     const wireRefs = skillRefsToWire(options?.skillRefs);
@@ -401,6 +460,12 @@ export class MeerkatClient {
     if (options?.skillReferences) {
       params.skill_references = options.skillReferences;
     }
+    if (options?.flowToolOverlay) {
+      params.flow_tool_overlay = {
+        allowed_tools: options.flowToolOverlay.allowedTools,
+        blocked_tools: options.flowToolOverlay.blockedTools,
+      };
+    }
     const raw = await this.request("turn/start", params);
     return MeerkatClient.parseRunResult(raw);
   }
@@ -409,7 +474,11 @@ export class MeerkatClient {
   _startTurnStreaming(
     sessionId: string,
     prompt: string,
-    options?: { skillRefs?: SkillRef[]; skillReferences?: string[] },
+    options?: {
+      skillRefs?: SkillRef[];
+      skillReferences?: string[];
+      flowToolOverlay?: TurnToolOverlay;
+    },
     session?: Session,
   ): EventStream {
     if (!this.process?.stdin) {
@@ -430,6 +499,12 @@ export class MeerkatClient {
     }
     if (options?.skillReferences) {
       params.skill_references = options.skillReferences;
+    }
+    if (options?.flowToolOverlay) {
+      params.flow_tool_overlay = {
+        allowed_tools: options.flowToolOverlay.allowedTools,
+        blocked_tools: options.flowToolOverlay.blockedTools,
+      };
     }
 
     const rpcRequest = { jsonrpc: "2.0", id: requestId, method: "turn/start", params };
@@ -459,14 +534,97 @@ export class MeerkatClient {
     sessionId: string,
     command: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
-    return this.request("comms/send", { session_id: sessionId, ...command });
+    return this.send(sessionId, command);
   }
 
   /** @internal */
   async _peers(
     sessionId: string,
   ): Promise<Record<string, unknown>> {
+    return this.peers(sessionId);
+  }
+
+  async send(
+    sessionId: string,
+    command: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.request("comms/send", { session_id: sessionId, ...command });
+  }
+
+  async peers(
+    sessionId: string,
+  ): Promise<Record<string, unknown>> {
     return this.request("comms/peers", { session_id: sessionId });
+  }
+
+  async openCommsStream(
+    sessionId: string,
+    options?: { scope?: "session" | "interaction"; interactionId?: string },
+  ): Promise<CommsEventStream> {
+    const scope = options?.scope ?? "session";
+    const params: Record<string, unknown> = { session_id: sessionId, scope };
+    if (options?.interactionId) {
+      params.interaction_id = options.interactionId;
+    }
+    const opened = await this.request("comms/stream_open", params);
+    const streamId = String(opened.stream_id ?? "");
+    if (!streamId) {
+      throw new MeerkatError("INVALID_RESPONSE", "Missing stream_id in comms/stream_open response");
+    }
+    const queue = new AsyncQueue<Record<string, unknown> | null>();
+    this.commsStreamQueues.set(streamId, queue);
+    return new CommsEventStream({
+      streamId,
+      eventQueue: queue,
+      onClose: async (id: string) => {
+        await this.request("comms/stream_close", { stream_id: id });
+        const q = this.commsStreamQueues.get(id);
+        if (q) {
+          q.put(null);
+        }
+        this.commsStreamQueues.delete(id);
+      },
+    });
+  }
+
+  async open_comms_stream(
+    sessionId: string,
+    options?: { scope?: "session" | "interaction"; interactionId?: string },
+  ): Promise<CommsEventStream> {
+    return this.openCommsStream(sessionId, options);
+  }
+
+  async sendAndStream(
+    sessionId: string,
+    command: Record<string, unknown>,
+  ): Promise<{ receipt: Record<string, unknown>; stream: CommsEventStream }> {
+    const receipt = await this.send(sessionId, command);
+    const interactionId = String(receipt.interaction_id ?? "");
+    const streamReserved = Boolean(receipt.stream_reserved ?? false);
+    if (!interactionId) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "comms/send response missing interaction_id for sendAndStream",
+      );
+    }
+    if (!streamReserved) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "comms/send response did not reserve stream for sendAndStream",
+      );
+    }
+    const stream = await this.openCommsStream(sessionId, {
+      scope: "interaction",
+      interactionId,
+    });
+    return { receipt, stream };
+  }
+
+  async send_and_stream(
+    sessionId: string,
+    command: Record<string, unknown>,
+  ): Promise<{ receipt: Record<string, unknown>; stream: CommsEventStream }> {
+    return this.sendAndStream(sessionId, command);
   }
 
   // -- Transport ----------------------------------------------------------
@@ -496,6 +654,15 @@ export class MeerkatClient {
         }
       }
     } else if ("method" in data) {
+      if (data.method === "comms/stream_event") {
+        const params = (data.params ?? {}) as Record<string, unknown>;
+        const streamId = String(params.stream_id ?? "");
+        const queue = this.commsStreamQueues.get(streamId);
+        if (queue) {
+          queue.put(params);
+        }
+        return;
+      }
       const params = (data.params ?? {}) as Record<string, unknown>;
       const sessionId = String(params.session_id ?? "");
       const event = params.event as Record<string, unknown> | undefined;
@@ -503,6 +670,10 @@ export class MeerkatClient {
         const queue = this.eventQueues.get(sessionId);
         if (queue) {
           queue.put(event);
+        } else if (this.pendingStreamQueue) {
+          const buffered = this.unmatchedStreamBuffer.get(sessionId) ?? [];
+          buffered.push(event);
+          this.unmatchedStreamBuffer.set(sessionId, buffered);
         }
       }
     }
@@ -673,9 +844,11 @@ export class MeerkatClient {
     if (options.enableShell) params.enable_shell = true;
     if (options.enableSubagents) params.enable_subagents = true;
     if (options.enableMemory) params.enable_memory = true;
+    if (options.enableMob) params.enable_mob = true;
     if (options.hostMode) params.host_mode = true;
     if (options.commsName) params.comms_name = options.commsName;
     if (options.peerMeta != null) params.peer_meta = options.peerMeta;
+    if (options.budgetLimits != null) params.budget_limits = options.budgetLimits;
     if (options.providerParams) params.provider_params = options.providerParams;
     if (options.preloadSkills != null) params.preload_skills = options.preloadSkills;
     const wireRefs = skillRefsToWire(options.skillRefs);

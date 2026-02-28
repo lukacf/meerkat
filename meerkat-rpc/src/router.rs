@@ -130,6 +130,8 @@ pub struct MethodRouter {
     config_store: Arc<dyn ConfigStore>,
     notification_sink: NotificationSink,
     skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
+    #[cfg(feature = "mob")]
+    mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
     #[cfg(feature = "comms")]
     active_streams: Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
 }
@@ -146,6 +148,8 @@ impl MethodRouter {
             config_store,
             notification_sink,
             skill_runtime: None,
+            #[cfg(feature = "mob")]
+            mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
             #[cfg(feature = "comms")]
             active_streams: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -199,6 +203,12 @@ impl MethodRouter {
                     .await
             }
             "turn/interrupt" => handlers::turn::handle_interrupt(id, params, &self.runtime).await,
+            #[cfg(feature = "mob")]
+            "mob/prefabs" => handlers::mob::handle_prefabs(id).await,
+            #[cfg(feature = "mob")]
+            "mob/tools" => handlers::mob::handle_tools(id).await,
+            #[cfg(feature = "mob")]
+            "mob/call" => handlers::mob::handle_call(id, params, &self.mob_state).await,
             #[cfg(feature = "comms")]
             "comms/send" => handlers::comms::handle_send(id, params, &self.runtime).await,
             #[cfg(feature = "comms")]
@@ -702,12 +712,121 @@ mod tests {
         assert!(method_names.contains(&"initialize"));
         assert!(method_names.contains(&"session/create"));
         assert!(method_names.contains(&"turn/start"));
+        #[cfg(feature = "mob")]
+        {
+            assert!(method_names.contains(&"mob/prefabs"));
+            assert!(method_names.contains(&"mob/tools"));
+            assert!(method_names.contains(&"mob/call"));
+        }
+        #[cfg(not(feature = "mob"))]
+        {
+            assert!(!method_names.contains(&"mob/prefabs"));
+            assert!(!method_names.contains(&"mob/tools"));
+            assert!(!method_names.contains(&"mob/call"));
+        }
         assert!(method_names.contains(&"config/get"));
         #[cfg(feature = "comms")]
         {
             assert!(method_names.contains(&"comms/stream_open"));
             assert!(method_names.contains(&"comms/stream_close"));
         }
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_prefabs_returns_prefab_templates() {
+        let (router, _notif_rx) = test_router().await;
+        let req = make_request_no_params("mob/prefabs");
+
+        let resp = router.dispatch(req).await.unwrap();
+        let result = result_value(&resp);
+        let prefabs = result["prefabs"]
+            .as_array()
+            .expect("prefabs should be an array");
+        assert!(
+            prefabs.len() >= 4,
+            "expected built-in prefabs, got {}",
+            prefabs.len()
+        );
+
+        let keys: Vec<&str> = prefabs
+            .iter()
+            .filter_map(|entry| entry["key"].as_str())
+            .collect();
+        assert!(keys.contains(&"coding_swarm"));
+        assert!(keys.contains(&"code_review"));
+        assert!(keys.contains(&"research_team"));
+        assert!(keys.contains(&"pipeline"));
+
+        for entry in prefabs {
+            assert!(entry["key"].is_string());
+            let template = entry["toml_template"]
+                .as_str()
+                .expect("toml_template should be a string");
+            assert!(
+                template.contains("id ="),
+                "template should look like TOML definition"
+            );
+        }
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_tools_and_call_flow_work() {
+        let (router, _notif_rx) = test_router().await;
+
+        let tools_resp = router
+            .dispatch(make_request_no_params("mob/tools"))
+            .await
+            .unwrap();
+        let tools_binding = result_value(&tools_resp);
+        let tools = tools_binding["tools"]
+            .as_array()
+            .expect("tools should be array");
+        assert!(tools.iter().any(|tool| tool["name"] == "mob_create"));
+
+        let create_resp = router
+            .dispatch(make_request(
+                "mob/call",
+                serde_json::json!({
+                    "name": "mob_create",
+                    "arguments": { "prefab": "coding_swarm" }
+                }),
+            ))
+            .await
+            .unwrap();
+        let created = result_value(&create_resp);
+        assert!(created["mob_id"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn turn_start_accepts_flow_tool_overlay() {
+        let (router, _notif_rx) = test_router().await;
+        let create_req = make_request("session/create", serde_json::json!({"prompt":"Hello"}));
+        let create_resp = router.dispatch(create_req).await.unwrap();
+        let created = result_value(&create_resp);
+        let session_id = created["session_id"]
+            .as_str()
+            .expect("session_id")
+            .to_string();
+
+        let turn_req = make_request(
+            "turn/start",
+            serde_json::json!({
+                "session_id": session_id,
+                "prompt": "continue with overlay",
+                "flow_tool_overlay": {
+                    "allowed_tools": [],
+                    "blocked_tools": []
+                }
+            }),
+        );
+        let turn_resp = router.dispatch(turn_req).await.unwrap();
+        let turned = result_value(&turn_resp);
+        assert_eq!(
+            turned["session_id"].as_str().expect("session id"),
+            created["session_id"].as_str().expect("session id")
+        );
     }
 
     #[cfg(feature = "comms")]
@@ -1182,6 +1301,21 @@ mod tests {
         assert_eq!(config2["config"]["max_tokens"], 2048);
     }
 
+    /// 11b. `config/set` rejects invalid config with INVALID_PARAMS for REST parity.
+    #[tokio::test]
+    async fn config_set_rejects_invalid_config() {
+        let (router, _notif_rx) = test_router().await;
+
+        let get_req = make_request_no_params("config/get");
+        let get_resp = router.dispatch(get_req).await.unwrap();
+        let mut config = result_value(&get_resp)["config"].clone();
+        config["max_tokens"] = serde_json::json!(0);
+
+        let set_req = make_request("config/set", serde_json::json!({ "config": config }));
+        let set_resp = router.dispatch(set_req).await.unwrap();
+        assert_eq!(error_code(&set_resp), error::INVALID_PARAMS);
+    }
+
     /// 12. `config/patch` merges a delta.
     #[tokio::test]
     async fn config_patch_merges_delta() {
@@ -1318,6 +1452,16 @@ mod tests {
         let after_value = result_value(&after_resp);
         let generation_after = after_value["generation"].as_u64().unwrap_or(0);
         assert_eq!(generation_after, generation_before);
+    }
+
+    /// 12d. Invalid config patches fail as INVALID_PARAMS for REST parity.
+    #[tokio::test]
+    async fn config_patch_rejects_invalid_config() {
+        let (router, _notif_rx) = test_router().await;
+        let patch_req = make_request("config/patch", serde_json::json!({"max_tokens": 0}));
+
+        let patch_resp = router.dispatch(patch_req).await.unwrap();
+        assert_eq!(error_code(&patch_resp), error::INVALID_PARAMS);
     }
 
     /// 13. A notification (request with no id) returns None (no response).

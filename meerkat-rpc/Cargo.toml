@@ -22,6 +22,8 @@ meerkat-core = { workspace = true }
 meerkat-contracts = { workspace = true }
 meerkat-client = { workspace = true }
 meerkat-store = { workspace = true }
+meerkat-mob = { workspace = true, optional = true }
+meerkat-mob-mcp = { workspace = true, optional = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
 indexmap = "2"
@@ -38,6 +40,7 @@ clap = { workspace = true }
 default = []
 comms = ["meerkat/comms"]
 mcp = ["meerkat/mcp"]
+mob = ["dep:meerkat-mob", "dep:meerkat-mob-mcp"]
 sub-agents = ["meerkat/sub-agents"]
 
 [dev-dependencies]

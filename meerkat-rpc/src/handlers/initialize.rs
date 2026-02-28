@@ -42,7 +42,15 @@ pub fn handle_initialize(id: Option<RpcId>) -> RpcResponse {
                 "config/set".to_string(),
                 "config/patch".to_string(),
                 "capabilities/get".to_string(),
+                "skills/list".to_string(),
+                "skills/inspect".to_string(),
             ];
+            #[cfg(feature = "mob")]
+            {
+                m.push("mob/prefabs".to_string());
+                m.push("mob/tools".to_string());
+                m.push("mob/call".to_string());
+            }
             #[cfg(feature = "mcp")]
             {
                 m.push("mcp/add".to_string());

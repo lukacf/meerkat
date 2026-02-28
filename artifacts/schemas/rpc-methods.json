@@ -65,6 +65,10 @@
   ],
   "notifications": [
     {
+      "description": "Client notification acknowledged silently (no response)",
+      "name": "initialized"
+    },
+    {
       "description": "AgentEvent payload during turns",
       "name": "session/event"
     }

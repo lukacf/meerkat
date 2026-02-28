@@ -182,5 +182,40 @@ export class EventStream implements AsyncIterable<StreamEvent> {
   }
 }
 
+/**
+ * Async iterable of raw comms stream notifications emitted via `comms/stream_event`.
+ */
+export class CommsEventStream implements AsyncIterable<Record<string, unknown>> {
+  private readonly _streamId: string;
+  private readonly _eventQueue: AsyncQueue<Record<string, unknown> | null>;
+  private readonly _onClose: (streamId: string) => Promise<void>;
+
+  constructor(opts: {
+    streamId: string;
+    eventQueue: AsyncQueue<Record<string, unknown> | null>;
+    onClose: (streamId: string) => Promise<void>;
+  }) {
+    this._streamId = opts.streamId;
+    this._eventQueue = opts.eventQueue;
+    this._onClose = opts.onClose;
+  }
+
+  get streamId(): string {
+    return this._streamId;
+  }
+
+  async *[Symbol.asyncIterator](): AsyncGenerator<Record<string, unknown>, void, undefined> {
+    while (true) {
+      const raw = await this._eventQueue.get();
+      if (raw == null) return;
+      yield raw;
+    }
+  }
+
+  async close(): Promise<void> {
+    await this._onClose(this._streamId);
+  }
+}
+
 // Re-export AsyncQueue for internal use by client
 export { AsyncQueue };

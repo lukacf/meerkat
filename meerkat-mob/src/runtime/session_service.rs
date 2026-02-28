@@ -1,29 +1,17 @@
 use super::*;
+use meerkat_core::service::SessionServiceCommsExt;
 
 // ---------------------------------------------------------------------------
 // MobSessionService trait extension
 // ---------------------------------------------------------------------------
 
-/// Extension trait for session services that support comms runtime access.
+/// Extension trait for session services used by the mob runtime.
 ///
-/// This bridges the gap between `SessionService` (which doesn't expose comms)
-/// and the mob runtime's need to access comms runtimes for wiring.
+/// Builds on `SessionServiceCommsExt` from core so mob orchestration can use
+/// comms/injector access without per-crate bridge traits.
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-pub trait MobSessionService: SessionService {
-    /// Get the comms runtime for a session.
-    async fn comms_runtime(&self, session_id: &SessionId) -> Option<Arc<dyn CoreCommsRuntime>>;
-
-    /// Get the subscribable event injector for a session, if available.
-    async fn event_injector(
-        &self,
-        session_id: &SessionId,
-    ) -> Option<Arc<dyn meerkat_core::SubscribableInjector>> {
-        self.comms_runtime(session_id)
-            .await
-            .and_then(|runtime| runtime.event_injector())
-    }
-
+pub trait MobSessionService: SessionServiceCommsExt {
     /// Subscribe to session-wide events regardless of triggering interaction.
     async fn subscribe_session_events(
         &self,
@@ -62,19 +50,8 @@ impl<B> MobSessionService for meerkat_session::EphemeralSessionService<B>
 where
     B: meerkat_session::SessionAgentBuilder + 'static,
 {
-    async fn comms_runtime(&self, session_id: &SessionId) -> Option<Arc<dyn CoreCommsRuntime>> {
-        meerkat_session::EphemeralSessionService::<B>::comms_runtime(self, session_id).await
-    }
-
     fn supports_persistent_sessions(&self) -> bool {
         false
-    }
-
-    async fn event_injector(
-        &self,
-        session_id: &SessionId,
-    ) -> Option<Arc<dyn meerkat_core::SubscribableInjector>> {
-        meerkat_session::EphemeralSessionService::<B>::event_injector(self, session_id).await
     }
 
     async fn subscribe_session_events(
@@ -96,19 +73,8 @@ impl<B> MobSessionService for meerkat_session::PersistentSessionService<B>
 where
     B: meerkat_session::SessionAgentBuilder + 'static,
 {
-    async fn comms_runtime(&self, session_id: &SessionId) -> Option<Arc<dyn CoreCommsRuntime>> {
-        meerkat_session::PersistentSessionService::<B>::comms_runtime(self, session_id).await
-    }
-
     fn supports_persistent_sessions(&self) -> bool {
         true
-    }
-
-    async fn event_injector(
-        &self,
-        session_id: &SessionId,
-    ) -> Option<Arc<dyn meerkat_core::SubscribableInjector>> {
-        meerkat_session::PersistentSessionService::<B>::event_injector(self, session_id).await
     }
 
     async fn subscribe_session_events(

@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 use meerkat_contracts::SkillsParams;
 use meerkat_core::EventEnvelope;
 use meerkat_core::event::AgentEvent;
+use meerkat_core::service::TurnToolOverlay;
 use meerkat_core::skills::{SkillKey, SkillRef};
 
 use super::{RpcResponseExt, parse_params, parse_session_id_for_runtime};
@@ -30,6 +31,9 @@ pub struct StartTurnParams {
     /// Skill IDs to resolve and inject for this turn.
     #[serde(default)]
     pub skill_references: Option<Vec<String>>,
+    /// Optional per-turn tool visibility overlay.
+    #[serde(default)]
+    pub flow_tool_overlay: Option<TurnToolOverlay>,
 }
 
 /// Parameters for `turn/interrupt`.
@@ -103,7 +107,13 @@ pub async fn handle_start(
         }
     };
     let result = match runtime
-        .start_turn(&session_id, params.prompt, event_tx, skill_refs)
+        .start_turn(
+            &session_id,
+            params.prompt,
+            event_tx,
+            skill_refs,
+            params.flow_tool_overlay,
+        )
         .await
     {
         Ok(r) => r,

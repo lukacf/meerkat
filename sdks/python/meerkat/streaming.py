@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable
 
 from .errors import MeerkatError
-from .events import Event, TextDelta, parse_event
+from .events import Event, TextDelta, UnknownEvent, parse_event
 
 if TYPE_CHECKING:
     from .session import Session
@@ -26,6 +27,7 @@ class _StdoutDispatcher:
         self._stdout = stdout
         self._pending_responses: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._event_queues: dict[str, asyncio.Queue[dict[str, Any] | None]] = {}
+        self._comms_stream_queues: dict[str, asyncio.Queue[dict[str, Any] | None]] = {}
         self._pending_stream_queue: asyncio.Queue[dict[str, Any] | None] | None = None
         self._pending_stream_request_id: int | None = None
         self._unmatched_buffer: dict[str, list[dict[str, Any]]] = {}
@@ -57,6 +59,14 @@ class _StdoutDispatcher:
 
     def unsubscribe_events(self, session_id: str) -> None:
         self._event_queues.pop(session_id, None)
+
+    def subscribe_comms_stream(self, stream_id: str) -> asyncio.Queue[dict[str, Any] | None]:
+        queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        self._comms_stream_queues[stream_id] = queue
+        return queue
+
+    def unsubscribe_comms_stream(self, stream_id: str) -> None:
+        self._comms_stream_queues.pop(stream_id, None)
 
     def subscribe_pending_stream(self, request_id: int) -> asyncio.Queue[dict[str, Any] | None]:
         if self._pending_stream_queue is not None:
@@ -109,7 +119,15 @@ class _StdoutDispatcher:
                             self._pending_stream_request_id = None
                             self._unmatched_buffer.clear()
             elif "method" in data:
+                method = str(data.get("method", ""))
                 params = data.get("params", {})
+                if method == "comms/stream_event":
+                    stream_id = str(params.get("stream_id", ""))
+                    queue = self._comms_stream_queues.get(stream_id)
+                    if queue is not None:
+                        await queue.put(params)
+                    continue
+
                 session_id = params.get("session_id", "")
                 event = params.get("event")
                 queue = self._event_queues.get(session_id)
@@ -126,11 +144,75 @@ class _StdoutDispatcher:
         for queue in self._event_queues.values():
             queue.put_nowait(None)
         self._event_queues.clear()
+        for queue in self._comms_stream_queues.values():
+            queue.put_nowait(None)
+        self._comms_stream_queues.clear()
         if self._pending_stream_queue is not None:
             self._pending_stream_queue.put_nowait(None)
             self._pending_stream_queue = None
             self._pending_stream_request_id = None
             self._unmatched_buffer.clear()
+
+
+@dataclass(frozen=True, slots=True)
+class CommsStreamEvent:
+    stream_id: str
+    scope: dict[str, Any]
+    sequence: int
+    event: Event
+    raw: dict[str, Any]
+
+
+class CommsEventStream:
+    """Async iterable of comms scoped events from `comms/stream_open`."""
+
+    def __init__(
+        self,
+        *,
+        stream_id: str,
+        event_queue: asyncio.Queue[dict[str, Any] | None],
+        dispatcher: _StdoutDispatcher,
+        closer: Callable[[str], asyncio.Future[Any]],
+    ):
+        self._stream_id = stream_id
+        self._event_queue = event_queue
+        self._dispatcher = dispatcher
+        self._closer = closer
+
+    @property
+    def stream_id(self) -> str:
+        return self._stream_id
+
+    async def __aenter__(self) -> "CommsEventStream":
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        await self.close()
+
+    def __aiter__(self) -> AsyncIterator[CommsStreamEvent]:
+        return self._iter_events()
+
+    async def _iter_events(self) -> AsyncIterator[CommsStreamEvent]:
+        while True:
+            raw = await self._event_queue.get()
+            if raw is None:
+                return
+            wire_event = raw.get("event")
+            parsed = parse_event(wire_event) if isinstance(wire_event, dict) else UnknownEvent()
+            scope = raw.get("scope")
+            yield CommsStreamEvent(
+                stream_id=str(raw.get("stream_id", "")),
+                scope=scope if isinstance(scope, dict) else {},
+                sequence=int(raw.get("sequence", 0)),
+                event=parsed,
+                raw=raw,
+            )
+
+    async def close(self) -> None:
+        try:
+            await self._closer(self._stream_id)
+        finally:
+            self._dispatcher.unsubscribe_comms_stream(self._stream_id)
 
 
 class EventStream:

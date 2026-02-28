@@ -17,6 +17,7 @@ meerkat-core          (no I/O deps — pure types, traits, agent loop)
 
 meerkat (facade)          (AgentFactory, wiring, re-exports)
   ├── meerkat-mob          (multi-agent: MobBuilder, MobActor, FlowEngine)
+  ├── meerkat-mob-pack     (mobpack archive: signing, trust, validation)
   ├── meerkat-mob-mcp      (mob tools as MCP dispatcher)
   └── meerkat-web-runtime  (WASM embedded runtime)
 

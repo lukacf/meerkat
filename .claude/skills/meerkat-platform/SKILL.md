@@ -131,7 +131,7 @@ The `meerkat-web-runtime` crate is an **embedded deployment target for mobpacks*
 - MCP protocol client (rmcp blocked by tokio/mio)
 - Network comms (TCP/UDS sockets — inproc only)
 
-**API surface (25 wasm_bindgen exports):**
+**API surface (26 wasm_bindgen exports):**
 ```
 # Bootstrap
 init_runtime(mobpack_bytes, credentials_json)
@@ -159,6 +159,12 @@ mob_lifecycle(mob_id, action)  [async]
 mob_run_flow(mob_id, flow_id, params_json) → run_id  [async]
 mob_flow_status(mob_id, run_id) → JSON
 mob_cancel_flow(mob_id, run_id)  [async]
+wire_cross_mob(mob_id, a, b)  [async]
+
+# Subscriptions
+mob_member_subscribe(mob_id, meerkat_id) → handle (u32)  [async]
+poll_subscription(handle) → JSON
+close_subscription(handle)
 
 # Comms
 comms_peers(session_id) → JSON
@@ -290,13 +296,13 @@ The `meerkat` facade crate defaults to providers only (Anthropic, OpenAI, Gemini
 
 ```toml
 # Default: three providers, no storage/comms/tools
-meerkat = "0.3"
+meerkat = "0.4"
 
 # Single provider, minimal
-meerkat = { version = "0.3", default-features = false, features = ["anthropic"] }
+meerkat = { version = "0.4", default-features = false, features = ["anthropic"] }
 
 # Add persistence + memory + comms
-meerkat = { version = "0.3", features = [
+meerkat = { version = "0.4", features = [
     "jsonl-store", "session-store", "session-compaction",
     "memory-store-session", "comms", "mcp", "sub-agents", "skills"
 ] }

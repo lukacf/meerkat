@@ -1,0 +1,59 @@
+---
+title: "Examples gallery"
+description: "Functional apps and production patterns built with Meerkat. From coding swarms to browser war games."
+icon: "rocket"
+---
+
+Production-ready applications in the [repository](https://github.com/lukacf/meerkat/tree/main/examples). For feature-by-feature code snippets, start with [Sessions & streaming](/examples/sessions).
+
+## Multi-agent systems
+
+<CardGroup cols={2}>
+  <Card title="017 Coding Swarm" icon="users" href="https://github.com/lukacf/meerkat/tree/main/examples/017-mob-coding-swarm-rs">
+    **Rust** -- Orchestrator + worker mob for coding tasks. Leader decomposes work, workers execute in parallel, results merge.
+  </Card>
+  <Card title="018 Research Team" icon="magnifying-glass" href="https://github.com/lukacf/meerkat/tree/main/examples/018-mob-research-team-rs">
+    **Rust** -- Diverge/converge research pattern. Specialized profiles explore independently, then synthesize findings.
+  </Card>
+  <Card title="019 CI/CD Pipeline" icon="arrow-right-arrow-left" href="https://github.com/lukacf/meerkat/tree/main/examples/019-mob-pipeline-rs">
+    **Rust** -- Sequential pipeline with stage handoffs. Each stage validates before passing to the next.
+  </Card>
+  <Card title="020 Peer Messaging" icon="tower-broadcast" href="https://github.com/lukacf/meerkat/tree/main/examples/020-comms-peer-messaging-rs">
+    **Rust** -- Two agents with Ed25519 identities communicate over encrypted channels. Signed envelopes, trust verification.
+  </Card>
+</CardGroup>
+
+## Production patterns
+
+<CardGroup cols={2}>
+  <Card title="021 Multi-Provider Routing" icon="server" href="https://github.com/lukacf/meerkat/tree/main/examples/021-multi-provider-routing-py">
+    **Python** -- Same code routes to Anthropic, OpenAI, or Gemini. Provider-specific params, model switching at runtime.
+  </Card>
+  <Card title="024 Event Mesh" icon="satellite-dish" href="https://github.com/lukacf/meerkat/tree/main/examples/024-host-mode-event-mesh-rs">
+    **Rust** -- Reactive agents in host mode. Process external events from webhooks, CI pipelines, monitoring systems.
+  </Card>
+  <Card title="025 Full-Stack Agent" icon="layer-group" href="https://github.com/lukacf/meerkat/tree/main/examples/025-full-stack-agent-rs">
+    **Rust** -- Reference architecture combining all features: tools, hooks, skills, memory, persistence, streaming, budget.
+  </Card>
+</CardGroup>
+
+## Portable deployment
+
+<CardGroup cols={2}>
+  <Card title="028 Mobpack Release Triage" icon="box-archive" href="https://github.com/lukacf/meerkat/tree/main/examples/028-mobpack-release-triage-sh">
+    **Shell** -- Build, sign, validate, and deploy a portable `.mobpack` artifact. Ed25519 trust policies, key management.
+  </Card>
+  <Card title="029 Web Incident War Room" icon="fire" href="https://github.com/lukacf/meerkat/tree/main/examples/029-web-incident-war-room-sh">
+    **Shell** -- Browser-deployable multi-agent incident response. WASM bundle generation from mobpack.
+  </Card>
+  <Card title="030 Web Dashboard Copilot" icon="chart-line" href="https://github.com/lukacf/meerkat/tree/main/examples/030-web-dashboard-copilot-sh">
+    **Shell** -- Embeddable web assistant for ops dashboards. WASM surface running the real agent stack in-browser.
+  </Card>
+  <Card title="031 Mini Diplomacy" icon="chess" href="https://github.com/lukacf/meerkat/tree/main/examples/031-wasm-mini-diplomacy-sh">
+    **Shell + Web** -- 9 autonomous agents across 4 WASM mobs. Three factions negotiate, strategize, and betray in a territory war. Real LLM calls via browser fetch, inproc comms, flow engine.
+  </Card>
+</CardGroup>
+
+---
+
+All 31 examples (including single-feature demos and hello-world starters) are in `examples/` in the [repository](https://github.com/lukacf/meerkat/tree/main/examples).

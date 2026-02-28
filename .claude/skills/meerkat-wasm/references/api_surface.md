@@ -1,6 +1,6 @@
 # WASM Runtime API Surface
 
-## 25 wasm_bindgen Exports
+## 26 wasm_bindgen Exports
 
 ### Bootstrap
 | Export | Params | Returns | Notes |
@@ -34,12 +34,20 @@
 | `mob_run_flow` | mob_id, flow_id, params JSON | run_id string | async |
 | `mob_flow_status` | mob_id, run_id | MobRun JSON | |
 | `mob_cancel_flow` | mob_id, run_id | `()` | async |
+| `wire_cross_mob` | mob_id, a, b | `()` | async, cross-mob comms wiring |
+
+### Subscriptions
+| Export | Params | Returns | Notes |
+|--------|--------|---------|-------|
+| `mob_member_subscribe` | mob_id, meerkat_id | handle (u32) | async, raw broadcast subscription |
+| `poll_subscription` | handle | JSON | Drain events from subscription |
+| `close_subscription` | handle | `()` | Close subscription handle |
 
 ### Comms
 | Export | Params | Returns | Notes |
 |--------|--------|---------|-------|
-| `comms_peers` | session_id | JSON | Placeholder |
-| `comms_send` | session_id, params JSON | JSON | Placeholder |
+| `comms_peers` | session_id | JSON | Live — lists trusted peers |
+| `comms_send` | session_id, params JSON | JSON | Live — send to peer |
 
 ### Inspection
 | Export | Params | Returns | Notes |

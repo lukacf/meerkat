@@ -1,0 +1,143 @@
+---
+title: "WASM runtime"
+description: "Browser deployment with the meerkat-web-runtime embedded surface."
+icon: "globe"
+---
+
+The WASM runtime compiles the full Meerkat agent stack to wasm32 for browser deployment. It routes through the same `AgentFactory::build_agent()` pipeline as all other surfaces.
+
+## Build the WASM bundle
+
+<Tabs>
+  <Tab title="CLI">
+    Build a web bundle from a `.mobpack` artifact:
+
+    ```bash
+    rkat mob web build ./dist/my-mob.mobpack -o ./dist/web-bundle
+    ```
+  </Tab>
+  <Tab title="Manual (wasm-pack)">
+    Build the WASM package directly with wasm-pack:
+
+    ```bash
+    RUSTFLAGS='--cfg getrandom_backend="wasm_js"' \
+      wasm-pack build meerkat-web-runtime --target web --out-dir pkg
+    ```
+  </Tab>
+</Tabs>
+
+## Initialize runtime
+
+```javascript
+import init, { init_runtime } from './runtime.js';
+
+await init();
+
+init_runtime(
+  mobpackBytes,
+  JSON.stringify({
+    api_key: "sk-ant-...",
+    model: "claude-sonnet-4-5",
+  })
+);
+```
+
+## Create session and run turn
+
+```javascript
+const handle = create_session(mobpackBytes, JSON.stringify({
+  api_key: "sk-ant-...",
+  model: "claude-sonnet-4-5",
+}));
+
+const result = JSON.parse(await start_turn(handle, "Hello", "{}"));
+console.log(result.text);
+```
+
+## Poll events
+
+```javascript
+const events = JSON.parse(poll_events(handle));
+
+for (const event of events) {
+  if (event.type === "text_delta") {
+    document.body.innerText += event.delta;
+  }
+}
+```
+
+## Mob lifecycle in browser
+
+```javascript
+// Create mob from definition
+const mobId = await mob_create(JSON.stringify({
+  id: "research-team",
+  orchestrator: "lead",
+  profiles: { lead: { model: "claude-sonnet-4-5" } },
+}));
+
+// Spawn members
+await mob_spawn(mobId, JSON.stringify([
+  { profile: "lead", meerkat_id: "lead-1" },
+  { profile: "worker", meerkat_id: "worker-1" },
+]));
+
+// Wire peers
+await mob_wire(mobId, "lead-1", "worker-1");
+
+// Run a flow
+const runId = await mob_run_flow(mobId, "review", "{}");
+const status = JSON.parse(await mob_flow_status(mobId, runId));
+```
+
+## Subscribe to member events
+
+```javascript
+const sub = await mob_member_subscribe(mobId, "lead-1");
+
+// Poll for events (non-blocking)
+const events = JSON.parse(poll_subscription(sub));
+for (const event of events) {
+  console.log(event.type, event);
+}
+
+// Clean up when done
+close_subscription(sub);
+```
+
+## Cross-mob comms
+
+Wire ambassadors across mobs for inter-faction communication, then send messages through the comms system.
+
+```javascript
+// Wire ambassadors between two mobs
+await wire_cross_mob(mobIdNorth, "ambassador-north", "ambassador-south");
+
+// Send a message through the ambassador's session
+await comms_send(
+  ambassadorSessionId,
+  JSON.stringify({
+    kind: "peer_message",
+    to: "south-faction/operator/ambassador-south",
+    body: "Proposing alliance on the eastern front.",
+  })
+);
+
+// Check peers visible to the ambassador
+const peers = JSON.parse(await comms_peers(ambassadorSessionId));
+```
+
+## What is available on wasm32
+
+| Category | Available | Not available |
+|----------|-----------|---------------|
+| **Agent loop** | Full agent state machine, streaming, budget | -- |
+| **Providers** | Anthropic, OpenAI, Gemini (browser fetch) | -- |
+| **Sessions** | Ephemeral sessions | Persistent sessions (filesystem) |
+| **Mobs** | Full orchestration, flows, lifecycle | -- |
+| **Comms** | In-process (`inproc`) transport | TCP, UDS, network transports |
+| **Tools** | Custom tools, tool dispatch | Shell tools, filesystem tools |
+| **Skills** | Embedded skills, HTTP skills | Filesystem skill sources |
+| **Hooks** | In-process hooks | Command hooks, filesystem hooks |
+| **Compaction** | Context compaction | -- |
+| **Other** | -- | MCP client, sub-agent spawning |

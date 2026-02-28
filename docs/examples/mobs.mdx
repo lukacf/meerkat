@@ -1,0 +1,620 @@
+---
+title: "Mobs"
+description: "Multi-agent orchestration with roles, wiring, flows, and lifecycle management."
+icon: "users"
+---
+
+For the full guide, see [Mobs](/guides/mobs).
+
+## Mob definition
+
+A mob definition declares profiles (agent templates), wiring rules, and flows. Definitions can be JSON or TOML.
+
+```json
+{
+  "id": "release-triage",
+  "profiles": {
+    "lead": {
+      "model": "claude-opus-4-6",
+      "peer_description": "Coordinates triage, assigns issues",
+      "tools": { "builtins": true, "comms": true, "mob": true, "mob_tasks": true },
+      "skills": ["triage-workflow"],
+      "runtime_mode": "autonomous_host"
+    },
+    "analyst": {
+      "model": "claude-sonnet-4-5",
+      "peer_description": "Investigates assigned issues",
+      "tools": { "builtins": true, "shell": true, "comms": true },
+      "runtime_mode": "autonomous_host"
+    }
+  },
+  "wiring": {
+    "auto_wire_orchestrator": false,
+    "role_wiring": [
+      { "a": "lead", "b": "analyst" }
+    ]
+  },
+  "flows": {
+    "triage": {
+      "description": "Triage incoming issues",
+      "steps": {
+        "scan": {
+          "role": "lead",
+          "message": "Scan the issue tracker and prioritize"
+        },
+        "investigate": {
+          "role": "analyst",
+          "message": "Investigate the top priority issue",
+          "depends_on": ["scan"],
+          "dispatch_mode": "fan_out"
+        },
+        "summarize": {
+          "role": "lead",
+          "message": "Summarize findings and recommend actions",
+          "depends_on": ["investigate"],
+          "depends_on_mode": "all"
+        }
+      }
+    }
+  },
+  "limits": {
+    "max_flow_duration_ms": 300000,
+    "max_step_retries": 2,
+    "max_orphaned_turns": 10
+  }
+}
+```
+
+### Profile fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `model` | string | LLM model name |
+| `skills` | string[] | Skill references to load |
+| `tools` | object | Tool categories: `builtins`, `shell`, `comms`, `memory`, `mob`, `mob_tasks`, `mcp` (server names) |
+| `peer_description` | string | Visible to peers in comms discovery |
+| `runtime_mode` | string | `"autonomous_host"` (default) or `"turn_driven"` |
+| `external_addressable` | bool | Visible for cross-mob comms |
+| `output_schema` | object | JSON Schema for structured output extraction |
+
+### Flow step fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `role` | string | Profile name to execute this step |
+| `message` | string | Prompt sent to the member |
+| `depends_on` | string[] | Step IDs that must complete first |
+| `depends_on_mode` | string | `"all"` (default) or `"any"` |
+| `dispatch_mode` | string | `"fan_out"` (default), `"one_to_one"`, `"fan_in"` |
+| `condition` | object | Guard expression (`eq`, `in`, `gt`, `lt`, `and`, `or`, `not`) |
+| `branch` | string | Branch label for conditional routing |
+| `timeout_ms` | number | Step-level timeout |
+| `allowed_tools` / `blocked_tools` | string[] | Per-step tool overlay |
+
+---
+
+## Mob tools reference
+
+When `enable_mob` is set, the agent gets these tools:
+
+| Tool | Parameters | Description |
+|------|-----------|-------------|
+| `mob_create` | `definition` (JSON) | Create a mob from definition |
+| `mob_list` | `mob_id?` | List mobs, or get status of one |
+| `mob_lifecycle` | `mob_id`, `action` (stop/resume/complete/destroy) | Control mob state |
+| `mob_events` | `mob_id`, `after_cursor?`, `limit?` | Read mob event log |
+| `mob_run_flow` | `mob_id`, `flow_id`, `params?` | Execute a DAG flow |
+| `mob_flow_status` | `mob_id`, `run_id` | Check flow run status |
+| `mob_cancel_flow` | `mob_id`, `run_id` | Cancel a running flow |
+| `meerkat_spawn` | `mob_id`, `specs` (array of `{profile, meerkat_id, runtime_mode?, initial_message?}`) | Spawn members (batch) |
+| `meerkat_retire` | `mob_id`, `meerkat_id` | Remove a member |
+| `meerkat_wire` | `mob_id`, `a`, `b` | Establish trusted comms channel |
+| `meerkat_list` | `mob_id` | List mob members and their state |
+| `meerkat_message` | `mob_id`, `meerkat_id`, `message` | Send a direct turn to a member |
+
+---
+
+## List prefabs
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    rkat mob prefabs
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    ```json
+    {"jsonrpc":"2.0","id":1,"method":"mob/prefabs","params":{}}
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    curl http://localhost:8080/mob/prefabs
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    {"name": "meerkat_mob_prefabs", "arguments": {}}
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    prefabs = await client.list_mob_prefabs()
+    for p in prefabs:
+        print(p["key"])
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    const prefabs = await client.listMobPrefabs();
+    prefabs.forEach(p => console.log(p.key));
+    ```
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    for prefab in meerkat_mob::Prefab::all() {
+        println!("{}", prefab.key());
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Create a mob
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    # From a prefab template
+    rkat mob create --prefab coding_swarm
+
+    # From a definition file
+    rkat mob create --definition ./mobs/triage/definition.json
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 1,
+      "method": "session/create",
+      "params": {
+        "prompt": "Create a mob from the coding_swarm prefab, spawn all members, wire them, and report status.",
+        "enable_builtins": true,
+        "enable_mob": true
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    curl -X POST http://localhost:8080/sessions \
+      -H "Content-Type: application/json" \
+      -d '{"prompt":"Create a mob from the coding_swarm prefab, spawn and wire all members.","enable_builtins":true,"enable_mob":true}'
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    {"name": "meerkat_run", "arguments": {
+      "prompt": "Create a coding swarm mob, spawn all members, wire them.",
+      "enable_builtins": true,
+      "enable_mob": true
+    }}
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    session = await client.create_session(
+        prompt="Create a coding swarm, spawn all members, wire them.",
+        enable_builtins=True,
+        enable_mob=True,
+    )
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    const session = await client.createSession({
+      prompt: "Create a coding swarm, spawn all members, wire them.",
+      enableBuiltins: true,
+      enableMob: true,
+    });
+    ```
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    let definition = Prefab::CodingSwarm.definition("my-swarm");
+    let handle = MobBuilder::new(definition, MobStorage::in_memory())
+        .with_session_service(service)
+        .allow_ephemeral_sessions(true)
+        .create()
+        .await?;
+    ```
+  </Tab>
+</Tabs>
+
+## Spawn members
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    rkat mob spawn my-mob lead lead-1
+    rkat mob spawn my-mob worker worker-1
+    rkat mob spawn my-mob worker worker-2
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    Agent calls `meerkat_spawn` tool:
+    ```json
+    {"mob_id": "my-mob", "specs": [
+      {"profile": "lead", "meerkat_id": "lead-1"},
+      {"profile": "worker", "meerkat_id": "worker-1"},
+      {"profile": "worker", "meerkat_id": "worker-2", "runtime_mode": "turn_driven"}
+    ]}
+    ```
+  </Tab>
+  <Tab title="REST">
+    Agent calls `meerkat_spawn` tool (same JSON as RPC — mob ops are tool-driven on all session surfaces).
+  </Tab>
+  <Tab title="MCP">
+    Agent calls `meerkat_spawn` tool (same JSON as RPC).
+  </Tab>
+  <Tab title="Python">
+    Agent calls `meerkat_spawn` tool (same JSON as RPC).
+  </Tab>
+  <Tab title="TypeScript">
+    Agent calls `meerkat_spawn` tool (same JSON as RPC).
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    handle.spawn_batch(vec![
+        SpawnSpec::new("lead", "lead-1"),
+        SpawnSpec::new("worker", "worker-1").runtime_mode(MobRuntimeMode::TurnDriven),
+        SpawnSpec::new("worker", "worker-2"),
+    ]).await?;
+    ```
+  </Tab>
+</Tabs>
+
+## Wire and unwire peers
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    rkat mob wire my-mob lead-1 worker-1
+    rkat mob unwire my-mob lead-1 worker-2
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    Agent calls `meerkat_wire` tool:
+    ```json
+    {"mob_id": "my-mob", "a": "lead-1", "b": "worker-1"}
+    ```
+  </Tab>
+  <Tab title="REST">
+    Agent calls `meerkat_wire` tool (same JSON as RPC).
+  </Tab>
+  <Tab title="MCP">
+    Agent calls `meerkat_wire` tool (same JSON as RPC).
+  </Tab>
+  <Tab title="Python">
+    Agent calls `meerkat_wire` tool (same JSON as RPC).
+  </Tab>
+  <Tab title="TypeScript">
+    Agent calls `meerkat_wire` tool (same JSON as RPC).
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    handle.wire("lead-1", "worker-1").await?;
+    handle.unwire("lead-1", "worker-2").await?;
+    ```
+  </Tab>
+</Tabs>
+
+## Retire a member
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    rkat mob retire my-mob worker-2
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    Agent calls `meerkat_retire` tool:
+    ```json
+    {"mob_id": "my-mob", "meerkat_id": "worker-2"}
+    ```
+  </Tab>
+  <Tab title="REST">
+    Agent calls `meerkat_retire` tool (same JSON as RPC).
+  </Tab>
+  <Tab title="MCP">
+    Agent calls `meerkat_retire` tool (same JSON as RPC).
+  </Tab>
+  <Tab title="Python">
+    Agent calls `meerkat_retire` tool (same JSON as RPC).
+  </Tab>
+  <Tab title="TypeScript">
+    Agent calls `meerkat_retire` tool (same JSON as RPC).
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    handle.retire("worker-2").await?;
+    ```
+  </Tab>
+</Tabs>
+
+## Send a turn
+
+Send a message directly to a specific mob member, triggering an LLM turn.
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    rkat mob turn my-mob lead-1 "Decompose the task and assign to workers."
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    Agent calls `meerkat_message` tool:
+    ```json
+    {"mob_id": "my-mob", "meerkat_id": "lead-1", "message": "Decompose the task and assign to workers."}
+    ```
+  </Tab>
+  <Tab title="REST">
+    Agent calls `meerkat_message` tool (same JSON as RPC).
+  </Tab>
+  <Tab title="MCP">
+    Agent calls `meerkat_message` tool (same JSON as RPC).
+  </Tab>
+  <Tab title="Python">
+    Agent calls `meerkat_message` tool (same JSON as RPC).
+  </Tab>
+  <Tab title="TypeScript">
+    Agent calls `meerkat_message` tool (same JSON as RPC).
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    handle.turn("lead-1", "Decompose the task and assign to workers.").await?;
+    ```
+  </Tab>
+</Tabs>
+
+## Run a flow
+
+Execute a named DAG flow. Steps execute in dependency order with configured dispatch modes.
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    rkat mob run-flow my-mob --flow triage --params '{"pr": 42}'
+    rkat mob run-flow my-mob --flow triage --stream --stream-view mux
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    Agent calls `mob_run_flow` tool:
+    ```json
+    {"mob_id": "my-mob", "flow_id": "triage", "params": {"pr": 42}}
+    ```
+  </Tab>
+  <Tab title="REST">
+    Agent calls `mob_run_flow` tool (same JSON as RPC).
+  </Tab>
+  <Tab title="MCP">
+    Agent calls `mob_run_flow` tool (same JSON as RPC).
+  </Tab>
+  <Tab title="Python">
+    Agent calls `mob_run_flow` tool (same JSON as RPC).
+  </Tab>
+  <Tab title="TypeScript">
+    Agent calls `mob_run_flow` tool (same JSON as RPC).
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    let run_id = handle.run_flow("triage", json!({"pr": 42})).await?;
+    ```
+  </Tab>
+</Tabs>
+
+## Check status
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    rkat mob status my-mob
+    rkat mob list
+    rkat mob flows my-mob
+    rkat mob flow-status my-mob <run_id>
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    Agent calls `mob_list` and `mob_flow_status` tools:
+    ```json
+    {"mob_id": "my-mob"}
+    {"mob_id": "my-mob", "run_id": "01936f8a-..."}
+    ```
+  </Tab>
+  <Tab title="REST">
+    Agent calls `mob_list` / `mob_flow_status` tools (same JSON as RPC).
+  </Tab>
+  <Tab title="MCP">
+    Agent calls `mob_list` / `mob_flow_status` tools (same JSON as RPC).
+  </Tab>
+  <Tab title="Python">
+    Agent calls `mob_list` / `mob_flow_status` tools (same JSON as RPC).
+  </Tab>
+  <Tab title="TypeScript">
+    Agent calls `mob_list` / `mob_flow_status` tools (same JSON as RPC).
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    let status = handle.status().await?;
+    let flow_run = handle.flow_status(&run_id).await?;
+    ```
+  </Tab>
+</Tabs>
+
+## Mob events
+
+Read the structural event log (spawns, retires, wires, flow transitions).
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    rkat mob events my-mob
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    Agent calls `mob_events` tool:
+    ```json
+    {"mob_id": "my-mob", "after_cursor": 0, "limit": 50}
+    ```
+  </Tab>
+  <Tab title="REST">
+    Agent calls `mob_events` tool (same JSON as RPC).
+  </Tab>
+  <Tab title="MCP">
+    Agent calls `mob_events` tool (same JSON as RPC).
+  </Tab>
+  <Tab title="Python">
+    Agent calls `mob_events` tool (same JSON as RPC).
+  </Tab>
+  <Tab title="TypeScript">
+    Agent calls `mob_events` tool (same JSON as RPC).
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    let events = handle.events(0, 100).await?;
+    for e in &events { println!("{:?}", e); }
+    ```
+  </Tab>
+</Tabs>
+
+## Lifecycle
+
+Control mob state transitions.
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    rkat mob stop my-mob       # pause all members
+    rkat mob resume my-mob     # restart members
+    rkat mob complete my-mob   # mark as done
+    rkat mob destroy my-mob    # tear down all resources
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    Agent calls `mob_lifecycle` tool:
+    ```json
+    {"mob_id": "my-mob", "action": "stop"}
+    {"mob_id": "my-mob", "action": "resume"}
+    {"mob_id": "my-mob", "action": "complete"}
+    {"mob_id": "my-mob", "action": "destroy"}
+    ```
+  </Tab>
+  <Tab title="REST">
+    Agent calls `mob_lifecycle` tool (same JSON as RPC).
+  </Tab>
+  <Tab title="MCP">
+    Agent calls `mob_lifecycle` tool (same JSON as RPC).
+  </Tab>
+  <Tab title="Python">
+    Agent calls `mob_lifecycle` tool (same JSON as RPC).
+  </Tab>
+  <Tab title="TypeScript">
+    Agent calls `mob_lifecycle` tool (same JSON as RPC).
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    handle.stop().await?;
+    handle.resume().await?;
+    handle.complete().await?;
+    handle.destroy().await?;
+    ```
+  </Tab>
+</Tabs>
+
+## Tool-driven mob usage
+
+The primary pattern across all surfaces: enable mob tools and let the agent orchestrate everything from a natural language request.
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    rkat run -M "Create a research team with a lead and 3 analysts. \
+      Wire them, then run the synthesis flow."
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 1,
+      "method": "session/create",
+      "params": {
+        "prompt": "Create a research team with a lead and 3 analysts, then run the synthesis flow.",
+        "enable_builtins": true,
+        "enable_mob": true
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    curl -X POST http://localhost:8080/sessions \
+      -H "Content-Type: application/json" \
+      -d '{"prompt":"Create a research team and run the synthesis flow","enable_builtins":true,"enable_mob":true}'
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    {"name": "meerkat_run", "arguments": {
+      "prompt": "Create a research team and run the synthesis flow",
+      "enable_builtins": true,
+      "enable_mob": true
+    }}
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    session = await client.create_session(
+        prompt="Create a research team and run the synthesis flow",
+        enable_builtins=True,
+        enable_mob=True,
+    )
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    const session = await client.createSession({
+      prompt: "Create a research team and run the synthesis flow",
+      enableBuiltins: true,
+      enableMob: true,
+    });
+    ```
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    let factory = AgentFactory::new(root)
+        .builtins(true)
+        .mob(true);
+    let service = build_ephemeral_service(factory, config, 64);
+    let result = service.create_session(CreateSessionRequest {
+        prompt: "Create a research team and run the synthesis flow".into(),
+        ..Default::default()
+    }).await?;
+    ```
+  </Tab>
+</Tabs>
+
+## Runtime modes
+
+| Mode | Behavior | Use case |
+|------|----------|----------|
+| `autonomous_host` (default) | Member runs a continuous loop: wake on inbox → process → respond → sleep | Long-lived agents that react to messages |
+| `turn_driven` | Member only executes when explicitly given a turn via `meerkat_message` or flow dispatch | Controlled execution, deterministic ordering |
+
+Set per-profile in the definition:
+```json
+{"model": "claude-sonnet-4-5", "runtime_mode": "turn_driven", "tools": {"comms": true}}
+```
+
+Or per-spawn:
+```bash
+rkat mob spawn my-mob worker worker-1 --runtime-mode turn_driven
+```

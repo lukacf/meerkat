@@ -1,0 +1,476 @@
+---
+title: "Hooks"
+description: "Lifecycle hooks for audit, guardrails, and content rewriting at 8 hook points."
+icon: "anchor"
+---
+
+For the full guide, see [Hooks](/guides/hooks).
+
+## Observer hook (background)
+
+A `post_tool_execution` background hook that logs every tool call to a file. Background hooks run asynchronously and never block the agent loop.
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    rkat run "Summarize this repo" --hooks-override-json '{
+      "entries": [{
+        "id": "audit-log",
+        "point": "post_tool_execution",
+        "mode": "background",
+        "command": ["python3", "hooks/log_tool.py"],
+        "timeout_ms": 3000
+      }]
+    }'
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 1,
+      "method": "session/create",
+      "params": {
+        "prompt": "Summarize this repo",
+        "hooks_override": {
+          "entries": [{
+            "id": "audit-log",
+            "point": "post_tool_execution",
+            "mode": "background",
+            "command": ["python3", "hooks/log_tool.py"],
+            "timeout_ms": 3000
+          }]
+        }
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    curl -X POST http://127.0.0.1:8080/sessions \
+      -H "Content-Type: application/json" \
+      -d '{
+        "prompt": "Summarize this repo",
+        "hooks_override": {
+          "entries": [{
+            "id": "audit-log",
+            "point": "post_tool_execution",
+            "mode": "background",
+            "command": ["python3", "hooks/log_tool.py"],
+            "timeout_ms": 3000
+          }]
+        }
+      }'
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    {
+      "name": "meerkat_run",
+      "arguments": {
+        "prompt": "Summarize this repo",
+        "enable_builtins": true,
+        "hooks_override": {
+          "entries": [{
+            "id": "audit-log",
+            "point": "post_tool_execution",
+            "mode": "background",
+            "command": ["python3", "hooks/log_tool.py"],
+            "timeout_ms": 3000
+          }]
+        }
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    result = client.create_session(
+        "Summarize this repo",
+        hooks_override={
+            "entries": [{
+                "id": "audit-log",
+                "point": "post_tool_execution",
+                "mode": "background",
+                "command": ["python3", "hooks/log_tool.py"],
+                "timeout_ms": 3000,
+            }]
+        },
+    )
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    const result = await client.createSession({
+      prompt: "Summarize this repo",
+      hooksOverride: {
+        entries: [{
+          id: "audit-log",
+          point: "post_tool_execution",
+          mode: "background",
+          command: ["python3", "hooks/log_tool.py"],
+          timeoutMs: 3000,
+        }],
+      },
+    });
+    ```
+  </Tab>
+</Tabs>
+
+## Guardrail hook (blocking)
+
+A `pre_tool_execution` blocking hook that must approve each tool call before it runs. If the hook returns `deny`, the tool call is skipped.
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    rkat run "Delete old logs" --hooks-override-json '{
+      "entries": [{
+        "id": "safety-gate",
+        "point": "pre_tool_execution",
+        "mode": "blocking",
+        "command": ["python3", "hooks/approve_tool.py"],
+        "timeout_ms": 5000
+      }]
+    }'
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 1,
+      "method": "session/create",
+      "params": {
+        "prompt": "Delete old logs",
+        "hooks_override": {
+          "entries": [{
+            "id": "safety-gate",
+            "point": "pre_tool_execution",
+            "mode": "blocking",
+            "command": ["python3", "hooks/approve_tool.py"],
+            "timeout_ms": 5000
+          }]
+        }
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    curl -X POST http://127.0.0.1:8080/sessions \
+      -H "Content-Type: application/json" \
+      -d '{
+        "prompt": "Delete old logs",
+        "hooks_override": {
+          "entries": [{
+            "id": "safety-gate",
+            "point": "pre_tool_execution",
+            "mode": "blocking",
+            "command": ["python3", "hooks/approve_tool.py"],
+            "timeout_ms": 5000
+          }]
+        }
+      }'
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    {
+      "name": "meerkat_run",
+      "arguments": {
+        "prompt": "Delete old logs",
+        "enable_builtins": true,
+        "hooks_override": {
+          "entries": [{
+            "id": "safety-gate",
+            "point": "pre_tool_execution",
+            "mode": "blocking",
+            "command": ["python3", "hooks/approve_tool.py"],
+            "timeout_ms": 5000
+          }]
+        }
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    result = client.create_session(
+        "Delete old logs",
+        hooks_override={
+            "entries": [{
+                "id": "safety-gate",
+                "point": "pre_tool_execution",
+                "mode": "blocking",
+                "command": ["python3", "hooks/approve_tool.py"],
+                "timeout_ms": 5000,
+            }]
+        },
+    )
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    const result = await client.createSession({
+      prompt: "Delete old logs",
+      hooksOverride: {
+        entries: [{
+          id: "safety-gate",
+          point: "pre_tool_execution",
+          mode: "blocking",
+          command: ["python3", "hooks/approve_tool.py"],
+          timeoutMs: 5000,
+        }],
+      },
+    });
+    ```
+  </Tab>
+</Tabs>
+
+## In-process hook (Rust only)
+
+Register a Rust closure directly -- no subprocess, no serialization overhead. Only available in the Rust SDK.
+
+<Tabs>
+  <Tab title="Rust">
+    ```rust
+    let engine = DefaultHookEngine::new(hooks_config)
+        .with_in_process_handler(
+            "pii-scrub",
+            Arc::new(|invocation| Box::pin(async move {
+                let text = invocation.tool_result.as_ref()
+                    .map(|r| r.content.as_str()).unwrap_or("");
+                let scrubbed = redact_pii(text);
+                Ok(RuntimeHookResponse {
+                    patches: vec![HookPatch::ToolResult {
+                        content: scrubbed,
+                        is_error: None,
+                    }],
+                    ..Default::default()
+                })
+            })),
+        );
+    ```
+  </Tab>
+</Tabs>
+
+## HTTP hook
+
+A hook that POSTs the invocation payload to a remote URL. Useful for centralized policy servers.
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    rkat run "Analyze quarterly data" --hooks-override-json '{
+      "entries": [{
+        "id": "policy-server",
+        "point": "pre_llm_call",
+        "mode": "blocking",
+        "url": "https://hooks.example.com/policy",
+        "timeout_ms": 10000
+      }]
+    }'
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 1,
+      "method": "session/create",
+      "params": {
+        "prompt": "Analyze quarterly data",
+        "hooks_override": {
+          "entries": [{
+            "id": "policy-server",
+            "point": "pre_llm_call",
+            "mode": "blocking",
+            "url": "https://hooks.example.com/policy",
+            "timeout_ms": 10000
+          }]
+        }
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    curl -X POST http://127.0.0.1:8080/sessions \
+      -H "Content-Type: application/json" \
+      -d '{
+        "prompt": "Analyze quarterly data",
+        "hooks_override": {
+          "entries": [{
+            "id": "policy-server",
+            "point": "pre_llm_call",
+            "mode": "blocking",
+            "url": "https://hooks.example.com/policy",
+            "timeout_ms": 10000
+          }]
+        }
+      }'
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    {
+      "name": "meerkat_run",
+      "arguments": {
+        "prompt": "Analyze quarterly data",
+        "enable_builtins": true,
+        "hooks_override": {
+          "entries": [{
+            "id": "policy-server",
+            "point": "pre_llm_call",
+            "mode": "blocking",
+            "url": "https://hooks.example.com/policy",
+            "timeout_ms": 10000
+          }]
+        }
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    result = client.create_session(
+        "Analyze quarterly data",
+        hooks_override={
+            "entries": [{
+                "id": "policy-server",
+                "point": "pre_llm_call",
+                "mode": "blocking",
+                "url": "https://hooks.example.com/policy",
+                "timeout_ms": 10000,
+            }]
+        },
+    )
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    const result = await client.createSession({
+      prompt: "Analyze quarterly data",
+      hooksOverride: {
+        entries: [{
+          id: "policy-server",
+          point: "pre_llm_call",
+          mode: "blocking",
+          url: "https://hooks.example.com/policy",
+          timeoutMs: 10000,
+        }],
+      },
+    });
+    ```
+  </Tab>
+</Tabs>
+
+## All 8 hook points
+
+| Hook point | Classification | When it fires |
+|---|---|---|
+| `pre_run` | pre | Start of `Agent::run()`, before any LLM call |
+| `pre_llm_call` | pre | Before each LLM streaming call |
+| `pre_tool_execution` | pre | Before each individual tool call is dispatched |
+| `pre_turn` | pre | Between turns, after all tool results are collected |
+| `post_llm_call` | post | After the LLM response is received |
+| `post_tool_execution` | post | After each tool execution completes |
+| `post_turn` | post | After a turn completes |
+| `post_run` | post | After a successful run completes |
+
+<Note>
+Pre-point hooks in `blocking` mode halt the agent loop until they return. Pre-point hooks in `background` mode are limited to observe-only capability.
+</Note>
+
+## Disable a hook
+
+Use the `disable` list to turn off hooks defined in the realm config without removing them.
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    rkat run "Quick test" --hooks-override-json '{
+      "disable": ["safety-gate", "audit-log"]
+    }'
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 1,
+      "method": "session/create",
+      "params": {
+        "prompt": "Quick test",
+        "hooks_override": {
+          "disable": ["safety-gate", "audit-log"]
+        }
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    curl -X POST http://127.0.0.1:8080/sessions \
+      -H "Content-Type: application/json" \
+      -d '{
+        "prompt": "Quick test",
+        "hooks_override": {
+          "disable": ["safety-gate", "audit-log"]
+        }
+      }'
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    {
+      "name": "meerkat_run",
+      "arguments": {
+        "prompt": "Quick test",
+        "enable_builtins": true,
+        "hooks_override": {
+          "disable": ["safety-gate", "audit-log"]
+        }
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    result = client.create_session(
+        "Quick test",
+        hooks_override={
+            "disable": ["safety-gate", "audit-log"]
+        },
+    )
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    const result = await client.createSession({
+      prompt: "Quick test",
+      hooksOverride: {
+        disable: ["safety-gate", "audit-log"],
+      },
+    });
+    ```
+  </Tab>
+</Tabs>
+
+## Hook events
+
+Hooks emit events into the session event stream. Subscribe to these to build dashboards, alerting, or audit trails.
+
+```json
+// HookStarted -- emitted when a hook begins execution
+{"type": "hook_started", "hook_id": "safety-gate", "point": "pre_tool_execution"}
+
+// HookCompleted -- emitted when a hook finishes successfully
+{"type": "hook_completed", "hook_id": "safety-gate", "decision": "allow"}
+
+// HookDenied -- emitted when a hook blocks execution
+{"type": "hook_denied", "hook_id": "safety-gate", "reason_code": "policy_violation", "message": "rm -rf not allowed"}
+
+// HookFailed -- emitted when a hook errors or times out
+{"type": "hook_failed", "hook_id": "audit-log", "error": "process exited with code 1"}
+
+// HookRewriteApplied -- emitted when a background hook publishes a patch
+{"type": "hook_rewrite_applied", "hook_id": "pii-scrub", "patch_type": "tool_result"}
+```

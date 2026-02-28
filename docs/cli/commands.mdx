@@ -72,6 +72,9 @@ Frequently used options:
 - `-M` (short for `--enable-mob`; opt-in mob tools, default: disabled)
 - `--no-subagents`
 - `-N` (short for `--no-subagents`)
+- `--output-schema <SCHEMA>` (file path or inline JSON for structured output)
+- `--output-schema-compat <lossy|strict>` (schema lowering mode)
+- `--structured-output-retries <N>` (validation retry count, default: 2)
 - `--hooks-override-json <JSON>`
 - `--hooks-override-file <FILE>`
 
@@ -116,7 +119,7 @@ tail -f app.log | rkat run --host --stdin "Monitor incidents and alert on anomal
 
 When `--stdin` is set, batch context injection is skipped so stdin remains available for the event reader.
 
-When `--enable-mob` (`-M`) is passed, `run` composes the consolidated mob tool surface (backed by `meerkat-mob-mcp`) into the agent tool list (`mob_create`, `mob_list`, `mob_lifecycle`, `meerkat_spawn`, `meerkat_retire`, `meerkat_wire`, `meerkat_message`, `meerkat_list`, `mob_events`, `mob_run_flow`, `mob_flow_status`, `mob_cancel_flow`).
+When `--enable-mob` (`-M`) is passed, `run` composes the consolidated mob tool surface (backed by `meerkat-mob-mcp`) into the agent tool list (`mob_create`, `mob_list`, `mob_lifecycle`, `meerkat_spawn`, `meerkat_retire`, `meerkat_wire`, `send`, `meerkat_list`, `mob_events`, `mob_run_flow`, `mob_flow_status`, `mob_cancel_flow`).
 Mob tools are opt-in and disabled by default. When enabled, they are available even when built-ins are disabled.
 
 For mob workflows, this tool path is the primary CLI UX:

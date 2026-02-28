@@ -67,9 +67,11 @@ meerkat-contracts → Wire types, capability registry, error codes (canonical ov
 meerkat-skills    → Skill loading, resolution, rendering (filesystem, git, HTTP, embedded sources)
 meerkat-hooks     → Hook infrastructure (in-process, command, HTTP runtimes)
 meerkat-mob       → Multi-agent mob orchestration (spawn, provision, finalize)
+meerkat-mob-pack  → Mobpack archive format, signing, trust policies, validation
 meerkat-mob-mcp   → Expose mob tools as MCP interface (MobMcpState, MobMcpDispatcher)
 meerkat-cli       → CLI binary (produces `rkat`)
 meerkat           → Facade crate, re-exports, AgentFactory, SDK helpers
+meerkat-web-runtime → WASM browser deployment target (wasm_bindgen exports)
 ```
 
 **Key traits** (all in meerkat-core):
@@ -79,6 +81,8 @@ meerkat           → Facade crate, re-exports, AgentFactory, SDK helpers
 - `SessionService` - Canonical session lifecycle (create/turn/interrupt/read/list/archive)
 - `Compactor` - Context compaction strategy
 - `MemoryStore` - Semantic memory indexing
+- `HookEngine` - Lifecycle hook execution
+- `SkillEngine` / `SkillSource` - Skill loading and resolution
 
 **Agent loop state machine:** `CallingLlm` → `WaitingForOps` → `DrainingEvents` → `Completed` (with `ErrorRecovery` and `Cancelling` branches)
 
@@ -86,7 +90,7 @@ meerkat           → Facade crate, re-exports, AgentFactory, SDK helpers
 
 **Agent construction:** All surfaces use `AgentFactory::build_agent()` for centralized prompt assembly, provider resolution, tool dispatcher setup, comms wiring, and hook resolution. Zero `AgentBuilder::new()` calls in surface crates.
 
-**Session lifecycle:** All four surfaces (CLI, REST, MCP Server, JSON-RPC) route through `SessionService` for the full session lifecycle (create/turn/interrupt/read/list/archive). `FactoryAgentBuilder` bridges `AgentFactory` into the `SessionAgentBuilder` trait. Per-request build data is passed in-band via `CreateSessionRequest.build` / `SessionBuildOptions`.
+**Session lifecycle:** All surfaces (CLI, REST, MCP Server, JSON-RPC, Rust/Python/TypeScript SDKs) route through `SessionService` for the full session lifecycle (create/turn/interrupt/read/list/archive). `FactoryAgentBuilder` bridges `AgentFactory` into the `SessionAgentBuilder` trait. Per-request build data is passed in-band via `CreateSessionRequest.build` / `SessionBuildOptions`.
 
 **Capability matrix:** See `docs/reference/capability-matrix.mdx` for build profiles, error codes, and feature behavior. See `docs/reference/session-contracts.mdx` for concurrency, durability, and compaction semantics.
 
@@ -132,6 +136,14 @@ The RPC server speaks JSON-RPC 2.0 over newline-delimited JSON (JSONL) on stdin/
 | `comms/peers` | List discoverable peers (comms feature) |
 | `comms/stream_open` | Open scoped comms event stream (comms feature) |
 | `comms/stream_close` | Close scoped comms stream (comms feature) |
+| `skills/list` | List skills with provenance |
+| `skills/inspect` | Inspect a skill's full content |
+| `mcp/add` | Stage live MCP server addition |
+| `mcp/remove` | Stage live MCP server removal |
+| `mcp/reload` | Reload one or all MCP servers |
+| `mob/prefabs` | List built-in mob prefab templates |
+| `mob/tools` | List protocol-callable mob lifecycle tools |
+| `mob/call` | Invoke a mob lifecycle tool directly |
 | `capabilities/get` | List runtime capabilities |
 | `config/get` | Read config |
 | `config/set` | Replace config |
@@ -165,6 +177,10 @@ The RPC server speaks JSON-RPC 2.0 over newline-delimited JSON (JSONL) on stdin/
 - `meerkat-rpc/src/session_runtime.rs` - SessionRuntime (stateful agent manager)
 - `meerkat-rpc/src/router.rs` - JSON-RPC method dispatch
 - `meerkat-rpc/src/server.rs` - RPC server main loop
+- `meerkat-rpc/src/handlers/mcp.rs` - Live MCP controls (mcp/add, mcp/remove, mcp/reload)
+- `meerkat-core/src/tool_scope.rs` - Runtime tool visibility control
+- `meerkat-mob-pack/src/lib.rs` - Mobpack archive format, signing, trust
+- `meerkat-web-runtime/src/lib.rs` - WASM browser deployment (wasm_bindgen exports)
 
 ## CI/CD and Versioning
 
@@ -183,17 +199,17 @@ make audit       # Security audit via cargo-deny
 
 ### GitHub Workflows
 
-**CI** (`.github/workflows/ci.yml`) — runs on push to main, PRs, and manual dispatch:
-- Single `quality` job: runs `make ci` (full pipeline)
+**CI** (`.github/workflows/ci.yml`) — runs on push to main, PRs, feature branches, and manual dispatch:
+- 8 parallel jobs: `fmt-lint` (format, clippy, feature matrix, cargo-machete) → `test` (nextest, all features) → `test-minimal` → `test-feature-matrix-lib` → `test-feature-matrix-surface-checks` → `test-surface-smoke` (per-binary) → `audit` (cargo-deny) → `gate` (status aggregation)
 
 **Release** (`.github/workflows/release.yml`) — runs on `v*` tag push or manual dispatch:
 
 | Job | Trigger | What it does |
 |-----|---------|-------------|
 | `release_validate` | Always | `make release-preflight-smoke` + tag-version check (tags only) |
-| `build_binaries` | Always | Matrix build for 4 targets, packages 4 binaries each (`rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`) |
+| `build_binaries` | Always | Matrix build for 5 targets, packages 4 binaries each (`rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`) |
 | `publish_github_release` | Tags only | Downloads artifacts, generates `checksums.sha256` + `index.json`, publishes GitHub Release |
-| `publish_registries` | Tags or manual `publish_release_packages=true` | Publishes 15 Rust crates → crates.io, Python SDK → PyPI, TypeScript SDK → npm |
+| `publish_registries` | Tags or manual `publish_release_packages=true` | Publishes 18 Rust crates → crates.io, Python SDK → PyPI, TypeScript SDK → npm |
 
 **Build matrix:**
 
@@ -202,6 +218,7 @@ make audit       # Security audit via cargo-deny
 | Linux x86_64 | `x86_64-unknown-linux-gnu` |
 | Linux ARM64 | `aarch64-unknown-linux-gnu` |
 | macOS ARM64 | `aarch64-apple-darwin` |
+| macOS x86_64 | `x86_64-apple-darwin` |
 | Windows x86_64 | `x86_64-pc-windows-msvc` |
 
 **Manual dispatch options:**
@@ -213,7 +230,7 @@ gh workflow run release.yml --ref main
 gh workflow run release.yml --ref main -f publish_release_packages=true -f registry_dry_run=true
 
 # Recovery: re-publish after registry outage during a tag-triggered release
-gh workflow run release.yml --ref v0.3.4 -f publish_release_packages=true
+gh workflow run release.yml --ref v0.4.0 -f publish_release_packages=true
 ```
 
 ### Pre-commit Hooks
@@ -243,7 +260,7 @@ Five files must agree on the same version:
 | `sdks/typescript/package.json` | `version` |
 | `artifacts/schemas/version.json` | `contract_version` |
 
-Additionally, all 17 internal crate dependencies in `Cargo.toml` must match the workspace version.
+Additionally, all 18 internal crate dependencies in `Cargo.toml` must match the workspace version.
 
 **`make verify-version-parity`** runs in CI and fails on any drift. After changing versions or wire types:
 
@@ -295,7 +312,7 @@ cargo release patch          # Bump, tag, push (uses cargo-release)
 ### Dry-run Publishing
 
 ```bash
-make publish-dry-run              # Parallel dry-run for all 15 Rust crates
+make publish-dry-run              # Parallel dry-run for all 18 Rust crates
 make publish-dry-run-python       # Build + twine check (no upload)
 make publish-dry-run-typescript   # npm publish --dry-run
 make release-dry-run              # Full preflight + all registry dry-runs
@@ -311,8 +328,8 @@ Required GitHub Actions secrets for full release:
 
 ### Crate Publish Order
 
-The 15 crates are published in dependency order:
-`meerkat-core` → `meerkat-contracts` → `meerkat-client` → `meerkat-store` → `meerkat-tools` → `meerkat-session` → `meerkat-memory` → `meerkat-mcp` → `meerkat-mcp-server` → `meerkat-hooks` → `meerkat-skills` → `meerkat-comms` → `meerkat-rpc` → `meerkat-rest` → `meerkat`
+The 18 crates are published in dependency order:
+`meerkat-core` → `meerkat-contracts` → `meerkat-client` → `meerkat-store` → `meerkat-tools` → `meerkat-session` → `meerkat-memory` → `meerkat-mcp` → `meerkat-mcp-server` → `meerkat-hooks` → `meerkat-skills` → `meerkat-comms` → `meerkat-rpc` → `meerkat-rest` → `meerkat` → `meerkat-mob` → `meerkat-mob-mcp` → `rkat`
 
 ### Key Rules for AI Agents
 

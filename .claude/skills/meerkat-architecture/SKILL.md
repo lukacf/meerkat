@@ -26,6 +26,9 @@ Meerkat is a library-first agent runtime. The execution pipeline is shared acros
 | `meerkat-session` | Session orchestration (Ephemeral, Persistent) | Implements `SessionService` |
 | `meerkat-comms` | Inter-agent messaging (inproc, TCP, UDS) | Implements `CoreCommsRuntime` |
 | `meerkat-mob` | Multi-agent orchestration (MobBuilder, FlowEngine) | `MobSessionService`, `MobProvisioner` |
+| `meerkat-mob-pack` | Mobpack archive format, signing, trust policies, validation | — |
+| `meerkat-mob-mcp` | Expose mob tools as MCP interface | `MobMcpState`, `MobMcpDispatcher` |
+| `meerkat-web-runtime` | WASM browser deployment (wasm_bindgen exports) | — |
 | `meerkat-hooks` | Hook runtimes (in-process, command, HTTP) | Implements `HookEngine` |
 | `meerkat-skills` | Skill loading (filesystem, git, HTTP, embedded) | Implements `SkillEngine` |
 | `meerkat` (facade) | AgentFactory, FactoryAgentBuilder, build_ephemeral_service, re-exports | Wires everything together |

@@ -83,6 +83,6 @@ Excluded: shell tools, filesystem persistence, MCP client (rmcp), network comms 
 
 For detailed API surface and architecture, load: `references/api_surface.md`.
 
-- `meerkat-web-runtime/src/lib.rs` — 25 wasm_bindgen exports
+- `meerkat-web-runtime/src/lib.rs` — 26 wasm_bindgen exports
 - `meerkat/src/factory.rs` — `build_agent()` with overrides, `AgentFactory::minimal()`
 - `meerkat/src/service_factory.rs` — `FactoryAgentBuilder` with default injection

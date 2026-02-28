@@ -80,7 +80,35 @@ Tool visibility can change during a session without restarting the agent. Change
 
 **Live MCP mutation.** MCP servers can be added or removed from a running session. Additions connect the server and register its tools; removals drain in-flight calls before finalizing. Both are staged and applied at the next turn boundary.
 
-**Composition rule:** Most-restrictive wins. Multiple allow-lists intersect, multiple deny-lists union, and deny always beats allow. The agent receives a `[SYSTEM NOTICE]` in the conversation when its tool set changes.
+**Composition rule:** Most-restrictive wins. Multiple allow-lists intersect, multiple deny-lists union, and deny always beats allow. The agent receives a `[SYSTEM NOTICE]` in the conversation when its tool set changes, and a `tool_config_changed` event is emitted to the event stream.
+
+### Live MCP controls
+
+MCP servers can be added, removed, or reloaded on a running session via the RPC surface:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"mcp/add","params":{
+  "session_id":"...","server_name":"my-tools",
+  "server_config":{"transport":"stdio","command":"npx","args":["-y","@my/server"]},
+  "persisted":false
+}}
+```
+
+| RPC Method | Effect |
+|------------|--------|
+| `mcp/add` | Connect a new MCP server, register its tools |
+| `mcp/remove` | Drain in-flight calls, disconnect server, remove tools |
+| `mcp/reload` | Reconnect one or all servers (picks up config changes) |
+
+All mutations are staged and applied at the next turn boundary. Set `persisted: true` to write the change to disk config so it survives restart. See the [RPC reference](/api/rpc#mcp-methods) for full parameter details.
+
+### Surface availability
+
+| Surface | Live MCP | External tool filter |
+|---------|----------|---------------------|
+| JSON-RPC | `mcp/add`, `mcp/remove`, `mcp/reload` | Via `ToolScopeHandle` on session runtime |
+| CLI | `rkat mcp add --session --live-server-url` | Delegates to REST |
+| REST | Route stubs registered | -- |
 
 See the [built-in tools reference](/reference/builtin-tools) for the mechanical details of factory flags and per-build overrides.
 

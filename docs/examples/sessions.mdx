@@ -1,103 +1,702 @@
 ---
-title: "Session examples"
-description: "Multi-turn conversations and session lifecycle management."
+title: "Sessions & streaming"
+description: "Session lifecycle, multi-turn conversations, event streaming, model selection, and config management."
 icon: "arrows-rotate"
 ---
 
-Session lifecycle and multi-turn conversations using a single agent instance.
+For concepts, see [Sessions](/concepts/sessions) and [Realms](/concepts/realms).
 
-<Accordion title="Multi-turn with stateful tools (multi_turn_tools.rs)">
+## Create a session
 
-**Location:** `meerkat/examples/multi_turn_tools.rs`
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    rkat run --model claude-sonnet-4-5 "What is the capital of France?"
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 1,
+      "method": "session/create",
+      "params": {
+        "prompt": "What is the capital of France?",
+        "model": "claude-sonnet-4-5"
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    curl -X POST http://localhost:8080/sessions \
+      -H "Content-Type: application/json" \
+      -d '{"prompt": "What is the capital of France?", "model": "claude-sonnet-4-5"}'
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    {
+      "prompt": "What is the capital of France?",
+      "model": "claude-sonnet-4-5"
+    }
+    ```
+    Called via the `meerkat_run` tool.
+  </Tab>
+  <Tab title="Python">
+    ```python
+    async with MeerkatClient() as client:
+        session = await client.create_session(
+            "What is the capital of France?",
+            model="claude-sonnet-4-5",
+        )
+        print(session.text)
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    const client = new MeerkatClient();
+    await client.connect();
 
-Demonstrates stateful tools that persist data across conversation turns and multiple `run()` calls on the same agent.
+    const session = await client.createSession("What is the capital of France?", {
+      model: "claude-sonnet-4-5",
+    });
+    console.log(session.text);
+    ```
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    let result = service.create_session(CreateSessionRequest {
+        model: "claude-sonnet-4-5".into(),
+        prompt: "What is the capital of France?".into(),
+        system_prompt: None,
+        max_tokens: None,
+        event_tx: None,
+        host_mode: false,
+        skill_references: None,
+        initial_turn: InitialTurnPolicy::RunImmediately,
+    }).await?;
+    println!("{}", result.text);
+    ```
+  </Tab>
+</Tabs>
 
-**Stateful tool dispatcher:**
+## Multi-turn
 
-```rust
-struct MultiToolDispatcher {
-    state: std::sync::Mutex<AppState>,
-}
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    # Resume the most recent session
+    rkat resume last "Now explain it in more detail"
 
-struct AppState {
-    notes: Vec<String>,        // Persists across turns
-    calculations: Vec<f64>,    // History of calculations
-}
+    # Or use the shortcut
+    rkat continue "Now explain it in more detail"
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 2,
+      "method": "turn/start",
+      "params": {
+        "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+        "prompt": "Now explain it in more detail"
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    curl -X POST http://localhost:8080/sessions/01936f8a-7b2c-7000-8000-000000000001/messages \
+      -H "Content-Type: application/json" \
+      -d '{
+        "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+        "prompt": "Now explain it in more detail"
+      }'
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    {
+      "name": "meerkat_resume",
+      "arguments": {
+        "session_id": "01936f8a-...",
+        "prompt": "What's my name?"
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    result = await session.turn("Now explain it in more detail")
+    print(result.text)
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    const result = await session.turn("Now explain it in more detail");
+    console.log(result.text);
+    ```
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    let result = service.start_turn(&session_id, StartTurnRequest {
+        prompt: "Now explain it in more detail".into(),
+        event_tx: None,
+        host_mode: false,
+        skill_references: None,
+        flow_tool_overlay: None,
+    }).await?;
+    println!("{}", result.text);
+    ```
+  </Tab>
+</Tabs>
+
+## Resume by ID or alias
+
+CLI supports short prefix matching and relative aliases for resuming sessions.
+
+```bash
+# Full UUID
+rkat resume 01936f8a-7b2c-7000-8000-000000000001 "Keep going"
+
+# Short prefix (git-style, fails on ambiguity)
+rkat resume 019c8b99 "Keep going"
+
+# Most recent session
+rkat resume last "Keep going"
+
+# 2nd most recent
+rkat resume ~2 "Go back to this one"
+
+# Shortcut for `resume last`
+rkat c "Keep going"
 ```
 
-**Conversation flow:**
+## List sessions
 
-```rust
-// Turn 1: Calculate and save
-let result = agent
-    .run("Calculate 15 * 8, then save a note about the result.".to_string())
-    .await?;
-// LLM calls calculate("15 * 8") -> "120"
-// LLM calls save_note("The calculation 15 * 8 equals 120")
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    rkat sessions list
+    rkat sessions list --limit 10
+    rkat sessions list --limit 10 --offset 20
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    ```json
+    {"jsonrpc": "2.0", "id": 3, "method": "session/list"}
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    curl http://localhost:8080/sessions
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    {"name": "meerkat_sessions", "arguments": {}}
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    sessions = await client.list_sessions()
+    for s in sessions:
+        print(s.session_id, s.state)
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    const sessions = await client.listSessions();
+    for (const s of sessions) {
+      console.log(s.sessionId, s.state);
+    }
+    ```
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    let sessions = service.list(SessionQuery::default()).await?;
+    for s in &sessions { println!("{}: {:?}", s.session_id, s.state); }
+    ```
+  </Tab>
+</Tabs>
 
-// Turn 2: More calculations
-let result = agent
-    .run("Now calculate 100 / 4 and 25 + 37.".to_string())
-    .await?;
+## Read session state
 
-// Turn 3: Review history (proves state persists)
-let result = agent
-    .run("Show me all the calculations we've done and any notes we've saved.".to_string())
-    .await?;
-// LLM calls get_calculation_history() -> "[120.0, 25.0, 62.0]"
-// LLM calls get_notes() -> "1. The calculation 15 * 8 equals 120"
-```
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    rkat sessions show 01936f8a-...
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 4,
+      "method": "session/read",
+      "params": { "session_id": "01936f8a-..." }
+    }
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    curl http://localhost:8080/sessions/01936f8a-...
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    {"name": "meerkat_read", "arguments": {"session_id": "01936f8a-..."}}
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    state = await client.read_session("01936f8a-...")
+    print(state)
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    const state = await client.readSession("01936f8a-...");
+    console.log(state);
+    ```
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    let view = service.read(&session_id).await?;
+    println!("Messages: {}", view.state.message_count);
+    ```
+  </Tab>
+</Tabs>
 
-**Key pattern -- reusing the same agent instance:**
+## Archive a session
 
-```rust
-let mut agent = AgentBuilder::new()
-    // ... configuration ...
-    .build(llm, tools, store);
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    rkat sessions delete 01936f8a-...
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 5,
+      "method": "session/archive",
+      "params": { "session_id": "01936f8a-..." }
+    }
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    curl -X DELETE http://localhost:8080/sessions/01936f8a-...
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    {"name": "meerkat_archive", "arguments": {"session_id": "01936f8a-..."}}
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    await session.archive()
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    await session.archive();
+    ```
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    service.archive(&session_id).await?;
+    ```
+  </Tab>
+</Tabs>
 
-// Reuse the SAME agent instance
-let result1 = agent.run("First message".to_string()).await?;
-let result2 = agent.run("Second message".to_string()).await?;  // Remembers result1
-let result3 = agent.run("Third message".to_string()).await?;   // Remembers result1 + result2
-```
+## Interrupt a turn
 
-Each `run()` call adds the user message to the session, calls the LLM with the full conversation history, adds the assistant response, and saves via the store.
+Cancel an in-flight turn. No-op if the session is idle.
 
-</Accordion>
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    rkat sessions interrupt 01936f8a-...
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 6,
+      "method": "turn/interrupt",
+      "params": { "session_id": "01936f8a-..." }
+    }
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    curl -X POST http://localhost:8080/sessions/01936f8a-.../interrupt
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    {"name": "meerkat_interrupt", "arguments": {"session_id": "01936f8a-..."}}
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    await session.interrupt()
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    await session.interrupt();
+    ```
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    service.interrupt(&session_id).await?;
+    ```
+  </Tab>
+</Tabs>
 
-<Accordion title="Session lifecycle via JSON-RPC">
+## Event streaming
 
-Create a session, run multiple turns, then archive it:
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    # Basic streaming
+    rkat run --stream "Tell me a story"
 
-```json
-// 1. Create session + first turn
-{
-  "jsonrpc": "2.0", "id": 1,
-  "method": "session/create",
-  "params": {
-    "prompt": "You are a research assistant.",
-    "model": "claude-sonnet-4-5"
-  }
-}
+    # Stream view modes
+    rkat run --stream --stream-view primary "Plan the release"
+    rkat run --stream --stream-view mux "Plan the release"
+    rkat run --stream --stream-view focus --stream-focus primary/sub:agent-42 "Draft steps"
 
-// 2. Continue with a follow-up turn
-{
-  "jsonrpc": "2.0", "id": 2,
-  "method": "turn/start",
-  "params": {
-    "session_id": "01936f8a-...",
-    "prompt": "Summarize what we discussed."
-  }
-}
+    # Short flags
+    rkat run -s -w mux "Plan the release"
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    Events arrive as `session/event` notifications during a turn:
 
-// 3. Archive when done
-{
-  "jsonrpc": "2.0", "id": 3,
-  "method": "session/archive",
-  "params": { "session_id": "01936f8a-..." }
-}
-```
+    ```json
+    {
+      "jsonrpc": "2.0",
+      "method": "session/event",
+      "params": {
+        "session_id": "01936f8a-...",
+        "event": {
+          "type": "text_delta",
+          "delta": "The capital"
+        }
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    # SSE stream (connect before starting a turn)
+    curl -N http://localhost:8080/sessions/01936f8a-.../events
+    ```
 
-See the [JSON-RPC API reference](/api/rpc) for the full method reference.
+    Events arrive as Server-Sent Events with types like `text_delta`, `tool_call_requested`, `turn_completed`, and `done`.
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    {
+      "name": "meerkat_run",
+      "arguments": {
+        "prompt": "Tell me a story",
+        "stream": true
+      }
+    }
+    ```
 
-</Accordion>
+    When `stream: true`, the MCP server sends progress notifications with `AgentEvent` payloads during execution.
+
+    For long-running or autonomous sessions, use the managed event stream tools instead:
+
+    ```json
+    // Open a stream
+    {"name": "meerkat_event_stream_open", "arguments": {"session_id": "01936f8a-..."}}
+    // => {"stream_id": "evt-..."}
+
+    // Poll for events (blocks until next event or timeout)
+    {"name": "meerkat_event_stream_read", "arguments": {"stream_id": "evt-..."}}
+
+    // Close when done
+    {"name": "meerkat_event_stream_close", "arguments": {"stream_id": "evt-..."}}
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    # Streaming on session create
+    async with client.create_session_streaming("Tell me a story") as stream:
+        async for event in stream:
+            match event:
+                case TextDelta(delta=chunk):
+                    print(chunk, end="", flush=True)
+        result = stream.result
+
+    # Streaming on a follow-up turn
+    async with session.stream("Continue the story") as events:
+        async for event in events:
+            match event:
+                case TextDelta(delta=chunk):
+                    print(chunk, end="", flush=True)
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    // Streaming on session create
+    const stream = client.createSessionStreaming("Tell me a story");
+    for await (const event of stream) {
+      if (event.type === "text_delta") {
+        process.stdout.write(event.delta);
+      }
+    }
+    const result = stream.result;
+
+    // Streaming on a follow-up turn
+    for await (const event of session.stream("Continue the story")) {
+      if (event.type === "text_delta") {
+        process.stdout.write(event.delta);
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    let (tx, mut rx) = mpsc::channel::<AgentEvent>(100);
+
+    tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            match event {
+                AgentEvent::TextDelta { delta } => print!("{}", delta),
+                AgentEvent::TurnCompleted { usage, .. } => {
+                    println!("\n[Tokens: {}]", usage.total_tokens());
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let result = agent.run_with_events("Tell me a story".into(), tx).await?;
+    ```
+  </Tab>
+</Tabs>
+
+## Model and provider selection
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    rkat run --model gpt-5.2 --provider openai "Hello"
+    rkat run --model gemini-3-flash-preview --provider gemini "Hello"
+    rkat run --model claude-opus-4-6 "Hello"
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 7,
+      "method": "session/create",
+      "params": {
+        "prompt": "Hello",
+        "model": "gpt-5.2",
+        "provider": "openai",
+        "provider_params": { "reasoning_effort": "high" }
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    curl -X POST http://localhost:8080/sessions \
+      -H "Content-Type: application/json" \
+      -d '{"prompt":"Explain monads","model":"gpt-5.2","provider":"openai","provider_params":{"temperature":0.7}}'
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    {
+      "prompt": "Hello",
+      "model": "gpt-5.2",
+      "provider": "openai"
+    }
+    ```
+    Called via the `meerkat_run` tool.
+  </Tab>
+  <Tab title="Python">
+    ```python
+    session = await client.create_session(
+        "Hello",
+        model="gpt-5.2",
+        provider="openai",
+        provider_params={"reasoning_effort": "high"},
+    )
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    const session = await client.createSession("Hello", {
+      model: "gpt-5.2",
+      provider: "openai",
+      providerParams: { reasoning_effort: "high" },
+    });
+    ```
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    let result = service.create_session(CreateSessionRequest {
+        model: "gpt-5.2".into(),
+        prompt: "Explain monads".into(),
+        build: Some(SessionBuildOptions {
+            provider: Some(Provider::OpenAi),
+            provider_params: Some(json!({"temperature": 0.7})),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }).await?;
+    ```
+  </Tab>
+</Tabs>
+
+## Config management
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    # Read config
+    rkat config get
+    rkat config get --format json --with-generation
+
+    # Replace config
+    rkat config set --json '{"agent": {"model": "gpt-5.2"}}'
+
+    # Merge-patch with optimistic concurrency
+    rkat config patch --json '{"budget": {"max_tokens": 50000}}' --expected-generation 3
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    ```json
+    {"jsonrpc": "2.0", "id": 8, "method": "config/get"}
+    ```
+
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 9,
+      "method": "config/set",
+      "params": {
+        "config": {"agent": {"model": "gpt-5.2"}},
+        "expected_generation": 3
+      }
+    }
+    ```
+
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 10,
+      "method": "config/patch",
+      "params": {
+        "patch": {"agent": {"max_tokens_per_turn": 8192}},
+        "expected_generation": 4
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    # Read
+    curl http://localhost:8080/config
+
+    # Replace
+    curl -X PUT http://localhost:8080/config \
+      -H "Content-Type: application/json" \
+      -d '{"config": {"agent": {"model": "gpt-5.2"}}, "expected_generation": 3}'
+
+    # Merge-patch
+    curl -X PATCH http://localhost:8080/config \
+      -H "Content-Type: application/json" \
+      -d '{"patch": {"agent": {"max_tokens_per_turn": 8192}}, "expected_generation": 4}'
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    // Get config
+    {"name": "meerkat_config", "arguments": {"action": "get"}}
+
+    // Patch config
+    {"name": "meerkat_config", "arguments": {
+      "action": "patch",
+      "patch": {"agent": {"max_tokens_per_turn": 8192}}
+    }}
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    config = await client.get_config()
+    await client.set_config({"agent": {"model": "gpt-5.2"}}, expected_generation=3)
+    await client.patch_config({"agent": {"max_tokens_per_turn": 8192}}, expected_generation=4)
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    const config = await client.getConfig();
+    await client.setConfig({ agent: { model: "gpt-5.2" } }, { expectedGeneration: 3 });
+    await client.patchConfig({ agent: { maxTokensPerTurn: 8192 } }, { expectedGeneration: 4 });
+    ```
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    let store = FileConfigStore::new(config_path)?;
+    let envelope = store.load()?;
+    println!("generation: {}", envelope.generation);
+
+    store.commit(ConfigSnapshot {
+        config: new_config,
+        expected_generation: Some(envelope.generation),
+    })?;
+    ```
+  </Tab>
+</Tabs>
+
+## Realm selection
+
+Realms scope sessions and config. Surfaces that share a `realm_id` see the same state. Realm is set at **startup** for server surfaces (RPC, REST, MCP) and **per-command** or **per-connection** for CLI and SDKs.
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    rkat --realm team-alpha run "Plan release"
+    rkat --realm team-alpha --instance worker-1 sessions list
+    rkat --realm team-alpha --realm-backend redb resume last "Continue"
+    ```
+  </Tab>
+  <Tab title="JSON-RPC server">
+    ```bash
+    rkat-rpc --realm team-alpha --instance worker-1
+    rkat-rpc --realm team-alpha --realm-backend redb --state-root /data/meerkat
+    ```
+  </Tab>
+  <Tab title="REST server">
+    ```bash
+    rkat-rest --realm team-alpha --instance api-1
+    rkat-rest --realm team-alpha --realm-backend redb --state-root /data/meerkat
+    ```
+  </Tab>
+  <Tab title="MCP server">
+    ```bash
+    rkat-mcp --realm team-alpha --instance mcp-1
+    rkat-mcp --realm team-alpha --realm-backend redb --state-root /data/meerkat
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    await client.connect(realm_id="team-alpha", instance_id="worker-1")
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    await client.connect({ realmId: "team-alpha", instanceId: "worker-1" });
+    ```
+  </Tab>
+</Tabs>

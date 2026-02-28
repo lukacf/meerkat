@@ -577,6 +577,164 @@ fn create_llm_client(
 }
 
 // ═══════════════════════════════════════════════════════════
+// JS Tool Callbacks — register tool implementations from JavaScript
+// ═══════════════════════════════════════════════════════════
+
+/// Registry of JS-implemented tools. Populated via `register_tool_callback`
+/// before `init_runtime` / `init_runtime_from_config`.
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static JS_TOOLS: RefCell<Vec<JsToolEntry>> = const { RefCell::new(Vec::new()) };
+}
+
+#[cfg(target_arch = "wasm32")]
+struct JsToolEntry {
+    def: Arc<meerkat_core::ToolDef>,
+    callback: js_sys::Function,
+}
+
+/// Register a tool implementation from JavaScript.
+///
+/// Call this BEFORE `init_runtime` or `init_runtime_from_config`.
+/// The `callback` receives a JSON string of tool arguments and must return
+/// a `Promise<string>` resolving to JSON `{"content": "...", "is_error": false}`.
+///
+/// Example (JS):
+/// ```js
+/// register_tool_callback("shell", '{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}', shellFn);
+/// ```
+#[wasm_bindgen]
+pub fn register_tool_callback(
+    name: String,
+    description: String,
+    schema_json: String,
+    callback: JsValue,
+) -> Result<(), JsValue> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let func: js_sys::Function = callback
+            .dyn_into()
+            .map_err(|_| err_js("invalid_callback", "callback must be a function"))?;
+
+        let schema: serde_json::Value = serde_json::from_str(&schema_json)
+            .map_err(|e| err_str("invalid_schema", format!("invalid JSON schema: {e}")))?;
+
+        let def = Arc::new(meerkat_core::ToolDef {
+            name: name.clone(),
+            description: description.clone(),
+            input_schema: schema,
+        });
+
+        JS_TOOLS.with(|cell| {
+            cell.borrow_mut().push(JsToolEntry {
+                def,
+                callback: func,
+            });
+        });
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (name, description, schema_json, callback);
+    }
+    Ok(())
+}
+
+/// Clear all registered tool callbacks.
+#[wasm_bindgen]
+pub fn clear_tool_callbacks() {
+    #[cfg(target_arch = "wasm32")]
+    JS_TOOLS.with(|cell| cell.borrow_mut().clear());
+}
+
+/// Tool dispatcher that delegates to JS callbacks stored in the thread-local registry.
+///
+/// The dispatcher itself only stores tool definitions (Send+Sync).
+/// At dispatch time, it looks up the JS callback from the thread-local `JS_TOOLS`.
+/// This avoids storing `js_sys::Function` (which is `!Send`) in the dispatcher.
+#[cfg(target_arch = "wasm32")]
+struct JsToolDispatcher {
+    tools: Arc<[Arc<meerkat_core::ToolDef>]>,
+    tool_names: Vec<String>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl JsToolDispatcher {
+    fn from_registry() -> Option<Self> {
+        JS_TOOLS.with(|cell| {
+            let entries = cell.borrow();
+            if entries.is_empty() {
+                return None;
+            }
+            let tools: Arc<[Arc<meerkat_core::ToolDef>]> =
+                entries.iter().map(|e| e.def.clone()).collect();
+            let tool_names: Vec<String> = entries.iter().map(|e| e.def.name.clone()).collect();
+            Some(Self { tools, tool_names })
+        })
+    }
+
+    /// Look up the JS callback for a tool by name from the thread-local registry.
+    fn get_callback(name: &str) -> Option<js_sys::Function> {
+        JS_TOOLS.with(|cell| {
+            let entries = cell.borrow();
+            entries
+                .iter()
+                .find(|e| e.def.name == name)
+                .map(|e| e.callback.clone())
+        })
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[async_trait::async_trait(?Send)]
+impl meerkat_core::AgentToolDispatcher for JsToolDispatcher {
+    fn tools(&self) -> Arc<[Arc<meerkat_core::ToolDef>]> {
+        self.tools.clone()
+    }
+
+    async fn dispatch(
+        &self,
+        call: meerkat_core::ToolCallView<'_>,
+    ) -> Result<meerkat_core::ToolResult, meerkat_core::error::ToolError> {
+        let callback = Self::get_callback(call.name)
+            .ok_or_else(|| meerkat_core::error::ToolError::not_found(call.name))?;
+
+        let args_str = call.args.get();
+        let js_args = JsValue::from_str(args_str);
+        let promise_val = callback.call1(&JsValue::NULL, &js_args).map_err(|e| {
+            meerkat_core::error::ToolError::execution_failed(format!("JS callback threw: {e:?}"))
+        })?;
+        let promise = js_sys::Promise::from(promise_val);
+        let result_val = wasm_bindgen_futures::JsFuture::from(promise)
+            .await
+            .map_err(|e| {
+                meerkat_core::error::ToolError::execution_failed(format!(
+                    "JS promise rejected: {e:?}"
+                ))
+            })?;
+        let result_str = result_val.as_string().unwrap_or_default();
+
+        // Parse JSON result: {"content": "...", "is_error": false}
+        #[derive(Deserialize)]
+        struct JsToolResult {
+            content: String,
+            #[serde(default)]
+            is_error: bool,
+        }
+        let parsed: JsToolResult = serde_json::from_str(&result_str).map_err(|e| {
+            meerkat_core::error::ToolError::execution_failed(format!(
+                "invalid tool result JSON: {e}"
+            ))
+        })?;
+
+        Ok(meerkat_core::ToolResult {
+            tool_use_id: call.id.to_string(),
+            content: parsed.content,
+            is_error: parsed.is_error,
+        })
+    }
+}
+
+// ═══════════════════════════════════════════════════════════
 // WASM Tool Dispatcher
 // ═══════════════════════════════════════════════════════════
 
@@ -585,8 +743,10 @@ fn build_wasm_tool_dispatcher() -> Result<Arc<dyn meerkat_core::AgentToolDispatc
     let task_store: Arc<dyn meerkat_tools::builtin::TaskStore> =
         Arc::new(meerkat_tools::builtin::MemoryTaskStore::new());
     let config = meerkat_tools::builtin::BuiltinToolConfig::default();
+    let external = JsToolDispatcher::from_registry()
+        .map(|d| Arc::new(d) as Arc<dyn meerkat_core::AgentToolDispatcher>);
     let composite =
-        meerkat_tools::builtin::CompositeDispatcher::new_wasm(task_store, &config, None, None)
+        meerkat_tools::builtin::CompositeDispatcher::new_wasm(task_store, &config, external, None)
             .map_err(|e| format!("failed to create tool dispatcher: {e}"))?;
     Ok(Arc::new(composite))
 }

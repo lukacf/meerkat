@@ -447,10 +447,10 @@ impl MobHandle {
     /// Inject a message into an autonomous member and return a subscription
     /// for streaming interaction-scoped events.
     ///
-    /// This routes through the actor, enforcing lifecycle state, external
-    /// addressability, and spawn policy — the same invariants as
-    /// [`send_message`](Self::send_message). Returns `UnsupportedForMode`
-    /// for `TurnDriven` members.
+    /// Routes through the actor, enforcing lifecycle state and external
+    /// addressability. Unlike [`send_message`](Self::send_message), this
+    /// does **not** support spawn-policy auto-provisioning for unknown
+    /// targets. Returns `UnsupportedForMode` for `TurnDriven` members.
     pub async fn inject_and_subscribe(
         &self,
         meerkat_id: MeerkatId,

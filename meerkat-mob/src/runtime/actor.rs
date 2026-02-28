@@ -2227,10 +2227,11 @@ impl MobActor {
     /// Inject a message into an autonomous member and return a subscription
     /// for streaming interaction-scoped events.
     ///
-    /// Like `handle_external_turn`, this enforces lifecycle state, external
-    /// addressability, and spawn policy. Unlike `dispatch_member_turn`, it
-    /// calls `inject_with_subscription` and returns `UnsupportedForMode` for
-    /// `TurnDriven` members.
+    /// Like `handle_external_turn`, this enforces lifecycle state and external
+    /// addressability. Unlike `handle_external_turn`, it does **not** support
+    /// spawn-policy auto-provisioning for unknown targets (the subscription
+    /// cannot be deferred through a lifecycle task). Returns
+    /// `UnsupportedForMode` for `TurnDriven` members.
     async fn handle_inject_and_subscribe(
         &mut self,
         meerkat_id: MeerkatId,

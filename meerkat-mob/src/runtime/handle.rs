@@ -444,6 +444,32 @@ impl MobHandle {
             .map_err(|_| MobError::Internal("actor reply dropped".into()))?
     }
 
+    /// Inject a message into an autonomous member and return a subscription
+    /// for streaming interaction-scoped events.
+    ///
+    /// This routes through the actor, enforcing lifecycle state, external
+    /// addressability, and spawn policy — the same invariants as
+    /// [`send_message`](Self::send_message). Returns `UnsupportedForMode`
+    /// for `TurnDriven` members.
+    pub async fn inject_and_subscribe(
+        &self,
+        meerkat_id: MeerkatId,
+        message: String,
+    ) -> Result<meerkat_core::InteractionSubscription, MobError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(MobCommand::InjectAndSubscribe {
+                meerkat_id,
+                message,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| MobError::Internal("actor task dropped".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| MobError::Internal("actor reply dropped".into()))?
+    }
+
     /// Send an internal turn to a member (no external_addressable check).
     pub async fn internal_turn(
         &self,

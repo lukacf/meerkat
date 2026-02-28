@@ -76,7 +76,15 @@ pub(super) fn spawn_event_router(
     let cancel_clone = cancel.clone();
 
     tokio::spawn(async move {
-        run_event_router(session_service, events, roster, config, event_tx, cancel_clone).await;
+        run_event_router(
+            session_service,
+            events,
+            roster,
+            config,
+            event_tx,
+            cancel_clone,
+        )
+        .await;
     });
 
     MobEventRouterHandle { event_rx, cancel }
@@ -189,7 +197,10 @@ type TaggedItem = (
 );
 type TaggedStream = futures::stream::Map<
     EventStream,
-    Box<dyn FnMut(meerkat_core::event::EventEnvelope<meerkat_core::event::AgentEvent>) -> TaggedItem + Send>,
+    Box<
+        dyn FnMut(meerkat_core::event::EventEnvelope<meerkat_core::event::AgentEvent>) -> TaggedItem
+            + Send,
+    >,
 >;
 
 async fn subscribe_member(
@@ -198,19 +209,18 @@ async fn subscribe_member(
     meerkat_id: MeerkatId,
     profile: ProfileName,
 ) -> Option<TaggedStream> {
-    let stream =
-        SessionService::subscribe_session_events(session_service.as_ref(), session_id)
-            .await
-            .ok()?;
+    let stream = SessionService::subscribe_session_events(session_service.as_ref(), session_id)
+        .await
+        .ok()?;
     let mid = meerkat_id;
     let prof = profile;
-    Some(stream.map(Box::new(move |envelope| {
-        (mid.clone(), prof.clone(), envelope)
-    })
-        as Box<
-            dyn FnMut(
-                    meerkat_core::event::EventEnvelope<meerkat_core::event::AgentEvent>,
-                ) -> TaggedItem
-                + Send,
-        >))
+    Some(stream.map(
+        Box::new(move |envelope| (mid.clone(), prof.clone(), envelope))
+            as Box<
+                dyn FnMut(
+                        meerkat_core::event::EventEnvelope<meerkat_core::event::AgentEvent>,
+                    ) -> TaggedItem
+                    + Send,
+            >,
+    ))
 }

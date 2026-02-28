@@ -1,5 +1,5 @@
-use crate::ids::{MeerkatId, ProfileName};
 use crate::MobRuntimeMode;
+use crate::ids::{MeerkatId, ProfileName};
 use async_trait::async_trait;
 
 /// Specification for auto-spawning a member when a [`SpawnPolicy`] resolves a target.

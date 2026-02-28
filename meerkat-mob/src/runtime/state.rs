@@ -97,6 +97,11 @@ pub(super) enum MobCommand {
         message: String,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+    InjectAndSubscribe {
+        meerkat_id: MeerkatId,
+        message: String,
+        reply_tx: oneshot::Sender<Result<meerkat_core::InteractionSubscription, MobError>>,
+    },
     InternalTurn {
         meerkat_id: MeerkatId,
         message: String,

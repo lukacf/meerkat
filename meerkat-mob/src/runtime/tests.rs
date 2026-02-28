@@ -9524,3 +9524,143 @@ async fn test_shutdown_does_not_stall_on_stuck_lifecycle_notification() {
     );
     shutdown_result.unwrap().expect("shutdown should succeed");
 }
+
+// -----------------------------------------------------------------------
+// inject_and_subscribe
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_inject_and_subscribe_autonomous_returns_subscription() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    handle
+        .spawn_with_options(
+            ProfileName::from("lead"),
+            MeerkatId::from("l-auto"),
+            None,
+            Some(crate::MobRuntimeMode::AutonomousHost),
+            None,
+        )
+        .await
+        .expect("spawn autonomous lead");
+
+    let mut sub = handle
+        .inject_and_subscribe(MeerkatId::from("l-auto"), "hello".into())
+        .await
+        .expect("inject_and_subscribe should succeed for autonomous member");
+
+    // The subscription has an interaction ID and an event receiver.
+    // The mock injector fires a terminal event asynchronously.
+    let event = tokio::time::timeout(Duration::from_secs(2), sub.events.recv())
+        .await
+        .expect("should receive terminal event within timeout")
+        .expect("channel should not be closed");
+
+    assert!(
+        service.inject_call_count() >= 1,
+        "inject_and_subscribe should use the event injector"
+    );
+    // Verify the terminal event matches the subscription ID.
+    match event {
+        AgentEvent::InteractionComplete { interaction_id, .. } => {
+            assert_eq!(interaction_id, sub.id, "interaction ID should match");
+        }
+        AgentEvent::InteractionFailed { interaction_id, .. } => {
+            assert_eq!(interaction_id, sub.id, "interaction ID should match");
+        }
+        other => panic!("expected terminal event, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_inject_and_subscribe_turn_driven_returns_unsupported() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    handle
+        .spawn_with_options(
+            ProfileName::from("lead"),
+            MeerkatId::from("l-td"),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven lead");
+
+    let result = handle
+        .inject_and_subscribe(MeerkatId::from("l-td"), "hello".into())
+        .await;
+
+    match result {
+        Err(MobError::UnsupportedForMode { mode, .. }) => {
+            assert_eq!(mode, crate::MobRuntimeMode::TurnDriven);
+        }
+        Ok(_) => panic!("expected UnsupportedForMode error, got Ok"),
+        Err(other) => panic!("expected UnsupportedForMode error, got: {other}"),
+    }
+}
+
+#[tokio::test]
+async fn test_inject_and_subscribe_not_addressable_fails() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-1"),
+            None,
+            Some(crate::MobRuntimeMode::AutonomousHost),
+            None,
+        )
+        .await
+        .expect("spawn worker");
+
+    let result = handle
+        .inject_and_subscribe(MeerkatId::from("w-1"), "hello".into())
+        .await;
+
+    match result {
+        Err(MobError::NotExternallyAddressable(_)) => {}
+        Ok(_) => panic!("expected NotExternallyAddressable, got Ok"),
+        Err(other) => panic!("expected NotExternallyAddressable, got: {other}"),
+    }
+}
+
+#[tokio::test]
+async fn test_inject_and_subscribe_unknown_meerkat_fails() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+
+    let result = handle
+        .inject_and_subscribe(MeerkatId::from("nonexistent"), "hello".into())
+        .await;
+
+    match result {
+        Err(MobError::MeerkatNotFound(_)) => {}
+        Ok(_) => panic!("expected MeerkatNotFound, got Ok"),
+        Err(other) => panic!("expected MeerkatNotFound, got: {other}"),
+    }
+}
+
+#[tokio::test]
+async fn test_inject_and_subscribe_stopped_mob_fails() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    handle
+        .spawn_with_options(
+            ProfileName::from("lead"),
+            MeerkatId::from("l-auto"),
+            None,
+            Some(crate::MobRuntimeMode::AutonomousHost),
+            None,
+        )
+        .await
+        .expect("spawn");
+
+    handle.stop().await.expect("stop");
+
+    let result = handle
+        .inject_and_subscribe(MeerkatId::from("l-auto"), "hello".into())
+        .await;
+
+    match result {
+        Err(MobError::InvalidTransition { .. }) => {}
+        Ok(_) => panic!("expected InvalidTransition, got Ok"),
+        Err(other) => panic!("expected InvalidTransition, got: {other}"),
+    }
+}

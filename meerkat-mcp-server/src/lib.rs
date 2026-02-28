@@ -1311,8 +1311,7 @@ pub async fn handle_tools_call_with_notifier(
                 .map_err(ToolCallError::internal)
         }
         _ if is_mob_tool_name(tool_name) => {
-            match meerkat_mob_mcp::handle_tools_call(&state.mob_state, tool_name, arguments).await
-            {
+            match meerkat_mob_mcp::handle_tools_call(&state.mob_state, tool_name, arguments).await {
                 Ok(value) => Ok(wrap_tool_payload(value)),
                 Err(err) if err.code == -32601 => Err(ToolCallError::method_not_found(format!(
                     "Unknown tool: {tool_name}"

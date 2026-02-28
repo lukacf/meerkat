@@ -3662,11 +3662,9 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         &self,
         session_id: &SessionId,
     ) -> Result<meerkat_core::comms::EventStream, meerkat_core::comms::StreamError> {
-        let runtime = self
-            .inner
-            .comms_runtime(session_id)
-            .await
-        .ok_or_else(|| meerkat_core::comms::StreamError::NotFound(format!("session {session_id}")))?;
+        let runtime = self.inner.comms_runtime(session_id).await.ok_or_else(|| {
+            meerkat_core::comms::StreamError::NotFound(format!("session {session_id}"))
+        })?;
         runtime.stream(meerkat_core::comms::StreamScope::Session(
             session_id.clone(),
         ))

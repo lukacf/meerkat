@@ -10,8 +10,8 @@ use meerkat_core::comms::{CommsCommand, SendError, SendReceipt, TrustedPeerSpec}
 use meerkat_core::error::ToolError;
 use meerkat_core::interaction::InteractionId;
 use meerkat_core::service::{
-    CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService, SessionSummary,
-    SessionServiceCommsExt, SessionUsage, SessionView, StartTurnRequest,
+    CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService,
+    SessionServiceCommsExt, SessionSummary, SessionUsage, SessionView, StartTurnRequest,
 };
 use meerkat_core::time_compat::{Instant, SystemTime};
 use meerkat_core::types::{RunResult, SessionId, ToolCallView, ToolDef, ToolResult, Usage};

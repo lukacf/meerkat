@@ -759,7 +759,10 @@ mod tests {
     async fn mob_tools_and_call_flow_work() {
         let (router, _notif_rx) = test_router().await;
 
-        let tools_resp = router.dispatch(make_request_no_params("mob/tools")).await.unwrap();
+        let tools_resp = router
+            .dispatch(make_request_no_params("mob/tools"))
+            .await
+            .unwrap();
         let tools_binding = result_value(&tools_resp);
         let tools = tools_binding["tools"]
             .as_array()

@@ -379,7 +379,11 @@ pub trait SessionServiceMcpExt: SessionServiceCommsExt {
     }
 
     /// Stage a live MCP server removal for the target session.
-    async fn stage_mcp_remove(&self, _session_id: &SessionId, _server_name: &str) -> Result<(), String> {
+    async fn stage_mcp_remove(
+        &self,
+        _session_id: &SessionId,
+        _server_name: &str,
+    ) -> Result<(), String> {
         Err("live MCP remove not supported on this session service".to_string())
     }
 

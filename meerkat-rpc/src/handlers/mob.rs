@@ -1,14 +1,14 @@
 //! `mob/*` method handlers.
 
-use serde::Serialize;
 use serde::Deserialize;
+use serde::Serialize;
 use serde_json::value::RawValue;
 
+use super::{RpcResponseExt, parse_params};
 use crate::error;
-use super::{parse_params, RpcResponseExt};
 use crate::protocol::{RpcId, RpcResponse};
-use std::sync::Arc;
 use meerkat_mob_mcp::MobMcpState;
+use std::sync::Arc;
 
 #[derive(Debug, Serialize)]
 struct MobPrefabEntry {

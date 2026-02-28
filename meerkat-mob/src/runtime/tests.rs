@@ -25,8 +25,9 @@ use meerkat_core::error::ToolError;
 use meerkat_core::event::{AgentEvent, EventEnvelope};
 use meerkat_core::interaction::InteractionId;
 use meerkat_core::service::{
-    CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService, SessionSummary,
-    SessionServiceCommsExt, SessionUsage, SessionView, StartTurnRequest, TurnToolOverlay,
+    CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService,
+    SessionServiceCommsExt, SessionSummary, SessionUsage, SessionView, StartTurnRequest,
+    TurnToolOverlay,
 };
 use meerkat_core::types::{
     AssistantBlock, RunResult, SessionId, StopReason, ToolCallView, ToolDef, ToolResult, Usage,

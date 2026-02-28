@@ -63,7 +63,7 @@ const TOOLS = [
 
 const SYSTEM_PROMPT = `You are a skilled software engineer with access to an Alpine Linux virtual machine running in the user's browser. You can execute shell commands, read and write files.
 
-The VM has: bash, python3, lua5.4, tcc (C compiler), git, curl, jq, sqlite3, vim.
+The VM has: ash (busybox shell), micropython (use "micropython" not "python3"), lua5.4, quickjs (qjs), tcc (C compiler), git, curl, jq, sqlite3, vim, neovim.
 
 Guidelines:
 - Use the shell tool to run commands. Always check exit codes.
@@ -222,7 +222,7 @@ export class Agent {
         "anthropic-dangerous-direct-browser-access": "true",
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-5-20250514",
+        model: "claude-opus-4-6",
         max_tokens: 4096,
         system: SYSTEM_PROMPT,
         tools: TOOLS,

@@ -75,6 +75,8 @@ bootBtn.addEventListener("click", async () => {
       status.textContent = msg;
     });
 
+    // Debug: expose VM on window for console inspection
+    (window as any).__vm = vm;
     agent = new Agent(key, vm, handleAgentEvent);
 
     setup.classList.add("hidden");

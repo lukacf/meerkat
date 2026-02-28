@@ -2,12 +2,12 @@
  * WebCM Host — programmatic bridge to a Linux VM running in the browser.
  *
  * Uses xterm-pty to communicate with the Cartesi RISC-V emulator.
- * Commands are sent via the PTY slave; output is captured by polling
- * for a unique delimiter echoed after each command.
+ * VM output is captured via master.onWrite (data flowing from VM to terminal).
+ * Commands use unique delimiters to detect completion and extract output.
  */
 
-import { Terminal } from "xterm";
-import { FitAddon } from "xterm-addon-fit";
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
 import { openpty } from "xterm-pty";
 
 export interface ExecResult {
@@ -17,7 +17,6 @@ export interface ExecResult {
 
 export class WebCMHost {
   private slave: any = null;
-  private master: any = null;
   private terminal: Terminal | null = null;
   private fitAddon: FitAddon | null = null;
   private outputBuffer = "";
@@ -30,34 +29,48 @@ export class WebCMHost {
       cursorBlink: true,
       fontSize: 13,
       fontFamily: '"Berkeley Mono", "SF Mono", monospace',
+      fontWeight: 400,
+      scrollback: 5000,
       theme: {
         background: "#000000",
         foreground: "#c9d1d9",
         cursor: "#58a6ff",
       },
     });
-    this.fitAddon = new FitAddon();
-    this.terminal.loadAddon(this.fitAddon);
     this.terminal.open(container);
-    this.fitAddon.fit();
+    this.terminal.focus();
 
     onStatus("Opening PTY...");
     const { master, slave } = openpty();
-    this.master = master;
     this.slave = slave;
 
-    // Wire terminal to PTY master
-    master.activate(this.terminal);
+    // Configure terminal for raw mode (required by WebCM)
+    const termios = slave.ioctl("TCGETS");
+    termios.iflag &= ~0x5eb;
+    termios.cflag &= ~0x130;
+    termios.lflag &= ~0x804b;
+    termios.cflag |= 0x30;
+    termios.oflag |= 0x1;
+    slave.ioctl("TCSETS", termios);
 
-    // Capture all output
-    slave.onReadable(() => {
-      const bytes = slave.read();
-      if (bytes) {
-        this.outputBuffer += new TextDecoder().decode(Uint8Array.from(bytes));
-      }
+    // Capture VM output via master.onWrite. This event fires with
+    // [Uint8Array, callback] for every chunk the VM writes to stdout.
+    // We MUST subscribe BEFORE loadAddon, because activate() also
+    // subscribes — our listener runs alongside the terminal writer.
+    const decoder = new TextDecoder();
+    master.onWrite(([data, _cb]: [Uint8Array, () => void]) => {
+      this.outputBuffer += decoder.decode(data, { stream: true });
     });
 
-    onStatus("Loading WebCM (32 MB)...");
+    // Connect master to xterm.js as addon
+    this.terminal.loadAddon(master);
+
+    // Fit after master is loaded
+    this.fitAddon = new FitAddon();
+    this.terminal.loadAddon(this.fitAddon);
+    this.fitAddon.fit();
+
+    onStatus("Loading WebCM (~30 MB)...");
 
     // Dynamic import of the WebCM emscripten module
     const webcmUrl = new URL("/webcm.mjs", window.location.href).toString();
@@ -76,18 +89,20 @@ export class WebCMHost {
 
     const delim = `__MKT_${Date.now()}_${Math.random().toString(36).slice(2, 8)}__`;
 
-    // Clear buffer, send command + capture exit code + delimiter
+    // Clear buffer, send command + capture exit code + delimiter on one line
     this.outputBuffer = "";
     const wrapped = `${command} 2>&1; echo "${delim}:$?"`;
-    this.slave.write(wrapped + "\n");
+    this.writeToShell(wrapped + "\n");
 
-    // Wait for delimiter in output
+    // Poll for delimiter in captured output.
+    // Match "<delim>:<digit>" to avoid matching the echoed command which has "<delim>:$?".
+    const delimPattern = new RegExp(delim.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + ":\\d");
     const result = await new Promise<string>((resolve, reject) => {
       const deadline = Date.now() + timeoutMs;
       const check = () => {
-        const idx = this.outputBuffer.indexOf(delim + ":");
-        if (idx >= 0) {
-          resolve(this.outputBuffer);
+        if (delimPattern.test(this.outputBuffer)) {
+          // Wait a tick for the rest of the line
+          setTimeout(() => resolve(this.outputBuffer), 50);
           return;
         }
         if (Date.now() > deadline) {
@@ -99,22 +114,48 @@ export class WebCMHost {
       check();
     });
 
-    // Parse: everything before the delimiter is output, after is exit code
-    const delimIdx = result.indexOf(delim + ":");
-    const raw = result.slice(0, delimIdx);
-    const exitStr = result.slice(delimIdx + delim.length + 1).trim().split("\n")[0];
-    const exitCode = parseInt(exitStr, 10) || 0;
+    // Parse output. Buffer format (single-line command):
+    //   <echoed-wrapped-command>\r\n<command-output>\r\n<delim>:<exitcode>\r\n<prompt>
+    // Strategy: strip ANSI codes, split on \n, find delimiter line,
+    // skip the first line (echoed command), take everything until delimiter.
+    const clean = result.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, ""); // strip ANSI
+    const lines = clean.split(/\r?\n/);
 
-    // Strip the echoed command from the first line
-    const lines = raw.split("\n");
-    const output = lines.slice(1).join("\n").trimEnd();
+    // Find the delimiter OUTPUT line (contains <delim>:<digit>)
+    const delimRe = new RegExp(delim.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + ":(\\d+)");
+    let delimLineIdx = -1;
+    let exitCode = 0;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const match = lines[i].match(delimRe);
+      if (match) {
+        delimLineIdx = i;
+        exitCode = parseInt(match[1], 10);
+        break;
+      }
+    }
+    if (delimLineIdx < 0) return { output: "", exitCode: -1 };
 
+    // Find the end of the echoed command. The echoed command may wrap across
+    // multiple terminal lines. Look for the last line containing $?" (the
+    // literal echo of our delimiter command) before the actual output.
+    let cmdEndIdx = 0;
+    for (let i = 0; i < delimLineIdx; i++) {
+      if (lines[i].includes('$?"') || lines[i].includes(delim.slice(0, 10))) {
+        cmdEndIdx = i + 1;
+      }
+    }
+
+    const outputLines = lines.slice(cmdEndIdx, delimLineIdx);
+    const output = outputLines.join("\n").trim();
     return { output, exitCode };
   }
 
   /** Write content to a file in the VM. */
   async writeFile(path: string, content: string): Promise<ExecResult> {
-    // Use base64 to avoid shell escaping issues
+    // Use printf with escaped content. Base64 would be cleaner but
+    // busybox base64 -d may not be available. Use printf with octal escapes
+    // for problematic chars, or split into multiple echo commands.
+    // Simplest reliable approach: base64 encode in JS, decode in shell.
     const b64 = btoa(unescape(encodeURIComponent(content)));
     return this.exec(`echo '${b64}' | base64 -d > ${path}`);
   }
@@ -126,6 +167,11 @@ export class WebCMHost {
     return output;
   }
 
+  /** Debug: get raw output buffer contents. */
+  getOutputBuffer(): string {
+    return this.outputBuffer;
+  }
+
   isBooted(): boolean {
     return this.booted;
   }
@@ -134,12 +180,23 @@ export class WebCMHost {
     this.fitAddon?.fit();
   }
 
+  /** Send input to the VM via the terminal (simulates typing). */
+  private writeToShell(text: string): void {
+    // slave.write() sends data TO the terminal (output direction).
+    // To send input TO the VM, we go through the terminal which fires
+    // onData → master → ldisc.writeFromLower → slave readable → VM reads.
+    if (this.terminal) {
+      // paste() triggers onData which flows through the PTY to the VM
+      this.terminal.paste(text);
+    }
+  }
+
+  /** Wait for the shell prompt by watching captured output. */
   private waitForPrompt(timeoutMs: number): Promise<void> {
     return new Promise((resolve, reject) => {
       const deadline = Date.now() + timeoutMs;
       const check = () => {
-        // Alpine uses "localhost:~#" or similar
-        if (this.outputBuffer.includes("# ") || this.outputBuffer.includes("$ ")) {
+        if (this.outputBuffer.includes("]#") || this.outputBuffer.includes("$ ")) {
           this.outputBuffer = "";
           resolve();
           return;
@@ -148,7 +205,7 @@ export class WebCMHost {
           reject(new Error("Timed out waiting for shell prompt"));
           return;
         }
-        setTimeout(check, 200);
+        setTimeout(check, 300);
       };
       check();
     });

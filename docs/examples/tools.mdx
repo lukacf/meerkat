@@ -1,0 +1,381 @@
+---
+title: "Tools & MCP"
+description: "Custom tools, built-in tools, MCP server management, live MCP controls, and tool scoping."
+icon: "wrench"
+---
+
+For concepts, see [Tools](/concepts/tools).
+
+## Custom tools (Rust SDK)
+
+Implement `AgentToolDispatcher` to define your own tools. The agent sees them alongside built-in and MCP tools.
+
+```rust
+struct MathTools;
+
+#[async_trait]
+impl AgentToolDispatcher for MathTools {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        vec![Arc::new(ToolDef {
+            name: "add".to_string(),
+            description: "Add two numbers".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "a": {"type": "number"},
+                    "b": {"type": "number"}
+                },
+                "required": ["a", "b"]
+            }),
+        })].into()
+    }
+
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        match call.name {
+            "add" => {
+                let args: AddArgs = call.parse_args()
+                    .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+                Ok(ToolResult::success(call.id, format!("{}", args.a + args.b)))
+            }
+            _ => Err(ToolError::not_found(call.name)),
+        }
+    }
+}
+```
+
+## Enable built-in tools
+
+Built-in tool categories: task management (`enable_builtins`), shell (`enable_shell`), sub-agents (`enable_subagents`), semantic memory (`enable_memory`), and mob orchestration (`enable_mob`).
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    # Enable builtins + shell
+    rkat run --enable-builtins --enable-shell "List files in /tmp"
+
+    # Short flags: -b for builtins, -x for shell (implies builtins)
+    rkat run -x "List files in /tmp"
+
+    # Enable mob orchestration tools (-M short flag)
+    rkat run -x --enable-mob "Coordinate the team"
+    rkat run -x -M "Coordinate the team"
+
+    # Disable sub-agents explicitly
+    rkat run -x --no-subagents "Run a shell command"
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 1,
+      "method": "session/create",
+      "params": {
+        "prompt": "List files in /tmp",
+        "enable_builtins": true,
+        "enable_shell": true,
+        "enable_subagents": false,
+        "enable_memory": true,
+        "enable_mob": true
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    curl -X POST http://localhost:8080/sessions \
+      -H "Content-Type: application/json" \
+      -d '{
+        "prompt": "List files in /tmp",
+        "enable_builtins": true,
+        "enable_shell": true,
+        "enable_subagents": false,
+        "enable_memory": true,
+        "enable_mob": true
+      }'
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    {
+      "prompt": "List files in /tmp",
+      "enable_builtins": true,
+      "builtin_config": {
+        "enable_shell": true,
+        "shell_timeout_secs": 30
+      },
+      "enable_subagents": true,
+      "enable_memory": true,
+      "enable_mob": true
+    }
+    ```
+    Called via the `meerkat_run` tool.
+  </Tab>
+  <Tab title="Python">
+    ```python
+    session = await client.create_session(
+        "List files in /tmp",
+        enable_builtins=True,
+        enable_shell=True,
+        enable_subagents=False,
+        enable_memory=True,
+        enable_mob=True,
+    )
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    const session = await client.createSession("List files in /tmp", {
+      enableBuiltins: true,
+      enableShell: true,
+      enableSubagents: false,
+      enableMemory: true,
+      enableMob: true,
+    });
+    ```
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    let factory = AgentFactory::new(root)
+        .builtins(true)
+        .shell(true)
+        .subagents(true)
+        .memory(true)
+        .mob(true);
+
+    let service = build_ephemeral_service(factory, config, 64);
+    let result = service.create_session(CreateSessionRequest {
+        prompt: "List files in /tmp".into(),
+        ..Default::default()
+    }).await?;
+    ```
+  </Tab>
+</Tabs>
+
+## Register MCP servers
+
+```bash
+# Add a stdio server
+rkat mcp add filesystem -- npx -y @anthropic/mcp-server-filesystem /tmp
+
+# Add a streamable HTTP server
+rkat mcp add remote-api --url https://mcp.example.com/api
+
+# List all registered servers
+rkat mcp list
+rkat mcp list --scope project --json
+
+# Get details for a specific server
+rkat mcp get filesystem
+
+# Remove a server
+rkat mcp remove filesystem
+
+# Reload MCP servers on a live session
+rkat mcp reload --session <SESSION_ID> --live-server-url http://localhost:8080
+rkat mcp reload --session <SESSION_ID> --live-server-url http://localhost:8080 --name my-tools
+```
+
+Config is stored in `.rkat/mcp.toml` (project) or `~/.rkat/mcp.toml` (user). Project scope wins on name collisions.
+
+## Live MCP controls
+
+Add, remove, or reload MCP servers on a running session without restarting the agent. Changes are staged and applied at the next turn boundary.
+
+<Note>
+CLI `rkat mcp add/remove` manages static server config (persisted to `.rkat/mcp.toml`). The methods below manage servers on a **running session** — changes are staged and applied at the next turn boundary.
+</Note>
+
+<Tabs>
+  <Tab title="JSON-RPC">
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 2,
+      "method": "mcp/add",
+      "params": {
+        "session_id": "01936f8a-...",
+        "server_name": "my-tools",
+        "server_config": {
+          "transport": "stdio",
+          "command": "npx",
+          "args": ["-y", "@my/mcp-server"]
+        },
+        "persisted": false
+      }
+    }
+    ```
+
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 3,
+      "method": "mcp/remove",
+      "params": {
+        "session_id": "01936f8a-...",
+        "server_name": "my-tools",
+        "persisted": false
+      }
+    }
+    ```
+
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 4,
+      "method": "mcp/reload",
+      "params": {
+        "session_id": "01936f8a-...",
+        "server_name": "my-tools"
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    # Add
+    curl -X POST http://localhost:8080/sessions/01936f8a-.../mcp/add \
+      -H "Content-Type: application/json" \
+      -d '{
+        "server_name": "my-tools",
+        "server_config": {"transport": "stdio", "command": "npx", "args": ["-y", "@my/mcp-server"]},
+        "persisted": false
+      }'
+
+    # Remove
+    curl -X POST http://localhost:8080/sessions/01936f8a-.../mcp/remove \
+      -H "Content-Type: application/json" \
+      -d '{"server_name": "my-tools", "persisted": false}'
+
+    # Reload
+    curl -X POST http://localhost:8080/sessions/01936f8a-.../mcp/reload \
+      -H "Content-Type: application/json" \
+      -d '{"server_name": "my-tools"}'
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    // Reload a specific server
+    {"name": "meerkat_mcp_reload", "arguments": {
+      "session_id": "01936f8a-...",
+      "server_name": "my-tools",
+      "persisted": false
+    }}
+
+    // Reload all servers
+    {"name": "meerkat_mcp_reload", "arguments": {
+      "session_id": "01936f8a-...",
+      "persisted": false
+    }}
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    await client.mcp_add(
+        session_id="01936f8a-...",
+        server_name="my-tools",
+        server_config={"transport": "stdio", "command": "npx", "args": ["-y", "@my/mcp-server"]},
+        persisted=False,
+    )
+
+    await client.mcp_remove(session_id="01936f8a-...", server_name="my-tools", persisted=False)
+    await client.mcp_reload(session_id="01936f8a-...", server_name="my-tools")
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    await client.mcpAdd({
+      sessionId: "01936f8a-...",
+      serverName: "my-tools",
+      serverConfig: { transport: "stdio", command: "npx", args: ["-y", "@my/mcp-server"] },
+      persisted: false,
+    });
+
+    await client.mcpRemove({ sessionId: "01936f8a-...", serverName: "my-tools", persisted: false });
+    await client.mcpReload({ sessionId: "01936f8a-...", serverName: "my-tools" });
+    ```
+  </Tab>
+</Tabs>
+
+Set `persisted: true` to write the change to disk config so it survives restart.
+
+## Tool scoping
+
+Tool visibility can change during a session. Changes are staged and atomically applied at the turn boundary -- the LLM never sees a tool list change mid-stream.
+
+**External filters.** Allow-list or deny-list filters are persisted in session metadata and survive resume.
+
+**Per-turn overlays.** Mob flow steps can restrict tools for a single turn via `TurnToolOverlay`. The overlay is ephemeral and cleared after the turn completes.
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    # Allow-list specific tools for this turn
+    rkat resume --session 01936f8a-... \
+      --allow-tool shell --allow-tool read_file \
+      --block-tool agent_spawn \
+      "Execute the next step"
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 5,
+      "method": "turn/start",
+      "params": {
+        "session_id": "01936f8a-...",
+        "prompt": "Execute the next step",
+        "flow_tool_overlay": {
+          "allowed_tools": ["shell", "read_file"],
+          "blocked_tools": ["agent_spawn"]
+        }
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    curl -X POST http://localhost:8080/sessions/01936f8a-.../messages \
+      -H "Content-Type: application/json" \
+      -d '{
+        "session_id": "01936f8a-...",
+        "prompt": "Execute the next step",
+        "flow_tool_overlay": {
+          "allowed_tools": ["shell", "read_file"],
+          "blocked_tools": ["agent_spawn"]
+        }
+      }'
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    {"name": "meerkat_resume", "arguments": {
+      "session_id": "01936f8a-...",
+      "prompt": "Continue with restricted tools",
+      "flow_tool_overlay": {
+        "allowed_tools": ["shell", "task_create"],
+        "blocked_tools": []
+      }
+    }}
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    result = await session.turn(
+        "Execute the next step",
+        flow_tool_overlay={
+            "allowed_tools": ["shell", "read_file"],
+            "blocked_tools": ["agent_spawn"],
+        },
+    )
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    const result = await session.turn("Execute the next step", {
+      flowToolOverlay: {
+        allowedTools: ["shell", "read_file"],
+        blockedTools: ["agent_spawn"],
+      },
+    });
+    ```
+  </Tab>
+</Tabs>
+
+**Composition rule:** most-restrictive wins. Multiple allow-lists intersect, multiple deny-lists union, and deny always beats allow. The agent receives a `[SYSTEM NOTICE]` when its tool set changes, and a `tool_config_changed` event is emitted to the event stream.

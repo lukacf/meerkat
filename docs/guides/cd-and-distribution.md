@@ -1,3 +1,9 @@
+---
+title: "CD and distribution"
+description: "Publication model for Meerkat binaries, Rust crates, Python SDK, and TypeScript SDK."
+icon: "truck-fast"
+---
+
 # CD and Distribution Rulebook
 
 This document captures the publication model for Meerkat binaries and SDKs
@@ -45,9 +51,10 @@ Release artifacts are built for each surface binary:
 
 Build targets:
 
-- `aarch64-apple-darwin`
 - `x86_64-unknown-linux-gnu`
 - `aarch64-unknown-linux-gnu`
+- `aarch64-apple-darwin`
+- `x86_64-apple-darwin`
 - `x86_64-pc-windows-msvc`
 
 Publish as release assets, for example:

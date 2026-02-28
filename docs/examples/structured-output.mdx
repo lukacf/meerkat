@@ -1,0 +1,342 @@
+---
+title: "Structured output"
+description: "JSON schema extraction with validation, retries, and provider compatibility."
+icon: "square-code"
+---
+
+For the full guide, see [Structured output](/guides/structured-output).
+
+## Basic extraction
+
+Provide an `output_schema` and the agent will extract validated JSON after the agentic loop completes.
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    rkat run --output-schema '{
+      "type": "object",
+      "properties": {
+        "city": {"type": "string"},
+        "country": {"type": "string"},
+        "population": {"type": "integer"}
+      },
+      "required": ["city", "country", "population"]
+    }' "Tell me about Tokyo"
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 1,
+      "method": "session/create",
+      "params": {
+        "prompt": "Tell me about Tokyo",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "city": {"type": "string"},
+            "country": {"type": "string"},
+            "population": {"type": "integer"}
+          },
+          "required": ["city", "country", "population"]
+        }
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    curl -X POST http://localhost:8080/sessions \
+      -H "Content-Type: application/json" \
+      -d '{
+        "prompt": "Tell me about Tokyo",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "city": {"type": "string"},
+            "country": {"type": "string"},
+            "population": {"type": "integer"}
+          },
+          "required": ["city", "country", "population"]
+        }
+      }'
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    {
+      "prompt": "Tell me about Tokyo",
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "city": {"type": "string"},
+          "country": {"type": "string"},
+          "population": {"type": "integer"}
+        },
+        "required": ["city", "country", "population"]
+      }
+    }
+    ```
+    Called via the `meerkat_run` tool.
+  </Tab>
+  <Tab title="Python">
+    ```python
+    session = await client.create_session(
+        "Tell me about Tokyo",
+        output_schema={
+            "type": "object",
+            "properties": {
+                "city": {"type": "string"},
+                "country": {"type": "string"},
+                "population": {"type": "integer"},
+            },
+            "required": ["city", "country", "population"],
+        },
+    )
+    print(session.structured_output)
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    const session = await client.createSession("Tell me about Tokyo", {
+      outputSchema: {
+        type: "object",
+        properties: {
+          city: { type: "string" },
+          country: { type: "string" },
+          population: { type: "integer" },
+        },
+        required: ["city", "country", "population"],
+      },
+    });
+    console.log(session.structuredOutput);
+    ```
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    let schema = OutputSchema::new(json!({
+        "type": "object",
+        "properties": {
+            "city": {"type": "string"},
+            "country": {"type": "string"},
+            "population": {"type": "integer"}
+        },
+        "required": ["city", "country", "population"]
+    }))?;
+
+    let result = service.create_session(CreateSessionRequest {
+        prompt: "Tell me about Tokyo".into(),
+        build: Some(SessionBuildOptions {
+            output_schema: Some(schema),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }).await?;
+    println!("{:?}", result.structured_output);
+    ```
+  </Tab>
+</Tabs>
+
+## Schema from file
+
+The CLI can load a schema from a JSON file instead of inline.
+
+```bash
+rkat run --output-schema ./schemas/city.json "Tell me about Tokyo"
+```
+
+The CLI detects files by checking if the value is an existing path. The file can contain a raw JSON Schema or the [wrapper format](/guides/structured-output#outputschema) with explicit `name`, `strict`, `compat`, and `format` fields.
+
+## Retries
+
+When validation fails, the agent retries the extraction turn with error feedback. The default is 2 retries (3 total attempts).
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    rkat run --output-schema ./schema.json --structured-output-retries 5 "Extract entities"
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 2,
+      "method": "session/create",
+      "params": {
+        "prompt": "Extract entities",
+        "output_schema": {"type": "object", "properties": {"entities": {"type": "array"}}},
+        "structured_output_retries": 5
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    curl -X POST http://localhost:8080/sessions \
+      -H "Content-Type: application/json" \
+      -d '{
+        "prompt": "Extract entities",
+        "output_schema": {
+          "type": "object",
+          "properties": {"entities": {"type": "array"}},
+          "required": ["entities"]
+        },
+        "structured_output_retries": 5
+      }'
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    {
+      "prompt": "Extract entities",
+      "output_schema": {
+        "type": "object",
+        "properties": {"entities": {"type": "array"}},
+        "required": ["entities"]
+      },
+      "structured_output_retries": 5
+    }
+    ```
+    Called via the `meerkat_run` tool.
+  </Tab>
+  <Tab title="Python">
+    ```python
+    session = await client.create_session(
+        "Extract entities",
+        output_schema={"type": "object", "properties": {"entities": {"type": "array"}}},
+        structured_output_retries=5,
+    )
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    const session = await client.createSession("Extract entities", {
+      outputSchema: { type: "object", properties: { entities: { type: "array" } } },
+      structuredOutputRetries: 5,
+    });
+    ```
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    let result = service.create_session(CreateSessionRequest {
+        prompt: "Extract entities".into(),
+        build: Some(SessionBuildOptions {
+            output_schema: Some(schema),
+            structured_output_retries: Some(5),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }).await?;
+    ```
+  </Tab>
+</Tabs>
+
+## Compatibility mode
+
+Schemas are normalized across providers. The `compat` setting controls how unsupported JSON Schema features are handled during provider-specific lowering.
+
+```bash
+# Lossy (default): unsupported features are dropped with warnings
+rkat run --output-schema ./schema.json --output-schema-compat lossy "Extract data"
+
+# Strict: reject schemas with unsupported features
+rkat run --output-schema ./schema.json --output-schema-compat strict "Extract data"
+```
+
+| Mode | Behavior |
+|------|----------|
+| `lossy` | Best-effort lowering; unsupported features are dropped with warnings |
+| `strict` | Reject schemas with unsupported features for the target provider |
+
+Warnings are included in the response as `schema_warnings`. The same schema works with Anthropic, OpenAI, and Gemini -- provider-specific lowering is handled transparently.
+
+## Read the result
+
+The structured output appears in the response alongside the raw text.
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    # --output json returns the full result including structured_output
+    rkat run --output json --output-schema '{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}' "What is 2+2?"
+    # stdout: {"session_id":"...","text":"...","structured_output":{"answer":"4"}}
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 1,
+      "result": {
+        "session_id": "01936f8a-...",
+        "text": "{\"city\":\"Tokyo\",\"country\":\"Japan\",\"population\":13960000}",
+        "structured_output": {
+          "city": "Tokyo",
+          "country": "Japan",
+          "population": 13960000
+        },
+        "schema_warnings": [],
+        "turns": 2,
+        "tool_calls": 0,
+        "usage": {"input_tokens": 120, "output_tokens": 45, "total_tokens": 165}
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```json
+    {
+      "session_id": "01936f8a-...",
+      "text": "{\"city\":\"Tokyo\",\"country\":\"Japan\",\"population\":13960000}",
+      "structured_output": {
+        "city": "Tokyo",
+        "country": "Japan",
+        "population": 13960000
+      },
+      "schema_warnings": [],
+      "turns": 2,
+      "tool_calls": 0,
+      "usage": {"input_tokens": 120, "output_tokens": 45, "total_tokens": 165}
+    }
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    // meerkat_run response includes structured_output in the tool result
+    {
+      "content": [{"type": "text", "text": "{\"session_id\":\"...\",\"structured_output\":{\"answer\":\"4\"}}"}]
+    }
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    session = await client.create_session("Tell me about Tokyo", output_schema=schema)
+    data = session.structured_output  # dict: {"city": "Tokyo", "country": "Japan", ...}
+    print(data["city"])
+    print(data["population"])
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    const session = await client.createSession("Tell me about Tokyo", { outputSchema: schema });
+    const data = session.structuredOutput;  // { city: "Tokyo", country: "Japan", ... }
+    console.log(data.city);
+    console.log(data.population);
+    ```
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    let result = service.create_session(req).await?;
+    if let Some(output) = &result.structured_output {
+        let city = output["city"].as_str().unwrap_or_default();
+        let pop = output["population"].as_i64().unwrap_or_default();
+        println!("{}: {}", city, pop);
+    }
+
+    if let Some(warnings) = &result.schema_warnings {
+        for w in warnings {
+            eprintln!("{:?} at {}: {}", w.provider, w.path, w.message);
+        }
+    }
+    ```
+  </Tab>
+</Tabs>

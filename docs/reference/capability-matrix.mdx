@@ -1,7 +1,7 @@
 ---
 title: "Capability matrix"
 description: "Build profiles, feature gates, error codes, and capability behavior across Meerkat configurations."
-icon: "grid-2x2"
+icon: "table-cells"
 ---
 
 Meerkat is modular. Every feature is opt-in. This matrix shows what works in each build profile.
@@ -57,16 +57,16 @@ string code and a transport-specific representation:
 ```toml
 # Minimal: just the agent loop
 [dependencies]
-meerkat = { version = "0.3", default-features = false, features = ["anthropic"] }
+meerkat = { version = "0.4", default-features = false, features = ["anthropic"] }
 
 # Add persistence
-meerkat = { version = "0.3", default-features = false, features = ["anthropic", "session-store"] }
+meerkat = { version = "0.4", default-features = false, features = ["anthropic", "session-store"] }
 
 # Add compaction
-meerkat = { version = "0.3", default-features = false, features = ["anthropic", "session-store", "session-compaction"] }
+meerkat = { version = "0.4", default-features = false, features = ["anthropic", "session-store", "session-compaction"] }
 
 # Kitchen sink
-meerkat = { version = "0.3", features = ["all-providers", "session-store", "session-compaction", "comms", "mcp"] }
+meerkat = { version = "0.4", features = ["all-providers", "session-store", "session-compaction", "comms", "mcp"] }
 ```
 
 ## Compaction behavior

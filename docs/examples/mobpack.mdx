@@ -1,0 +1,74 @@
+---
+title: "Mobpack"
+description: "Portable multi-agent deployment with signed archives and trust policies."
+icon: "box"
+---
+
+For the full guide, see [Mobpack](/guides/mobpack).
+
+## Pack a mob directory
+
+Bundle a mob directory into a single portable `.mobpack` artifact containing the definition, skills, hooks, and config.
+
+```bash
+rkat mob pack ./mobs/release-triage -o ./dist/release-triage.mobpack
+```
+
+## Sign a pack
+
+Attach an Ed25519 signature at pack time for trust verification on deploy.
+
+```bash
+rkat mob pack ./mobs/release-triage \
+  -o ./dist/release-triage.mobpack \
+  --sign ./keys/release.key
+```
+
+## Inspect a pack
+
+View the contents, metadata, and signature status of a `.mobpack` without deploying.
+
+```bash
+rkat mob inspect ./dist/release-triage.mobpack
+```
+
+## Validate a pack
+
+Check structural integrity, schema conformance, and signature validity.
+
+```bash
+rkat mob validate ./dist/release-triage.mobpack
+```
+
+## Deploy a pack
+
+Run a `.mobpack` as a live mob with a prompt. The trust policy controls whether unsigned or unknown-signer packs are accepted.
+
+```bash
+rkat mob deploy ./dist/release-triage.mobpack \
+  "triage latest regressions" \
+  --trust-policy strict \
+  --model claude-sonnet-4-5
+```
+
+Deploy to an RPC service instead of one-shot CLI:
+
+```bash
+rkat mob deploy ./dist/release-triage.mobpack \
+  "boot triage service" \
+  --surface rpc
+```
+
+## Trust policies
+
+| Policy | Unsigned packs | Unknown signers | Invalid signatures |
+|--------|---------------|----------------|-------------------|
+| `permissive` | Allowed (warns) | Allowed (warns) | Rejected |
+| `strict` | Rejected | Rejected | Rejected |
+
+Trust policy resolution order:
+
+1. CLI flag: `--trust-policy strict`
+2. Environment variable: `RKAT_TRUST_POLICY=strict`
+3. Config file: `trust.policy` field
+4. Default: `permissive`

@@ -1,0 +1,375 @@
+---
+title: "Skills"
+description: "Load, discover, inject, and inspect domain-specific knowledge packs."
+icon: "graduation-cap"
+---
+
+For the full guide, see [Skills](/guides/skills).
+
+## List available skills
+
+Discover all skills from every source (project, user, git, HTTP, embedded) with provenance and shadowing info.
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    # Human-readable table
+    rkat skills list
+
+    # Machine-readable JSON
+    rkat skills list --json
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 1,
+      "method": "skills/list",
+      "params": {}
+    }
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    curl http://127.0.0.1:8080/skills
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    {
+      "name": "meerkat_skills",
+      "arguments": { "action": "list" }
+    }
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    skills = client.list_skills()
+    for s in skills:
+        print(f"{s.id}: {s.name} (source={s.source})")
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    const skills = await client.listSkills();
+    for (const s of skills) {
+      console.log(`${s.id}: ${s.name} (source=${s.source})`);
+    }
+    ```
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    let entries = skill_runtime
+        .list_all_with_provenance(&SkillFilter::default())
+        .await?;
+    for entry in &entries {
+        println!("{}: active={}", entry.descriptor.id, entry.is_active);
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Inspect a skill
+
+View the full body and metadata of a specific skill. Use `--source` to inspect a shadowed version.
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    # Inspect the active version
+    rkat skills inspect task-workflow
+
+    # Inspect a shadowed version from a specific source
+    rkat skills inspect task-workflow --source company --json
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 1,
+      "method": "skills/inspect",
+      "params": {
+        "id": "task-workflow",
+        "source": "company"
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    # Active version
+    curl http://127.0.0.1:8080/skills/task-workflow
+
+    # From a specific source
+    curl http://127.0.0.1:8080/skills/task-workflow?source=company
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    {
+      "name": "meerkat_skills",
+      "arguments": {
+        "action": "inspect",
+        "skill_id": "task-workflow",
+        "source": "company"
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    skill = client.inspect_skill("task-workflow", source="company")
+    print(skill.body)
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    const skill = await client.inspectSkill("task-workflow", {
+      source: "company",
+    });
+    console.log(skill.body);
+    ```
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    let doc = skill_runtime
+        .load_from_source(&"task-workflow".into(), Some("company"))
+        .await?;
+    println!("{}", doc.body);
+    ```
+  </Tab>
+</Tabs>
+
+## Inject skills on session create
+
+Pass `skill_references` to resolve and inject skill content into the system prompt when a session starts.
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    rkat run "Extract emails" --skill-refs "/email-extractor" "/formatting/markdown"
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 1,
+      "method": "session/create",
+      "params": {
+        "prompt": "Extract emails",
+        "skill_references": ["/email-extractor", "/formatting/markdown"]
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    curl -X POST http://127.0.0.1:8080/sessions \
+      -H "Content-Type: application/json" \
+      -d '{
+        "prompt": "Extract emails",
+        "skill_references": ["/email-extractor", "/formatting/markdown"]
+      }'
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    {
+      "name": "meerkat_run",
+      "arguments": {
+        "prompt": "Extract emails",
+        "skill_references": ["/email-extractor", "/formatting/markdown"]
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    result = client.create_session(
+        "Extract emails",
+        skill_refs=["/email-extractor", "/formatting/markdown"],
+    )
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    const result = await client.createSession({
+      prompt: "Extract emails",
+      skillRefs: ["/email-extractor", "/formatting/markdown"],
+    });
+    ```
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    let request = CreateSessionRequest {
+        prompt: "Extract emails".into(),
+        skill_references: vec![
+            "/email-extractor".into(),
+            "/formatting/markdown".into(),
+        ],
+        ..Default::default()
+    };
+    let result = service.create_session(request).await?;
+    ```
+  </Tab>
+</Tabs>
+
+## Preload skills
+
+Preloaded skills are resolved and injected into the system prompt before the first turn runs. Unlike `skill_references`, these are loaded eagerly at session creation.
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    rkat run "Help me deploy" --preload-skills "deployment-guide" "shell-patterns"
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 1,
+      "method": "session/create",
+      "params": {
+        "prompt": "Help me deploy",
+        "preload_skills": ["deployment-guide", "shell-patterns"]
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    curl -X POST http://127.0.0.1:8080/sessions \
+      -H "Content-Type: application/json" \
+      -d '{
+        "prompt": "Help me deploy",
+        "preload_skills": ["deployment-guide", "shell-patterns"]
+      }'
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    {
+      "name": "meerkat_run",
+      "arguments": {
+        "prompt": "Help me deploy",
+        "preload_skills": ["deployment-guide", "shell-patterns"]
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    result = client.create_session(
+        "Help me deploy",
+        preload_skills=["deployment-guide", "shell-patterns"],
+    )
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    const result = await client.createSession({
+      prompt: "Help me deploy",
+      preloadSkills: ["deployment-guide", "shell-patterns"],
+    });
+    ```
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    let build_opts = SessionBuildOptions {
+        preload_skills: vec![
+            "deployment-guide".into(),
+            "shell-patterns".into(),
+        ],
+        ..Default::default()
+    };
+    ```
+  </Tab>
+</Tabs>
+
+## Per-turn skill injection
+
+Inject skills into a specific turn on an existing session. The skill content is added to the context for that turn only.
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    rkat resume <session-id> "Now format the output" \
+      --skill-refs "/formatting/markdown"
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 2,
+      "method": "turn/start",
+      "params": {
+        "session_id": "019467d9-7e3a-7000-8000-000000000000",
+        "prompt": "Now format the output",
+        "skill_references": ["/formatting/markdown"]
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    curl -X POST http://localhost:8080/sessions/019467d9-7e3a.../messages \
+      -H "Content-Type: application/json" \
+      -d '{
+        "prompt": "Now format the output",
+        "skill_references": ["/formatting/markdown"]
+      }'
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    {
+      "name": "meerkat_resume",
+      "arguments": {
+        "session_id": "019467d9-7e3a-7000-8000-000000000000",
+        "prompt": "Now format the output",
+        "skill_references": ["/formatting/markdown"]
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    result = session.turn(
+        "Now format the output",
+        skill_refs=["/formatting/markdown"],
+    )
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    const result = await session.turn("Now format the output", {
+      skillRefs: ["/formatting/markdown"],
+    });
+    ```
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    let result = service.start_turn(&session_id, StartTurnRequest {
+        prompt: "Now format the output".into(),
+        skill_references: Some(vec!["/formatting/markdown".parse()?]),
+        ..Default::default()
+    }).await?;
+    ```
+  </Tab>
+</Tabs>
+
+## Skill sources
+
+Skills are discovered from multiple sources in precedence order. The first source providing a given skill ID wins.
+
+| Priority | Source | Location |
+|---|---|---|
+| 1 | Project | `.rkat/skills/` in the project root |
+| 2 | User | `~/.rkat/skills/` |
+| 3 | Git | Cloned repositories (configured in `config.toml`) |
+| 4 | HTTP | Remote skill servers (configured in `config.toml`) |
+| 5 | Embedded | Built-in skills from component crates |
+
+<Note>
+A project skill with the same ID as a built-in skill overrides the built-in. Use `rkat skills list --json` to see shadowing details.
+</Note>

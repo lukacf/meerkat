@@ -61,6 +61,9 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <redb|js
 | `comms/stream_close` | Comms | Close scoped event stream (comms feature) |
 | `skills/list` | Skills | List skills with provenance |
 | `skills/inspect` | Skills | Inspect a skill's full content |
+| `mcp/add` | MCP | Stage live MCP server addition |
+| `mcp/remove` | MCP | Stage live MCP server removal |
+| `mcp/reload` | MCP | Reload one or all MCP servers |
 | `capabilities/get` | Capabilities | Runtime capability report |
 | `config/get` | Config | Read current config |
 | `config/set` | Config | Replace config |
@@ -121,14 +124,16 @@ Handshake. Returns server capabilities.
   "result": {
     "server_info": {
       "name": "meerkat-rpc",
-      "version": "0.3.4"
+      "version": "0.4.0"
     },
-    "contract_version": "0.3.4",
+    "contract_version": "0.4.0",
     "methods": [
       "initialize", "initialized",
       "session/create", "session/list", "session/read",
       "session/archive", "turn/start", "turn/interrupt",
       "comms/send", "comms/peers", "comms/stream_open", "comms/stream_close",
+      "skills/list", "skills/inspect",
+      "mcp/add", "mcp/remove", "mcp/reload",
       "capabilities/get",
       "config/get", "config/set", "config/patch"
     ]
@@ -683,6 +688,150 @@ Inspect a skill's full content (body).
   Load from a specific named source, bypassing first-wins resolution. Useful for inspecting shadowed skills.
 </ParamField>
 
+## MCP methods
+
+### mcp/add
+
+Stage a live MCP server addition for a running session. The server is connected at the next turn boundary.
+
+<CodeGroup>
+```json Request
+{
+  "jsonrpc": "2.0",
+  "id": 14,
+  "method": "mcp/add",
+  "params": {
+    "session_id": "01936f8a-...",
+    "server_name": "my-tools",
+    "server_config": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@my/mcp-server"]
+    },
+    "persisted": false
+  }
+}
+```
+
+```json Response
+{
+  "jsonrpc": "2.0",
+  "id": 14,
+  "result": {
+    "session_id": "01936f8a-...",
+    "operation": "Add",
+    "server_name": "my-tools",
+    "status": "Staged",
+    "persisted": false,
+    "applied_at_turn": null
+  }
+}
+```
+</CodeGroup>
+
+<ParamField body="session_id" type="string" required>
+  Session ID to add the server to.
+</ParamField>
+
+<ParamField body="server_name" type="string" required>
+  Name for the MCP server.
+</ParamField>
+
+<ParamField body="server_config" type="object" required>
+  MCP server configuration (transport, command, args, url, etc.).
+</ParamField>
+
+<ParamField body="persisted" type="bool" default="false">
+  Whether to also write the server to disk config.
+</ParamField>
+
+### mcp/remove
+
+Stage removal of an MCP server from a running session. Active tool calls drain before the server disconnects at the next turn boundary.
+
+<CodeGroup>
+```json Request
+{
+  "jsonrpc": "2.0",
+  "id": 15,
+  "method": "mcp/remove",
+  "params": {
+    "session_id": "01936f8a-...",
+    "server_name": "my-tools",
+    "persisted": false
+  }
+}
+```
+
+```json Response
+{
+  "jsonrpc": "2.0",
+  "id": 15,
+  "result": {
+    "session_id": "01936f8a-...",
+    "operation": "Remove",
+    "server_name": "my-tools",
+    "status": "Staged",
+    "persisted": false,
+    "applied_at_turn": null
+  }
+}
+```
+</CodeGroup>
+
+<ParamField body="session_id" type="string" required>
+  Session ID to remove the server from.
+</ParamField>
+
+<ParamField body="server_name" type="string" required>
+  Name of the MCP server to remove.
+</ParamField>
+
+<ParamField body="persisted" type="bool" default="false">
+  Whether to also remove from disk config.
+</ParamField>
+
+### mcp/reload
+
+Reload one or all MCP servers for a running session. Useful after config changes.
+
+<CodeGroup>
+```json Request
+{
+  "jsonrpc": "2.0",
+  "id": 16,
+  "method": "mcp/reload",
+  "params": {
+    "session_id": "01936f8a-...",
+    "server_name": "my-tools"
+  }
+}
+```
+
+```json Response
+{
+  "jsonrpc": "2.0",
+  "id": 16,
+  "result": {
+    "session_id": "01936f8a-...",
+    "operation": "Reload",
+    "server_name": "my-tools",
+    "status": "Staged",
+    "persisted": false,
+    "applied_at_turn": null
+  }
+}
+```
+</CodeGroup>
+
+<ParamField body="session_id" type="string" required>
+  Session ID to reload servers for.
+</ParamField>
+
+<ParamField body="server_name" type="string | null" default="null">
+  Specific server to reload. If null, reloads all servers.
+</ParamField>
+
 ## Capabilities
 
 ### capabilities/get
@@ -916,6 +1065,7 @@ Event types match the `AgentEvent` enum in `meerkat-core`:
 | `hook_patch_published` | Hook published a patch |
 | `skills_resolved` | Skills loaded for turn |
 | `skill_resolution_failed` | Skill resolution failed |
+| `tool_config_changed` | Tool visibility or MCP config changed |
 | `interaction_complete` | Interaction-scoped stream completed |
 | `interaction_failed` | Interaction-scoped stream failed |
 | `stream_truncated` | Backpressure dropped intermediate events |
@@ -936,7 +1086,7 @@ When a scoped event stream is open (via `comms/stream_open`), the server emits `
       "type": "text_delta",
       "delta": "Hello"
     },
-    "contract_version": "0.3.4"
+    "contract_version": "0.4.0"
   }
 }
 ```

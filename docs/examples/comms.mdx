@@ -1,0 +1,414 @@
+---
+title: "Comms & sub-agents"
+description: "Inter-agent messaging, host mode, external event injection, and sub-agent orchestration."
+icon: "tower-broadcast"
+---
+
+For the full guide, see [Comms](/guides/comms) and [Sub-agents](/guides/sub-agents).
+
+## Host mode
+
+Enable the comms listener so the agent stays alive after its initial prompt, waiting for incoming messages and external events.
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    rkat run --comms-name agent-a --host "You are a coordinator."
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 1,
+      "method": "session/create",
+      "params": {
+        "prompt": "You are a coordinator.",
+        "host_mode": true,
+        "comms_name": "agent-a"
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    curl -X POST http://localhost:8080/sessions \
+      -H "Content-Type: application/json" \
+      -d '{
+        "prompt": "You are a coordinator.",
+        "host_mode": true,
+        "comms_name": "agent-a"
+      }'
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    {
+      "prompt": "You are a coordinator.",
+      "host_mode": true,
+      "comms_name": "agent-a"
+    }
+    ```
+    Called via the `meerkat_run` tool.
+  </Tab>
+  <Tab title="Python">
+    ```python
+    session = await client.create_session(
+        "You are a coordinator.",
+        host_mode=True,
+        comms_name="agent-a",
+    )
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    const session = await client.createSession("You are a coordinator.", {
+      hostMode: true,
+      commsName: "agent-a",
+    });
+    ```
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    let result = service.create_session(CreateSessionRequest {
+        prompt: "You are a coordinator.".into(),
+        host_mode: true,
+        build: Some(SessionBuildOptions {
+            comms_name: Some("agent-a".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }).await?;
+    ```
+  </Tab>
+</Tabs>
+
+## Send a message
+
+Push an event into a running session's comms inbox.
+
+<Tabs>
+  <Tab title="JSON-RPC">
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 2,
+      "method": "comms/send",
+      "params": {
+        "session_id": "01936f8a-...",
+        "payload": {"alert": "build failed", "severity": "high"},
+        "source": "ci-pipeline"
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    curl -X POST http://localhost:8080/comms/send \
+      -H "Content-Type: application/json" \
+      -d '{"session_id":"01936f8a-...","payload":{"alert":"build failed"},"source":"ci-pipeline"}'
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    {"name": "meerkat_comms_send", "arguments": {
+      "session_id": "01936f8a-...",
+      "kind": "peer_message",
+      "to": "agent-b",
+      "body": "Hello from agent-a"
+    }}
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    await client.send(session_id, payload={"alert": "build failed"}, source="ci-pipeline")
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    await client.send(sessionId, { payload: { alert: "build failed" }, source: "ci-pipeline" });
+    ```
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    let injector = service.event_injector(&session_id).await
+        .expect("comms must be enabled");
+    injector.inject(r#"{"alert": "build failed"}"#.into(), PlainEventSource::Rpc)?;
+    ```
+  </Tab>
+</Tabs>
+
+## List peers
+
+Discover trusted peers visible to a running session.
+
+<Tabs>
+  <Tab title="JSON-RPC">
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 3,
+      "method": "comms/peers",
+      "params": { "session_id": "01936f8a-..." }
+    }
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    curl http://localhost:8080/comms/peers?session_id=01936f8a-...
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    {"name": "meerkat_comms_peers", "arguments": {
+      "session_id": "01936f8a-..."
+    }}
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    peers = await client.peers(session_id)
+    for p in peers["peers"]:
+        print(f"{p['name']} @ {p['address']}")
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    const { peers } = await client.peers(sessionId);
+    peers.forEach(p => console.log(`${p.name} @ ${p.address}`));
+    ```
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    let runtime = service.comms_runtime(&session_id).await
+        .expect("comms must be enabled");
+    let peers = runtime.peers().await;
+    for p in &peers { println!("{} @ {}", p.name, p.address); }
+    ```
+  </Tab>
+</Tabs>
+
+## External event injection
+
+Push external events from outside systems into a running agent. Events are drained at turn boundaries and injected as user messages.
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    # Host mode with stdin events (pipe or type interactively)
+    rkat run --comms-name monitor --host --stdin \
+      "You are a monitoring agent."
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 4,
+      "method": "comms/send",
+      "params": {
+        "session_id": "01936f8a-...",
+        "payload": {"event": "deploy_complete", "env": "prod"},
+        "source": "deploy-bot"
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    curl -X POST http://localhost:8080/comms/send \
+      -H "Content-Type: application/json" \
+      -d '{"session_id":"01936f8a-...","payload":{"event":"deploy_complete","env":"prod"},"source":"deploy-bot"}'
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    {"name": "meerkat_comms_send", "arguments": {
+      "session_id": "01936f8a-...",
+      "kind": "event",
+      "body": "{\"event\":\"deploy_complete\",\"env\":\"prod\"}"
+    }}
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    await client.send(session_id, payload={"event": "deploy_complete", "env": "prod"}, source="deploy-bot")
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    await client.send(sessionId, { payload: { event: "deploy_complete", env: "prod" }, source: "deploy-bot" });
+    ```
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    let injector = service.event_injector(&session_id).await
+        .expect("comms must be enabled");
+
+    let sub = injector.inject_with_subscription(
+        r#"{"event": "deploy_complete"}"#.into(),
+        PlainEventSource::Rpc,
+    )?;
+
+    while let Some(event) = sub.events.recv().await {
+        match event {
+            AgentEvent::TextDelta { delta } => print!("{delta}"),
+            AgentEvent::InteractionComplete { .. } => break,
+            _ => {}
+        }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Comms event streaming
+
+Open a scoped event stream for a session's comms activity. Events arrive in real-time as peers send messages.
+
+<Tabs>
+  <Tab title="JSON-RPC">
+    ```json
+    // Open stream
+    {"jsonrpc":"2.0","id":5,"method":"comms/stream_open","params":{"session_id":"01936f8a-..."}}
+    // → {"stream_id": "550e8400-..."}
+
+    // Events arrive as notifications:
+    {"jsonrpc":"2.0","method":"comms/stream_event","params":{
+      "session_id":"01936f8a-...",
+      "event":{"type":"comms_message","from":"agent-b","body":"task done"}
+    }}
+
+    // Close stream
+    {"jsonrpc":"2.0","id":6,"method":"comms/stream_close","params":{"stream_id":"550e8400-..."}}
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    # SSE stream of comms events for a session
+    curl -N "http://localhost:8080/comms/stream?session_id=01936f8a-..."
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    // Open
+    {"name":"meerkat_comms_stream_open","arguments":{"session_id":"01936f8a-...","scope":"session"}}
+    // → {"stream_id":"550e8400-..."}
+
+    // Poll (returns next event or null)
+    {"name":"meerkat_comms_stream_read","arguments":{"stream_id":"550e8400-..."}}
+
+    // Close
+    {"name":"meerkat_comms_stream_close","arguments":{"stream_id":"550e8400-..."}}
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    stream = await client.open_comms_stream(session_id)
+    async for event in stream:
+        print(event)
+    await stream.close()
+
+    # Or send + stream the interaction in one call:
+    stream = await client.send_and_stream(session_id, kind="peer_message", to="agent-b", body="hello")
+    async for event in stream:
+        print(event)
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    const stream = await client.openCommsStream(sessionId);
+    for await (const event of stream) {
+      console.log(event);
+    }
+    await stream.close();
+
+    // Or send + stream the interaction:
+    const stream2 = await client.sendAndStream(sessionId, { kind: "peer_message", to: "agent-b", body: "hello" });
+    for await (const event of stream2) {
+      console.log(event);
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Enable sub-agents
+
+Give the agent the ability to spawn, fork, and manage independent sub-agents running concurrently in background tasks.
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    rkat run --enable-subagents --enable-builtins \
+      "Break this task into sub-tasks and delegate."
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 7,
+      "method": "session/create",
+      "params": {
+        "prompt": "Break this task into sub-tasks and delegate.",
+        "enable_subagents": true
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    curl -X POST http://localhost:8080/sessions \
+      -H "Content-Type: application/json" \
+      -d '{
+        "prompt": "Break this task into sub-tasks and delegate.",
+        "enable_subagents": true
+      }'
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    {"name": "meerkat_run", "arguments": {
+      "prompt": "Research these topics in parallel",
+      "enable_builtins": true,
+      "enable_subagents": true
+    }}
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    session = await client.create_session(
+        "Break this task into sub-tasks and delegate.",
+        enable_subagents=True,
+    )
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    const session = await client.createSession(
+      "Break this task into sub-tasks and delegate.",
+      { enableSubagents: true },
+    );
+    ```
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    let factory = AgentFactory::new(store_path)
+        .builtins(true)
+        .subagents(true);
+
+    let agent = factory.build_agent(
+        AgentBuildConfig::new("claude-sonnet-4-5"),
+        &config,
+    ).await?;
+    ```
+  </Tab>
+</Tabs>
+
+## Sub-agent tools
+
+When sub-agents are enabled, the agent gains these tools automatically:
+
+| Tool | Description |
+|------|-------------|
+| `agent_spawn` | Create a sub-agent with a clean context (only the prompt). |
+| `agent_fork` | Create a sub-agent that inherits the full conversation history. |
+| `agent_status` | Get the status and output of a sub-agent by ID. |
+| `agent_cancel` | Cancel a running sub-agent. |
+| `agent_list` | List all sub-agents and their current states. |
+
+Sub-agents run concurrently with isolated budgets. A Claude parent can spawn GPT or Gemini children. The parent monitors, collects results, and cancels children as needed.

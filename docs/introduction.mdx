@@ -11,7 +11,7 @@ It's a set of modular Rust crates that handle the hard parts of agentic systems:
 
 - **Fast.** Rust from the ground up. Single 5MB binary, &lt;10ms cold start, ~20MB memory. No runtime, no garbage collector, no dependency tree to manage.
 - **Provider-agnostic.** Same code, same tools, same sessions across Anthropic, OpenAI, and Gemini. Switch models with a config change. Run a Claude parent that spawns GPT sub-agents.
-- **Modular.** Eighteen crates, all opt-in. Need just the agent loop? Pull in `meerkat-core`. Need session persistence? Add `meerkat-store`. Need inter-agent comms? Add `meerkat-comms`. Your binary includes only what you use. Disabled features return typed errors, not panics.
+- **Modular.** Twenty crates, all opt-in. Need just the agent loop? Pull in `meerkat-core`. Need session persistence? Add `meerkat-store`. Need inter-agent comms? Add `meerkat-comms`. Your binary includes only what you use. Disabled features return typed errors, not panics.
 - **Stable.** Deterministic state machine with defined transitions. Typed errors with compile-time guarantees. Every error code maps to a stable string across JSON-RPC, REST, and CLI exit codes.
 - **Controlled.** Hard budget limits on tokens, wall-clock time, and tool calls. Eight hook points for guardrails, audit, and content rewriting. Shell security with allow/deny lists.
 - **Multi-agent native.** Sub-agents spawn on different providers with isolated budgets. Independent agents communicate over Ed25519-signed channels. Compaction + semantic memory handles conversations that exceed any context window.
@@ -59,7 +59,7 @@ Those tools excel at interactive development with rich terminal UIs. Meerkat has
   <Card title="Quickstart" icon="rocket" href="/quickstart">
     Install and run your first agent in under a minute.
   </Card>
-  <Card title="Examples" icon="code" href="/examples/basics">
-    Worked examples you can copy and run.
+  <Card title="Examples" icon="code" href="/examples/gallery">
+    Functional apps and feature walkthroughs you can copy and run.
   </Card>
 </CardGroup>

@@ -55,9 +55,17 @@
           {
             "group": "Examples",
             "pages": [
-              "examples/basics",
+              "examples/gallery",
               "examples/sessions",
-              "examples/advanced"
+              "examples/tools",
+              "examples/structured-output",
+              "examples/hooks",
+              "examples/skills",
+              "examples/memory",
+              "examples/comms",
+              "examples/mobs",
+              "examples/mobpack",
+              "examples/wasm"
             ]
           }
         ]
@@ -124,8 +132,10 @@
             "group": "Architecture",
             "pages": [
               "reference/architecture",
+              "reference/design-philosophy",
               "reference/capability-matrix",
-              "reference/session-contracts"
+              "reference/session-contracts",
+              "guides/cd-and-distribution"
             ]
           }
         ]

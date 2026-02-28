@@ -1,0 +1,294 @@
+---
+title: "Memory & compaction"
+description: "Semantic memory indexing, context compaction, and budget controls."
+icon: "brain"
+---
+
+For the full guide, see [Memory](/guides/memory).
+
+## Enable semantic memory
+
+When memory is enabled, discarded conversation turns are indexed into a semantic store. The agent gains a `memory_search` tool to recall past context on demand.
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    rkat run "Analyze the full codebase" \
+      --enable-memory \
+      --enable-builtins
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 1,
+      "method": "session/create",
+      "params": {
+        "prompt": "Analyze the full codebase",
+        "enable_memory": true,
+        "enable_builtins": true
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    curl -X POST http://127.0.0.1:8080/sessions \
+      -H "Content-Type: application/json" \
+      -d '{
+        "prompt": "Analyze the full codebase",
+        "enable_memory": true,
+        "enable_builtins": true
+      }'
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    {
+      "name": "meerkat_run",
+      "arguments": {
+        "prompt": "Analyze the full codebase",
+        "enable_builtins": true,
+        "enable_memory": true
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    result = client.create_session(
+        "Analyze the full codebase",
+        enable_memory=True,
+        enable_builtins=True,
+    )
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    const result = await client.createSession({
+      prompt: "Analyze the full codebase",
+      enableMemory: true,
+      enableBuiltins: true,
+    });
+    ```
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    let factory = AgentFactory::new(store_path)
+        .builtins(true)
+        .memory(true);
+
+    let agent = factory
+        .build_agent(AgentBuildConfig::new("claude-sonnet-4-5"), &config)
+        .await?;
+    ```
+  </Tab>
+</Tabs>
+
+## Memory search
+
+When memory is enabled, the agent automatically gains the `memory_search` tool. It calls this tool when it needs to recall information from earlier, compacted-away turns.
+
+The tool call appears in the event stream like any other tool invocation:
+
+```json
+{
+  "type": "tool_call_requested",
+  "name": "memory_search",
+  "args": {
+    "query": "database migration steps from earlier",
+    "limit": 5
+  }
+}
+```
+
+Results are returned as a JSON array with similarity scores:
+
+```json
+[
+  {
+    "content": "We agreed to use sequential migrations with...",
+    "score": 0.87,
+    "session_id": "019467d9-7e3a-7000-8000-000000000000",
+    "turn": 3
+  }
+]
+```
+
+<Note>
+Scores range from 0.0 (no match) to 1.0 (exact match). Useful results are typically above 0.7.
+</Note>
+
+## Compaction
+
+Context compaction triggers automatically when the conversation history exceeds a token threshold. The compactor summarizes older turns, keeps recent ones, and indexes discarded messages into memory.
+
+The compaction cycle emits events into the session stream:
+
+```json
+// CompactionStarted -- context has grown past threshold
+{
+  "type": "compaction_started",
+  "input_tokens": 105000,
+  "estimated_history_tokens": 112000,
+  "message_count": 48
+}
+
+// CompactionCompleted -- history rebuilt with summary
+{
+  "type": "compaction_completed",
+  "summary_tokens": 2048,
+  "messages_before": 48,
+  "messages_after": 12
+}
+
+// CompactionFailed -- session is not mutated on failure
+{
+  "type": "compaction_failed",
+  "error": "LLM returned empty summary"
+}
+```
+
+Custom thresholds via the Rust SDK:
+
+<Tabs>
+  <Tab title="Rust">
+    ```rust
+    let compactor = DefaultCompactor::new(CompactionConfig {
+        auto_compact_threshold: 50_000,
+        recent_turn_budget: 6,
+        max_summary_tokens: 8192,
+        min_turns_between_compactions: 5,
+    });
+    ```
+  </Tab>
+</Tabs>
+
+## Budget limits
+
+Cap resource usage per session with token, time, and tool-call limits. When a budget is exhausted, the agent loop terminates gracefully.
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    rkat run "Research this topic" \
+      --max-total-tokens 10000 \
+      --max-duration 30s \
+      --max-tool-calls 5
+    ```
+  </Tab>
+  <Tab title="JSON-RPC">
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 1,
+      "method": "session/create",
+      "params": {
+        "prompt": "Research this topic",
+        "budget_limits": {
+          "max_total_tokens": 10000,
+          "max_duration_ms": 30000,
+          "max_tool_calls": 5
+        }
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    curl -X POST http://127.0.0.1:8080/sessions \
+      -H "Content-Type: application/json" \
+      -d '{
+        "prompt": "Research this topic",
+        "budget_limits": {
+          "max_total_tokens": 10000,
+          "max_duration_ms": 30000,
+          "max_tool_calls": 5
+        }
+      }'
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    {
+      "name": "meerkat_run",
+      "arguments": {
+        "prompt": "Research this topic",
+        "enable_builtins": true,
+        "budget_limits": {
+          "max_tokens": 10000,
+          "max_duration_secs": 30,
+          "max_tool_calls": 5
+        }
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    result = client.create_session(
+        "Research this topic",
+        budget_limits={
+            "max_total_tokens": 10000,
+            "max_duration_ms": 30000,
+            "max_tool_calls": 5,
+        },
+    )
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    const result = await client.createSession({
+      prompt: "Research this topic",
+      budgetLimits: {
+        maxTotalTokens: 10000,
+        maxDurationMs: 30000,
+        maxToolCalls: 5,
+      },
+    });
+    ```
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    let build_opts = SessionBuildOptions {
+        budget_limits: Some(BudgetLimits {
+            max_total_tokens: Some(10_000),
+            max_duration_ms: Some(30_000),
+            max_tool_calls: Some(5),
+        }),
+        ..Default::default()
+    };
+    ```
+  </Tab>
+</Tabs>
+
+## Budget events
+
+When consumption nears a limit, a warning event is emitted before the budget is fully exhausted:
+
+```json
+{
+  "type": "budget_warning",
+  "limit_type": "max_total_tokens",
+  "current": 8500,
+  "limit": 10000,
+  "message": "Token budget 85% consumed"
+}
+```
+
+## Retry policy
+
+Transient LLM errors (rate limits, network timeouts) trigger automatic retries with exponential backoff. Each retry attempt emits an event:
+
+```json
+{
+  "type": "retrying",
+  "attempt": 2,
+  "max_attempts": 5,
+  "error": "rate_limit_exceeded",
+  "backoff_ms": 4000
+}
+```
+
+<Note>
+Retries consume time budget but not token budget. If the time budget expires during a backoff wait, the agent terminates with a budget-exhausted error.
+</Note>

@@ -5,6 +5,16 @@
 default_stages: [pre-commit]
 
 repos:
+  # On commit: auto-format Rust code
+  - repo: local
+    hooks:
+      - id: cargo-fmt-fix
+        name: cargo fmt (auto-fix)
+        entry: cargo fmt --all
+        language: system
+        types: [rust]
+        pass_filenames: false
+
   # On commit: clippy + unit tests on changed crates only (~5-10s)
   - repo: local
     hooks:
@@ -57,6 +67,17 @@ repos:
       - id: cargo-clippy
         name: cargo clippy (workspace)
         entry: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages: [pre-push]
+
+  # On push: workspace build check
+  - repo: local
+    hooks:
+      - id: cargo-build
+        name: cargo build (workspace)
+        entry: cargo build --workspace
         language: system
         types: [rust]
         pass_filenames: false

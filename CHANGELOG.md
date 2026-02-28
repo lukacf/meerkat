@@ -7,6 +7,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-02-28
+
+### Added
+
+#### WASM Browser Runtime
+- `meerkat-web-runtime` crate with 25+ `wasm_bindgen` exports for browser deployment.
+- 9 crates compile for `wasm32-unknown-unknown`: meerkat-store, meerkat-skills, meerkat-hooks, meerkat-comms, meerkat-tools, meerkat-session, meerkat (facade), meerkat-mob, meerkat-mob-mcp.
+- Override-first resource injection: `AgentBuildConfig` accepts `tool_dispatcher_override`, `session_store_override`, `hook_engine_override`, `skill_engine_override` — bypasses filesystem resolution on wasm32.
+- `AgentFactory::minimal()` filesystem-free factory constructor for browser environments.
+- `CompositeDispatcher::new_wasm()` tool dispatcher without shell tools.
+- `MobStorage::in_memory()` ephemeral mob storage for browser-hosted mobs.
+- `FactoryAgentBuilder` default injection propagates wasm32-compatible resources to mob-spawned sessions automatically.
+- Time compatibility layer (`meerkat_core::time_compat`) using `web-time` for `SystemTime`/`Instant` on wasm32.
+- Anthropic client auto-adds `anthropic-dangerous-direct-browser-access` header on wasm32.
+
+#### Tool Scoping and Runtime Tool Control
+- `ToolScope` contract with `ToolFilter` enum (whitelist/blacklist) for per-turn tool visibility.
+- Live MCP mutation: `mcp/add`, `mcp/remove`, `mcp/reload` RPC methods for runtime server provisioning.
+- `tool_scope` field on `SessionBuildOptions` for session-wide tool visibility defaults.
+
+#### Mob API Enhancements (Architecture Review)
+- `Roster::session_id()` convenience accessor for direct session ID retrieval.
+- `MobHandle::subscribe_agent_events()` per-member event subscription with point-in-time snapshots.
+- `AttributedEvent` type for mob-level event sourcing with member attribution.
+- Non-blocking `respawn` command (atomic retire + spawn).
+- `SpawnPolicy` trait as extension point for auto-provisioning strategy on external turns.
+- `MobEventRouter` independent async task merging per-member event streams.
+- `inject_and_subscribe()` request-reply pattern for sync-like interactions over autonomous agents.
+
+#### EventEnvelope Standardization
+- Hard-cut canonical `EventEnvelope` contract: `{timestamp_ms, source_id, seq, event_id, payload}` across all surfaces.
+- Strict `seq` ordering for replay and idempotency.
+- Client-side malformed event guards with structured logging.
+
+#### Schema Hardening
+- Recursive `additionalProperties: false` injection at all nesting levels for Anthropic schema compliance.
+- Handles arrays of objects, union types (`anyOf`), and deeply nested properties.
+- Preserves user-provided `additionalProperties` settings.
+
+#### Mobpack Archive Format
+- `meerkat-mob-pack` crate: portable multi-agent deployment bundles.
+- Pack/deploy/sign pipeline with Ed25519 signing, digest verification, and allowlist trust.
+- WASM web build target support for browser deployment of mobpacks.
+
+#### Documentation
+- 10 new feature pages: sessions, tools, structured output, hooks, skills, memory, comms, mobs, mobpack, WASM.
+- Examples gallery with 11 curated showcase applications.
+- Universal surface tabs showing CLI, RPC, REST, MCP, Python, TypeScript, and Rust implementations.
+- 20+ stale references fixed (version numbers, crate counts, CI descriptions, build matrix).
+
+#### Examples
+- Expanded to 31 polished examples (up from 27) covering all features and surfaces.
+- All examples compile and exercise real features (validated in CI).
+- WASM mini-diplomacy demo: 3-faction browser app with real mob orchestration.
+
+#### CI/CD
+- WASM compilation check job in CI workflow.
+- `cargo fmt --all` auto-fix on pre-commit hook stage.
+- `cargo build --workspace` added to pre-push hook stage.
+
+### Changed
+- CI parallelized to 8 jobs (~3.5 min): fmt-lint, test, test-minimal, test-feature-matrix-lib, test-feature-matrix-surface-checks, test-surface-smoke, audit, gate.
+- Adopted `nextest` for faster parallel test execution across all CI jobs.
+- Pedantic clippy with `-D warnings` enforced across full feature matrix.
+- Toolchain updated to 1.93.1 with provenance tracking.
+- Cross-surface parity: all 7 surfaces (CLI, RPC, REST, MCP, Python SDK, TypeScript SDK, Rust SDK) support EventEnvelope, tool scoping, live MCP controls, and mob feature-gating.
+- Facade re-exports expanded: `ConfigStore`, `ConfigError`, `SessionServiceCommsExt`.
+- CODEOWNERS file added for maintenance coverage.
+
+### Fixed
+- WASM32 runtime panics: `SystemTime`/`Instant` replaced with `web-time` shims, CORS headers for Anthropic, JSON schema validation restored.
+- Mob spawn pipeline on WASM: `FactoryAgentBuilder` default injection ensures mob-spawned sessions inherit wasm32-compatible resources.
+- Inproc comms enabled on wasm32 with override-first pattern.
+- All 31 examples compile without warnings (non-exhaustive match, unused_mut, vec![] → array literals).
+- Import ordering fixed for `cargo fmt` compliance across workspace.
+
+## [0.4.0] - 2026-02-23
+
 ### Added
 
 #### Mobs (Multi-Agent Orchestration)
@@ -293,7 +371,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/lukacf/meerkat/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/lukacf/meerkat/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/lukacf/meerkat/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/lukacf/meerkat/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/lukacf/meerkat/releases/tag/v0.1.0

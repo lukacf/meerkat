@@ -1214,11 +1214,11 @@ impl AgentFactory {
         // 5. Resolve max_tokens
         let max_tokens = build_config.max_tokens.unwrap_or(config.max_tokens);
         let _realm_scope_root = self.realm_scope_root(&build_config);
-        let conventions_context_root = self
+        let _conventions_context_root = self
             .context_root
             .as_deref()
             .or(self.project_root.as_deref());
-        let conventions_user_root = self.user_config_root.as_deref();
+        let _conventions_user_root = self.user_config_root.as_deref();
 
         // 6a. Build skill engine (override > factory > config > filesystem).
         #[cfg(feature = "skills")]
@@ -1236,8 +1236,8 @@ impl AgentFactory {
                         {
                             match meerkat_skills::resolve_repositories_with_roots(
                                 &config.skills,
-                                conventions_context_root,
-                                conventions_user_root,
+                                _conventions_context_root,
+                                _conventions_user_root,
                                 Some(_realm_scope_root.as_path()),
                             )
                             .await
@@ -1421,8 +1421,8 @@ impl AgentFactory {
             #[cfg(not(target_arch = "wasm32"))]
             {
                 let layered_hooks = resolve_layered_hooks_config(
-                    conventions_context_root,
-                    conventions_user_root,
+                    _conventions_context_root,
+                    _conventions_user_root,
                     config,
                 )
                 .await;
@@ -1518,7 +1518,7 @@ impl AgentFactory {
         let system_prompt = crate::assemble_system_prompt(
             config,
             per_request_prompt.as_deref(),
-            conventions_context_root,
+            _conventions_context_root,
             &extra_sections,
             &tool_usage_instructions,
         )

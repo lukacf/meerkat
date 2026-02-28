@@ -90,6 +90,18 @@ fn apply_patch_preview(config: &Config, patch: Value) -> Result<Config, String> 
 }
 
 #[allow(clippy::result_large_err)]
+fn validate_config_for_commit(id: Option<RpcId>, config: &Config) -> Result<(), RpcResponse> {
+    config.validate().map_err(|err| {
+        RpcResponse::error(
+            id.clone(),
+            error::INVALID_PARAMS,
+            format!("Invalid config: {err}"),
+        )
+    })?;
+    build_registry_or_invalid_params(id, config).map(|_| ())
+}
+
+#[allow(clippy::result_large_err)]
 fn build_registry_or_invalid_params(
     id: Option<RpcId>,
     config: &Config,
@@ -156,6 +168,10 @@ pub async fn handle_set(
             );
         }
     };
+
+    if let Err(response) = validate_config_for_commit(id.clone(), &config) {
+        return response;
+    }
 
     let registry = match build_registry_or_invalid_params(id.clone(), &config) {
         Ok(registry) => registry,
@@ -244,10 +260,9 @@ pub async fn handle_patch(
                 );
             }
         };
-        let _registry = match build_registry_or_invalid_params(id.clone(), &preview) {
-            Ok(registry) => registry,
-            Err(response) => return response,
-        };
+        if let Err(response) = validate_config_for_commit(id.clone(), &preview) {
+            return response;
+        }
 
         match config_runtime
             .patch(ConfigDelta(patch), expected_generation)
@@ -297,6 +312,9 @@ pub async fn handle_patch(
                 );
             }
         };
+        if let Err(response) = validate_config_for_commit(id.clone(), &preview) {
+            return response;
+        }
         let registry = match build_registry_or_invalid_params(id.clone(), &preview) {
             Ok(registry) => registry,
             Err(response) => return response,

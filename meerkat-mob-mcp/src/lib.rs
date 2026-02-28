@@ -11,7 +11,7 @@ use meerkat_core::error::ToolError;
 use meerkat_core::interaction::InteractionId;
 use meerkat_core::service::{
     CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService, SessionSummary,
-    SessionUsage, SessionView, StartTurnRequest,
+    SessionServiceCommsExt, SessionUsage, SessionView, StartTurnRequest,
 };
 use meerkat_core::time_compat::{Instant, SystemTime};
 use meerkat_core::types::{RunResult, SessionId, ToolCallView, ToolDef, ToolResult, Usage};
@@ -461,7 +461,7 @@ impl SessionService for LocalSessionService {
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-impl MobSessionService for LocalSessionService {
+impl SessionServiceCommsExt for LocalSessionService {
     async fn comms_runtime(&self, session_id: &SessionId) -> Option<Arc<dyn CoreCommsRuntime>> {
         self.sessions
             .read()
@@ -478,7 +478,11 @@ impl MobSessionService for LocalSessionService {
         let runtime = sessions.get(session_id)?;
         runtime.event_injector()
     }
+}
 
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl MobSessionService for LocalSessionService {
     fn supports_persistent_sessions(&self) -> bool {
         true
     }
@@ -1322,7 +1326,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl MobSessionService for MockSessionSvc {
+    impl SessionServiceCommsExt for MockSessionSvc {
         async fn comms_runtime(&self, session_id: &SessionId) -> Option<Arc<dyn CoreCommsRuntime>> {
             self.sessions
                 .read()
@@ -1340,7 +1344,10 @@ mod tests {
             }
             Some(Arc::new(MockInjector))
         }
+    }
 
+    #[async_trait]
+    impl MobSessionService for MockSessionSvc {
         fn supports_persistent_sessions(&self) -> bool {
             true
         }

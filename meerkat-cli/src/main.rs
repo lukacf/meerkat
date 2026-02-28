@@ -13,7 +13,7 @@ use meerkat_core::CommsRuntimeMode;
 use meerkat_core::config::CliOverrides;
 use meerkat_core::service::{
     CreateSessionRequest, SessionBuildOptions, SessionError, SessionQuery, SessionService,
-    StartTurnRequest, TurnToolOverlay,
+    SessionServiceCommsExt, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::{
     AgentEvent, EventEnvelope, RealmConfig, RealmLocator, RealmSelection, SchemaCompat,
@@ -357,6 +357,10 @@ enum Commands {
         /// The prompt to execute
         prompt: String,
 
+        /// Optional per-request system prompt override.
+        #[arg(long)]
+        system_prompt: Option<String>,
+
         /// Model to use (defaults to config when omitted)
         #[arg(long, short = 'm')]
         model: Option<String>,
@@ -520,6 +524,10 @@ enum Commands {
         /// The prompt to continue with
         prompt: String,
 
+        /// Optional per-request system prompt override.
+        #[arg(long)]
+        system_prompt: Option<String>,
+
         /// Run-scoped hook overrides as inline JSON.
         #[arg(long = "hooks-override-json", value_name = "JSON")]
         hooks_override_json: Option<String>,
@@ -545,6 +553,26 @@ enum Commands {
         #[arg(long = "block-tool", value_name = "TOOL")]
         block_tools: Vec<String>,
 
+        /// Maximum total tokens for this resumed run.
+        #[arg(long)]
+        max_total_tokens: Option<u64>,
+
+        /// Maximum duration for this resumed run (e.g., "5m", "1h30m").
+        #[arg(long, short = 'd')]
+        max_duration: Option<String>,
+
+        /// Maximum tool calls for this resumed run.
+        #[arg(long)]
+        max_tool_calls: Option<usize>,
+
+        /// Provider-specific parameter (KEY=VALUE). Can be repeated.
+        #[arg(long = "param", value_name = "KEY=VALUE")]
+        params: Vec<String>,
+
+        /// Provider-specific params as a JSON object.
+        #[arg(long = "provider-params-json", value_name = "JSON")]
+        provider_params_json: Option<String>,
+
         /// Verbose output: show each turn, tool calls, and results as they happen
         #[arg(long, short = 'v')]
         verbose: bool,
@@ -555,6 +583,35 @@ enum Commands {
     Continue {
         /// The prompt to continue with
         prompt: String,
+
+        /// Optional per-request system prompt override.
+        #[arg(long)]
+        system_prompt: Option<String>,
+
+        /// Run-scoped hook overrides as inline JSON.
+        #[arg(long = "hooks-override-json", value_name = "JSON")]
+        hooks_override_json: Option<String>,
+
+        /// Run-scoped hook overrides from a JSON file.
+        #[arg(long = "hooks-override-file", value_name = "FILE")]
+        hooks_override_file: Option<PathBuf>,
+
+        /// Structured skill refs for this continued turn.
+        /// Accepts JSON objects or legacy source_uuid/skill_name strings.
+        #[arg(long = "skill-ref", value_name = "REF", value_parser = parse_skill_ref_arg)]
+        skill_refs: Vec<SkillRef>,
+
+        /// Legacy compatibility refs for this continued turn.
+        #[arg(long = "skill-reference", value_name = "ID")]
+        skill_references: Vec<String>,
+
+        /// Per-turn allow list for tools on this turn (repeatable).
+        #[arg(long = "allow-tool", value_name = "TOOL")]
+        allow_tools: Vec<String>,
+
+        /// Per-turn block list for tools on this turn (repeatable).
+        #[arg(long = "block-tool", value_name = "TOOL")]
+        block_tools: Vec<String>,
 
         /// Verbose output
         #[arg(long, short = 'v')]
@@ -682,6 +739,8 @@ enum SessionCommands {
     List {
         #[arg(long, default_value = "20")]
         limit: usize,
+        #[arg(long)]
+        offset: Option<usize>,
     },
 
     /// Show session details
@@ -881,6 +940,24 @@ enum McpCommands {
 
         /// Persist live change to config for future sessions (default: runtime-only)
         #[arg(long, requires = "session")]
+        persist: bool,
+    },
+
+    /// Reload MCP servers on a live session
+    Reload {
+        /// Optional server name. Omit to reload all active servers.
+        name: Option<String>,
+
+        /// Live session target for runtime staging.
+        #[arg(long)]
+        session: String,
+
+        /// Base URL of active REST server for live MCP ops (for example: http://127.0.0.1:8080)
+        #[arg(long)]
+        live_server_url: String,
+
+        /// Persist live change to config for future sessions (default: runtime-only)
+        #[arg(long)]
         persist: bool,
     },
 
@@ -1085,6 +1162,7 @@ async fn main() -> anyhow::Result<ExitCode> {
         #[cfg(feature = "comms")]
         Commands::Run {
             prompt,
+            system_prompt,
             model,
             provider,
             max_tokens,
@@ -1145,6 +1223,7 @@ async fn main() -> anyhow::Result<ExitCode> {
             };
             handle_run_command(
                 prompt,
+                system_prompt,
                 model,
                 provider,
                 max_tokens,
@@ -1183,6 +1262,7 @@ async fn main() -> anyhow::Result<ExitCode> {
         #[cfg(not(feature = "comms"))]
         Commands::Run {
             prompt,
+            system_prompt,
             model,
             provider,
             max_tokens,
@@ -1215,6 +1295,7 @@ async fn main() -> anyhow::Result<ExitCode> {
             let prompt = maybe_prepend_stdin_context(prompt);
             handle_run_command(
                 prompt,
+                system_prompt,
                 model,
                 provider,
                 max_tokens,
@@ -1253,6 +1334,43 @@ async fn main() -> anyhow::Result<ExitCode> {
         Commands::Resume {
             session_id,
             prompt,
+            system_prompt,
+            hooks_override_json,
+            hooks_override_file,
+            skill_refs,
+            skill_references,
+            allow_tools,
+            block_tools,
+            max_total_tokens,
+            max_duration,
+            max_tool_calls,
+            params,
+            provider_params_json,
+            verbose,
+        } => {
+            let overrides = parse_hook_run_overrides(hooks_override_file, hooks_override_json)?;
+            resume_session(
+                &session_id,
+                &prompt,
+                system_prompt,
+                overrides,
+                skill_refs,
+                skill_references,
+                allow_tools,
+                block_tools,
+                max_total_tokens,
+                max_duration,
+                max_tool_calls,
+                params,
+                provider_params_json,
+                &cli_scope,
+                verbose,
+            )
+            .await
+        }
+        Commands::Continue {
+            prompt,
+            system_prompt,
             hooks_override_json,
             hooks_override_file,
             skill_refs,
@@ -1263,34 +1381,28 @@ async fn main() -> anyhow::Result<ExitCode> {
         } => {
             let overrides = parse_hook_run_overrides(hooks_override_file, hooks_override_json)?;
             resume_session(
-                &session_id,
+                "last",
                 &prompt,
+                system_prompt,
                 overrides,
                 skill_refs,
                 skill_references,
                 allow_tools,
                 block_tools,
-                &cli_scope,
-                verbose,
-            )
-            .await
-        }
-        Commands::Continue { prompt, verbose } => {
-            resume_session(
-                "last",
-                &prompt,
-                HookRunOverrides::default(),
+                None,
+                None,
+                None,
                 Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
+                None,
                 &cli_scope,
                 verbose,
             )
             .await
         }
         Commands::Sessions { command } => match command {
-            SessionCommands::List { limit } => list_sessions(limit, &cli_scope).await,
+            SessionCommands::List { limit, offset } => {
+                list_sessions(limit, offset, &cli_scope).await
+            }
             SessionCommands::Show { id } => show_session(&id, &cli_scope).await,
             SessionCommands::Delete { session_id } => delete_session(&session_id, &cli_scope).await,
             SessionCommands::Interrupt { session_id } => {
@@ -1370,6 +1482,7 @@ async fn main() -> anyhow::Result<ExitCode> {
 #[allow(clippy::too_many_arguments)]
 async fn handle_run_command(
     prompt: String,
+    system_prompt: Option<String>,
     model: Option<String>,
     provider: Option<Provider>,
     max_tokens: Option<u32>,
@@ -1454,6 +1567,7 @@ async fn handle_run_command(
             }
             run_agent(
                 &prompt,
+                system_prompt,
                 &model,
                 resolved_provider,
                 max_tokens,
@@ -2321,7 +2435,7 @@ impl SessionService for RunMobSessionService {
 }
 
 #[async_trait::async_trait]
-impl meerkat_mob::MobSessionService for RunMobSessionService {
+impl SessionServiceCommsExt for RunMobSessionService {
     async fn comms_runtime(
         &self,
         session_id: &SessionId,
@@ -2335,7 +2449,10 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
     ) -> Option<Arc<dyn meerkat_core::SubscribableInjector>> {
         self.inner.event_injector(session_id).await
     }
+}
 
+#[async_trait::async_trait]
+impl meerkat_mob::MobSessionService for RunMobSessionService {
     async fn subscribe_session_events(
         &self,
         session_id: &SessionId,
@@ -2661,6 +2778,7 @@ fn build_flow_tool_overlay(
 #[allow(clippy::too_many_arguments)]
 async fn run_agent(
     prompt: &str,
+    system_prompt: Option<String>,
     model: &str,
     provider: Provider,
     max_tokens: u32,
@@ -2851,7 +2969,7 @@ async fn run_agent(
     let create_req = CreateSessionRequest {
         model: model.to_string(),
         prompt: prompt.to_string(),
-        system_prompt: None,
+        system_prompt,
         max_tokens: Some(max_tokens),
         event_tx: event_tx.clone(),
         host_mode,
@@ -3064,22 +3182,34 @@ async fn run_agent(
 async fn resume_session(
     session_id: &str,
     prompt: &str,
+    system_prompt: Option<String>,
     hooks_override: HookRunOverrides,
     skill_refs: Vec<SkillRef>,
     skill_references: Vec<String>,
     allow_tools: Vec<String>,
     block_tools: Vec<String>,
+    max_total_tokens: Option<u64>,
+    max_duration: Option<String>,
+    max_tool_calls: Option<usize>,
+    params: Vec<String>,
+    provider_params_json: Option<String>,
     scope: &RuntimeScope,
     verbose: bool,
 ) -> anyhow::Result<()> {
     resume_session_with_llm_override(
         session_id,
         prompt,
+        system_prompt,
         hooks_override,
         skill_refs,
         skill_references,
         allow_tools,
         block_tools,
+        max_total_tokens,
+        max_duration,
+        max_tool_calls,
+        params,
+        provider_params_json,
         scope,
         None,
         verbose,
@@ -3091,11 +3221,17 @@ async fn resume_session(
 async fn resume_session_with_llm_override(
     session_id: &str,
     prompt: &str,
+    system_prompt: Option<String>,
     hooks_override: HookRunOverrides,
     skill_refs: Vec<SkillRef>,
     skill_references: Vec<String>,
     allow_tools: Vec<String>,
     block_tools: Vec<String>,
+    max_total_tokens: Option<u64>,
+    max_duration: Option<String>,
+    max_tool_calls: Option<usize>,
+    params: Vec<String>,
+    provider_params_json: Option<String>,
     scope: &RuntimeScope,
     llm_override: Option<Arc<dyn meerkat_client::LlmClient>>,
     verbose: bool,
@@ -3113,6 +3249,28 @@ async fn resume_session_with_llm_override(
 
     log_stage("load_config");
     let (config, _config_base_dir) = load_config(scope).await?;
+    let has_max_total_tokens = max_total_tokens.is_some();
+    let has_max_duration = max_duration.is_some();
+    let has_max_tool_calls = max_tool_calls.is_some();
+    let duration = max_duration.map(|s| parse_duration(&s)).transpose()?;
+    let parsed_params = parse_provider_params(&params)?;
+    let parsed_params_json = parse_provider_params_json(provider_params_json)?;
+    let merged_provider_params = merge_provider_params(parsed_params, parsed_params_json)?;
+    let mut limits = config.budget_limits();
+    if let Some(limit) = max_total_tokens {
+        limits.max_tokens = Some(limit);
+    }
+    if let Some(dur) = duration {
+        limits.max_duration = Some(dur);
+    }
+    if let Some(calls) = max_tool_calls {
+        limits.max_tool_calls = Some(calls);
+    }
+    let budget_override = if has_max_total_tokens || has_max_duration || has_max_tool_calls {
+        Some(limits)
+    } else {
+        None
+    };
 
     // Resolve session identifier (full UUID, short prefix, or relative alias).
     log_stage("resolve_session_id");
@@ -3233,8 +3391,8 @@ async fn resume_session_with_llm_override(
         hooks_override,
         comms_name: comms_name.clone(),
         resume_session: Some(session),
-        budget_limits: None,
-        provider_params: None,
+        budget_limits: budget_override,
+        provider_params: merged_provider_params,
         external_tools,
         llm_client_override: llm_override.map(meerkat::encode_llm_client_override_for_service),
         scoped_event_tx: None,
@@ -3272,7 +3430,7 @@ async fn resume_session_with_llm_override(
         .create_session(CreateSessionRequest {
             model,
             prompt: prompt.to_string(),
-            system_prompt: None,
+            system_prompt,
             max_tokens: Some(max_tokens),
             event_tx: event_tx.clone(),
             host_mode,
@@ -3482,16 +3640,12 @@ impl SessionService for MobCliSessionService {
 }
 
 #[async_trait::async_trait]
-impl meerkat_mob::MobSessionService for MobCliSessionService {
+impl SessionServiceCommsExt for MobCliSessionService {
     async fn comms_runtime(
         &self,
         session_id: &SessionId,
     ) -> Option<Arc<dyn meerkat_core::agent::CommsRuntime>> {
-        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::comms_runtime(
-            &self.inner,
-            session_id,
-        )
-        .await
+        self.inner.comms_runtime(session_id).await
     }
 
     async fn event_injector(
@@ -3500,16 +3654,18 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
     ) -> Option<Arc<dyn meerkat_core::SubscribableInjector>> {
         self.inner.event_injector(session_id).await
     }
+}
 
+#[async_trait::async_trait]
+impl meerkat_mob::MobSessionService for MobCliSessionService {
     async fn subscribe_session_events(
         &self,
         session_id: &SessionId,
     ) -> Result<meerkat_core::comms::EventStream, meerkat_core::comms::StreamError> {
-        let runtime = <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::comms_runtime(
-            &self.inner,
-            session_id,
-        )
-        .await
+        let runtime = self
+            .inner
+            .comms_runtime(session_id)
+            .await
         .ok_or_else(|| meerkat_core::comms::StreamError::NotFound(format!("session {session_id}")))?;
         runtime.stream(meerkat_core::comms::StreamScope::Session(
             session_id.clone(),
@@ -3535,12 +3691,16 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
 }
 
 /// List sessions from the realm-scoped persistent backend.
-async fn list_sessions(limit: usize, scope: &RuntimeScope) -> anyhow::Result<()> {
+async fn list_sessions(
+    limit: usize,
+    offset: Option<usize>,
+    scope: &RuntimeScope,
+) -> anyhow::Result<()> {
     let (config, _) = load_config(scope).await?;
     let service = build_cli_persistent_service(scope, config).await?;
     let query = SessionQuery {
         limit: Some(limit),
-        offset: None,
+        offset,
     };
 
     let sessions = service
@@ -4240,6 +4400,20 @@ async fn handle_mcp_command(command: McpCommands) -> anyhow::Result<()> {
                 }
                 mcp::remove_server(name, scope).await
             }
+        }
+        McpCommands::Reload {
+            name,
+            session,
+            live_server_url,
+            persist,
+        } => {
+            if persist {
+                anyhow::bail!(
+                    "--persist is not yet supported for live MCP operations; \
+                     changes are runtime-only until the session ends"
+                );
+            }
+            mcp::live_reload_server(&live_server_url, &session, name).await
         }
         McpCommands::List { scope, json } => {
             let scope = scope.map(|s| match s {
@@ -6244,7 +6418,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl meerkat_mob::MobSessionService for TestMobSessionService {
+    impl SessionServiceCommsExt for TestMobSessionService {
         async fn comms_runtime(&self, session_id: &SessionId) -> Option<Arc<dyn CoreCommsRuntime>> {
             self.sessions
                 .read()
@@ -6259,7 +6433,10 @@ mod tests {
         ) -> Option<Arc<dyn meerkat_core::SubscribableInjector>> {
             None
         }
+    }
 
+    #[async_trait]
+    impl meerkat_mob::MobSessionService for TestMobSessionService {
         fn supports_persistent_sessions(&self) -> bool {
             true
         }
@@ -6376,6 +6553,36 @@ mod tests {
     }
 
     #[test]
+    fn test_continue_resume_parity_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "rkat",
+            "continue",
+            "next step",
+            "--allow-tool",
+            "search",
+            "--block-tool",
+            "shell",
+            "--skill-reference",
+            "legacy/skill",
+        ])
+        .expect("continue parity flags should parse");
+
+        match cli.command {
+            Commands::Continue {
+                allow_tools,
+                block_tools,
+                skill_references,
+                ..
+            } => {
+                assert_eq!(allow_tools, vec!["search"]);
+                assert_eq!(block_tools, vec!["shell"]);
+                assert_eq!(skill_references, vec!["legacy/skill"]);
+            }
+            _ => unreachable!("expected continue command"),
+        }
+    }
+
+    #[test]
     fn test_inject_default_run_subcommand() {
         // Bare prompt → inject "run"
         let args = inject_default_run_subcommand(["rkat", "hello world"].map(Into::into));
@@ -6432,6 +6639,22 @@ mod tests {
                 .map(std::ffi::OsString::from)
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn test_sessions_list_offset_flag_parses() {
+        let cli =
+            Cli::try_parse_from(["rkat", "sessions", "list", "--limit", "10", "--offset", "3"])
+                .expect("sessions list offset should parse");
+        match cli.command {
+            Commands::Sessions {
+                command: SessionCommands::List { limit, offset },
+            } => {
+                assert_eq!(limit, 10);
+                assert_eq!(offset, Some(3));
+            }
+            _ => unreachable!("expected sessions list command"),
+        }
     }
 
     #[cfg(feature = "comms")]
@@ -6784,6 +7007,39 @@ mod tests {
                 assert!(persist);
             }
             _ => unreachable!("expected mcp remove command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_mcp_reload_live_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "rkat",
+            "mcp",
+            "reload",
+            "live-server",
+            "--session",
+            "session-123",
+            "--live-server-url",
+            "http://127.0.0.1:8080",
+        ])
+        .expect("mcp reload live flags should parse");
+
+        match cli.command {
+            Commands::Mcp {
+                command:
+                    McpCommands::Reload {
+                        name,
+                        session,
+                        live_server_url,
+                        persist,
+                    },
+            } => {
+                assert_eq!(name.as_deref(), Some("live-server"));
+                assert_eq!(session, "session-123");
+                assert_eq!(live_server_url, "http://127.0.0.1:8080");
+                assert!(!persist);
+            }
+            _ => unreachable!("expected mcp reload command"),
         }
     }
 
@@ -8469,11 +8725,17 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
         resume_session_with_llm_override(
             &session_id,
             "resume and list tools",
+            None,
             HookRunOverrides::default(),
             vec![],
             vec![],
             vec![],
             vec![],
+            None,
+            None,
+            None,
+            vec![],
+            None,
             &scope,
             Some(llm_override),
             false,

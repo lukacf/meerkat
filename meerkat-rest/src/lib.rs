@@ -110,6 +110,8 @@ pub struct AppState {
     pub config_runtime: Arc<meerkat_core::ConfigRuntime>,
     pub realm_lease: Arc<tokio::sync::Mutex<Option<meerkat_store::RealmLeaseGuard>>>,
     pub skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
+    /// Shared in-process mob lifecycle state for protocol mob operations.
+    pub mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
     /// Per-session MCP adapter state (live MCP mutation).
     #[cfg(feature = "mcp")]
     pub mcp_sessions: Arc<RwLock<std::collections::HashMap<SessionId, SessionMcpState>>>,
@@ -268,6 +270,7 @@ impl AppState {
             config_runtime,
             realm_lease: Arc::new(tokio::sync::Mutex::new(Some(lease))),
             skill_runtime,
+            mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
             #[cfg(feature = "mcp")]
             mcp_sessions: Arc::new(RwLock::new(std::collections::HashMap::new())),
         })
@@ -487,6 +490,8 @@ pub fn router(state: AppState) -> Router {
         .route("/comms/peers", get(comms_peers))
         .route("/comms/stream", get(comms_stream))
         .route("/mob/prefabs", get(mob_prefabs))
+        .route("/mob/tools", get(mob_tools))
+        .route("/mob/call", post(mob_call))
         // BRIDGE(M11→M12): Legacy event push endpoint.
         .route("/sessions/{id}/event", post(push_event))
         .route(
@@ -524,6 +529,29 @@ async fn mob_prefabs() -> Json<Value> {
         })
         .collect();
     Json(json!({ "prefabs": prefabs }))
+}
+
+/// GET /mob/tools — list protocol-callable mob lifecycle tools.
+async fn mob_tools() -> Json<Value> {
+    Json(json!({ "tools": meerkat_mob_mcp::tools_list() }))
+}
+
+#[derive(Debug, Deserialize)]
+struct MobCallRequest {
+    name: String,
+    #[serde(default)]
+    arguments: Value,
+}
+
+/// POST /mob/call — invoke a mob lifecycle tool.
+async fn mob_call(
+    State(state): State<AppState>,
+    Json(req): Json<MobCallRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let result = meerkat_mob_mcp::handle_tools_call(&state.mob_state, &req.name, &req.arguments)
+        .await
+        .map_err(|e| ApiError::BadRequest(e.message))?;
+    Ok(Json(result))
 }
 
 /// Canonical comms send request body.
@@ -566,6 +594,12 @@ pub struct CommsStreamRequest {
     pub scope: String,
     #[serde(default)]
     pub interaction_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InspectSkillQuery {
+    #[serde(default)]
+    source: Option<String>,
 }
 
 /// POST /comms/send — dispatch a canonical comms command.
@@ -722,6 +756,8 @@ async fn comms_peers(
                 "address": p.address,
                 "source": format!("{:?}", p.source),
                 "sendable_kinds": p.sendable_kinds,
+                "capabilities": p.capabilities,
+                "meta": p.meta,
             })
         })
         .collect();
@@ -871,6 +907,7 @@ async fn list_skills(
 async fn inspect_skill(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<InspectSkillQuery>,
 ) -> Result<Json<meerkat_contracts::SkillInspectResponse>, ApiError> {
     let runtime = state
         .skill_runtime
@@ -878,7 +915,10 @@ async fn inspect_skill(
         .ok_or_else(|| ApiError::NotFound("skills not enabled".into()))?;
 
     let doc = runtime
-        .load_from_source(&meerkat_core::skills::SkillId::from(id.as_str()), None)
+        .load_from_source(
+            &meerkat_core::skills::SkillId::from(id.as_str()),
+            query.source.as_deref(),
+        )
         .await
         .map_err(|e| ApiError::NotFound(format!("skill inspect failed: {e}")))?;
 
@@ -2014,6 +2054,78 @@ mod tests {
         assert!(envelope.resolved_paths.is_some());
     }
 
+    #[tokio::test]
+    async fn test_config_set_and_patch_roundtrip_parity() {
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+
+        let Json(initial) = get_config(State(state.clone())).await.unwrap();
+        let mut config_value = serde_json::to_value(&initial.config).expect("serialize config");
+        config_value["max_tokens"] = serde_json::json!(2048);
+        let updated_config: Config =
+            serde_json::from_value(config_value).expect("deserialize config update");
+
+        let Json(after_set) = set_config(
+            State(state.clone()),
+            Json(SetConfigRequest::Wrapped {
+                config: updated_config,
+                expected_generation: None,
+            }),
+        )
+        .await
+        .expect("config set");
+        assert_eq!(after_set.config.max_tokens, 2048);
+
+        let Json(after_patch) = patch_config(
+            State(state.clone()),
+            Json(PatchConfigRequest::Wrapped {
+                patch: serde_json::json!({"max_tokens": 3072}),
+                expected_generation: None,
+            }),
+        )
+        .await
+        .expect("config patch");
+        assert_eq!(after_patch.config.max_tokens, 3072);
+    }
+
+    #[tokio::test]
+    async fn test_config_set_and_patch_reject_invalid_config() {
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+
+        let Json(initial) = get_config(State(state.clone())).await.unwrap();
+        let mut config_value = serde_json::to_value(&initial.config).expect("serialize config");
+        config_value["max_tokens"] = serde_json::json!(0);
+        let invalid_config: Config =
+            serde_json::from_value(config_value).expect("deserialize invalid config");
+
+        let set_err = set_config(
+            State(state.clone()),
+            Json(SetConfigRequest::Wrapped {
+                config: invalid_config,
+                expected_generation: None,
+            }),
+        )
+        .await
+        .expect_err("set should reject invalid config");
+        assert!(matches!(set_err, ApiError::BadRequest(_)));
+
+        let patch_err = patch_config(
+            State(state),
+            Json(PatchConfigRequest::Wrapped {
+                patch: serde_json::json!({"max_tokens": 0}),
+                expected_generation: None,
+            }),
+        )
+        .await
+        .expect_err("patch should reject invalid config");
+        assert!(matches!(patch_err, ApiError::BadRequest(_)));
+    }
+
     #[test]
     fn test_create_session_request_parsing_with_host_mode() {
         let req_json = serde_json::json!({
@@ -2283,6 +2395,54 @@ mod tests {
                 .iter()
                 .all(|entry| entry["toml_template"].is_string())
         );
+    }
+
+    #[tokio::test]
+    async fn test_mob_tools_and_call_routes_work() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let app = router(state);
+
+        let tools_req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/mob/tools")
+            .body(Body::empty())
+            .unwrap();
+        let tools_resp = app.clone().oneshot(tools_req).await.unwrap();
+        assert_eq!(tools_resp.status(), StatusCode::OK);
+        let tools_bytes = tools_resp.into_body().collect().await.unwrap().to_bytes();
+        let tools_payload: serde_json::Value = serde_json::from_slice(&tools_bytes).unwrap();
+        assert!(
+            tools_payload["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["name"] == "mob_create")
+        );
+
+        let call_req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/mob/call")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "name": "mob_create",
+                    "arguments": { "prefab": "coding_swarm" }
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let call_resp = app.oneshot(call_req).await.unwrap();
+        assert_eq!(call_resp.status(), StatusCode::OK);
+        let call_bytes = call_resp.into_body().collect().await.unwrap().to_bytes();
+        let call_payload: serde_json::Value = serde_json::from_slice(&call_bytes).unwrap();
+        assert!(call_payload["mob_id"].as_str().is_some());
     }
 
     // -----------------------------------------------------------------------

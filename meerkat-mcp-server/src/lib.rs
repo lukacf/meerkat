@@ -20,16 +20,17 @@ use meerkat_core::{
     ConfigStore, EventEnvelope, FileConfigStore, HookRunOverrides, Provider, RealmSelection,
     RuntimeBootstrap, Session, ToolCallView, format_verbose_event,
 };
+use meerkat_mcp::{McpReloadTarget, McpRouter};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 
-#[cfg(feature = "comms")]
 use futures::StreamExt;
+use tokio::sync::Mutex;
 
 /// Tool definition provided by the MCP client
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -253,7 +254,19 @@ async fn load_config_async(
 }
 
 fn resolve_host_mode(requested: bool) -> Result<bool, String> {
-    meerkat::surface::resolve_host_mode(requested)
+    #[cfg(feature = "comms")]
+    {
+        meerkat::surface::resolve_host_mode(requested)
+    }
+    #[cfg(not(feature = "comms"))]
+    {
+        if requested {
+            return Err(
+                "host_mode requires comms support (build with --features comms)".to_string(),
+            );
+        }
+        Ok(false)
+    }
 }
 
 fn tagged_realm_config_store(
@@ -330,9 +343,16 @@ pub struct MeerkatMcpState {
     expose_paths: bool,
     config_runtime: Arc<meerkat_core::ConfigRuntime>,
     skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
+    mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
+    mcp_adapters: Arc<Mutex<HashMap<String, Arc<meerkat_mcp::McpRouterAdapter>>>>,
+    session_event_streams: Arc<Mutex<HashMap<String, Arc<SessionEventStreamHandle>>>>,
     #[cfg(feature = "comms")]
     comms_streams: Arc<Mutex<HashMap<String, Arc<CommsStreamHandle>>>>,
     _realm_lease: Option<meerkat_store::RealmLeaseGuard>,
+}
+
+struct SessionEventStreamHandle {
+    stream: Mutex<meerkat_core::EventStream>,
 }
 
 #[cfg(feature = "comms")]
@@ -433,6 +453,9 @@ impl MeerkatMcpState {
             expose_paths,
             config_runtime,
             skill_runtime,
+            mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
+            mcp_adapters: Arc::new(Mutex::new(HashMap::new())),
+            session_event_streams: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(feature = "comms")]
             comms_streams: Arc::new(Mutex::new(HashMap::new())),
             _realm_lease: Some(lease),
@@ -495,6 +518,9 @@ impl MeerkatMcpState {
             expose_paths: false,
             config_runtime,
             skill_runtime: None,
+            mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
+            mcp_adapters: Arc::new(Mutex::new(HashMap::new())),
+            session_event_streams: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(feature = "comms")]
             comms_streams: Arc::new(Mutex::new(HashMap::new())),
             _realm_lease: None,
@@ -511,6 +537,34 @@ impl MeerkatMcpState {
 
     pub fn expose_paths(&self) -> bool {
         self.expose_paths
+    }
+
+    async fn upsert_mcp_adapter(
+        &self,
+        session_id: &meerkat::SessionId,
+        adapter: Arc<meerkat_mcp::McpRouterAdapter>,
+    ) {
+        self.mcp_adapters
+            .lock()
+            .await
+            .insert(session_id.to_string(), adapter);
+    }
+
+    async fn mcp_adapter_for_session(
+        &self,
+        session_id: &meerkat::SessionId,
+    ) -> Result<Arc<meerkat_mcp::McpRouterAdapter>, String> {
+        if self.service.read(session_id).await.is_err() {
+            return Err(format!("Session not found: {session_id}"));
+        }
+        self.mcp_adapters
+            .lock()
+            .await
+            .get(&session_id.to_string())
+            .cloned()
+            .ok_or_else(|| {
+                "Live MCP unavailable for this session. Resume the session with this MCP server before staging live MCP changes.".to_string()
+            })
     }
 }
 
@@ -535,6 +589,8 @@ fn realm_origin_from_selection(selection: &RealmSelection) -> meerkat_store::Rea
 pub struct MeerkatResumeInput {
     pub session_id: String,
     pub prompt: String,
+    #[serde(default)]
+    pub system_prompt: Option<String>,
     /// Stream agent events to the MCP client via notifications.
     #[serde(default)]
     pub stream: bool,
@@ -571,6 +627,12 @@ pub struct MeerkatResumeInput {
     /// Optional provider override for resume.
     #[serde(default)]
     pub provider: Option<ProviderInput>,
+    /// JSON schema for structured output extraction (wrapper or raw schema).
+    #[serde(default)]
+    pub output_schema: Option<serde_json::Value>,
+    /// Max retries for structured output validation (default: 2).
+    #[serde(default = "default_structured_output_retries")]
+    pub structured_output_retries: u32,
     /// Optional run-scoped hook overrides.
     #[serde(default)]
     pub hooks_override: Option<HookRunOverrides>,
@@ -614,6 +676,59 @@ pub struct MeerkatSessionListInput {
     pub limit: Option<usize>,
     #[serde(default)]
     pub offset: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MeerkatMcpAddInput {
+    pub session_id: String,
+    pub server_name: String,
+    pub server_config: Value,
+    #[serde(default)]
+    pub persisted: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MeerkatMcpRemoveInput {
+    pub session_id: String,
+    pub server_name: String,
+    #[serde(default)]
+    pub persisted: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MeerkatMcpReloadInput {
+    pub session_id: String,
+    #[serde(default)]
+    pub server_name: Option<String>,
+    #[serde(default)]
+    pub persisted: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MeerkatSkillsInput {
+    pub action: String,
+    #[serde(default)]
+    pub skill_id: Option<String>,
+    /// Optional source selector for inspect action.
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MeerkatSessionEventStreamOpenInput {
+    pub session_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MeerkatSessionEventStreamReadInput {
+    pub stream_id: String,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MeerkatSessionEventStreamCloseInput {
+    pub stream_id: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -804,7 +919,8 @@ fn format_agent_result(
 
 /// Returns the list of tools exposed by this MCP server
 pub fn tools_list() -> Vec<Value> {
-    vec![
+    #[cfg(feature = "comms")]
+    let mut tools = vec![
         json!({
             "name": "meerkat_run",
             "description": "Run a new Meerkat agent with the given prompt. Returns the agent's response. If tools are provided and the agent requests a tool call, the response will include pending_tool_calls that must be fulfilled via meerkat_resume.",
@@ -832,21 +948,7 @@ pub fn tools_list() -> Vec<Value> {
         json!({
             "name": "meerkat_skills",
             "description": "List or inspect available skills. Use action 'list' to see all skills, or 'inspect' with a skill_id to see its full content.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["list", "inspect"],
-                        "description": "Action to perform: 'list' all skills or 'inspect' a specific skill"
-                    },
-                    "skill_id": {
-                        "type": "string",
-                        "description": "Skill ID to inspect (required when action is 'inspect')"
-                    }
-                },
-                "required": ["action"]
-            }
+            "inputSchema": meerkat_tools::schema_for::<MeerkatSkillsInput>()
         }),
         json!({
             "name": "meerkat_mob_prefabs",
@@ -878,6 +980,134 @@ pub fn tools_list() -> Vec<Value> {
             "inputSchema": meerkat_tools::schema_for::<MeerkatSessionIdInput>()
         }),
         json!({
+            "name": "meerkat_mcp_add",
+            "description": "Stage a live MCP server add operation on an active session.",
+            "inputSchema": meerkat_tools::schema_for::<MeerkatMcpAddInput>()
+        }),
+        json!({
+            "name": "meerkat_mcp_remove",
+            "description": "Stage a live MCP server removal on an active session.",
+            "inputSchema": meerkat_tools::schema_for::<MeerkatMcpRemoveInput>()
+        }),
+        json!({
+            "name": "meerkat_mcp_reload",
+            "description": "Stage a live MCP server reload on an active session.",
+            "inputSchema": meerkat_tools::schema_for::<MeerkatMcpReloadInput>()
+        }),
+        json!({
+            "name": "meerkat_event_stream_open",
+            "description": "Open a session-level agent event stream.",
+            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionEventStreamOpenInput>()
+        }),
+        json!({
+            "name": "meerkat_event_stream_read",
+            "description": "Read the next item from an open session-level event stream.",
+            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionEventStreamReadInput>()
+        }),
+        json!({
+            "name": "meerkat_event_stream_close",
+            "description": "Close a previously opened session-level event stream.",
+            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionEventStreamCloseInput>()
+        }),
+    ];
+
+    #[cfg(not(feature = "comms"))]
+    let tools = vec![
+        json!({
+            "name": "meerkat_run",
+            "description": "Run a new Meerkat agent with the given prompt. Returns the agent's response. If tools are provided and the agent requests a tool call, the response will include pending_tool_calls that must be fulfilled via meerkat_resume.",
+            "inputSchema": meerkat_tools::schema_for::<MeerkatRunInput>()
+        }),
+        json!({
+            "name": "meerkat_resume",
+            "description": "Resume an existing Meerkat session. Use this to continue a conversation or provide tool results for pending tool calls.",
+            "inputSchema": meerkat_tools::schema_for::<MeerkatResumeInput>()
+        }),
+        json!({
+            "name": "meerkat_config",
+            "description": "Get or update Meerkat config for this MCP server instance.",
+            "inputSchema": meerkat_tools::schema_for::<MeerkatConfigInput>()
+        }),
+        json!({
+            "name": "meerkat_capabilities",
+            "description": "Get the list of capabilities available in this Meerkat runtime.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }),
+        json!({
+            "name": "meerkat_skills",
+            "description": "List or inspect available skills. Use action 'list' to see all skills, or 'inspect' with a skill_id to see its full content.",
+            "inputSchema": meerkat_tools::schema_for::<MeerkatSkillsInput>()
+        }),
+        json!({
+            "name": "meerkat_mob_prefabs",
+            "description": "List built-in mob prefab templates.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }),
+        json!({
+            "name": "meerkat_read",
+            "description": "Read current session state.",
+            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionIdInput>()
+        }),
+        json!({
+            "name": "meerkat_sessions",
+            "description": "List sessions in the active realm.",
+            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionListInput>()
+        }),
+        json!({
+            "name": "meerkat_interrupt",
+            "description": "Interrupt an in-flight turn for a session.",
+            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionIdInput>()
+        }),
+        json!({
+            "name": "meerkat_archive",
+            "description": "Archive (remove) a session.",
+            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionIdInput>()
+        }),
+        json!({
+            "name": "meerkat_mcp_add",
+            "description": "Stage a live MCP server add operation on an active session.",
+            "inputSchema": meerkat_tools::schema_for::<MeerkatMcpAddInput>()
+        }),
+        json!({
+            "name": "meerkat_mcp_remove",
+            "description": "Stage a live MCP server removal on an active session.",
+            "inputSchema": meerkat_tools::schema_for::<MeerkatMcpRemoveInput>()
+        }),
+        json!({
+            "name": "meerkat_mcp_reload",
+            "description": "Stage a live MCP server reload on an active session.",
+            "inputSchema": meerkat_tools::schema_for::<MeerkatMcpReloadInput>()
+        }),
+        json!({
+            "name": "meerkat_event_stream_open",
+            "description": "Open a session-level agent event stream.",
+            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionEventStreamOpenInput>()
+        }),
+        json!({
+            "name": "meerkat_event_stream_read",
+            "description": "Read the next item from an open session-level event stream.",
+            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionEventStreamReadInput>()
+        }),
+        json!({
+            "name": "meerkat_event_stream_close",
+            "description": "Close a previously opened session-level event stream.",
+            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionEventStreamCloseInput>()
+        }),
+    ];
+
+    tools.extend(meerkat_mob_mcp::tools_list());
+
+    #[cfg(feature = "comms")]
+    tools.extend([
+        json!({
             "name": "meerkat_comms_send",
             "description": "Send a canonical comms command to a session.",
             "inputSchema": meerkat_tools::schema_for::<MeerkatCommsSendInput>()
@@ -902,7 +1132,17 @@ pub fn tools_list() -> Vec<Value> {
             "description": "Close a previously opened comms stream.",
             "inputSchema": meerkat_tools::schema_for::<MeerkatCommsStreamCloseInput>()
         }),
-    ]
+    ]);
+
+    tools
+}
+
+fn is_mob_tool_name(name: &str) -> bool {
+    meerkat_mob_mcp::tools_list().iter().any(|tool| {
+        tool.get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|candidate| candidate == name)
+    })
 }
 
 /// Handle a tools/call request
@@ -945,7 +1185,8 @@ pub async fn handle_tools_call_with_notifier(
             .await
             .map_err(ToolCallError::internal),
         "meerkat_skills" => {
-            let input: serde_json::Value = arguments.clone();
+            let input: MeerkatSkillsInput = serde_json::from_value(arguments.clone())
+                .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
             handle_meerkat_skills(state, input)
                 .await
                 .map_err(ToolCallError::internal)
@@ -981,6 +1222,55 @@ pub async fn handle_tools_call_with_notifier(
                 .await
                 .map_err(ToolCallError::internal)
         }
+        "meerkat_mcp_add" => {
+            let input: MeerkatMcpAddInput = serde_json::from_value(arguments.clone())
+                .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
+            handle_meerkat_mcp_add(state, input)
+                .await
+                .map_err(ToolCallError::internal)
+        }
+        "meerkat_mcp_remove" => {
+            let input: MeerkatMcpRemoveInput = serde_json::from_value(arguments.clone())
+                .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
+            handle_meerkat_mcp_remove(state, input)
+                .await
+                .map_err(ToolCallError::internal)
+        }
+        "meerkat_mcp_reload" => {
+            let input: MeerkatMcpReloadInput = serde_json::from_value(arguments.clone())
+                .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
+            handle_meerkat_mcp_reload(state, input)
+                .await
+                .map_err(ToolCallError::internal)
+        }
+        "meerkat_event_stream_open" => {
+            let input: MeerkatSessionEventStreamOpenInput =
+                serde_json::from_value(arguments.clone()).map_err(|e| {
+                    ToolCallError::invalid_params(format!("Invalid arguments: {e}"))
+                })?;
+            handle_meerkat_event_stream_open(state, input)
+                .await
+                .map_err(ToolCallError::internal)
+        }
+        "meerkat_event_stream_read" => {
+            let input: MeerkatSessionEventStreamReadInput =
+                serde_json::from_value(arguments.clone()).map_err(|e| {
+                    ToolCallError::invalid_params(format!("Invalid arguments: {e}"))
+                })?;
+            handle_meerkat_event_stream_read(state, input)
+                .await
+                .map_err(ToolCallError::internal)
+        }
+        "meerkat_event_stream_close" => {
+            let input: MeerkatSessionEventStreamCloseInput =
+                serde_json::from_value(arguments.clone()).map_err(|e| {
+                    ToolCallError::invalid_params(format!("Invalid arguments: {e}"))
+                })?;
+            handle_meerkat_event_stream_close(state, input)
+                .await
+                .map_err(ToolCallError::internal)
+        }
+        #[cfg(feature = "comms")]
         "meerkat_comms_send" => {
             let input: MeerkatCommsSendInput = serde_json::from_value(arguments.clone())
                 .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
@@ -988,6 +1278,7 @@ pub async fn handle_tools_call_with_notifier(
                 .await
                 .map_err(ToolCallError::internal)
         }
+        #[cfg(feature = "comms")]
         "meerkat_comms_peers" => {
             let input: MeerkatCommsPeersInput = serde_json::from_value(arguments.clone())
                 .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
@@ -995,6 +1286,7 @@ pub async fn handle_tools_call_with_notifier(
                 .await
                 .map_err(ToolCallError::internal)
         }
+        #[cfg(feature = "comms")]
         "meerkat_comms_stream_open" => {
             let input: MeerkatCommsStreamOpenInput = serde_json::from_value(arguments.clone())
                 .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
@@ -1002,6 +1294,7 @@ pub async fn handle_tools_call_with_notifier(
                 .await
                 .map_err(ToolCallError::internal)
         }
+        #[cfg(feature = "comms")]
         "meerkat_comms_stream_read" => {
             let input: MeerkatCommsStreamReadInput = serde_json::from_value(arguments.clone())
                 .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
@@ -1009,6 +1302,7 @@ pub async fn handle_tools_call_with_notifier(
                 .await
                 .map_err(ToolCallError::internal)
         }
+        #[cfg(feature = "comms")]
         "meerkat_comms_stream_close" => {
             let input: MeerkatCommsStreamCloseInput = serde_json::from_value(arguments.clone())
                 .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
@@ -1016,23 +1310,32 @@ pub async fn handle_tools_call_with_notifier(
                 .await
                 .map_err(ToolCallError::internal)
         }
+        _ if is_mob_tool_name(tool_name) => {
+            match meerkat_mob_mcp::handle_tools_call(&state.mob_state, tool_name, arguments).await
+            {
+                Ok(value) => Ok(wrap_tool_payload(value)),
+                Err(err) if err.code == -32601 => Err(ToolCallError::method_not_found(format!(
+                    "Unknown tool: {tool_name}"
+                ))),
+                Err(err) => Err(ToolCallError::new(err.code, err.message, err.data)),
+            }
+        }
         _ => Err(ToolCallError::method_not_found(format!(
             "Unknown tool: {tool_name}"
         ))),
     }
 }
 
-async fn handle_meerkat_skills(state: &MeerkatMcpState, input: Value) -> Result<Value, String> {
+async fn handle_meerkat_skills(
+    state: &MeerkatMcpState,
+    input: MeerkatSkillsInput,
+) -> Result<Value, String> {
     let runtime = state
         .skill_runtime
         .as_ref()
         .ok_or_else(|| "skills not enabled".to_string())?;
 
-    let action = input["action"]
-        .as_str()
-        .ok_or_else(|| "missing 'action' field".to_string())?;
-
-    match action {
+    match input.action.as_str() {
         "list" => {
             let entries = runtime
                 .list_all_with_provenance(&meerkat_core::skills::SkillFilter::default())
@@ -1054,11 +1357,15 @@ async fn handle_meerkat_skills(state: &MeerkatMcpState, input: Value) -> Result<
                 .map_err(|e| format!("serialization failed: {e}"))
         }
         "inspect" => {
-            let skill_id = input["skill_id"]
-                .as_str()
+            let skill_id = input
+                .skill_id
+                .as_deref()
                 .ok_or_else(|| "missing 'skill_id' for inspect action".to_string())?;
             let doc = runtime
-                .load_from_source(&meerkat_core::skills::SkillId::from(skill_id), None)
+                .load_from_source(
+                    &meerkat_core::skills::SkillId::from(skill_id),
+                    input.source.as_deref(),
+                )
                 .await
                 .map_err(|e| format!("skill inspect failed: {e}"))?;
             serde_json::to_value(meerkat_contracts::SkillInspectResponse {
@@ -1071,7 +1378,7 @@ async fn handle_meerkat_skills(state: &MeerkatMcpState, input: Value) -> Result<
             })
             .map_err(|e| format!("serialization failed: {e}"))
         }
-        _ => Err(format!("unknown action: {action}")),
+        _ => Err(format!("unknown action: {}", input.action)),
     }
 }
 
@@ -1198,31 +1505,22 @@ fn apply_patch_preview(config: &Config, patch: Value) -> Result<Config, ToolCall
 }
 
 fn canonical_skill_keys(
+    config: &Config,
     skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
     skill_references: Option<Vec<String>>,
 ) -> Result<Option<Vec<meerkat_core::skills::SkillKey>>, String> {
+    let registry = config
+        .skills
+        .build_source_identity_registry()
+        .map_err(|e| format!("Invalid skills config: {e}"))?;
     let params = SkillsParams {
         preload_skills: None,
         skill_refs,
         skill_references,
     };
-    let refs = params.canonical_skill_refs();
-    let Some(refs) = refs else {
-        return Ok(None);
-    };
-
-    let mut keys = Vec::with_capacity(refs.len());
-    for reference in refs {
-        match reference {
-            meerkat_core::skills::SkillRef::Structured(key) => keys.push(key),
-            meerkat_core::skills::SkillRef::Legacy(legacy) => {
-                return Err(format!(
-                    "legacy skill ref '{legacy}' is unsupported on MCP; pass structured skill_refs"
-                ));
-            }
-        }
-    }
-    Ok(Some(keys))
+    params
+        .canonical_skill_keys_with_registry(&registry)
+        .map_err(|e| format!("Invalid skill refs: {e}"))
 }
 
 fn preload_skill_ids(
@@ -1314,6 +1612,197 @@ async fn handle_meerkat_archive(
     })))
 }
 
+async fn handle_meerkat_mcp_add(
+    state: &MeerkatMcpState,
+    input: MeerkatMcpAddInput,
+) -> Result<Value, String> {
+    if input.server_name.trim().is_empty() {
+        return Err("server_name cannot be empty".to_string());
+    }
+    let session_id =
+        meerkat::SessionId::parse(&input.session_id).map_err(invalid_session_id_message)?;
+    let adapter = state.mcp_adapter_for_session(&session_id).await?;
+
+    let mut server_config = input.server_config;
+    if let Some(obj) = server_config.as_object_mut() {
+        obj.insert(
+            "name".to_string(),
+            serde_json::Value::String(input.server_name.clone()),
+        );
+    }
+    let config: meerkat_core::McpServerConfig =
+        serde_json::from_value(server_config).map_err(|e| format!("invalid server_config: {e}"))?;
+    adapter
+        .stage_add(config)
+        .await
+        .map_err(|e| format!("failed to stage add: {e}"))?;
+
+    Ok(wrap_tool_payload(json!({
+        "session_id": input.session_id,
+        "operation": "add",
+        "server_name": input.server_name,
+        "status": "staged",
+        "persisted": false
+    })))
+}
+
+async fn handle_meerkat_mcp_remove(
+    state: &MeerkatMcpState,
+    input: MeerkatMcpRemoveInput,
+) -> Result<Value, String> {
+    if input.server_name.trim().is_empty() {
+        return Err("server_name cannot be empty".to_string());
+    }
+    let session_id =
+        meerkat::SessionId::parse(&input.session_id).map_err(invalid_session_id_message)?;
+    let adapter = state.mcp_adapter_for_session(&session_id).await?;
+    adapter
+        .stage_remove(input.server_name.clone())
+        .await
+        .map_err(|e| format!("failed to stage remove: {e}"))?;
+
+    Ok(wrap_tool_payload(json!({
+        "session_id": input.session_id,
+        "operation": "remove",
+        "server_name": input.server_name,
+        "status": "staged",
+        "persisted": false
+    })))
+}
+
+async fn handle_meerkat_mcp_reload(
+    state: &MeerkatMcpState,
+    input: MeerkatMcpReloadInput,
+) -> Result<Value, String> {
+    let session_id =
+        meerkat::SessionId::parse(&input.session_id).map_err(invalid_session_id_message)?;
+    let adapter = state.mcp_adapter_for_session(&session_id).await?;
+
+    match input.server_name.clone() {
+        Some(name) => {
+            if name.trim().is_empty() {
+                return Err("server_name cannot be empty".to_string());
+            }
+            adapter
+                .stage_reload(McpReloadTarget::ServerName(name))
+                .await
+                .map_err(|e| format!("failed to stage reload: {e}"))?;
+        }
+        None => {
+            for name in adapter.active_server_names().await {
+                adapter
+                    .stage_reload(McpReloadTarget::ServerName(name))
+                    .await
+                    .map_err(|e| format!("failed to stage reload: {e}"))?;
+            }
+        }
+    }
+
+    Ok(wrap_tool_payload(json!({
+        "session_id": input.session_id,
+        "operation": "reload",
+        "server_name": input.server_name,
+        "status": "staged",
+        "persisted": false
+    })))
+}
+
+async fn handle_meerkat_event_stream_open(
+    state: &MeerkatMcpState,
+    input: MeerkatSessionEventStreamOpenInput,
+) -> Result<Value, String> {
+    let session_id =
+        meerkat::SessionId::parse(&input.session_id).map_err(invalid_session_id_message)?;
+    let stream = state
+        .service
+        .subscribe_session_events(&session_id)
+        .await
+        .map_err(|e| format!("Failed to open session event stream: {e}"))?;
+    let stream_id = meerkat::SessionId::new().to_string();
+    state.session_event_streams.lock().await.insert(
+        stream_id.clone(),
+        Arc::new(SessionEventStreamHandle {
+            stream: Mutex::new(stream),
+        }),
+    );
+
+    Ok(wrap_tool_payload(json!({
+        "stream_id": stream_id,
+        "session_id": session_id.to_string()
+    })))
+}
+
+async fn handle_meerkat_event_stream_read(
+    state: &MeerkatMcpState,
+    input: MeerkatSessionEventStreamReadInput,
+) -> Result<Value, String> {
+    let handle = state
+        .session_event_streams
+        .lock()
+        .await
+        .get(&input.stream_id)
+        .cloned()
+        .ok_or_else(|| format!("Stream not found: {}", input.stream_id))?;
+
+    let timeout_ms = input.timeout_ms.unwrap_or(0);
+    let next_event = {
+        let mut stream = handle.stream.lock().await;
+        if timeout_ms == 0 {
+            stream.next().await
+        } else {
+            match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), stream.next())
+                .await
+            {
+                Ok(item) => item,
+                Err(_) => {
+                    return Ok(wrap_tool_payload(json!({
+                        "stream_id": input.stream_id,
+                        "status": "timeout"
+                    })));
+                }
+            }
+        }
+    };
+
+    match next_event {
+        Some(envelope) => {
+            let envelope_json = serde_json::to_value(&envelope)
+                .map_err(|e| format!("Failed to serialize stream event: {e}"))?;
+            Ok(wrap_tool_payload(json!({
+                "stream_id": input.stream_id,
+                "status": "event",
+                "event": envelope_json
+            })))
+        }
+        None => {
+            state
+                .session_event_streams
+                .lock()
+                .await
+                .remove(&input.stream_id);
+            Ok(wrap_tool_payload(json!({
+                "stream_id": input.stream_id,
+                "status": "closed"
+            })))
+        }
+    }
+}
+
+async fn handle_meerkat_event_stream_close(
+    state: &MeerkatMcpState,
+    input: MeerkatSessionEventStreamCloseInput,
+) -> Result<Value, String> {
+    let removed = state
+        .session_event_streams
+        .lock()
+        .await
+        .remove(&input.stream_id);
+    Ok(wrap_tool_payload(json!({
+        "stream_id": input.stream_id,
+        "closed": removed.is_some()
+    })))
+}
+
 #[cfg(feature = "comms")]
 fn build_comms_receipt_json(receipt: meerkat_core::comms::SendReceipt) -> Value {
     match receipt {
@@ -1389,14 +1878,6 @@ async fn handle_meerkat_comms_send(
     ))
 }
 
-#[cfg(not(feature = "comms"))]
-async fn handle_meerkat_comms_send(
-    _state: &MeerkatMcpState,
-    _input: MeerkatCommsSendInput,
-) -> Result<Value, String> {
-    Err("comms feature not enabled".to_string())
-}
-
 #[cfg(feature = "comms")]
 async fn handle_meerkat_comms_peers(
     state: &MeerkatMcpState,
@@ -1424,14 +1905,6 @@ async fn handle_meerkat_comms_peers(
         }).collect::<Vec<_>>()
     });
     Ok(wrap_tool_payload(payload))
-}
-
-#[cfg(not(feature = "comms"))]
-async fn handle_meerkat_comms_peers(
-    _state: &MeerkatMcpState,
-    _input: MeerkatCommsPeersInput,
-) -> Result<Value, String> {
-    Err("comms feature not enabled".to_string())
 }
 
 #[cfg(feature = "comms")]
@@ -1483,14 +1956,6 @@ async fn handle_meerkat_comms_stream_open(
         "scope": scope_name,
         "interaction_id": interaction_id_for_payload
     })))
-}
-
-#[cfg(not(feature = "comms"))]
-async fn handle_meerkat_comms_stream_open(
-    _state: &MeerkatMcpState,
-    _input: MeerkatCommsStreamOpenInput,
-) -> Result<Value, String> {
-    Err("comms feature not enabled".to_string())
 }
 
 #[cfg(feature = "comms")]
@@ -1546,14 +2011,6 @@ async fn handle_meerkat_comms_stream_read(
     }
 }
 
-#[cfg(not(feature = "comms"))]
-async fn handle_meerkat_comms_stream_read(
-    _state: &MeerkatMcpState,
-    _input: MeerkatCommsStreamReadInput,
-) -> Result<Value, String> {
-    Err("comms feature not enabled".to_string())
-}
-
 #[cfg(feature = "comms")]
 async fn handle_meerkat_comms_stream_close(
     state: &MeerkatMcpState,
@@ -1564,14 +2021,6 @@ async fn handle_meerkat_comms_stream_close(
         "stream_id": input.stream_id,
         "closed": removed.is_some()
     })))
-}
-
-#[cfg(not(feature = "comms"))]
-async fn handle_meerkat_comms_stream_close(
-    _state: &MeerkatMcpState,
-    _input: MeerkatCommsStreamCloseInput,
-) -> Result<Value, String> {
-    Err("comms feature not enabled".to_string())
 }
 
 async fn handle_meerkat_run(
@@ -1596,20 +2045,29 @@ async fn handle_meerkat_run(
         .unwrap_or_default();
     let model = input.model.unwrap_or_else(|| config.agent.model.clone());
 
-    // Build external tool dispatcher from MCP callback tools (if any)
-    let external_tools: Option<Arc<dyn AgentToolDispatcher>> = if input.tools.is_empty() {
+    // Build composed external tools:
+    // - callback tools supplied by the MCP client
+    // - per-session live MCP router adapter (for add/remove/reload parity)
+    let callback_tools: Option<Arc<dyn AgentToolDispatcher>> = if input.tools.is_empty() {
         None
     } else {
         Some(Arc::new(MpcToolDispatcher::new(&input.tools)))
     };
+    let mcp_adapter = Arc::new(meerkat_mcp::McpRouterAdapter::new(McpRouter::new()));
+    let mcp_tools: Arc<dyn AgentToolDispatcher> = mcp_adapter.clone();
+    let external_tools = compose_external_tool_dispatchers(callback_tools, Some(mcp_tools))
+        .map_err(|e| format!("failed to compose external tools: {e}"))?;
 
     let enable_shell = input
         .builtin_config
         .as_ref()
         .is_some_and(|c| c.enable_shell);
     let preload_skills = preload_skill_ids(input.preload_skills.clone());
-    let skill_references =
-        canonical_skill_keys(input.skill_refs.clone(), input.skill_references.clone())?;
+    let skill_references = canonical_skill_keys(
+        &config,
+        input.skill_refs.clone(),
+        input.skill_references.clone(),
+    )?;
 
     // Parse output schema if provided
     let output_schema = match input.output_schema.clone() {
@@ -1679,6 +2137,10 @@ async fn handle_meerkat_run(
         && let Err(e) = task.await
     {
         tracing::warn!("event task panicked: {e}");
+    }
+
+    if state.service.read(&session_id).await.is_ok() {
+        state.upsert_mcp_adapter(&session_id, mcp_adapter).await;
     }
 
     format_agent_result(result, &session_id)
@@ -1764,12 +2226,26 @@ async fn handle_meerkat_resume(
         .map(ProviderInput::to_provider)
         .or_else(|| stored_metadata.as_ref().map(|meta| meta.provider));
 
-    // Build external tool dispatcher from MCP callback tools (if any)
-    let external_tools: Option<Arc<dyn AgentToolDispatcher>> = if input.tools.is_empty() {
+    // Build composed external tools:
+    // - callback tools supplied by the MCP client
+    // - per-session live MCP router adapter
+    let callback_tools: Option<Arc<dyn AgentToolDispatcher>> = if input.tools.is_empty() {
         None
     } else {
         Some(Arc::new(MpcToolDispatcher::new(&input.tools)))
     };
+    let existing_adapter = state
+        .mcp_adapters
+        .lock()
+        .await
+        .get(&session_id.to_string())
+        .cloned();
+    let mcp_adapter = existing_adapter
+        .clone()
+        .unwrap_or_else(|| Arc::new(meerkat_mcp::McpRouterAdapter::new(McpRouter::new())));
+    let mcp_tools: Arc<dyn AgentToolDispatcher> = mcp_adapter.clone();
+    let external_tools = compose_external_tool_dispatchers(callback_tools, Some(mcp_tools))
+        .map_err(|e| format!("failed to compose external tools: {e}"))?;
 
     // Use empty prompt when only providing tool results
     let prompt = if input.prompt.is_empty() && !input.tool_results.is_empty() {
@@ -1778,8 +2254,11 @@ async fn handle_meerkat_resume(
         input.prompt
     };
     let preload_skills = preload_skill_ids(input.preload_skills.clone());
-    let skill_references =
-        canonical_skill_keys(input.skill_refs.clone(), input.skill_references.clone())?;
+    let skill_references = canonical_skill_keys(
+        &config,
+        input.skill_refs.clone(),
+        input.skill_references.clone(),
+    )?;
 
     // Set up event forwarding
     let (event_tx, event_rx) = maybe_event_channel(input.verbose, input.stream);
@@ -1789,10 +2268,17 @@ async fn handle_meerkat_resume(
     });
 
     let current_generation = state.config_runtime.get().await.ok().map(|s| s.generation);
+    let output_schema = match input.output_schema.clone() {
+        Some(schema) => Some(
+            OutputSchema::from_json_value(schema)
+                .map_err(|e| format!("Invalid output_schema: {e}"))?,
+        ),
+        None => None,
+    };
     let build = SessionBuildOptions {
         provider,
-        output_schema: None,
-        structured_output_retries: 2,
+        output_schema,
+        structured_output_retries: input.structured_output_retries,
         hooks_override: input.hooks_override.clone().unwrap_or_default(),
         comms_name,
         resume_session: Some(session),
@@ -1830,34 +2316,53 @@ async fn handle_meerkat_resume(
         max_inline_peer_notifications: None,
     };
 
-    // Try start_turn on the live session first (it may still be alive
-    // from a prior meerkat_run in the same MCP server process).
-    let turn_req = StartTurnRequest {
-        prompt: prompt.clone(),
-        event_tx: event_tx.clone(),
-        host_mode,
-        skill_references: skill_references.clone(),
-        flow_tool_overlay: input.flow_tool_overlay.clone().map(Into::into),
-    };
+    let needs_rebuild = existing_adapter.is_none()
+        || input.system_prompt.is_some()
+        || input.output_schema.is_some()
+        || input.structured_output_retries != default_structured_output_retries();
 
-    let result = match state.service.start_turn(&session_id, turn_req).await {
-        Ok(run_result) => Ok(run_result),
-        Err(SessionError::NotFound { .. }) => {
-            let req = CreateSessionRequest {
-                model,
-                prompt,
-                system_prompt: None,
-                max_tokens,
-                event_tx: event_tx.clone(),
-                host_mode,
-                skill_references,
-                initial_turn: InitialTurnPolicy::RunImmediately,
-                build: Some(build),
-            };
+    let result = if needs_rebuild {
+        let req = CreateSessionRequest {
+            model,
+            prompt,
+            system_prompt: input.system_prompt.clone(),
+            max_tokens,
+            event_tx: event_tx.clone(),
+            host_mode,
+            skill_references,
+            initial_turn: InitialTurnPolicy::RunImmediately,
+            build: Some(build),
+        };
+        state.service.create_session(req).await
+    } else {
+        // Try start_turn on the live session first (it may still be alive
+        // from a prior meerkat_run in the same MCP server process).
+        let turn_req = StartTurnRequest {
+            prompt: prompt.clone(),
+            event_tx: event_tx.clone(),
+            host_mode,
+            skill_references: skill_references.clone(),
+            flow_tool_overlay: input.flow_tool_overlay.clone().map(Into::into),
+        };
+        match state.service.start_turn(&session_id, turn_req).await {
+            Ok(run_result) => Ok(run_result),
+            Err(SessionError::NotFound { .. }) => {
+                let req = CreateSessionRequest {
+                    model,
+                    prompt,
+                    system_prompt: input.system_prompt.clone(),
+                    max_tokens,
+                    event_tx: event_tx.clone(),
+                    host_mode,
+                    skill_references,
+                    initial_turn: InitialTurnPolicy::RunImmediately,
+                    build: Some(build),
+                };
 
-            state.service.create_session(req).await
+                state.service.create_session(req).await
+            }
+            Err(other) => Err(other),
         }
-        Err(other) => Err(other),
     };
 
     drop(event_tx);
@@ -1865,6 +2370,10 @@ async fn handle_meerkat_resume(
         && let Err(e) = task.await
     {
         tracing::warn!("event task panicked: {e}");
+    }
+
+    if state.service.read(&session_id).await.is_ok() {
+        state.upsert_mcp_adapter(&session_id, mcp_adapter).await;
     }
 
     format_agent_result(result, &session_id)
@@ -1880,6 +2389,46 @@ fn wrap_tool_payload(payload: Value) -> Value {
     })
 }
 
+fn compose_external_tool_dispatchers(
+    primary: Option<Arc<dyn AgentToolDispatcher>>,
+    secondary: Option<Arc<dyn AgentToolDispatcher>>,
+) -> Result<Option<Arc<dyn AgentToolDispatcher>>, String> {
+    match (primary, secondary) {
+        (None, None) => Ok(None),
+        (Some(dispatcher), None) | (None, Some(dispatcher)) => Ok(Some(dispatcher)),
+        (Some(a), Some(b)) => {
+            let primary_names: HashSet<String> = a.tools().iter().map(|t| t.name.clone()).collect();
+            let secondary_tools = b.tools();
+            let secondary_unique: Vec<String> = secondary_tools
+                .iter()
+                .map(|t| t.name.clone())
+                .filter(|name| !primary_names.contains(name))
+                .collect();
+
+            if secondary_unique.is_empty() {
+                return Ok(Some(a));
+            }
+
+            let secondary: Arc<dyn AgentToolDispatcher> =
+                if secondary_unique.len() == secondary_tools.len() {
+                    b
+                } else {
+                    Arc::new(meerkat_core::FilteredToolDispatcher::new(
+                        b,
+                        secondary_unique,
+                    ))
+                };
+
+            let gateway = meerkat_core::ToolGatewayBuilder::new()
+                .add_dispatcher(a)
+                .add_dispatcher(secondary)
+                .build()
+                .map_err(|e| format!("failed to compose external tools: {e}"))?;
+            Ok(Some(Arc::new(gateway)))
+        }
+    }
+}
+
 // Adapter types needed for the MCP server
 
 use async_trait::async_trait;
@@ -1889,7 +2438,7 @@ use meerkat::{AgentToolDispatcher, Message, ToolDef};
 /// by returning a special error that signals the MCP client needs to handle the tool call
 pub struct MpcToolDispatcher {
     tools: Arc<[Arc<ToolDef>]>,
-    callback_tools: std::collections::HashSet<String>,
+    callback_tools: HashSet<String>,
 }
 
 impl MpcToolDispatcher {
@@ -2047,7 +2596,16 @@ mod tests {
     #[test]
     fn test_tools_list_schema() {
         let tools = tools_list();
-        assert_eq!(tools.len(), 15);
+        let mob_tools = meerkat_mob_mcp::tools_list();
+        #[cfg(feature = "comms")]
+        assert_eq!(tools.len(), 21 + mob_tools.len());
+        #[cfg(not(feature = "comms"))]
+        assert_eq!(tools.len(), 16 + mob_tools.len());
+
+        let tool_names: Vec<&str> = tools
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
 
         let run_tool = &tools[0];
         assert_eq!(run_tool["name"], "meerkat_run");
@@ -2093,19 +2651,52 @@ mod tests {
         assert_eq!(interrupt_tool["name"], "meerkat_interrupt");
         let archive_tool = &tools[9];
         assert_eq!(archive_tool["name"], "meerkat_archive");
-        let comms_send_tool = &tools[10];
-        assert_eq!(comms_send_tool["name"], "meerkat_comms_send");
-        let comms_peers_tool = &tools[11];
-        assert_eq!(comms_peers_tool["name"], "meerkat_comms_peers");
-        let comms_stream_open_tool = &tools[12];
-        assert_eq!(comms_stream_open_tool["name"], "meerkat_comms_stream_open");
-        let comms_stream_read_tool = &tools[13];
-        assert_eq!(comms_stream_read_tool["name"], "meerkat_comms_stream_read");
-        let comms_stream_close_tool = &tools[14];
+        let mcp_add_tool = &tools[10];
+        assert_eq!(mcp_add_tool["name"], "meerkat_mcp_add");
+        let mcp_remove_tool = &tools[11];
+        assert_eq!(mcp_remove_tool["name"], "meerkat_mcp_remove");
+        let mcp_reload_tool = &tools[12];
+        assert_eq!(mcp_reload_tool["name"], "meerkat_mcp_reload");
+        let event_stream_open_tool = &tools[13];
+        assert_eq!(event_stream_open_tool["name"], "meerkat_event_stream_open");
+        let event_stream_read_tool = &tools[14];
+        assert_eq!(event_stream_read_tool["name"], "meerkat_event_stream_read");
+        let event_stream_close_tool = &tools[15];
         assert_eq!(
-            comms_stream_close_tool["name"],
-            "meerkat_comms_stream_close"
+            event_stream_close_tool["name"],
+            "meerkat_event_stream_close"
         );
+        assert!(tool_names.contains(&"meerkat_mob_prefabs"));
+        assert!(tool_names.contains(&"mob_create"));
+        assert!(tool_names.contains(&"mob_list"));
+        assert!(tool_names.contains(&"mob_lifecycle"));
+
+        #[cfg(feature = "comms")]
+        {
+            assert!(tool_names.contains(&"meerkat_comms_send"));
+            assert!(tool_names.contains(&"meerkat_comms_peers"));
+            assert!(tool_names.contains(&"meerkat_comms_stream_open"));
+            assert!(tool_names.contains(&"meerkat_comms_stream_read"));
+            assert!(tool_names.contains(&"meerkat_comms_stream_close"));
+        }
+    }
+
+    #[cfg(not(feature = "comms"))]
+    #[test]
+    fn test_tools_list_omits_comms_tools_when_feature_disabled() {
+        let tools = tools_list();
+        let names: Vec<&str> = tools
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert!(!names.contains(&"meerkat_comms_send"));
+        assert!(!names.contains(&"meerkat_comms_peers"));
+        assert!(!names.contains(&"meerkat_comms_stream_open"));
+        assert!(!names.contains(&"meerkat_comms_stream_read"));
+        assert!(!names.contains(&"meerkat_comms_stream_close"));
+        assert!(names.contains(&"meerkat_event_stream_open"));
+        assert!(names.contains(&"meerkat_event_stream_read"));
+        assert!(names.contains(&"meerkat_event_stream_close"));
     }
 
     #[test]
@@ -2134,6 +2725,9 @@ mod tests {
         let input: MeerkatResumeInput = serde_json::from_value(input_json).unwrap();
         assert_eq!(input.session_id, "01234567-89ab-cdef-0123-456789abcdef");
         assert_eq!(input.prompt, "Continue");
+        assert!(input.system_prompt.is_none());
+        assert!(input.output_schema.is_none());
+        assert_eq!(input.structured_output_retries, 2);
         assert!(!input.verbose);
     }
 
@@ -2341,6 +2935,17 @@ mod tests {
         assert!(
             tool_results["items"].is_object(),
             "tool_results items should be defined"
+        );
+    }
+
+    #[test]
+    fn test_tools_list_skills_schema_has_source_selector() {
+        let tools = tools_list();
+        let skills_tool = &tools[4];
+        assert_eq!(skills_tool["name"], "meerkat_skills");
+        assert!(
+            skills_tool["inputSchema"]["properties"]["source"].is_object(),
+            "skills inspect should expose optional source selector"
         );
     }
 

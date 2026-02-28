@@ -359,11 +359,11 @@ class MeerkatClient:
         config: dict[str, Any],
         *,
         expected_generation: int | None = None,
-    ) -> None:
+    ) -> dict[str, Any]:
         params: dict[str, Any] = {"config": config}
         if expected_generation is not None:
             params["expected_generation"] = expected_generation
-        await self._request("config/set", params)
+        return await self._request("config/set", params)
 
     async def patch_config(
         self,
@@ -468,6 +468,23 @@ class MeerkatClient:
         result = await self._request("mob/prefabs", {})
         return result.get("prefabs", [])
 
+    async def list_mob_tools(self) -> list[dict[str, Any]]:
+        result = await self._request("mob/tools", {})
+        return result.get("tools", [])
+
+    async def call_mob_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await self._request(
+            "mob/call",
+            {
+                "name": name,
+                "arguments": arguments or {},
+            },
+        )
+
     # -- Internal methods used by Session ----------------------------------
 
     async def _start_turn(
@@ -533,10 +550,16 @@ class MeerkatClient:
         await self._request("session/archive", {"session_id": session_id})
 
     async def _send(self, session_id: str, **kwargs: Any) -> dict[str, Any]:
+        return await self.send(session_id, **kwargs)
+
+    async def _peers(self, session_id: str) -> dict[str, Any]:
+        return await self.peers(session_id)
+
+    async def send(self, session_id: str, **kwargs: Any) -> dict[str, Any]:
         params: dict[str, Any] = {"session_id": session_id, **kwargs}
         return await self._request("comms/send", params)
 
-    async def _peers(self, session_id: str) -> dict[str, Any]:
+    async def peers(self, session_id: str) -> dict[str, Any]:
         return await self._request("comms/peers", {"session_id": session_id})
 
     async def open_comms_stream(
@@ -564,6 +587,31 @@ class MeerkatClient:
             dispatcher=self._dispatcher,
             closer=self._close_comms_stream,
         )
+
+    async def send_and_stream(
+        self,
+        session_id: str,
+        **kwargs: Any,
+    ) -> tuple[dict[str, Any], CommsEventStream]:
+        receipt = await self.send(session_id, **kwargs)
+        interaction_id = str(receipt.get("interaction_id", ""))
+        stream_reserved = bool(receipt.get("stream_reserved", False))
+        if not interaction_id:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                "comms/send response missing interaction_id for send_and_stream",
+            )
+        if not stream_reserved:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                "comms/send response did not reserve stream for send_and_stream",
+            )
+        stream = await self.open_comms_stream(
+            session_id,
+            scope="interaction",
+            interaction_id=interaction_id,
+        )
+        return receipt, stream
 
     async def _close_comms_stream(self, stream_id: str) -> None:
         await self._request("comms/stream_close", {"stream_id": stream_id})

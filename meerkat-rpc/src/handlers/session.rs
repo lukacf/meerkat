@@ -47,12 +47,12 @@ pub struct CreateSessionParams {
     /// Run-scoped hook overrides.
     #[serde(default)]
     pub hooks_override: Option<HookRunOverrides>,
-    /// Enable built-in tools (task management, etc.)
+    /// Enable built-in tools. Omit to use runtime defaults.
     #[serde(default)]
-    pub enable_builtins: bool,
-    /// Enable shell tool (requires enable_builtins).
+    pub enable_builtins: Option<bool>,
+    /// Enable shell tool. Omit to use runtime defaults.
     #[serde(default)]
-    pub enable_shell: bool,
+    pub enable_shell: Option<bool>,
     /// Run in host mode for inter-agent comms.
     #[serde(default)]
     pub host_mode: bool,
@@ -62,15 +62,15 @@ pub struct CreateSessionParams {
     /// Friendly metadata for peer discovery (description, labels).
     #[serde(default)]
     pub peer_meta: Option<meerkat_core::PeerMeta>,
-    /// Enable sub-agent tools (fork, spawn).
+    /// Enable sub-agent tools. Omit to use runtime defaults.
     #[serde(default)]
-    pub enable_subagents: bool,
-    /// Enable semantic memory (memory_search tool + compaction indexing).
+    pub enable_subagents: Option<bool>,
+    /// Enable semantic memory. Omit to use runtime defaults.
     #[serde(default)]
-    pub enable_memory: bool,
-    /// Enable mob tools.
+    pub enable_memory: Option<bool>,
+    /// Enable mob tools. Omit to use runtime defaults.
     #[serde(default)]
-    pub enable_mob: bool,
+    pub enable_mob: Option<bool>,
     /// Explicit budget limits for this session.
     #[serde(default)]
     pub budget_limits: Option<BudgetLimits>,
@@ -164,9 +164,19 @@ pub async fn handle_create(
         Err(resp) => return resp.with_id(id),
     };
 
+    let runtime_default_model = if let Some(config_runtime) = runtime.config_runtime() {
+        config_runtime
+            .get()
+            .await
+            .ok()
+            .map(|snapshot| snapshot.config.agent.model)
+    } else {
+        None
+    };
     let model_name = params
         .model
         .clone()
+        .or(runtime_default_model)
         .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
     let provider = params.provider.as_deref().map(Provider::from_name);
 
@@ -192,14 +202,14 @@ pub async fn handle_create(
     build_config.output_schema = output_schema;
     build_config.structured_output_retries = params.structured_output_retries;
     build_config.hooks_override = params.hooks_override.unwrap_or_default();
-    build_config.override_builtins = Some(params.enable_builtins);
-    build_config.override_shell = Some(params.enable_builtins && params.enable_shell);
+    build_config.override_builtins = params.enable_builtins;
+    build_config.override_shell = params.enable_shell;
     build_config.host_mode = params.host_mode;
     build_config.comms_name = params.comms_name;
     build_config.peer_meta = params.peer_meta;
-    build_config.override_subagents = Some(params.enable_subagents);
-    build_config.override_memory = Some(params.enable_memory);
-    build_config.override_mob = Some(params.enable_mob);
+    build_config.override_subagents = params.enable_subagents;
+    build_config.override_memory = params.enable_memory;
+    build_config.override_mob = params.enable_mob;
     build_config.budget_limits = params.budget_limits;
     build_config.provider_params = params.provider_params;
     build_config.preload_skills = params

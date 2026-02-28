@@ -422,6 +422,106 @@ describe("RunResult parsing", () => {
   });
 });
 
+describe("Comms methods", () => {
+  it("send/peers route through comms RPC methods", async () => {
+    const client = new MeerkatClient();
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      if (method === "comms/peers") {
+        return { peers: [{ name: "agent-a" }] };
+      }
+      return { kind: "peer_message_sent", acked: true };
+    };
+
+    const sendReceipt = await client.send("s1", {
+      kind: "peer_message",
+      to: "agent-a",
+      body: "hello",
+    });
+    const peers = await client.peers("s1");
+
+    assert.equal(sendReceipt.kind, "peer_message_sent");
+    assert.deepEqual(peers.peers, [{ name: "agent-a" }]);
+    assert.deepEqual(calls.map((call) => call.method), ["comms/send", "comms/peers"]);
+  });
+
+  it("openCommsStream/open_comms_stream aliases both open stream", async () => {
+    const client = new MeerkatClient();
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      return { stream_id: `stream-${calls.length}` };
+    };
+
+    const first = await client.openCommsStream("s1");
+    const second = await client.open_comms_stream("s1", {
+      scope: "interaction",
+      interactionId: "i-1",
+    });
+
+    assert.equal(first.streamId, "stream-1");
+    assert.equal(second.streamId, "stream-2");
+    assert.deepEqual(calls.map((call) => call.method), ["comms/stream_open", "comms/stream_open"]);
+  });
+
+  it("sendAndStream/send_and_stream sends, validates reservation, then opens interaction stream", async () => {
+    const client = new MeerkatClient();
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      if (method === "comms/send") {
+        return {
+          kind: "input_accepted",
+          interaction_id: "i-42",
+          stream_reserved: true,
+        };
+      }
+      return { stream_id: "stream-42" };
+    };
+
+    const first = await client.sendAndStream("s1", {
+      kind: "input",
+      body: "hello",
+      source: "rpc",
+      stream: "reserve_interaction",
+    });
+    const second = await client.send_and_stream("s1", {
+      kind: "input",
+      body: "hello again",
+      source: "rpc",
+      stream: "reserve_interaction",
+    });
+
+    assert.equal(first.receipt.interaction_id, "i-42");
+    assert.equal(first.stream.streamId, "stream-42");
+    assert.equal(second.stream.streamId, "stream-42");
+    assert.deepEqual(calls.map((call) => call.method), [
+      "comms/send",
+      "comms/stream_open",
+      "comms/send",
+      "comms/stream_open",
+    ]);
+    assert.equal(calls[1].params.interaction_id, "i-42");
+    assert.equal(calls[3].params.scope, "interaction");
+  });
+
+  it("sendAndStream rejects receipt without interaction reservation", async () => {
+    const client = new MeerkatClient();
+    client.request = async (method) => {
+      if (method === "comms/send") {
+        return { kind: "peer_message_sent", acked: true };
+      }
+      return { stream_id: "unused" };
+    };
+
+    await assert.rejects(
+      () => client.sendAndStream("s1", { kind: "peer_message", to: "agent-a", body: "hi" }),
+      /missing interaction_id/,
+    );
+  });
+});
+
 describe("Live MCP methods", () => {
   it("mcpAdd/mcpRemove/mcpReload send correct RPC methods and payloads", async () => {
     const client = new MeerkatClient();

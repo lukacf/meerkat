@@ -233,6 +233,10 @@ class Session:
             interaction_id=interaction_id,
         )
 
+    async def send_and_stream(self, **kwargs: Any) -> tuple[dict[str, Any], "CommsEventStream"]:
+        """Send a comms command and attach an interaction-scoped stream."""
+        return await self._client.send_and_stream(self._id, **kwargs)  # noqa: SLF001
+
     # -- Dunder ------------------------------------------------------------
 
     def __repr__(self) -> str:

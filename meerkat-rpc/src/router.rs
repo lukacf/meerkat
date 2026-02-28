@@ -130,6 +130,7 @@ pub struct MethodRouter {
     config_store: Arc<dyn ConfigStore>,
     notification_sink: NotificationSink,
     skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
+    mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
     #[cfg(feature = "comms")]
     active_streams: Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
 }
@@ -146,6 +147,7 @@ impl MethodRouter {
             config_store,
             notification_sink,
             skill_runtime: None,
+            mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
             #[cfg(feature = "comms")]
             active_streams: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -200,6 +202,8 @@ impl MethodRouter {
             }
             "turn/interrupt" => handlers::turn::handle_interrupt(id, params, &self.runtime).await,
             "mob/prefabs" => handlers::mob::handle_prefabs(id).await,
+            "mob/tools" => handlers::mob::handle_tools(id).await,
+            "mob/call" => handlers::mob::handle_call(id, params, &self.mob_state).await,
             #[cfg(feature = "comms")]
             "comms/send" => handlers::comms::handle_send(id, params, &self.runtime).await,
             #[cfg(feature = "comms")]
@@ -704,6 +708,8 @@ mod tests {
         assert!(method_names.contains(&"session/create"));
         assert!(method_names.contains(&"turn/start"));
         assert!(method_names.contains(&"mob/prefabs"));
+        assert!(method_names.contains(&"mob/tools"));
+        assert!(method_names.contains(&"mob/call"));
         assert!(method_names.contains(&"config/get"));
         #[cfg(feature = "comms")]
         {
@@ -747,6 +753,31 @@ mod tests {
                 "template should look like TOML definition"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn mob_tools_and_call_flow_work() {
+        let (router, _notif_rx) = test_router().await;
+
+        let tools_resp = router.dispatch(make_request_no_params("mob/tools")).await.unwrap();
+        let tools_binding = result_value(&tools_resp);
+        let tools = tools_binding["tools"]
+            .as_array()
+            .expect("tools should be array");
+        assert!(tools.iter().any(|tool| tool["name"] == "mob_create"));
+
+        let create_resp = router
+            .dispatch(make_request(
+                "mob/call",
+                serde_json::json!({
+                    "name": "mob_create",
+                    "arguments": { "prefab": "coding_swarm" }
+                }),
+            ))
+            .await
+            .unwrap();
+        let created = result_value(&create_resp);
+        assert!(created["mob_id"].as_str().is_some());
     }
 
     #[tokio::test]
@@ -1251,6 +1282,21 @@ mod tests {
         assert_eq!(config2["config"]["max_tokens"], 2048);
     }
 
+    /// 11b. `config/set` rejects invalid config with INVALID_PARAMS for REST parity.
+    #[tokio::test]
+    async fn config_set_rejects_invalid_config() {
+        let (router, _notif_rx) = test_router().await;
+
+        let get_req = make_request_no_params("config/get");
+        let get_resp = router.dispatch(get_req).await.unwrap();
+        let mut config = result_value(&get_resp)["config"].clone();
+        config["max_tokens"] = serde_json::json!(0);
+
+        let set_req = make_request("config/set", serde_json::json!({ "config": config }));
+        let set_resp = router.dispatch(set_req).await.unwrap();
+        assert_eq!(error_code(&set_resp), error::INVALID_PARAMS);
+    }
+
     /// 12. `config/patch` merges a delta.
     #[tokio::test]
     async fn config_patch_merges_delta() {
@@ -1387,6 +1433,16 @@ mod tests {
         let after_value = result_value(&after_resp);
         let generation_after = after_value["generation"].as_u64().unwrap_or(0);
         assert_eq!(generation_after, generation_before);
+    }
+
+    /// 12d. Invalid config patches fail as INVALID_PARAMS for REST parity.
+    #[tokio::test]
+    async fn config_patch_rejects_invalid_config() {
+        let (router, _notif_rx) = test_router().await;
+        let patch_req = make_request("config/patch", serde_json::json!({"max_tokens": 0}));
+
+        let patch_resp = router.dispatch(patch_req).await.unwrap();
+        assert_eq!(error_code(&patch_resp), error::INVALID_PARAMS);
     }
 
     /// 13. A notification (request with no id) returns None (no response).

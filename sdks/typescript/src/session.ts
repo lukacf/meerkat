@@ -179,6 +179,12 @@ export class Session {
     return this._client.openCommsStream(this._id, options);
   }
 
+  async sendAndStream(
+    command: Record<string, unknown>,
+  ): Promise<{ receipt: Record<string, unknown>; stream: CommsEventStream }> {
+    return this._client.sendAndStream(this._id, command);
+  }
+
   toString(): string {
     const ref = this._ref ? ` ref=${this._ref}` : "";
     return `Session(id=${this._id}${ref})`;

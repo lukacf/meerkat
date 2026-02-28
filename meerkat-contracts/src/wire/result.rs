@@ -38,3 +38,49 @@ impl From<RunResult> for WireRunResult {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use meerkat_core::skills::{SkillRuntimeDiagnostics, SourceHealthSnapshot, SourceHealthState};
+
+    #[test]
+    fn wire_run_result_preserves_unhealthy_skill_diagnostics() {
+        let run = RunResult {
+            text: "ok".to_string(),
+            session_id: SessionId::new(),
+            usage: Default::default(),
+            turns: 1,
+            tool_calls: 0,
+            structured_output: None,
+            schema_warnings: None,
+            skill_diagnostics: Some(SkillRuntimeDiagnostics {
+                source_health: SourceHealthSnapshot {
+                    state: SourceHealthState::Unhealthy,
+                    invalid_ratio: 0.8,
+                    invalid_count: 8,
+                    total_count: 10,
+                    failure_streak: 10,
+                    handshake_failed: true,
+                },
+                quarantined: vec![],
+            }),
+        };
+
+        let wire: WireRunResult = run.into();
+        assert_eq!(
+            wire.skill_diagnostics
+                .as_ref()
+                .expect("skill_diagnostics")
+                .source_health
+                .state,
+            SourceHealthState::Unhealthy
+        );
+
+        let json = serde_json::to_value(&wire).expect("serialize wire result");
+        assert_eq!(
+            json["skill_diagnostics"]["source_health"]["state"],
+            "unhealthy"
+        );
+    }
+}

@@ -335,6 +335,64 @@ pub trait SessionService: Send + Sync {
     }
 }
 
+/// Optional comms/control-plane extension for `SessionService`.
+///
+/// Base lifecycle operations stay on `SessionService`; advanced surfaces
+/// (RPC/REST/mob orchestration) can use this trait when they need direct
+/// access to comms runtime and injector handles.
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+pub trait SessionServiceCommsExt: SessionService {
+    /// Get the comms runtime for a session, if available.
+    async fn comms_runtime(
+        &self,
+        _session_id: &SessionId,
+    ) -> Option<Arc<dyn crate::agent::CommsRuntime>> {
+        None
+    }
+
+    /// Get the subscribable event injector for a session, if available.
+    async fn event_injector(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<dyn crate::SubscribableInjector>> {
+        self.comms_runtime(session_id)
+            .await
+            .and_then(|runtime| runtime.event_injector())
+    }
+}
+
+/// Optional live-MCP control-plane extension for `SessionService`.
+///
+/// Surfaces that support runtime MCP staging can implement these methods.
+/// Services that do not support live MCP keep the default "unsupported" behavior.
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+pub trait SessionServiceMcpExt: SessionServiceCommsExt {
+    /// Stage a live MCP server addition for the target session.
+    async fn stage_mcp_add(
+        &self,
+        _session_id: &SessionId,
+        _server: crate::mcp_config::McpServerConfig,
+    ) -> Result<(), String> {
+        Err("live MCP add not supported on this session service".to_string())
+    }
+
+    /// Stage a live MCP server removal for the target session.
+    async fn stage_mcp_remove(&self, _session_id: &SessionId, _server_name: &str) -> Result<(), String> {
+        Err("live MCP remove not supported on this session service".to_string())
+    }
+
+    /// Stage a live MCP server reload for one server or all (`None`).
+    async fn stage_mcp_reload(
+        &self,
+        _session_id: &SessionId,
+        _server_name: Option<&str>,
+    ) -> Result<(), String> {
+        Err("live MCP reload not supported on this session service".to_string())
+    }
+}
+
 /// Extension trait for `Arc<dyn SessionService>` to allow calling methods directly.
 impl dyn SessionService {
     /// Wrap self in an Arc.

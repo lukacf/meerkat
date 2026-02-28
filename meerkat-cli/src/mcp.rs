@@ -1,6 +1,6 @@
 //! MCP server management CLI commands
 //!
-//! Provides `rkat mcp add|remove|list|get` commands for managing MCP server configuration.
+//! Provides `rkat mcp add|remove|reload|list|get` commands for managing MCP server configuration.
 
 use meerkat_core::mcp_config::{
     McpConfig, McpScope, McpServerConfig, McpTransportConfig, McpTransportKind, find_project_mcp,
@@ -654,6 +654,29 @@ pub async fn live_remove_server(
         .and_then(|s| s.as_str())
         .unwrap_or("unknown");
     println!("MCP server '{name}' removal {status} on session {session_id}");
+    Ok(())
+}
+
+/// Stage a live MCP server reload on a running session via REST.
+pub async fn live_reload_server(
+    base_url: &str,
+    session_id: &str,
+    name: Option<String>,
+) -> anyhow::Result<()> {
+    let body = serde_json::json!({
+        "session_id": session_id,
+        "server_name": name,
+    });
+
+    let result = post_live_op(base_url, session_id, "reload", body).await?;
+    let status = result
+        .get("status")
+        .and_then(|s| s.as_str())
+        .unwrap_or("unknown");
+    match name {
+        Some(name) => println!("MCP server '{name}' reload {status} on session {session_id}"),
+        None => println!("MCP server reload-all {status} on session {session_id}"),
+    }
     Ok(())
 }
 

@@ -11,8 +11,9 @@ use indexmap::IndexSet;
 #[allow(unused_imports)] // Used in read() fallback path
 use meerkat_core::Session;
 use meerkat_core::service::{
-    CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService, SessionSummary,
-    SessionUsage, SessionView, StartTurnRequest,
+    CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService,
+    SessionServiceCommsExt, SessionServiceMcpExt, SessionSummary, SessionUsage, SessionView,
+    StartTurnRequest,
 };
 use meerkat_core::types::{RunResult, SessionId};
 use meerkat_store::SessionStore;
@@ -277,6 +278,27 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         self.inner.subscribe_session_events(id).await
     }
 }
+
+#[async_trait]
+impl<B: SessionAgentBuilder + 'static> SessionServiceCommsExt for PersistentSessionService<B> {
+    async fn comms_runtime(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<std::sync::Arc<dyn meerkat_core::agent::CommsRuntime>> {
+        self.inner.comms_runtime(session_id).await
+    }
+
+    async fn event_injector(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<std::sync::Arc<dyn meerkat_core::SubscribableInjector>> {
+        self.inner.event_injector(session_id).await
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl<B: SessionAgentBuilder + 'static> SessionServiceMcpExt for PersistentSessionService<B> {}
 
 impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// Get the subscribable event injector for a session, if available.

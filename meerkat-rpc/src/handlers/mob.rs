@@ -1,8 +1,14 @@
 //! `mob/*` method handlers.
 
 use serde::Serialize;
+use serde::Deserialize;
+use serde_json::value::RawValue;
 
+use crate::error;
+use super::{parse_params, RpcResponseExt};
 use crate::protocol::{RpcId, RpcResponse};
+use std::sync::Arc;
+use meerkat_mob_mcp::MobMcpState;
 
 #[derive(Debug, Serialize)]
 struct MobPrefabEntry {
@@ -25,6 +31,44 @@ pub async fn handle_prefabs(id: Option<RpcId>) -> RpcResponse {
         })
         .collect();
     RpcResponse::success(id, MobPrefabsResult { prefabs })
+}
+
+#[derive(Debug, Serialize)]
+struct MobToolsResult {
+    tools: Vec<serde_json::Value>,
+}
+
+/// Handle `mob/tools` — list callable mob lifecycle tools.
+pub async fn handle_tools(id: Option<RpcId>) -> RpcResponse {
+    RpcResponse::success(
+        id,
+        MobToolsResult {
+            tools: meerkat_mob_mcp::tools_list(),
+        },
+    )
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MobCallParams {
+    pub name: String,
+    #[serde(default)]
+    pub arguments: serde_json::Value,
+}
+
+/// Handle `mob/call` — call a mob lifecycle tool by name with JSON args.
+pub async fn handle_call(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobCallParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    match meerkat_mob_mcp::handle_tools_call(state, &params.name, &params.arguments).await {
+        Ok(value) => RpcResponse::success(id, value),
+        Err(err) => RpcResponse::error(id, error::INVALID_PARAMS, err.message),
+    }
 }
 
 #[cfg(test)]

@@ -138,6 +138,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
             },
         ],
         "notifications": [
+            {"name": "initialized", "description": "Client notification acknowledged silently (no response)"},
             {"name": "session/event", "description": "AgentEvent payload during turns"},
         ]
     });

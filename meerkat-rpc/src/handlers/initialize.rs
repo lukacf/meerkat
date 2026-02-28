@@ -39,6 +39,8 @@ pub fn handle_initialize(id: Option<RpcId>) -> RpcResponse {
                 "turn/start".to_string(),
                 "turn/interrupt".to_string(),
                 "mob/prefabs".to_string(),
+                "mob/tools".to_string(),
+                "mob/call".to_string(),
                 "config/get".to_string(),
                 "config/set".to_string(),
                 "config/patch".to_string(),

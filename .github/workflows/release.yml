@@ -78,7 +78,7 @@ jobs:
           - runs-on: macos-15
             target: aarch64-apple-darwin
             archive_ext: tar.gz
-          - runs-on: macos-13
+          - runs-on: macos-15-large
             target: x86_64-apple-darwin
             archive_ext: tar.gz
           - runs-on: windows-latest

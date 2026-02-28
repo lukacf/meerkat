@@ -129,6 +129,7 @@ async fn run_event_router(
     }
 
     let mut poll_interval = tokio::time::interval(config.poll_interval);
+    #[cfg(not(target_arch = "wasm32"))]
     poll_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {

@@ -199,6 +199,29 @@ jobs:
         if: matrix.test
         run: cargo nextest run -p ${{ matrix.pkg }} --no-default-features --features session-store,mcp --no-capture
 
+  wasm-check:
+    name: WASM compilation check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: wasm32
+
+      - name: Check meerkat-web-runtime for wasm32
+        env:
+          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
+        run: cargo check -p meerkat-web-runtime --target wasm32-unknown-unknown
+
   audit:
     name: Security audit
     runs-on: ubuntu-latest
@@ -212,7 +235,7 @@ jobs:
   gate:
     name: CI gate
     if: always()
-    needs: [fmt-lint, test, test-minimal, test-feature-matrix-lib, test-feature-matrix-surface-checks, test-surface-smoke, audit]
+    needs: [fmt-lint, test, test-minimal, test-feature-matrix-lib, test-feature-matrix-surface-checks, test-surface-smoke, wasm-check, audit]
     runs-on: ubuntu-latest
     steps:
       - name: Check results
@@ -225,6 +248,7 @@ jobs:
             test-feature-matrix-lib \
             test-feature-matrix-surface-checks \
             test-surface-smoke \
+            wasm-check \
             audit
           do
             case "$job" in
@@ -234,6 +258,7 @@ jobs:
               test-feature-matrix-lib) result="${{ needs.test-feature-matrix-lib.result }}" ;;
               test-feature-matrix-surface-checks) result="${{ needs.test-feature-matrix-surface-checks.result }}" ;;
               test-surface-smoke) result="${{ needs.test-surface-smoke.result }}" ;;
+              wasm-check) result="${{ needs.wasm-check.result }}" ;;
               audit) result="${{ needs.audit.result }}" ;;
             esac
             if [[ "$result" != "success" ]]; then

@@ -1065,6 +1065,20 @@ enum MobCommands {
     },
     /// Retire a meerkat.
     Retire { mob_id: String, meerkat_id: String },
+    /// Retire and re-spawn a meerkat with the same profile.
+    Respawn {
+        mob_id: String,
+        meerkat_id: String,
+        /// Optional initial message for the respawned meerkat.
+        #[arg(long)]
+        message: Option<String>,
+    },
+    /// Inject a message into an autonomous meerkat (request-reply).
+    InjectAndSubscribe {
+        mob_id: String,
+        meerkat_id: String,
+        message: String,
+    },
     /// Wire two peers.
     Wire {
         mob_id: String,
@@ -5159,6 +5173,42 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
+            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
+            save_mob_registry(scope, &registry).await?;
+            Ok(())
+        }
+        MobCommands::Respawn {
+            mob_id,
+            meerkat_id,
+            message,
+        } => {
+            state
+                .mob_respawn(
+                    &meerkat_mob::MobId::from(mob_id.clone()),
+                    meerkat_mob::MeerkatId::from(meerkat_id),
+                    message,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("respawn enqueued");
+            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
+            save_mob_registry(scope, &registry).await?;
+            Ok(())
+        }
+        MobCommands::InjectAndSubscribe {
+            mob_id,
+            meerkat_id,
+            message,
+        } => {
+            let subscription = state
+                .mob_inject_and_subscribe(
+                    &meerkat_mob::MobId::from(mob_id.clone()),
+                    meerkat_mob::MeerkatId::from(meerkat_id),
+                    message,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("{}", subscription.id);
             sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
             save_mob_registry(scope, &registry).await?;
             Ok(())

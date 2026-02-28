@@ -65,6 +65,8 @@ pub(super) struct MobActor {
     pub(super) pending_spawn_tasks: BTreeMap<u64, tokio::task::JoinHandle<()>>,
     pub(super) edge_locks: Arc<super::edge_locks::EdgeLockRegistry>,
     pub(super) lifecycle_tasks: tokio::task::JoinSet<()>,
+    pub(super) session_service: Arc<dyn MobSessionService>,
+    pub(super) spawn_policy: Option<Arc<dyn super::spawn_policy::SpawnPolicy>>,
 }
 
 impl MobActor {
@@ -82,6 +84,7 @@ impl MobActor {
             events: self.events.clone(),
             mcp_servers: self.mcp_servers.clone(),
             flow_streams: self.flow_streams.clone(),
+            session_service: self.session_service.clone(),
         }
     }
 
@@ -675,6 +678,20 @@ impl MobActor {
                     };
                     let _ = reply_tx.send(result);
                 }
+                MobCommand::Respawn {
+                    meerkat_id,
+                    initial_message,
+                    reply_tx,
+                } => {
+                    let result =
+                        match self.require_state(&[MobState::Running, MobState::Creating]) {
+                            Ok(()) => {
+                                self.handle_respawn(meerkat_id, initial_message).await
+                            }
+                            Err(error) => Err(error),
+                        };
+                    let _ = reply_tx.send(result);
+                }
                 MobCommand::RetireAll { reply_tx } => {
                     let result = match self.require_state(&[
                         MobState::Running,
@@ -920,6 +937,10 @@ impl MobActor {
                         Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);
+                }
+                MobCommand::SetSpawnPolicy { policy, reply_tx } => {
+                    self.spawn_policy = policy;
+                    let _ = reply_tx.send(());
                 }
                 MobCommand::Shutdown { reply_tx } => {
                     self.fail_all_pending_spawns("mob runtime is shutting down")
@@ -1424,6 +1445,59 @@ impl MobActor {
             Box::new(WarnAndContinue)
         };
         self.dispose_member(&ctx, policy.as_mut()).await;
+
+        Ok(())
+    }
+
+    /// Retire a member and re-spawn it with the same profile (non-blocking).
+    ///
+    /// Retire completes synchronously within this call. Spawn is enqueued
+    /// asynchronously — the new member becomes available when
+    /// `MeerkatSpawned` is emitted. Returns `Ok(())` once retire completes
+    /// and spawn is enqueued.
+    async fn handle_respawn(
+        &mut self,
+        meerkat_id: MeerkatId,
+        initial_message: Option<String>,
+    ) -> Result<(), MobError> {
+        // Capture profile before retire removes entry.
+        let profile_name = {
+            let roster = self.roster.read().await;
+            let entry = roster
+                .get(&meerkat_id)
+                .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?;
+            entry.profile.clone()
+        };
+
+        // Full retire (disposal pipeline).
+        self.handle_retire(meerkat_id.clone()).await?;
+
+        // Enqueue async spawn with same profile and meerkat ID.
+        // The spawn result is delivered via MeerkatSpawned event.
+        let (spawn_reply_tx, spawn_reply_rx) = oneshot::channel();
+        self.enqueue_spawn(
+            profile_name,
+            meerkat_id.clone(),
+            initial_message,
+            None,
+            None,
+            spawn_reply_tx,
+        )
+        .await;
+
+        // Fire-and-forget: log spawn failures but don't block the caller.
+        let mid = meerkat_id.clone();
+        self.lifecycle_tasks.spawn(async move {
+            match spawn_reply_rx.await {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    tracing::error!(meerkat_id = %mid, error = %e, "respawn: spawn failed after retire");
+                }
+                Err(_) => {
+                    tracing::error!(meerkat_id = %mid, "respawn: spawn reply dropped");
+                }
+            }
+        });
 
         Ok(())
     }
@@ -2006,18 +2080,58 @@ impl MobActor {
     }
 
     /// P1-T10: external_turn enforces addressability.
+    ///
+    /// When the target meerkat is not in the roster and a [`SpawnPolicy`] is
+    /// set, the policy is consulted. If it resolves a [`SpawnSpec`], the
+    /// member is auto-spawned and the message is delivered after provisioning
+    /// completes.
     async fn handle_external_turn(
-        &self,
+        &mut self,
         meerkat_id: MeerkatId,
         message: String,
     ) -> Result<(), MobError> {
         // Look up the entry
         let entry = {
             let roster = self.roster.read().await;
-            roster
-                .get(&meerkat_id)
-                .cloned()
-                .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?
+            roster.get(&meerkat_id).cloned()
+        };
+        let entry = match entry {
+            Some(e) => e,
+            None => {
+                // Consult spawn policy for auto-provisioning
+                if let Some(ref policy) = self.spawn_policy
+                    && let Some(spec) = policy.resolve(&meerkat_id).await
+                {
+                    let (spawn_reply_tx, spawn_reply_rx) = oneshot::channel();
+                    self.enqueue_spawn(
+                        spec.profile,
+                        meerkat_id.clone(),
+                        None,
+                        spec.runtime_mode,
+                        None,
+                        spawn_reply_tx,
+                    )
+                    .await;
+
+                    // Schedule deferred message delivery after spawn completes.
+                    let command_tx = self.command_tx.clone();
+                    let target_id = meerkat_id.clone();
+                    self.lifecycle_tasks.spawn(async move {
+                        if let Ok(Ok(_)) = spawn_reply_rx.await {
+                            let (reply_tx, _reply_rx) = oneshot::channel();
+                            let _ = command_tx
+                                .send(MobCommand::ExternalTurn {
+                                    meerkat_id: target_id,
+                                    message,
+                                    reply_tx,
+                                })
+                                .await;
+                        }
+                    });
+                    return Ok(());
+                }
+                return Err(MobError::MeerkatNotFound(meerkat_id));
+            }
         };
 
         // Check external_addressable

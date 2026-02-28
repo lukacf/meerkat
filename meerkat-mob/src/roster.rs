@@ -207,6 +207,15 @@ impl Roster {
             .filter(move |e| e.profile == *profile && e.state == MemberState::Active)
     }
 
+    /// Look up the session ID for a meerkat by its ID.
+    ///
+    /// Returns `Some(&SessionId)` for `Session` members and `BackendPeer`
+    /// members with a bridge session. Returns `None` if the meerkat is not
+    /// in the roster or its member ref has no session bridge.
+    pub fn session_id(&self, meerkat_id: &MeerkatId) -> Option<&SessionId> {
+        self.entries.get(meerkat_id)?.member_ref.session_id()
+    }
+
     /// Get the set of peer meerkat IDs wired to a given meerkat.
     pub fn wired_peers_of(&self, meerkat_id: &MeerkatId) -> Option<&BTreeSet<MeerkatId>> {
         self.entries.get(meerkat_id).map(|e| &e.wired_to)
@@ -731,6 +740,58 @@ mod tests {
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: RosterEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.state, MemberState::Active);
+    }
+
+    #[test]
+    fn test_session_id_convenience_session_member() {
+        let mut roster = Roster::new();
+        let sid = session_id();
+        roster.add(
+            MeerkatId::from("a"),
+            ProfileName::from("worker"),
+            MobRuntimeMode::AutonomousHost,
+            MemberRef::from_session_id(sid.clone()),
+        );
+        assert_eq!(roster.session_id(&MeerkatId::from("a")), Some(&sid));
+    }
+
+    #[test]
+    fn test_session_id_convenience_backend_peer_with_bridge() {
+        let mut roster = Roster::new();
+        let sid = session_id();
+        roster.add(
+            MeerkatId::from("ext-1"),
+            ProfileName::from("worker"),
+            MobRuntimeMode::AutonomousHost,
+            MemberRef::BackendPeer {
+                peer_id: "peer-ext-1".to_string(),
+                address: "https://backend.example.invalid/mesh/ext-1".to_string(),
+                session_id: Some(sid.clone()),
+            },
+        );
+        assert_eq!(roster.session_id(&MeerkatId::from("ext-1")), Some(&sid));
+    }
+
+    #[test]
+    fn test_session_id_convenience_backend_peer_no_bridge() {
+        let mut roster = Roster::new();
+        roster.add(
+            MeerkatId::from("ext-2"),
+            ProfileName::from("worker"),
+            MobRuntimeMode::AutonomousHost,
+            MemberRef::BackendPeer {
+                peer_id: "peer-ext-2".to_string(),
+                address: "https://backend.example.invalid/mesh/ext-2".to_string(),
+                session_id: None,
+            },
+        );
+        assert_eq!(roster.session_id(&MeerkatId::from("ext-2")), None);
+    }
+
+    #[test]
+    fn test_session_id_convenience_not_found() {
+        let roster = Roster::new();
+        assert_eq!(roster.session_id(&MeerkatId::from("nonexistent")), None);
     }
 
     #[test]

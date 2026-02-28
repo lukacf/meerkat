@@ -7,6 +7,7 @@ use crate::definition::MobDefinition;
 use crate::ids::{FlowId, MeerkatId, MobId, ProfileName, RunId, StepId, TaskId};
 use crate::runtime_mode::MobRuntimeMode;
 use chrono::{DateTime, Utc};
+use meerkat_core::event::{AgentEvent, EventEnvelope};
 use meerkat_core::types::SessionId;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -598,6 +599,22 @@ pub enum MobEventKind {
         step_id: StepId,
         escalated_to: MeerkatId,
     },
+}
+
+/// An agent event attributed to a specific mob member.
+///
+/// Wraps the full [`EventEnvelope<AgentEvent>`] to preserve event metadata
+/// (`event_id`, `source_id`, `seq`, `mob_id`, `timestamp_ms`) without
+/// information loss. Used by the mob event bus to tag session-level events
+/// with mob-level attribution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttributedEvent {
+    /// The meerkat that produced this event.
+    pub source: MeerkatId,
+    /// Profile name of the source meerkat.
+    pub profile: ProfileName,
+    /// The original enveloped agent event from the session stream.
+    pub envelope: EventEnvelope<AgentEvent>,
 }
 
 #[cfg(test)]

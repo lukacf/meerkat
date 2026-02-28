@@ -74,6 +74,11 @@ pub(super) enum MobCommand {
         meerkat_id: MeerkatId,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+    Respawn {
+        meerkat_id: MeerkatId,
+        initial_message: Option<String>,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
     RetireAll {
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
@@ -144,6 +149,10 @@ pub(super) enum MobCommand {
         status: TaskStatus,
         owner: Option<MeerkatId>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    SetSpawnPolicy {
+        policy: Option<Arc<dyn super::spawn_policy::SpawnPolicy>>,
+        reply_tx: oneshot::Sender<()>,
     },
     Shutdown {
         reply_tx: oneshot::Sender<Result<(), MobError>>,

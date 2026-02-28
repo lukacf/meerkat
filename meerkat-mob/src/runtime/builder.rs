@@ -332,7 +332,9 @@ impl MobBuilder {
             events: storage.events.clone(),
             mcp_servers: mcp_servers.clone(),
             flow_streams: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
+            session_service: session_service.clone(),
         };
+        // session_service is still live here (not consumed until start_runtime_with_components)
 
         if resumed_state == MobState::Running {
             Self::reconcile_resume(
@@ -621,6 +623,8 @@ impl MobBuilder {
             command_tx,
             command_rx,
         } = wiring;
+        let external_backend = definition.backend.external.clone();
+        let handle_session_service = session_service.clone();
         let handle = MobHandle {
             command_tx: command_tx.clone(),
             roster: roster.clone(),
@@ -630,8 +634,8 @@ impl MobBuilder {
             events: events.clone(),
             mcp_servers: mcp_servers.clone(),
             flow_streams: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
+            session_service: handle_session_service.clone(),
         };
-        let external_backend = definition.backend.external.clone();
         let provisioner: Arc<dyn MobProvisioner> = Arc::new(MultiBackendProvisioner::new(
             session_service,
             external_backend,
@@ -677,6 +681,8 @@ impl MobBuilder {
             pending_spawn_tasks: BTreeMap::new(),
             edge_locks: Arc::new(super::edge_locks::EdgeLockRegistry::new()),
             lifecycle_tasks: tokio::task::JoinSet::new(),
+            session_service: handle_session_service,
+            spawn_policy: None,
         };
         tokio::spawn(actor.run(command_rx));
 

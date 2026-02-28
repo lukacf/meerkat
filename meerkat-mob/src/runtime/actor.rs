@@ -28,6 +28,7 @@ pub(super) struct PendingSpawn {
     meerkat_id: MeerkatId,
     prompt: String,
     runtime_mode: crate::MobRuntimeMode,
+    labels: std::collections::BTreeMap<String, String>,
     reply_tx: oneshot::Sender<Result<MemberRef, MobError>>,
 }
 
@@ -65,6 +66,8 @@ pub(super) struct MobActor {
     pub(super) pending_spawn_tasks: BTreeMap<u64, tokio::task::JoinHandle<()>>,
     pub(super) edge_locks: Arc<super::edge_locks::EdgeLockRegistry>,
     pub(super) lifecycle_tasks: tokio::task::JoinSet<()>,
+    pub(super) session_service: Arc<dyn MobSessionService>,
+    pub(super) spawn_policy: Option<Arc<dyn super::spawn_policy::SpawnPolicy>>,
 }
 
 impl MobActor {
@@ -82,6 +85,7 @@ impl MobActor {
             events: self.events.clone(),
             mcp_servers: self.mcp_servers.clone(),
             flow_streams: self.flow_streams.clone(),
+            session_service: self.session_service.clone(),
         }
     }
 
@@ -173,6 +177,7 @@ impl MobActor {
                                 host_mode: false,
                                 skill_references: None,
                                 flow_tool_overlay: None,
+                                additional_instructions: None,
                             },
                         )
                         .await
@@ -333,6 +338,7 @@ impl MobActor {
                         host_mode: true,
                         skill_references: None,
                         flow_tool_overlay: None,
+                        additional_instructions: None,
                     },
                 )
                 .await;
@@ -617,28 +623,13 @@ impl MobActor {
                 break;
             };
             match cmd {
-                MobCommand::Spawn {
-                    profile_name,
-                    meerkat_id,
-                    initial_message,
-                    runtime_mode,
-                    backend,
-                    reply_tx,
-                } => {
+                MobCommand::Spawn { spec, reply_tx } => {
                     if let Err(error) = self.require_state(&[MobState::Running, MobState::Creating])
                     {
                         let _ = reply_tx.send(Err(error));
                         continue;
                     }
-                    self.enqueue_spawn(
-                        profile_name,
-                        meerkat_id,
-                        initial_message,
-                        runtime_mode,
-                        backend,
-                        reply_tx,
-                    )
-                    .await;
+                    self.enqueue_spawn(spec, reply_tx).await;
                 }
                 MobCommand::SpawnProvisioned {
                     spawn_ticket,
@@ -671,6 +662,18 @@ impl MobActor {
                         MobState::Stopped,
                     ]) {
                         Ok(()) => self.handle_retire(meerkat_id).await,
+                        Err(error) => Err(error),
+                    };
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::Respawn {
+                    meerkat_id,
+                    initial_message,
+                    reply_tx,
+                } => {
+                    let result = match self.require_state(&[MobState::Running, MobState::Creating])
+                    {
+                        Ok(()) => self.handle_respawn(meerkat_id, initial_message).await,
                         Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);
@@ -710,6 +713,18 @@ impl MobActor {
                     let result = match self.require_state(&[MobState::Running, MobState::Creating])
                     {
                         Ok(()) => self.handle_external_turn(meerkat_id, message).await,
+                        Err(error) => Err(error),
+                    };
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::InjectAndSubscribe {
+                    meerkat_id,
+                    message,
+                    reply_tx,
+                } => {
+                    let result = match self.require_state(&[MobState::Running, MobState::Creating])
+                    {
+                        Ok(()) => self.handle_inject_and_subscribe(meerkat_id, message).await,
                         Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);
@@ -921,6 +936,10 @@ impl MobActor {
                     };
                     let _ = reply_tx.send(result);
                 }
+                MobCommand::SetSpawnPolicy { policy, reply_tx } => {
+                    self.spawn_policy = policy;
+                    let _ = reply_tx.send(());
+                }
                 MobCommand::Shutdown { reply_tx } => {
                     self.fail_all_pending_spawns("mob runtime is shutting down")
                         .await;
@@ -974,13 +993,19 @@ impl MobActor {
     /// Provisioning runs in parallel tasks; final actor commit stays serialized.
     async fn enqueue_spawn(
         &mut self,
-        profile_name: ProfileName,
-        meerkat_id: MeerkatId,
-        initial_message: Option<String>,
-        runtime_mode: Option<crate::MobRuntimeMode>,
-        backend: Option<MobBackendKind>,
+        spec: super::handle::SpawnMemberSpec,
         reply_tx: oneshot::Sender<Result<MemberRef, MobError>>,
     ) {
+        let super::handle::SpawnMemberSpec {
+            profile_name,
+            meerkat_id,
+            initial_message,
+            runtime_mode,
+            backend,
+            context,
+            labels,
+            resume_session_id,
+        } = spec;
         let prepare_result = async {
             if meerkat_id
                 .as_str()
@@ -1014,15 +1039,81 @@ impl MobActor {
                 .get(&profile_name)
                 .ok_or_else(|| MobError::ProfileNotFound(profile_name.clone()))?;
 
+            let selected_runtime_mode = runtime_mode.unwrap_or(profile.runtime_mode);
+
+            // ---------- Resume session fast-path ----------
+            // When resume_session_id is set, skip provisioning and go straight
+            // to finalization. The session must already exist and be usable.
+            if let Some(resume_id) = resume_session_id {
+                let member_ref = MemberRef::from_session_id(resume_id.clone());
+
+                // Validate the session exists and is active.
+                let is_active = self
+                    .provisioner
+                    .is_member_active(&member_ref)
+                    .await
+                    .map_err(|e| {
+                        MobError::Internal(format!(
+                            "resume session check failed for '{meerkat_id}': {e}"
+                        ))
+                    })?;
+                if !is_active.unwrap_or(false) {
+                    return Err(MobError::Internal(
+                        format!("resumed session '{resume_id}' not found or inactive for '{meerkat_id}'"),
+                    ));
+                }
+
+                // Validate event injector for autonomous mode.
+                if selected_runtime_mode == crate::MobRuntimeMode::AutonomousHost
+                    && self.provisioner.event_injector(&resume_id).await.is_none()
+                {
+                    return Err(MobError::Internal(format!(
+                        "resumed session '{resume_id}' has no event injector for autonomous '{meerkat_id}'"
+                    )));
+                }
+
+                // Validate comms if wiring rules exist.
+                let has_wiring = self.definition.wiring.auto_wire_orchestrator
+                    || !self.definition.wiring.role_wiring.is_empty();
+                if has_wiring
+                    && self
+                        .provisioner
+                        .comms_runtime(&member_ref)
+                        .await
+                        .is_none()
+                {
+                    return Err(MobError::Internal(format!(
+                        "resumed session '{resume_id}' has no comms runtime for '{meerkat_id}'"
+                    )));
+                }
+
+                let prompt = initial_message
+                    .clone()
+                    .unwrap_or_else(|| self.fallback_spawn_prompt(&profile_name, &meerkat_id));
+                let resolved_labels = labels.unwrap_or_default();
+
+                return Ok((
+                    profile_name,
+                    meerkat_id,
+                    prompt,
+                    selected_runtime_mode,
+                    resolved_labels,
+                    Some(member_ref),
+                    None,
+                ));
+            }
+
             let external_tools = self.external_tools_for_profile(profile)?;
-            let mut config = build::build_agent_config(
-                &self.definition.id,
-                &profile_name,
-                &meerkat_id,
+            let mut config = build::build_agent_config(build::BuildAgentConfigParams {
+                mob_id: &self.definition.id,
+                profile_name: &profile_name,
+                meerkat_id: &meerkat_id,
                 profile,
-                &self.definition,
+                definition: &self.definition,
                 external_tools,
-            )
+                context,
+                labels: labels.clone(),
+            })
             .await?;
             if let Some(ref client) = self.default_llm_client {
                 config.llm_client_override = Some(client.clone());
@@ -1035,36 +1126,74 @@ impl MobActor {
             let selected_backend = backend
                 .or(profile.backend)
                 .unwrap_or(self.definition.backend.default);
-            let selected_runtime_mode = runtime_mode.unwrap_or(profile.runtime_mode);
             let peer_name = format!("{}/{}/{}", self.definition.id, profile_name, meerkat_id);
             let provision_request = ProvisionMemberRequest {
                 create_session: req,
                 backend: selected_backend,
                 peer_name,
             };
+            let resolved_labels = labels.unwrap_or_default();
             Ok((
                 profile_name,
                 meerkat_id,
                 prompt,
                 selected_runtime_mode,
-                provision_request,
+                resolved_labels,
+                None::<MemberRef>,
+                Some(provision_request),
             ))
         }
         .await;
 
-        let (profile_name, meerkat_id, prompt, selected_runtime_mode, provision_request) =
-            match prepare_result {
-                Ok(prepared) => prepared,
-                Err(error) => {
-                    let _ = reply_tx.send(Err(error));
-                    return;
-                }
-            };
+        let (
+            profile_name,
+            meerkat_id,
+            prompt,
+            selected_runtime_mode,
+            resolved_labels,
+            resume_member_ref,
+            maybe_provision_request,
+        ) = match prepare_result {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let _ = reply_tx.send(Err(error));
+                return;
+            }
+        };
+
+        // ---------- Resume fast-path: skip async provisioning ----------
+        if let Some(member_ref) = resume_member_ref {
+            let provision =
+                PendingProvision::new(member_ref, meerkat_id.clone(), self.provisioner.clone());
+            // Go straight to finalization — no async provisioning task needed.
+            let result = self
+                .finalize_spawn_from_pending(
+                    &profile_name,
+                    &meerkat_id,
+                    selected_runtime_mode,
+                    prompt,
+                    resolved_labels,
+                    provision,
+                )
+                .await;
+            let _ = reply_tx.send(result);
+            return;
+        }
+
+        // Normal provisioning path — resume path already returned above.
+        let Some(provision_request) = maybe_provision_request else {
+            let _ = reply_tx.send(Err(MobError::Internal(
+                "provision_request missing for normal spawn path".into(),
+            )));
+            return;
+        };
+
         let pending = PendingSpawn {
             profile_name,
             meerkat_id,
             prompt,
             runtime_mode: selected_runtime_mode,
+            labels: resolved_labels,
             reply_tx,
         };
 
@@ -1176,6 +1305,7 @@ impl MobActor {
                 meerkat_id,
                 prompt,
                 runtime_mode,
+                labels,
                 reply_tx,
             } = pending;
             in_flight.push(async move {
@@ -1202,6 +1332,7 @@ impl MobActor {
                                 &meerkat_id,
                                 runtime_mode,
                                 prompt,
+                                labels,
                                 provision,
                             )
                             .await
@@ -1224,6 +1355,7 @@ impl MobActor {
         meerkat_id: &MeerkatId,
         runtime_mode: crate::MobRuntimeMode,
         prompt: String,
+        labels: std::collections::BTreeMap<String, String>,
         provision: PendingProvision,
     ) -> Result<MemberRef, MobError> {
         if let Err(append_error) = self
@@ -1236,6 +1368,7 @@ impl MobActor {
                     role: profile_name.clone(),
                     runtime_mode,
                     member_ref: provision.member_ref().clone(),
+                    labels: labels.clone(),
                 },
             })
             .await
@@ -1255,12 +1388,13 @@ impl MobActor {
 
         {
             let mut roster = self.roster.write().await;
-            let inserted = roster.add(
-                meerkat_id.clone(),
-                profile_name.clone(),
+            let inserted = roster.add(crate::roster::RosterAddEntry {
+                meerkat_id: meerkat_id.clone(),
+                profile: profile_name.clone(),
                 runtime_mode,
-                member_ref.clone(),
-            );
+                member_ref: member_ref.clone(),
+                labels,
+            });
             debug_assert!(
                 inserted,
                 "duplicate meerkat insert should be prevented before add()"
@@ -1424,6 +1558,64 @@ impl MobActor {
             Box::new(WarnAndContinue)
         };
         self.dispose_member(&ctx, policy.as_mut()).await;
+
+        Ok(())
+    }
+
+    /// Retire a member and re-spawn it with the same profile (non-blocking).
+    ///
+    /// Retire completes synchronously within this call. Spawn is enqueued
+    /// asynchronously — the new member becomes available when
+    /// `MeerkatSpawned` is emitted. Returns `Ok(())` once retire completes
+    /// and spawn is enqueued.
+    async fn handle_respawn(
+        &mut self,
+        meerkat_id: MeerkatId,
+        initial_message: Option<String>,
+    ) -> Result<(), MobError> {
+        // Capture profile before retire removes entry.
+        let profile_name = {
+            let roster = self.roster.read().await;
+            let entry = roster
+                .get(&meerkat_id)
+                .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?;
+            entry.profile.clone()
+        };
+
+        // Full retire (disposal pipeline).
+        self.handle_retire(meerkat_id.clone()).await?;
+
+        // Enqueue async spawn with same profile and meerkat ID.
+        // The spawn result is delivered via MeerkatSpawned event.
+        let (spawn_reply_tx, spawn_reply_rx) = oneshot::channel();
+        self.enqueue_spawn(
+            super::handle::SpawnMemberSpec {
+                profile_name,
+                meerkat_id: meerkat_id.clone(),
+                initial_message,
+                runtime_mode: None,
+                backend: None,
+                context: None,
+                labels: None,
+                resume_session_id: None,
+            },
+            spawn_reply_tx,
+        )
+        .await;
+
+        // Fire-and-forget: log spawn failures but don't block the caller.
+        let mid = meerkat_id.clone();
+        self.lifecycle_tasks.spawn(async move {
+            match spawn_reply_rx.await {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    tracing::error!(meerkat_id = %mid, error = %e, "respawn: spawn failed after retire");
+                }
+                Err(_) => {
+                    tracing::error!(meerkat_id = %mid, "respawn: spawn reply dropped");
+                }
+            }
+        });
 
         Ok(())
     }
@@ -1831,7 +2023,7 @@ impl MobActor {
                     mob_id: mob_id.clone(),
                     timestamp: None,
                     kind: MobEventKind::MobCreated {
-                        definition: self.definition.as_ref().clone(),
+                        definition: Box::new(self.definition.as_ref().clone()),
                     },
                 },
                 NewMobEvent {
@@ -2006,18 +2198,79 @@ impl MobActor {
     }
 
     /// P1-T10: external_turn enforces addressability.
+    ///
+    /// When the target meerkat is not in the roster and a [`SpawnPolicy`] is
+    /// set, the policy is consulted. If it resolves a [`SpawnSpec`], the
+    /// member is auto-spawned and the message is delivered after provisioning
+    /// completes.
     async fn handle_external_turn(
-        &self,
+        &mut self,
         meerkat_id: MeerkatId,
         message: String,
     ) -> Result<(), MobError> {
         // Look up the entry
         let entry = {
             let roster = self.roster.read().await;
-            roster
-                .get(&meerkat_id)
-                .cloned()
-                .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?
+            roster.get(&meerkat_id).cloned()
+        };
+        let entry = match entry {
+            Some(e) => e,
+            None => {
+                // Consult spawn policy for auto-provisioning
+                if let Some(ref policy) = self.spawn_policy
+                    && let Some(spec) = policy.resolve(&meerkat_id).await
+                {
+                    let (spawn_reply_tx, spawn_reply_rx) = oneshot::channel();
+                    self.enqueue_spawn(
+                        super::handle::SpawnMemberSpec {
+                            profile_name: spec.profile,
+                            meerkat_id: meerkat_id.clone(),
+                            initial_message: None,
+                            runtime_mode: spec.runtime_mode,
+                            backend: None,
+                            context: None,
+                            labels: None,
+                            resume_session_id: None,
+                        },
+                        spawn_reply_tx,
+                    )
+                    .await;
+
+                    // Schedule deferred message delivery after spawn completes.
+                    let command_tx = self.command_tx.clone();
+                    let target_id = meerkat_id.clone();
+                    self.lifecycle_tasks.spawn(async move {
+                        if let Ok(Ok(_)) = spawn_reply_rx.await {
+                            let (reply_tx, reply_rx) = oneshot::channel();
+                            let _ = command_tx
+                                .send(MobCommand::ExternalTurn {
+                                    meerkat_id: target_id.clone(),
+                                    message,
+                                    reply_tx,
+                                })
+                                .await;
+                            match reply_rx.await {
+                                Ok(Ok(())) => {}
+                                Ok(Err(e)) => {
+                                    tracing::error!(
+                                        meerkat_id = %target_id,
+                                        error = %e,
+                                        "deferred delivery after auto-spawn failed"
+                                    );
+                                }
+                                Err(_) => {
+                                    tracing::error!(
+                                        meerkat_id = %target_id,
+                                        "deferred delivery channel dropped before response"
+                                    );
+                                }
+                            }
+                        }
+                    });
+                    return Ok(());
+                }
+                return Err(MobError::MeerkatNotFound(meerkat_id));
+            }
         };
 
         // Check external_addressable
@@ -2094,10 +2347,83 @@ impl MobActor {
                     host_mode: false,
                     skill_references: None,
                     flow_tool_overlay: None,
+                    additional_instructions: None,
                 };
                 self.provisioner.start_turn(&entry.member_ref, req).await
             }
         }
+    }
+
+    /// Inject a message into an autonomous member and return a subscription
+    /// for streaming interaction-scoped events.
+    ///
+    /// Like `handle_external_turn`, this enforces lifecycle state and external
+    /// addressability. Unlike `handle_external_turn`, it does **not** support
+    /// spawn-policy auto-provisioning for unknown targets (the subscription
+    /// cannot be deferred through a lifecycle task). Returns
+    /// `UnsupportedForMode` for `TurnDriven` members.
+    async fn handle_inject_and_subscribe(
+        &mut self,
+        meerkat_id: MeerkatId,
+        message: String,
+    ) -> Result<meerkat_core::InteractionSubscription, MobError> {
+        // Look up the entry (mirrors handle_external_turn)
+        let entry = {
+            let roster = self.roster.read().await;
+            roster.get(&meerkat_id).cloned()
+        };
+        let entry = match entry {
+            Some(e) => e,
+            None => {
+                // Consult spawn policy — but unlike ExternalTurn we can't defer
+                // the subscription through a lifecycle task, so reject cleanly.
+                return Err(MobError::MeerkatNotFound(meerkat_id));
+            }
+        };
+
+        // Enforce external_addressable
+        let profile = self
+            .definition
+            .profiles
+            .get(&entry.profile)
+            .ok_or_else(|| MobError::ProfileNotFound(entry.profile.clone()))?;
+
+        if !profile.external_addressable {
+            return Err(MobError::NotExternallyAddressable(meerkat_id));
+        }
+
+        // Only AutonomousHost supports inject_with_subscription
+        if entry.runtime_mode != crate::MobRuntimeMode::AutonomousHost {
+            return Err(MobError::UnsupportedForMode {
+                mode: entry.runtime_mode,
+                reason: "inject_and_subscribe requires autonomous_host mode".into(),
+            });
+        }
+
+        let session_id = entry.member_ref.session_id().ok_or_else(|| {
+            MobError::Internal(format!(
+                "autonomous dispatch requires session-backed member ref for '{}'",
+                entry.meerkat_id
+            ))
+        })?;
+        let injector = self
+            .provisioner
+            .event_injector(session_id)
+            .await
+            .ok_or_else(|| {
+                MobError::Internal(format!(
+                    "missing event injector for autonomous member '{}'",
+                    entry.meerkat_id
+                ))
+            })?;
+        injector
+            .inject_with_subscription(message, meerkat_core::PlainEventSource::Rpc)
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "inject_and_subscribe failed for '{}': {}",
+                    entry.meerkat_id, error
+                ))
+            })
     }
 
     async fn handle_run_flow(
@@ -2507,6 +2833,7 @@ impl MobActor {
                 runtime_mode: crate::MobRuntimeMode::TurnDriven,
                 state: crate::roster::MemberState::Active,
                 wired_to: std::collections::BTreeSet::new(),
+                labels: std::collections::BTreeMap::new(),
             }),
             retiring_comms: spawned_comms.clone(),
             retiring_key: spawned_comms.as_ref().and_then(|c| c.public_key()),

@@ -2,20 +2,20 @@
 
 use std::sync::Arc;
 
-#[cfg(feature = "comms")]
+#[cfg(any(feature = "comms", feature = "mob"))]
 use futures::StreamExt;
 #[cfg(feature = "comms")]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "comms")]
+#[cfg(any(feature = "comms", feature = "mob"))]
 use std::collections::HashMap;
-#[cfg(feature = "comms")]
+#[cfg(any(feature = "comms", feature = "mob"))]
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
-#[cfg(feature = "comms")]
+#[cfg(any(feature = "comms", feature = "mob"))]
 use tokio::sync::oneshot;
-#[cfg(feature = "comms")]
+#[cfg(any(feature = "comms", feature = "mob"))]
 use tokio::task::JoinHandle;
-#[cfg(feature = "comms")]
+#[cfg(any(feature = "comms", feature = "mob"))]
 use uuid::Uuid;
 
 use meerkat_core::ConfigStore;
@@ -80,6 +80,26 @@ impl NotificationSink {
         let notification = RpcNotification::new("comms/stream_event", params);
         let _ = self.tx.send(notification).await;
     }
+
+    #[cfg(feature = "mob")]
+    /// Emit a mob stream event as a JSON-RPC notification.
+    ///
+    /// For mob-wide streams the event is an [`AttributedEvent`] (source + profile + envelope).
+    /// For per-member streams the event is the raw [`EventEnvelope<AgentEvent>`].
+    async fn emit_mob_stream_event(
+        &self,
+        stream_id: &Uuid,
+        sequence: u64,
+        event: &serde_json::Value,
+    ) {
+        let params = serde_json::json!({
+            "stream_id": stream_id.to_string(),
+            "sequence": sequence,
+            "event": event,
+        });
+        let notification = RpcNotification::new("mob/stream_event", params);
+        let _ = self.tx.send(notification).await;
+    }
 }
 
 #[cfg(feature = "comms")]
@@ -105,12 +125,12 @@ impl StreamScopeState {
     }
 }
 
-#[cfg(feature = "comms")]
+#[cfg(any(feature = "comms", feature = "mob"))]
 struct StreamForwarder {
     state: StreamForwarderState,
 }
 
-#[cfg(feature = "comms")]
+#[cfg(any(feature = "comms", feature = "mob"))]
 enum StreamForwarderState {
     Active {
         stop_tx: Option<oneshot::Sender<()>>,
@@ -134,6 +154,8 @@ pub struct MethodRouter {
     mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
     #[cfg(feature = "comms")]
     active_streams: Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
+    #[cfg(feature = "mob")]
+    active_mob_streams: Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
 }
 
 impl MethodRouter {
@@ -152,6 +174,8 @@ impl MethodRouter {
             mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
             #[cfg(feature = "comms")]
             active_streams: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(feature = "mob")]
+            active_mob_streams: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -195,7 +219,7 @@ impl MethodRouter {
                 )
                 .await
             }
-            "session/list" => handlers::session::handle_list(id, &self.runtime).await,
+            "session/list" => handlers::session::handle_list(id, params, &self.runtime).await,
             "session/read" => handlers::session::handle_read(id, params, &self.runtime).await,
             "session/archive" => handlers::session::handle_archive(id, params, &self.runtime).await,
             "turn/start" => {
@@ -209,6 +233,10 @@ impl MethodRouter {
             "mob/tools" => handlers::mob::handle_tools(id).await,
             #[cfg(feature = "mob")]
             "mob/call" => handlers::mob::handle_call(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/stream_open" => self.handle_mob_stream_open(id, params).await,
+            #[cfg(feature = "mob")]
+            "mob/stream_close" => self.handle_mob_stream_close(id, params).await,
             #[cfg(feature = "comms")]
             "comms/send" => handlers::comms::handle_send(id, params, &self.runtime).await,
             #[cfg(feature = "comms")]
@@ -476,6 +504,226 @@ impl MethodRouter {
             }),
         )
     }
+
+    #[cfg(feature = "mob")]
+    async fn handle_mob_stream_open(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        use serde::Deserialize;
+        use serde_json::json;
+
+        #[derive(Deserialize)]
+        struct MobStreamOpenParams {
+            mob_id: String,
+            #[serde(default)]
+            member_id: Option<String>,
+        }
+
+        let params = match handlers::parse_params::<MobStreamOpenParams>(params) {
+            Ok(p) => p,
+            Err(resp) => return resp,
+        };
+
+        let mob_id = meerkat_mob::MobId::from(params.mob_id.as_str());
+        let handle: meerkat_mob::MobHandle = match self.mob_state.handle_for(&mob_id).await {
+            Ok(h) => h,
+            Err(e) => {
+                return RpcResponse::error(
+                    id,
+                    error::INVALID_PARAMS,
+                    format!("Mob not found: {e}"),
+                );
+            }
+        };
+
+        let stream_id = Uuid::new_v4();
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        let notification_sink = self.notification_sink.clone();
+        let active_mob_streams = self.active_mob_streams.clone();
+        let stream_id_for_task = stream_id;
+
+        if let Some(member_id_str) = params.member_id {
+            // Per-member stream: subscribe to a specific member's agent events.
+            let meerkat_id = meerkat_mob::MeerkatId::from(member_id_str.as_str());
+            let stream: meerkat_core::comms::EventStream =
+                match handle.subscribe_agent_events(&meerkat_id).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return RpcResponse::error(
+                            id,
+                            error::INVALID_PARAMS,
+                            format!("Failed to subscribe to member events: {e}"),
+                        );
+                    }
+                };
+
+            let task = tokio::spawn(async move {
+                let mut stream = stream;
+                let mut stop_rx = stop_rx;
+                let mut sequence = 0u64;
+
+                loop {
+                    tokio::select! {
+                        _ = &mut stop_rx => {
+                            break;
+                        }
+                        event = stream.next() => {
+                            match event {
+                                Some(envelope) => {
+                                    sequence += 1;
+                                    let event_json = serde_json::to_value(&envelope)
+                                        .unwrap_or(serde_json::Value::Null);
+                                    notification_sink
+                                        .emit_mob_stream_event(
+                                            &stream_id_for_task,
+                                            sequence,
+                                            &event_json,
+                                        )
+                                        .await;
+                                }
+                                None => break,
+                            }
+                        }
+                    }
+                }
+
+                let mut streams = active_mob_streams.lock().await;
+                if streams
+                    .get(&stream_id_for_task)
+                    .is_some_and(|s| matches!(s.state, StreamForwarderState::Active { .. }))
+                {
+                    streams.remove(&stream_id_for_task);
+                }
+            });
+
+            self.active_mob_streams.lock().await.insert(
+                stream_id,
+                StreamForwarder {
+                    state: StreamForwarderState::Active {
+                        stop_tx: Some(stop_tx),
+                        task,
+                    },
+                },
+            );
+        } else {
+            // Mob-wide stream: subscribe to all members' events (attributed).
+            let mut router_handle = handle.subscribe_mob_events();
+
+            let task = tokio::spawn(async move {
+                let mut stop_rx = stop_rx;
+                let mut sequence = 0u64;
+
+                loop {
+                    tokio::select! {
+                        _ = &mut stop_rx => {
+                            break;
+                        }
+                        event = router_handle.event_rx.recv() => {
+                            match event {
+                                Some(attributed) => {
+                                    sequence += 1;
+                                    let event_json = serde_json::to_value(&attributed)
+                                        .unwrap_or(serde_json::Value::Null);
+                                    notification_sink
+                                        .emit_mob_stream_event(
+                                            &stream_id_for_task,
+                                            sequence,
+                                            &event_json,
+                                        )
+                                        .await;
+                                }
+                                None => break,
+                            }
+                        }
+                    }
+                }
+
+                let mut streams = active_mob_streams.lock().await;
+                if streams
+                    .get(&stream_id_for_task)
+                    .is_some_and(|s| matches!(s.state, StreamForwarderState::Active { .. }))
+                {
+                    streams.remove(&stream_id_for_task);
+                }
+            });
+
+            self.active_mob_streams.lock().await.insert(
+                stream_id,
+                StreamForwarder {
+                    state: StreamForwarderState::Active {
+                        stop_tx: Some(stop_tx),
+                        task,
+                    },
+                },
+            );
+        }
+
+        RpcResponse::success(
+            id,
+            json!({
+                "stream_id": stream_id.to_string(),
+                "opened": true,
+            }),
+        )
+    }
+
+    #[cfg(feature = "mob")]
+    async fn handle_mob_stream_close(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        use serde::Deserialize;
+        use serde_json::json;
+
+        #[derive(Deserialize)]
+        struct MobStreamCloseParams {
+            stream_id: String,
+        }
+
+        let params = match handlers::parse_params::<MobStreamCloseParams>(params) {
+            Ok(p) => p,
+            Err(resp) => return resp,
+        };
+
+        let stream_id = match Uuid::parse_str(&params.stream_id) {
+            Ok(stream_id) => stream_id,
+            Err(_) => {
+                return RpcResponse::error(
+                    id,
+                    error::INVALID_PARAMS,
+                    format!("Invalid stream_id: {}", params.stream_id),
+                );
+            }
+        };
+
+        let mut active_mob_streams = self.active_mob_streams.lock().await;
+        let already_closed = match active_mob_streams.get_mut(&stream_id) {
+            Some(stream) => match &mut stream.state {
+                StreamForwarderState::Active { stop_tx, task } => {
+                    if let Some(stop_tx) = stop_tx.take() {
+                        let _ = stop_tx.send(());
+                    }
+                    task.abort();
+                    stream.state = StreamForwarderState::Closed;
+                    false
+                }
+                StreamForwarderState::Closed => true,
+            },
+            None => false,
+        };
+
+        RpcResponse::success(
+            id,
+            json!({
+                "stream_id": stream_id.to_string(),
+                "closed": true,
+                "already_closed": already_closed,
+            }),
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -717,12 +965,16 @@ mod tests {
             assert!(method_names.contains(&"mob/prefabs"));
             assert!(method_names.contains(&"mob/tools"));
             assert!(method_names.contains(&"mob/call"));
+            assert!(method_names.contains(&"mob/stream_open"));
+            assert!(method_names.contains(&"mob/stream_close"));
         }
         #[cfg(not(feature = "mob"))]
         {
             assert!(!method_names.contains(&"mob/prefabs"));
             assert!(!method_names.contains(&"mob/tools"));
             assert!(!method_names.contains(&"mob/call"));
+            assert!(!method_names.contains(&"mob/stream_open"));
+            assert!(!method_names.contains(&"mob/stream_close"));
         }
         assert!(method_names.contains(&"config/get"));
         #[cfg(feature = "comms")]
@@ -797,6 +1049,94 @@ mod tests {
             .unwrap();
         let created = result_value(&create_resp);
         assert!(created["mob_id"].as_str().is_some());
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_stream_open_close_roundtrip() {
+        let (router, _notif_rx) = test_router().await;
+
+        // Create a mob first.
+        let create_resp = router
+            .dispatch(make_request(
+                "mob/call",
+                serde_json::json!({
+                    "name": "mob_create",
+                    "arguments": { "prefab": "coding_swarm" }
+                }),
+            ))
+            .await
+            .unwrap();
+        let created = result_value(&create_resp);
+        let mob_id = created["mob_id"].as_str().unwrap().to_string();
+
+        // Open a mob-wide stream.
+        let open_resp = router
+            .dispatch(make_request(
+                "mob/stream_open",
+                serde_json::json!({ "mob_id": mob_id }),
+            ))
+            .await
+            .unwrap();
+        let opened = result_value(&open_resp);
+        assert_eq!(opened["opened"], true);
+        let stream_id = opened["stream_id"].as_str().unwrap().to_string();
+
+        // Close the stream.
+        let close_resp = router
+            .dispatch(make_request(
+                "mob/stream_close",
+                serde_json::json!({ "stream_id": stream_id }),
+            ))
+            .await
+            .unwrap();
+        let closed = result_value(&close_resp);
+        assert_eq!(closed["closed"], true);
+        assert_eq!(closed["already_closed"], false);
+
+        // Idempotent: second close succeeds with already_closed=true.
+        let close_again_resp = router
+            .dispatch(make_request(
+                "mob/stream_close",
+                serde_json::json!({ "stream_id": stream_id }),
+            ))
+            .await
+            .unwrap();
+        let closed_again = result_value(&close_again_resp);
+        assert_eq!(closed_again["closed"], true);
+        assert_eq!(closed_again["already_closed"], true);
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_stream_close_unknown_returns_not_already_closed() {
+        let (router, _notif_rx) = test_router().await;
+
+        let close_resp = router
+            .dispatch(make_request(
+                "mob/stream_close",
+                serde_json::json!({ "stream_id": "00000000-0000-0000-0000-000000000000" }),
+            ))
+            .await
+            .unwrap();
+        let closed = result_value(&close_resp);
+        assert_eq!(closed["closed"], true);
+        assert_eq!(closed["already_closed"], false);
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_stream_open_unknown_mob_returns_error() {
+        let (router, _notif_rx) = test_router().await;
+
+        let open_resp = router
+            .dispatch(make_request(
+                "mob/stream_open",
+                serde_json::json!({ "mob_id": "nonexistent-mob" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(error_code(&open_resp), error::INVALID_PARAMS);
     }
 
     #[tokio::test]

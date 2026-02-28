@@ -7,8 +7,10 @@ use crate::definition::MobDefinition;
 use crate::ids::{FlowId, MeerkatId, MobId, ProfileName, RunId, StepId, TaskId};
 use crate::runtime_mode::MobRuntimeMode;
 use chrono::{DateTime, Utc};
+use meerkat_core::event::{AgentEvent, EventEnvelope};
 use meerkat_core::types::SessionId;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// A mob event with metadata assigned by the event store.
@@ -165,7 +167,7 @@ pub struct MobEventCompat {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MobEventKindCompat {
     MobCreated {
-        definition: MobDefinition,
+        definition: Box<MobDefinition>,
     },
     MobCompleted,
     MobReset,
@@ -178,6 +180,8 @@ pub enum MobEventKindCompat {
         session_id: Option<SessionId>,
         #[serde(default)]
         member_ref: Option<MemberRef>,
+        #[serde(default)]
+        labels: BTreeMap<String, String>,
     },
     MeerkatRetired {
         meerkat_id: MeerkatId,
@@ -325,6 +329,7 @@ impl TryFrom<MobEventCompat> for MobEvent {
                 runtime_mode,
                 session_id,
                 member_ref,
+                labels,
             } => MobEventKind::MeerkatSpawned {
                 member_ref: upcast_member_ref(
                     "meerkat_spawned",
@@ -335,6 +340,7 @@ impl TryFrom<MobEventCompat> for MobEvent {
                 meerkat_id,
                 role,
                 runtime_mode,
+                labels,
             },
             MobEventKindCompat::MeerkatRetired {
                 meerkat_id,
@@ -477,7 +483,7 @@ pub enum MobEventKind {
     /// Mob was created with the given definition.
     MobCreated {
         /// Full mob definition (serializable form, excluding runtime-only state).
-        definition: MobDefinition,
+        definition: Box<MobDefinition>,
     },
     /// Mob reached terminal completed state.
     MobCompleted,
@@ -494,6 +500,9 @@ pub enum MobEventKind {
         runtime_mode: MobRuntimeMode,
         /// Backend-neutral member identity created for this meerkat.
         member_ref: MemberRef,
+        /// Application-defined labels for this member.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        labels: BTreeMap<String, String>,
     },
     /// A meerkat was retired and its session archived.
     MeerkatRetired {
@@ -600,6 +609,22 @@ pub enum MobEventKind {
     },
 }
 
+/// An agent event attributed to a specific mob member.
+///
+/// Wraps the full [`EventEnvelope<AgentEvent>`] to preserve event metadata
+/// (`event_id`, `source_id`, `seq`, `mob_id`, `timestamp_ms`) without
+/// information loss. Used by the mob event bus to tag session-level events
+/// with mob-level attribution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttributedEvent {
+    /// The meerkat that produced this event.
+    pub source: MeerkatId,
+    /// Profile name of the source meerkat.
+    pub profile: ProfileName,
+    /// The original enveloped agent event from the session stream.
+    pub envelope: EventEnvelope<AgentEvent>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -643,6 +668,8 @@ mod tests {
             topology: None,
             supervisor: None,
             limits: None,
+            spawn_policy: None,
+            event_router: None,
         }
     }
 
@@ -655,7 +682,7 @@ mod tests {
     #[test]
     fn test_mob_created_roundtrip() {
         roundtrip(&MobEventKind::MobCreated {
-            definition: sample_definition(),
+            definition: Box::new(sample_definition()),
         });
     }
 
@@ -676,6 +703,7 @@ mod tests {
             role: ProfileName::from("worker"),
             runtime_mode: MobRuntimeMode::AutonomousHost,
             member_ref: MemberRef::from_session_id(SessionId::from_uuid(Uuid::nil())),
+            labels: BTreeMap::new(),
         });
     }
 

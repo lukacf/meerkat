@@ -338,4 +338,59 @@ mod tests {
         assert!(skills_pos < config_pos);
         assert!(config_pos < dispatcher_pos);
     }
+
+    // --- Additional instructions via extra_sections ---
+
+    #[tokio::test]
+    async fn test_additional_instructions_appear_after_skills_before_tool_instructions() {
+        let mut config = default_config();
+        config.agent.tool_instructions = Some("Config tools".to_string());
+
+        let result = assemble_system_prompt(
+            &config,
+            None,
+            None,
+            &[
+                "Skills section",
+                "Additional instruction 1",
+                "Additional instruction 2",
+            ],
+            "Dispatcher tools",
+        )
+        .await;
+
+        let skills_pos = result.find("Skills section").unwrap();
+        let instr1_pos = result.find("Additional instruction 1").unwrap();
+        let instr2_pos = result.find("Additional instruction 2").unwrap();
+        let config_pos = result.find("Config tools").unwrap();
+        let dispatcher_pos = result.find("Dispatcher tools").unwrap();
+
+        assert!(skills_pos < instr1_pos, "instructions after skills");
+        assert!(instr1_pos < instr2_pos, "instructions preserve order");
+        assert!(instr2_pos < config_pos, "instructions before config tools");
+        assert!(
+            config_pos < dispatcher_pos,
+            "config tools before dispatcher"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_additional_instructions_not_after_tool_instructions() {
+        let config = default_config();
+        let result = assemble_system_prompt(
+            &config,
+            None,
+            None,
+            &["My additional instruction"],
+            "Dispatcher tools block",
+        )
+        .await;
+
+        let instruction_pos = result.find("My additional instruction").unwrap();
+        let dispatcher_pos = result.find("Dispatcher tools block").unwrap();
+        assert!(
+            instruction_pos < dispatcher_pos,
+            "additional instructions must NOT appear after dispatcher tool instructions"
+        );
+    }
 }

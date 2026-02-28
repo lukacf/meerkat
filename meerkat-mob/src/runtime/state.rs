@@ -59,11 +59,7 @@ impl std::fmt::Display for MobState {
 /// Commands sent from [`MobHandle`] to the [`MobActor`] for serialized processing.
 pub(super) enum MobCommand {
     Spawn {
-        profile_name: ProfileName,
-        meerkat_id: MeerkatId,
-        initial_message: Option<String>,
-        runtime_mode: Option<crate::MobRuntimeMode>,
-        backend: Option<MobBackendKind>,
+        spec: super::handle::SpawnMemberSpec,
         reply_tx: oneshot::Sender<Result<MemberRef, MobError>>,
     },
     SpawnProvisioned {
@@ -72,6 +68,11 @@ pub(super) enum MobCommand {
     },
     Retire {
         meerkat_id: MeerkatId,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    Respawn {
+        meerkat_id: MeerkatId,
+        initial_message: Option<String>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     RetireAll {
@@ -91,6 +92,11 @@ pub(super) enum MobCommand {
         meerkat_id: MeerkatId,
         message: String,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    InjectAndSubscribe {
+        meerkat_id: MeerkatId,
+        message: String,
+        reply_tx: oneshot::Sender<Result<meerkat_core::InteractionSubscription, MobError>>,
     },
     InternalTurn {
         meerkat_id: MeerkatId,
@@ -144,6 +150,10 @@ pub(super) enum MobCommand {
         status: TaskStatus,
         owner: Option<MeerkatId>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    SetSpawnPolicy {
+        policy: Option<Arc<dyn super::spawn_policy::SpawnPolicy>>,
+        reply_tx: oneshot::Sender<()>,
     },
     Shutdown {
         reply_tx: oneshot::Sender<Result<(), MobError>>,

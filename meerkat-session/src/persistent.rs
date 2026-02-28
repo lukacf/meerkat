@@ -16,10 +16,11 @@ use meerkat_core::service::{
 };
 use meerkat_core::types::{RunResult, SessionId};
 use meerkat_store::SessionStore;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use crate::SESSION_LABELS_KEY;
 use crate::ephemeral::{EphemeralSessionService, SessionAgentBuilder};
 
 /// Shared gate between the checkpointer and archive.
@@ -85,6 +86,30 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     checkpointer_gates: Mutex<HashMap<SessionId, Arc<CheckpointerGate>>>,
 }
 
+/// Extract session labels from a metadata map.
+///
+/// Looks for `SESSION_LABELS_KEY` and deserializes the value as
+/// `BTreeMap<String, String>`. Returns an empty map on missing or
+/// malformed data.
+fn extract_labels_from_metadata(
+    metadata: &serde_json::Map<String, serde_json::Value>,
+) -> BTreeMap<String, String> {
+    match metadata.get(SESSION_LABELS_KEY) {
+        Some(v) => match serde_json::from_value::<BTreeMap<String, String>>(v.clone()) {
+            Ok(labels) => labels,
+            Err(e) => {
+                tracing::warn!(
+                    key = SESSION_LABELS_KEY,
+                    error = %e,
+                    "failed to deserialize session labels from metadata"
+                );
+                BTreeMap::new()
+            }
+        },
+        None => BTreeMap::new(),
+    }
+}
+
 impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// Create a new persistent session service.
     pub fn new(builder: B, max_sessions: usize, store: Arc<dyn SessionStore>) -> Self {
@@ -102,6 +127,12 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         &self,
         mut req: CreateSessionRequest,
     ) -> Result<RunResult, SessionError> {
+        // Capture labels before req is consumed — labels live on the
+        // SessionHandle in the ephemeral service, but export_session()
+        // returns a raw Session without them. We inject labels into the
+        // persisted session's metadata so they survive restarts.
+        let req_labels = req.labels.clone();
+
         // Inject a checkpointer for all sessions — the agent only calls it
         // inside the host-mode loop, so non-host sessions pay zero cost.
         // This must be unconditional because mob agents create sessions with
@@ -134,6 +165,24 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         checkpointer
             .last_saved_len
             .store(saved_len, std::sync::atomic::Ordering::Release);
+
+        // Inject labels into the persisted session metadata so they survive
+        // restarts. Labels are stored on SessionHandle.labels in-memory but
+        // export_session() returns a raw Session without them.
+        if let Some(ref labels) = req_labels
+            && !labels.is_empty()
+            && let Ok(Some(mut session)) = self.store.load(&result.session_id).await
+            && let Ok(labels_value) = serde_json::to_value(labels)
+        {
+            session.set_metadata(SESSION_LABELS_KEY, labels_value);
+            if let Err(e) = self.store.save(&session).await {
+                tracing::warn!(
+                    session_id = %result.session_id,
+                    error = %e,
+                    "failed to persist session labels"
+                );
+            }
+        }
 
         Ok(result)
     }
@@ -168,6 +217,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
                     .map_err(|e| SessionError::Store(Box::new(e)))?
                     .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
 
+                let labels = extract_labels_from_metadata(session.metadata());
                 Ok(SessionView {
                     state: SessionInfo {
                         session_id: session.id().clone(),
@@ -176,6 +226,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
                         message_count: session.messages().len(),
                         is_active: false,
                         last_assistant_text: session.last_assistant_text(),
+                        labels,
                     },
                     billing: SessionUsage {
                         total_tokens: session.total_tokens(),
@@ -201,6 +252,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
 
         for meta in stored {
             if !live_ids.contains(&meta.id) {
+                let labels = extract_labels_from_metadata(&meta.metadata);
                 summaries.push(SessionSummary {
                     session_id: meta.id,
                     created_at: meta.created_at,
@@ -208,8 +260,18 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
                     message_count: meta.message_count,
                     total_tokens: meta.total_tokens,
                     is_active: false,
+                    labels,
                 });
             }
+        }
+
+        // Filter by labels if specified (all k/v pairs must match).
+        if let Some(ref filter_labels) = query.labels {
+            summaries.retain(|s| {
+                filter_labels
+                    .iter()
+                    .all(|(k, v)| s.labels.get(k) == Some(v))
+            });
         }
 
         // Apply pagination

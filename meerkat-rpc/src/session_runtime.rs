@@ -9,6 +9,7 @@
 //! `SessionId`; the first `start_turn()` call for that ID materializes the
 //! session inside the service (which runs the first turn).
 
+use std::collections::BTreeMap;
 #[cfg(feature = "mcp")]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock as StdRwLock};
@@ -22,7 +23,9 @@ use meerkat::{
 use meerkat_client::LlmClient;
 use meerkat_core::EventEnvelope;
 use meerkat_core::event::AgentEvent;
-use meerkat_core::service::{CreateSessionRequest, SessionError, SessionService, StartTurnRequest};
+use meerkat_core::service::{
+    CreateSessionRequest, SessionError, SessionQuery, SessionService, StartTurnRequest,
+};
 use meerkat_core::skills::{SkillError, SourceIdentityRegistry};
 use meerkat_core::types::{RunResult, SessionId};
 #[cfg(feature = "mcp")]
@@ -80,10 +83,17 @@ impl SessionState {
 }
 
 /// Summary information about a session.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionInfo {
     pub session_id: SessionId,
     pub state: SessionState,
+    pub labels: BTreeMap<String, String>,
+}
+
+/// Staged session data: build config + metadata not yet materialized in the service.
+struct PendingSession {
+    build_config: AgentBuildConfig,
+    labels: Option<BTreeMap<String, String>>,
 }
 
 // FactoryAgent and FactoryAgentBuilder are imported from meerkat::service_factory.
@@ -100,7 +110,7 @@ pub struct SessionRuntime {
     service: PersistentSessionService<FactoryAgentBuilder>,
     /// Sessions that have been "created" (ID returned to caller) but not yet
     /// materialized in the service. The first `start_turn` call promotes them.
-    pending: RwLock<IndexMap<SessionId, AgentBuildConfig>>,
+    pending: RwLock<IndexMap<SessionId, PendingSession>>,
     max_sessions: usize,
     /// Override LLM client for all sessions (primarily for testing).
     pub default_llm_client: Option<Arc<dyn LlmClient>>,
@@ -239,6 +249,7 @@ impl SessionRuntime {
     pub async fn create_session(
         &self,
         build_config: AgentBuildConfig,
+        labels: Option<BTreeMap<String, String>>,
     ) -> Result<SessionId, RpcError> {
         // Check combined capacity (pending + active).
         {
@@ -276,7 +287,13 @@ impl SessionRuntime {
 
         {
             let mut pending = self.pending.write().await;
-            pending.insert(session_id.clone(), build_config);
+            pending.insert(
+                session_id.clone(),
+                PendingSession {
+                    build_config,
+                    labels,
+                },
+            );
         }
 
         Ok(session_id)
@@ -293,6 +310,7 @@ impl SessionRuntime {
         event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
         flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
+        additional_instructions: Option<Vec<String>>,
     ) -> Result<RunResult, RpcError> {
         #[allow(unused_mut)]
         let mut turn_prompt = prompt;
@@ -301,12 +319,16 @@ impl SessionRuntime {
             .await?;
 
         // Check if this is a pending (not-yet-materialized) session.
-        let pending_config = {
+        let pending_session = {
             let mut pending = self.pending.write().await;
             pending.swap_remove(session_id)
         };
 
-        if let Some(mut build_config) = pending_config {
+        if let Some(PendingSession {
+            mut build_config,
+            labels,
+        }) = pending_session
+        {
             // Inject default LLM client if the caller didn't provide one.
             if build_config.llm_client_override.is_none()
                 && let Some(ref client) = self.default_llm_client
@@ -339,6 +361,7 @@ impl SessionRuntime {
                 skill_references: skill_references.clone(),
                 initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
                 build: Some(build),
+                labels,
             };
 
             let result = self
@@ -357,6 +380,7 @@ impl SessionRuntime {
             host_mode: false,
             skill_references,
             flow_tool_overlay,
+            additional_instructions,
         };
 
         self.service
@@ -386,12 +410,16 @@ impl SessionRuntime {
     }
 
     /// Get the current state of a session, or `None` if the session does not exist.
-    pub async fn session_state(&self, session_id: &SessionId) -> Option<SessionState> {
+    pub async fn session_state(&self, session_id: &SessionId) -> Option<SessionInfo> {
         // Check pending sessions first.
         {
             let pending = self.pending.read().await;
-            if pending.contains_key(session_id) {
-                return Some(SessionState::Idle);
+            if let Some(ps) = pending.get(session_id) {
+                return Some(SessionInfo {
+                    session_id: session_id.clone(),
+                    state: SessionState::Idle,
+                    labels: ps.labels.clone().unwrap_or_default(),
+                });
             }
         }
 
@@ -399,12 +427,16 @@ impl SessionRuntime {
         // `ReadSnapshot` command while a turn is in progress. `list()`
         // reads state from non-blocking watch receivers.
         if let Ok(summaries) = self.service.list(Default::default()).await {
-            for summary in &summaries {
+            for summary in summaries {
                 if summary.session_id == *session_id {
-                    return Some(if summary.is_active {
-                        SessionState::Running
-                    } else {
-                        SessionState::Idle
+                    return Some(SessionInfo {
+                        session_id: summary.session_id,
+                        state: if summary.is_active {
+                            SessionState::Running
+                        } else {
+                            SessionState::Idle
+                        },
+                        labels: summary.labels,
                     });
                 }
             }
@@ -441,23 +473,33 @@ impl SessionRuntime {
         result
     }
 
-    /// List all active sessions.
-    pub async fn list_sessions(&self) -> Vec<SessionInfo> {
+    /// List all active sessions, optionally filtered by query parameters.
+    pub async fn list_sessions(&self, query: SessionQuery) -> Vec<SessionInfo> {
         let mut result = Vec::new();
 
-        // Include pending sessions as Idle.
+        // Include pending sessions as Idle, filtered by labels if requested.
         {
             let pending = self.pending.read().await;
-            for session_id in pending.keys() {
+            for (session_id, ps) in pending.iter() {
+                let pending_labels = ps.labels.as_ref();
+                if let Some(ref filter) = query.labels {
+                    let matches = pending_labels
+                        .is_some_and(|pl| filter.iter().all(|(k, v)| pl.get(k) == Some(v)));
+                    if !matches {
+                        continue;
+                    }
+                }
                 result.push(SessionInfo {
                     session_id: session_id.clone(),
                     state: SessionState::Idle,
+                    labels: pending_labels.cloned().unwrap_or_default(),
                 });
             }
         }
 
-        // Include active sessions from the service.
-        if let Ok(summaries) = self.service.list(Default::default()).await {
+        // Include active sessions from the service. The service's `list()`
+        // already handles label filtering on materialized sessions.
+        if let Ok(summaries) = self.service.list(query).await {
             for summary in summaries {
                 let state = if summary.is_active {
                     SessionState::Running
@@ -467,6 +509,7 @@ impl SessionRuntime {
                 result.push(SessionInfo {
                     session_id: summary.session_id,
                     state,
+                    labels: summary.labels,
                 });
             }
         }
@@ -1044,10 +1087,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
 
-        let session_id = runtime.create_session(mock_build_config()).await.unwrap();
+        let session_id = runtime
+            .create_session(mock_build_config(), None)
+            .await
+            .unwrap();
 
-        let state = runtime.session_state(&session_id).await;
-        assert_eq!(state, Some(SessionState::Idle));
+        let info = runtime.session_state(&session_id).await;
+        assert_eq!(info.map(|i| i.state), Some(SessionState::Idle));
     }
 
     /// 2. Starting a turn returns a RunResult with expected text.
@@ -1056,11 +1102,14 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
 
-        let session_id = runtime.create_session(mock_build_config()).await.unwrap();
+        let session_id = runtime
+            .create_session(mock_build_config(), None)
+            .await
+            .unwrap();
         let (event_tx, _event_rx) = mpsc::channel(100);
 
         let result = runtime
-            .start_turn(&session_id, "Hello".to_string(), event_tx, None, None)
+            .start_turn(&session_id, "Hello".to_string(), event_tx, None, None, None)
             .await
             .unwrap();
 
@@ -1079,13 +1128,13 @@ mod tests {
 
         // Use a slow mock to give us time to observe Running state
         let session_id = runtime
-            .create_session(slow_build_config(100))
+            .create_session(slow_build_config(100), None)
             .await
             .unwrap();
 
         // Verify initial state
         assert_eq!(
-            runtime.session_state(&session_id).await,
+            runtime.session_state(&session_id).await.map(|i| i.state),
             Some(SessionState::Idle)
         );
 
@@ -1096,14 +1145,16 @@ mod tests {
 
         let turn_handle = tokio::spawn(async move {
             runtime_clone
-                .start_turn(&sid_clone, "Hello".to_string(), event_tx, None, None)
+                .start_turn(&sid_clone, "Hello".to_string(), event_tx, None, None, None)
                 .await
         });
 
         // Wait until the session transitions to Running.
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
         loop {
-            if runtime.session_state(&session_id).await == Some(SessionState::Running) {
+            if runtime.session_state(&session_id).await.map(|i| i.state)
+                == Some(SessionState::Running)
+            {
                 break;
             }
             assert!(
@@ -1118,9 +1169,8 @@ mod tests {
         assert!(result.text.contains("Slow response"));
 
         // After completion, state should be Idle again
-        let state = runtime.session_state(&session_id).await;
         assert_eq!(
-            state,
+            runtime.session_state(&session_id).await.map(|i| i.state),
             Some(SessionState::Idle),
             "Session should be Idle after turn completes"
         );
@@ -1133,7 +1183,7 @@ mod tests {
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
 
         let session_id = runtime
-            .create_session(slow_build_config(200))
+            .create_session(slow_build_config(200), None)
             .await
             .unwrap();
 
@@ -1143,14 +1193,16 @@ mod tests {
         let sid_clone = session_id.clone();
         let _turn_handle = tokio::spawn(async move {
             runtime_clone
-                .start_turn(&sid_clone, "First".to_string(), event_tx1, None, None)
+                .start_turn(&sid_clone, "First".to_string(), event_tx1, None, None, None)
                 .await
         });
 
         // Wait until the first turn is definitely running.
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
         loop {
-            if runtime.session_state(&session_id).await == Some(SessionState::Running) {
+            if runtime.session_state(&session_id).await.map(|i| i.state)
+                == Some(SessionState::Running)
+            {
                 break;
             }
             assert!(
@@ -1163,7 +1215,14 @@ mod tests {
         // Try to start a second turn
         let (event_tx2, _rx2) = mpsc::channel(100);
         let result = runtime
-            .start_turn(&session_id, "Second".to_string(), event_tx2, None, None)
+            .start_turn(
+                &session_id,
+                "Second".to_string(),
+                event_tx2,
+                None,
+                None,
+                None,
+            )
             .await;
 
         assert!(result.is_err(), "Second turn should fail");
@@ -1182,11 +1241,14 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
 
-        let session_id = runtime.create_session(mock_build_config()).await.unwrap();
+        let session_id = runtime
+            .create_session(mock_build_config(), None)
+            .await
+            .unwrap();
         let (event_tx, mut event_rx) = mpsc::channel(100);
 
         let _result = runtime
-            .start_turn(&session_id, "Hello".to_string(), event_tx, None, None)
+            .start_turn(&session_id, "Hello".to_string(), event_tx, None, None, None)
             .await
             .unwrap();
 
@@ -1215,7 +1277,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
 
-        let session_id = runtime.create_session(mock_build_config()).await.unwrap();
+        let session_id = runtime
+            .create_session(mock_build_config(), None)
+            .await
+            .unwrap();
 
         // Interrupt while idle should succeed without error
         let result = runtime.interrupt(&session_id).await;
@@ -1223,7 +1288,7 @@ mod tests {
 
         // State should still be idle
         assert_eq!(
-            runtime.session_state(&session_id).await,
+            runtime.session_state(&session_id).await.map(|i| i.state),
             Some(SessionState::Idle)
         );
     }
@@ -1234,7 +1299,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
 
-        let session_id = runtime.create_session(mock_build_config()).await.unwrap();
+        let session_id = runtime
+            .create_session(mock_build_config(), None)
+            .await
+            .unwrap();
 
         // Verify it exists
         assert!(runtime.session_state(&session_id).await.is_some());
@@ -1261,11 +1329,17 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 2);
 
         // Create two sessions (the max)
-        let _s1 = runtime.create_session(mock_build_config()).await.unwrap();
-        let _s2 = runtime.create_session(mock_build_config()).await.unwrap();
+        let _s1 = runtime
+            .create_session(mock_build_config(), None)
+            .await
+            .unwrap();
+        let _s2 = runtime
+            .create_session(mock_build_config(), None)
+            .await
+            .unwrap();
 
         // Third should fail
-        let result = runtime.create_session(mock_build_config()).await;
+        let result = runtime.create_session(mock_build_config(), None).await;
         assert!(result.is_err(), "Third session should fail");
         let err = result.unwrap_err();
         assert!(
@@ -1291,8 +1365,14 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
 
-        let s1 = runtime.create_session(mock_build_config()).await.unwrap();
-        let s2 = runtime.create_session(mock_build_config()).await.unwrap();
+        let s1 = runtime
+            .create_session(mock_build_config(), None)
+            .await
+            .unwrap();
+        let s2 = runtime
+            .create_session(mock_build_config(), None)
+            .await
+            .unwrap();
 
         // Verify both exist
         assert!(runtime.session_state(&s1).await.is_some());
@@ -1302,7 +1382,7 @@ mod tests {
         runtime.shutdown().await;
 
         // Both should be gone from the sessions map
-        let sessions = runtime.list_sessions().await;
+        let sessions = runtime.list_sessions(Default::default()).await;
         assert!(
             sessions.is_empty(),
             "All sessions should be removed after shutdown"
@@ -1314,7 +1394,10 @@ mod tests {
     async fn start_turn_applies_staged_mcp_ops_at_turn_boundary() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
-        let session_id = runtime.create_session(mock_build_config()).await.unwrap();
+        let session_id = runtime
+            .create_session(mock_build_config(), None)
+            .await
+            .unwrap();
 
         runtime
             .mcp_stage_add(
@@ -1331,7 +1414,7 @@ mod tests {
 
         let (event_tx, _event_rx) = mpsc::channel(32);
         let first = runtime
-            .start_turn(&session_id, "hello".to_string(), event_tx, None, None)
+            .start_turn(&session_id, "hello".to_string(), event_tx, None, None, None)
             .await;
         assert!(
             first.is_err(),
@@ -1340,7 +1423,14 @@ mod tests {
 
         let (event_tx, _event_rx) = mpsc::channel(32);
         let second = runtime
-            .start_turn(&session_id, "hello again".to_string(), event_tx, None, None)
+            .start_turn(
+                &session_id,
+                "hello again".to_string(),
+                event_tx,
+                None,
+                None,
+                None,
+            )
             .await;
         assert!(
             second.is_ok(),
@@ -1356,7 +1446,10 @@ mod tests {
         };
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
-        let session_id = runtime.create_session(mock_build_config()).await.unwrap();
+        let session_id = runtime
+            .create_session(mock_build_config(), None)
+            .await
+            .unwrap();
 
         runtime
             .mcp_stage_add(&session_id, "test-server".to_string(), server_config)
@@ -1365,7 +1458,14 @@ mod tests {
 
         let (event_tx, mut event_rx) = mpsc::channel(64);
         runtime
-            .start_turn(&session_id, "turn add".to_string(), event_tx, None, None)
+            .start_turn(
+                &session_id,
+                "turn add".to_string(),
+                event_tx,
+                None,
+                None,
+                None,
+            )
             .await
             .expect("turn add should apply staged add");
         let add_events = collect_tool_config_events(&mut event_rx);
@@ -1381,7 +1481,14 @@ mod tests {
             .expect("stage reload");
         let (event_tx, mut event_rx) = mpsc::channel(64);
         runtime
-            .start_turn(&session_id, "turn reload".to_string(), event_tx, None, None)
+            .start_turn(
+                &session_id,
+                "turn reload".to_string(),
+                event_tx,
+                None,
+                None,
+                None,
+            )
             .await
             .expect("turn reload should apply staged reload");
         let reload_events = collect_tool_config_events(&mut event_rx);
@@ -1397,7 +1504,14 @@ mod tests {
             .expect("stage remove");
         let (event_tx, mut event_rx) = mpsc::channel(64);
         runtime
-            .start_turn(&session_id, "turn remove".to_string(), event_tx, None, None)
+            .start_turn(
+                &session_id,
+                "turn remove".to_string(),
+                event_tx,
+                None,
+                None,
+                None,
+            )
             .await
             .expect("turn remove should apply staged remove");
         let remove_events = collect_tool_config_events(&mut event_rx);
@@ -1416,7 +1530,10 @@ mod tests {
         };
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
-        let session_id = runtime.create_session(mock_build_config()).await.unwrap();
+        let session_id = runtime
+            .create_session(mock_build_config(), None)
+            .await
+            .unwrap();
 
         runtime
             .mcp_stage_add(&session_id, "timeout-server".to_string(), server_config)
@@ -1425,7 +1542,14 @@ mod tests {
 
         let (event_tx, _event_rx) = mpsc::channel(64);
         runtime
-            .start_turn(&session_id, "turn add".to_string(), event_tx, None, None)
+            .start_turn(
+                &session_id,
+                "turn add".to_string(),
+                event_tx,
+                None,
+                None,
+                None,
+            )
             .await
             .expect("add boundary");
 
@@ -1449,7 +1573,14 @@ mod tests {
 
         let (event_tx, mut event_rx) = mpsc::channel(128);
         runtime
-            .start_turn(&session_id, "turn remove".to_string(), event_tx, None, None)
+            .start_turn(
+                &session_id,
+                "turn remove".to_string(),
+                event_tx,
+                None,
+                None,
+                None,
+            )
             .await
             .expect("remove boundary");
         let first_turn_events = collect_tool_config_events(&mut event_rx);
@@ -1467,6 +1598,7 @@ mod tests {
                 &session_id,
                 "turn after timeout".to_string(),
                 event_tx,
+                None,
                 None,
                 None,
             )
@@ -1492,7 +1624,10 @@ mod tests {
 
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
-        let session_id = runtime.create_session(mock_build_config()).await.unwrap();
+        let session_id = runtime
+            .create_session(mock_build_config(), None)
+            .await
+            .unwrap();
 
         runtime
             .mcp_stage_add(&session_id, "server-draining".to_string(), server1_config)
@@ -1504,6 +1639,7 @@ mod tests {
                 &session_id,
                 "turn add first".to_string(),
                 event_tx,
+                None,
                 None,
                 None,
             )
@@ -1533,6 +1669,7 @@ mod tests {
                 &session_id,
                 "turn remove first".to_string(),
                 event_tx,
+                None,
                 None,
                 None,
             )
@@ -1568,6 +1705,7 @@ mod tests {
                 event_tx,
                 None,
                 None,
+                None,
             )
             .await
             .expect("next boundary should apply staged add");
@@ -1593,7 +1731,10 @@ mod tests {
 
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
-        let session_id = runtime.create_session(mock_build_config()).await.unwrap();
+        let session_id = runtime
+            .create_session(mock_build_config(), None)
+            .await
+            .unwrap();
 
         runtime
             .mcp_stage_add(&session_id, "lossless-server".to_string(), server_config)
@@ -1601,7 +1742,14 @@ mod tests {
             .expect("stage add");
         let (event_tx, _event_rx) = mpsc::channel(64);
         runtime
-            .start_turn(&session_id, "turn add".to_string(), event_tx, None, None)
+            .start_turn(
+                &session_id,
+                "turn add".to_string(),
+                event_tx,
+                None,
+                None,
+                None,
+            )
             .await
             .expect("add boundary");
 
@@ -1624,7 +1772,14 @@ mod tests {
             .expect("stage remove");
         let (event_tx, _event_rx) = mpsc::channel(64);
         runtime
-            .start_turn(&session_id, "turn remove".to_string(), event_tx, None, None)
+            .start_turn(
+                &session_id,
+                "turn remove".to_string(),
+                event_tx,
+                None,
+                None,
+                None,
+            )
             .await
             .expect("remove boundary");
 
@@ -1649,6 +1804,7 @@ mod tests {
                 &session_id,
                 "turn failing apply".to_string(),
                 event_tx,
+                None,
                 None,
                 None,
             )

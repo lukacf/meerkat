@@ -358,6 +358,8 @@ mod tests {
             topology: None,
             supervisor: None,
             limits: None,
+            spawn_policy: None,
+            event_router: None,
         }
     }
 
@@ -626,6 +628,8 @@ model = "claude-sonnet-4-5"
             topology: None,
             supervisor: None,
             limits: None,
+            spawn_policy: None,
+            event_router: None,
         };
         let diagnostics = validate_definition(&def);
         assert!(

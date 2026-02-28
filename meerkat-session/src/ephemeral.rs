@@ -14,6 +14,7 @@ use meerkat_core::service::{
 };
 use meerkat_core::time_compat::SystemTime;
 use meerkat_core::types::{RunResult, SessionId, Usage};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -96,6 +97,8 @@ struct SessionHandle {
     turn_lock: Arc<AtomicBool>,
     _capacity_permit: OwnedSemaphorePermit,
     created_at: SystemTime,
+    /// Key-value labels attached at session creation.
+    labels: BTreeMap<String, String>,
     /// Subscribable event injector for pushing external events.
     /// Extracted from the agent before it moves into its task.
     event_injector: Option<Arc<dyn meerkat_core::SubscribableInjector>>,
@@ -388,6 +391,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         let caller_event_tx = req.event_tx.clone();
         let defer_initial_turn =
             req.initial_turn == meerkat_core::service::InitialTurnPolicy::Defer;
+        let labels = req.labels.clone().unwrap_or_default();
 
         // Create the permanent event channel for this session.
         let (agent_event_tx, agent_event_rx) = mpsc::channel::<AgentEvent>(EVENT_CHANNEL_CAPACITY);
@@ -445,6 +449,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             turn_lock: turn_lock.clone(),
             _capacity_permit: capacity_permit,
             created_at,
+            labels,
             event_injector,
             comms_runtime,
             interrupt_requested,
@@ -538,6 +543,21 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
     ) -> Result<RunResult, SessionError> {
         let (result_tx, result_rx) = oneshot::channel();
 
+        // Prepend additional instructions as system notices to the prompt.
+        let prompt = match &req.additional_instructions {
+            Some(instructions) if !instructions.is_empty() => {
+                let mut prefix = String::new();
+                for instruction in instructions {
+                    prefix.push_str("[SYSTEM NOTICE: ");
+                    prefix.push_str(instruction);
+                    prefix.push_str("]\n\n");
+                }
+                prefix.push_str(&req.prompt);
+                prefix
+            }
+            _ => req.prompt,
+        };
+
         {
             let sessions = self.sessions.read().await;
             let handle = sessions
@@ -551,7 +571,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             handle
                 .command_tx
                 .send(SessionCommand::StartTurn {
-                    prompt: req.prompt,
+                    prompt,
                     host_mode: req.host_mode,
                     event_tx: req.event_tx,
                     result_tx,
@@ -627,6 +647,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                 message_count: snapshot.message_count,
                 is_active,
                 last_assistant_text: snapshot.last_assistant_text,
+                labels: handle.labels.clone(),
             },
             billing: SessionUsage {
                 total_tokens: snapshot.total_tokens,
@@ -649,9 +670,19 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                     message_count: cache.message_count,
                     total_tokens: cache.total_tokens,
                     is_active: state == SessionState::Running,
+                    labels: h.labels.clone(),
                 }
             })
             .collect();
+
+        // Filter by labels if specified (all k/v pairs must match).
+        if let Some(ref filter_labels) = query.labels {
+            summaries.retain(|s| {
+                filter_labels
+                    .iter()
+                    .all(|(k, v)| s.labels.get(k) == Some(v))
+            });
+        }
 
         if let Some(offset) = query.offset {
             if offset < summaries.len() {

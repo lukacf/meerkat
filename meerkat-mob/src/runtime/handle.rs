@@ -22,6 +22,7 @@ pub struct MobHandle {
     pub(super) mcp_servers: Arc<tokio::sync::Mutex<BTreeMap<String, actor::McpServerEntry>>>,
     pub(super) flow_streams:
         Arc<tokio::sync::Mutex<BTreeMap<RunId, mpsc::Sender<meerkat_core::ScopedAgentEvent>>>>,
+    pub(super) session_service: Arc<dyn MobSessionService>,
 }
 
 #[derive(Clone)]
@@ -37,6 +38,12 @@ pub struct SpawnMemberSpec {
     pub initial_message: Option<String>,
     pub runtime_mode: Option<crate::MobRuntimeMode>,
     pub backend: Option<MobBackendKind>,
+    /// Opaque application context passed through to the agent build pipeline.
+    pub context: Option<serde_json::Value>,
+    /// Application-defined labels for this member.
+    pub labels: Option<std::collections::BTreeMap<String, String>>,
+    /// Resume an existing session instead of creating a new one.
+    pub resume_session_id: Option<meerkat_core::types::SessionId>,
 }
 
 impl SpawnMemberSpec {
@@ -53,6 +60,9 @@ impl SpawnMemberSpec {
             initial_message,
             runtime_mode,
             backend,
+            context: None,
+            labels: None,
+            resume_session_id: None,
         }
     }
 }
@@ -130,6 +140,85 @@ impl MobHandle {
         MobEventsView {
             inner: self.events.clone(),
         }
+    }
+
+    /// Subscribe to agent-level events for a specific meerkat.
+    ///
+    /// Looks up the meerkat's session ID from the roster, then subscribes
+    /// to the session-level event stream via [`MobSessionService`].
+    ///
+    /// Returns `MobError::MeerkatNotFound` if the meerkat is not in the
+    /// roster or has no session ID.
+    pub async fn subscribe_agent_events(
+        &self,
+        meerkat_id: &MeerkatId,
+    ) -> Result<EventStream, MobError> {
+        let session_id = {
+            let roster = self.roster.read().await;
+            roster
+                .session_id(meerkat_id)
+                .cloned()
+                .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?
+        };
+        SessionService::subscribe_session_events(self.session_service.as_ref(), &session_id)
+            .await
+            .map_err(|e| {
+                MobError::Internal(format!(
+                    "failed to subscribe to agent events for '{meerkat_id}': {e}"
+                ))
+            })
+    }
+
+    /// Subscribe to agent events for all active members (point-in-time snapshot).
+    ///
+    /// Returns one stream per active member that has a session ID. Members
+    /// spawned after this call are not included — use [`subscribe_mob_events`]
+    /// for a continuously updated view.
+    pub async fn subscribe_all_agent_events(&self) -> Vec<(MeerkatId, EventStream)> {
+        let entries: Vec<_> = {
+            let roster = self.roster.read().await;
+            roster
+                .list()
+                .filter_map(|e| {
+                    e.member_ref
+                        .session_id()
+                        .map(|sid| (e.meerkat_id.clone(), sid.clone()))
+                })
+                .collect()
+        };
+        let mut streams = Vec::with_capacity(entries.len());
+        for (meerkat_id, session_id) in entries {
+            if let Ok(stream) =
+                SessionService::subscribe_session_events(self.session_service.as_ref(), &session_id)
+                    .await
+            {
+                streams.push((meerkat_id, stream));
+            }
+        }
+        streams
+    }
+
+    /// Subscribe to a continuously-updated, mob-level event bus.
+    ///
+    /// Spawns an independent task that merges per-member session streams,
+    /// tags each event with [`AttributedEvent`], and tracks roster changes
+    /// (spawns/retires) automatically. Drop the returned handle to stop
+    /// the router.
+    pub fn subscribe_mob_events(&self) -> super::event_router::MobEventRouterHandle {
+        self.subscribe_mob_events_with_config(super::event_router::MobEventRouterConfig::default())
+    }
+
+    /// Like [`subscribe_mob_events`](Self::subscribe_mob_events) with explicit config.
+    pub fn subscribe_mob_events_with_config(
+        &self,
+        config: super::event_router::MobEventRouterConfig,
+    ) -> super::event_router::MobEventRouterHandle {
+        super::event_router::spawn_event_router(
+            self.session_service.clone(),
+            self.events.clone(),
+            self.roster.clone(),
+            config,
+        )
     }
 
     /// Snapshot of MCP server lifecycle state tracked by this runtime.
@@ -234,16 +323,24 @@ impl MobHandle {
         runtime_mode: Option<crate::MobRuntimeMode>,
         backend: Option<MobBackendKind>,
     ) -> Result<MemberRef, MobError> {
+        self.spawn_spec(SpawnMemberSpec {
+            profile_name,
+            meerkat_id,
+            initial_message,
+            runtime_mode,
+            backend,
+            context: None,
+            labels: None,
+            resume_session_id: None,
+        })
+        .await
+    }
+
+    /// Spawn a member from a fully-specified [`SpawnMemberSpec`].
+    pub async fn spawn_spec(&self, spec: SpawnMemberSpec) -> Result<MemberRef, MobError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
-            .send(MobCommand::Spawn {
-                profile_name,
-                meerkat_id,
-                initial_message,
-                runtime_mode,
-                backend,
-                reply_tx,
-            })
+            .send(MobCommand::Spawn { spec, reply_tx })
             .await
             .map_err(|_| MobError::Internal("actor task dropped".into()))?;
         reply_rx
@@ -258,16 +355,7 @@ impl MobHandle {
         &self,
         specs: Vec<SpawnMemberSpec>,
     ) -> Vec<Result<MemberRef, MobError>> {
-        futures::future::join_all(specs.into_iter().map(|spec| {
-            self.spawn_with_options(
-                spec.profile_name,
-                spec.meerkat_id,
-                spec.initial_message,
-                spec.runtime_mode,
-                spec.backend,
-            )
-        }))
-        .await
+        futures::future::join_all(specs.into_iter().map(|spec| self.spawn_spec(spec))).await
     }
 
     /// Retire a member, archiving its session and removing trust.
@@ -276,6 +364,29 @@ impl MobHandle {
         self.command_tx
             .send(MobCommand::Retire {
                 meerkat_id,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| MobError::Internal("actor task dropped".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| MobError::Internal("actor reply dropped".into()))?
+    }
+
+    /// Retire a member and enqueue a respawn with the same profile.
+    ///
+    /// Returns `Ok(())` once retire completes and spawn is enqueued.
+    /// The new member becomes available when `MeerkatSpawned` is emitted.
+    pub async fn respawn(
+        &self,
+        meerkat_id: MeerkatId,
+        initial_message: Option<String>,
+    ) -> Result<(), MobError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(MobCommand::Respawn {
+                meerkat_id,
+                initial_message,
                 reply_tx,
             })
             .await
@@ -330,6 +441,32 @@ impl MobHandle {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(MobCommand::ExternalTurn {
+                meerkat_id,
+                message,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| MobError::Internal("actor task dropped".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| MobError::Internal("actor reply dropped".into()))?
+    }
+
+    /// Inject a message into an autonomous member and return a subscription
+    /// for streaming interaction-scoped events.
+    ///
+    /// Routes through the actor, enforcing lifecycle state and external
+    /// addressability. Unlike [`send_message`](Self::send_message), this
+    /// does **not** support spawn-policy auto-provisioning for unknown
+    /// targets. Returns `UnsupportedForMode` for `TurnDriven` members.
+    pub async fn inject_and_subscribe(
+        &self,
+        meerkat_id: MeerkatId,
+        message: String,
+    ) -> Result<meerkat_core::InteractionSubscription, MobError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(MobCommand::InjectAndSubscribe {
                 meerkat_id,
                 message,
                 reply_tx,
@@ -488,6 +625,25 @@ impl MobHandle {
         reply_rx
             .await
             .map_err(|_| MobError::Internal("actor reply dropped".into()))
+    }
+
+    /// Set or clear the spawn policy for automatic member provisioning.
+    ///
+    /// When set, external turns targeting an unknown meerkat ID will
+    /// consult the policy before returning `MeerkatNotFound`.
+    pub async fn set_spawn_policy(
+        &self,
+        policy: Option<Arc<dyn super::spawn_policy::SpawnPolicy>>,
+    ) -> Result<(), MobError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(MobCommand::SetSpawnPolicy { policy, reply_tx })
+            .await
+            .map_err(|_| MobError::Internal("actor task dropped".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| MobError::Internal("actor reply dropped".into()))?;
+        Ok(())
     }
 
     /// Shut down the actor. After this, no more commands are accepted.

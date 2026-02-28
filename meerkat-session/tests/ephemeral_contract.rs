@@ -401,6 +401,7 @@ fn create_req(prompt: &str) -> CreateSessionRequest {
         skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         build: None,
+        labels: None,
     }
 }
 
@@ -457,6 +458,7 @@ async fn test_create_session_can_defer_initial_turn() {
                 flow_tool_overlay: None,
                 prompt: "now run".to_string(),
                 event_tx: None,
+                additional_instructions: None,
             },
         )
         .await
@@ -487,6 +489,7 @@ async fn test_subscribe_session_events_available_before_first_turn() {
                 flow_tool_overlay: None,
                 prompt: "trigger".to_string(),
                 event_tx: None,
+                additional_instructions: None,
             },
         )
         .await
@@ -526,6 +529,7 @@ async fn test_start_turn_on_existing_session() {
                 flow_tool_overlay: None,
                 prompt: "Follow up".to_string(),
                 event_tx: None,
+                additional_instructions: None,
             },
         )
         .await
@@ -631,6 +635,7 @@ async fn test_turn_on_archived_session_returns_not_found() {
                 flow_tool_overlay: None,
                 prompt: "After archive".to_string(),
                 event_tx: None,
+                additional_instructions: None,
             },
         )
         .await;
@@ -665,6 +670,7 @@ async fn test_concurrent_turns_return_busy() {
                     flow_tool_overlay: None,
                     prompt: "Slow".to_string(),
                     event_tx: None,
+                    additional_instructions: None,
                 },
             )
             .await
@@ -683,6 +689,7 @@ async fn test_concurrent_turns_return_busy() {
                 flow_tool_overlay: None,
                 prompt: "Fast".to_string(),
                 event_tx: None,
+                additional_instructions: None,
             },
         )
         .await;
@@ -717,6 +724,7 @@ async fn test_interrupt_cancels_inflight_turn() {
                     flow_tool_overlay: None,
                     prompt: "Slow".to_string(),
                     event_tx: None,
+                    additional_instructions: None,
                 },
             )
             .await
@@ -768,6 +776,7 @@ async fn test_flow_tool_overlay_is_cleared_after_canceled_turn() {
                     flow_tool_overlay: Some(overlay),
                     prompt: "Slow with overlay".to_string(),
                     event_tx: None,
+                    additional_instructions: None,
                 },
             )
             .await
@@ -822,6 +831,7 @@ async fn test_flow_tool_overlay_enforced_by_runtime_and_resets_next_turn() {
                 }),
                 prompt: "overlayed turn".to_string(),
                 event_tx: None,
+                additional_instructions: None,
             },
         )
         .await
@@ -836,6 +846,7 @@ async fn test_flow_tool_overlay_enforced_by_runtime_and_resets_next_turn() {
                 flow_tool_overlay: None,
                 prompt: "baseline turn".to_string(),
                 event_tx: None,
+                additional_instructions: None,
             },
         )
         .await
@@ -889,6 +900,7 @@ async fn test_start_turn_returns_error_when_overlay_clear_fails() {
                 }),
                 prompt: "overlay clear fails".to_string(),
                 event_tx: None,
+                additional_instructions: None,
             },
         )
         .await;
@@ -947,6 +959,7 @@ async fn test_interrupt_host_mode_returns_without_waiting_for_ack() {
                     flow_tool_overlay: None,
                     prompt: "host turn".to_string(),
                     event_tx: None,
+                    additional_instructions: None,
                 },
             )
             .await
@@ -962,4 +975,134 @@ async fn test_interrupt_host_mode_returns_without_waiting_for_ack() {
     );
 
     let _ = host_turn.await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Session labels tests
+// ---------------------------------------------------------------------------
+
+fn create_req_with_labels(
+    prompt: &str,
+    labels: std::collections::BTreeMap<String, String>,
+) -> CreateSessionRequest {
+    CreateSessionRequest {
+        labels: Some(labels),
+        ..create_req(prompt)
+    }
+}
+
+#[tokio::test]
+async fn test_session_labels_set_at_creation_appear_in_read() {
+    let service = make_service(MockAgentBuilder::new());
+    let mut labels = std::collections::BTreeMap::new();
+    labels.insert("env".to_string(), "staging".to_string());
+    labels.insert("team".to_string(), "infra".to_string());
+
+    let result = service
+        .create_session(create_req_with_labels("Hello", labels.clone()))
+        .await
+        .unwrap();
+
+    let view = service.read(&result.session_id).await.unwrap();
+    assert_eq!(view.state.labels, labels);
+}
+
+#[tokio::test]
+async fn test_session_labels_appear_in_list() {
+    let service = make_service(MockAgentBuilder::new());
+    let mut labels = std::collections::BTreeMap::new();
+    labels.insert("env".to_string(), "prod".to_string());
+
+    let _ = service
+        .create_session(create_req_with_labels("Hello", labels.clone()))
+        .await
+        .unwrap();
+
+    let sessions = service.list(SessionQuery::default()).await.unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].labels, labels);
+}
+
+#[tokio::test]
+async fn test_session_list_label_filter() {
+    let service = make_service(MockAgentBuilder::new());
+
+    let mut labels_a = std::collections::BTreeMap::new();
+    labels_a.insert("env".to_string(), "prod".to_string());
+    labels_a.insert("team".to_string(), "frontend".to_string());
+
+    let mut labels_b = std::collections::BTreeMap::new();
+    labels_b.insert("env".to_string(), "staging".to_string());
+    labels_b.insert("team".to_string(), "backend".to_string());
+
+    let _ = service
+        .create_session(create_req_with_labels("A", labels_a.clone()))
+        .await
+        .unwrap();
+    let _ = service
+        .create_session(create_req_with_labels("B", labels_b.clone()))
+        .await
+        .unwrap();
+
+    // Filter by env=prod — should match only A
+    let mut filter = std::collections::BTreeMap::new();
+    filter.insert("env".to_string(), "prod".to_string());
+    let sessions = service
+        .list(SessionQuery {
+            labels: Some(filter),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(
+        sessions[0].labels.get("team").map(String::as_str),
+        Some("frontend")
+    );
+
+    // Filter by team=backend — should match only B
+    let mut filter = std::collections::BTreeMap::new();
+    filter.insert("team".to_string(), "backend".to_string());
+    let sessions = service
+        .list(SessionQuery {
+            labels: Some(filter),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(
+        sessions[0].labels.get("env").map(String::as_str),
+        Some("staging")
+    );
+
+    // Filter by env=prod AND team=backend — should match neither
+    let mut filter = std::collections::BTreeMap::new();
+    filter.insert("env".to_string(), "prod".to_string());
+    filter.insert("team".to_string(), "backend".to_string());
+    let sessions = service
+        .list(SessionQuery {
+            labels: Some(filter),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(sessions.is_empty());
+
+    // No filter — should return both
+    let sessions = service.list(SessionQuery::default()).await.unwrap();
+    assert_eq!(sessions.len(), 2);
+}
+
+#[tokio::test]
+async fn test_session_labels_empty_default() {
+    let service = make_service(MockAgentBuilder::new());
+    let result = service.create_session(create_req("Hello")).await.unwrap();
+
+    let view = service.read(&result.session_id).await.unwrap();
+    assert!(view.state.labels.is_empty());
+
+    let sessions = service.list(SessionQuery::default()).await.unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert!(sessions[0].labels.is_empty());
 }

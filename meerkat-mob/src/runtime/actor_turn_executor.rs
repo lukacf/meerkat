@@ -349,6 +349,7 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                             host_mode: false,
                             skill_references: None,
                             flow_tool_overlay,
+                            additional_instructions: None,
                         },
                     )
                     .await

@@ -28,7 +28,7 @@ use axum::{
     routing::{get, post},
 };
 use chrono::{DateTime, Utc};
-#[cfg(feature = "comms")]
+#[cfg(any(feature = "comms", feature = "mob"))]
 use futures::StreamExt;
 use futures::stream::Stream;
 use meerkat::{
@@ -51,6 +51,7 @@ use meerkat_store::{RealmBackend, RealmOrigin};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -370,6 +371,15 @@ pub struct CreateSessionRequest {
     /// Legacy compatibility skill refs for per-turn injection.
     #[serde(default)]
     pub skill_references: Option<Vec<String>>,
+    /// Optional key-value labels attached at session creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<BTreeMap<String, String>>,
+    /// Additional instruction sections appended to the system prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_instructions: Option<Vec<String>>,
+    /// Opaque application context passed through to custom builders.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_context: Option<Value>,
 }
 
 fn default_structured_output_retries() -> u32 {
@@ -446,6 +456,9 @@ pub struct ContinueSessionRequest {
     /// Optional per-turn flow tool overlay.
     #[serde(default)]
     pub flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
+    /// Additional instruction sections prepended as system notices to the prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_instructions: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -454,6 +467,10 @@ pub struct ListSessionsQuery {
     pub limit: Option<usize>,
     #[serde(default)]
     pub offset: Option<usize>,
+    /// Repeatable label filter: `?label=env%3Dprod&label=team%3Dinfra`.
+    /// Each value is parsed as `key=value` via `split_once('=')`.
+    #[serde(default)]
+    pub label: Option<Vec<String>>,
 }
 
 /// Session response — canonical wire type from contracts.
@@ -471,6 +488,8 @@ pub struct SessionDetailsResponse {
     pub updated_at: String,
     pub message_count: usize,
     pub total_tokens: u64,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
 }
 
 /// API error response
@@ -506,7 +525,8 @@ pub fn router(state: AppState) -> Router {
     let r = r
         .route("/mob/prefabs", get(mob_prefabs))
         .route("/mob/tools", get(mob_tools))
-        .route("/mob/call", post(mob_call));
+        .route("/mob/call", post(mob_call))
+        .route("/mob/{id}/events", get(mob_event_stream));
 
     #[cfg(feature = "mcp")]
     let r = r
@@ -561,6 +581,84 @@ async fn mob_call(
         .await
         .map_err(|e| ApiError::BadRequest(e.message))?;
     Ok(Json(result))
+}
+
+/// Query parameters for `GET /mob/{id}/events`.
+#[derive(Debug, Deserialize)]
+#[cfg(feature = "mob")]
+struct MobEventStreamQuery {
+    /// Subscribe to a single member's agent events. If absent, subscribes
+    /// to the mob-wide event bus covering all members.
+    #[serde(default)]
+    member: Option<String>,
+}
+
+/// GET /mob/{id}/events — SSE stream of mob or per-member agent events.
+///
+/// If `?member=<meerkat_id>` is provided, streams that member's session
+/// events. Otherwise streams the mob-wide event bus which merges all
+/// member events tagged with [`AttributedEvent`] attribution.
+#[cfg(feature = "mob")]
+async fn mob_event_stream(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<MobEventStreamQuery>,
+) -> Result<Sse<std::pin::Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>>, ApiError>
+{
+    let mob_id = meerkat_mob::MobId::from(id.as_str());
+
+    let stream: std::pin::Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> =
+        if let Some(member) = query.member {
+            // Per-member agent event stream.
+            let meerkat_id = meerkat_mob::MeerkatId::from(member.as_str());
+            let mut event_stream = state
+                .mob_state
+                .subscribe_agent_events(&mob_id, &meerkat_id)
+                .await
+                .map_err(|e| ApiError::NotFound(e.to_string()))?;
+
+            Box::pin(async_stream::stream! {
+                yield Ok(Event::default().event("stream_opened").data(
+                    serde_json::to_string(&json!({
+                        "mob_id": id,
+                        "member": member,
+                    })).unwrap_or_default(),
+                ));
+
+                while let Some(envelope) = event_stream.next().await {
+                    let event_type = agent_event_type(&envelope.payload);
+                    let data = serde_json::to_string(&envelope).unwrap_or_default();
+                    yield Ok(Event::default().event(event_type).data(data));
+                }
+
+                yield Ok(Event::default().event("done").data("{}"));
+            })
+        } else {
+            // Mob-wide event stream (all members, continuously updated).
+            let mut handle = state
+                .mob_state
+                .subscribe_mob_events(&mob_id)
+                .await
+                .map_err(|e| ApiError::NotFound(e.to_string()))?;
+
+            Box::pin(async_stream::stream! {
+                yield Ok(Event::default().event("stream_opened").data(
+                    serde_json::to_string(&json!({
+                        "mob_id": id,
+                    })).unwrap_or_default(),
+                ));
+
+                while let Some(attributed) = handle.event_rx.recv().await {
+                    let event_type = agent_event_type(&attributed.envelope.payload);
+                    let data = serde_json::to_string(&attributed).unwrap_or_default();
+                    yield Ok(Event::default().event(event_type).data(data));
+                }
+
+                yield Ok(Event::default().event("done").data("{}"));
+            })
+        };
+
+    Ok(Sse::new(stream))
 }
 
 /// Canonical comms send request body.
@@ -1265,6 +1363,8 @@ async fn create_session(
         checkpointer: None,
         silent_comms_intents: Vec::new(),
         max_inline_peer_notifications: None,
+        app_context: req.app_context,
+        additional_instructions: req.additional_instructions,
     };
 
     let svc_req = SvcCreateSessionRequest {
@@ -1277,6 +1377,7 @@ async fn create_session(
         skill_references,
         initial_turn: InitialTurnPolicy::RunImmediately,
         build: Some(build),
+        labels: req.labels,
     };
 
     let result = state.session_service.create_session(svc_req).await;
@@ -1295,40 +1396,54 @@ async fn create_session(
     }
 }
 
+/// Parse repeatable `label` query params into a `BTreeMap`.
+///
+/// Each param is expected as `key=value`. Returns an error for params without `=`.
+fn parse_label_filters(
+    raw: Option<Vec<String>>,
+) -> Result<Option<BTreeMap<String, String>>, String> {
+    let labels = match raw {
+        Some(l) if !l.is_empty() => l,
+        _ => return Ok(None),
+    };
+    let mut map = BTreeMap::new();
+    for s in labels {
+        let (k, v) = s
+            .split_once('=')
+            .ok_or_else(|| format!("malformed label filter, expected key=value: {s}"))?;
+        map.insert(k.to_string(), v.to_string());
+    }
+    Ok(if map.is_empty() { None } else { Some(map) })
+}
+
 /// List sessions in the active realm.
 async fn list_sessions(
     State(state): State<AppState>,
     Query(query): Query<ListSessionsQuery>,
 ) -> Result<Json<Value>, ApiError> {
+    let label_filters = parse_label_filters(query.label).map_err(ApiError::BadRequest)?;
+
     let sessions = state
         .session_service
         .list(meerkat_core::service::SessionQuery {
             limit: query.limit,
             offset: query.offset,
+            labels: label_filters,
         })
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to list sessions: {e}")))?;
 
-    let payload = json!({
-        "sessions": sessions
-            .into_iter()
-            .map(|s| {
-                let created_at: DateTime<Utc> = s.created_at.into();
-                let updated_at: DateTime<Utc> = s.updated_at.into();
-                json!({
-                    "session_id": s.session_id.to_string(),
-                    "session_ref": format_session_ref(&state.realm_id, &s.session_id),
-                    "created_at": created_at.to_rfc3339(),
-                    "updated_at": updated_at.to_rfc3339(),
-                    "message_count": s.message_count,
-                    "total_tokens": s.total_tokens,
-                    "is_active": s.is_active
-                })
-            })
-            .collect::<Vec<_>>()
-    });
+    let wire_sessions: Vec<meerkat_contracts::WireSessionSummary> = sessions
+        .into_iter()
+        .map(|s| {
+            let session_ref = format_session_ref(&state.realm_id, &s.session_id);
+            let mut wire = meerkat_contracts::WireSessionSummary::from(s);
+            wire.session_ref = Some(session_ref);
+            wire
+        })
+        .collect();
 
-    Ok(Json(payload))
+    Ok(Json(json!({ "sessions": wire_sessions })))
 }
 
 /// Get session details
@@ -1357,6 +1472,7 @@ async fn get_session(
         updated_at: updated_at.to_rfc3339(),
         message_count: view.state.message_count,
         total_tokens: view.billing.total_tokens,
+        labels: view.state.labels,
     }))
 }
 
@@ -1451,6 +1567,7 @@ async fn continue_session(
         host_mode,
         skill_references: skill_references.clone(),
         flow_tool_overlay: req.flow_tool_overlay.clone(),
+        additional_instructions: req.additional_instructions.clone(),
     };
 
     let result = state.session_service.start_turn(&session_id, svc_req).await;
@@ -1550,6 +1667,8 @@ async fn continue_session(
                 checkpointer: None,
                 silent_comms_intents: Vec::new(),
                 max_inline_peer_notifications: None,
+                app_context: None,
+                additional_instructions: None,
             };
 
             let svc_req = SvcCreateSessionRequest {
@@ -1562,6 +1681,7 @@ async fn continue_session(
                 skill_references,
                 initial_turn: InitialTurnPolicy::RunImmediately,
                 build: Some(build),
+                labels: None,
             };
 
             state

@@ -50,6 +50,81 @@
     "title": "CommsParams",
     "type": "object"
   },
+  "CoreCreateParams": {
+    "$defs": {
+      "Provider": {
+        "description": "Supported LLM providers.",
+        "enum": [
+          "anthropic",
+          "open_a_i",
+          "gemini",
+          "other"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Core session creation parameters.",
+    "properties": {
+      "additional_instructions": {
+        "items": {
+          "type": "string"
+        },
+        "type": [
+          "array",
+          "null"
+        ]
+      },
+      "app_context": true,
+      "labels": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "type": [
+          "object",
+          "null"
+        ]
+      },
+      "max_tokens": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "model": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "prompt": {
+        "type": "string"
+      },
+      "provider": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/Provider"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "system_prompt": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "prompt"
+    ],
+    "title": "CoreCreateParams",
+    "type": "object"
+  },
   "McpAddParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Request payload for `mcp/add`.",

@@ -58,19 +58,22 @@ pub use backend::MobBackendKind;
 pub use definition::MobDefinition;
 pub use error::MobError;
 pub use event::{
-    MemberRef, MobEvent, MobEventCompat, MobEventCompatError, MobEventKind, MobEventKindCompat,
-    NewMobEvent,
+    AttributedEvent, MemberRef, MobEvent, MobEventCompat, MobEventCompatError, MobEventKind,
+    MobEventKindCompat, NewMobEvent,
 };
 pub use ids::{BranchId, FlowId, MeerkatId, MobId, ProfileName, RunId, StepId, TaskId};
 pub use prefab::Prefab;
 pub use profile::{Profile, ToolConfig};
-pub use roster::{MemberState, Roster, RosterEntry};
+pub use roster::{MemberState, Roster, RosterAddEntry, RosterEntry};
 pub use run::{
     FailureLedgerEntry, FlowContext, FlowRunConfig, MobRun, MobRunStatus, StepLedgerEntry,
     StepRunStatus,
 };
 pub use runtime::{FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition};
-pub use runtime::{MobBuilder, MobHandle, MobSessionService, MobState, SpawnMemberSpec};
+pub use runtime::{
+    MobBuilder, MobEventRouterConfig, MobEventRouterHandle, MobHandle, MobSessionService, MobState,
+    SpawnMemberSpec, SpawnPolicy, SpawnSpec,
+};
 pub use runtime_mode::MobRuntimeMode;
 pub use spec::SpecValidator;
 pub use storage::MobStorage;

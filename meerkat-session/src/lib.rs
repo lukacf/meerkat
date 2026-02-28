@@ -34,6 +34,13 @@ pub mod redb_events;
 
 pub use ephemeral::{EphemeralSessionService, SessionAgent, SessionAgentBuilder, SessionSnapshot};
 
+/// Metadata key used to store session labels in the `Session.metadata` map.
+///
+/// This is a persistence implementation detail — the ephemeral service stores
+/// labels directly on its in-memory handle; the persistent service reads/writes
+/// this key in the session snapshot for durable storage.
+pub const SESSION_LABELS_KEY: &str = "session_labels";
+
 /// Type alias for the raw broadcast receiver used by event subscriptions.
 /// Exported for WASM surface which needs synchronous `try_recv()`.
 pub type BroadcastEventReceiver =

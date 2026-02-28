@@ -73,8 +73,7 @@ fn truncate_str(s: &str, max_bytes: usize) -> &str {
     &s[..truncate_at]
 }
 
-/// Parse a `key=value` label for `--agent-label`.
-#[cfg(feature = "comms")]
+/// Parse a `key=value` label for `--label` / `--agent-label`.
 fn parse_label(s: &str) -> Result<(String, String), String> {
     let (key, value) = s
         .split_once('=')
@@ -450,6 +449,18 @@ enum Commands {
         #[arg(long = "block-tool", value_name = "TOOL")]
         block_tools: Vec<String>,
 
+        /// Session label (key=value, repeatable). Attached at creation for filtering.
+        #[arg(long = "label", value_name = "KEY=VALUE", value_parser = parse_label)]
+        labels: Vec<(String, String)>,
+
+        /// Additional instruction section appended to the system prompt (repeatable).
+        #[arg(long = "instructions", value_name = "TEXT")]
+        instructions: Vec<String>,
+
+        /// Opaque application context (JSON). Passed through to custom builders.
+        #[arg(long = "app-context", value_name = "JSON")]
+        app_context: Option<String>,
+
         // === Comms flags ===
         /// Agent name for inter-agent communication. Enables comms if set.
         #[cfg(feature = "comms")]
@@ -553,6 +564,10 @@ enum Commands {
         #[arg(long = "block-tool", value_name = "TOOL")]
         block_tools: Vec<String>,
 
+        /// Additional instruction section prepended to the turn prompt (repeatable).
+        #[arg(long = "instructions", value_name = "TEXT")]
+        instructions: Vec<String>,
+
         /// Maximum total tokens for this resumed run.
         #[arg(long)]
         max_total_tokens: Option<u64>,
@@ -612,6 +627,10 @@ enum Commands {
         /// Per-turn block list for tools on this turn (repeatable).
         #[arg(long = "block-tool", value_name = "TOOL")]
         block_tools: Vec<String>,
+
+        /// Additional instruction section prepended to the turn prompt (repeatable).
+        #[arg(long = "instructions", value_name = "TEXT")]
+        instructions: Vec<String>,
 
         /// Verbose output
         #[arg(long, short = 'v')]
@@ -741,6 +760,9 @@ enum SessionCommands {
         limit: usize,
         #[arg(long)]
         offset: Option<usize>,
+        /// Filter by label (key=value, repeatable). Only sessions matching ALL labels are shown.
+        #[arg(long = "label", value_name = "KEY=VALUE", value_parser = parse_label)]
+        labels: Vec<(String, String)>,
     },
 
     /// Show session details
@@ -1043,6 +1065,20 @@ enum MobCommands {
     },
     /// Retire a meerkat.
     Retire { mob_id: String, meerkat_id: String },
+    /// Retire and re-spawn a meerkat with the same profile.
+    Respawn {
+        mob_id: String,
+        meerkat_id: String,
+        /// Optional initial message for the respawned meerkat.
+        #[arg(long)]
+        message: Option<String>,
+    },
+    /// Inject a message into an autonomous meerkat (request-reply).
+    InjectAndSubscribe {
+        mob_id: String,
+        meerkat_id: String,
+        message: String,
+    },
     /// Wire two peers.
     Wire {
         mob_id: String,
@@ -1088,6 +1124,13 @@ enum MobCommands {
     },
     /// Show JSON status for a flow run.
     FlowStatus { mob_id: String, run_id: String },
+    /// Stream mob events to stdout as JSON lines.
+    Events {
+        mob_id: String,
+        /// Stream events for a specific member only.
+        #[arg(long)]
+        member: Option<String>,
+    },
     /// Destroy a mob.
     Destroy { mob_id: String },
     /// Web deployment commands.
@@ -1185,6 +1228,9 @@ async fn main() -> anyhow::Result<ExitCode> {
             skill_references,
             allow_tools,
             block_tools,
+            labels,
+            instructions,
+            app_context,
             comms_name,
             comms_listen_tcp,
             no_comms,
@@ -1246,6 +1292,9 @@ async fn main() -> anyhow::Result<ExitCode> {
                 skill_references,
                 allow_tools,
                 block_tools,
+                labels,
+                instructions,
+                app_context,
                 comms_overrides,
                 enable_builtins,
                 enable_shell,
@@ -1285,6 +1334,9 @@ async fn main() -> anyhow::Result<ExitCode> {
             skill_references,
             allow_tools,
             block_tools,
+            labels,
+            instructions,
+            app_context,
             enable_builtins,
             enable_shell,
             no_subagents,
@@ -1318,6 +1370,9 @@ async fn main() -> anyhow::Result<ExitCode> {
                 skill_references,
                 allow_tools,
                 block_tools,
+                labels,
+                instructions,
+                app_context,
                 CommsOverrides::default(),
                 enable_builtins,
                 enable_shell,
@@ -1341,6 +1396,7 @@ async fn main() -> anyhow::Result<ExitCode> {
             skill_references,
             allow_tools,
             block_tools,
+            instructions,
             max_total_tokens,
             max_duration,
             max_tool_calls,
@@ -1358,6 +1414,7 @@ async fn main() -> anyhow::Result<ExitCode> {
                 skill_references,
                 allow_tools,
                 block_tools,
+                instructions,
                 max_total_tokens,
                 max_duration,
                 max_tool_calls,
@@ -1377,6 +1434,7 @@ async fn main() -> anyhow::Result<ExitCode> {
             skill_references,
             allow_tools,
             block_tools,
+            instructions,
             verbose,
         } => {
             let overrides = parse_hook_run_overrides(hooks_override_file, hooks_override_json)?;
@@ -1389,6 +1447,7 @@ async fn main() -> anyhow::Result<ExitCode> {
                 skill_references,
                 allow_tools,
                 block_tools,
+                instructions,
                 None,
                 None,
                 None,
@@ -1400,9 +1459,11 @@ async fn main() -> anyhow::Result<ExitCode> {
             .await
         }
         Commands::Sessions { command } => match command {
-            SessionCommands::List { limit, offset } => {
-                list_sessions(limit, offset, &cli_scope).await
-            }
+            SessionCommands::List {
+                limit,
+                offset,
+                labels,
+            } => list_sessions(limit, offset, labels, &cli_scope).await,
             SessionCommands::Show { id } => show_session(&id, &cli_scope).await,
             SessionCommands::Delete { session_id } => delete_session(&session_id, &cli_scope).await,
             SessionCommands::Interrupt { session_id } => {
@@ -1505,6 +1566,9 @@ async fn handle_run_command(
     skill_references: Vec<String>,
     allow_tools: Vec<String>,
     block_tools: Vec<String>,
+    labels: Vec<(String, String)>,
+    instructions: Vec<String>,
+    app_context: Option<String>,
     comms_overrides: CommsOverrides,
     enable_builtins: bool,
     enable_shell: bool,
@@ -1593,6 +1657,9 @@ async fn handle_run_command(
                 skill_references,
                 allow_tools,
                 block_tools,
+                labels,
+                instructions,
+                app_context,
                 config_base_dir,
                 hooks_override,
                 scope,
@@ -2665,6 +2732,7 @@ async fn resolve_flexible_session_id(
             .list(SessionQuery {
                 limit: Some(offset + 1),
                 offset: None,
+                labels: None,
             })
             .await
             .map_err(|e| anyhow::anyhow!("Failed to list sessions: {e}"))?;
@@ -2703,6 +2771,7 @@ async fn resolve_flexible_session_id(
         .list(SessionQuery {
             limit: None,
             offset: None,
+            labels: None,
         })
         .await
         .map_err(|e| anyhow::anyhow!("Failed to list sessions: {e}"))?;
@@ -2804,6 +2873,9 @@ async fn run_agent(
     skill_references: Vec<String>,
     allow_tools: Vec<String>,
     block_tools: Vec<String>,
+    labels: Vec<(String, String)>,
+    instructions: Vec<String>,
+    app_context: Option<String>,
     _config_base_dir: PathBuf,
     hooks_override: HookRunOverrides,
     scope: &RuntimeScope,
@@ -2963,6 +3035,22 @@ async fn run_agent(
         checkpointer: None,
         silent_comms_intents: Vec::new(),
         max_inline_peer_notifications: None,
+        app_context: app_context
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|e| anyhow::anyhow!("Invalid --app-context JSON: {e}"))?,
+        additional_instructions: if instructions.is_empty() {
+            None
+        } else {
+            Some(instructions)
+        },
+    };
+
+    let parsed_labels = if labels.is_empty() {
+        None
+    } else {
+        Some(std::collections::BTreeMap::from_iter(labels))
     };
 
     // Route through SessionService::create_session()
@@ -2984,6 +3072,7 @@ async fn run_agent(
             meerkat_core::service::InitialTurnPolicy::Defer
         },
         build: Some(build),
+        labels: parsed_labels,
     };
 
     // Warn if --stdin is used without --host (it has no effect)
@@ -3066,6 +3155,7 @@ async fn run_agent(
                     host_mode,
                     skill_references: canonical_skill_refs,
                     flow_tool_overlay,
+                    additional_instructions: None,
                 },
             )
             .await
@@ -3188,6 +3278,7 @@ async fn resume_session(
     skill_references: Vec<String>,
     allow_tools: Vec<String>,
     block_tools: Vec<String>,
+    instructions: Vec<String>,
     max_total_tokens: Option<u64>,
     max_duration: Option<String>,
     max_tool_calls: Option<usize>,
@@ -3205,6 +3296,7 @@ async fn resume_session(
         skill_references,
         allow_tools,
         block_tools,
+        instructions,
         max_total_tokens,
         max_duration,
         max_tool_calls,
@@ -3227,6 +3319,7 @@ async fn resume_session_with_llm_override(
     skill_references: Vec<String>,
     allow_tools: Vec<String>,
     block_tools: Vec<String>,
+    instructions: Vec<String>,
     max_total_tokens: Option<u64>,
     max_duration: Option<String>,
     max_tool_calls: Option<usize>,
@@ -3420,6 +3513,8 @@ async fn resume_session_with_llm_override(
         checkpointer: None,
         silent_comms_intents: Vec::new(),
         max_inline_peer_notifications: None,
+        app_context: None,
+        additional_instructions: None,
     };
 
     // Route through SessionService::create_session() with the resumed session
@@ -3445,9 +3540,15 @@ async fn resume_session_with_llm_override(
                 meerkat_core::service::InitialTurnPolicy::Defer
             },
             build: Some(build),
+            labels: None,
         })
         .await
         .map_err(session_err_to_anyhow)?;
+    let additional_instructions = if instructions.is_empty() {
+        None
+    } else {
+        Some(instructions)
+    };
     let result = if run_initial_turn_during_create {
         create_result
     } else {
@@ -3460,6 +3561,7 @@ async fn resume_session_with_llm_override(
                     host_mode,
                     skill_references: canonical_skill_refs,
                     flow_tool_overlay,
+                    additional_instructions,
                 },
             )
             .await
@@ -3692,6 +3794,7 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
 async fn list_sessions(
     limit: usize,
     offset: Option<usize>,
+    labels: Vec<(String, String)>,
     scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
     let (config, _) = load_config(scope).await?;
@@ -3699,6 +3802,11 @@ async fn list_sessions(
     let query = SessionQuery {
         limit: Some(limit),
         offset,
+        labels: if labels.is_empty() {
+            None
+        } else {
+            Some(std::collections::BTreeMap::from_iter(labels))
+        },
     };
 
     let sessions = service
@@ -3711,11 +3819,22 @@ async fn list_sessions(
         return Ok(());
     }
 
-    println!(
-        "{:<40} {:<72} {:<12} {:<20} {:<20}",
-        "ID", "SESSION_REF", "MESSAGES", "CREATED", "UPDATED"
-    );
-    println!("{}", "-".repeat(170));
+    // Check if any session has labels to decide whether to show the LABELS column.
+    let any_labels = sessions.iter().any(|s| !s.labels.is_empty());
+
+    if any_labels {
+        println!(
+            "{:<40} {:<72} {:<12} {:<20} {:<20} LABELS",
+            "ID", "SESSION_REF", "MESSAGES", "CREATED", "UPDATED"
+        );
+        println!("{}", "-".repeat(200));
+    } else {
+        println!(
+            "{:<40} {:<72} {:<12} {:<20} {:<20}",
+            "ID", "SESSION_REF", "MESSAGES", "CREATED", "UPDATED"
+        );
+        println!("{}", "-".repeat(170));
+    }
 
     for meta in sessions {
         let created = chrono::DateTime::<chrono::Utc>::from(meta.created_at)
@@ -3725,14 +3844,32 @@ async fn list_sessions(
             .format("%Y-%m-%d %H:%M")
             .to_string();
 
-        println!(
-            "{:<40} {:<72} {:<12} {:<20} {:<20}",
-            meta.session_id,
-            format_session_ref(&scope.locator.realm_id, &meta.session_id),
-            meta.message_count,
-            created,
-            updated
-        );
+        if any_labels {
+            let label_str: String = meta
+                .labels
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!(
+                "{:<40} {:<72} {:<12} {:<20} {:<20} {}",
+                meta.session_id,
+                format_session_ref(&scope.locator.realm_id, &meta.session_id),
+                meta.message_count,
+                created,
+                updated,
+                label_str,
+            );
+        } else {
+            println!(
+                "{:<40} {:<72} {:<12} {:<20} {:<20}",
+                meta.session_id,
+                format_session_ref(&scope.locator.realm_id, &meta.session_id),
+                meta.message_count,
+                created,
+                updated
+            );
+        }
     }
 
     Ok(())
@@ -4725,7 +4862,9 @@ async fn hydrate_mob_state(
                 .append(meerkat_mob::NewMobEvent {
                     mob_id: definition.id.clone(),
                     timestamp: None,
-                    kind: meerkat_mob::MobEventKind::MobCreated { definition },
+                    kind: meerkat_mob::MobEventKind::MobCreated {
+                        definition: Box::new(definition),
+                    },
                 })
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -5045,6 +5184,42 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             save_mob_registry(scope, &registry).await?;
             Ok(())
         }
+        MobCommands::Respawn {
+            mob_id,
+            meerkat_id,
+            message,
+        } => {
+            state
+                .mob_respawn(
+                    &meerkat_mob::MobId::from(mob_id.clone()),
+                    meerkat_mob::MeerkatId::from(meerkat_id),
+                    message,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("respawn enqueued");
+            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
+            save_mob_registry(scope, &registry).await?;
+            Ok(())
+        }
+        MobCommands::InjectAndSubscribe {
+            mob_id,
+            meerkat_id,
+            message,
+        } => {
+            let subscription = state
+                .mob_inject_and_subscribe(
+                    &meerkat_mob::MobId::from(mob_id.clone()),
+                    meerkat_mob::MeerkatId::from(meerkat_id),
+                    message,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("{}", subscription.id);
+            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
+            save_mob_registry(scope, &registry).await?;
+            Ok(())
+        }
         MobCommands::Stop { mob_id } => {
             state
                 .mob_stop(&meerkat_mob::MobId::from(mob_id.clone()))
@@ -5152,6 +5327,53 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
             save_mob_registry(scope, &registry).await?;
             println!("{}", render_flow_status_json(resolved)?);
+            Ok(())
+        }
+        MobCommands::Events { mob_id, member } => {
+            use futures::StreamExt;
+            let mob_id_typed = meerkat_mob::MobId::from(mob_id.as_str());
+            if let Some(member_id) = member {
+                let meerkat_id = meerkat_mob::MeerkatId::from(member_id.as_str());
+                let mut stream = state
+                    .subscribe_agent_events(&mob_id_typed, &meerkat_id)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                loop {
+                    tokio::select! {
+                        item = stream.next() => {
+                            match item {
+                                Some(envelope) => {
+                                    let json = serde_json::to_string(&envelope)
+                                        .map_err(|e| anyhow::anyhow!("serialize error: {e}"))?;
+                                    println!("{json}");
+                                }
+                                None => break,
+                            }
+                        }
+                        _ = tokio::signal::ctrl_c() => break,
+                    }
+                }
+            } else {
+                let mut router_handle = state
+                    .subscribe_mob_events(&mob_id_typed)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                loop {
+                    tokio::select! {
+                        item = router_handle.event_rx.recv() => {
+                            match item {
+                                Some(attributed) => {
+                                    let json = serde_json::to_string(&attributed)
+                                        .map_err(|e| anyhow::anyhow!("serialize error: {e}"))?;
+                                    println!("{json}");
+                                }
+                                None => break,
+                            }
+                        }
+                        _ = tokio::signal::ctrl_c() => break,
+                    }
+                }
+            }
             Ok(())
         }
         MobCommands::Destroy { mob_id } => {
@@ -6384,6 +6606,7 @@ mod tests {
                     message_count: 0,
                     is_active: false,
                     last_assistant_text: None,
+                    labels: Default::default(),
                 },
                 billing: SessionUsage {
                     total_tokens: 0,
@@ -6405,6 +6628,7 @@ mod tests {
                     message_count: 0,
                     total_tokens: 0,
                     is_active: false,
+                    labels: Default::default(),
                 })
                 .collect())
         }
@@ -6646,7 +6870,7 @@ mod tests {
                 .expect("sessions list offset should parse");
         match cli.command {
             Commands::Sessions {
-                command: SessionCommands::List { limit, offset },
+                command: SessionCommands::List { limit, offset, .. },
             } => {
                 assert_eq!(limit, 10);
                 assert_eq!(offset, Some(3));
@@ -8463,6 +8687,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             build: Some(build),
+            labels: None,
         };
 
         service
@@ -8726,6 +8951,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             "resume and list tools",
             None,
             HookRunOverrides::default(),
+            vec![],
             vec![],
             vec![],
             vec![],

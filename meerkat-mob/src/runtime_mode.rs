@@ -10,3 +10,12 @@ pub enum MobRuntimeMode {
     /// Explicit turn-by-turn execution.
     TurnDriven,
 }
+
+impl std::fmt::Display for MobRuntimeMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AutonomousHost => f.write_str("autonomous_host"),
+            Self::TurnDriven => f.write_str("turn_driven"),
+        }
+    }
+}

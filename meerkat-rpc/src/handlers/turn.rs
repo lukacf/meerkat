@@ -34,6 +34,9 @@ pub struct StartTurnParams {
     /// Optional per-turn tool visibility overlay.
     #[serde(default)]
     pub flow_tool_overlay: Option<TurnToolOverlay>,
+    /// Additional instruction sections prepended as system notices for this turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_instructions: Option<Vec<String>>,
 }
 
 /// Parameters for `turn/interrupt`.
@@ -113,6 +116,7 @@ pub async fn handle_start(
             event_tx,
             skill_refs,
             params.flow_tool_overlay,
+            params.additional_instructions,
         )
         .await
     {

@@ -24,6 +24,12 @@ pub struct CoreCreateParams {
     pub max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<std::collections::BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_instructions: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_context: Option<serde_json::Value>,
 }
 
 /// Structured output parameters.
@@ -329,5 +335,70 @@ mod tests {
                 SkillId("a93d587d-8f44-438f-8189-6e8cf549f6e7/mail-extractor".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn test_core_create_params_all_fields_roundtrip() -> Result<(), serde_json::Error> {
+        let mut labels = std::collections::BTreeMap::new();
+        labels.insert("env".to_string(), "prod".to_string());
+        labels.insert("team".to_string(), "infra".to_string());
+
+        let params = CoreCreateParams {
+            prompt: "hello".to_string(),
+            model: Some("claude-opus-4-6".to_string()),
+            provider: Some(Provider::Anthropic),
+            max_tokens: Some(1024),
+            system_prompt: Some("You are helpful.".to_string()),
+            labels: Some(labels.clone()),
+            additional_instructions: Some(vec![
+                "Be concise.".to_string(),
+                "Use JSON output.".to_string(),
+            ]),
+            app_context: Some(serde_json::json!({"org_id": "acme", "tier": "premium"})),
+        };
+        let json = serde_json::to_string(&params)?;
+        let parsed: CoreCreateParams = serde_json::from_str(&json)?;
+        assert_eq!(parsed.prompt, "hello");
+        assert_eq!(parsed.labels, Some(labels));
+        assert_eq!(
+            parsed.additional_instructions,
+            Some(vec![
+                "Be concise.".to_string(),
+                "Use JSON output.".to_string()
+            ])
+        );
+        assert!(parsed.app_context.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn test_core_create_params_defaults_backward_compat() -> Result<(), serde_json::Error> {
+        let json = r#"{"prompt": "hello"}"#;
+        let parsed: CoreCreateParams = serde_json::from_str(json)?;
+        assert_eq!(parsed.prompt, "hello");
+        assert!(parsed.model.is_none());
+        assert!(parsed.labels.is_none());
+        assert!(parsed.additional_instructions.is_none());
+        assert!(parsed.app_context.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_core_create_params_none_fields_omitted() -> Result<(), serde_json::Error> {
+        let params = CoreCreateParams {
+            prompt: "hello".to_string(),
+            model: None,
+            provider: None,
+            max_tokens: None,
+            system_prompt: None,
+            labels: None,
+            additional_instructions: None,
+            app_context: None,
+        };
+        let json = serde_json::to_string(&params)?;
+        assert!(!json.contains("\"labels\""));
+        assert!(!json.contains("\"additional_instructions\""));
+        assert!(!json.contains("\"app_context\""));
+        Ok(())
     }
 }

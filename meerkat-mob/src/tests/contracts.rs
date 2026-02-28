@@ -550,6 +550,7 @@ impl SessionService for ContractSessionService {
                 message_count: 0,
                 is_active: false,
                 last_assistant_text: None,
+                labels: Default::default(),
             },
             billing: SessionUsage {
                 total_tokens: 0,
@@ -569,6 +570,7 @@ impl SessionService for ContractSessionService {
                 message_count: 0,
                 total_tokens: 0,
                 is_active: false,
+                labels: Default::default(),
             })
             .collect())
     }
@@ -597,6 +599,7 @@ fn host_mode_req(comms_name: &str) -> CreateSessionRequest {
             comms_name: Some(comms_name.to_string()),
             ..Default::default()
         }),
+        labels: None,
     }
 }
 
@@ -673,6 +676,7 @@ async fn contract_mob_001_host_mode_session_stays_alive() {
                 host_mode: true,
                 skill_references: None,
                 flow_tool_overlay: None,
+                additional_instructions: None,
             },
         )
         .await
@@ -743,6 +747,7 @@ async fn contract_mob_007_session_archive_removes_from_active_list() {
                 host_mode: false,
                 skill_references: None,
                 flow_tool_overlay: None,
+                additional_instructions: None,
             },
         )
         .await;

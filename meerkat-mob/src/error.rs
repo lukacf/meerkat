@@ -87,6 +87,13 @@ pub enum MobError {
     #[error("supervisor escalation: {0}")]
     SupervisorEscalation(String),
 
+    /// Operation is not supported for the member's runtime mode.
+    #[error("unsupported for runtime mode {mode}: {reason}")]
+    UnsupportedForMode {
+        mode: crate::MobRuntimeMode,
+        reason: String,
+    },
+
     /// Operation blocked by reset barrier.
     #[error("reset barrier active")]
     ResetBarrier,
@@ -231,6 +238,10 @@ mod tests {
                 to_role: ProfileName::from("worker"),
             },
             MobError::SupervisorEscalation("boom".to_string()),
+            MobError::UnsupportedForMode {
+                mode: crate::MobRuntimeMode::TurnDriven,
+                reason: "inject_and_subscribe requires AutonomousHost mode".to_string(),
+            },
             MobError::ResetBarrier,
             MobError::StorageError(Box::new(std::io::Error::new(
                 std::io::ErrorKind::Other,

@@ -17,6 +17,7 @@ use crate::{
 use crate::{EventStream, StreamError};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -98,6 +99,8 @@ pub struct CreateSessionRequest {
     pub initial_turn: InitialTurnPolicy,
     /// Optional extended build options for factory-backed builders.
     pub build: Option<SessionBuildOptions>,
+    /// Optional key-value labels attached at session creation.
+    pub labels: Option<BTreeMap<String, String>>,
 }
 
 /// Optional build-time options used by factory-backed session builders.
@@ -144,6 +147,16 @@ pub struct SessionBuildOptions {
     /// - `>0`: inline only when post-drain peer count is <= threshold
     /// - `<-1`: invalid
     pub max_inline_peer_notifications: Option<i32>,
+    /// Opaque application context passed through to custom `SessionAgentBuilder`
+    /// implementations. Not consumed by the standard build pipeline.
+    ///
+    /// Uses `Value` rather than `Box<RawValue>` because `SessionBuildOptions`
+    /// must be `Clone` and `Box<RawValue>` does not implement `Clone`.
+    /// Same tradeoff as `provider_params`.
+    pub app_context: Option<serde_json::Value>,
+    /// Additional instruction sections appended to the system prompt after skill
+    /// assembly, before tool instructions. Order preserved.
+    pub additional_instructions: Option<Vec<String>>,
 }
 
 impl Default for SessionBuildOptions {
@@ -175,6 +188,8 @@ impl Default for SessionBuildOptions {
             checkpointer: None,
             silent_comms_intents: Vec::new(),
             max_inline_peer_notifications: None,
+            app_context: None,
+            additional_instructions: None,
         }
     }
 }
@@ -211,6 +226,8 @@ impl std::fmt::Debug for SessionBuildOptions {
                 "max_inline_peer_notifications",
                 &self.max_inline_peer_notifications,
             )
+            .field("app_context", &self.app_context.is_some())
+            .field("additional_instructions", &self.additional_instructions)
             .finish()
     }
 }
@@ -228,6 +245,14 @@ pub struct StartTurnRequest {
     pub skill_references: Option<Vec<crate::skills::SkillKey>>,
     /// Optional per-turn flow tool overlay (ephemeral, non-persistent).
     pub flow_tool_overlay: Option<TurnToolOverlay>,
+    /// Optional additional instructions prepended as `[SYSTEM NOTICE: ...]` to the user prompt.
+    ///
+    /// Unlike `SessionBuildOptions.additional_instructions` (which are appended to the
+    /// system prompt as extra sections at session creation), turn-level instructions
+    /// are prepended to the user message as `[SYSTEM NOTICE: {instruction}]` blocks.
+    /// This distinction means create-time instructions persist across turns (system prompt)
+    /// while turn-level instructions are per-turn only (conversation history).
+    pub additional_instructions: Option<Vec<String>>,
 }
 
 /// Ephemeral per-turn tool overlay for flow-dispatched turns.
@@ -248,6 +273,8 @@ pub struct SessionQuery {
     pub limit: Option<usize>,
     /// Offset for pagination.
     pub offset: Option<usize>,
+    /// Filters sessions where all specified k/v pairs match.
+    pub labels: Option<BTreeMap<String, String>>,
 }
 
 /// Summary of a session (for list results).
@@ -261,6 +288,8 @@ pub struct SessionSummary {
     pub message_count: usize,
     pub total_tokens: u64,
     pub is_active: bool,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
 }
 
 /// Detailed view of a session's state and history metadata.
@@ -272,6 +301,8 @@ pub struct SessionInfo {
     pub message_count: usize,
     pub is_active: bool,
     pub last_assistant_text: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
 }
 
 /// Billing/usage data for a session, returned separately from state.

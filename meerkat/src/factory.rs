@@ -289,6 +289,13 @@ pub struct AgentBuildConfig {
 
     /// Pre-built skill engine. Skips filesystem/git repository resolution.
     pub skill_engine_override: Option<Arc<meerkat_core::skills::SkillRuntime>>,
+
+    /// Opaque application context for custom `SessionAgentBuilder` implementations.
+    /// Not consumed by the standard build pipeline.
+    pub app_context: Option<serde_json::Value>,
+    /// Additional instruction sections appended to the system prompt after skill
+    /// assembly, before tool instructions. Order preserved.
+    pub additional_instructions: Option<Vec<String>>,
 }
 
 impl std::fmt::Debug for AgentBuildConfig {
@@ -343,6 +350,8 @@ impl std::fmt::Debug for AgentBuildConfig {
                 "skill_engine_override",
                 &self.skill_engine_override.is_some(),
             )
+            .field("app_context", &self.app_context.is_some())
+            .field("additional_instructions", &self.additional_instructions)
             .finish()
     }
 }
@@ -386,6 +395,8 @@ impl AgentBuildConfig {
             session_store_override: None,
             hook_engine_override: None,
             skill_engine_override: None,
+            app_context: None,
+            additional_instructions: None,
         }
     }
 
@@ -437,6 +448,8 @@ impl AgentBuildConfig {
         self.silent_comms_intents
             .clone_from(&build.silent_comms_intents);
         self.max_inline_peer_notifications = build.max_inline_peer_notifications;
+        self.app_context = build.app_context.clone();
+        self.additional_instructions = build.additional_instructions.clone();
     }
 
     /// Convert build options to the service transport representation.
@@ -471,6 +484,8 @@ impl AgentBuildConfig {
             checkpointer: self.checkpointer.clone(),
             silent_comms_intents: self.silent_comms_intents.clone(),
             max_inline_peer_notifications: self.max_inline_peer_notifications,
+            app_context: self.app_context.clone(),
+            additional_instructions: self.additional_instructions.clone(),
         }
     }
 }
@@ -1488,6 +1503,16 @@ impl AgentFactory {
         }
         for section in &preloaded_skill_sections {
             extra_sections.push(section.as_str());
+        }
+        // Append additional instructions after skills, before tool instructions.
+        let additional_instruction_storage: Vec<String> = build_config
+            .additional_instructions
+            .take()
+            .unwrap_or_default();
+        for instruction in &additional_instruction_storage {
+            if !instruction.is_empty() {
+                extra_sections.push(instruction.as_str());
+            }
         }
         #[cfg(not(target_arch = "wasm32"))]
         let system_prompt = crate::assemble_system_prompt(

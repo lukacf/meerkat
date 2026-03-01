@@ -1,65 +1,38 @@
 /**
- * Minimal agent loop — calls Anthropic API directly from the browser,
- * dispatches tool calls to WebCM, and iterates until done.
+ * Agent — drives the Meerkat WASM runtime for a single-agent session.
  *
- * This is a POC spike. The production version would use meerkat-web-runtime's
- * Rust agent loop with a custom tool dispatcher bridged to WebCM.
+ * Uses meerkat-web-runtime exports:
+ * - register_tool_callback: register WebCM tools before session creation
+ * - create_session_simple: create a session without mobpack
+ * - start_turn: run a full agent turn (LLM + tool dispatch loop)
+ * - poll_events: drain AgentEvents from the completed turn
+ * - destroy_session: cleanup
+ *
+ * The agent loop runs in Rust (meerkat-core). Tool calls are dispatched
+ * to JS callbacks (WebCM) via the JsToolDispatcher bridge.
  */
 
 import type { WebCMHost } from "./webcm-host";
 
-// ── Tool definitions ────────────────────────────────────────────────────────
+// ── Types ───────────────────────────────────────────────────────────────────
 
-const TOOLS = [
-  {
-    name: "shell",
-    description:
-      "Execute a shell command in the Alpine Linux VM. Returns stdout+stderr and exit code. Use this for running programs, installing packages (apk add), compiling code, etc.",
-    input_schema: {
-      type: "object" as const,
-      properties: {
-        command: {
-          type: "string",
-          description: "The shell command to execute",
-        },
-      },
-      required: ["command"],
-    },
-  },
-  {
-    name: "write_file",
-    description:
-      "Write content to a file in the VM filesystem. Creates parent directories if needed.",
-    input_schema: {
-      type: "object" as const,
-      properties: {
-        path: {
-          type: "string",
-          description: "Absolute path to write to",
-        },
-        content: {
-          type: "string",
-          description: "File content",
-        },
-      },
-      required: ["path", "content"],
-    },
-  },
-  {
-    name: "read_file",
-    description: "Read the contents of a file from the VM filesystem.",
-    input_schema: {
-      type: "object" as const,
-      properties: {
-        path: {
-          type: "string",
-          description: "Absolute path to read",
-        },
-      },
-      required: ["path"],
-    },
-  },
-];
+export interface AgentEvent {
+  type: "thinking" | "text" | "tool_call" | "tool_result" | "error" | "done";
+  content: string;
+  toolName?: string;
+}
+
+interface RuntimeModule {
+  default(): Promise<void>;
+  register_tool_callback(name: string, description: string, schema_json: string, callback: any): void;
+  clear_tool_callbacks(): void;
+  create_session_simple(config_json: string): number;
+  start_turn(handle: number, prompt: string, options_json: string): Promise<any>;
+  poll_events(handle: number): string;
+  destroy_session(handle: number): void;
+}
+
+// ── Tool definitions ────────────────────────────────────────────────────────
 
 const SYSTEM_PROMPT = `You are a skilled software engineer with access to an Alpine Linux virtual machine running in the user's browser. You can execute shell commands, read and write files.
 
@@ -73,40 +46,39 @@ Guidelines:
 - Work in /root/ or /tmp/.
 - Be concise in your responses. Show your work.`;
 
-// ── Types ───────────────────────────────────────────────────────────────────
+const SHELL_SCHEMA = JSON.stringify({
+  type: "object",
+  properties: {
+    command: { type: "string", description: "Shell command to execute in the Alpine Linux VM" },
+  },
+  required: ["command"],
+});
 
-interface Message {
-  role: "user" | "assistant";
-  content: any;
-}
+const WRITE_FILE_SCHEMA = JSON.stringify({
+  type: "object",
+  properties: {
+    path: { type: "string", description: "Absolute path to write to" },
+    content: { type: "string", description: "File content" },
+  },
+  required: ["path", "content"],
+});
 
-interface ToolUse {
-  type: "tool_use";
-  id: string;
-  name: string;
-  input: Record<string, any>;
-}
+const READ_FILE_SCHEMA = JSON.stringify({
+  type: "object",
+  properties: {
+    path: { type: "string", description: "Absolute path to read" },
+  },
+  required: ["path"],
+});
 
-interface ToolResult {
-  type: "tool_result";
-  tool_use_id: string;
-  content: string;
-  is_error?: boolean;
-}
-
-export interface AgentEvent {
-  type: "thinking" | "text" | "tool_call" | "tool_result" | "error" | "done";
-  content: string;
-  toolName?: string;
-}
-
-// ── Agent loop ──────────────────────────────────────────────────────────────
+// ── Agent ───────────────────────────────────────────────────────────────────
 
 export class Agent {
-  private apiKey: string;
   private vm: WebCMHost;
-  private messages: Message[] = [];
   private onEvent: (e: AgentEvent) => void;
+  private runtime: RuntimeModule | null = null;
+  private sessionHandle: number | null = null;
+  private apiKey: string;
   private model: string;
 
   constructor(apiKey: string, vm: WebCMHost, onEvent: (e: AgentEvent) => void, model = "claude-opus-4-6") {
@@ -116,120 +88,120 @@ export class Agent {
     this.model = model;
   }
 
-  async run(userMessage: string): Promise<void> {
-    this.messages.push({ role: "user", content: userMessage });
+  /** Load the WASM runtime, register tools, create session. */
+  async init(): Promise<void> {
+    // Load meerkat-web-runtime WASM
+    const url = new URL("/meerkat-pkg/meerkat_web_runtime.js", window.location.href).toString();
+    this.runtime = (await import(/* @vite-ignore */ url)) as RuntimeModule;
+    await this.runtime.default();
 
-    // Agent loop: call LLM, execute tools, repeat until no more tool calls
-    for (let turn = 0; turn < 20; turn++) {
-      const response = await this.callApi();
+    // Register WebCM tools
+    this.runtime.clear_tool_callbacks();
 
-      if (!response.ok) {
-        const err = await response.text();
-        this.onEvent({ type: "error", content: `API error: ${response.status} ${err}` });
-        return;
-      }
+    this.runtime.register_tool_callback(
+      "shell",
+      "Execute a shell command in the Alpine Linux VM. Returns stdout+stderr and exit code.",
+      SHELL_SCHEMA,
+      async (argsJson: string) => {
+        const args = JSON.parse(argsJson);
+        const { output, exitCode } = await this.vm.exec(args.command);
+        return JSON.stringify({
+          content: exitCode === 0 ? (output || "(no output)") : `Exit code ${exitCode}\n${output}`,
+          is_error: exitCode !== 0,
+        });
+      },
+    );
 
-      const data = await response.json();
-      const assistantContent = data.content;
+    this.runtime.register_tool_callback(
+      "write_file",
+      "Write content to a file in the VM filesystem. Creates parent directories if needed.",
+      WRITE_FILE_SCHEMA,
+      async (argsJson: string) => {
+        const args = JSON.parse(argsJson);
+        await this.vm.exec(`mkdir -p $(dirname ${args.path})`);
+        await this.vm.writeFile(args.path, args.content);
+        return JSON.stringify({ content: `Wrote ${args.path}`, is_error: false });
+      },
+    );
 
-      // Add assistant message to history
-      this.messages.push({ role: "assistant", content: assistantContent });
-
-      // Process response blocks
-      const toolUses: ToolUse[] = [];
-
-      for (const block of assistantContent) {
-        if (block.type === "text" && block.text) {
-          this.onEvent({ type: "text", content: block.text });
-        } else if (block.type === "tool_use") {
-          toolUses.push(block);
+    this.runtime.register_tool_callback(
+      "read_file",
+      "Read the contents of a file from the VM filesystem.",
+      READ_FILE_SCHEMA,
+      async (argsJson: string) => {
+        const args = JSON.parse(argsJson);
+        try {
+          const content = await this.vm.readFile(args.path);
+          return JSON.stringify({ content, is_error: false });
+        } catch (e: any) {
+          return JSON.stringify({ content: e.message, is_error: true });
         }
-      }
+      },
+    );
 
-      // If no tool calls, we're done
-      if (data.stop_reason === "end_turn" || toolUses.length === 0) {
-        this.onEvent({ type: "done", content: "" });
-        return;
-      }
+    // Create session
+    this.sessionHandle = this.runtime.create_session_simple(JSON.stringify({
+      model: this.model,
+      api_key: this.apiKey,
+      system_prompt: SYSTEM_PROMPT,
+      max_tokens: 4096,
+    }));
+  }
 
-      // Execute tools and collect results
-      const toolResults: ToolResult[] = [];
+  /** Run a full agent turn. Events are emitted via onEvent callback. */
+  async run(userMessage: string): Promise<void> {
+    if (!this.runtime || this.sessionHandle === null) {
+      throw new Error("Agent not initialized — call init() first");
+    }
 
-      for (const tool of toolUses) {
+    // start_turn runs the full agent loop (LLM + tool calls) and returns
+    // when done. Events are buffered and retrieved via poll_events.
+    const resultStr = await this.runtime.start_turn(this.sessionHandle, userMessage, "{}");
+    const result = typeof resultStr === "string" ? JSON.parse(resultStr) : resultStr;
+
+    // Drain events
+    const eventsJson = this.runtime.poll_events(this.sessionHandle);
+    const events: any[] = JSON.parse(eventsJson);
+
+    // Route events to the UI
+    for (const event of events) {
+      this.routeEvent(event);
+    }
+
+    // Final status
+    if (result.status === "failed") {
+      this.onEvent({ type: "error", content: result.error || "Agent run failed" });
+    }
+    this.onEvent({ type: "done", content: "" });
+  }
+
+  private routeEvent(event: any): void {
+    switch (event.type) {
+      case "text_delta":
+        // Accumulate deltas — we'll emit the full text from text_complete
+        break;
+      case "text_complete":
+        this.onEvent({ type: "text", content: event.content || "" });
+        break;
+      case "tool_call_requested":
         this.onEvent({
           type: "tool_call",
-          content: tool.name === "shell" ? tool.input.command : JSON.stringify(tool.input),
-          toolName: tool.name,
+          content: event.name === "shell"
+            ? (typeof event.args === "string" ? JSON.parse(event.args).command : event.args?.command || JSON.stringify(event.args))
+            : JSON.stringify(event.args),
+          toolName: event.name,
         });
-
-        try {
-          const result = await this.executeTool(tool);
-          toolResults.push({
-            type: "tool_result",
-            tool_use_id: tool.id,
-            content: result,
-          });
-          this.onEvent({
-            type: "tool_result",
-            content: result.length > 2000 ? result.slice(0, 2000) + "\n...(truncated)" : result,
-            toolName: tool.name,
-          });
-        } catch (err: any) {
-          const errMsg = err.message || String(err);
-          toolResults.push({
-            type: "tool_result",
-            tool_use_id: tool.id,
-            content: errMsg,
-            is_error: true,
-          });
-          this.onEvent({ type: "error", content: errMsg });
-        }
-      }
-
-      // Add tool results as user message and loop
-      this.messages.push({ role: "user", content: toolResults });
+        break;
+      case "tool_execution_completed":
+        this.onEvent({
+          type: "tool_result",
+          content: event.result || "(no output)",
+          toolName: event.name,
+        });
+        break;
+      case "run_failed":
+        this.onEvent({ type: "error", content: event.error || "Unknown error" });
+        break;
     }
-
-    this.onEvent({ type: "error", content: "Max turns reached" });
-  }
-
-  private async executeTool(tool: ToolUse): Promise<string> {
-    switch (tool.name) {
-      case "shell": {
-        const { output, exitCode } = await this.vm.exec(tool.input.command);
-        return exitCode === 0
-          ? output || "(no output)"
-          : `Exit code ${exitCode}\n${output}`;
-      }
-      case "write_file": {
-        await this.vm.exec(`mkdir -p $(dirname ${tool.input.path})`);
-        await this.vm.writeFile(tool.input.path, tool.input.content);
-        return `Wrote ${tool.input.path}`;
-      }
-      case "read_file": {
-        return await this.vm.readFile(tool.input.path);
-      }
-      default:
-        throw new Error(`Unknown tool: ${tool.name}`);
-    }
-  }
-
-  private callApi(): Promise<Response> {
-    return fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": this.apiKey,
-        "anthropic-version": "2023-06-01",
-        "anthropic-dangerous-direct-browser-access": "true",
-      },
-      body: JSON.stringify({
-        model: this.model,
-        max_tokens: 4096,
-        system: SYSTEM_PROMPT,
-        tools: TOOLS,
-        messages: this.messages,
-      }),
-    });
   }
 }

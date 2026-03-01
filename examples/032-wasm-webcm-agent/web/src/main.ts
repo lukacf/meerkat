@@ -92,8 +92,10 @@ bootBtn.addEventListener("click", async () => {
       await mob.createMob(selectedModel);
       sessionInfo.textContent = `Mob mode · ${selectedModel}`;
     } else {
-      // Solo mode: direct JS agent loop
+      // Solo mode: meerkat WASM agent loop with WebCM tools
+      bootStatus.textContent = "Loading Meerkat runtime...";
       agent = new Agent(key, vm, handleAgentEvent, selectedModel);
+      await agent.init();
       sessionInfo.textContent = `Model: ${selectedModel}`;
     }
 
@@ -261,10 +263,11 @@ promptInput.addEventListener("input", () => {
 
 // ── Model switch ────────────────────────────────────────────────────────────
 
-modelSwitch.addEventListener("change", () => {
+modelSwitch.addEventListener("change", async () => {
   selectedModel = modelSwitch.value;
   if (agent) {
     agent = new Agent(apiKeyInput.value.trim(), vm, handleAgentEvent, selectedModel);
+    await agent.init();
     turnCount = 0;
     sessionInfo.textContent = `Model: ${selectedModel} (new session)`;
   }
@@ -272,9 +275,10 @@ modelSwitch.addEventListener("change", () => {
 
 // ── New session ─────────────────────────────────────────────────────────────
 
-newSessionBtn.addEventListener("click", () => {
+newSessionBtn.addEventListener("click", async () => {
   if (agent) {
     agent = new Agent(apiKeyInput.value.trim(), vm, handleAgentEvent, selectedModel);
+    await agent.init();
     chat.clear();
     turnCount = 0;
     sessionInfo.textContent = `Model: ${selectedModel}`;

@@ -975,6 +975,77 @@ pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<u32, Js
     Ok(handle)
 }
 
+/// Create a session without a mobpack — for standalone agent use.
+///
+/// `config_json`: `{ "model": "...", "api_key": "sk-...", "system_prompt"?: "...",
+///                    "max_tokens"?: N, "additional_instructions"?: ["..."] }`
+///
+/// Uses `register_tool_callback` tools if any were registered before this call.
+#[wasm_bindgen]
+pub fn create_session_simple(config_json: &str) -> Result<u32, JsValue> {
+    let config: SessionConfig =
+        serde_json::from_str(config_json).map_err(|e| err_str("invalid_config", e))?;
+
+    if config.model.trim().is_empty() {
+        return Err(err_js("invalid_config", "model must not be empty"));
+    }
+    let api_key = config.api_key.as_deref().unwrap_or("");
+    if api_key.is_empty() {
+        return Err(err_js("invalid_config", "api_key must not be empty"));
+    }
+
+    // Create LLM client.
+    let llm_client = create_llm_client(&config.model, api_key, config.base_url.as_deref())
+        .map_err(|e| err_str("provider_error", e))?;
+
+    // Build tool dispatcher (includes JS-registered tools).
+    let tools = build_wasm_tool_dispatcher().map_err(|e| err_str("tool_error", e))?;
+
+    // Build session store (in-memory).
+    let store: Arc<dyn meerkat_core::AgentSessionStore> = Arc::new(
+        meerkat_store::StoreAdapter::new(Arc::new(meerkat_store::MemoryStore::new())),
+    );
+
+    // Prepare AgentBuildConfig with all overrides set.
+    let mut build_config = AgentBuildConfig::new(&config.model);
+    build_config.system_prompt = config.system_prompt.clone();
+    build_config.max_tokens = Some(config.max_tokens);
+    build_config.tool_dispatcher_override = Some(tools);
+    build_config.session_store_override = Some(store);
+    build_config.llm_client_override = Some(llm_client);
+    build_config.additional_instructions = config.additional_instructions.clone();
+    build_config.app_context = config.app_context.clone();
+
+    // Create a minimal Config for the factory.
+    let meerkat_config = Config::default();
+
+    let handle = REGISTRY.with(|cell| {
+        let mut registry = cell.borrow_mut();
+        let handle = registry.next_handle;
+        registry.next_handle = registry.next_handle.wrapping_add(1);
+        while registry.next_handle == 0 || registry.sessions.contains_key(&registry.next_handle) {
+            registry.next_handle = registry.next_handle.wrapping_add(1);
+        }
+
+        let session = RuntimeSession {
+            handle,
+            mob_id: String::new(),
+            model: config.model.clone(),
+            config: meerkat_config,
+            build_config_template: build_config,
+            meerkat_session: None,
+            run_counter: 0,
+            usage: Usage::default(),
+            pending_events: Vec::new(),
+        };
+
+        registry.sessions.insert(handle, session);
+        handle
+    });
+
+    Ok(handle)
+}
+
 /// Per-turn options parsed from `options_json`.
 #[derive(Debug, Default, Deserialize)]
 struct TurnOptions {

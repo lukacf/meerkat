@@ -23,6 +23,10 @@
             <option value="claude-sonnet-4-5" selected>Claude Sonnet 4.5</option>
           </select>
         </div>
+        <div class="setup-row mode-toggle">
+          <label><input type="radio" name="mode" value="solo" checked /> Solo agent</label>
+          <label><input type="radio" name="mode" value="mob" /> Mob (planner + coder + reviewer)</label>
+        </div>
         <button id="boot-btn">Boot VM & Start</button>
         <div id="boot-status"></div>
       </div>

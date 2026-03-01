@@ -1,10 +1,13 @@
 # 032 — Meerkat WebCM Agent
 
-A coding agent that runs entirely in the browser — no server required.
+A coding agent IDE that runs entirely in the browser — no server required.
 
-- **LLM**: Anthropic Claude via direct browser fetch
-- **Execution**: Alpine Linux VM (RISC-V) via [WebCM](https://github.com/edubart/webcm) WASM
-- **Tools**: `shell`, `read_file`, `write_file`
+## Features
+
+- **Claude Code-like UI**: File tree, Monaco editor with tabs, markdown chat, collapsible terminal
+- **Solo mode**: Single agent with shell/file tools backed by WebCM Linux VM
+- **Mob mode**: Planner + Coder + Reviewer agents collaborating via Meerkat mob orchestration
+- **100% browser-native**: LLM calls via fetch, VM via RISC-V WASM emulator
 
 ## Quick start
 
@@ -12,30 +15,39 @@ A coding agent that runs entirely in the browser — no server required.
 ./examples.sh
 # Open http://127.0.0.1:4032
 # Paste your Anthropic API key
-# Click "Boot VM" (loads 32MB WASM bundle)
-# Ask: "Write a Python script that generates the first 20 prime numbers and run it"
+# Select Solo or Mob mode
+# Click "Boot VM & Start"
 ```
 
 ## Architecture
 
 ```
 Browser Tab
-├── Agent loop (TypeScript)         ← calls Anthropic API via fetch
-│   └── tool dispatcher
-│       ├── shell ──────────────→ WebCM (RISC-V Linux in WASM)
-│       ├── write_file ─────────→ WebCM (via base64 pipe)
-│       └── read_file ──────────→ WebCM (via cat)
-├── WebCM (Cartesi Machine)        ← Alpine Linux, 32MB WASM bundle
-│   └── xterm-pty bridge           ← PTY for command I/O
-└── UI: terminal view + chat panel
+├── Agent loop
+│   ├── Solo: JS agent loop → Anthropic API
+│   └── Mob: meerkat-web-runtime (Rust WASM)
+│       ├── JsToolDispatcher → WebCM callbacks
+│       ├── mob_create / mob_spawn / mob_wire
+│       └── mob_run_flow (planner → coder → reviewer)
+├── WebCM (Cartesi Machine, RISC-V Alpine Linux)
+│   └── xterm-pty bridge for command I/O
+├── UI
+│   ├── File tree (VM filesystem browser)
+│   ├── Monaco editor (syntax highlighting, tabs)
+│   ├── Chat panel (markdown, tool cards)
+│   └── Terminal (xterm.js, collapsible)
+```
+
+## Mob flow
+
+```
+1. Plan    [planner]  → writes /workspace/plan.md
+2. Code    [coder]    → implements in /workspace/src/
+3. Review  [reviewer] → writes /workspace/review.md
+4. Revise  [coder]    → addresses feedback
+5. Approve [reviewer] → final verification
 ```
 
 ## What's in the VM
 
-Alpine Linux with: bash, python3, lua5.4, tcc, quickjs, git, curl, jq, sqlite3, vim, neovim.
-
-## Status
-
-**POC spike.** The agent loop runs in TypeScript. The production version
-would use `meerkat-web-runtime`'s Rust agent loop with a custom
-`AgentToolDispatcher` bridged to WebCM via `wasm_bindgen`.
+Alpine Linux with: ash, micropython, lua5.4, quickjs, tcc, git, curl, jq, sqlite3, vim, neovim.

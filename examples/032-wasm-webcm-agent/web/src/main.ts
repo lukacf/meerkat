@@ -7,6 +7,7 @@
 
 import { WebCMHost } from "./webcm-host";
 import { Agent, type AgentEvent } from "./agent";
+import { MobOrchestrator, type MobEvent } from "./mob";
 import { FileTree } from "./ui/file-tree";
 import { Editor } from "./ui/editor";
 import { Chat } from "./ui/chat";
@@ -37,12 +38,14 @@ const newSessionBtn = document.getElementById("new-session-btn") as HTMLButtonEl
 
 const vm = new WebCMHost();
 let agent: Agent | null = null;
+let mob: MobOrchestrator | null = null;
 let running = false;
 let chat: Chat;
 let editor: Editor;
 let fileTree: FileTree;
 let turnCount = 0;
 let selectedModel = "claude-sonnet-4-5";
+let isMobMode = false;
 
 // ── UI Components ───────────────────────────────────────────────────────────
 
@@ -57,6 +60,7 @@ bootBtn.addEventListener("click", async () => {
     return;
   }
   selectedModel = modelSelect.value;
+  isMobMode = (document.querySelector('input[name="mode"]:checked') as HTMLInputElement)?.value === "mob";
   bootBtn.disabled = true;
 
   try {
@@ -78,13 +82,22 @@ bootBtn.addEventListener("click", async () => {
       },
     });
 
-    agent = new Agent(key, vm, handleAgentEvent, selectedModel);
+    if (isMobMode) {
+      // Mob mode: init meerkat WASM runtime + create mob
+      mob = new MobOrchestrator(vm, handleMobEvent);
+      await mob.init(key, selectedModel);
+      await mob.createMob(selectedModel);
+      sessionInfo.textContent = `Mob mode · ${selectedModel}`;
+    } else {
+      // Solo mode: direct JS agent loop
+      agent = new Agent(key, vm, handleAgentEvent, selectedModel);
+      sessionInfo.textContent = `Model: ${selectedModel}`;
+    }
 
     // Transition to workspace
     setupOverlay.classList.add("hidden");
     workspace.classList.remove("hidden");
     vm.fit();
-    sessionInfo.textContent = `Model: ${selectedModel}`;
     modelSwitch.value = selectedModel;
     promptInput.focus();
 
@@ -113,6 +126,39 @@ window.addEventListener("resize", () => vm.fit());
 // ── Agent events ────────────────────────────────────────────────────────────
 
 let currentToolCard: HTMLElement | null = null;
+
+// ── Mob event handler ───────────────────────────────────────────────────────
+
+function handleMobEvent(e: MobEvent) {
+  // Add agent label before content
+  const agentLabel = document.createElement("span");
+  agentLabel.className = `mob-agent-label ${e.agent}`;
+  agentLabel.textContent = e.agent;
+
+  switch (e.type) {
+    case "status":
+      chat.addAssistantText(`**[${e.agent}]** ${e.content}`);
+      break;
+    case "text":
+      chat.addAssistantText(`**[${e.agent}]** ${e.content}`);
+      break;
+    case "tool_call":
+      currentToolCard = chat.addToolCall(
+        `${e.agent}/${e.toolName || "tool"}`,
+        e.content.slice(0, 300),
+      );
+      break;
+    case "tool_result":
+      if (currentToolCard) {
+        chat.resolveToolCard(currentToolCard, e.content, false);
+        currentToolCard = null;
+      }
+      fileTree?.refresh();
+      break;
+  }
+}
+
+// ── Agent event handler ─────────────────────────────────────────────────────
 
 function handleAgentEvent(e: AgentEvent) {
   switch (e.type) {
@@ -163,7 +209,7 @@ function handleAgentEvent(e: AgentEvent) {
 // ── Send ────────────────────────────────────────────────────────────────────
 
 async function send() {
-  if (running || !agent) return;
+  if (running) return;
   const text = promptInput.value.trim();
   if (!text) return;
 
@@ -174,7 +220,14 @@ async function send() {
 
   setRunning(true);
   try {
-    await agent.run(text);
+    if (isMobMode && mob) {
+      // Mob mode: run the implement flow
+      await mob.runFlow(text);
+      // Refresh file tree after flow
+      await fileTree?.refresh();
+    } else if (agent) {
+      await agent.run(text);
+    }
   } catch (err: any) {
     chat.addError(err.message);
   }

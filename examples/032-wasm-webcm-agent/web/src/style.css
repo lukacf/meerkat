@@ -82,6 +82,44 @@ body {
   cursor: pointer;
 }
 
+.mode-toggle {
+  display: flex;
+  gap: 16px;
+  justify-content: center;
+}
+
+.mode-toggle label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.mode-toggle input[type="radio"] {
+  accent-color: var(--accent-blue);
+}
+
+/* ── Mob activity ─────────────────────────────────────────── */
+
+.mob-agent-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  display: inline-block;
+  margin-bottom: 4px;
+}
+
+.mob-agent-label.planner { background: #1a3a5c; color: var(--accent-blue); }
+.mob-agent-label.coder { background: #1a3c1a; color: var(--accent-green); }
+.mob-agent-label.reviewer { background: #3a1a3c; color: var(--accent-purple); }
+.mob-agent-label.system { background: var(--bg-tertiary); color: var(--accent-orange); }
+
 #boot-btn {
   width: 100%;
   background: var(--accent-green);

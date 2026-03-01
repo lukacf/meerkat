@@ -27,6 +27,22 @@ else
   echo "WebCM already downloaded"
 fi
 
+# ── Build meerkat WASM runtime (for mob mode) ────────────────────────────────
+
+MEERKAT_PKG="${PUBLIC_DIR}/meerkat-pkg"
+if [[ ! -f "${MEERKAT_PKG}/meerkat_web_runtime_bg.wasm" ]]; then
+  echo "Building meerkat-web-runtime for wasm32..."
+  REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+  RUSTFLAGS='--cfg getrandom_backend="wasm_js"' \
+    wasm-pack build "${REPO_ROOT}/meerkat-web-runtime" \
+      --target web \
+      --out-dir "${PWD}/${MEERKAT_PKG}" \
+      --dev
+  echo "Meerkat WASM runtime built to ${MEERKAT_PKG}/"
+else
+  echo "Meerkat WASM runtime already built"
+fi
+
 # ── Install deps and build ──────────────────────────────────────────────────
 
 cd "${WEB_DIR}"

@@ -1,3 +1,4 @@
 web/public/webcm.*
+web/public/meerkat-pkg/
 web/node_modules/
 web/dist/

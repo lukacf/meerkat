@@ -212,9 +212,9 @@ Work in /workspace/. Use shell, write_file, and read_file tools.`,
 export class MobOrchestrator {
   private vm: WebCMHost;
   private onEvent: MobEventHandler;
-  private runtime: RuntimeModule | null = null;
+  runtime: RuntimeModule | null = null;
   private mobId = "dev-team";
-  private members: Map<string, { meerkatId: string; subHandle: number }> = new Map();
+  members: Map<string, { meerkatId: string; subHandle: number }> = new Map();
   private pollInterval: number | null = null;
 
   constructor(vm: WebCMHost, onEvent: MobEventHandler) {
@@ -279,27 +279,32 @@ export class MobOrchestrator {
     }
 
     this.onEvent({ agent: "system", type: "status", content: "Mob created and wired" });
+
+    // Start polling events immediately — autonomous agents may already be active
+    this.startPolling();
   }
 
   async runFlow(objective: string): Promise<void> {
     if (!this.runtime) throw new Error("Runtime not initialized");
 
-    this.onEvent({ agent: "system", type: "status", content: `Starting flow: "${objective}"` });
-    this.startPolling();
+    this.onEvent({ agent: "system", type: "status", content: `Task: "${objective}"` });
 
-    try {
-      const runIdRaw = await this.runtime.mob_run_flow(
+    // Send the objective directly to the planner via comms message.
+    // Flow step messages don't interpolate {{variables}}, so we
+    // deliver the user's request as a direct message instead.
+    const planner = this.members.get("planner");
+    if (planner) {
+      await this.runtime.mob_send_message(
         this.mobId,
-        "implement",
-        JSON.stringify({ objective }),
+        planner.meerkatId,
+        `New task from user: ${objective}\n\nPlease create an implementation plan in /workspace/plan.md, then notify the coder to start implementing.`,
       );
-      const runId = typeof runIdRaw === "string" ? runIdRaw.replace(/"/g, "") : String(runIdRaw);
-      await this.pollFlowStatus(runId);
-    } catch (err: any) {
-      this.onEvent({ agent: "system", type: "status", content: `Flow error: ${err.message}` });
+      this.onEvent({ agent: "system", type: "status", content: "Sent task to planner" });
     }
 
-    this.stop();
+    // Wait for the agents to work autonomously
+    // (they coordinate via comms — planner writes plan, tells coder, coder implements, tells reviewer)
+    this.onEvent({ agent: "system", type: "status", content: "Agents working autonomously..." });
   }
 
   stop(): void {
@@ -371,53 +376,55 @@ export class MobOrchestrator {
   }
 
   private routeEvent(profile: string, envelope: any): void {
-    // EventEnvelope format: { event_id, source_id, seq, timestamp_ms, kind, data }
-    const kind = envelope.kind || envelope.type;
-    const data = envelope.data || envelope;
+    // EventEnvelope format: { event_id, source_id, seq, timestamp_ms, payload }
+    // payload: { type: "text_delta", delta: "..." } or { type: "tool_call_requested", ... }
+    const payload = envelope.payload || envelope;
+    const type = payload.type;
 
-    switch (kind) {
+    switch (type) {
       case "text_delta":
         // Skip deltas, wait for text_complete
         break;
       case "text_complete":
-        this.onEvent({ agent: profile, type: "text", content: data.text || data.content || "" });
-        break;
-      case "tool_calls":
-        if (data.tool_calls) {
-          for (const tc of data.tool_calls) {
-            this.onEvent({
-              agent: profile,
-              type: "tool_call",
-              content: JSON.stringify(tc.args || tc.input || {}),
-              toolName: tc.name,
-            });
-          }
-        }
+        this.onEvent({ agent: profile, type: "text", content: payload.content || "" });
         break;
       case "tool_call_requested":
         this.onEvent({
           agent: profile,
           type: "tool_call",
-          content: JSON.stringify(data.args || {}),
-          toolName: data.name,
+          content: payload.name === "shell"
+            ? (typeof payload.args === "object" ? payload.args.command || JSON.stringify(payload.args) : String(payload.args))
+            : JSON.stringify(payload.args || {}),
+          toolName: payload.name,
         });
         break;
-      case "tool_result":
       case "tool_execution_completed":
         this.onEvent({
           agent: profile,
           type: "tool_result",
-          content: data.result || data.content || "(no output)",
-          toolName: data.name || data.tool_name,
+          content: (payload.result || "(no output)").slice(0, 500),
+          toolName: payload.name,
         });
         break;
-      case "turn_complete":
-      case "run_completed":
-        this.onEvent({ agent: profile, type: "status", content: "Turn completed" });
+      case "tool_result_received":
+        this.onEvent({
+          agent: profile,
+          type: "tool_result",
+          content: payload.name || "tool",
+          toolName: payload.name,
+        });
         break;
-      case "error":
+      case "turn_started":
+        this.onEvent({ agent: profile, type: "status", content: `Turn ${payload.turn_number || ""}` });
+        break;
+      case "turn_completed":
+        this.onEvent({ agent: profile, type: "status", content: "Turn done" });
+        break;
+      case "run_completed":
+        this.onEvent({ agent: profile, type: "status", content: "Completed" });
+        break;
       case "run_failed":
-        this.onEvent({ agent: profile, type: "status", content: `Error: ${data.message || data.error || "unknown"}` });
+        this.onEvent({ agent: profile, type: "status", content: `Error: ${payload.error || "unknown"}` });
         break;
     }
   }

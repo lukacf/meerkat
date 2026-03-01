@@ -88,6 +88,7 @@ bootBtn.addEventListener("click", async () => {
     if (isMobMode) {
       // Mob mode: init meerkat WASM runtime + create mob
       mob = new MobOrchestrator(vm, handleMobEvent);
+      (window as any).__mob = mob;
       await mob.init(key, selectedModel);
       await mob.createMob(selectedModel);
       sessionInfo.textContent = `Mob mode · ${selectedModel}`;
@@ -226,10 +227,13 @@ async function send() {
   setRunning(true);
   try {
     if (isMobMode && mob) {
-      // Mob mode: run the implement flow
+      // Mob mode: send task to planner, agents work autonomously
       await mob.runFlow(text);
-      // Refresh file tree after flow
-      await fileTree?.refresh();
+      setRunning(false);
+      // Periodically refresh file tree while agents work
+      const refreshInterval = setInterval(() => fileTree?.refresh(), 5000);
+      setTimeout(() => clearInterval(refreshInterval), 300000);
+      return;
     } else if (agent) {
       await agent.run(text);
     }

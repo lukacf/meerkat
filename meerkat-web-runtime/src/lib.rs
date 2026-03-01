@@ -235,6 +235,8 @@ struct RuntimeSession {
     meerkat_session: Option<meerkat_core::session::Session>,
     run_counter: u64,
     usage: Usage,
+    /// Buffered agent events from the last turn, drained by poll_events.
+    pending_events: Vec<serde_json::Value>,
 }
 
 #[derive(Default)]
@@ -963,6 +965,7 @@ pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<u32, Js
             meerkat_session: None,
             run_counter: 0,
             usage: Usage::default(),
+            pending_events: Vec::new(),
         };
 
         registry.sessions.insert(handle, session);
@@ -1038,6 +1041,11 @@ pub async fn start_turn(handle: u32, prompt: &str, options_json: &str) -> Result
         build_config.additional_instructions = options.additional_instructions;
     }
 
+    // Set up event channel to capture AgentEvents during the turn.
+    let (event_tx, mut event_rx) =
+        crate::tokio::sync::mpsc::channel::<meerkat_core::event::AgentEvent>(256);
+    build_config.event_tx = Some(event_tx);
+
     // Build the agent through AgentFactory::build_agent() — same pipeline as all surfaces.
     let factory = meerkat::AgentFactory::minimal();
     let mut agent = factory
@@ -1047,6 +1055,14 @@ pub async fn start_turn(handle: u32, prompt: &str, options_json: &str) -> Result
 
     // Run the turn.
     let run_result = agent.run(prompt.into()).await;
+
+    // Drain events from the channel into serialized JSON values.
+    let mut captured_events: Vec<serde_json::Value> = Vec::new();
+    while let Ok(event) = event_rx.try_recv() {
+        if let Ok(val) = serde_json::to_value(&event) {
+            captured_events.push(val);
+        }
+    }
 
     // Preserve the agent's session for future turns.
     let agent_session = agent.session().clone();
@@ -1065,6 +1081,7 @@ pub async fn start_turn(handle: u32, prompt: &str, options_json: &str) -> Result
                         .usage
                         .output_tokens
                         .saturating_add(result.usage.output_tokens);
+                    session.pending_events.extend(captured_events);
                 }
             });
 
@@ -1088,6 +1105,7 @@ pub async fn start_turn(handle: u32, prompt: &str, options_json: &str) -> Result
                 let mut registry = cell.borrow_mut();
                 if let Some(session) = registry.sessions.get_mut(&handle) {
                     session.meerkat_session = Some(agent_session);
+                    session.pending_events.extend(captured_events);
                 }
             });
 
@@ -1166,12 +1184,23 @@ pub fn destroy_session(handle: u32) -> Result<(), JsValue> {
     })
 }
 
-/// Drain and return all pending events (placeholder for future event streaming).
+/// Drain and return all pending agent events from the last turn(s).
+///
+/// Returns a JSON array of `AgentEvent` objects. Each call drains the buffer;
+/// subsequent calls return `[]` until the next `start_turn` produces more events.
 #[wasm_bindgen]
-pub fn poll_events(_handle: u32) -> Result<String, JsValue> {
-    // Events will be populated once we wire AgentEvent streaming through
-    // the build_config event channel. For now, return empty array.
-    Ok("[]".to_string())
+pub fn poll_events(handle: u32) -> Result<String, JsValue> {
+    REGISTRY
+        .with(|cell| {
+            let mut registry = cell.borrow_mut();
+            let session = registry
+                .sessions
+                .get_mut(&handle)
+                .ok_or_else(|| format!("unknown session handle: {handle}"))?;
+            let events = std::mem::take(&mut session.pending_events);
+            serde_json::to_string(&events).map_err(|e| format!("serialize error: {e}"))
+        })
+        .map_err(|e: String| err_str("poll_events_error", e))
 }
 
 // ═══════════════════════════════════════════════════════════

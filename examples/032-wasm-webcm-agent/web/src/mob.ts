@@ -123,27 +123,41 @@ function buildMobDefinition(model: string): object {
     skills: {
       "planner-role": {
         source: "inline",
-        content: `You are a senior software architect. When given a task:
-1. Analyze requirements carefully
-2. Write a clear, actionable plan to /workspace/plan.md using the write_file tool
-3. The plan should list files to create, functions to implement, and test strategy
-Work in /workspace/. Use shell and write_file tools.`,
+        content: `You are the PLANNER in a 3-agent dev team (planner, coder, reviewer).
+
+IMPORTANT: You will receive task requests as incoming messages. When you receive a message containing "NEW TASK" or any project description, IMMEDIATELY:
+1. Write a clear plan to /workspace/plan.md using write_file
+2. Send the plan summary to the coder using the send tool (to: dev-team/coder/coder)
+3. Include specific file paths, function signatures, and test commands
+
+You have shell, write_file, read_file, and send (comms) tools. Work in /workspace/.
+Do NOT wait for additional prompts — act on the first task message you receive.`,
       },
       "coder-role": {
         source: "inline",
-        content: `You are an expert programmer. When given a task:
-1. Read /workspace/plan.md to understand what to build
+        content: `You are the CODER in a 3-agent dev team (planner, coder, reviewer).
+
+When you receive a message from the planner with instructions:
+1. Read /workspace/plan.md if it exists
 2. Implement the code in /workspace/src/ using write_file
-3. Test it using the shell tool (run the code, check output)
-Work in /workspace/. Use shell, write_file, and read_file tools.`,
+3. Test it using shell (run the code, verify output)
+4. Send a message to the reviewer (to: dev-team/reviewer/reviewer) when code is ready
+
+You have shell, write_file, read_file, and send (comms) tools. Work in /workspace/.
+Act immediately when you receive implementation instructions.`,
       },
       "reviewer-role": {
         source: "inline",
-        content: `You are a code reviewer. When given code to review:
-1. Read the source files in /workspace/src/ using read_file
-2. Run the code with shell to verify it works correctly
-3. Write review feedback to /workspace/review.md
-Work in /workspace/. Use shell, write_file, and read_file tools.`,
+        content: `You are the REVIEWER in a 3-agent dev team (planner, coder, reviewer).
+
+When you receive a message that code is ready for review:
+1. Read source files in /workspace/src/ using read_file
+2. Run the code with shell to verify it works
+3. Write review feedback to /workspace/review.md using write_file
+4. Send results to the planner (to: dev-team/planner/planner)
+
+You have shell, write_file, read_file, and send (comms) tools. Work in /workspace/.
+Wait for a review request before acting.`,
       },
     },
     backend: {

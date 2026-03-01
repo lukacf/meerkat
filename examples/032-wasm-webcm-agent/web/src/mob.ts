@@ -5,6 +5,7 @@
  */
 
 import type { WebCMHost } from "./webcm-host";
+import { registerWebCMTools, type ToolRuntime } from "./tools";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -17,10 +18,8 @@ export interface MobEvent {
 
 type MobEventHandler = (e: MobEvent) => void;
 
-interface RuntimeModule {
+interface RuntimeModule extends ToolRuntime {
   default(): Promise<void>;
-  register_tool_callback(name: string, description: string, schema_json: string, callback: any): void;
-  clear_tool_callbacks(): void;
   init_runtime_from_config(config_json: string): any;
   mob_create(definition_json: string): Promise<any>;
   mob_spawn(mob_id: string, specs_json: string): Promise<any>;
@@ -31,33 +30,6 @@ interface RuntimeModule {
   mob_flow_status(mob_id: string, run_id: string): Promise<any>;
   poll_subscription(handle: number): string;
 }
-
-// ── Tool schemas ────────────────────────────────────────────────────────────
-
-const SHELL_SCHEMA = JSON.stringify({
-  type: "object",
-  properties: {
-    command: { type: "string", description: "Shell command to execute in the Alpine Linux VM" },
-  },
-  required: ["command"],
-});
-
-const WRITE_FILE_SCHEMA = JSON.stringify({
-  type: "object",
-  properties: {
-    path: { type: "string", description: "Absolute path to write to" },
-    content: { type: "string", description: "File content" },
-  },
-  required: ["path", "content"],
-});
-
-const READ_FILE_SCHEMA = JSON.stringify({
-  type: "object",
-  properties: {
-    path: { type: "string", description: "Absolute path to read" },
-  },
-  required: ["path"],
-});
 
 // ── Mob definition (exact MobDefinition format) ─────────────────────────────
 
@@ -240,10 +212,22 @@ export class MobOrchestrator {
     this.onEvent({ agent: "system", type: "status", content: "Loading Meerkat WASM runtime..." });
 
     const url = new URL("/meerkat-pkg/meerkat_web_runtime.js", window.location.href).toString();
-    this.runtime = (await import(/* @vite-ignore */ url)) as RuntimeModule;
+    let mod: RuntimeModule;
+    try {
+      mod = (await import(/* @vite-ignore */ url)) as RuntimeModule;
+    } catch (err: any) {
+      throw new Error(
+        `Failed to load Meerkat WASM runtime from ${url}. ` +
+        `Make sure you built the WASM bundle with wasm-pack (see examples.sh) ` +
+        `and the dev server is serving /meerkat-pkg/. ` +
+        `Original error: ${err.message}`,
+      );
+    }
+    this.runtime = mod;
     await this.runtime.default();
 
-    this.registerTools();
+    // Register WebCM tools (shared with agent.ts)
+    registerWebCMTools(this.runtime, this.vm);
 
     this.runtime.init_runtime_from_config(JSON.stringify({
       api_key: apiKey,
@@ -304,7 +288,7 @@ export class MobOrchestrator {
     this.onEvent({ agent: "system", type: "status", content: `Task: "${objective}"` });
 
     // Send the objective to the planner (mirrors diplomacy demo pattern:
-    // mob_send_message → wake agent → tight poll loop → quiet threshold)
+    // mob_send_message -> wake agent -> tight poll loop -> quiet threshold)
     const planner = this.members.get("planner");
     if (planner) {
       await this.runtime.mob_send_message(
@@ -331,10 +315,6 @@ export class MobOrchestrator {
       if (eventCount > 0) {
         lastEventTime = Date.now();
       }
-      // Refresh file tree periodically
-      if (eventCount > 0) {
-        // debounce: don't refresh every poll, just when events happen
-      }
       if (Date.now() - lastEventTime > QUIET_THRESHOLD) {
         this.onEvent({ agent: "system", type: "status", content: "Agents idle — task may be complete" });
         break;
@@ -348,46 +328,6 @@ export class MobOrchestrator {
       clearInterval(this.pollInterval);
       this.pollInterval = null;
     }
-  }
-
-  private registerTools(): void {
-    if (!this.runtime) return;
-    this.runtime.clear_tool_callbacks();
-
-    this.runtime.register_tool_callback(
-      "shell", "Execute a shell command in the Alpine Linux VM", SHELL_SCHEMA,
-      async (argsJson: string) => {
-        const args = JSON.parse(argsJson);
-        const { output, exitCode } = await this.vm.exec(args.command);
-        return JSON.stringify({
-          content: exitCode === 0 ? (output || "(no output)") : `Exit code ${exitCode}\n${output}`,
-          is_error: exitCode !== 0,
-        });
-      },
-    );
-
-    this.runtime.register_tool_callback(
-      "write_file", "Write content to a file in the VM", WRITE_FILE_SCHEMA,
-      async (argsJson: string) => {
-        const args = JSON.parse(argsJson);
-        await this.vm.exec(`mkdir -p $(dirname ${args.path})`);
-        await this.vm.writeFile(args.path, args.content);
-        return JSON.stringify({ content: `Wrote ${args.path}`, is_error: false });
-      },
-    );
-
-    this.runtime.register_tool_callback(
-      "read_file", "Read a file from the VM", READ_FILE_SCHEMA,
-      async (argsJson: string) => {
-        const args = JSON.parse(argsJson);
-        try {
-          const content = await this.vm.readFile(args.path);
-          return JSON.stringify({ content, is_error: false });
-        } catch (e: any) {
-          return JSON.stringify({ content: e.message, is_error: true });
-        }
-      },
-    );
   }
 
   private startPolling(): void {
@@ -468,29 +408,5 @@ export class MobOrchestrator {
         this.onEvent({ agent: profile, type: "status", content: `Error: ${payload.error || "unknown"}` });
         break;
     }
-  }
-
-  private async pollFlowStatus(runId: string): Promise<void> {
-    if (!this.runtime) return;
-
-    for (let i = 0; i < 180; i++) { // Max 6 minutes
-      await new Promise((r) => setTimeout(r, 2000));
-      try {
-        const statusRaw = await this.runtime.mob_flow_status(this.mobId, runId);
-        const status = typeof statusRaw === "string" ? JSON.parse(statusRaw) : statusRaw;
-
-        if (status.state === "completed" || status.state === "Completed") {
-          this.onEvent({ agent: "system", type: "status", content: "Flow completed!" });
-          return;
-        } else if (status.state === "failed" || status.state === "Failed") {
-          this.onEvent({ agent: "system", type: "status", content: `Flow failed: ${status.error || status.reason || "unknown"}` });
-          return;
-        }
-      } catch {
-        // Status endpoint may not be ready yet
-      }
-    }
-
-    this.onEvent({ agent: "system", type: "status", content: "Flow timed out" });
   }
 }

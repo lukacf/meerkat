@@ -21,7 +21,7 @@ export class FileTree {
   private vm: WebCMHost;
   private callbacks: FileTreeCallbacks;
   private activePath: string | null = null;
-  private roots = ["/root", "/tmp"];
+  private roots = ["/root", "/tmp", "/workspace"];
 
   constructor(container: HTMLElement, vm: WebCMHost, callbacks: FileTreeCallbacks) {
     this.container = container;

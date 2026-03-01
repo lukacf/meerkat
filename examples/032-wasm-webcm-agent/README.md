@@ -1,13 +1,21 @@
 # 032 — Meerkat WebCM Agent
 
 A coding agent IDE that runs entirely in the browser — no server required.
+Both solo and mob modes are fully functional.
 
 ## Features
 
 - **Claude Code-like UI**: File tree, Monaco editor with tabs, markdown chat, collapsible terminal
 - **Solo mode**: Single agent with shell/file tools backed by WebCM Linux VM
-- **Mob mode**: Planner + Coder + Reviewer agents collaborating via Meerkat mob orchestration
+- **Mob mode**: Planner + Coder + Reviewer agents collaborating via Meerkat mob orchestration (WASM)
 - **100% browser-native**: LLM calls via fetch, VM via RISC-V WASM emulator
+
+## Prerequisites
+
+- **Node.js** (v18+) and npm
+- **curl** (for downloading the WebCM bundle)
+- **wasm-pack** (only needed for mob mode — builds `meerkat-web-runtime`)
+- An **Anthropic API key**
 
 ## Quick start
 
@@ -19,20 +27,27 @@ A coding agent IDE that runs entirely in the browser — no server required.
 # Click "Boot VM & Start"
 ```
 
+The script downloads the WebCM RISC-V emulator (~30 MB), builds the Meerkat
+WASM runtime (if wasm-pack is available), installs npm dependencies, and
+starts the Vite dev server.
+
+Use `./examples.sh --clean` to force a fresh download/rebuild of all cached
+artifacts (WebCM bundle and meerkat-pkg).
+
 ## Architecture
 
 ```
 Browser Tab
 ├── Agent loop
-│   ├── Solo: JS agent loop → Anthropic API
+│   ├── Solo: Meerkat WASM agent loop → Anthropic API
 │   └── Mob: meerkat-web-runtime (Rust WASM)
 │       ├── JsToolDispatcher → WebCM callbacks
 │       ├── mob_create / mob_spawn / mob_wire
-│       └── mob_run_flow (planner → coder → reviewer)
+│       └── mob_send_message → autonomous host polling
 ├── WebCM (Cartesi Machine, RISC-V Alpine Linux)
 │   └── xterm-pty bridge for command I/O
 ├── UI
-│   ├── File tree (VM filesystem browser)
+│   ├── File tree (VM filesystem browser: /root, /tmp, /workspace)
 │   ├── Monaco editor (syntax highlighting, tabs)
 │   ├── Chat panel (markdown, tool cards)
 │   └── Terminal (xterm.js, collapsible)

@@ -3,8 +3,8 @@
 #
 # Downloads pre-built WebCM WASM bundle, builds the Vite app, and serves.
 #
-# Prerequisites: node, npm
-# Usage: ./examples.sh
+# Prerequisites: node, npm, curl (wasm-pack for mob mode)
+# Usage: ./examples.sh [--clean]
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -12,24 +12,33 @@ cd "$(dirname "$0")"
 WEBCM_BASE="https://edubart.github.io/webcm"
 WEB_DIR="web"
 PUBLIC_DIR="${WEB_DIR}/public"
+MEERKAT_PKG="${PUBLIC_DIR}/meerkat-pkg"
+
+# ── Clean flag ───────────────────────────────────────────────────────────────
+
+if [[ "${1:-}" == "--clean" ]]; then
+  echo "Cleaning cached WebCM and meerkat-pkg artifacts..."
+  rm -f "${PUBLIC_DIR}/webcm.mjs" "${PUBLIC_DIR}/webcm.wasm"
+  rm -rf "${MEERKAT_PKG}"
+  echo "Done. Re-downloading and rebuilding."
+fi
 
 # ── Download WebCM WASM bundle ──────────────────────────────────────────────
 
 if [[ ! -f "${PUBLIC_DIR}/webcm.mjs" ]]; then
-  echo "Downloading WebCM..."
+  echo "Downloading WebCM (~30 MB)..."
   mkdir -p "${PUBLIC_DIR}"
 
   curl -fSL "${WEBCM_BASE}/webcm.mjs" -o "${PUBLIC_DIR}/webcm.mjs"
   curl -fSL "${WEBCM_BASE}/webcm.wasm" -o "${PUBLIC_DIR}/webcm.wasm"
 
-  echo "WebCM downloaded (~30 MB) to ${PUBLIC_DIR}/"
+  echo "WebCM downloaded to ${PUBLIC_DIR}/"
 else
   echo "WebCM already downloaded"
 fi
 
 # ── Build meerkat WASM runtime (for mob mode) ────────────────────────────────
 
-MEERKAT_PKG="${PUBLIC_DIR}/meerkat-pkg"
 if [[ ! -f "${MEERKAT_PKG}/meerkat_web_runtime_bg.wasm" ]]; then
   echo "Building meerkat-web-runtime for wasm32..."
   REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"

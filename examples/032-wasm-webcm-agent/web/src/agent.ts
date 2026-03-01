@@ -13,6 +13,7 @@
  */
 
 import type { WebCMHost } from "./webcm-host";
+import { registerWebCMTools } from "./tools";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -32,7 +33,7 @@ interface RuntimeModule {
   destroy_session(handle: number): void;
 }
 
-// ── Tool definitions ────────────────────────────────────────────────────────
+// ── System prompt ──────────────────────────────────────────────────────────
 
 const SYSTEM_PROMPT = `You are a skilled software engineer with access to an Alpine Linux virtual machine running in the user's browser. You can execute shell commands, read and write files.
 
@@ -45,31 +46,6 @@ Guidelines:
 - Install additional packages with: apk add <package>
 - Work in /root/ or /tmp/.
 - Be concise in your responses. Show your work.`;
-
-const SHELL_SCHEMA = JSON.stringify({
-  type: "object",
-  properties: {
-    command: { type: "string", description: "Shell command to execute in the Alpine Linux VM" },
-  },
-  required: ["command"],
-});
-
-const WRITE_FILE_SCHEMA = JSON.stringify({
-  type: "object",
-  properties: {
-    path: { type: "string", description: "Absolute path to write to" },
-    content: { type: "string", description: "File content" },
-  },
-  required: ["path", "content"],
-});
-
-const READ_FILE_SCHEMA = JSON.stringify({
-  type: "object",
-  properties: {
-    path: { type: "string", description: "Absolute path to read" },
-  },
-  required: ["path"],
-});
 
 // ── Agent ───────────────────────────────────────────────────────────────────
 
@@ -92,52 +68,21 @@ export class Agent {
   async init(): Promise<void> {
     // Load meerkat-web-runtime WASM
     const url = new URL("/meerkat-pkg/meerkat_web_runtime.js", window.location.href).toString();
-    this.runtime = (await import(/* @vite-ignore */ url)) as RuntimeModule;
+    let mod: RuntimeModule;
+    try {
+      mod = (await import(/* @vite-ignore */ url)) as RuntimeModule;
+    } catch (err: any) {
+      throw new Error(
+        `Failed to load Meerkat WASM runtime from ${url}. ` +
+        `Make sure you built the WASM bundle (see examples.sh) and the dev server is serving /meerkat-pkg/. ` +
+        `Original error: ${err.message}`,
+      );
+    }
+    this.runtime = mod;
     await this.runtime.default();
 
-    // Register WebCM tools
-    this.runtime.clear_tool_callbacks();
-
-    this.runtime.register_tool_callback(
-      "shell",
-      "Execute a shell command in the Alpine Linux VM. Returns stdout+stderr and exit code.",
-      SHELL_SCHEMA,
-      async (argsJson: string) => {
-        const args = JSON.parse(argsJson);
-        const { output, exitCode } = await this.vm.exec(args.command);
-        return JSON.stringify({
-          content: exitCode === 0 ? (output || "(no output)") : `Exit code ${exitCode}\n${output}`,
-          is_error: exitCode !== 0,
-        });
-      },
-    );
-
-    this.runtime.register_tool_callback(
-      "write_file",
-      "Write content to a file in the VM filesystem. Creates parent directories if needed.",
-      WRITE_FILE_SCHEMA,
-      async (argsJson: string) => {
-        const args = JSON.parse(argsJson);
-        await this.vm.exec(`mkdir -p $(dirname ${args.path})`);
-        await this.vm.writeFile(args.path, args.content);
-        return JSON.stringify({ content: `Wrote ${args.path}`, is_error: false });
-      },
-    );
-
-    this.runtime.register_tool_callback(
-      "read_file",
-      "Read the contents of a file from the VM filesystem.",
-      READ_FILE_SCHEMA,
-      async (argsJson: string) => {
-        const args = JSON.parse(argsJson);
-        try {
-          const content = await this.vm.readFile(args.path);
-          return JSON.stringify({ content, is_error: false });
-        } catch (e: any) {
-          return JSON.stringify({ content: e.message, is_error: true });
-        }
-      },
-    );
+    // Register WebCM tools (shared with mob.ts)
+    registerWebCMTools(this.runtime, this.vm);
 
     // Create session
     this.sessionHandle = this.runtime.create_session_simple(JSON.stringify({

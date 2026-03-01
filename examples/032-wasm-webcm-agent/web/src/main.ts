@@ -82,13 +82,9 @@ bootBtn.addEventListener("click", async () => {
       },
     });
 
-    // Debug: expose VM for console testing
-    (window as any).__vm = vm;
-
     if (isMobMode) {
       // Mob mode: init meerkat WASM runtime + create mob
       mob = new MobOrchestrator(vm, handleMobEvent);
-      (window as any).__mob = mob;
       await mob.init(key, selectedModel);
       await mob.createMob(selectedModel);
       sessionInfo.textContent = `Mob mode · ${selectedModel}`;
@@ -193,7 +189,7 @@ function handleAgentEvent(e: AgentEvent) {
               editor?.openFile(path, content);
               fileTree?.setActive(path);
             })
-            .catch(() => {});
+            .catch((err: any) => console.warn(`Failed to open written file ${path}:`, err));
         }
       }
       break;
@@ -265,7 +261,15 @@ promptInput.addEventListener("input", () => {
 
 modelSwitch.addEventListener("change", async () => {
   selectedModel = modelSwitch.value;
-  if (agent) {
+  if (isMobMode && mob) {
+    // Mob mode: recreate the entire mob with the new model
+    mob.stop();
+    mob = new MobOrchestrator(vm, handleMobEvent);
+    await mob.init(apiKeyInput.value.trim(), selectedModel);
+    await mob.createMob(selectedModel);
+    chat.clear();
+    sessionInfo.textContent = `Mob mode · ${selectedModel} (new session)`;
+  } else if (agent) {
     agent = new Agent(apiKeyInput.value.trim(), vm, handleAgentEvent, selectedModel);
     await agent.init();
     turnCount = 0;

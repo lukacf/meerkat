@@ -280,7 +280,7 @@ export class MobOrchestrator {
 
     this.onEvent({ agent: "system", type: "status", content: "Mob created and wired" });
 
-    // Start polling events immediately — autonomous agents may already be active
+    // Start background polling for autonomous agent activity
     this.startPolling();
   }
 
@@ -289,23 +289,45 @@ export class MobOrchestrator {
 
     this.onEvent({ agent: "system", type: "status", content: `Task: "${objective}"` });
 
-    // Send the objective directly to the planner via comms message.
-    // Flow step messages don't interpolate {{variables}}, so we
-    // deliver the user's request as a direct message instead.
+    // Send the objective to the planner (mirrors diplomacy demo pattern:
+    // mob_send_message → wake agent → tight poll loop → quiet threshold)
     const planner = this.members.get("planner");
     if (planner) {
       await this.runtime.mob_send_message(
         this.mobId,
         planner.meerkatId,
-        `New task from user: ${objective}\n\nPlease create an implementation plan in /workspace/plan.md, then notify the coder to start implementing.`,
+        `=== NEW TASK ===\n${objective}\n\n` +
+        `Instructions:\n` +
+        `1. Write an implementation plan to /workspace/plan.md\n` +
+        `2. Send the plan to the coder using the send tool\n` +
+        `3. The coder will implement and test, then the reviewer will review\n`,
       );
-      this.onEvent({ agent: "system", type: "status", content: "Sent task to planner" });
+      this.onEvent({ agent: "system", type: "status", content: "Task sent to planner" });
     }
 
-    // Wait for the agents to work autonomously
-    // (they coordinate via comms — planner writes plan, tells coder, coder implements, tells reviewer)
-    this.onEvent({ agent: "system", type: "status", content: "Agents working autonomously..." });
+    // Tight poll loop (matches diplomacy demo pattern: 300ms poll, 15s quiet threshold)
+    const MAX_WAIT = 300_000; // 5 min max
+    const QUIET_THRESHOLD = 15_000; // 15s quiet = done
+    const deadline = Date.now() + MAX_WAIT;
+    let lastEventTime = Date.now();
+
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 500));
+      const eventCount = this.pollEvents();
+      if (eventCount > 0) {
+        lastEventTime = Date.now();
+      }
+      // Refresh file tree periodically
+      if (eventCount > 0) {
+        // debounce: don't refresh every poll, just when events happen
+      }
+      if (Date.now() - lastEventTime > QUIET_THRESHOLD) {
+        this.onEvent({ agent: "system", type: "status", content: "Agents idle — task may be complete" });
+        break;
+      }
+    }
   }
+
 
   stop(): void {
     if (this.pollInterval) {
@@ -356,11 +378,14 @@ export class MobOrchestrator {
 
   private startPolling(): void {
     if (this.pollInterval) return;
-    this.pollInterval = window.setInterval(() => this.pollEvents(), 1000);
+    this.pollInterval = window.setInterval(() => {
+      this.pollEvents();
+    }, 1000);
   }
 
-  private pollEvents(): void {
-    if (!this.runtime) return;
+  private pollEvents(): number {
+    if (!this.runtime) return 0;
+    let count = 0;
 
     for (const [profile, { subHandle }] of this.members) {
       try {
@@ -368,11 +393,13 @@ export class MobOrchestrator {
         const events: any[] = JSON.parse(raw);
         for (const event of events) {
           this.routeEvent(profile, event);
+          count++;
         }
       } catch {
         // Subscription may not be ready yet
       }
     }
+    return count;
   }
 
   private routeEvent(profile: string, envelope: any): void {

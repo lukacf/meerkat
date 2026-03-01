@@ -227,13 +227,9 @@ async function send() {
   setRunning(true);
   try {
     if (isMobMode && mob) {
-      // Mob mode: send task to planner, agents work autonomously
+      // Mob mode: send task to planner, poll until agents idle
       await mob.runFlow(text);
-      setRunning(false);
-      // Periodically refresh file tree while agents work
-      const refreshInterval = setInterval(() => fileTree?.refresh(), 5000);
-      setTimeout(() => clearInterval(refreshInterval), 300000);
-      return;
+      await fileTree?.refresh();
     } else if (agent) {
       await agent.run(text);
     }

@@ -5,32 +5,81 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Meerkat WebCM Agent</title>
   <link rel="stylesheet" href="/src/style.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css" />
 </head>
 <body>
   <div id="app">
-    <header>
-      <h1>Meerkat WebCM Agent</h1>
-      <span class="subtitle">LLM agent with a Linux VM in your browser</span>
-    </header>
-
-    <div id="setup" class="panel">
-      <input type="password" id="api-key" placeholder="Anthropic API key" />
-      <button id="boot-btn">Boot VM</button>
-      <span id="status">Ready</span>
+    <!-- Setup overlay -->
+    <div id="setup-overlay">
+      <div id="setup-card">
+        <h1>Meerkat WebCM Agent</h1>
+        <p class="subtitle">LLM coding agent with a Linux VM — entirely in your browser</p>
+        <div class="setup-row">
+          <input type="password" id="api-key" placeholder="Anthropic API key" />
+        </div>
+        <div class="setup-row">
+          <select id="model-select">
+            <option value="claude-opus-4-6">Claude Opus 4.6</option>
+            <option value="claude-sonnet-4-5" selected>Claude Sonnet 4.5</option>
+          </select>
+        </div>
+        <button id="boot-btn">Boot VM & Start</button>
+        <div id="boot-status"></div>
+      </div>
     </div>
 
+    <!-- Main workspace (hidden until booted) -->
     <div id="workspace" class="hidden">
-      <div id="terminal-pane">
-        <div class="pane-header">Terminal (Alpine Linux VM)</div>
-        <div id="terminal"></div>
-      </div>
-      <div id="chat-pane">
-        <div class="pane-header">Agent</div>
-        <div id="messages"></div>
-        <div id="input-row">
-          <input type="text" id="prompt" placeholder="Ask the agent to do something..." />
-          <button id="send-btn">Send</button>
+      <div id="header">
+        <span class="logo">meerkat</span>
+        <span id="session-info"></span>
+        <div id="header-controls">
+          <select id="model-switch">
+            <option value="claude-opus-4-6">Opus 4.6</option>
+            <option value="claude-sonnet-4-5" selected>Sonnet 4.5</option>
+          </select>
+          <button id="new-session-btn" title="New session">+ New</button>
         </div>
+      </div>
+
+      <div id="main-area">
+        <!-- File tree -->
+        <div id="file-tree-pane">
+          <div class="pane-title">Files</div>
+          <div id="file-tree"></div>
+        </div>
+
+        <!-- Resize handle -->
+        <div class="resize-handle" data-resize="tree-editor"></div>
+
+        <!-- Editor -->
+        <div id="editor-pane">
+          <div id="editor-tabs"></div>
+          <div id="editor-container"></div>
+          <div id="editor-empty">Select a file to view</div>
+        </div>
+
+        <!-- Resize handle -->
+        <div class="resize-handle" data-resize="editor-chat"></div>
+
+        <!-- Chat -->
+        <div id="chat-pane">
+          <div class="pane-title">Agent</div>
+          <div id="messages"></div>
+          <div id="input-row">
+            <textarea id="prompt" placeholder="Ask the agent..." rows="1"></textarea>
+            <button id="send-btn" title="Send (Cmd+Enter)">Send</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Terminal (collapsible bottom) -->
+      <div id="terminal-toggle" title="Toggle terminal">
+        <span>Terminal</span>
+        <span id="terminal-chevron">^</span>
+      </div>
+      <div id="terminal-pane">
+        <div id="terminal"></div>
       </div>
     </div>
   </div>

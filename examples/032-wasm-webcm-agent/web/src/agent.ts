@@ -107,11 +107,13 @@ export class Agent {
   private vm: WebCMHost;
   private messages: Message[] = [];
   private onEvent: (e: AgentEvent) => void;
+  private model: string;
 
-  constructor(apiKey: string, vm: WebCMHost, onEvent: (e: AgentEvent) => void) {
+  constructor(apiKey: string, vm: WebCMHost, onEvent: (e: AgentEvent) => void, model = "claude-opus-4-6") {
     this.apiKey = apiKey;
     this.vm = vm;
     this.onEvent = onEvent;
+    this.model = model;
   }
 
   async run(userMessage: string): Promise<void> {
@@ -222,7 +224,7 @@ export class Agent {
         "anthropic-dangerous-direct-browser-access": "true",
       },
       body: JSON.stringify({
-        model: "claude-opus-4-6",
+        model: this.model,
         max_tokens: 4096,
         system: SYSTEM_PROMPT,
         tools: TOOLS,

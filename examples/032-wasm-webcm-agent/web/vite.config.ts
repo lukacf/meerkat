@@ -15,5 +15,9 @@ export default defineConfig({
   },
   optimizeDeps: {
     exclude: ["webcm"],
+    include: ["monaco-editor"],
+  },
+  worker: {
+    format: "es",
   },
 });

@@ -15,6 +15,9 @@
     "@anthropic-ai/sdk": "^0.39.0",
     "@xterm/xterm": "^5.5.0",
     "@xterm/addon-fit": "^0.10.0",
-    "xterm-pty": "^0.11.1"
+    "xterm-pty": "^0.11.1",
+    "monaco-editor": "^0.52.0",
+    "marked": "^15.0.0",
+    "highlight.js": "^11.11.0"
   }
 }

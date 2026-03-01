@@ -376,6 +376,12 @@ body {
 .msg.assistant .msg-body code { background: var(--bg-tertiary); padding: 1px 4px; border-radius: 3px; font-family: var(--font-mono); font-size: 12px; }
 .msg.assistant .msg-body pre { background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 6px; padding: 10px; margin: 8px 0; overflow-x: auto; }
 .msg.assistant .msg-body pre code { background: none; padding: 0; font-size: 12px; }
+.msg.assistant .msg-body table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 12px; }
+.msg.assistant .msg-body th, .msg.assistant .msg-body td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; }
+.msg.assistant .msg-body th { background: var(--bg-tertiary); font-weight: 600; }
+.msg.assistant .msg-body ul, .msg.assistant .msg-body ol { padding-left: 20px; margin: 8px 0; }
+.msg.assistant .msg-body li { margin-bottom: 4px; }
+.msg.assistant .msg-body strong { color: var(--text-primary); }
 
 .tool-card {
   background: var(--bg-secondary);

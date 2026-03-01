@@ -82,6 +82,9 @@ bootBtn.addEventListener("click", async () => {
       },
     });
 
+    // Debug: expose VM for console testing
+    (window as any).__vm = vm;
+
     if (isMobMode) {
       // Mob mode: init meerkat WASM runtime + create mob
       mob = new MobOrchestrator(vm, handleMobEvent);

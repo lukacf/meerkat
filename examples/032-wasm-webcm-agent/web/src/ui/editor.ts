@@ -4,10 +4,11 @@
 
 import * as monaco from "monaco-editor";
 
-// Configure Monaco workers for Vite
+// Configure Monaco workers for Vite.
+// Language-specific workers (typescript, json, css, html) are optional.
+// We only load the base editor worker to avoid module resolution errors.
 self.MonacoEnvironment = {
-  getWorker(_: string, label: string) {
-    // For the demo, use a simple fallback — no language service workers
+  getWorker() {
     return new Worker(
       new URL("monaco-editor/esm/vs/editor/editor.worker.js", import.meta.url),
       { type: "module" },

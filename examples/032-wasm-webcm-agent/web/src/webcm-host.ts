@@ -152,12 +152,23 @@ export class WebCMHost {
 
   /** Write content to a file in the VM. */
   async writeFile(path: string, content: string): Promise<ExecResult> {
-    // Use printf with escaped content. Base64 would be cleaner but
-    // busybox base64 -d may not be available. Use printf with octal escapes
-    // for problematic chars, or split into multiple echo commands.
-    // Simplest reliable approach: base64 encode in JS, decode in shell.
+    // Base64 encode and split into chunks to avoid PTY buffer overflow.
+    // terminal.paste() processes each character through the line discipline,
+    // so very long single-line commands time out.
     const b64 = btoa(unescape(encodeURIComponent(content)));
-    return this.exec(`echo '${b64}' | base64 -d > ${path}`);
+    const CHUNK = 512;
+    if (b64.length <= CHUNK) {
+      return this.exec(`echo '${b64}' | base64 -d > ${path}`);
+    }
+    // Multi-chunk: write base64 to a temp file in chunks, then decode
+    const tmp = `/tmp/_mkt_b64_${Date.now()}`;
+    await this.exec(`true > ${tmp}`);
+    for (let i = 0; i < b64.length; i += CHUNK) {
+      const chunk = b64.slice(i, i + CHUNK);
+      await this.exec(`echo -n '${chunk}' >> ${tmp}`);
+    }
+    const result = await this.exec(`base64 -d < ${tmp} > ${path} && rm ${tmp}`);
+    return result;
   }
 
   /** Read a file from the VM. */

@@ -1,8 +1,7 @@
 /**
  * Mob orchestration — planner + coder + reviewer collaborating in the browser VM.
  *
- * Uses meerkat-web-runtime WASM mob APIs (mob_create, mob_spawn, mob_wire,
- * mob_run_flow) with WebCM tools registered via register_tool_callback.
+ * Uses meerkat-web-runtime WASM mob APIs with exact MobDefinition format.
  */
 
 import type { WebCMHost } from "./webcm-host";
@@ -10,7 +9,7 @@ import type { WebCMHost } from "./webcm-host";
 // ── Types ───────────────────────────────────────────────────────────────────
 
 export interface MobEvent {
-  agent: string; // "planner" | "coder" | "reviewer"
+  agent: string;
   type: "thinking" | "text" | "tool_call" | "tool_result" | "status";
   content: string;
   toolName?: string;
@@ -30,7 +29,6 @@ interface RuntimeModule {
   mob_member_subscribe(mob_id: string, meerkat_id: string): Promise<number>;
   mob_run_flow(mob_id: string, flow_id: string, params_json: string): Promise<any>;
   mob_flow_status(mob_id: string, run_id: string): Promise<any>;
-  mob_list_members(mob_id: string): Promise<any>;
   poll_subscription(handle: number): string;
 }
 
@@ -61,62 +59,151 @@ const READ_FILE_SCHEMA = JSON.stringify({
   required: ["path"],
 });
 
-// ── Mob definition ──────────────────────────────────────────────────────────
+// ── Mob definition (exact MobDefinition format) ─────────────────────────────
 
 function buildMobDefinition(model: string): object {
+  const toolConfig = {
+    builtins: true,
+    shell: false,
+    comms: true,
+    memory: false,
+    mob: false,
+    mob_tasks: false,
+    mcp: [] as string[],
+    rust_bundles: [] as string[],
+  };
+
   return {
     id: "dev-team",
+    orchestrator: null,
     profiles: {
       planner: {
         model,
-        system_prompt: `You are a senior software architect. When given a task:
-1. Analyze requirements
-2. Write a clear plan to /workspace/plan.md using the write_file tool
-3. Notify the coder via the send tool when done
-
-Use shell and write_file tools. Work in /workspace/.`,
+        skills: ["planner-role"],
+        tools: toolConfig,
+        peer_description: "Senior architect who creates implementation plans",
+        external_addressable: false,
+        backend: null,
         runtime_mode: "autonomous_host",
-        tools: { shell: true, file: true, comms: true },
+        max_inline_peer_notifications: null,
+        output_schema: null,
       },
       coder: {
         model,
-        system_prompt: `You are an expert programmer. When given a task:
-1. Read /workspace/plan.md to understand what to build
-2. Implement the code in /workspace/src/ using write_file
-3. Test it using the shell tool
-4. Notify the reviewer via the send tool when done
-
-Use shell, write_file, and read_file tools. Work in /workspace/.`,
+        skills: ["coder-role"],
+        tools: toolConfig,
+        peer_description: "Expert programmer who implements code",
+        external_addressable: false,
+        backend: null,
         runtime_mode: "autonomous_host",
-        tools: { shell: true, file: true, comms: true },
+        max_inline_peer_notifications: null,
+        output_schema: null,
       },
       reviewer: {
         model,
-        system_prompt: `You are a code reviewer. When given code to review:
-1. Read the source files in /workspace/src/
-2. Run the code with shell to verify it works
-3. Write feedback to /workspace/review.md
-4. If changes needed, notify the coder. If approved, notify the planner.
-
-Use shell, write_file, and read_file tools. Work in /workspace/.`,
+        skills: ["reviewer-role"],
+        tools: toolConfig,
+        peer_description: "Code reviewer who verifies quality",
+        external_addressable: false,
+        backend: null,
         runtime_mode: "autonomous_host",
-        tools: { shell: true, file: true, comms: true },
+        max_inline_peer_notifications: null,
+        output_schema: null,
       },
+    },
+    mcp_servers: {},
+    wiring: {
+      auto_wire_orchestrator: false,
+      role_wiring: [
+        { a: "planner", b: "coder" },
+        { a: "planner", b: "reviewer" },
+        { a: "coder", b: "reviewer" },
+      ],
+    },
+    skills: {
+      "planner-role": {
+        source: "inline",
+        content: `You are a senior software architect. When given a task:
+1. Analyze requirements carefully
+2. Write a clear, actionable plan to /workspace/plan.md using the write_file tool
+3. The plan should list files to create, functions to implement, and test strategy
+Work in /workspace/. Use shell and write_file tools.`,
+      },
+      "coder-role": {
+        source: "inline",
+        content: `You are an expert programmer. When given a task:
+1. Read /workspace/plan.md to understand what to build
+2. Implement the code in /workspace/src/ using write_file
+3. Test it using the shell tool (run the code, check output)
+Work in /workspace/. Use shell, write_file, and read_file tools.`,
+      },
+      "reviewer-role": {
+        source: "inline",
+        content: `You are a code reviewer. When given code to review:
+1. Read the source files in /workspace/src/ using read_file
+2. Run the code with shell to verify it works correctly
+3. Write review feedback to /workspace/review.md
+Work in /workspace/. Use shell, write_file, and read_file tools.`,
+      },
+    },
+    backend: {
+      default: "subagent",
+      external: null,
     },
     flows: {
       implement: {
-        steps: [
-          { id: "plan", profile: "planner", message: "{{objective}}" },
-          { id: "code", profile: "coder", depends_on: ["plan"], message: "Read /workspace/plan.md and implement the code." },
-          { id: "review", profile: "reviewer", depends_on: ["code"], message: "Review the code in /workspace/src/ and write feedback to /workspace/review.md" },
-          { id: "revise", profile: "coder", depends_on: ["review"], message: "Read /workspace/review.md and address the feedback." },
-          { id: "approve", profile: "reviewer", depends_on: ["revise"], message: "Final review. Verify the changes address your feedback." },
-        ],
+        description: "Plan, implement, and review code",
+        steps: {
+          plan: {
+            role: "planner",
+            message: "Create an implementation plan for: {{objective}}. Write it to /workspace/plan.md",
+            depends_on: [],
+            dispatch_mode: "fan_out",
+            collection_policy: { type: "all" },
+            condition: null,
+            timeout_ms: 120000,
+            expected_schema_ref: null,
+            branch: null,
+            depends_on_mode: "all",
+            allowed_tools: null,
+            blocked_tools: null,
+          },
+          code: {
+            role: "coder",
+            message: "Read /workspace/plan.md and implement the code in /workspace/src/. Test it.",
+            depends_on: ["plan"],
+            dispatch_mode: "fan_out",
+            collection_policy: { type: "all" },
+            condition: null,
+            timeout_ms: 180000,
+            expected_schema_ref: null,
+            branch: null,
+            depends_on_mode: "all",
+            allowed_tools: null,
+            blocked_tools: null,
+          },
+          review: {
+            role: "reviewer",
+            message: "Review the code in /workspace/src/. Write feedback to /workspace/review.md",
+            depends_on: ["code"],
+            dispatch_mode: "fan_out",
+            collection_policy: { type: "all" },
+            condition: null,
+            timeout_ms: 120000,
+            expected_schema_ref: null,
+            branch: null,
+            depends_on_mode: "all",
+            allowed_tools: null,
+            blocked_tools: null,
+          },
+        },
       },
     },
-    wiring: {
-      auto_wire_all: true,
-    },
+    topology: null,
+    supervisor: null,
+    limits: null,
+    spawn_policy: null,
+    event_router: null,
   };
 }
 
@@ -138,22 +225,18 @@ export class MobOrchestrator {
   async init(apiKey: string, model: string): Promise<void> {
     this.onEvent({ agent: "system", type: "status", content: "Loading Meerkat WASM runtime..." });
 
-    // Load the WASM runtime
     const url = new URL("/meerkat-pkg/meerkat_web_runtime.js", window.location.href).toString();
     this.runtime = (await import(/* @vite-ignore */ url)) as RuntimeModule;
     await this.runtime.default();
 
-    // Register WebCM tools
     this.registerTools();
 
-    // Init runtime with API key
     this.runtime.init_runtime_from_config(JSON.stringify({
       api_key: apiKey,
       model,
       max_sessions: 16,
     }));
 
-    // Setup workspace
     await this.vm.exec("mkdir -p /workspace/src");
 
     this.onEvent({ agent: "system", type: "status", content: "Meerkat runtime initialized" });
@@ -167,29 +250,31 @@ export class MobOrchestrator {
     const def = buildMobDefinition(model);
     await this.runtime.mob_create(JSON.stringify(def));
 
-    // Spawn members
+    // Spawn members (array of specs)
     for (const profile of ["planner", "coder", "reviewer"]) {
-      const result = await this.runtime.mob_spawn(this.mobId, JSON.stringify({
-        profile,
-        meerkat_id: profile,
-      }));
-      const parsed = typeof result === "string" ? JSON.parse(result) : result;
-      const meerkatId = parsed.meerkat_id || profile;
+      const specs = [{ profile, meerkat_id: profile }];
+      const resultRaw = await this.runtime.mob_spawn(this.mobId, JSON.stringify(specs));
+      const results = typeof resultRaw === "string" ? JSON.parse(resultRaw) : resultRaw;
 
-      // Subscribe to events
+      if (Array.isArray(results) && results[0]?.status === "error") {
+        throw new Error(`Failed to spawn ${profile}: ${results[0].error}`);
+      }
+
+      const meerkatId = profile;
       const subHandle = await this.runtime.mob_member_subscribe(this.mobId, meerkatId);
       this.members.set(profile, { meerkatId, subHandle });
-
-      this.onEvent({ agent: profile, type: "status", content: `Spawned ${profile}` });
+      this.onEvent({ agent: profile, type: "status", content: `Spawned` });
     }
 
-    // Wire all pairs
+    // Wire all pairs (done via definition's role_wiring, but explicit wire is also fine)
     const profiles = Array.from(this.members.keys());
     for (let i = 0; i < profiles.length; i++) {
       for (let j = i + 1; j < profiles.length; j++) {
-        const a = this.members.get(profiles[i])!.meerkatId;
-        const b = this.members.get(profiles[j])!.meerkatId;
-        await this.runtime.mob_wire(this.mobId, a, b);
+        try {
+          await this.runtime.mob_wire(this.mobId, profiles[i], profiles[j]);
+        } catch {
+          // May already be wired from role_wiring
+        }
       }
     }
 
@@ -200,20 +285,21 @@ export class MobOrchestrator {
     if (!this.runtime) throw new Error("Runtime not initialized");
 
     this.onEvent({ agent: "system", type: "status", content: `Starting flow: "${objective}"` });
-
-    // Start polling events
     this.startPolling();
 
-    // Run the implement flow
-    const runId = await this.runtime.mob_run_flow(
-      this.mobId,
-      "implement",
-      JSON.stringify({ objective }),
-    );
+    try {
+      const runIdRaw = await this.runtime.mob_run_flow(
+        this.mobId,
+        "implement",
+        JSON.stringify({ objective }),
+      );
+      const runId = typeof runIdRaw === "string" ? runIdRaw.replace(/"/g, "") : String(runIdRaw);
+      await this.pollFlowStatus(runId);
+    } catch (err: any) {
+      this.onEvent({ agent: "system", type: "status", content: `Flow error: ${err.message}` });
+    }
 
-    // Poll flow status until complete
-    const runIdStr = typeof runId === "string" ? JSON.parse(runId) : runId;
-    await this.pollFlowStatus(typeof runIdStr === "string" ? runIdStr : runIdStr.run_id || "unknown");
+    this.stop();
   }
 
   stop(): void {
@@ -225,14 +311,10 @@ export class MobOrchestrator {
 
   private registerTools(): void {
     if (!this.runtime) return;
-
     this.runtime.clear_tool_callbacks();
 
-    // Shell tool
     this.runtime.register_tool_callback(
-      "shell",
-      "Execute a shell command in the Alpine Linux VM",
-      SHELL_SCHEMA,
+      "shell", "Execute a shell command in the Alpine Linux VM", SHELL_SCHEMA,
       async (argsJson: string) => {
         const args = JSON.parse(argsJson);
         const { output, exitCode } = await this.vm.exec(args.command);
@@ -243,11 +325,8 @@ export class MobOrchestrator {
       },
     );
 
-    // Write file tool
     this.runtime.register_tool_callback(
-      "write_file",
-      "Write content to a file in the VM",
-      WRITE_FILE_SCHEMA,
+      "write_file", "Write content to a file in the VM", WRITE_FILE_SCHEMA,
       async (argsJson: string) => {
         const args = JSON.parse(argsJson);
         await this.vm.exec(`mkdir -p $(dirname ${args.path})`);
@@ -256,11 +335,8 @@ export class MobOrchestrator {
       },
     );
 
-    // Read file tool
     this.runtime.register_tool_callback(
-      "read_file",
-      "Read a file from the VM",
-      READ_FILE_SCHEMA,
+      "read_file", "Read a file from the VM", READ_FILE_SCHEMA,
       async (argsJson: string) => {
         const args = JSON.parse(argsJson);
         try {
@@ -275,7 +351,7 @@ export class MobOrchestrator {
 
   private startPolling(): void {
     if (this.pollInterval) return;
-    this.pollInterval = window.setInterval(() => this.pollEvents(), 500);
+    this.pollInterval = window.setInterval(() => this.pollEvents(), 1000);
   }
 
   private pollEvents(): void {
@@ -294,33 +370,54 @@ export class MobOrchestrator {
     }
   }
 
-  private routeEvent(profile: string, event: any): void {
-    const type = event.type || event.event_type;
-    switch (type) {
+  private routeEvent(profile: string, envelope: any): void {
+    // EventEnvelope format: { event_id, source_id, seq, timestamp_ms, kind, data }
+    const kind = envelope.kind || envelope.type;
+    const data = envelope.data || envelope;
+
+    switch (kind) {
       case "text_delta":
-        this.onEvent({ agent: profile, type: "text", content: event.text || event.delta || "" });
+        // Skip deltas, wait for text_complete
+        break;
+      case "text_complete":
+        this.onEvent({ agent: profile, type: "text", content: data.text || data.content || "" });
+        break;
+      case "tool_calls":
+        if (data.tool_calls) {
+          for (const tc of data.tool_calls) {
+            this.onEvent({
+              agent: profile,
+              type: "tool_call",
+              content: JSON.stringify(tc.args || tc.input || {}),
+              toolName: tc.name,
+            });
+          }
+        }
         break;
       case "tool_call_requested":
         this.onEvent({
           agent: profile,
           type: "tool_call",
-          content: event.args || JSON.stringify(event.input || {}),
-          toolName: event.name || event.tool_name,
+          content: JSON.stringify(data.args || {}),
+          toolName: data.name,
         });
         break;
-      case "tool_result_received":
+      case "tool_result":
+      case "tool_execution_completed":
         this.onEvent({
           agent: profile,
           type: "tool_result",
-          content: event.content || event.result || "",
-          toolName: event.name || event.tool_name,
+          content: data.result || data.content || "(no output)",
+          toolName: data.name || data.tool_name,
         });
         break;
+      case "turn_complete":
       case "run_completed":
         this.onEvent({ agent: profile, type: "status", content: "Turn completed" });
         break;
+      case "error":
       case "run_failed":
-        this.onEvent({ agent: profile, type: "status", content: `Error: ${event.error || "unknown"}` });
+        this.onEvent({ agent: profile, type: "status", content: `Error: ${data.message || data.error || "unknown"}` });
         break;
     }
   }
@@ -328,32 +425,24 @@ export class MobOrchestrator {
   private async pollFlowStatus(runId: string): Promise<void> {
     if (!this.runtime) return;
 
-    for (let i = 0; i < 300; i++) { // Max 5 minutes
+    for (let i = 0; i < 180; i++) { // Max 6 minutes
       await new Promise((r) => setTimeout(r, 2000));
       try {
         const statusRaw = await this.runtime.mob_flow_status(this.mobId, runId);
         const status = typeof statusRaw === "string" ? JSON.parse(statusRaw) : statusRaw;
 
-        if (status.state === "completed") {
-          this.onEvent({ agent: "system", type: "status", content: "Flow completed successfully!" });
-          this.stop();
+        if (status.state === "completed" || status.state === "Completed") {
+          this.onEvent({ agent: "system", type: "status", content: "Flow completed!" });
           return;
-        } else if (status.state === "failed") {
-          this.onEvent({ agent: "system", type: "status", content: `Flow failed: ${status.error || "unknown"}` });
-          this.stop();
+        } else if (status.state === "failed" || status.state === "Failed") {
+          this.onEvent({ agent: "system", type: "status", content: `Flow failed: ${status.error || status.reason || "unknown"}` });
           return;
-        }
-
-        // Update current step
-        if (status.current_step) {
-          this.onEvent({ agent: "system", type: "status", content: `Flow step: ${status.current_step}` });
         }
       } catch {
-        // Status endpoint may not be ready
+        // Status endpoint may not be ready yet
       }
     }
 
     this.onEvent({ agent: "system", type: "status", content: "Flow timed out" });
-    this.stop();
   }
 }

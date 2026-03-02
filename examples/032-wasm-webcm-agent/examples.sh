@@ -2,8 +2,10 @@
 # 032 — Meerkat WebCM Agent
 #
 # Downloads pre-built WebCM WASM bundle, builds the Vite app, and serves.
+# WebCM (https://github.com/edubart/webcm) by @edubart — Cartesi Machine
+# RISC-V emulator compiled to WebAssembly.
 #
-# Prerequisites: node, npm, curl (wasm-pack for mob mode)
+# Prerequisites: node, npm, curl, wasm-pack
 # Usage: ./examples.sh [--clean]
 
 set -euo pipefail

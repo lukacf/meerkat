@@ -78,3 +78,9 @@ mruby, git, curl, jq, sqlite3, vim, neovim, grep, sed, awk, bc.
 
 **Note:** No python3/pip or node/npm. Use `micropython` for Python, `qjs` for JavaScript.
 Install additional packages with `apk add <package>`.
+
+## Credits
+
+The sandboxed Linux VM is powered by [WebCM](https://github.com/edubart/webcm)
+by [@edubart](https://github.com/edubart) — a Cartesi Machine RISC-V emulator
+compiled to WebAssembly, running a full Alpine Linux userland in the browser.

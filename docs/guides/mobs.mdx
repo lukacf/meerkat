@@ -142,9 +142,9 @@ A mob definition is a JSON or TOML document that declares everything: profiles, 
 }
 ```
 
-### Prefabs
+### Prefabs and mobpacks
 
-Meerkat ships with built-in prefab definitions for common patterns:
+**Prefabs** are built-in definition templates for common patterns:
 
 | Prefab | Pattern | Profiles |
 |--------|---------|----------|
@@ -153,7 +153,9 @@ Meerkat ships with built-in prefab definitions for common patterns:
 | `pipeline` | Sequential stage handoffs | stages |
 | `review_board` | Multi-reviewer consensus | author, reviewer |
 
-Prefabs are starting points — create from a prefab, then customize the definition.
+Prefabs are starting points — create from a prefab, then customize.
+
+**Mobpacks** are portable archives (`.mobpack`) that bundle a mob definition with its skills, config, and optional Ed25519 signatures into a single deployable artifact. Mobpacks can be deployed to any surface or compiled into a browser-runnable WASM bundle. See the [Mobpack guide](/guides/mobpack) for packaging, signing, trust policies, and web deployment.
 
 ---
 

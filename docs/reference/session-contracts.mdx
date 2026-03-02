@@ -28,9 +28,11 @@ Agent construction is centralized in `AgentFactory::build_agent()`.
 
 ### create_session
 
-`create_session(req)` builds the agent and runs first turn.
+`create_session(req)` builds the agent and optionally runs the first turn.
 
 - Returns `RunResult` with `session_id`.
+- `InitialTurnPolicy::RunImmediately` executes the first turn inline (default).
+- `InitialTurnPolicy::Defer` registers the session without running a turn.
 - Supports host mode where enabled.
 
 ### start_turn

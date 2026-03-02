@@ -1124,19 +1124,32 @@ pub async fn start_turn(handle: u32, prompt: &str, options_json: &str) -> Result
         .await
         .map_err(|e| err_str("build_agent_error", e))?;
 
-    // Run the turn.
+    // Spawn a concurrent task that drains events into pending_events in real-time.
+    // This allows poll_events() to return events DURING the turn, not just after.
+    let drain_handle = handle;
+    let event_drainer = crate::tokio::spawn(async move {
+        while let Some(event) = event_rx.recv().await {
+            if let Ok(val) = serde_json::to_value(&event) {
+                REGISTRY.with(|cell| {
+                    let mut registry = cell.borrow_mut();
+                    if let Some(session) = registry.sessions.get_mut(&drain_handle) {
+                        session.pending_events.push(val);
+                    }
+                });
+            }
+        }
+    });
+
+    // Run the turn. Events are drained concurrently into pending_events.
     let run_result = agent.run(prompt.into()).await;
 
-    // Drain events from the channel into serialized JSON values.
-    let mut captured_events: Vec<serde_json::Value> = Vec::new();
-    while let Ok(event) = event_rx.try_recv() {
-        if let Ok(val) = serde_json::to_value(&event) {
-            captured_events.push(val);
-        }
-    }
-
-    // Preserve the agent's session for future turns.
+    // Preserve the session BEFORE dropping the agent.
     let agent_session = agent.session().clone();
+
+    // Drop the agent to release its event_tx sender, which closes the channel
+    // and allows the drainer's recv() loop to terminate.
+    drop(agent);
+    let _ = event_drainer.await;
 
     match run_result {
         Ok(result) => {
@@ -1152,7 +1165,7 @@ pub async fn start_turn(handle: u32, prompt: &str, options_json: &str) -> Result
                         .usage
                         .output_tokens
                         .saturating_add(result.usage.output_tokens);
-                    session.pending_events.extend(captured_events);
+                    // Events already pushed to pending_events by the concurrent drainer.
                 }
             });
 
@@ -1176,7 +1189,7 @@ pub async fn start_turn(handle: u32, prompt: &str, options_json: &str) -> Result
                 let mut registry = cell.borrow_mut();
                 if let Some(session) = registry.sessions.get_mut(&handle) {
                     session.meerkat_session = Some(agent_session);
-                    session.pending_events.extend(captured_events);
+                    // Events already pushed to pending_events by the concurrent drainer.
                 }
             });
 

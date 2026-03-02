@@ -1,10 +1,16 @@
 /**
- * Shared tool schemas and callback registration for WebCM-backed tools.
+ * Tool schemas and callback registration.
  *
- * Both the single-agent (agent.ts) and mob orchestrator (mob.ts) register
- * the same shell / write_file / read_file tools against the WebCM host.
- * This module owns the canonical schemas and the registration helper so
- * the definitions live in exactly one place.
+ * Two groups:
+ * 1. WebCM tools (shell, write_file, read_file) — registered for all agents.
+ * 2. Delegation tools (delegate_to_*, check_agent_status) — registered only
+ *    for the main agent session (after mob init, before create_session_simple).
+ *
+ * ORDERING MATTERS: JsToolDispatcher snapshots tool definitions at
+ * build_wasm_tool_dispatcher() call time. WebCM tools are registered before
+ * init_runtime_from_config (so mob sub-agents get them). Delegation tools are
+ * registered after mob init but before create_session_simple (so only the
+ * main agent gets them).
  */
 
 import type { WebCMHost } from "./webcm-host";
@@ -49,11 +55,25 @@ export interface ToolRuntime {
   clear_tool_callbacks(): void;
 }
 
+// ── VM command queue (serializes PTY access) ────────────────────────────────
+
+/** Simple async mutex — the PTY can only handle one command at a time. */
+let vmQueue: Promise<void> = Promise.resolve();
+
+function serialized<T>(fn: () => Promise<T>): Promise<T> {
+  const next = vmQueue.then(fn, fn); // run even if previous rejected
+  vmQueue = next.then(() => {}, () => {}); // keep chain alive
+  return next;
+}
+
 // ── Registration helper ─────────────────────────────────────────────────────
 
 /**
  * Clear existing tool callbacks and register the three WebCM tools
  * (shell, write_file, read_file) against the given runtime and VM host.
+ *
+ * All VM operations are serialized through a queue because the PTY
+ * bridge can only handle one command at a time.
  */
 export function registerWebCMTools(runtime: ToolRuntime, vm: WebCMHost): void {
   runtime.clear_tool_callbacks();
@@ -62,10 +82,12 @@ export function registerWebCMTools(runtime: ToolRuntime, vm: WebCMHost): void {
     "shell", SHELL_DESCRIPTION, SHELL_SCHEMA,
     async (argsJson: string) => {
       const args = JSON.parse(argsJson);
-      const { output, exitCode } = await vm.exec(args.command);
-      return JSON.stringify({
-        content: exitCode === 0 ? (output || "(no output)") : `Exit code ${exitCode}\n${output}`,
-        is_error: exitCode !== 0,
+      return serialized(async () => {
+        const { output, exitCode } = await vm.exec(args.command);
+        return JSON.stringify({
+          content: exitCode === 0 ? (output || "(no output)") : `Exit code ${exitCode}\n${output}`,
+          is_error: exitCode !== 0,
+        });
       });
     },
   );
@@ -74,9 +96,11 @@ export function registerWebCMTools(runtime: ToolRuntime, vm: WebCMHost): void {
     "write_file", WRITE_FILE_DESCRIPTION, WRITE_FILE_SCHEMA,
     async (argsJson: string) => {
       const args = JSON.parse(argsJson);
-      await vm.exec(`mkdir -p $(dirname ${args.path})`);
-      await vm.writeFile(args.path, args.content);
-      return JSON.stringify({ content: `Wrote ${args.path}`, is_error: false });
+      return serialized(async () => {
+        await vm.exec(`mkdir -p $(dirname ${args.path})`);
+        await vm.writeFile(args.path, args.content);
+        return JSON.stringify({ content: `Wrote ${args.path}`, is_error: false });
+      });
     },
   );
 
@@ -84,12 +108,15 @@ export function registerWebCMTools(runtime: ToolRuntime, vm: WebCMHost): void {
     "read_file", READ_FILE_DESCRIPTION, READ_FILE_SCHEMA,
     async (argsJson: string) => {
       const args = JSON.parse(argsJson);
-      try {
-        const content = await vm.readFile(args.path);
-        return JSON.stringify({ content, is_error: false });
-      } catch (e: any) {
-        return JSON.stringify({ content: e.message, is_error: true });
-      }
+      return serialized(async () => {
+        try {
+          const content = await vm.readFile(args.path);
+          return JSON.stringify({ content, is_error: false });
+        } catch (e: any) {
+          return JSON.stringify({ content: e.message, is_error: true });
+        }
+      });
     },
   );
 }
+

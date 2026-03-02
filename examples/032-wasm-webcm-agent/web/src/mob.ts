@@ -1,58 +1,107 @@
 /**
- * Mob orchestration — planner + coder + reviewer collaborating in the browser VM.
+ * Mob orchestrator — multi-provider sub-agent management.
  *
- * Uses meerkat-web-runtime WASM mob APIs with exact MobDefinition format.
+ * Creates a 3-agent mob (planner, coder, reviewer) with different LLM
+ * providers per role. Manages subscriptions, background polling, and
+ * per-panel StreamRenderer routing.
  */
 
-import type { WebCMHost } from "./webcm-host";
-import { registerWebCMTools, type ToolRuntime } from "./tools";
+import { StreamRenderer } from "./stream";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
-export interface MobEvent {
-  agent: string;
-  type: "thinking" | "text" | "tool_call" | "tool_result" | "status";
-  content: string;
-  toolName?: string;
+export interface ApiKeys {
+  anthropic?: string;
+  openai?: string;
+  gemini?: string;
 }
 
-type MobEventHandler = (e: MobEvent) => void;
+export interface ModelAssignments {
+  main: string;
+  mainKey: string;
+  planner: string;
+  coder: string;
+  reviewer: string;
+}
 
-interface RuntimeModule extends ToolRuntime {
-  default(): Promise<void>;
-  init_runtime_from_config(config_json: string): any;
-  mob_create(definition_json: string): Promise<any>;
-  mob_spawn(mob_id: string, specs_json: string): Promise<any>;
+interface PanelState {
+  stream: StreamRenderer;
+  statusEl: HTMLElement;
+  subHandle: number | null;
+  currentCard: HTMLElement | null;
+}
+
+export interface MobRuntime {
+  init_runtime_from_config(config_json: string): void;
+  mob_create(definition_json: string): Promise<string>;
+  mob_spawn(mob_id: string, specs_json: string): Promise<string>;
   mob_wire(mob_id: string, a: string, b: string): Promise<void>;
-  mob_send_message(mob_id: string, meerkat_id: string, message: string): Promise<void>;
   mob_member_subscribe(mob_id: string, meerkat_id: string): Promise<number>;
-  mob_run_flow(mob_id: string, flow_id: string, params_json: string): Promise<any>;
-  mob_flow_status(mob_id: string, run_id: string): Promise<any>;
+  mob_send_message(mob_id: string, meerkat_id: string, message: string): Promise<void>;
   poll_subscription(handle: number): string;
 }
 
-// ── Mob definition (exact MobDefinition format) ─────────────────────────────
+// ── Model resolution ────────────────────────────────────────────────────────
 
-function buildMobDefinition(model: string): object {
-  const toolConfig = {
-    builtins: true,
-    shell: false,
-    comms: true,
-    memory: false,
-    mob: false,
-    mob_tasks: false,
-    mcp: [] as string[],
-    rust_bundles: [] as string[],
-  };
+/**
+ * Resolve model assignments based on available API keys.
+ * Preferred: main=opus, planner=gpt-5.2, coder=gpt-5.3-codex, reviewer=gemini-3.1-pro-preview.
+ * Falls back to available providers when keys are missing.
+ */
+export function resolveModels(keys: ApiKeys): ModelAssignments {
+  const hasAnthropic = !!keys.anthropic;
+  const hasOpenAI = !!keys.openai;
+  const hasGemini = !!keys.gemini;
+
+  // Main agent: prefer Anthropic Opus
+  let main: string;
+  let mainKey: string;
+  if (hasAnthropic) { main = "claude-opus-4-6"; mainKey = keys.anthropic!; }
+  else if (hasOpenAI) { main = "gpt-5.2"; mainKey = keys.openai!; }
+  else { main = "gemini-3.1-pro-preview"; mainKey = keys.gemini!; }
+
+  // Planner: prefer OpenAI gpt-5.2
+  const planner = hasOpenAI ? "gpt-5.2"
+    : hasAnthropic ? "claude-sonnet-4-5"
+    : "gemini-3.1-pro-preview";
+
+  // Coder: prefer OpenAI gpt-5.3-codex
+  const coder = hasOpenAI ? "gpt-5.3-codex"
+    : hasAnthropic ? "claude-sonnet-4-5"
+    : "gemini-3.1-pro-preview";
+
+  // Reviewer: prefer Gemini
+  const reviewer = hasGemini ? "gemini-3.1-flash-preview"
+    : hasAnthropic ? "claude-sonnet-4-5"
+    : "gpt-5.2";
+
+  return { main, mainKey, planner, coder, reviewer };
+}
+
+// ── Mob definition builder ──────────────────────────────────────────────────
+
+function buildMobDefinition(models: ModelAssignments): object {
+  const subAgentTools = { builtins: false, comms: true, shell: false };
+  const orchestratorTools = { builtins: false, comms: true, shell: false };
 
   return {
     id: "dev-team",
-    orchestrator: null,
     profiles: {
+      orchestrator: {
+        model: models.main,
+        skills: ["orchestrator-role"],
+        tools: orchestratorTools,
+        peer_description: "Alpha Meerkat — lead orchestrator who coordinates the team",
+        external_addressable: true,
+        backend: null,
+        runtime_mode: "autonomous_host",
+        max_inline_peer_notifications: null,
+        output_schema: null,
+      },
       planner: {
-        model,
+        model: models.planner,
         skills: ["planner-role"],
-        tools: toolConfig,
+        tools: subAgentTools,
         peer_description: "Senior architect who creates implementation plans",
         external_addressable: true,
         backend: null,
@@ -61,10 +110,10 @@ function buildMobDefinition(model: string): object {
         output_schema: null,
       },
       coder: {
-        model,
+        model: models.coder,
         skills: ["coder-role"],
-        tools: toolConfig,
-        peer_description: "Expert programmer who implements code",
+        tools: subAgentTools,
+        peer_description: "Expert programmer who implements and tests code",
         external_addressable: true,
         backend: null,
         runtime_mode: "autonomous_host",
@@ -72,10 +121,10 @@ function buildMobDefinition(model: string): object {
         output_schema: null,
       },
       reviewer: {
-        model,
+        model: models.reviewer,
         skills: ["reviewer-role"],
-        tools: toolConfig,
-        peer_description: "Code reviewer who verifies quality",
+        tools: subAgentTools,
+        peer_description: "Code reviewer who verifies quality and correctness",
         external_addressable: true,
         backend: null,
         runtime_mode: "autonomous_host",
@@ -85,328 +134,278 @@ function buildMobDefinition(model: string): object {
     },
     mcp_servers: {},
     wiring: {
-      auto_wire_orchestrator: false,
       role_wiring: [
+        { a: "orchestrator", b: "planner" },
+        { a: "orchestrator", b: "coder" },
+        { a: "orchestrator", b: "reviewer" },
         { a: "planner", b: "coder" },
         { a: "planner", b: "reviewer" },
         { a: "coder", b: "reviewer" },
       ],
     },
     skills: {
+      "orchestrator-role": {
+        source: "inline",
+        content: `You are the Alpha Meerkat — lead agent of a coding team. You coordinate three specialists via messaging.
+
+Your peers:
+- dev-team/planner/planner — creates implementation plans
+- dev-team/coder/coder — writes and tests code
+- dev-team/reviewer/reviewer — reviews code quality
+
+ON STARTUP (no messages): Say "Alpha Meerkat ready." — no tool calls, end your turn.
+
+WHEN YOU RECEIVE A USER TASK (external message):
+- Send the task to the planner via send(to: "dev-team/planner/planner", kind: "peer_message", body: "<detailed task description>")
+- Then END YOUR TURN. Do NOT wait or poll. The system wakes you when a reply arrives.
+
+WHEN YOU RECEIVE A REPLY FROM THE PLANNER:
+- Read the plan if needed (read_file /workspace/plan.md)
+- Send instructions to the coder via send(to: "dev-team/coder/coder", kind: "peer_message", body: "<implementation instructions referencing the plan>")
+- Then END YOUR TURN.
+
+WHEN YOU RECEIVE A REPLY FROM THE CODER:
+- Send a review request to the reviewer via send(to: "dev-team/reviewer/reviewer", kind: "peer_message", body: "<review request>")
+- Then END YOUR TURN.
+
+WHEN YOU RECEIVE A REPLY FROM THE REVIEWER:
+- Read /workspace/review.md if needed
+- If the reviewer found issues to fix: send the feedback to the coder via send(to: "dev-team/coder/coder", kind: "peer_message", body: "<fix instructions based on review>"). Then END YOUR TURN. When the coder replies, send it back to the reviewer for re-review.
+- If the review is clean (no issues): summarize the final results for the user and END YOUR TURN.
+
+CRITICAL RULES:
+- NEVER call the wait tool. The system handles message delivery automatically between turns.
+- Each turn: process one message, send one reply, end turn. Do not try to do the whole pipeline in one turn.
+- You also have shell, write_file, read_file tools for quick checks.
+- Work in /workspace/.`,
+      },
       "planner-role": {
         source: "inline",
-        content: `You are the PLANNER in a 3-agent dev team (planner, coder, reviewer).
+        content: `You are the PLANNER in a dev team.
 
-IMPORTANT: You will receive task requests as incoming messages. When you receive a message containing "NEW TASK" or any project description, IMMEDIATELY:
-1. Write a clear plan to /workspace/plan.md using write_file
-2. Send the plan summary to the coder using the send tool (to: dev-team/coder/coder)
-3. Include specific file paths, function signatures, and test commands
+ON STARTUP (no messages): Say "Planner standing by." — no tool calls, end your turn.
 
-You have shell, write_file, read_file, and send (comms) tools. Work in /workspace/.
-Do NOT wait for additional prompts — act on the first task message you receive.`,
+WHEN YOU RECEIVE A TASK via message:
+1. Analyze requirements
+2. Break into ordered steps with file paths, function signatures, and test commands
+3. Write the plan to /workspace/plan.md using write_file
+4. Send the plan summary back to the Alpha Meerkat: send(to: "dev-team/orchestrator/orchestrator", kind: "peer_message", body: "Plan written to /workspace/plan.md. <brief summary>")
+
+Tools: shell, write_file, read_file, send. Work in /workspace/.`,
       },
       "coder-role": {
         source: "inline",
-        content: `You are the CODER in a 3-agent dev team (planner, coder, reviewer).
+        content: `You are the CODER in a dev team.
 
-When you receive a message from the planner with instructions:
-1. Read /workspace/plan.md if it exists
+ON STARTUP (no messages): Say "Coder standing by." — no tool calls, end your turn.
+
+WHEN YOU RECEIVE INSTRUCTIONS via message:
+1. Read /workspace/plan.md if referenced
 2. Implement the code in /workspace/src/ using write_file
-3. Test it using shell (run the code, verify output)
-4. Send a message to the reviewer (to: dev-team/reviewer/reviewer) when code is ready
+3. Test with shell — run the code, fix errors until it works
+4. Send completion notice to the Alpha Meerkat: send(to: "dev-team/orchestrator/orchestrator", kind: "peer_message", body: "Implementation complete. <summary of what was built and test results>")
 
-You have shell, write_file, read_file, and send (comms) tools. Work in /workspace/.
-Act immediately when you receive implementation instructions.`,
+Tools: shell, write_file, read_file, send. Work in /workspace/.`,
       },
       "reviewer-role": {
         source: "inline",
-        content: `You are the REVIEWER in a 3-agent dev team (planner, coder, reviewer).
+        content: `You are the REVIEWER in a dev team.
 
-When you receive a message that code is ready for review:
-1. Read source files in /workspace/src/ using read_file
-2. Run the code with shell to verify it works
-3. Write review feedback to /workspace/review.md using write_file
-4. Send results to the planner (to: dev-team/planner/planner)
+ON STARTUP (no messages): Say "Reviewer standing by." — no tool calls, end your turn.
 
-You have shell, write_file, read_file, and send (comms) tools. Work in /workspace/.
-Wait for a review request before acting.`,
+WHEN YOU RECEIVE A REVIEW REQUEST via message:
+1. Read source files in /workspace/src/
+2. Run the code with shell to verify correctness
+3. Write review to /workspace/review.md using write_file
+4. Send review results to the Alpha Meerkat: send(to: "dev-team/orchestrator/orchestrator", kind: "peer_message", body: "Review complete. <summary of findings>")
+
+Tools: shell, write_file, read_file, send. Work in /workspace/.`,
       },
     },
-    backend: {
-      default: "subagent",
-      external: null,
-    },
-    flows: {
-      implement: {
-        description: "Plan, implement, and review code",
-        steps: {
-          plan: {
-            role: "planner",
-            message: "Create an implementation plan for: {{objective}}. Write it to /workspace/plan.md",
-            depends_on: [],
-            dispatch_mode: "fan_out",
-            collection_policy: { type: "all" },
-            condition: null,
-            timeout_ms: 120000,
-            expected_schema_ref: null,
-            branch: null,
-            depends_on_mode: "all",
-            allowed_tools: null,
-            blocked_tools: null,
-          },
-          code: {
-            role: "coder",
-            message: "Read /workspace/plan.md and implement the code in /workspace/src/. Test it.",
-            depends_on: ["plan"],
-            dispatch_mode: "fan_out",
-            collection_policy: { type: "all" },
-            condition: null,
-            timeout_ms: 180000,
-            expected_schema_ref: null,
-            branch: null,
-            depends_on_mode: "all",
-            allowed_tools: null,
-            blocked_tools: null,
-          },
-          review: {
-            role: "reviewer",
-            message: "Review the code in /workspace/src/. Write feedback to /workspace/review.md",
-            depends_on: ["code"],
-            dispatch_mode: "fan_out",
-            collection_policy: { type: "all" },
-            condition: null,
-            timeout_ms: 120000,
-            expected_schema_ref: null,
-            branch: null,
-            depends_on_mode: "all",
-            allowed_tools: null,
-            blocked_tools: null,
-          },
-        },
-      },
-    },
-    topology: null,
-    supervisor: null,
-    limits: null,
-    spawn_policy: null,
-    event_router: null,
+    backend: { default: "subagent" },
   };
 }
 
-// ── Mob orchestrator ────────────────────────────────────────────────────────
+// ── MobOrchestrator ─────────────────────────────────────────────────────────
+
+const AGENTS = ["orchestrator", "planner", "coder", "reviewer"] as const;
 
 export class MobOrchestrator {
-  private vm: WebCMHost;
-  private onEvent: MobEventHandler;
-  runtime: RuntimeModule | null = null;
-  private mobId = "dev-team";
-  members: Map<string, { meerkatId: string; subHandle: number }> = new Map();
-  private pollInterval: number | null = null;
+  private runtime: MobRuntime;
+  private panels: Map<string, PanelState>;
+  private mobId = "";
+  private pollInterval: ReturnType<typeof setInterval> | null = null;
+  private subscriptions = new Map<string, number>();
 
-  constructor(vm: WebCMHost, onEvent: MobEventHandler) {
-    this.vm = vm;
-    this.onEvent = onEvent;
+  constructor(runtime: MobRuntime, panels: Map<string, PanelState>) {
+    this.runtime = runtime;
+    this.panels = panels;
   }
 
-  async init(apiKey: string, model: string): Promise<void> {
-    this.onEvent({ agent: "system", type: "status", content: "Loading Meerkat WASM runtime..." });
+  /**
+   * Initialize the mob runtime and create + spawn the dev team.
+   * Must be called after WebCM tools are registered.
+   */
+  async init(keys: ApiKeys, models: ModelAssignments): Promise<void> {
+    // Build config with all available API keys
+    const config: Record<string, any> = { model: models.main, max_sessions: 32 };
+    if (keys.anthropic) config.anthropic_api_key = keys.anthropic;
+    if (keys.openai) config.openai_api_key = keys.openai;
+    if (keys.gemini) config.gemini_api_key = keys.gemini;
 
-    const url = new URL("/meerkat-pkg/meerkat_web_runtime.js", window.location.href).toString();
-    let mod: RuntimeModule;
+    this.runtime.init_runtime_from_config(JSON.stringify(config));
+
+    // Create mob
+    const definition = buildMobDefinition(models);
+    const createResult = await this.runtime.mob_create(JSON.stringify(definition));
+    // mob_create returns the mob_id as a string (may or may not be JSON-wrapped)
+    const resultStr = typeof createResult === "string" ? createResult : String(createResult);
     try {
-      mod = (await import(/* @vite-ignore */ url)) as RuntimeModule;
-    } catch (err: any) {
-      throw new Error(
-        `Failed to load Meerkat WASM runtime from ${url}. ` +
-        `Make sure you built the WASM bundle with wasm-pack (see examples.sh) ` +
-        `and the dev server is serving /meerkat-pkg/. ` +
-        `Original error: ${err.message}`,
-      );
+      const parsed = JSON.parse(resultStr);
+      this.mobId = parsed.mob_id || parsed.id || "dev-team";
+    } catch {
+      // Raw string like "dev-team"
+      this.mobId = resultStr || "dev-team";
     }
-    this.runtime = mod;
-    await this.runtime.default();
 
-    // Register WebCM tools (shared with agent.ts)
-    registerWebCMTools(this.runtime, this.vm);
-
-    this.runtime.init_runtime_from_config(JSON.stringify({
-      api_key: apiKey,
-      model,
-      max_sessions: 16,
+    // Spawn all three agents
+    const specs = AGENTS.map((profile) => ({
+      profile,
+      meerkat_id: profile,
+      runtime_mode: "autonomous_host",
     }));
+    await this.runtime.mob_spawn(this.mobId, JSON.stringify(specs));
 
-    await this.vm.exec("mkdir -p /workspace/src");
-
-    this.onEvent({ agent: "system", type: "status", content: "Meerkat runtime initialized" });
-  }
-
-  async createMob(model: string): Promise<void> {
-    if (!this.runtime) throw new Error("Runtime not initialized");
-
-    this.onEvent({ agent: "system", type: "status", content: "Creating mob: planner + coder + reviewer..." });
-
-    const def = buildMobDefinition(model);
-    await this.runtime.mob_create(JSON.stringify(def));
-
-    // Spawn members (array of specs)
-    for (const profile of ["planner", "coder", "reviewer"]) {
-      const specs = [{ profile, meerkat_id: profile }];
-      const resultRaw = await this.runtime.mob_spawn(this.mobId, JSON.stringify(specs));
-      const results = typeof resultRaw === "string" ? JSON.parse(resultRaw) : resultRaw;
-
-      if (Array.isArray(results) && results[0]?.status === "error") {
-        throw new Error(`Failed to spawn ${profile}: ${results[0].error}`);
-      }
-
-      const meerkatId = profile;
-      const subHandle = await this.runtime.mob_member_subscribe(this.mobId, meerkatId);
-      this.members.set(profile, { meerkatId, subHandle });
-      this.onEvent({ agent: profile, type: "status", content: `Spawned` });
-    }
-
-    // Wire all pairs (done via definition's role_wiring, but explicit wire is also fine)
-    const profiles = Array.from(this.members.keys());
-    for (let i = 0; i < profiles.length; i++) {
-      for (let j = i + 1; j < profiles.length; j++) {
+    // Wire all pairs (ignore already-wired errors)
+    for (let i = 0; i < AGENTS.length; i++) {
+      for (let j = i + 1; j < AGENTS.length; j++) {
         try {
-          await this.runtime.mob_wire(this.mobId, profiles[i], profiles[j]);
-        } catch {
-          // May already be wired from role_wiring
-        }
+          await this.runtime.mob_wire(this.mobId, AGENTS[i], AGENTS[j]);
+        } catch { /* already wired from definition */ }
       }
     }
 
-    this.onEvent({ agent: "system", type: "status", content: "Mob created and wired" });
-
-    // Start background polling for autonomous agent activity
-    this.startPolling();
-  }
-
-  async runFlow(objective: string): Promise<void> {
-    if (!this.runtime) throw new Error("Runtime not initialized");
-
-    this.onEvent({ agent: "system", type: "status", content: `Task: "${objective}"` });
-
-    // Send the objective to the planner (mirrors diplomacy demo pattern:
-    // mob_send_message -> wake agent -> tight poll loop -> quiet threshold)
-    const planner = this.members.get("planner");
-    if (planner) {
-      await this.runtime.mob_send_message(
-        this.mobId,
-        planner.meerkatId,
-        `=== NEW TASK ===\n${objective}\n\n` +
-        `Instructions:\n` +
-        `1. Write an implementation plan to /workspace/plan.md\n` +
-        `2. Send the plan to the coder using the send tool\n` +
-        `3. The coder will implement and test, then the reviewer will review\n`,
-      );
-      this.onEvent({ agent: "system", type: "status", content: "Task sent to planner" });
+    // Subscribe to each agent's events
+    for (const agent of AGENTS) {
+      const handle = await this.runtime.mob_member_subscribe(this.mobId, agent);
+      this.subscriptions.set(agent, handle);
+      const panel = this.panels.get(agent);
+      if (panel) panel.subHandle = handle;
     }
 
-    // Tight poll loop (matches diplomacy demo pattern: 300ms poll, 15s quiet threshold)
-    const MAX_WAIT = 300_000; // 5 min max
-    const QUIET_THRESHOLD = 15_000; // 15s quiet = done
-    const deadline = Date.now() + MAX_WAIT;
-    let lastEventTime = Date.now();
-
-    while (Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 500));
-      const eventCount = this.pollEvents();
-      if (eventCount > 0) {
-        lastEventTime = Date.now();
-      }
-      if (Date.now() - lastEventTime > QUIET_THRESHOLD) {
-        this.onEvent({ agent: "system", type: "status", content: "Agents idle — task may be complete" });
-        break;
-      }
+    // Update panel status
+    for (const agent of AGENTS) {
+      this.updateStatus(agent, "spawned", "thinking");
+      setTimeout(() => this.updateStatus(agent, "idle"), 2000);
     }
   }
 
+  /** Send a user message to the orchestrator mob member. */
+  async sendToOrchestrator(message: string): Promise<void> {
+    await this.runtime.mob_send_message(this.mobId, "orchestrator", message);
+  }
 
-  stop(): void {
+  /** Start background polling for sub-agent events. */
+  startPolling(): void {
+    if (this.pollInterval) return;
+    this.pollInterval = setInterval(() => this.pollAll(), 200);
+  }
+
+  /** Stop background polling. */
+  stopPolling(): void {
     if (this.pollInterval) {
       clearInterval(this.pollInterval);
       this.pollInterval = null;
     }
   }
 
-  private startPolling(): void {
-    if (this.pollInterval) return;
-    this.pollInterval = window.setInterval(() => {
-      this.pollEvents();
-    }, 1000);
-  }
+  private pollAll(): void {
+    for (const agent of AGENTS) {
+      const panel = this.panels.get(agent);
+      if (!panel || panel.subHandle == null) continue;
 
-  private pollEvents(): number {
-    if (!this.runtime) return 0;
-    let count = 0;
-
-    for (const [profile, { subHandle }] of this.members) {
       try {
-        const raw = this.runtime.poll_subscription(subHandle);
-        const events: any[] = JSON.parse(raw);
-        for (const event of events) {
-          this.routeEvent(profile, event);
-          count++;
+        const raw = this.runtime.poll_subscription(panel.subHandle);
+        const envelopes: any[] = JSON.parse(raw);
+        for (const envelope of envelopes) {
+          this.routeEnvelope(agent, envelope, panel);
         }
-      } catch {
-        // Subscription may not be ready yet
-      }
+      } catch { /* subscription not ready or lagged */ }
     }
-    return count;
   }
 
-  private routeEvent(profile: string, envelope: any): void {
-    // EventEnvelope format: { event_id, source_id, seq, timestamp_ms, payload }
-    // payload: { type: "text_delta", delta: "..." } or { type: "tool_call_requested", ... }
-    const payload = envelope.payload || envelope;
-    const type = payload.type;
+  private routeEnvelope(agent: string, envelope: any, panel: PanelState): void {
+    // EventEnvelope<AgentEvent> — payload is the AgentEvent
+    const ev = envelope.payload || envelope;
 
-    switch (type) {
+    switch (ev.type) {
+      case "reasoning_delta":
+        panel.stream.appendTextDelta(ev.delta);
+        break;
+
+      case "reasoning_complete":
+        panel.stream.finalizeText(ev.content);
+        break;
+
       case "text_delta":
-        // Skip deltas, wait for text_complete
+        panel.stream.appendTextDelta(ev.delta);
         break;
+
       case "text_complete":
-        this.onEvent({ agent: profile, type: "text", content: payload.content || "" });
+        panel.stream.finalizeText(ev.content);
+        this.updateStatus(agent, "idle");
         break;
+
       case "tool_call_requested":
-        this.onEvent({
-          agent: profile,
-          type: "tool_call",
-          content: payload.name === "shell"
-            ? (typeof payload.args === "object" ? payload.args.command || JSON.stringify(payload.args) : String(payload.args))
-            : JSON.stringify(payload.args || {}),
-          toolName: payload.name,
-        });
+        panel.currentCard = panel.stream.beginToolCall(ev.name, ev.args);
+        this.updateStatus(agent, `${ev.name}`, "tool-use");
         break;
+
       case "tool_execution_completed":
-        this.onEvent({
-          agent: profile,
-          type: "tool_result",
-          content: (payload.result || "(no output)").slice(0, 500),
-          toolName: payload.name,
-        });
+        if (panel.currentCard) {
+          panel.stream.resolveToolCall(panel.currentCard, ev.result || "", ev.is_error || false);
+          panel.currentCard = null;
+        }
         break;
+
       case "tool_result_received":
-        this.onEvent({
-          agent: profile,
-          type: "tool_result",
-          content: payload.name || "tool",
-          toolName: payload.name,
-        });
+        // Fallback: clear spinner if tool_execution_completed was missed
+        if (panel.currentCard) {
+          panel.stream.resolveToolCall(panel.currentCard, "", false);
+          panel.currentCard = null;
+        }
         break;
+
+      case "tool_execution_started":
+        this.updateStatus(agent, ev.name, "tool-use");
+        break;
+
       case "turn_started":
-        this.onEvent({ agent: profile, type: "status", content: `Turn ${payload.turn_number || ""}` });
+        this.updateStatus(agent, "thinking", "thinking");
         break;
+
       case "turn_completed":
-        this.onEvent({ agent: profile, type: "status", content: "Turn done" });
-        break;
       case "run_completed":
-        this.onEvent({ agent: profile, type: "status", content: "Completed" });
+        // Clear any lingering tool spinners
+        if (panel.currentCard) {
+          panel.stream.resolveToolCall(panel.currentCard, "", false);
+          panel.currentCard = null;
+        }
+        this.updateStatus(agent, "idle");
         break;
+
       case "run_failed":
-        this.onEvent({ agent: profile, type: "status", content: `Error: ${payload.error || "unknown"}` });
+        panel.stream.appendError(ev.error || "Run failed");
+        this.updateStatus(agent, "error", "error");
         break;
     }
+  }
+
+  private updateStatus(agent: string, text: string, cls?: string): void {
+    const panel = this.panels.get(agent);
+    if (!panel) return;
+    panel.statusEl.textContent = `\u25CF ${text}`;
+    panel.statusEl.className = "agent-status";
+    if (cls) panel.statusEl.classList.add(cls);
   }
 }

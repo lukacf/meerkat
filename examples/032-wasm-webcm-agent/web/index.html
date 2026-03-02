@@ -13,79 +13,84 @@
     <!-- Setup overlay -->
     <div id="setup-overlay">
       <div id="setup-card">
-        <h1>Meerkat WebCM Agent</h1>
-        <p class="subtitle">LLM coding agent with a Linux VM — entirely in your browser</p>
-        <div class="setup-row">
-          <input type="password" id="api-key" placeholder="Anthropic API key" />
+        <pre id="setup-banner">  .~.  .~.  .~.       MEERKAT
+ (o.o)(o.o)(o.o)      ───────
+  /|\  /|\  /|\       Agent mob running
+  | |  | |  | |       in your browser
+ _/ \__/ \__/ \_</pre>
+        <p class="subtitle">Multi-provider LLM coding agent with a Linux VM — entirely in WASM</p>
+
+        <div class="key-section">
+          <div class="key-row">
+            <label for="anthropic-key">Anthropic</label>
+            <input type="password" id="anthropic-key" placeholder="sk-ant-..." autocomplete="off" />
+          </div>
+          <div class="key-row">
+            <label for="openai-key">OpenAI</label>
+            <input type="password" id="openai-key" placeholder="sk-..." autocomplete="off" />
+          </div>
+          <div class="key-row">
+            <label for="gemini-key">Gemini</label>
+            <input type="password" id="gemini-key" placeholder="AI..." autocomplete="off" />
+          </div>
+          <p class="key-hint">Enter at least one API key. More keys = more providers for sub-agents.</p>
         </div>
-        <div class="setup-row">
-          <select id="model-select">
-            <option value="claude-opus-4-6">Claude Opus 4.6</option>
-            <option value="claude-sonnet-4-5" selected>Claude Sonnet 4.5</option>
-          </select>
-        </div>
-        <div class="setup-row mode-toggle">
-          <label><input type="radio" name="mode" value="solo" checked /> Solo agent</label>
-          <label><input type="radio" name="mode" value="mob" /> Mob (planner + coder + reviewer)</label>
-        </div>
-        <button id="boot-btn">Boot VM & Start</button>
+
+        <button id="boot-btn">Boot VM &amp; Start</button>
         <div id="boot-status"></div>
       </div>
     </div>
 
-    <!-- Main workspace (hidden until booted) -->
+    <!-- Workspace (hidden until booted) -->
     <div id="workspace" class="hidden">
-      <div id="header">
-        <span class="logo">meerkat</span>
-        <span id="session-info"></span>
-        <div id="header-controls">
-          <select id="model-switch">
-            <option value="claude-opus-4-6">Opus 4.6</option>
-            <option value="claude-sonnet-4-5" selected>Sonnet 4.5</option>
-          </select>
-          <button id="new-session-btn" title="New session">+ New</button>
-        </div>
-      </div>
-
-      <div id="main-area">
-        <!-- File tree -->
-        <div id="file-tree-pane">
-          <div class="pane-title">Files</div>
-          <div id="file-tree"></div>
-        </div>
-
-        <!-- Resize handle -->
-        <div class="resize-handle" data-resize="tree-editor"></div>
-
-        <!-- Editor -->
-        <div id="editor-pane">
-          <div id="editor-tabs"></div>
-          <div id="editor-container"></div>
-          <div id="editor-empty">Select a file to view</div>
-        </div>
-
-        <!-- Resize handle -->
-        <div class="resize-handle" data-resize="editor-chat"></div>
-
-        <!-- Chat -->
-        <div id="chat-pane">
-          <div class="pane-title">Agent</div>
-          <div id="messages"></div>
+      <div id="split">
+        <!-- Left: main agent stream (70%) -->
+        <div id="main-pane">
+          <div class="main-agent-header">
+            <span class="agent-name" style="color: var(--accent-orange);">ALPHA MEERKAT</span>
+            <span class="agent-model" id="model-orchestrator"></span>
+            <span class="agent-status" id="status-orchestrator">&#9679; idle</span>
+          </div>
+          <div id="main-stream"></div>
           <div id="input-row">
-            <textarea id="prompt" placeholder="Ask the agent..." rows="1"></textarea>
-            <button id="send-btn" title="Send (Cmd+Enter)">Send</button>
+            <span id="prompt-sigil" class="prompt-sigil">&#10095;</span>
+            <input id="prompt" type="text" placeholder="Ask the agent..." autocomplete="off" spellcheck="false" />
+          </div>
+        </div>
+
+        <!-- Right: sub-agent panels (30%) -->
+        <div id="sub-pane">
+          <div class="sub-agent-panel" id="panel-planner">
+            <div class="sub-agent-header">
+              <span class="agent-name">planner</span>
+              <span class="agent-model" id="model-planner"></span>
+              <span class="agent-status" id="status-planner">&#9679; idle</span>
+            </div>
+            <div class="sub-agent-stream" id="stream-planner"></div>
+          </div>
+          <div class="sub-agent-panel" id="panel-coder">
+            <div class="sub-agent-header">
+              <span class="agent-name">coder</span>
+              <span class="agent-model" id="model-coder"></span>
+              <span class="agent-status" id="status-coder">&#9679; idle</span>
+            </div>
+            <div class="sub-agent-stream" id="stream-coder"></div>
+          </div>
+          <div class="sub-agent-panel" id="panel-reviewer">
+            <div class="sub-agent-header">
+              <span class="agent-name">reviewer</span>
+              <span class="agent-model" id="model-reviewer"></span>
+              <span class="agent-status" id="status-reviewer">&#9679; idle</span>
+            </div>
+            <div class="sub-agent-stream" id="stream-reviewer"></div>
           </div>
         </div>
       </div>
+    </div>
 
-      <!-- Terminal (collapsible bottom) -->
-      <div id="terminal-toggle" title="Toggle terminal">
-        <span>Terminal</span>
-        <span id="terminal-chevron">^</span>
-      </div>
-      <div id="terminal-pane">
-        <div id="terminal"></div>
-      </div>
+    <!-- Hidden terminal for WebCM (off-screen so xterm can initialize) -->
+    <div id="terminal-host">
+      <div id="terminal"></div>
     </div>
   </div>
   <script type="module" src="/src/main.ts"></script>

@@ -1,340 +1,198 @@
 /**
- * 032 — Meerkat WebCM Agent
+ * 032 — Meerkat WebCM Agent (TUI)
  *
- * Claude Code-inspired coding agent running entirely in the browser.
- * Split-pane layout: file tree + Monaco editor + chat + terminal.
+ * Claude Code-inspired coding agent mob running entirely in the browser.
+ * Left: orchestrator stream. Right: three sub-agent panels (planner/coder/reviewer).
+ * All agents communicate via comms (send/peers). No custom delegation tools.
  */
 
 import { WebCMHost } from "./webcm-host";
-import { Agent, type AgentEvent } from "./agent";
-import { MobOrchestrator, type MobEvent } from "./mob";
-import { FileTree } from "./ui/file-tree";
-import { Editor } from "./ui/editor";
-import { Chat } from "./ui/chat";
+import { StreamRenderer } from "./stream";
+import { MobOrchestrator, resolveModels, type MobRuntime } from "./mob";
+import { registerWebCMTools, type ToolRuntime } from "./tools";
 
 // ── DOM refs ────────────────────────────────────────────────────────────────
 
+// Compile-time env injection (Vite `define`)
+declare const __ANTHROPIC_API_KEY__: string;
+declare const __OPENAI_API_KEY__: string;
+declare const __GEMINI_API_KEY__: string;
+
 const setupOverlay = document.getElementById("setup-overlay") as HTMLDivElement;
-const apiKeyInput = document.getElementById("api-key") as HTMLInputElement;
-const modelSelect = document.getElementById("model-select") as HTMLSelectElement;
+const anthropicKeyInput = document.getElementById("anthropic-key") as HTMLInputElement;
+const openaiKeyInput = document.getElementById("openai-key") as HTMLInputElement;
+const geminiKeyInput = document.getElementById("gemini-key") as HTMLInputElement;
+
+// Pre-fill from environment variables (baked in at build/dev time)
+if (__ANTHROPIC_API_KEY__) anthropicKeyInput.value = __ANTHROPIC_API_KEY__;
+if (__OPENAI_API_KEY__) openaiKeyInput.value = __OPENAI_API_KEY__;
+if (__GEMINI_API_KEY__) geminiKeyInput.value = __GEMINI_API_KEY__;
 const bootBtn = document.getElementById("boot-btn") as HTMLButtonElement;
 const bootStatus = document.getElementById("boot-status") as HTMLDivElement;
 const workspace = document.getElementById("workspace") as HTMLDivElement;
 const terminalEl = document.getElementById("terminal") as HTMLDivElement;
-const terminalPane = document.getElementById("terminal-pane") as HTMLDivElement;
-const terminalToggle = document.getElementById("terminal-toggle") as HTMLDivElement;
-const fileTreeEl = document.getElementById("file-tree") as HTMLDivElement;
-const editorTabsEl = document.getElementById("editor-tabs") as HTMLDivElement;
-const editorContainerEl = document.getElementById("editor-container") as HTMLDivElement;
-const editorEmptyEl = document.getElementById("editor-empty") as HTMLDivElement;
-const messagesEl = document.getElementById("messages") as HTMLDivElement;
-const promptInput = document.getElementById("prompt") as HTMLTextAreaElement;
-const sendBtn = document.getElementById("send-btn") as HTMLButtonElement;
-const sessionInfo = document.getElementById("session-info") as HTMLSpanElement;
-const modelSwitch = document.getElementById("model-switch") as HTMLSelectElement;
-const newSessionBtn = document.getElementById("new-session-btn") as HTMLButtonElement;
+const mainStreamEl = document.getElementById("main-stream") as HTMLDivElement;
+const promptInput = document.getElementById("prompt") as HTMLInputElement;
+const promptSigil = document.getElementById("prompt-sigil") as HTMLSpanElement;
+
+// Sub-agent panel elements
+const panelEls = {
+  planner: {
+    stream: document.getElementById("stream-planner") as HTMLDivElement,
+    status: document.getElementById("status-planner") as HTMLSpanElement,
+    model: document.getElementById("model-planner") as HTMLSpanElement,
+  },
+  coder: {
+    stream: document.getElementById("stream-coder") as HTMLDivElement,
+    status: document.getElementById("status-coder") as HTMLSpanElement,
+    model: document.getElementById("model-coder") as HTMLSpanElement,
+  },
+  reviewer: {
+    stream: document.getElementById("stream-reviewer") as HTMLDivElement,
+    status: document.getElementById("status-reviewer") as HTMLSpanElement,
+    model: document.getElementById("model-reviewer") as HTMLSpanElement,
+  },
+};
 
 // ── State ───────────────────────────────────────────────────────────────────
 
 const vm = new WebCMHost();
-let agent: Agent | null = null;
 let mob: MobOrchestrator | null = null;
+let mainStream: StreamRenderer | null = null;
 let running = false;
-let chat: Chat;
-let editor: Editor;
-let fileTree: FileTree;
-let turnCount = 0;
-let selectedModel = "claude-sonnet-4-5";
-let isMobMode = false;
-
-// ── UI Components ───────────────────────────────────────────────────────────
-
-chat = new Chat(messagesEl);
 
 // ── Boot ────────────────────────────────────────────────────────────────────
 
-bootBtn.addEventListener("click", async () => {
-  const key = apiKeyInput.value.trim();
-  if (!key) {
-    bootStatus.textContent = "Enter an API key";
+bootBtn.addEventListener("click", boot);
+
+async function boot() {
+  const keys = {
+    anthropic: anthropicKeyInput.value.trim() || undefined,
+    openai: openaiKeyInput.value.trim() || undefined,
+    gemini: geminiKeyInput.value.trim() || undefined,
+  };
+
+  if (!keys.anthropic && !keys.openai && !keys.gemini) {
+    bootStatus.textContent = "Enter at least one API key";
     return;
   }
-  selectedModel = modelSelect.value;
-  isMobMode = (document.querySelector('input[name="mode"]:checked') as HTMLInputElement)?.value === "mob";
+
   bootBtn.disabled = true;
+  const models = resolveModels(keys);
 
   try {
-    await vm.boot(terminalEl, (msg) => {
-      bootStatus.textContent = msg;
+    // Step 1: Boot WebCM VM
+    bootStatus.textContent = "Booting Alpine Linux VM...";
+    await vm.boot(terminalEl, (msg) => { bootStatus.textContent = msg; });
+
+    // Step 2: Load WASM runtime
+    bootStatus.textContent = "Loading Meerkat WASM runtime...";
+    const runtime = await loadWasmRuntime();
+
+    // Step 3: Register WebCM tools (before init_runtime_from_config)
+    registerWebCMTools(runtime as ToolRuntime, vm);
+
+    // Step 4: Init mob runtime
+    bootStatus.textContent = "Initializing mob runtime...";
+    const mobRuntime = runtime as unknown as MobRuntime;
+
+    // Build panel state for sub-agents (orchestrator goes to main stream)
+    const panelStates = new Map<string, any>();
+
+    // Orchestrator events → main stream
+    mainStream = new StreamRenderer(mainStreamEl, "main");
+    const orchestratorStatusEl = document.getElementById("status-orchestrator") as HTMLSpanElement;
+    const orchestratorModelEl = document.getElementById("model-orchestrator") as HTMLSpanElement;
+    orchestratorModelEl.textContent = models.main;
+    panelStates.set("orchestrator", {
+      stream: mainStream,
+      statusEl: orchestratorStatusEl,
+      subHandle: null,
+      currentCard: null,
     });
 
-    // Init UI components that need the VM
-    editor = new Editor(editorContainerEl, editorTabsEl, editorEmptyEl);
-    fileTree = new FileTree(fileTreeEl, vm, {
-      onFileSelect: async (path) => {
-        try {
-          const content = await vm.readFile(path);
-          editor.openFile(path, content);
-          fileTree.setActive(path);
-        } catch (e: any) {
-          chat.addError(`Failed to open ${path}: ${e.message}`);
-        }
-      },
-    });
-
-    if (isMobMode) {
-      // Mob mode: init meerkat WASM runtime + create mob
-      mob = new MobOrchestrator(vm, handleMobEvent);
-      await mob.init(key, selectedModel);
-      await mob.createMob(selectedModel);
-      sessionInfo.textContent = `Mob mode · ${selectedModel}`;
-    } else {
-      // Solo mode: meerkat WASM agent loop with WebCM tools
-      bootStatus.textContent = "Loading Meerkat runtime...";
-      agent = new Agent(key, vm, handleAgentEvent, selectedModel);
-      await agent.init();
-      sessionInfo.textContent = `Model: ${selectedModel}`;
+    // Sub-agent panels
+    for (const [name, els] of Object.entries(panelEls)) {
+      els.model.textContent = (models as any)[name];
+      panelStates.set(name, {
+        stream: new StreamRenderer(els.stream, "sub"),
+        statusEl: els.status,
+        subHandle: null,
+        currentCard: null,
+      });
     }
 
-    // Transition to workspace
+    // Step 5: Create mob (orchestrator + planner + coder + reviewer)
+    mob = new MobOrchestrator(mobRuntime, panelStates);
+    await mob.init(keys, models);
+
+    // Step 6: Show workspace
     setupOverlay.classList.add("hidden");
     workspace.classList.remove("hidden");
-    vm.fit();
-    modelSwitch.value = selectedModel;
+    mainStream.appendBanner(models);
+
+    // Step 7: Start event polling for all agents
+    mob.startPolling();
+
+    // Step 8: Focus prompt
     promptInput.focus();
 
-    // Initial file tree scan
-    await fileTree.refresh();
   } catch (err: any) {
-    bootStatus.textContent = `Boot failed: ${err.message}`;
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("Boot failed:", err);
+    bootStatus.textContent = `Boot failed: ${msg}`;
     bootBtn.disabled = false;
   }
-});
-
-// ── Terminal toggle ─────────────────────────────────────────────────────────
-
-let terminalCollapsed = false;
-terminalToggle.addEventListener("click", () => {
-  terminalCollapsed = !terminalCollapsed;
-  terminalPane.classList.toggle("collapsed", terminalCollapsed);
-  document.getElementById("terminal-chevron")!.style.transform = terminalCollapsed ? "rotate(180deg)" : "";
-  setTimeout(() => vm.fit(), 50);
-});
-
-// ── Resize ──────────────────────────────────────────────────────────────────
-
-window.addEventListener("resize", () => vm.fit());
-
-// ── Agent events ────────────────────────────────────────────────────────────
-
-let currentToolCard: HTMLElement | null = null;
-
-// ── Mob event handler ───────────────────────────────────────────────────────
-
-function handleMobEvent(e: MobEvent) {
-  // Add agent label before content
-  const agentLabel = document.createElement("span");
-  agentLabel.className = `mob-agent-label ${e.agent}`;
-  agentLabel.textContent = e.agent;
-
-  switch (e.type) {
-    case "status":
-      chat.addAssistantText(`**[${e.agent}]** ${e.content}`);
-      break;
-    case "text":
-      chat.addAssistantText(`**[${e.agent}]** ${e.content}`);
-      break;
-    case "tool_call":
-      currentToolCard = chat.addToolCall(
-        `${e.agent}/${e.toolName || "tool"}`,
-        e.content.slice(0, 300),
-      );
-      break;
-    case "tool_result":
-      if (currentToolCard) {
-        chat.resolveToolCard(currentToolCard, e.content, false);
-        currentToolCard = null;
-      }
-      fileTree?.refresh();
-      break;
-  }
 }
 
-// ── Agent event handler ─────────────────────────────────────────────────────
+// ── WASM runtime loader ─────────────────────────────────────────────────────
 
-function handleAgentEvent(e: AgentEvent) {
-  switch (e.type) {
-    case "text":
-      chat.addAssistantText(e.content);
-      break;
-    case "tool_call":
-      currentToolCard = chat.addToolCall(
-        e.toolName || "tool",
-        e.toolName === "shell" ? e.content : e.content.slice(0, 200),
-      );
-      break;
-    case "tool_result":
-      if (currentToolCard) {
-        chat.resolveToolCard(currentToolCard, e.content, false);
-        currentToolCard = null;
-      }
-      // Auto-refresh file tree after write operations
-      if (e.toolName === "write_file" || e.toolName === "shell") {
-        fileTree?.refresh();
-        // If a file was written, try to open it in editor
-        if (e.toolName === "write_file" && e.content.startsWith("Wrote ")) {
-          const path = e.content.slice(6).trim();
-          vm.readFile(path)
-            .then((content) => {
-              editor?.openFile(path, content);
-              fileTree?.setActive(path);
-            })
-            .catch((err: any) => console.warn(`Failed to open written file ${path}:`, err));
-        }
-      }
-      break;
-    case "error":
-      if (currentToolCard) {
-        chat.resolveToolCard(currentToolCard, e.content, true);
-        currentToolCard = null;
-      } else {
-        chat.addError(e.content);
-      }
-      break;
-    case "done":
-      turnCount++;
-      sessionInfo.textContent = `Model: ${selectedModel} · Turn ${turnCount}`;
-      break;
+async function loadWasmRuntime(): Promise<any> {
+  const url = new URL("/meerkat-pkg/meerkat_web_runtime.js", window.location.href).toString();
+  let mod: any;
+  try {
+    mod = await import(/* @vite-ignore */ url);
+  } catch (err: any) {
+    throw new Error(
+      `Failed to load WASM runtime from ${url}. ` +
+      `Run ./examples.sh to build the WASM bundle. Error: ${err.message}`,
+    );
   }
+  await mod.default();
+  return mod;
 }
 
-// ── Send ────────────────────────────────────────────────────────────────────
+// ── Input handling ──────────────────────────────────────────────────────────
+
+promptInput.addEventListener("keydown", async (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !running) {
+    e.preventDefault();
+    await send();
+  }
+});
 
 async function send() {
-  if (running) return;
+  if (running || !mob) return;
   const text = promptInput.value.trim();
   if (!text) return;
 
   promptInput.value = "";
-  promptInput.style.height = "36px";
-  chat.addUserMessage(text);
-  currentToolCard = null;
-
+  mainStream?.appendUserLine(text);
   setRunning(true);
+
   try {
-    if (isMobMode && mob) {
-      // Mob mode: send task to planner, poll until agents idle
-      await mob.runFlow(text);
-      await fileTree?.refresh();
-    } else if (agent) {
-      await agent.run(text);
-    }
+    // Inject user message into the orchestrator mob member via mob_send_message
+    await mob.sendToOrchestrator(text);
   } catch (err: any) {
-    chat.addError(err.message);
+    mainStream?.appendError(err.message);
   }
+
   setRunning(false);
 }
 
 function setRunning(v: boolean) {
   running = v;
-  sendBtn.disabled = v;
   promptInput.disabled = v;
+  promptSigil.classList.toggle("running", v);
+  if (!v) promptInput.focus();
 }
-
-sendBtn.addEventListener("click", send);
-
-// Cmd+Enter or Ctrl+Enter to send
-promptInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-    e.preventDefault();
-    send();
-  }
-});
-
-// Auto-resize textarea
-promptInput.addEventListener("input", () => {
-  promptInput.style.height = "36px";
-  promptInput.style.height = Math.min(promptInput.scrollHeight, 120) + "px";
-});
-
-// ── Model switch ────────────────────────────────────────────────────────────
-
-modelSwitch.addEventListener("change", async () => {
-  selectedModel = modelSwitch.value;
-  if (isMobMode && mob) {
-    // Mob mode: recreate the entire mob with the new model
-    mob.stop();
-    mob = new MobOrchestrator(vm, handleMobEvent);
-    await mob.init(apiKeyInput.value.trim(), selectedModel);
-    await mob.createMob(selectedModel);
-    chat.clear();
-    sessionInfo.textContent = `Mob mode · ${selectedModel} (new session)`;
-  } else if (agent) {
-    agent = new Agent(apiKeyInput.value.trim(), vm, handleAgentEvent, selectedModel);
-    await agent.init();
-    turnCount = 0;
-    sessionInfo.textContent = `Model: ${selectedModel} (new session)`;
-  }
-});
-
-// ── New session ─────────────────────────────────────────────────────────────
-
-newSessionBtn.addEventListener("click", async () => {
-  if (agent) {
-    agent = new Agent(apiKeyInput.value.trim(), vm, handleAgentEvent, selectedModel);
-    await agent.init();
-    chat.clear();
-    turnCount = 0;
-    sessionInfo.textContent = `Model: ${selectedModel}`;
-    promptInput.focus();
-  }
-});
-
-// ── Resize handles ──────────────────────────────────────────────────────────
-
-document.querySelectorAll(".resize-handle").forEach((handle) => {
-  let startX = 0;
-  let startWidth = 0;
-  let target: HTMLElement | null = null;
-
-  const onMouseMove = (e: MouseEvent) => {
-    if (!target) return;
-    const dx = e.clientX - startX;
-    target.style.width = Math.max(120, startWidth + dx) + "px";
-  };
-
-  const onMouseUp = () => {
-    handle.classList.remove("active");
-    document.removeEventListener("mousemove", onMouseMove as any);
-    document.removeEventListener("mouseup", onMouseUp);
-  };
-
-  handle.addEventListener("mousedown", (e: Event) => {
-    const me = e as MouseEvent;
-    handle.classList.add("active");
-    startX = me.clientX;
-    const resizeType = (handle as HTMLElement).getAttribute("data-resize");
-    if (resizeType === "tree-editor") {
-      target = document.getElementById("file-tree-pane");
-    } else if (resizeType === "editor-chat") {
-      target = document.getElementById("chat-pane");
-      // For chat, resize is from the left edge, so invert
-      startWidth = target?.offsetWidth || 400;
-      const origStartX = startX;
-      const origOnMouseMove = (ev: MouseEvent) => {
-        if (!target) return;
-        const dx = origStartX - ev.clientX;
-        target.style.width = Math.max(250, startWidth + dx) + "px";
-      };
-      document.addEventListener("mousemove", origOnMouseMove as any);
-      document.addEventListener("mouseup", () => {
-        handle.classList.remove("active");
-        document.removeEventListener("mousemove", origOnMouseMove as any);
-      }, { once: true });
-      return;
-    }
-    if (target) startWidth = target.offsetWidth;
-    document.addEventListener("mousemove", onMouseMove as any);
-    document.addEventListener("mouseup", onMouseUp);
-  });
-});

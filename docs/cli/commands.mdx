@@ -119,7 +119,7 @@ tail -f app.log | rkat run --host --stdin "Monitor incidents and alert on anomal
 
 When `--stdin` is set, batch context injection is skipped so stdin remains available for the event reader.
 
-When `--enable-mob` (`-M`) is passed, `run` composes the consolidated mob tool surface (backed by `meerkat-mob-mcp`) into the agent tool list (`mob_create`, `mob_list`, `mob_lifecycle`, `meerkat_spawn`, `meerkat_retire`, `meerkat_wire`, `send`, `meerkat_list`, `mob_events`, `mob_run_flow`, `mob_flow_status`, `mob_cancel_flow`).
+When `--enable-mob` (`-M`) is passed, `run` composes the consolidated mob tool surface (backed by `meerkat-mob-mcp`) into the agent tool list (`mob_create`, `mob_list`, `mob_lifecycle`, `mob_events`, `mob_run_flow`, `mob_flow_status`, `mob_cancel_flow`, `meerkat_spawn`, `meerkat_retire`, `meerkat_list`, `meerkat_wire`, `meerkat_message`, `mob_respawn`, `mob_inject_and_subscribe`).
 Mob tools are opt-in and disabled by default. When enabled, they are available even when built-ins are disabled.
 
 For mob workflows, this tool path is the primary CLI UX:
@@ -149,7 +149,7 @@ rkat resume 019c8b99 "keep going"                # short prefix match
 
 Session identifiers accept full UUIDs, short prefixes (git-style, fails on ambiguity), or relative aliases (`last`/`~`/`~N`). All scoped to the active realm.
 
-Like `run`, `resume` composes the mob tool surface when `--enable-mob` (`-M`) is passed.
+Mob tools are inherited from the original session configuration; `resume` does not accept `--enable-mob`.
 
 ## continue
 

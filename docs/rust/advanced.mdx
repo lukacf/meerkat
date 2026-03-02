@@ -59,9 +59,9 @@ Built-in clients for major LLM providers:
     ```rust
     use meerkat::AnthropicClient;
 
-    let client = AnthropicClient::new("sk-ant-...".to_string());
+    let client = AnthropicClient::new("sk-ant-...".to_string())?;
     let client = AnthropicClient::from_env()?;
-    let client = AnthropicClient::new("key".to_string())
+    let client = AnthropicClient::new("key".to_string())?
         .with_base_url("https://my-proxy.example.com".to_string());
     ```
   </Tab>
@@ -115,7 +115,9 @@ Pass provider-specific options via `AgentBuildConfig`:
 ```rust
 use async_trait::async_trait;
 use meerkat::{AgentLlmClient, AgentError, LlmStreamResult, Message, ToolDef, StopReason, Usage};
+use meerkat::AssistantBlock;
 use serde_json::Value;
+use std::sync::Arc;
 
 struct MyCustomClient { api_key: String }
 
@@ -124,18 +126,17 @@ impl AgentLlmClient for MyCustomClient {
     async fn stream_response(
         &self,
         messages: &[Message],
-        tools: &[ToolDef],
+        tools: &[Arc<ToolDef>],
         max_tokens: u32,
         temperature: Option<f32>,
         provider_params: Option<&Value>,
     ) -> Result<LlmStreamResult, AgentError> {
         // Call your LLM API here
-        Ok(LlmStreamResult {
-            content: "Response text".to_string(),
-            tool_calls: vec![],
-            stop_reason: StopReason::EndTurn,
-            usage: Usage { input_tokens: 10, output_tokens: 20, ..Default::default() },
-        })
+        Ok(LlmStreamResult::new(
+            vec![AssistantBlock::Text { text: "Response text".to_string(), meta: None }],
+            StopReason::EndTurn,
+            Usage { input_tokens: 10, output_tokens: 20, ..Default::default() },
+        ))
     }
 
     fn provider(&self) -> &'static str { "my-provider" }
@@ -325,7 +326,8 @@ async fn handle_chat(session_id: SessionId, user_msg: String) -> impl IntoRespon
 
 ```rust
 use meerkat::{AgentFactory, Config, build_ephemeral_service};
-use meerkat::service::{CreateSessionRequest, InitialTurnPolicy, StartTurnRequest, SessionService};
+use meerkat::{CreateSessionRequest, StartTurnRequest, SessionService};
+use meerkat_core::service::InitialTurnPolicy;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -342,6 +344,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         host_mode: false,
         skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
+        build: None,
+        labels: None,
     }).await?;
 
     println!("Response: {}", result.text);
@@ -350,6 +354,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         prompt: "Now divide that result by 5.".into(),
         event_tx: None,
         host_mode: false,
+        skill_references: None,
+        flow_tool_overlay: None,
+        additional_instructions: None,
     }).await?;
 
     println!("Follow-up: {}", result.text);

@@ -190,9 +190,11 @@ interface SessionOptions {
   enableShell?: boolean;
   enableSubagents?: boolean;
   enableMemory?: boolean;
+  enableMob?: boolean;
   hostMode?: boolean;
   commsName?: string;
   peerMeta?: Record<string, unknown>;
+  budgetLimits?: Record<string, unknown>;
   providerParams?: Record<string, unknown>;
   preloadSkills?: string[];
   skillRefs?: SkillRef[];

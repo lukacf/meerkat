@@ -34,8 +34,8 @@ impl AgentToolDispatcher for MathTools {
         match call.name {
             "add" => {
                 let args: AddArgs = call.parse_args()
-                    .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
-                Ok(ToolResult::success(call.id, format!("{}", args.a + args.b)))
+                    .map_err(|e| ToolError::invalid_arguments("add", e.to_string()))?;
+                Ok(ToolResult::new(call.id.to_string(), format!("{}", args.a + args.b), false))
             }
             _ => Err(ToolError::not_found(call.name)),
         }

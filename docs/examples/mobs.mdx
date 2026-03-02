@@ -220,7 +220,7 @@ When `enable_mob` is set, the agent gets these tools:
   </Tab>
   <Tab title="Rust">
     ```rust
-    let definition = Prefab::CodingSwarm.definition("my-swarm");
+    let definition = Prefab::CodingSwarm.definition();
     let handle = MobBuilder::new(definition, MobStorage::in_memory())
         .with_session_service(service)
         .allow_ephemeral_sessions(true)
@@ -264,11 +264,12 @@ When `enable_mob` is set, the agent gets these tools:
   </Tab>
   <Tab title="Rust">
     ```rust
-    handle.spawn_batch(vec![
-        SpawnSpec::new("lead", "lead-1"),
-        SpawnSpec::new("worker", "worker-1").runtime_mode(MobRuntimeMode::TurnDriven),
-        SpawnSpec::new("worker", "worker-2"),
-    ]).await?;
+    handle.spawn("lead".into(), "lead-1".into(), None).await?;
+    handle.spawn_with_options(
+        "worker".into(), "worker-1".into(), None,
+        Some(MobRuntimeMode::TurnDriven), None,
+    ).await?;
+    handle.spawn("worker".into(), "worker-2".into(), None).await?;
     ```
   </Tab>
 </Tabs>
@@ -371,7 +372,7 @@ Send a message directly to a specific mob member, triggering an LLM turn.
   </Tab>
   <Tab title="Rust">
     ```rust
-    handle.turn("lead-1", "Decompose the task and assign to workers.").await?;
+    handle.send_message("lead-1".into(), "Decompose the task and assign to workers.".into()).await?;
     ```
   </Tab>
 </Tabs>
@@ -407,7 +408,7 @@ Execute a named DAG flow. Steps execute in dependency order with configured disp
   </Tab>
   <Tab title="Rust">
     ```rust
-    let run_id = handle.run_flow("triage", json!({"pr": 42})).await?;
+    let run_id = handle.run_flow("triage".into(), json!({"pr": 42})).await?;
     ```
   </Tab>
 </Tabs>
@@ -444,8 +445,8 @@ Execute a named DAG flow. Steps execute in dependency order with configured disp
   </Tab>
   <Tab title="Rust">
     ```rust
-    let status = handle.status().await?;
-    let flow_run = handle.flow_status(&run_id).await?;
+    let status = handle.status();
+    let flow_run = handle.flow_status(run_id).await?;
     ```
   </Tab>
 </Tabs>
@@ -480,8 +481,8 @@ Read the structural event log (spawns, retires, wires, flow transitions).
   </Tab>
   <Tab title="Rust">
     ```rust
-    let events = handle.events(0, 100).await?;
-    for e in &events { println!("{:?}", e); }
+    let events_view = handle.events();
+    // Use events_view to read the structural event log
     ```
   </Tab>
 </Tabs>
@@ -595,8 +596,16 @@ The primary pattern across all surfaces: enable mob tools and let the agent orch
         .mob(true);
     let service = build_ephemeral_service(factory, config, 64);
     let result = service.create_session(CreateSessionRequest {
+        model: "claude-sonnet-4-5".into(),
         prompt: "Create a research team and run the synthesis flow".into(),
-        ..Default::default()
+        system_prompt: None,
+        max_tokens: None,
+        event_tx: None,
+        host_mode: false,
+        skill_references: None,
+        initial_turn: InitialTurnPolicy::RunImmediately,
+        build: None,
+        labels: None,
     }).await?;
     ```
   </Tab>

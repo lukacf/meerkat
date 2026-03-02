@@ -656,6 +656,7 @@ mod tests {
                         runtime_mode: MobRuntimeMode::AutonomousHost,
                         max_inline_peer_notifications: None,
                         output_schema: None,
+                        provider_params: None,
                     },
                 );
                 m

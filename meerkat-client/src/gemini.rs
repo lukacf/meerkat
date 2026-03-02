@@ -386,6 +386,18 @@ fn strip_gemini_function_parameters_unsupported_keywords(value: &mut Value) {
     }
 }
 
+fn text_event_for_part(
+    text: String,
+    is_thought: bool,
+    meta: Option<Box<meerkat_core::ProviderMeta>>,
+) -> LlmEvent {
+    if is_thought {
+        LlmEvent::ReasoningDelta { delta: text }
+    } else {
+        LlmEvent::TextDelta { delta: text, meta }
+    }
+}
+
 fn validate_gemini_response_json_schema(schema: &Value, provider: Provider) -> Vec<SchemaWarning> {
     let mut warnings = Vec::new();
     inspect_gemini_json_schema_node(schema, "", provider, &mut warnings);
@@ -577,10 +589,11 @@ impl LlmClient for GeminiClient {
                                             });
 
                                             if let Some(text) = part.text {
-                                                yield LlmEvent::TextDelta {
-                                                    delta: text,
-                                                    meta: meta.clone(),
-                                                };
+                                                yield text_event_for_part(
+                                                    text,
+                                                    part.thought.unwrap_or(false),
+                                                    meta.clone(),
+                                                );
                                             }
                                             if let Some(fc) = part.function_call {
                                                 let id = format!("fc_{tool_call_index}");
@@ -656,6 +669,7 @@ struct CandidateContent {
 struct Part {
     text: Option<String>,
     function_call: Option<FunctionCall>,
+    thought: Option<bool>,
     thought_signature: Option<String>,
 }
 
@@ -1586,6 +1600,25 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn test_parse_text_with_thought_flag() -> Result<(), Box<dyn std::error::Error>> {
+        let line =
+            r#"{"candidates":[{"content":{"parts":[{"text":"thinking...","thought":true}]}}]}"#;
+        let response = GeminiClient::parse_stream_line(line).ok_or("missing response")?;
+        let candidates = response.candidates.as_ref().ok_or("missing candidates")?;
+        let parts = candidates[0]
+            .content
+            .as_ref()
+            .ok_or("missing content")?
+            .parts
+            .as_ref()
+            .ok_or("missing parts")?;
+
+        assert_eq!(parts[0].text.as_deref(), Some("thinking..."));
+        assert_eq!(parts[0].thought, Some(true));
+        Ok(())
+    }
+
     /// Parallel tool calls: only FIRST call has signature per spec section 2.3
     #[test]
     fn test_parallel_calls_only_first_has_signature() -> Result<(), Box<dyn std::error::Error>> {
@@ -1755,6 +1788,41 @@ mod tests {
                 }
                 _ => panic!("expected Gemini variant"),
             }
+        }
+    }
+
+    #[test]
+    fn test_text_event_for_part_emits_reasoning_delta_when_thought() {
+        let event = text_event_for_part("plan step".to_string(), true, None);
+        match event {
+            LlmEvent::ReasoningDelta { delta } => assert_eq!(delta, "plan step"),
+            _ => panic!("expected ReasoningDelta"),
+        }
+    }
+
+    #[test]
+    fn test_text_event_for_part_emits_text_delta_when_not_thought() {
+        use meerkat_core::ProviderMeta;
+
+        let event = text_event_for_part(
+            "final answer".to_string(),
+            false,
+            Some(Box::new(ProviderMeta::Gemini {
+                thought_signature: "sig_text".to_string(),
+            })),
+        );
+        match event {
+            LlmEvent::TextDelta { delta, meta } => {
+                assert_eq!(delta, "final answer");
+                let meta = meta.expect("meta");
+                match meta.as_ref() {
+                    ProviderMeta::Gemini { thought_signature } => {
+                        assert_eq!(thought_signature, "sig_text");
+                    }
+                    _ => panic!("expected Gemini meta"),
+                }
+            }
+            _ => panic!("expected TextDelta"),
         }
     }
 }

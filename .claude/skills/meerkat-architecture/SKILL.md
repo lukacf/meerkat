@@ -20,12 +20,12 @@ Meerkat is a library-first agent runtime. The execution pipeline is shared acros
 | Crate | Owns | Key Trait |
 |-------|------|-----------|
 | `meerkat-core` | Agent loop, types, budget, retry, state machine, ALL trait contracts | `AgentLlmClient`, `AgentToolDispatcher`, `AgentSessionStore`, `SessionService`, `CommsRuntime`, `HookEngine` |
-| `meerkat-client` | LLM providers (Anthropic, OpenAI, Gemini) | Implements `LlmClient` |
+| `meerkat-client` | LLM providers (Anthropic, OpenAI, Gemini) | Implements `AgentLlmClient` (via `LlmClientAdapter`) |
 | `meerkat-store` | Session persistence (Jsonl, Memory, Redb) | Implements `SessionStore` |
 | `meerkat-tools` | Tool registry, dispatch, builtins | Implements `AgentToolDispatcher` |
 | `meerkat-session` | Session orchestration (Ephemeral, Persistent) | Implements `SessionService` |
-| `meerkat-comms` | Inter-agent messaging (inproc, TCP, UDS) | Implements `CoreCommsRuntime` |
-| `meerkat-mob` | Multi-agent orchestration (MobBuilder, FlowEngine) | `MobSessionService`, `MobProvisioner` |
+| `meerkat-comms` | Inter-agent messaging (inproc, TCP, UDS) | Implements `CommsRuntime` |
+| `meerkat-mob` | Multi-agent orchestration (MobBuilder, FlowEngine) | `MobSessionService`, `MobProvisioner` (mob-local traits) |
 | `meerkat-mob-pack` | Mobpack archive format, signing, trust policies, validation | — |
 | `meerkat-mob-mcp` | Expose mob tools as MCP interface | `MobMcpState`, `MobMcpDispatcher` |
 | `meerkat-web-runtime` | WASM browser deployment (wasm_bindgen exports) | — |
@@ -37,22 +37,22 @@ Meerkat is a library-first agent runtime. The execution pipeline is shared acros
 
 ## Agent Construction Pipeline
 
-`AgentFactory::build_agent()` is the single entry point for ALL surfaces. 12 steps:
+`AgentFactory::build_agent()` is the single entry point for ALL surfaces. Key steps:
 
 1. Validate host_mode
 2. Resolve provider (infer from model or explicit)
 3. Create LLM client (override > factory credentials > config)
-4. Create LLM adapter (with event channel)
+4. Create LLM adapter (with event channel and event tap)
 5. Resolve max_tokens
 6a. Build skill engine (override > factory > config > filesystem)
-6b. Create comms runtime (if comms_name set; inproc on wasm32)
-6b. Build tool dispatcher (override > factory builtin builder)
+6b. Build tool dispatcher (override > factory builtin builder); create comms runtime (if comms_name set; inproc on wasm32); wire sub-agent comms inheritance (if enabled)
 7. Create session store (override > factory custom_store > feature-flag default)
-8. Sub-agent comms inheritance (if enabled)
 9. Compose tools with comms (add send/list_peers tools)
 10. Resolve hooks (override > filesystem layered config)
 11. Generate skill inventory
-12. Build system prompt + AgentBuilder + SessionMetadata
+12. Build system prompt + AgentBuilder + wire memory/compactor/skill-engine/event-tap/checkpointer
+13. Build agent
+14. Set SessionMetadata
 
 **Precedence at every step:** `build_config override > factory field > config resolution > default`
 

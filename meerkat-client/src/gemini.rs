@@ -243,13 +243,14 @@ impl GeminiClient {
                 .tools
                 .iter()
                 .map(|t| {
-                    serde_json::json!({
+                    let parameters = normalize_gemini_function_parameters_schema(&t.input_schema)?;
+                    Ok(serde_json::json!({
                         "name": t.name,
                         "description": t.description,
-                        "parameters": normalize_gemini_function_parameters_schema(&t.input_schema)
-                    })
+                        "parameters": parameters
+                    }))
                 })
-                .collect();
+                .collect::<Result<Vec<_>, LlmError>>()?;
 
             body["tools"] = serde_json::json!([{
                 "functionDeclarations": function_declarations
@@ -285,10 +286,23 @@ impl GeminiClient {
     }
 }
 
-fn normalize_gemini_function_parameters_schema(schema: &Value) -> Value {
-    let mut normalized = inline_local_schema_refs(schema, schema, &mut Vec::new(), 0);
-    strip_gemini_function_parameters_unsupported_keywords(&mut normalized);
-    normalized
+fn normalize_gemini_function_parameters_schema(schema: &Value) -> Result<Value, LlmError> {
+    let mut unresolved_refs = Vec::new();
+    let mut normalized =
+        inline_local_schema_refs(schema, schema, &mut Vec::new(), 0, &mut unresolved_refs);
+    if !unresolved_refs.is_empty() {
+        unresolved_refs.sort();
+        unresolved_refs.dedup();
+        return Err(LlmError::InvalidRequest {
+            message: format!(
+                "Gemini function parameters schema contains unresolved $ref values: {}. \
+                 Only local refs (e.g. '#/$defs/...') are supported for inlining.",
+                unresolved_refs.join(", ")
+            ),
+        });
+    }
+    strip_gemini_function_parameters_unsupported_keywords(&mut normalized, 0);
+    Ok(normalized)
 }
 
 fn inline_local_schema_refs(
@@ -296,6 +310,7 @@ fn inline_local_schema_refs(
     root: &Value,
     active_refs: &mut Vec<String>,
     depth: usize,
+    unresolved_refs: &mut Vec<String>,
 ) -> Value {
     const MAX_REF_DEPTH: usize = 64;
     if depth > MAX_REF_DEPTH {
@@ -309,7 +324,13 @@ fn inline_local_schema_refs(
                 && !active_refs.iter().any(|r| r == reference)
             {
                 active_refs.push(reference.to_string());
-                let mut inlined = inline_local_schema_refs(resolved, root, active_refs, depth + 1);
+                let mut inlined = inline_local_schema_refs(
+                    resolved,
+                    root,
+                    active_refs,
+                    depth + 1,
+                    unresolved_refs,
+                );
                 active_refs.pop();
 
                 if let Value::Object(ref mut inlined_obj) = inlined {
@@ -319,7 +340,13 @@ fn inline_local_schema_refs(
                         }
                         inlined_obj.insert(
                             key.clone(),
-                            inline_local_schema_refs(value, root, active_refs, depth + 1),
+                            inline_local_schema_refs(
+                                value,
+                                root,
+                                active_refs,
+                                depth + 1,
+                                unresolved_refs,
+                            ),
                         );
                     }
                     return inlined;
@@ -327,12 +354,15 @@ fn inline_local_schema_refs(
 
                 return inlined;
             }
+            if let Some(reference) = obj.get("$ref").and_then(Value::as_str) {
+                unresolved_refs.push(reference.to_string());
+            }
 
             let mut mapped = Map::new();
             for (key, value) in obj {
                 mapped.insert(
                     key.clone(),
-                    inline_local_schema_refs(value, root, active_refs, depth + 1),
+                    inline_local_schema_refs(value, root, active_refs, depth + 1, unresolved_refs),
                 );
             }
             Value::Object(mapped)
@@ -340,7 +370,9 @@ fn inline_local_schema_refs(
         Value::Array(items) => Value::Array(
             items
                 .iter()
-                .map(|item| inline_local_schema_refs(item, root, active_refs, depth + 1))
+                .map(|item| {
+                    inline_local_schema_refs(item, root, active_refs, depth + 1, unresolved_refs)
+                })
                 .collect(),
         ),
         _ => node.clone(),
@@ -361,7 +393,7 @@ fn resolve_local_schema_ref<'a>(root: &'a Value, reference: &str) -> Option<&'a 
     Some(cursor)
 }
 
-fn strip_gemini_function_parameters_unsupported_keywords(value: &mut Value) {
+fn strip_gemini_function_parameters_unsupported_keywords(value: &mut Value, depth: usize) {
     match value {
         Value::Object(obj) => {
             obj.remove("$schema");
@@ -371,15 +403,22 @@ fn strip_gemini_function_parameters_unsupported_keywords(value: &mut Value) {
             obj.remove("$ref");
             obj.remove("$id");
             obj.remove("$anchor");
-            obj.remove("additionalProperties");
+            obj.remove("title");
+            // Keep root-level additionalProperties because Gemini exposes a
+            // dedicated JSON-schema parameters surface where this is accepted.
+            // Nested additionalProperties remains unsupported on the
+            // function-declaration schema subset and is stripped.
+            if depth > 0 {
+                obj.remove("additionalProperties");
+            }
 
             for child in obj.values_mut() {
-                strip_gemini_function_parameters_unsupported_keywords(child);
+                strip_gemini_function_parameters_unsupported_keywords(child, depth + 1);
             }
         }
         Value::Array(items) => {
             for item in items {
-                strip_gemini_function_parameters_unsupported_keywords(item);
+                strip_gemini_function_parameters_unsupported_keywords(item, depth + 1);
             }
         }
         _ => {}
@@ -1421,6 +1460,7 @@ mod tests {
 
         let schema = serde_json::json!({
             "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "title": "RootParameters",
             "type": "object",
             "properties": {
                 "payload": {
@@ -1430,9 +1470,13 @@ mod tests {
             "required": ["payload"],
             "$defs": {
                 "Payload": {
+                    "title": "Payload",
                     "type": "object",
                     "properties": {
-                        "message": {"type": "string"}
+                        "message": {
+                            "title": "Message",
+                            "type": "string"
+                        }
                     },
                     "required": ["message"],
                     "additionalProperties": false
@@ -1465,12 +1509,21 @@ mod tests {
             "tool parameters should not include $defs"
         );
         assert!(
-            parameters.get("additionalProperties").is_none(),
-            "tool parameters should strip additionalProperties"
+            parameters.get("title").is_none(),
+            "tool parameters should not include title"
+        );
+        assert_eq!(
+            parameters.get("additionalProperties"),
+            Some(&serde_json::json!(false)),
+            "tool parameters should preserve top-level additionalProperties"
         );
         assert!(
             parameters["properties"]["payload"].get("$ref").is_none(),
             "tool parameters should inline $ref targets"
+        );
+        assert!(
+            parameters["properties"]["payload"].get("title").is_none(),
+            "inlined payload should strip title"
         );
         assert_eq!(
             parameters["properties"]["payload"]["type"], "object",
@@ -1479,6 +1532,12 @@ mod tests {
         assert_eq!(
             parameters["properties"]["payload"]["properties"]["message"]["type"], "string",
             "inlined payload should preserve nested properties"
+        );
+        assert!(
+            parameters["properties"]["payload"]["properties"]["message"]
+                .get("title")
+                .is_none(),
+            "nested title should be stripped"
         );
         Ok(())
     }
@@ -1545,6 +1604,52 @@ mod tests {
         );
         assert_eq!(object_branch["properties"]["ticket"]["type"], "string");
         Ok(())
+    }
+
+    #[test]
+    fn test_tool_schema_parameters_rejects_unresolved_external_ref() {
+        use meerkat_core::ToolDef;
+        use std::sync::Arc;
+
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "payload": {
+                    "$ref": "https://example.com/schemas/Payload.json"
+                }
+            }
+        });
+
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-3-pro-preview",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_tools(vec![Arc::new(ToolDef {
+            name: "test_tool".to_string(),
+            description: "test".to_string(),
+            input_schema: schema,
+        })]);
+
+        let err = client
+            .build_request_body(&request)
+            .expect_err("external refs should fail fast for function parameters");
+
+        match err {
+            LlmError::InvalidRequest { message } => {
+                assert!(
+                    message.contains("unresolved $ref"),
+                    "unexpected message: {message}"
+                );
+                assert!(
+                    message.contains("https://example.com/schemas/Payload.json"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
     }
 
     // =========================================================================

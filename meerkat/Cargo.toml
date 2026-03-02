@@ -157,21 +157,6 @@ path = "../examples/016-sub-agent-orchestration-rs/main.rs"
 required-features = ["jsonl-store"]
 
 [[example]]
-name = "017-mob-coding-swarm"
-path = "../examples/017-mob-coding-swarm-rs/main.rs"
-required-features = ["comms"]
-
-[[example]]
-name = "018-mob-research-team"
-path = "../examples/018-mob-research-team-rs/main.rs"
-required-features = ["comms"]
-
-[[example]]
-name = "019-mob-pipeline"
-path = "../examples/019-mob-pipeline-rs/main.rs"
-required-features = ["comms"]
-
-[[example]]
 name = "020-comms-peer-messaging"
 path = "../examples/020-comms-peer-messaging-rs/main.rs"
 required-features = ["jsonl-store", "comms"]

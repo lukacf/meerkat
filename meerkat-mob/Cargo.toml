@@ -66,5 +66,17 @@ meerkat-store = { workspace = true }
 [package.metadata.cargo-machete]
 ignored = ["async-stream"]  # proc macro (stream!)
 
+[[example]]
+name = "017-mob-coding-swarm"
+path = "../examples/017-mob-coding-swarm-rs/main.rs"
+
+[[example]]
+name = "018-mob-research-team"
+path = "../examples/018-mob-research-team-rs/main.rs"
+
+[[example]]
+name = "019-mob-pipeline"
+path = "../examples/019-mob-pipeline-rs/main.rs"
+
 [lints]
 workspace = true

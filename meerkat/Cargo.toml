@@ -49,8 +49,6 @@ which = { workspace = true }
 indexmap = { workspace = true }
 # meerkat-mob and meerkat-mcp-server depend on us, not the other way around.
 # Binaries (rkat, meerkat-rest) depend on them directly.
-# Dev-dependency for examples only (does not affect library dependency graph).
-meerkat-mob = { path = "../meerkat-mob" }
 
 [target.'cfg(unix)'.dev-dependencies]
 nix = { workspace = true }

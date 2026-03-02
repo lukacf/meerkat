@@ -70,15 +70,25 @@ export function resolveModels(keys: ApiKeys): ModelAssignments {
     : hasAnthropic ? "claude-sonnet-4-5"
     : "gemini-3.1-pro-preview";
 
-  // Reviewer: prefer Anthropic Sonnet (Gemini tool schema compat still WIP upstream)
-  const reviewer = hasAnthropic ? "claude-sonnet-4-5"
-    : hasGemini ? "gemini-3-flash-preview"
+  // Reviewer: prefer Gemini (schema issues fixed in PR #93)
+  const reviewer = hasGemini ? "gemini-3-flash-preview"
+    : hasAnthropic ? "claude-sonnet-4-5"
     : "gpt-5.2";
 
   return { main, mainKey, planner, coder, reviewer };
 }
 
 // ── Mob definition builder ──────────────────────────────────────────────────
+
+const VM_ENV = `
+ENVIRONMENT: Alpine Linux VM (RISC-V, WebAssembly/Cartesi Machine)
+Shell: ash (BusyBox)
+Languages: micropython (NOT python3), lua5.4, quickjs (qjs), tcc (C compiler), mruby
+Tools: git, curl, jq, sqlite3, vim, neovim, grep, sed, awk, bc
+Package manager: apk add <package>
+IMPORTANT: There is NO python3/pip. Use "micropython" for Python. There is NO node/npm. Use "qjs" for JavaScript.
+Working directory: /workspace/ (use /workspace/src/ for source code)
+`.trim();
 
 function buildMobDefinition(models: ModelAssignments): object {
   const subAgentTools = { builtins: false, comms: true, shell: false };
@@ -97,6 +107,7 @@ function buildMobDefinition(models: ModelAssignments): object {
         runtime_mode: "autonomous_host",
         max_inline_peer_notifications: null,
         output_schema: null,
+        provider_params: { reasoning_effort: "low" },
       },
       planner: {
         model: models.planner,
@@ -108,6 +119,7 @@ function buildMobDefinition(models: ModelAssignments): object {
         runtime_mode: "autonomous_host",
         max_inline_peer_notifications: null,
         output_schema: null,
+        provider_params: { reasoning_effort: "low" },
       },
       coder: {
         model: models.coder,
@@ -119,6 +131,7 @@ function buildMobDefinition(models: ModelAssignments): object {
         runtime_mode: "autonomous_host",
         max_inline_peer_notifications: null,
         output_schema: null,
+        provider_params: { reasoning_effort: "low" },
       },
       reviewer: {
         model: models.reviewer,
@@ -130,6 +143,7 @@ function buildMobDefinition(models: ModelAssignments): object {
         runtime_mode: "autonomous_host",
         max_inline_peer_notifications: null,
         output_schema: null,
+        provider_params: { reasoning_effort: "low" },
       },
     },
     mcp_servers: {},
@@ -148,6 +162,8 @@ function buildMobDefinition(models: ModelAssignments): object {
         source: "inline",
         content: `You are the Alpha Meerkat — lead agent of a coding team. You coordinate three specialists via messaging.
 
+${VM_ENV}
+
 Your peers:
 - dev-team/planner/planner — creates implementation plans
 - dev-team/coder/coder — writes and tests code
@@ -156,7 +172,7 @@ Your peers:
 ON STARTUP (no messages): Say "Alpha Meerkat ready." — no tool calls, end your turn.
 
 WHEN YOU RECEIVE A USER TASK (external message):
-- Send the task to the planner via send(to: "dev-team/planner/planner", kind: "peer_message", body: "<detailed task description>")
+- Send the task to the planner via send(to: "dev-team/planner/planner", kind: "peer_message", body: "<detailed task description including language/runtime constraints from the environment spec>")
 - Then END YOUR TURN. Do NOT wait or poll. The system wakes you when a reply arrives.
 
 WHEN YOU RECEIVE A REPLY FROM THE PLANNER:
@@ -176,26 +192,29 @@ WHEN YOU RECEIVE A REPLY FROM THE REVIEWER:
 CRITICAL RULES:
 - NEVER call the wait tool. The system handles message delivery automatically between turns.
 - Each turn: process one message, send one reply, end turn. Do not try to do the whole pipeline in one turn.
-- You also have shell, write_file, read_file tools for quick checks.
-- Work in /workspace/.`,
+- You also have shell, write_file, read_file tools for quick checks.`,
       },
       "planner-role": {
         source: "inline",
         content: `You are the PLANNER in a dev team.
 
+${VM_ENV}
+
 ON STARTUP (no messages): Say "Planner standing by." — no tool calls, end your turn.
 
 WHEN YOU RECEIVE A TASK via message:
-1. Analyze requirements
+1. Analyze requirements — consider the VM environment constraints above
 2. Break into ordered steps with file paths, function signatures, and test commands
 3. Write the plan to /workspace/plan.md using write_file
 4. Send the plan summary back to the Alpha Meerkat: send(to: "dev-team/orchestrator/orchestrator", kind: "peer_message", body: "Plan written to /workspace/plan.md. <brief summary>")
 
-Tools: shell, write_file, read_file, send. Work in /workspace/.`,
+Tools: shell, write_file, read_file, send.`,
       },
       "coder-role": {
         source: "inline",
         content: `You are the CODER in a dev team.
+
+${VM_ENV}
 
 ON STARTUP (no messages): Say "Coder standing by." — no tool calls, end your turn.
 
@@ -205,11 +224,13 @@ WHEN YOU RECEIVE INSTRUCTIONS via message:
 3. Test with shell — run the code, fix errors until it works
 4. Send completion notice to the Alpha Meerkat: send(to: "dev-team/orchestrator/orchestrator", kind: "peer_message", body: "Implementation complete. <summary of what was built and test results>")
 
-Tools: shell, write_file, read_file, send. Work in /workspace/.`,
+Tools: shell, write_file, read_file, send.`,
       },
       "reviewer-role": {
         source: "inline",
         content: `You are the REVIEWER in a dev team.
+
+${VM_ENV}
 
 ON STARTUP (no messages): Say "Reviewer standing by." — no tool calls, end your turn.
 
@@ -219,7 +240,7 @@ WHEN YOU RECEIVE A REVIEW REQUEST via message:
 3. Write review to /workspace/review.md using write_file
 4. Send review results to the Alpha Meerkat: send(to: "dev-team/orchestrator/orchestrator", kind: "peer_message", body: "Review complete. <summary of findings>")
 
-Tools: shell, write_file, read_file, send. Work in /workspace/.`,
+Tools: shell, write_file, read_file, send.`,
       },
     },
     backend: { default: "subagent" },
@@ -380,14 +401,18 @@ export class MobOrchestrator {
         this.updateStatus(agent, ev.name, "tool-use");
         break;
 
-      case "run_started":
-        // Show the incoming prompt (contains comms messages) as a collapsed card
-        if (ev.prompt && agent !== "orchestrator") {
+      case "run_started": {
+        // Show the incoming prompt as a collapsed card.
+        // Comms messages contain peer addresses (e.g. "dev-team/planner/planner").
+        // User messages (via mob_send_message) are raw text — already shown as ❯ line.
+        const isComms = ev.prompt && /dev-team\/\w+\/\w+/.test(ev.prompt);
+        if (ev.prompt && (agent !== "orchestrator" || isComms)) {
           const card = panel.stream.beginToolCall("message received", { text: ev.prompt });
           panel.stream.resolveToolCall(card, ev.prompt, false);
         }
         this.updateStatus(agent, "thinking", "thinking");
         break;
+      }
 
       case "turn_started":
         this.updateStatus(agent, "thinking", "thinking");

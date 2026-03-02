@@ -84,7 +84,7 @@ export class WebCMHost {
   }
 
   /** Execute a command in the VM and return the output + exit code. */
-  async exec(command: string, timeoutMs = 30_000): Promise<ExecResult> {
+  async exec(command: string, timeoutMs = 60_000): Promise<ExecResult> {
     if (!this.booted) throw new Error("VM not booted");
 
     const delim = `__MKT_${Date.now()}_${Math.random().toString(36).slice(2, 8)}__`;

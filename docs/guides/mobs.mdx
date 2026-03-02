@@ -149,9 +149,9 @@ A mob definition is a JSON or TOML document that declares everything: profiles, 
 | Prefab | Pattern | Profiles |
 |--------|---------|----------|
 | `coding_swarm` | Lead + workers for coding tasks | lead, worker |
-| `research_team` | Diverge/converge research | lead, researcher |
-| `pipeline` | Sequential stage handoffs | stages |
-| `review_board` | Multi-reviewer consensus | author, reviewer |
+| `code_review` | Multi-reviewer code audits | lead, worker |
+| `research_team` | Diverge/converge research | lead, worker |
+| `pipeline` | Sequential stage handoffs | lead, worker |
 
 Prefabs are starting points — create from a prefab, then customize.
 
@@ -201,7 +201,7 @@ When mob capability is enabled on a session, the agent gets these tools:
 | `mob_cancel_flow` | `mob_id`, `run_id` | Cancel a running flow |
 | `meerkat_spawn` | `mob_id`, `specs[]` | Spawn members (batch) |
 | `meerkat_retire` | `mob_id`, `meerkat_id` | Remove a member |
-| `meerkat_wire` | `mob_id`, `a`, `b` | Establish comms channel |
+| `meerkat_wire` | `mob_id`, `a`, `b`, `action` | Wire or unwire comms channel (`action`: `"wire"` or `"unwire"`) |
 | `meerkat_list` | `mob_id` | List members and state |
 | `meerkat_message` | `mob_id`, `meerkat_id`, `message` | Send a turn to a member |
 

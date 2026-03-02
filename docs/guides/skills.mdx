@@ -292,18 +292,18 @@ When multiple sources provide a skill with the same ID, the first source wins (p
 [
   {
     "id": "task-workflow",
-    "name": "Task Workflow",
-    "scope": "builtin",
-    "source": "embedded",
+    "name": "Custom Task Workflow",
+    "scope": "project",
+    "source": "company",
     "is_active": true
   },
   {
     "id": "task-workflow",
-    "name": "Custom Task Workflow",
-    "scope": "project",
-    "source": "company",
+    "name": "Task Workflow",
+    "scope": "builtin",
+    "source": "embedded",
     "is_active": false,
-    "shadowed_by": "embedded"
+    "shadowed_by": "company"
   }
 ]
 ```

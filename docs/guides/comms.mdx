@@ -118,6 +118,7 @@ pub struct TrustedPeer {
     pub name: String,     // Human-readable name (used by tools)
     pub pubkey: PubKey,   // Ed25519 public key
     pub addr: String,     // Address: "uds://...", "tcp://...", or "inproc://..."
+    pub meta: PeerMeta,   // Friendly metadata for peer discovery (description, labels)
 }
 ```
 

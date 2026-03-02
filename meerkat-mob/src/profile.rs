@@ -95,6 +95,13 @@ pub struct Profile {
     /// implement `Eq` or validate on deserialization.
     #[serde(default)]
     pub output_schema: Option<serde_json::Value>,
+    /// Optional provider-specific parameters passed to the LLM adapter.
+    ///
+    /// This maps directly to `AgentBuildConfig.provider_params` and is useful
+    /// for model/provider knobs such as Gemini `thinking_budget` or OpenAI
+    /// `reasoning_effort`.
+    #[serde(default)]
+    pub provider_params: Option<serde_json::Value>,
 }
 
 #[cfg(test)]
@@ -156,6 +163,7 @@ mod tests {
             runtime_mode: MobRuntimeMode::AutonomousHost,
             max_inline_peer_notifications: None,
             output_schema: None,
+            provider_params: None,
         };
         let json = serde_json::to_string(&profile).unwrap();
         let parsed: Profile = serde_json::from_str(&json).unwrap();
@@ -183,6 +191,7 @@ mod tests {
             runtime_mode: MobRuntimeMode::TurnDriven,
             max_inline_peer_notifications: Some(20),
             output_schema: None,
+            provider_params: None,
         };
         let toml_str = toml::to_string(&profile).unwrap();
         let parsed: Profile = toml::from_str(&toml_str).unwrap();
@@ -216,6 +225,7 @@ model = "claude-sonnet-4-5"
         assert_eq!(profile.backend, None);
         assert_eq!(profile.runtime_mode, MobRuntimeMode::AutonomousHost);
         assert_eq!(profile.max_inline_peer_notifications, None);
+        assert_eq!(profile.provider_params, None);
     }
 
     #[test]
@@ -236,5 +246,18 @@ max_inline_peer_notifications = -1
 "#;
         let profile: Profile = toml::from_str(toml_str).unwrap();
         assert_eq!(profile.max_inline_peer_notifications, Some(-1));
+    }
+
+    #[test]
+    fn test_profile_toml_parses_provider_params() {
+        let toml_str = r#"
+model = "gemini-3-pro-preview"
+provider_params = { thinking_budget = 8192, top_k = 20 }
+"#;
+        let profile: Profile = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            profile.provider_params,
+            Some(serde_json::json!({"thinking_budget": 8192, "top_k": 20}))
+        );
     }
 }

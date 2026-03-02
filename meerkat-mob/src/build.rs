@@ -114,6 +114,7 @@ pub async fn build_agent_config(
 
     // Opaque application context passed through to the agent build pipeline
     config.app_context = context;
+    config.provider_params = profile.provider_params.clone();
 
     // Structured output: convert JSON schema value to OutputSchema
     if let Some(schema_value) = &profile.output_schema {
@@ -232,6 +233,7 @@ mod tests {
                 runtime_mode: crate::MobRuntimeMode::AutonomousHost,
                 max_inline_peer_notifications: None,
                 output_schema: None,
+                provider_params: None,
             },
         );
         profiles.insert(
@@ -255,6 +257,7 @@ mod tests {
                 runtime_mode: crate::MobRuntimeMode::AutonomousHost,
                 max_inline_peer_notifications: None,
                 output_schema: None,
+                provider_params: None,
             },
         );
 
@@ -773,6 +776,53 @@ mod tests {
         assert_eq!(
             config.app_context, None,
             "app_context should be None when no context is provided"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_agent_config_passes_provider_params() {
+        let mut def = sample_definition();
+        let lead_key = ProfileName::from("lead");
+        def.profiles
+            .get_mut(&lead_key)
+            .expect("lead profile")
+            .provider_params = Some(serde_json::json!({
+            "thinking_budget": 4096,
+            "top_k": 40
+        }));
+
+        let lead = &def.profiles[&lead_key];
+        let config = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &lead_key,
+            meerkat_id: &MeerkatId::from("lead-1"),
+            profile: lead,
+            definition: &def,
+            external_tools: None,
+            context: None,
+            labels: None,
+        })
+        .await
+        .expect("build_agent_config");
+
+        assert_eq!(
+            config.provider_params,
+            Some(serde_json::json!({
+                "thinking_budget": 4096,
+                "top_k": 40
+            })),
+            "provider_params should be passed through to AgentBuildConfig"
+        );
+
+        let req = to_create_session_request(&config, "hello".into());
+        let build = req.build.expect("build options should be set");
+        assert_eq!(
+            build.provider_params,
+            Some(serde_json::json!({
+                "thinking_budget": 4096,
+                "top_k": 40
+            })),
+            "provider_params should survive into SessionBuildOptions"
         );
     }
 

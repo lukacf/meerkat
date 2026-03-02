@@ -9,7 +9,7 @@ use futures::StreamExt;
 use meerkat_core::schema::{CompiledSchema, SchemaCompat, SchemaError, SchemaWarning};
 use meerkat_core::{Message, OutputSchema, Provider, StopReason, Usage};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 
 /// Client for Google Gemini API
@@ -243,13 +243,14 @@ impl GeminiClient {
                 .tools
                 .iter()
                 .map(|t| {
-                    serde_json::json!({
+                    let parameters = normalize_gemini_function_parameters_schema(&t.input_schema)?;
+                    Ok(serde_json::json!({
                         "name": t.name,
                         "description": t.description,
-                        "parameters": t.input_schema.clone()
-                    })
+                        "parameters": parameters
+                    }))
                 })
-                .collect();
+                .collect::<Result<Vec<_>, LlmError>>()?;
 
             body["tools"] = serde_json::json!([{
                 "functionDeclarations": function_declarations
@@ -282,6 +283,156 @@ impl GeminiClient {
         }
 
         Ok(CompiledSchema { schema, warnings })
+    }
+}
+
+fn normalize_gemini_function_parameters_schema(schema: &Value) -> Result<Value, LlmError> {
+    let mut unresolved_refs = Vec::new();
+    let mut normalized =
+        inline_local_schema_refs(schema, schema, &mut Vec::new(), 0, &mut unresolved_refs);
+    if !unresolved_refs.is_empty() {
+        unresolved_refs.sort();
+        unresolved_refs.dedup();
+        return Err(LlmError::InvalidRequest {
+            message: format!(
+                "Gemini function parameters schema contains unresolved $ref values: {}. \
+                 Only local refs (e.g. '#/$defs/...') are supported for inlining.",
+                unresolved_refs.join(", ")
+            ),
+        });
+    }
+    strip_gemini_function_parameters_unsupported_keywords(&mut normalized, 0);
+    Ok(normalized)
+}
+
+fn inline_local_schema_refs(
+    node: &Value,
+    root: &Value,
+    active_refs: &mut Vec<String>,
+    depth: usize,
+    unresolved_refs: &mut Vec<String>,
+) -> Value {
+    const MAX_REF_DEPTH: usize = 64;
+    if depth > MAX_REF_DEPTH {
+        return node.clone();
+    }
+
+    match node {
+        Value::Object(obj) => {
+            if let Some(reference) = obj.get("$ref").and_then(Value::as_str)
+                && let Some(resolved) = resolve_local_schema_ref(root, reference)
+                && !active_refs.iter().any(|r| r == reference)
+            {
+                active_refs.push(reference.to_string());
+                let mut inlined = inline_local_schema_refs(
+                    resolved,
+                    root,
+                    active_refs,
+                    depth + 1,
+                    unresolved_refs,
+                );
+                active_refs.pop();
+
+                if let Value::Object(ref mut inlined_obj) = inlined {
+                    for (key, value) in obj {
+                        if key == "$ref" {
+                            continue;
+                        }
+                        inlined_obj.insert(
+                            key.clone(),
+                            inline_local_schema_refs(
+                                value,
+                                root,
+                                active_refs,
+                                depth + 1,
+                                unresolved_refs,
+                            ),
+                        );
+                    }
+                    return inlined;
+                }
+
+                return inlined;
+            }
+            if let Some(reference) = obj.get("$ref").and_then(Value::as_str) {
+                unresolved_refs.push(reference.to_string());
+            }
+
+            let mut mapped = Map::new();
+            for (key, value) in obj {
+                mapped.insert(
+                    key.clone(),
+                    inline_local_schema_refs(value, root, active_refs, depth + 1, unresolved_refs),
+                );
+            }
+            Value::Object(mapped)
+        }
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| {
+                    inline_local_schema_refs(item, root, active_refs, depth + 1, unresolved_refs)
+                })
+                .collect(),
+        ),
+        _ => node.clone(),
+    }
+}
+
+fn resolve_local_schema_ref<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
+    if !reference.starts_with("#/") {
+        return None;
+    }
+
+    let mut cursor = root;
+    for segment in reference.trim_start_matches("#/").split('/') {
+        let key = segment.replace("~1", "/").replace("~0", "~");
+        cursor = cursor.get(&key)?;
+    }
+
+    Some(cursor)
+}
+
+fn strip_gemini_function_parameters_unsupported_keywords(value: &mut Value, depth: usize) {
+    match value {
+        Value::Object(obj) => {
+            obj.remove("$schema");
+            obj.remove("$defs");
+            obj.remove("defs");
+            obj.remove("definitions");
+            obj.remove("$ref");
+            obj.remove("$id");
+            obj.remove("$anchor");
+            obj.remove("title");
+            // Keep root-level additionalProperties to avoid dropping top-level
+            // caller intent. Nested additionalProperties remains unsupported on
+            // the function-declaration schema subset and is stripped.
+            if depth > 0 {
+                obj.remove("additionalProperties");
+            }
+
+            for child in obj.values_mut() {
+                strip_gemini_function_parameters_unsupported_keywords(child, depth + 1);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                strip_gemini_function_parameters_unsupported_keywords(item, depth + 1);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn text_event_for_part(
+    text: String,
+    is_thought: bool,
+    meta: Option<Box<meerkat_core::ProviderMeta>>,
+) -> LlmEvent {
+    if is_thought {
+        LlmEvent::ReasoningDelta { delta: text }
+    } else {
+        LlmEvent::TextDelta { delta: text, meta }
     }
 }
 
@@ -476,10 +627,11 @@ impl LlmClient for GeminiClient {
                                             });
 
                                             if let Some(text) = part.text {
-                                                yield LlmEvent::TextDelta {
-                                                    delta: text,
-                                                    meta: meta.clone(),
-                                                };
+                                                yield text_event_for_part(
+                                                    text,
+                                                    part.thought.unwrap_or(false),
+                                                    meta.clone(),
+                                                );
                                             }
                                             if let Some(fc) = part.function_call {
                                                 let id = format!("fc_{tool_call_index}");
@@ -555,6 +707,7 @@ struct CandidateContent {
 struct Part {
     text: Option<String>,
     function_call: Option<FunctionCall>,
+    thought: Option<bool>,
     thought_signature: Option<String>,
 }
 
@@ -1298,6 +1451,206 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn test_tool_schema_parameters_inlines_ref_and_strips_unsupported_keywords()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use meerkat_core::ToolDef;
+        use std::sync::Arc;
+
+        let schema = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "title": "RootParameters",
+            "type": "object",
+            "properties": {
+                "payload": {
+                    "$ref": "#/$defs/Payload"
+                }
+            },
+            "required": ["payload"],
+            "$defs": {
+                "Payload": {
+                    "title": "Payload",
+                    "type": "object",
+                    "properties": {
+                        "message": {
+                            "title": "Message",
+                            "type": "string"
+                        }
+                    },
+                    "required": ["message"],
+                    "additionalProperties": false
+                }
+            },
+            "additionalProperties": false
+        });
+
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-3-pro-preview",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_tools(vec![Arc::new(ToolDef {
+            name: "test_tool".to_string(),
+            description: "test".to_string(),
+            input_schema: schema,
+        })]);
+        let body = client.build_request_body(&request)?;
+        let parameters = &body["tools"][0]["functionDeclarations"][0]["parameters"];
+
+        assert!(
+            parameters.get("$schema").is_none(),
+            "tool parameters should not include $schema"
+        );
+        assert!(
+            parameters.get("$defs").is_none(),
+            "tool parameters should not include $defs"
+        );
+        assert!(
+            parameters.get("title").is_none(),
+            "tool parameters should not include title"
+        );
+        assert_eq!(
+            parameters.get("additionalProperties"),
+            Some(&serde_json::json!(false)),
+            "tool parameters should preserve top-level additionalProperties"
+        );
+        assert!(
+            parameters["properties"]["payload"].get("$ref").is_none(),
+            "tool parameters should inline $ref targets"
+        );
+        assert!(
+            parameters["properties"]["payload"].get("title").is_none(),
+            "inlined payload should strip title"
+        );
+        assert_eq!(
+            parameters["properties"]["payload"]["type"], "object",
+            "inlined payload should preserve referenced type"
+        );
+        assert_eq!(
+            parameters["properties"]["payload"]["properties"]["message"]["type"], "string",
+            "inlined payload should preserve nested properties"
+        );
+        assert!(
+            parameters["properties"]["payload"]["properties"]["message"]
+                .get("title")
+                .is_none(),
+            "nested title should be stripped"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_tool_schema_parameters_inline_ref_inside_anyof()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use meerkat_core::ToolDef;
+        use std::sync::Arc;
+
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "context": {
+                    "anyOf": [
+                        {"$ref": "#/$defs/Context"},
+                        {"type": "null"}
+                    ]
+                }
+            },
+            "$defs": {
+                "Context": {
+                    "type": "object",
+                    "properties": {
+                        "ticket": {"type": "string"}
+                    },
+                    "required": ["ticket"],
+                    "additionalProperties": false
+                }
+            }
+        });
+
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-3-pro-preview",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_tools(vec![Arc::new(ToolDef {
+            name: "test_tool".to_string(),
+            description: "test".to_string(),
+            input_schema: schema,
+        })]);
+
+        let body = client.build_request_body(&request)?;
+        let parameters = &body["tools"][0]["functionDeclarations"][0]["parameters"];
+        let context_schema = &parameters["properties"]["context"];
+        let any_of = context_schema["anyOf"]
+            .as_array()
+            .ok_or("missing anyOf array")?;
+        let object_branch = any_of
+            .iter()
+            .find(|item| item["type"] == "object")
+            .ok_or("missing inlined object branch")?;
+
+        assert!(
+            object_branch.get("$ref").is_none(),
+            "inlined anyOf branch should not keep $ref"
+        );
+        assert!(
+            object_branch.get("additionalProperties").is_none(),
+            "additionalProperties should be stripped from inlined branch"
+        );
+        assert_eq!(object_branch["properties"]["ticket"]["type"], "string");
+        Ok(())
+    }
+
+    #[test]
+    fn test_tool_schema_parameters_rejects_unresolved_external_ref() {
+        use meerkat_core::ToolDef;
+        use std::sync::Arc;
+
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "payload": {
+                    "$ref": "https://example.com/schemas/Payload.json"
+                }
+            }
+        });
+
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-3-pro-preview",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_tools(vec![Arc::new(ToolDef {
+            name: "test_tool".to_string(),
+            description: "test".to_string(),
+            input_schema: schema,
+        })]);
+
+        let err = client
+            .build_request_body(&request)
+            .expect_err("external refs should fail fast for function parameters");
+
+        match err {
+            LlmError::InvalidRequest { message } => {
+                assert!(
+                    message.contains("unresolved $ref"),
+                    "unexpected message: {message}"
+                );
+                assert!(
+                    message.contains("https://example.com/schemas/Payload.json"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
     // =========================================================================
     // Thought Signature Tests (Spec Section 3.5)
     // =========================================================================
@@ -1348,6 +1701,25 @@ mod tests {
             Some("sig_text_456"),
             "text parts can have thoughtSignature for continuity"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_text_with_thought_flag() -> Result<(), Box<dyn std::error::Error>> {
+        let line =
+            r#"{"candidates":[{"content":{"parts":[{"text":"thinking...","thought":true}]}}]}"#;
+        let response = GeminiClient::parse_stream_line(line).ok_or("missing response")?;
+        let candidates = response.candidates.as_ref().ok_or("missing candidates")?;
+        let parts = candidates[0]
+            .content
+            .as_ref()
+            .ok_or("missing content")?
+            .parts
+            .as_ref()
+            .ok_or("missing parts")?;
+
+        assert_eq!(parts[0].text.as_deref(), Some("thinking..."));
+        assert_eq!(parts[0].thought, Some(true));
         Ok(())
     }
 
@@ -1520,6 +1892,41 @@ mod tests {
                 }
                 _ => panic!("expected Gemini variant"),
             }
+        }
+    }
+
+    #[test]
+    fn test_text_event_for_part_emits_reasoning_delta_when_thought() {
+        let event = text_event_for_part("plan step".to_string(), true, None);
+        match event {
+            LlmEvent::ReasoningDelta { delta } => assert_eq!(delta, "plan step"),
+            _ => panic!("expected ReasoningDelta"),
+        }
+    }
+
+    #[test]
+    fn test_text_event_for_part_emits_text_delta_when_not_thought() {
+        use meerkat_core::ProviderMeta;
+
+        let event = text_event_for_part(
+            "final answer".to_string(),
+            false,
+            Some(Box::new(ProviderMeta::Gemini {
+                thought_signature: "sig_text".to_string(),
+            })),
+        );
+        match event {
+            LlmEvent::TextDelta { delta, meta } => {
+                assert_eq!(delta, "final answer");
+                let meta = meta.expect("meta");
+                match meta.as_ref() {
+                    ProviderMeta::Gemini { thought_signature } => {
+                        assert_eq!(thought_signature, "sig_text");
+                    }
+                    _ => panic!("expected Gemini meta"),
+                }
+            }
+            _ => panic!("expected TextDelta"),
         }
     }
 }

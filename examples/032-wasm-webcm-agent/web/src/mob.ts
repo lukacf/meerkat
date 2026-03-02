@@ -70,9 +70,9 @@ export function resolveModels(keys: ApiKeys): ModelAssignments {
     : hasAnthropic ? "claude-sonnet-4-5"
     : "gemini-3.1-pro-preview";
 
-  // Reviewer: prefer Gemini
-  const reviewer = hasGemini ? "gemini-3.1-flash-preview"
-    : hasAnthropic ? "claude-sonnet-4-5"
+  // Reviewer: prefer Anthropic Sonnet (Gemini tool schema compat still WIP upstream)
+  const reviewer = hasAnthropic ? "claude-sonnet-4-5"
+    : hasGemini ? "gemini-3-flash-preview"
     : "gpt-5.2";
 
   return { main, mainKey, planner, coder, reviewer };
@@ -378,6 +378,15 @@ export class MobOrchestrator {
 
       case "tool_execution_started":
         this.updateStatus(agent, ev.name, "tool-use");
+        break;
+
+      case "run_started":
+        // Show the incoming prompt (contains comms messages) as a collapsed card
+        if (ev.prompt && agent !== "orchestrator") {
+          const card = panel.stream.beginToolCall("message received", { text: ev.prompt });
+          panel.stream.resolveToolCall(card, ev.prompt, false);
+        }
+        this.updateStatus(agent, "thinking", "thinking");
         break;
 
       case "turn_started":

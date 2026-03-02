@@ -28,23 +28,35 @@ Surface binaries:
   └── meerkat-mcp-server (rkat-mcp)
 ```
 
-## Key Traits (all in meerkat-core)
+## Key Traits
+
+### Core traits (defined in meerkat-core)
 
 | Trait | Purpose | Implementors |
 |-------|---------|-------------|
-| `AgentLlmClient` | LLM provider abstraction | `LlmClientAdapter` |
-| `AgentToolDispatcher` | Tool routing | `CompositeDispatcher`, `ToolGateway`, `EmptyToolDispatcher` |
-| `AgentSessionStore` | Session persistence | `StoreAdapter<S>`, no-op stores |
-| `SessionService` | Full session lifecycle | `EphemeralSessionService<B>`, `PersistentSessionService<B>` |
-| `SessionAgentBuilder` | Agent construction from request | `FactoryAgentBuilder` |
-| `SessionAgent` | Running agent with session access | `FactoryAgent` |
+| `AgentLlmClient` | LLM provider abstraction | `LlmClientAdapter` (meerkat-client) |
+| `AgentToolDispatcher` | Tool routing | `CompositeDispatcher` (meerkat-tools), `ToolGateway` (meerkat-core), `EmptyToolDispatcher` (meerkat-tools) |
+| `AgentSessionStore` | Session persistence | `StoreAdapter<S>` (meerkat-store), no-op stores |
+| `SessionService` | Full session lifecycle | `EphemeralSessionService<B>` (meerkat-session), `PersistentSessionService<B>` (meerkat-session) |
 | `CommsRuntime` | Inter-agent communication | `meerkat_comms::CommsRuntime` |
-| `HookEngine` | Hook execution | `DefaultHookEngine` |
-| `SkillEngine` | Skill resolution + rendering | `DefaultSkillEngine` |
-| `Compactor` | Context compaction | `DefaultCompactor` |
-| `MemoryStore` | Semantic memory | `HnswMemoryStore`, `SimpleMemoryStore` |
+| `HookEngine` | Hook execution | `DefaultHookEngine` (meerkat-hooks) |
+| `SkillEngine` | Skill resolution + rendering | `DefaultSkillEngine` (meerkat-skills) |
+| `Compactor` | Context compaction | `DefaultCompactor` (meerkat-session) |
+| `MemoryStore` | Semantic memory | `HnswMemoryStore` (meerkat-memory), `SimpleMemoryStore` (meerkat-memory) |
+
+### Session traits (defined in meerkat-session)
+
+| Trait | Purpose | Implementors |
+|-------|---------|-------------|
+| `SessionAgentBuilder` | Agent construction from request | `FactoryAgentBuilder` (meerkat facade) |
+| `SessionAgent` | Running agent with session access | `FactoryAgent` (meerkat facade) |
+
+### Mob traits (defined in meerkat-mob)
+
+| Trait | Purpose | Implementors |
+|-------|---------|-------------|
 | `MobSessionService` | Session service + comms access for mobs | `EphemeralSessionService<B>`, `PersistentSessionService<B>` |
-| `MobProvisioner` | Member spawn/retire/turn | `SubagentBackend`, `MultiBackendProvisioner` |
+| `MobProvisioner` | Member spawn/retire/turn | `MultiBackendProvisioner`, `SubagentBackend` |
 | `MobEventStore` | Mob structural events | `InMemoryMobEventStore`, `RedbMobEventStore` |
 
 ## Agent Loop State Machine
@@ -80,7 +92,7 @@ archive(id)
 MobBuilder::create() → MobHandle
   ├── validate definition
   ├── emit MobCreated event
-  ├── create provisioner (SubagentBackend wrapping session_service)
+  ├── create provisioner (MultiBackendProvisioner wrapping session_service)
   └── spawn MobActor task
 
 MobHandle::spawn(profile, meerkat_id)

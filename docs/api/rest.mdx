@@ -53,12 +53,23 @@ If `--realm` is omitted, the server creates a new isolated opaque realm (`realm-
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/sessions` | Create and run a new session |
-| `POST` | `/sessions/{id}/messages` | Continue an existing session |
-| `POST` | `/sessions/{id}/event` | Push an external event into a session |
+| `GET` | `/sessions` | List sessions |
 | `GET` | `/sessions/{id}` | Fetch session metadata and usage |
+| `POST` | `/sessions/{id}/messages` | Continue an existing session |
+| `POST` | `/sessions/{id}/interrupt` | Interrupt an in-flight turn |
+| `DELETE` | `/sessions/{id}` | Archive (remove) a session |
 | `GET` | `/sessions/{id}/events` | SSE stream for real-time updates |
+| `POST` | `/sessions/{id}/event` | Push an external event into a session (legacy) |
+| `POST` | `/sessions/{id}/mcp/add` | Stage live MCP server addition (mcp feature) |
+| `POST` | `/sessions/{id}/mcp/remove` | Stage live MCP server removal (mcp feature) |
+| `POST` | `/sessions/{id}/mcp/reload` | Reload MCP server(s) (mcp feature) |
 | `POST` | `/comms/send` | Push comms message into a session (comms feature) |
 | `GET` | `/comms/peers` | List discoverable peers (comms feature) |
+| `GET` | `/comms/stream` | Comms SSE stream (comms feature) |
+| `GET` | `/mob/prefabs` | List mob prefab templates (mob feature) |
+| `GET` | `/mob/tools` | List mob tools (mob feature) |
+| `POST` | `/mob/call` | Call a mob tool (mob feature) |
+| `GET` | `/mob/{id}/events` | Mob event SSE stream (mob feature) |
 | `GET` | `/skills` | List skills with provenance |
 | `GET` | `/skills/{id}` | Inspect a skill's full content |
 | `GET` | `/health` | Liveness check |
@@ -338,6 +349,22 @@ Create and run a new session.
   JSON Schema object. The wrapper enables explicit `compat`/`format` settings.
 </Accordion>
 
+### GET /sessions
+
+List sessions. Supports optional label filters via query parameters.
+
+```json Response
+{
+  "sessions": [
+    {
+      "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+      "state": "idle",
+      "created_at": "2025-01-15T10:30:00Z"
+    }
+  ]
+}
+```
+
 ### POST /sessions/\{id\}/messages
 
 Continue an existing session.
@@ -420,6 +447,26 @@ Continue an existing session.
 #### Response fields
 
 Same shape as `POST /sessions`.
+
+### POST /sessions/\{id\}/interrupt
+
+Interrupt an in-flight turn. No-op if the session is idle.
+
+```json Response
+{"interrupted": true}
+```
+
+Returns `404` if the session is not found, `409` if the session is not running.
+
+### DELETE /sessions/\{id\}
+
+Archive (remove) a session.
+
+```json Response
+{"archived": true}
+```
+
+Returns `404` if the session is not found.
 
 ### POST /sessions/\{id\}/event
 
@@ -564,7 +611,7 @@ Returns runtime capabilities with status resolved against config.
 
 ```json Response (abbreviated)
 {
-  "contract_version": {"major": 0, "minor": 2, "patch": 0},
+  "contract_version": {"major": 0, "minor": 4, "patch": 1},
   "capabilities": [
     {
       "id": "sessions",
@@ -580,7 +627,7 @@ Returns runtime capabilities with status resolved against config.
 }
 ```
 
-The full response includes all capabilities: `sessions`, `streaming`, `structured_output`, `hooks`, `builtins`, `shell`, `comms`, `sub_agents`, `memory_store`, `skills`. See the [RPC capabilities endpoint](/api/rpc#capabilitiesget) for the complete example.
+The full response includes all capabilities: `sessions`, `streaming`, `structured_output`, `hooks`, `builtins`, `shell`, `comms`, `sub_agents`, `memory_store`, `session_store`, `session_compaction`, `skills`, `mcp_live`. See the [RPC capabilities endpoint](/api/rpc#capabilitiesget) for the complete example.
 
 ### GET /config
 

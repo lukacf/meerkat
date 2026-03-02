@@ -125,12 +125,19 @@ Provide an `output_schema` and the agent will extract validated JSON after the a
     }))?;
 
     let result = service.create_session(CreateSessionRequest {
+        model: "claude-sonnet-4-5".into(),
         prompt: "Tell me about Tokyo".into(),
+        system_prompt: None,
+        max_tokens: None,
+        event_tx: None,
+        host_mode: false,
+        skill_references: None,
+        initial_turn: InitialTurnPolicy::RunImmediately,
         build: Some(SessionBuildOptions {
             output_schema: Some(schema),
             ..Default::default()
         }),
-        ..Default::default()
+        labels: None,
     }).await?;
     println!("{:?}", result.structured_output);
     ```
@@ -219,13 +226,20 @@ When validation fails, the agent retries the extraction turn with error feedback
   <Tab title="Rust">
     ```rust
     let result = service.create_session(CreateSessionRequest {
+        model: "claude-sonnet-4-5".into(),
         prompt: "Extract entities".into(),
+        system_prompt: None,
+        max_tokens: None,
+        event_tx: None,
+        host_mode: false,
+        skill_references: None,
+        initial_turn: InitialTurnPolicy::RunImmediately,
         build: Some(SessionBuildOptions {
             output_schema: Some(schema),
-            structured_output_retries: Some(5),
+            structured_output_retries: 5,
             ..Default::default()
         }),
-        ..Default::default()
+        labels: None,
     }).await?;
     ```
   </Tab>

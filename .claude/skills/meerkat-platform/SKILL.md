@@ -71,10 +71,13 @@ rkat mob list
 rkat mob status <mob_id>
 rkat mob spawn <mob_id> <profile> <meerkat_id>
 rkat mob retire <mob_id> <meerkat_id>
+rkat mob respawn <mob_id> <meerkat_id> [--message <msg>]
+rkat mob inject-and-subscribe <mob_id> <meerkat_id> <message>
 rkat mob wire <mob_id> <a> <b>
 rkat mob unwire <mob_id> <a> <b>
 rkat mob turn <mob_id> <meerkat_id> <message>
 rkat mob stop|resume|complete <mob_id>
+rkat mob events <mob_id> [--member <meerkat_id>]
 rkat mob destroy <mob_id>
 ```
 
@@ -111,7 +114,7 @@ The `meerkat-web-runtime` crate is an **embedded deployment target for mobpacks*
 - `tokio_with_wasm` provides the async runtime (single-threaded, JS event loop backed)
 - `reqwest` uses browser `fetch` on wasm32
 - `InprocRegistry` provides peer discovery for comms (all sessions share one process-global registry)
-- 9 crates compile for wasm32 (store, skills, hooks, comms, tools, session, facade, mob, mob-mcp)
+- 10 dependency crates compile for wasm32 (core, client, store, tools, session, hooks, comms, mob, mob-mcp, facade)
 
 **Fully available on wasm32:**
 - Agent loop (streaming, retries, error recovery, budget enforcement)
@@ -131,7 +134,7 @@ The `meerkat-web-runtime` crate is an **embedded deployment target for mobpacks*
 - MCP protocol client (rmcp blocked by tokio/mio)
 - Network comms (TCP/UDS sockets — inproc only)
 
-**API surface (26 wasm_bindgen exports):**
+**API surface (29 wasm_bindgen exports):**
 ```
 # Bootstrap
 init_runtime(mobpack_bytes, credentials_json)
@@ -150,6 +153,8 @@ mob_spawn(mob_id, specs_json) → result JSON  [async]
 mob_wire(mob_id, a, b)  [async]
 mob_unwire(mob_id, a, b)  [async]
 mob_retire(mob_id, meerkat_id)  [async]
+mob_respawn(mob_id, meerkat_id, initial_message?)  [async]
+mob_inject_and_subscribe(mob_id, meerkat_id, message) → interaction_id  [async]
 mob_list_members(mob_id) → JSON
 mob_send_message(mob_id, meerkat_id, msg)  [async]
 mob_events(mob_id, after_cursor, limit) → JSON
@@ -163,12 +168,9 @@ wire_cross_mob(mob_id, a, b)  [async]
 
 # Subscriptions
 mob_member_subscribe(mob_id, meerkat_id) → handle (u32)  [async]
+mob_subscribe_events(mob_id) → handle (u32)  [async]
 poll_subscription(handle) → JSON
 close_subscription(handle)
-
-# Comms
-comms_peers(session_id) → JSON
-comms_send(session_id, params_json) → JSON  [async]
 
 # Inspection
 inspect_mobpack(bytes) → JSON
@@ -220,6 +222,7 @@ Do not conflate the two: mob tool availability is a surface behavior, backend is
 rkat "What is Rust?"                     # "run" is the default subcommand
 rkat run "What is Rust?"                 # equivalent explicit form
 rkat --realm team-alpha run "Create a todo app" --enable-builtins --enable-shell --stream -v
+# Global flags: --realm, --isolated, --instance, --realm-backend, --state-root, --context-root, --user-config-root
 rkat resume last "keep going"             # resume most recent session
 rkat resume 019c8b99 "continue"          # resume by short prefix
 rkat continue "next step"                # shortcut for resume last
@@ -251,7 +254,7 @@ await client.close()
 ### TypeScript SDK
 
 ```typescript
-import { MeerkatClient } from "@meerkat/sdk";
+import { MeerkatClient } from "@rkat/sdk";
 
 const client = new MeerkatClient();
 await client.connect({ realmId: "team-alpha" });

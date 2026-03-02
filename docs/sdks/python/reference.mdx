@@ -207,6 +207,7 @@ from meerkat import (
     SkillsResolved, SkillResolutionFailed,
     InteractionComplete, InteractionFailed,
     StreamTruncated,
+    ToolConfigChanged, ToolConfigChangedPayload,
     UnknownEvent,
 )
 ```
@@ -477,7 +478,7 @@ The SDK negotiates version compatibility during `connect()`:
 
 ```python
 from meerkat import CONTRACT_VERSION
-print(CONTRACT_VERSION)  # e.g. "0.2.0"
+print(CONTRACT_VERSION)  # e.g. "0.4.1"
 ```
 
 ---

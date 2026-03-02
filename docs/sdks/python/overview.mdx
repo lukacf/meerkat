@@ -164,9 +164,11 @@ async def create_session(
     enable_shell: bool = False,
     enable_subagents: bool = False,
     enable_memory: bool = False,
+    enable_mob: bool = False,
     host_mode: bool = False,
     comms_name: str | None = None,
     peer_meta: dict | None = None,
+    budget_limits: dict | None = None,
     provider_params: dict | None = None,
     preload_skills: list[str] | None = None,
     skill_refs: list[SkillRef] | None = None,
@@ -369,7 +371,7 @@ All events are frozen dataclasses importable from `meerkat`. Unknown event types
 | `ToolExecutionTimedOut` | `id`, `name`, `timeout_ms` | Tool exceeded its timeout |
 | `RunCompleted` | `session_id`, `result`, `usage` | Agent run completed |
 | `RunFailed` | `session_id`, `error` | Agent run failed |
-| `CompactionStarted` | `input_tokens`, `message_count` | Context compaction began |
+| `CompactionStarted` | `input_tokens`, `estimated_history_tokens`, `message_count` | Context compaction began |
 | `CompactionCompleted` | `summary_tokens`, `messages_before`, `messages_after` | Compaction finished |
 | `CompactionFailed` | `error` | Compaction failed |
 | `BudgetWarning` | `budget_type`, `used`, `limit`, `percent` | A budget threshold crossed |
@@ -384,6 +386,7 @@ All events are frozen dataclasses importable from `meerkat`. Unknown event types
 | `InteractionComplete` | `interaction_id`, `result` | Comms interaction completed |
 | `InteractionFailed` | `interaction_id`, `error` | Comms interaction failed |
 | `StreamTruncated` | `reason` | Event stream was truncated |
+| `ToolConfigChanged` | `payload` | Live tool configuration changed for this session |
 | `UnknownEvent` | `type`, `data` | Unrecognised event type (forward compat) |
 
 ---

@@ -1,6 +1,6 @@
 # WASM Runtime API Surface
 
-## 26 wasm_bindgen Exports
+## 29 wasm_bindgen Exports
 
 ### Bootstrap
 | Export | Params | Returns | Notes |
@@ -27,6 +27,8 @@
 | `mob_retire` | mob_id, meerkat_id | `()` | async |
 | `mob_list_members` | mob_id | RosterEntry[] JSON | |
 | `mob_send_message` | mob_id, meerkat_id, msg | `()` | async |
+| `mob_respawn` | mob_id, meerkat_id, initial_message? | result JSON | async, retire + re-spawn same profile |
+| `mob_inject_and_subscribe` | mob_id, meerkat_id, message | interaction_id JSON | async, inject msg + subscribe |
 | `mob_events` | mob_id, after_cursor (u32), limit (u32) | MobEvent[] JSON | |
 | `mob_status` | mob_id | JSON | |
 | `mob_list` | | MobSummary[] JSON | |
@@ -34,20 +36,15 @@
 | `mob_run_flow` | mob_id, flow_id, params JSON | run_id string | async |
 | `mob_flow_status` | mob_id, run_id | MobRun JSON | |
 | `mob_cancel_flow` | mob_id, run_id | `()` | async |
-| `wire_cross_mob` | mob_id, a, b | `()` | async, cross-mob comms wiring |
+| `wire_cross_mob` | mob_a, meerkat_a, mob_b, meerkat_b | `()` | async, cross-mob comms wiring |
 
 ### Subscriptions
 | Export | Params | Returns | Notes |
 |--------|--------|---------|-------|
-| `mob_member_subscribe` | mob_id, meerkat_id | handle (u32) | async, raw broadcast subscription |
+| `mob_member_subscribe` | mob_id, meerkat_id | handle (u32) | async, per-member broadcast subscription |
+| `mob_subscribe_events` | mob_id | handle (u32) | async, mob-wide attributed event stream |
 | `poll_subscription` | handle | JSON | Drain events from subscription |
 | `close_subscription` | handle | `()` | Close subscription handle |
-
-### Comms
-| Export | Params | Returns | Notes |
-|--------|--------|---------|-------|
-| `comms_peers` | session_id | JSON | Live — lists trusted peers |
-| `comms_send` | session_id, params JSON | JSON | Live — send to peer |
 
 ### Inspection
 | Export | Params | Returns | Notes |
@@ -58,15 +55,15 @@
 
 ```
 thread_local! {
-    REGISTRY: RefCell<RuntimeRegistry>       // Legacy session management
-    RUNTIME_STATE: RefCell<Option<RuntimeState>>  // Service-based infrastructure
+    REGISTRY: RefCell<RuntimeRegistry>              // Legacy session management
+    RUNTIME_STATE: RefCell<Option<RuntimeState>>    // Service-based infrastructure
+    SUBSCRIPTIONS: RefCell<SubscriptionRegistry>    // Event subscription handles
 }
 
 RuntimeState {
-    mob_state: Arc<MobMcpState>,             // All mob operations
-    model: String,                           // Default model
-    api_key: String,                         // API credentials
-    base_url: Option<String>,                // Provider base URL override
+    mob_state: Arc<MobMcpState>,                    // All mob operations
+    session_service: Arc<WasmSessionService>,       // Concrete service for subscriptions
+    model: String,                                  // Default model
 }
 ```
 

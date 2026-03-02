@@ -272,6 +272,7 @@ type AgentEvent =
   | InteractionCompleteEvent
   | InteractionFailedEvent
   | StreamTruncatedEvent
+  | ToolConfigChangedEvent
   | UnknownEvent;
 ```
 
@@ -365,6 +366,20 @@ interface SkillResolutionFailedEvent { type: "skill_resolution_failed"; referenc
 ```typescript
 interface InteractionCompleteEvent { type: "interaction_complete"; interactionId: string; result: string }
 interface InteractionFailedEvent   { type: "interaction_failed";   interactionId: string; error: string }
+```
+
+### Tool config events
+
+```typescript
+interface ToolConfigChangedEvent { type: "tool_config_changed"; payload: ToolConfigChangedPayload }
+
+interface ToolConfigChangedPayload {
+  operation: "add" | "remove" | "reload";
+  target: string;
+  status: string;
+  persisted: boolean;
+  appliedAtTurn?: number;
+}
 ```
 
 ### Stream management
@@ -483,7 +498,7 @@ const result2 = await session.invokeSkill(
 
 ```typescript
 import { CONTRACT_VERSION } from "@rkat/sdk";
-console.log(CONTRACT_VERSION);  // e.g. "0.4.0"
+console.log(CONTRACT_VERSION);  // e.g. "0.4.1"
 ```
 
 - While the major version is `0`, minor versions must match exactly between SDK and server.

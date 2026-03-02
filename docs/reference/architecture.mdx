@@ -9,7 +9,7 @@ Meerkat is a library-first, modular agent engine built in Rust. It provides the 
 ## Design philosophy
 
 1. **Library-first** -- the Rust crate is the primary interface; surfaces (CLI, REST, RPC, MCP) are thin wrappers
-2. **Modular** -- eighteen crates, all opt-in. Clean trait boundaries let you swap providers, stores, and dispatchers
+2. **Modular** -- twenty crates, all opt-in. Clean trait boundaries let you swap providers, stores, and dispatchers
 3. **No I/O in core** -- `meerkat-core` has no network or filesystem dependencies; all I/O is in satellite crates
 4. **Streaming-first** -- all LLM interactions use streaming for responsive user experiences
 5. **Budget-aware** -- built-in resource tracking for tokens, time, and tool calls
@@ -28,11 +28,12 @@ graph TD
     TOOLS["meerkat-tools<br/>Registry / Validation"]
     MEMORY["meerkat-memory<br/>HNSW / Simple"]
     HOOKS["meerkat-hooks<br/>In-proc / Command / HTTP"]
-    MCPSERVER["meerkat-mcp-server<br/>meerkat_run / meerkat_resume<br/>meerkat_config / meerkat_capabilities"]
+    MCPSERVER["meerkat-mcp-server<br/>24 tools: run / resume / config<br/>capabilities / skills / sessions / ..."]
     COMMS["meerkat-comms<br/>Ed25519 / Transports / Trust"]
     CONTRACTS["meerkat-contracts<br/>Wire types / Capabilities / Error codes"]
     SKILLS["meerkat-skills<br/>Filesystem / Git / HTTP / Embedded"]
     MOB["meerkat-mob<br/>Mob runtime / Flows / Tasks"]
+    MOBPACK["meerkat-mob-pack<br/>Archive format / Signing / Trust"]
     MOBMCP["meerkat-mob-mcp<br/>MobMcpDispatcher / MobMcpState"]
 
     CORE["meerkat-core<br/>Traits, agent loop, types<br/>SessionService trait, SessionError"]
@@ -51,6 +52,7 @@ graph TD
     MCPSERVER --> FACADE
     MOBMCP --> MOB
     MOBMCP --> CORE
+    MOBPACK --> MOB
     MOB --> CORE
 
     CLIENT --> CORE
@@ -66,7 +68,7 @@ graph TD
 ```
 
 <Note>
-**SessionService routing:** All four surfaces (CLI, REST, MCP Server, JSON-RPC) route through
+**SessionService routing:** All surfaces (CLI, REST, MCP Server, JSON-RPC, SDKs) route through
 `SessionService` for the full session lifecycle. `AgentFactory::build_agent()` centralizes all
 agent construction. Zero `AgentBuilder::new()` calls in surface crates.
 </Note>
@@ -129,7 +131,7 @@ The heart of Meerkat. Contains:
 
 - **Agent**: the main execution engine
 - **Types**: `Message`, `Session`, `ToolCall`, `ToolResult`, `Usage`, `ToolCallView`, etc.
-- **Trait contracts**: `AgentLlmClient`, `AgentToolDispatcher`, `AgentSessionStore`, `SessionService`, `Compactor`, `MemoryStore`
+- **Trait contracts**: `AgentLlmClient`, `AgentToolDispatcher`, `AgentSessionStore`, `SessionService`, `Compactor`, `MemoryStore`, `HookEngine`, `SkillEngine`, `SkillSource`
 - **Service types**: `SessionError`, `CreateSessionRequest`, `StartTurnRequest`, `SessionView`, `SessionInfo`, `SessionUsage`
 - **Budget**: resource tracking and enforcement
 - **Retry**: exponential backoff with jitter
@@ -229,12 +231,15 @@ MCP protocol client implementation:
 </Accordion>
 
 <Accordion title="meerkat-mcp-server">
-MCP server exposing Meerkat as tools for other MCP clients:
+MCP server exposing Meerkat as tools for other MCP clients (24 tools total):
 
-- **meerkat_run**: start a new agent session with a prompt
-- **meerkat_resume**: continue a session or provide tool results for pending calls
-- **meerkat_config**: get, set, or patch server configuration
-- **meerkat_capabilities**: query runtime capabilities
+- **Core**: `meerkat_run`, `meerkat_resume`, `meerkat_config`, `meerkat_capabilities`
+- **Session lifecycle**: `meerkat_read`, `meerkat_sessions`, `meerkat_interrupt`, `meerkat_archive`
+- **Skills**: `meerkat_skills`
+- **MCP management**: `meerkat_mcp_add`, `meerkat_mcp_remove`, `meerkat_mcp_reload`
+- **Event streaming**: `meerkat_event_stream_open`, `meerkat_event_stream_read`, `meerkat_event_stream_close`
+- **Mob** (feature-gated): `meerkat_mob_prefabs`, `meerkat_mob_event_stream_open`, `meerkat_mob_event_stream_read`, `meerkat_mob_event_stream_close`
+- **Comms** (feature-gated): `meerkat_comms_send`, `meerkat_comms_peers`, `meerkat_comms_stream_open`, `meerkat_comms_stream_read`, `meerkat_comms_stream_close`
 
 Tools with `handler: "callback"` support a callback pattern where the MCP client executes tools and returns results via `meerkat_resume`.
 </Accordion>
@@ -259,7 +264,7 @@ Canonical wire types and capability model shared across all surfaces:
 - **Wire types**: `WireRunResult`, `WireSessionInfo`, `WireEvent`, `WireUsage`, `WireError`
 - **Capabilities**: `CapabilityId`, `CapabilityStatus`, `CapabilityRegistration`, `CapabilitiesResponse`
 - **Error codes**: `ErrorCode` with stable projections to JSON-RPC codes, HTTP status, and CLI exit codes
-- **Contract version**: semver versioning for API compatibility (`0.4.0`)
+- **Contract version**: semver versioning for API compatibility (`0.4.1`)
 - **Parameter types**: `CoreCreateParams`, `StructuredOutputParams`, `HookParams`, `CommsParams`, `SkillsParams`
 </Accordion>
 
@@ -288,6 +293,17 @@ Mob runtime for multi-agent coordination:
 - **Parallel spawn**: `spawn_many` batches provisioning and wiring concurrently
 
 Feature-gated; depends on `meerkat-core` directly.
+</Accordion>
+
+<Accordion title="meerkat-mob-pack">
+Mobpack archive format for packaging and distributing mob definitions:
+
+- **Mobpack archive**: tar+gzip bundle containing mob definition, skills, and metadata
+- **Ed25519 signing**: cryptographic signing and verification of mobpack archives
+- **Trust policies**: configurable trust model for accepting packaged mob definitions
+- **Validation**: structural and signature verification on load
+
+Depends on `meerkat-mob` for mob definition types.
 </Accordion>
 
 <Accordion title="meerkat-mob-mcp">

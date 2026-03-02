@@ -82,24 +82,26 @@ Primary crates:
 ### `MobBuilder` API
 
 - `MobBuilder::new(definition, storage)`
+- `MobBuilder::from_mobpack(definition, packed_skills, storage)` — create from mobpack with inline skills
 - `MobBuilder::for_resume(storage)`
 - `.with_session_service(Arc<dyn MobSessionService>)`
 - `.allow_ephemeral_sessions(bool)`
 - `.notify_orchestrator_on_resume(bool)`
+- `.with_default_llm_client(client)` — override LLM client (primarily for testing)
 - `.register_tool_bundle(name, dispatcher)`
 - `.create().await`
 - `.resume().await`
 
 ### `MobHandle` API
 
-- inspection: `status()`, `definition()`, `roster()`, `list_members()`, `events()`
-- membership: `spawn()`, `spawn_with_backend()`, `spawn_with_options()`, `spawn_many()`, `retire`
-- graph: `wire`, `unwire`
-- turns: `send_message`, `internal_turn`
-- lifecycle: `stop`, `resume`, `complete`, `destroy`
-- flows: `list_flows`, `run_flow`, `flow_status`, `cancel_flow`
-- tasks: `task_create`, `task_update`, `task_list`, `task_get`
-- shutdown: `shutdown`
+- inspection: `status()`, `definition()`, `mob_id()`, `roster()`, `list_members()`, `list_all_members()`, `get_member()`, `events()`, `mcp_server_states()`
+- membership: `spawn()`, `spawn_with_backend()`, `spawn_with_options()`, `spawn_spec()`, `spawn_many()`, `retire()`, `respawn()`, `retire_all()`, `set_spawn_policy()`
+- graph: `wire()`, `unwire()`
+- turns: `send_message()`, `inject_and_subscribe()`, `internal_turn()`
+- lifecycle: `stop()`, `resume()`, `complete()`, `reset()`, `destroy()`, `shutdown()`
+- flows: `list_flows()`, `run_flow()`, `run_flow_with_stream()`, `flow_status()`, `cancel_flow()`
+- subscriptions: `subscribe_agent_events()`, `subscribe_all_agent_events()`, `subscribe_mob_events()`, `subscribe_mob_events_with_config()`
+- tasks: `task_create()`, `task_update()`, `task_list()`, `task_get()`
 
 ### Rust example: full lifecycle via `MobBuilder` + `MobHandle`
 
@@ -158,10 +160,11 @@ async fn in_memory() -> Result<(), Box<dyn std::error::Error>> {
     let mob_id = state.mob_create_prefab(Prefab::Pipeline).await?;
 
     state
-        .mob_spawn_spec(
+        .mob_spawn(
             &mob_id,
             ProfileName::from("lead"),
             MeerkatId::from("lead-1"),
+            None,
             None,
         )
         .await?;
@@ -238,6 +241,9 @@ rkat mob create --definition mob.toml
 rkat mob spawn team-mob lead lead-1
 rkat mob wire team-mob lead-1 worker-1
 rkat mob status team-mob
+rkat mob respawn team-mob worker-1 --message "restart"
+rkat mob inject-and-subscribe team-mob worker-1 "what is your status?"
+rkat mob events team-mob --member worker-1
 ```
 
 ### CLI artifact + web deployment
@@ -271,14 +277,18 @@ The web build produces a real meerkat surface — same agent loop, providers, an
 
 **Not available in browser:** filesystem config loading (programmatic config instead), stdio MCP servers (no processes), MCP protocol client (rmcp depends on tokio/mio — types work but connections blocked), shell tool, file-based persistence.
 
-**WASM API:**
+**WASM API (29 exports):**
+See `SKILL.md` WASM section for the full export list. Key mob-related exports:
 ```
-create_session(mobpack_bytes, config_json) → handle
-start_turn(handle, prompt, options_json) → RunResult  [async]
-poll_events(handle) → RuntimeEvent[]
-get_session_state(handle) → metadata
-inspect_mobpack(mobpack_bytes) → manifest + skills
-destroy_session(handle)
+mob_create(definition_json) → mob_id  [async]
+mob_spawn(mob_id, specs_json) → result JSON  [async]
+mob_wire / mob_unwire / mob_retire / mob_respawn  [async]
+mob_inject_and_subscribe(mob_id, meerkat_id, message)  [async]
+mob_list_members / mob_send_message / mob_events / mob_status / mob_list
+mob_lifecycle(mob_id, action)  [async]
+mob_run_flow / mob_flow_status / mob_cancel_flow  [async]
+wire_cross_mob(mob_id, a, b)  [async]
+mob_member_subscribe / mob_subscribe_events / poll_subscription / close_subscription
 ```
 
 ### RPC
@@ -322,7 +332,7 @@ await client.close()
 ### TypeScript SDK
 
 ```typescript
-import { MeerkatClient } from "@meerkat/sdk";
+import { MeerkatClient } from "@rkat/sdk";
 
 const client = new MeerkatClient();
 await client.connect({ realmId: "team-alpha" });

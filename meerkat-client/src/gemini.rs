@@ -404,10 +404,9 @@ fn strip_gemini_function_parameters_unsupported_keywords(value: &mut Value, dept
             obj.remove("$id");
             obj.remove("$anchor");
             obj.remove("title");
-            // Keep root-level additionalProperties because Gemini exposes a
-            // dedicated JSON-schema parameters surface where this is accepted.
-            // Nested additionalProperties remains unsupported on the
-            // function-declaration schema subset and is stripped.
+            // Keep root-level additionalProperties to avoid dropping top-level
+            // caller intent. Nested additionalProperties remains unsupported on
+            // the function-declaration schema subset and is stripped.
             if depth > 0 {
                 obj.remove("additionalProperties");
             }

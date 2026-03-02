@@ -202,12 +202,19 @@ Pass `skill_references` to resolve and inject skill content into the system prom
   <Tab title="Rust">
     ```rust
     let request = CreateSessionRequest {
+        model: "claude-sonnet-4-5".into(),
         prompt: "Extract emails".into(),
-        skill_references: vec![
-            "/email-extractor".into(),
-            "/formatting/markdown".into(),
-        ],
-        ..Default::default()
+        system_prompt: None,
+        max_tokens: None,
+        event_tx: None,
+        host_mode: false,
+        skill_references: Some(vec![
+            "/email-extractor".parse()?,
+            "/formatting/markdown".parse()?,
+        ]),
+        initial_turn: InitialTurnPolicy::RunImmediately,
+        build: None,
+        labels: None,
     };
     let result = service.create_session(request).await?;
     ```
@@ -276,10 +283,10 @@ Preloaded skills are resolved and injected into the system prompt before the fir
   <Tab title="Rust">
     ```rust
     let build_opts = SessionBuildOptions {
-        preload_skills: vec![
+        preload_skills: Some(vec![
             "deployment-guide".into(),
             "shell-patterns".into(),
-        ],
+        ]),
         ..Default::default()
     };
     ```
@@ -351,8 +358,11 @@ Inject skills into a specific turn on an existing session. The skill content is 
     ```rust
     let result = service.start_turn(&session_id, StartTurnRequest {
         prompt: "Now format the output".into(),
+        event_tx: None,
+        host_mode: false,
         skill_references: Some(vec!["/formatting/markdown".parse()?]),
-        ..Default::default()
+        flow_tool_overlay: None,
+        additional_instructions: None,
     }).await?;
     ```
   </Tab>

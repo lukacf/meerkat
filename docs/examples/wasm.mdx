@@ -107,25 +107,21 @@ close_subscription(sub);
 
 ## Cross-mob comms
 
-Wire ambassadors across mobs for inter-faction communication, then send messages through the comms system.
+Wire ambassadors across mobs for inter-faction communication. The `wire_cross_mob` function establishes trust between members in different mobs so they can exchange messages via the comms system.
 
 ```javascript
 // Wire ambassadors between two mobs
 await wire_cross_mob(mobIdNorth, "ambassador-north", "ambassador-south");
 
-// Send a message through the ambassador's session
-await comms_send(
-  ambassadorSessionId,
-  JSON.stringify({
-    kind: "peer_message",
-    to: "south-faction/operator/ambassador-south",
-    body: "Proposing alliance on the eastern front.",
-  })
+// Send a message to a member (triggers a turn with the message)
+await mob_send_message(mobIdNorth, "ambassador-north",
+  "Send a message to the south faction proposing an alliance on the eastern front."
 );
-
-// Check peers visible to the ambassador
-const peers = JSON.parse(await comms_peers(ambassadorSessionId));
 ```
+
+<Note>
+Direct `comms_send` and `comms_peers` functions are not yet exported as WASM bindings. Inter-agent messaging happens through the comms tools available to agents during their turns (the `send` and `peers` tools).
+</Note>
 
 ## What is available on wasm32
 

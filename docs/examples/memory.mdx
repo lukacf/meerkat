@@ -251,8 +251,8 @@ Cap resource usage per session with token, time, and tool-call limits. When a bu
     ```rust
     let build_opts = SessionBuildOptions {
         budget_limits: Some(BudgetLimits {
-            max_total_tokens: Some(10_000),
-            max_duration_ms: Some(30_000),
+            max_tokens: Some(10_000),
+            max_duration: Some(Duration::from_secs(30)),
             max_tool_calls: Some(5),
         }),
         ..Default::default()
@@ -268,10 +268,10 @@ When consumption nears a limit, a warning event is emitted before the budget is 
 ```json
 {
   "type": "budget_warning",
-  "limit_type": "max_total_tokens",
-  "current": 8500,
+  "budget_type": "max_tokens",
+  "used": 8500,
   "limit": 10000,
-  "message": "Token budget 85% consumed"
+  "percent": 85.0
 }
 ```
 
@@ -285,7 +285,7 @@ Transient LLM errors (rate limits, network timeouts) trigger automatic retries w
   "attempt": 2,
   "max_attempts": 5,
   "error": "rate_limit_exceeded",
-  "backoff_ms": 4000
+  "delay_ms": 4000
 }
 ```
 

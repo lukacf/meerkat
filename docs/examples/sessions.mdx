@@ -74,6 +74,8 @@ For concepts, see [Sessions](/concepts/sessions) and [Realms](/concepts/realms).
         host_mode: false,
         skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
+        build: None,
+        labels: None,
     }).await?;
     println!("{}", result.text);
     ```
@@ -145,6 +147,7 @@ For concepts, see [Sessions](/concepts/sessions) and [Realms](/concepts/realms).
         host_mode: false,
         skill_references: None,
         flow_tool_overlay: None,
+        additional_instructions: None,
     }).await?;
     println!("{}", result.text);
     ```
@@ -549,12 +552,18 @@ Cancel an in-flight turn. No-op if the session is idle.
     let result = service.create_session(CreateSessionRequest {
         model: "gpt-5.2".into(),
         prompt: "Explain monads".into(),
+        system_prompt: None,
+        max_tokens: None,
+        event_tx: None,
+        host_mode: false,
+        skill_references: None,
+        initial_turn: InitialTurnPolicy::RunImmediately,
         build: Some(SessionBuildOptions {
             provider: Some(Provider::OpenAi),
             provider_params: Some(json!({"temperature": 0.7})),
             ..Default::default()
         }),
-        ..Default::default()
+        labels: None,
     }).await?;
     ```
   </Tab>

@@ -34,8 +34,8 @@ impl AgentToolDispatcher for MathTools {
         match call.name {
             "add" => {
                 let args: AddArgs = call.parse_args()
-                    .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
-                Ok(ToolResult::success(call.id, format!("{}", args.a + args.b)))
+                    .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+                Ok(ToolResult::new(call.id.to_string(), format!("{}", args.a + args.b), false))
             }
             _ => Err(ToolError::not_found(call.name)),
         }
@@ -121,7 +121,7 @@ Tools from different sources (custom, MCP, built-in) are composed into a single 
 Mob tools (`mob_*`) are provided by the `meerkat-mob-mcp` dispatcher and composed
 through `SessionBuildOptions.external_tools`.
 
-- CLI `run`/`resume` pre-compose this dispatcher by default.
+- CLI `run` composes this dispatcher when `--enable-mob` (`-M`) is passed (opt-in, disabled by default).
 - `rkat mob ...` remains the explicit direct lifecycle surface.
 - Other session-driven surfaces (RPC/REST/MCP/SDK hosts) can expose the same `mob_*`
   capability by composing `MobMcpDispatcher` into their session build path.

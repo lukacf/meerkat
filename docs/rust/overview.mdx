@@ -87,7 +87,8 @@ The recommended entry point is `SessionService` via `build_ephemeral_service`:
 
 ```rust
 use meerkat::{AgentFactory, Config, build_ephemeral_service};
-use meerkat::service::{CreateSessionRequest, InitialTurnPolicy, SessionService};
+use meerkat::{CreateSessionRequest, SessionService};
+use meerkat_core::service::InitialTurnPolicy;
 use meerkat_store;
 
 #[tokio::main]
@@ -106,6 +107,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         host_mode: false,
         skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
+        build: None,
+        labels: None,
     }).await?;
 
     println!("Response: {}", result.text);
@@ -123,7 +126,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Multi-turn conversations
 
 ```rust
-use meerkat::service::{CreateSessionRequest, InitialTurnPolicy, StartTurnRequest, SessionService};
+use meerkat::{CreateSessionRequest, StartTurnRequest, SessionService};
+use meerkat_core::service::InitialTurnPolicy;
 
 // Turn 1: create session
 let result = service.create_session(CreateSessionRequest {
@@ -144,6 +148,9 @@ let result = service.start_turn(&session_id, StartTurnRequest {
     prompt: "What's my name?".into(),
     event_tx: None,
     host_mode: false,
+    skill_references: None,
+    flow_tool_overlay: None,
+    additional_instructions: None,
 }).await?;
 
 // Read session state
@@ -157,7 +164,7 @@ service.archive(&session_id).await?;
 ### Error handling
 
 ```rust
-use meerkat::service::SessionError;
+use meerkat::SessionError;
 
 match service.start_turn(&id, req).await {
     Ok(result) => println!("Response: {}", result.text),
@@ -244,8 +251,18 @@ match event {
     AgentEvent::RunCompleted { session_id, result, usage } => {}
     AgentEvent::RunFailed { session_id, error } => {}
 
+    // Hook lifecycle
+    AgentEvent::HookStarted { hook_id, point } => {}
+    AgentEvent::HookCompleted { hook_id, point, duration_ms } => {}
+    AgentEvent::HookFailed { hook_id, point, error } => {}
+    AgentEvent::HookDenied { hook_id, point, reason_code, message, .. } => {}
+    AgentEvent::HookRewriteApplied { hook_id, point, patch } => {}
+    AgentEvent::HookPatchPublished { hook_id, point, envelope } => {}
+
     // LLM interaction
     AgentEvent::TurnStarted { turn_number } => {}
+    AgentEvent::ReasoningDelta { delta } => {}
+    AgentEvent::ReasoningComplete { content } => {}
     AgentEvent::TextDelta { delta } => {}
     AgentEvent::TextComplete { content } => {}
     AgentEvent::ToolCallRequested { id, name, args } => {}
@@ -255,12 +272,32 @@ match event {
     // Tool execution
     AgentEvent::ToolExecutionStarted { id, name } => {}
     AgentEvent::ToolExecutionCompleted { id, name, result, is_error, duration_ms } => {}
+    AgentEvent::ToolExecutionTimedOut { id, name, timeout_ms } => {}
+
+    // Compaction
+    AgentEvent::CompactionStarted { input_tokens, estimated_history_tokens, message_count } => {}
+    AgentEvent::CompactionCompleted { summary_tokens, messages_before, messages_after } => {}
+    AgentEvent::CompactionFailed { error } => {}
 
     // Budget
     AgentEvent::BudgetWarning { budget_type, used, limit, percent } => {}
 
     // Retry
     AgentEvent::Retrying { attempt, max_attempts, error, delay_ms } => {}
+
+    // Skills
+    AgentEvent::SkillsResolved { skills, injection_bytes } => {}
+    AgentEvent::SkillResolutionFailed { reference, error } => {}
+
+    // Interaction-scoped streaming
+    AgentEvent::InteractionComplete { interaction_id, result } => {}
+    AgentEvent::InteractionFailed { interaction_id, error } => {}
+    AgentEvent::StreamTruncated { reason } => {}
+
+    // Tool config changes
+    AgentEvent::ToolConfigChanged { payload } => {}
+
+    _ => {} // non_exhaustive: forward compatibility
 }
 ```
 </Accordion>

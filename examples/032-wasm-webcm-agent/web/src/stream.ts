@@ -21,17 +21,13 @@ const renderer: Partial<Renderer> = {
 
 marked.use({ renderer });
 
-export type StreamMode = "main" | "sub";
-
 export class StreamRenderer {
   private container: HTMLElement;
-  private mode: StreamMode;
   private statusEl: HTMLElement | null = null;
   private pendingTextEl: HTMLElement | null = null;
 
-  constructor(container: HTMLElement, mode: StreamMode = "main") {
+  constructor(container: HTMLElement) {
     this.container = container;
-    this.mode = mode;
   }
 
   /** Render a user prompt line: ❯ text */
@@ -42,8 +38,8 @@ export class StreamRenderer {
     this.append(el);
   }
 
-  /** Render agent text with light markdown. */
-  appendText(markdown: string): void {
+  /** Render agent text with light markdown (used internally by finalizeText). */
+  private appendText(markdown: string): void {
     const el = document.createElement("div");
     el.className = "stream-entry stream-text";
     el.innerHTML = marked.parse(markdown) as string;

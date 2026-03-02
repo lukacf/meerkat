@@ -59,11 +59,17 @@ export interface ToolRuntime {
 
 /** Simple async mutex — the PTY can only handle one command at a time. */
 let vmQueue: Promise<void> = Promise.resolve();
+const noop = () => {};
 
 function serialized<T>(fn: () => Promise<T>): Promise<T> {
   const next = vmQueue.then(fn, fn); // run even if previous rejected
-  vmQueue = next.then(() => {}, () => {}); // keep chain alive
+  vmQueue = next.then(noop, noop);   // keep chain alive
   return next;
+}
+
+/** Format a tool result for the WASM runtime (content + is_error envelope). */
+function toolResult(content: string, isError = false): string {
+  return JSON.stringify({ content, is_error: isError });
 }
 
 // ── Registration helper ─────────────────────────────────────────────────────
@@ -84,10 +90,10 @@ export function registerWebCMTools(runtime: ToolRuntime, vm: WebCMHost): void {
       const args = JSON.parse(argsJson);
       return serialized(async () => {
         const { output, exitCode } = await vm.exec(args.command);
-        return JSON.stringify({
-          content: exitCode === 0 ? (output || "(no output)") : `Exit code ${exitCode}\n${output}`,
-          is_error: exitCode !== 0,
-        });
+        return toolResult(
+          exitCode === 0 ? (output || "(no output)") : `Exit code ${exitCode}\n${output}`,
+          exitCode !== 0,
+        );
       });
     },
   );
@@ -99,7 +105,7 @@ export function registerWebCMTools(runtime: ToolRuntime, vm: WebCMHost): void {
       return serialized(async () => {
         await vm.exec(`mkdir -p $(dirname ${args.path})`);
         await vm.writeFile(args.path, args.content);
-        return JSON.stringify({ content: `Wrote ${args.path}`, is_error: false });
+        return toolResult(`Wrote ${args.path}`);
       });
     },
   );
@@ -111,9 +117,9 @@ export function registerWebCMTools(runtime: ToolRuntime, vm: WebCMHost): void {
       return serialized(async () => {
         try {
           const content = await vm.readFile(args.path);
-          return JSON.stringify({ content, is_error: false });
+          return toolResult(content);
         } catch (e: any) {
-          return JSON.stringify({ content: e.message, is_error: true });
+          return toolResult(e.message, true);
         }
       });
     },

@@ -100,7 +100,7 @@ async function boot() {
     const panelStates = new Map<string, any>();
 
     // Orchestrator events → main stream
-    mainStream = new StreamRenderer(mainStreamEl, "main");
+    mainStream = new StreamRenderer(mainStreamEl);
     const orchestratorStatusEl = document.getElementById("status-orchestrator") as HTMLSpanElement;
     const orchestratorModelEl = document.getElementById("model-orchestrator") as HTMLSpanElement;
     orchestratorModelEl.textContent = models.main;
@@ -113,9 +113,9 @@ async function boot() {
 
     // Sub-agent panels
     for (const [name, els] of Object.entries(panelEls)) {
-      els.model.textContent = (models as any)[name];
+      els.model.textContent = models[name as keyof typeof models] ?? "";
       panelStates.set(name, {
-        stream: new StreamRenderer(els.stream, "sub"),
+        stream: new StreamRenderer(els.stream),
         statusEl: els.status,
         subHandle: null,
         currentCard: null,
@@ -185,9 +185,9 @@ async function send() {
     await mob.sendToOrchestrator(text);
   } catch (err: any) {
     mainStream?.appendError(err.message);
+  } finally {
+    setRunning(false);
   }
-
-  setRunning(false);
 }
 
 function setRunning(v: boolean) {

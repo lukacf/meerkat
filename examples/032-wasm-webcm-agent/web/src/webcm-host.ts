@@ -44,13 +44,14 @@ export class WebCMHost {
     const { master, slave } = openpty();
     this.slave = slave;
 
-    // Configure terminal for raw mode (required by WebCM)
+    // Configure terminal for raw mode (required by WebCM).
+    // Disables echo, canonical mode, signals; enables CS8 and OPOST for clean I/O.
     const termios = slave.ioctl("TCGETS");
-    termios.iflag &= ~0x5eb;
-    termios.cflag &= ~0x130;
-    termios.lflag &= ~0x804b;
-    termios.cflag |= 0x30;
-    termios.oflag |= 0x1;
+    termios.iflag &= ~0x5eb;  // clear BRKINT|ICRNL|INPCK|ISTRIP|IXON
+    termios.cflag &= ~0x130;  // clear CSIZE|PARENB
+    termios.lflag &= ~0x804b; // clear ECHO|ICANON|IEXTEN|ISIG
+    termios.cflag |= 0x30;    // set CS8
+    termios.oflag |= 0x1;     // set OPOST
     slave.ioctl("TCSETS", termios);
 
     // Capture VM output via master.onWrite. This event fires with
@@ -96,7 +97,8 @@ export class WebCMHost {
 
     // Poll for delimiter in captured output.
     // Match "<delim>:<digit>" to avoid matching the echoed command which has "<delim>:$?".
-    const delimPattern = new RegExp(delim.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + ":\\d");
+    const escapedDelim = delim.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const delimPattern = new RegExp(escapedDelim + ":\\d");
     const result = await new Promise<string>((resolve, reject) => {
       const deadline = Date.now() + timeoutMs;
       const check = () => {
@@ -122,7 +124,7 @@ export class WebCMHost {
     const lines = clean.split(/\r?\n/);
 
     // Find the delimiter OUTPUT line (contains <delim>:<digit>)
-    const delimRe = new RegExp(delim.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + ":(\\d+)");
+    const delimRe = new RegExp(escapedDelim + ":(\\d+)");
     let delimLineIdx = -1;
     let exitCode = 0;
     for (let i = lines.length - 1; i >= 0; i--) {

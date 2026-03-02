@@ -90,61 +90,33 @@ IMPORTANT: There is NO python3/pip. Use "micropython" for Python. There is NO no
 Working directory: /workspace/ (use /workspace/src/ for source code)
 `.trim();
 
+const MOB_ID = "dev-team";
+
 function buildMobDefinition(models: ModelAssignments): object {
-  const subAgentTools = { builtins: false, comms: true, shell: false };
-  const orchestratorTools = { builtins: false, comms: true, shell: false };
+  const tools = { builtins: false, comms: true, shell: false };
+
+  // Shared profile defaults — only model, skills, tools, and peer_description vary per role.
+  const base = {
+    tools,
+    external_addressable: true,
+    backend: null,
+    runtime_mode: "autonomous_host" as const,
+    max_inline_peer_notifications: null,
+    output_schema: null,
+    provider_params: { reasoning_effort: "low" },
+  };
 
   return {
-    id: "dev-team",
+    id: MOB_ID,
     profiles: {
-      orchestrator: {
-        model: models.main,
-        skills: ["orchestrator-role"],
-        tools: orchestratorTools,
-        peer_description: "Alpha Meerkat — lead orchestrator who coordinates the team",
-        external_addressable: true,
-        backend: null,
-        runtime_mode: "autonomous_host",
-        max_inline_peer_notifications: null,
-        output_schema: null,
-        provider_params: { reasoning_effort: "low" },
-      },
-      planner: {
-        model: models.planner,
-        skills: ["planner-role"],
-        tools: subAgentTools,
-        peer_description: "Senior architect who creates implementation plans",
-        external_addressable: true,
-        backend: null,
-        runtime_mode: "autonomous_host",
-        max_inline_peer_notifications: null,
-        output_schema: null,
-        provider_params: { reasoning_effort: "low" },
-      },
-      coder: {
-        model: models.coder,
-        skills: ["coder-role"],
-        tools: subAgentTools,
-        peer_description: "Expert programmer who implements and tests code",
-        external_addressable: true,
-        backend: null,
-        runtime_mode: "autonomous_host",
-        max_inline_peer_notifications: null,
-        output_schema: null,
-        provider_params: { reasoning_effort: "low" },
-      },
-      reviewer: {
-        model: models.reviewer,
-        skills: ["reviewer-role"],
-        tools: subAgentTools,
-        peer_description: "Code reviewer who verifies quality and correctness",
-        external_addressable: true,
-        backend: null,
-        runtime_mode: "autonomous_host",
-        max_inline_peer_notifications: null,
-        output_schema: null,
-        provider_params: { reasoning_effort: "low" },
-      },
+      orchestrator: { ...base, model: models.main, skills: ["orchestrator-role"],
+        peer_description: "Alpha Meerkat — lead orchestrator who coordinates the team" },
+      planner: { ...base, model: models.planner, skills: ["planner-role"],
+        peer_description: "Senior architect who creates implementation plans" },
+      coder: { ...base, model: models.coder, skills: ["coder-role"],
+        peer_description: "Expert programmer who implements and tests code" },
+      reviewer: { ...base, model: models.reviewer, skills: ["reviewer-role"],
+        peer_description: "Code reviewer who verifies quality and correctness" },
     },
     mcp_servers: {},
     wiring: {
@@ -256,7 +228,6 @@ export class MobOrchestrator {
   private panels: Map<string, PanelState>;
   private mobId = "";
   private pollInterval: ReturnType<typeof setInterval> | null = null;
-  private subscriptions = new Map<string, number>();
 
   constructor(runtime: MobRuntime, panels: Map<string, PanelState>) {
     this.runtime = runtime;
@@ -279,46 +250,39 @@ export class MobOrchestrator {
     // Create mob
     const definition = buildMobDefinition(models);
     const createResult = await this.runtime.mob_create(JSON.stringify(definition));
-    // mob_create returns the mob_id as a string (may or may not be JSON-wrapped)
     const resultStr = typeof createResult === "string" ? createResult : String(createResult);
     try {
       const parsed = JSON.parse(resultStr);
-      this.mobId = parsed.mob_id || parsed.id || "dev-team";
+      this.mobId = parsed.mob_id || parsed.id || MOB_ID;
     } catch {
-      // Raw string like "dev-team"
-      this.mobId = resultStr || "dev-team";
+      this.mobId = resultStr || MOB_ID;
     }
 
-    // Spawn all three agents
+    // Spawn all agents
     const specs = AGENTS.map((profile) => ({
       profile,
       meerkat_id: profile,
-      runtime_mode: "autonomous_host",
+      runtime_mode: "autonomous_host" as const,
     }));
     await this.runtime.mob_spawn(this.mobId, JSON.stringify(specs));
 
-    // Wire all pairs (ignore already-wired errors)
-    for (let i = 0; i < AGENTS.length; i++) {
-      for (let j = i + 1; j < AGENTS.length; j++) {
-        try {
-          await this.runtime.mob_wire(this.mobId, AGENTS[i], AGENTS[j]);
-        } catch { /* already wired from definition */ }
-      }
-    }
+    // Wire all pairs (definition already declares wiring, but explicit wire
+    // ensures the comms trust is established even if definition wiring is lazy)
+    const wirePairs = AGENTS.flatMap((a, i) => AGENTS.slice(i + 1).map(b => [a, b] as const));
+    await Promise.all(wirePairs.map(([a, b]) =>
+      this.runtime.mob_wire(this.mobId, a, b).catch(() => {/* already wired */}),
+    ));
 
-    // Subscribe to each agent's events
-    for (const agent of AGENTS) {
+    // Subscribe to each agent's events (parallel — independent operations)
+    await Promise.all(AGENTS.map(async (agent) => {
       const handle = await this.runtime.mob_member_subscribe(this.mobId, agent);
-      this.subscriptions.set(agent, handle);
       const panel = this.panels.get(agent);
-      if (panel) panel.subHandle = handle;
-    }
-
-    // Update panel status
-    for (const agent of AGENTS) {
-      this.updateStatus(agent, "spawned", "thinking");
-      setTimeout(() => this.updateStatus(agent, "idle"), 2000);
-    }
+      if (panel) {
+        panel.subHandle = handle;
+        this.updateStatus(agent, "spawned", "thinking");
+        setTimeout(() => this.updateStatus(agent, "idle"), 2000);
+      }
+    }));
   }
 
   /** Send a user message to the orchestrator mob member. */
@@ -340,18 +304,30 @@ export class MobOrchestrator {
     }
   }
 
+  /** Clear any pending tool call spinner on a panel. */
+  private clearCard(panel: PanelState, output = "", isError = false): void {
+    if (panel.currentCard) {
+      panel.stream.resolveToolCall(panel.currentCard, output, isError);
+      panel.currentCard = null;
+    }
+  }
+
   private pollAll(): void {
     for (const agent of AGENTS) {
       const panel = this.panels.get(agent);
       if (!panel || panel.subHandle == null) continue;
 
       try {
-        const raw = this.runtime.poll_subscription(panel.subHandle);
+        const raw = this.runtime.poll_subscription(panel.subHandle) as string;
+        if (!raw || raw === "[]") continue; // fast path: no events
         const envelopes: any[] = JSON.parse(raw);
         for (const envelope of envelopes) {
           this.routeEnvelope(agent, envelope, panel);
         }
-      } catch { /* subscription not ready or lagged */ }
+      } catch (e) {
+        // Expected: subscription not ready or lagged. Log unexpected errors.
+        if (e instanceof SyntaxError) console.warn(`[${agent}] poll parse error:`, e);
+      }
     }
   }
 
@@ -383,18 +359,11 @@ export class MobOrchestrator {
         break;
 
       case "tool_execution_completed":
-        if (panel.currentCard) {
-          panel.stream.resolveToolCall(panel.currentCard, ev.result || "", ev.is_error || false);
-          panel.currentCard = null;
-        }
+        this.clearCard(panel, ev.result || "", ev.is_error || false);
         break;
 
       case "tool_result_received":
-        // Fallback: clear spinner if tool_execution_completed was missed
-        if (panel.currentCard) {
-          panel.stream.resolveToolCall(panel.currentCard, "", false);
-          panel.currentCard = null;
-        }
+        this.clearCard(panel); // fallback if tool_execution_completed was missed
         break;
 
       case "tool_execution_started":
@@ -405,7 +374,7 @@ export class MobOrchestrator {
         // Show the incoming prompt as a collapsed card.
         // Comms messages contain peer addresses (e.g. "dev-team/planner/planner").
         // User messages (via mob_send_message) are raw text — already shown as ❯ line.
-        const isComms = ev.prompt && /dev-team\/\w+\/\w+/.test(ev.prompt);
+        const isComms = ev.prompt && ev.prompt.includes(`${this.mobId}/`);
         if (ev.prompt && (agent !== "orchestrator" || isComms)) {
           const card = panel.stream.beginToolCall("message received", { text: ev.prompt });
           panel.stream.resolveToolCall(card, ev.prompt, false);
@@ -420,11 +389,7 @@ export class MobOrchestrator {
 
       case "turn_completed":
       case "run_completed":
-        // Clear any lingering tool spinners
-        if (panel.currentCard) {
-          panel.stream.resolveToolCall(panel.currentCard, "", false);
-          panel.currentCard = null;
-        }
+        this.clearCard(panel); // clear any lingering tool spinners
         this.updateStatus(agent, "idle");
         break;
 

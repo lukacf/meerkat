@@ -1,5 +1,11 @@
 # Comms Redesign V6 — Hard-Cut Plan
 
+> **Historical design document.** This plan was written before implementation.
+> The comms redesign has been implemented. The contract version references to
+> `0.3.0` below reflect the original plan; the actual contract version at
+> time of implementation was `0.4.x`. See the current `CommsRuntime` trait in
+> `meerkat-core/src/agent.rs` for the implemented API.
+
 ## Unified TDD Master Plan V6: Hard-Cut Comms Redesign (Final)
 
 ## Summary

@@ -686,10 +686,10 @@ Pause execution for the specified number of seconds. Supports fractional seconds
 **Default enabled:** Yes
 
 <ParamField body="seconds" type="f64" required>
-  Duration to wait (range: 0.1 to 300.0).
+  Duration to wait in seconds (clamped to 0.0 to 300.0).
 </ParamField>
 
-Maximum wait time is 300 seconds (5 minutes). Values below 0.1 or above 300.0 are rejected.
+Maximum wait time is 300 seconds (5 minutes). Values are clamped to the range 0.0 to 300.0.
 
 <CodeGroup>
 ```json Returns (completed)
@@ -704,7 +704,7 @@ Maximum wait time is 300 seconds (5 minutes). Values below 0.1 or above 300.0 ar
   "waited_seconds": 2.3,
   "requested_seconds": 5.0,
   "status": "interrupted",
-  "reason": "cancellation signal received"
+  "reason": "Wait interrupted after 2.3s: incoming message from peer"
 }
 ```
 </CodeGroup>
@@ -742,8 +742,7 @@ Comms tools enable inter-agent communication. They require the `comms` Cargo fea
 
 Comms tools are only shown to the agent when at least one peer is discoverable
 (controlled by `CommsToolSurface::peer_availability()`). The check passes when
-either `TrustedPeers` has entries or `InprocRegistry` has a peer other than
-self.
+`TrustedPeers` has entries.
 
 Tool definitions (name, description, input schema) are dynamically loaded from `meerkat_comms::tools_list()`.
 
@@ -786,7 +785,8 @@ Send a message, request, or response to a trusted peer. The `kind` parameter det
 
 ```json
 {
-  "status": "sent"
+  "status": "sent",
+  "kind": "peer_message"
 }
 ```
 
@@ -796,11 +796,7 @@ Send a message, request, or response to a trusted peer. The `kind` parameter det
 <Accordion title="peers">
 List all discoverable peers and their connection status.
 
-Returns the union of:
-- configured trusted peers (`TrustedPeers`)
-- in-process peers currently registered in `InprocRegistry`
-
-Peers are de-duplicated by name and the current agent ("self") is excluded.
+Returns configured trusted peers (`TrustedPeers`), excluding the current agent ("self") by public key.
 
 **Default enabled:** Yes (when comms is active)
 

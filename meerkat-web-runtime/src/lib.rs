@@ -235,6 +235,8 @@ struct RuntimeSession {
     meerkat_session: Option<meerkat_core::session::Session>,
     run_counter: u64,
     usage: Usage,
+    /// Buffered agent events from the last turn, drained by poll_events.
+    pending_events: Vec<serde_json::Value>,
 }
 
 #[derive(Default)]
@@ -577,6 +579,164 @@ fn create_llm_client(
 }
 
 // ═══════════════════════════════════════════════════════════
+// JS Tool Callbacks — register tool implementations from JavaScript
+// ═══════════════════════════════════════════════════════════
+
+/// Registry of JS-implemented tools. Populated via `register_tool_callback`
+/// before `init_runtime` / `init_runtime_from_config`.
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static JS_TOOLS: RefCell<Vec<JsToolEntry>> = const { RefCell::new(Vec::new()) };
+}
+
+#[cfg(target_arch = "wasm32")]
+struct JsToolEntry {
+    def: Arc<meerkat_core::ToolDef>,
+    callback: js_sys::Function,
+}
+
+/// Register a tool implementation from JavaScript.
+///
+/// Call this BEFORE `init_runtime` or `init_runtime_from_config`.
+/// The `callback` receives a JSON string of tool arguments and must return
+/// a `Promise<string>` resolving to JSON `{"content": "...", "is_error": false}`.
+///
+/// Example (JS):
+/// ```js
+/// register_tool_callback("shell", '{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}', shellFn);
+/// ```
+#[wasm_bindgen]
+pub fn register_tool_callback(
+    name: String,
+    description: String,
+    schema_json: String,
+    callback: JsValue,
+) -> Result<(), JsValue> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let func: js_sys::Function = callback
+            .dyn_into()
+            .map_err(|_| err_js("invalid_callback", "callback must be a function"))?;
+
+        let schema: serde_json::Value = serde_json::from_str(&schema_json)
+            .map_err(|e| err_str("invalid_schema", format!("invalid JSON schema: {e}")))?;
+
+        let def = Arc::new(meerkat_core::ToolDef {
+            name: name.clone(),
+            description: description.clone(),
+            input_schema: schema,
+        });
+
+        JS_TOOLS.with(|cell| {
+            cell.borrow_mut().push(JsToolEntry {
+                def,
+                callback: func,
+            });
+        });
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (name, description, schema_json, callback);
+    }
+    Ok(())
+}
+
+/// Clear all registered tool callbacks.
+#[wasm_bindgen]
+pub fn clear_tool_callbacks() {
+    #[cfg(target_arch = "wasm32")]
+    JS_TOOLS.with(|cell| cell.borrow_mut().clear());
+}
+
+/// Tool dispatcher that delegates to JS callbacks stored in the thread-local registry.
+///
+/// The dispatcher itself only stores tool definitions (Send+Sync).
+/// At dispatch time, it looks up the JS callback from the thread-local `JS_TOOLS`.
+/// This avoids storing `js_sys::Function` (which is `!Send`) in the dispatcher.
+#[cfg(target_arch = "wasm32")]
+struct JsToolDispatcher {
+    tools: Arc<[Arc<meerkat_core::ToolDef>]>,
+    tool_names: Vec<String>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl JsToolDispatcher {
+    fn from_registry() -> Option<Self> {
+        JS_TOOLS.with(|cell| {
+            let entries = cell.borrow();
+            if entries.is_empty() {
+                return None;
+            }
+            let tools: Arc<[Arc<meerkat_core::ToolDef>]> =
+                entries.iter().map(|e| e.def.clone()).collect();
+            let tool_names: Vec<String> = entries.iter().map(|e| e.def.name.clone()).collect();
+            Some(Self { tools, tool_names })
+        })
+    }
+
+    /// Look up the JS callback for a tool by name from the thread-local registry.
+    fn get_callback(name: &str) -> Option<js_sys::Function> {
+        JS_TOOLS.with(|cell| {
+            let entries = cell.borrow();
+            entries
+                .iter()
+                .find(|e| e.def.name == name)
+                .map(|e| e.callback.clone())
+        })
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[async_trait::async_trait(?Send)]
+impl meerkat_core::AgentToolDispatcher for JsToolDispatcher {
+    fn tools(&self) -> Arc<[Arc<meerkat_core::ToolDef>]> {
+        self.tools.clone()
+    }
+
+    async fn dispatch(
+        &self,
+        call: meerkat_core::ToolCallView<'_>,
+    ) -> Result<meerkat_core::ToolResult, meerkat_core::error::ToolError> {
+        let callback = Self::get_callback(call.name)
+            .ok_or_else(|| meerkat_core::error::ToolError::not_found(call.name))?;
+
+        let args_str = call.args.get();
+        let js_args = JsValue::from_str(args_str);
+        let promise_val = callback.call1(&JsValue::NULL, &js_args).map_err(|e| {
+            meerkat_core::error::ToolError::execution_failed(format!("JS callback threw: {e:?}"))
+        })?;
+        let promise = js_sys::Promise::from(promise_val);
+        let result_val = wasm_bindgen_futures::JsFuture::from(promise)
+            .await
+            .map_err(|e| {
+                meerkat_core::error::ToolError::execution_failed(format!(
+                    "JS promise rejected: {e:?}"
+                ))
+            })?;
+        let result_str = result_val.as_string().unwrap_or_default();
+
+        // Parse JSON result: {"content": "...", "is_error": false}
+        #[derive(Deserialize)]
+        struct JsToolResult {
+            content: String,
+            #[serde(default)]
+            is_error: bool,
+        }
+        let parsed: JsToolResult = serde_json::from_str(&result_str).map_err(|e| {
+            meerkat_core::error::ToolError::execution_failed(format!(
+                "invalid tool result JSON: {e}"
+            ))
+        })?;
+
+        Ok(meerkat_core::ToolResult {
+            tool_use_id: call.id.to_string(),
+            content: parsed.content,
+            is_error: parsed.is_error,
+        })
+    }
+}
+
+// ═══════════════════════════════════════════════════════════
 // WASM Tool Dispatcher
 // ═══════════════════════════════════════════════════════════
 
@@ -585,8 +745,10 @@ fn build_wasm_tool_dispatcher() -> Result<Arc<dyn meerkat_core::AgentToolDispatc
     let task_store: Arc<dyn meerkat_tools::builtin::TaskStore> =
         Arc::new(meerkat_tools::builtin::MemoryTaskStore::new());
     let config = meerkat_tools::builtin::BuiltinToolConfig::default();
+    let external = JsToolDispatcher::from_registry()
+        .map(|d| Arc::new(d) as Arc<dyn meerkat_core::AgentToolDispatcher>);
     let composite =
-        meerkat_tools::builtin::CompositeDispatcher::new_wasm(task_store, &config, None, None)
+        meerkat_tools::builtin::CompositeDispatcher::new_wasm(task_store, &config, external, None)
             .map_err(|e| format!("failed to create tool dispatcher: {e}"))?;
     Ok(Arc::new(composite))
 }
@@ -803,6 +965,78 @@ pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<u32, Js
             meerkat_session: None,
             run_counter: 0,
             usage: Usage::default(),
+            pending_events: Vec::new(),
+        };
+
+        registry.sessions.insert(handle, session);
+        handle
+    });
+
+    Ok(handle)
+}
+
+/// Create a session without a mobpack — for standalone agent use.
+///
+/// `config_json`: `{ "model": "...", "api_key": "sk-...", "system_prompt"?: "...",
+///                    "max_tokens"?: N, "additional_instructions"?: ["..."] }`
+///
+/// Uses `register_tool_callback` tools if any were registered before this call.
+#[wasm_bindgen]
+pub fn create_session_simple(config_json: &str) -> Result<u32, JsValue> {
+    let config: SessionConfig =
+        serde_json::from_str(config_json).map_err(|e| err_str("invalid_config", e))?;
+
+    if config.model.trim().is_empty() {
+        return Err(err_js("invalid_config", "model must not be empty"));
+    }
+    let api_key = config.api_key.as_deref().unwrap_or("");
+    if api_key.is_empty() {
+        return Err(err_js("invalid_config", "api_key must not be empty"));
+    }
+
+    // Create LLM client.
+    let llm_client = create_llm_client(&config.model, api_key, config.base_url.as_deref())
+        .map_err(|e| err_str("provider_error", e))?;
+
+    // Build tool dispatcher (includes JS-registered tools).
+    let tools = build_wasm_tool_dispatcher().map_err(|e| err_str("tool_error", e))?;
+
+    // Build session store (in-memory).
+    let store: Arc<dyn meerkat_core::AgentSessionStore> = Arc::new(
+        meerkat_store::StoreAdapter::new(Arc::new(meerkat_store::MemoryStore::new())),
+    );
+
+    // Prepare AgentBuildConfig with all overrides set.
+    let mut build_config = AgentBuildConfig::new(&config.model);
+    build_config.system_prompt = config.system_prompt.clone();
+    build_config.max_tokens = Some(config.max_tokens);
+    build_config.tool_dispatcher_override = Some(tools);
+    build_config.session_store_override = Some(store);
+    build_config.llm_client_override = Some(llm_client);
+    build_config.additional_instructions = config.additional_instructions.clone();
+    build_config.app_context = config.app_context.clone();
+
+    // Create a minimal Config for the factory.
+    let meerkat_config = Config::default();
+
+    let handle = REGISTRY.with(|cell| {
+        let mut registry = cell.borrow_mut();
+        let handle = registry.next_handle;
+        registry.next_handle = registry.next_handle.wrapping_add(1);
+        while registry.next_handle == 0 || registry.sessions.contains_key(&registry.next_handle) {
+            registry.next_handle = registry.next_handle.wrapping_add(1);
+        }
+
+        let session = RuntimeSession {
+            handle,
+            mob_id: String::new(),
+            model: config.model.clone(),
+            config: meerkat_config,
+            build_config_template: build_config,
+            meerkat_session: None,
+            run_counter: 0,
+            usage: Usage::default(),
+            pending_events: Vec::new(),
         };
 
         registry.sessions.insert(handle, session);
@@ -878,6 +1112,11 @@ pub async fn start_turn(handle: u32, prompt: &str, options_json: &str) -> Result
         build_config.additional_instructions = options.additional_instructions;
     }
 
+    // Set up event channel to capture AgentEvents during the turn.
+    let (event_tx, mut event_rx) =
+        crate::tokio::sync::mpsc::channel::<meerkat_core::event::AgentEvent>(256);
+    build_config.event_tx = Some(event_tx);
+
     // Build the agent through AgentFactory::build_agent() — same pipeline as all surfaces.
     let factory = meerkat::AgentFactory::minimal();
     let mut agent = factory
@@ -885,11 +1124,32 @@ pub async fn start_turn(handle: u32, prompt: &str, options_json: &str) -> Result
         .await
         .map_err(|e| err_str("build_agent_error", e))?;
 
-    // Run the turn.
+    // Spawn a concurrent task that drains events into pending_events in real-time.
+    // This allows poll_events() to return events DURING the turn, not just after.
+    let drain_handle = handle;
+    let event_drainer = crate::tokio::spawn(async move {
+        while let Some(event) = event_rx.recv().await {
+            if let Ok(val) = serde_json::to_value(&event) {
+                REGISTRY.with(|cell| {
+                    let mut registry = cell.borrow_mut();
+                    if let Some(session) = registry.sessions.get_mut(&drain_handle) {
+                        session.pending_events.push(val);
+                    }
+                });
+            }
+        }
+    });
+
+    // Run the turn. Events are drained concurrently into pending_events.
     let run_result = agent.run(prompt.into()).await;
 
-    // Preserve the agent's session for future turns.
+    // Preserve the session BEFORE dropping the agent.
     let agent_session = agent.session().clone();
+
+    // Drop the agent to release its event_tx sender, which closes the channel
+    // and allows the drainer's recv() loop to terminate.
+    drop(agent);
+    let _ = event_drainer.await;
 
     match run_result {
         Ok(result) => {
@@ -905,6 +1165,7 @@ pub async fn start_turn(handle: u32, prompt: &str, options_json: &str) -> Result
                         .usage
                         .output_tokens
                         .saturating_add(result.usage.output_tokens);
+                    // Events already pushed to pending_events by the concurrent drainer.
                 }
             });
 
@@ -928,6 +1189,7 @@ pub async fn start_turn(handle: u32, prompt: &str, options_json: &str) -> Result
                 let mut registry = cell.borrow_mut();
                 if let Some(session) = registry.sessions.get_mut(&handle) {
                     session.meerkat_session = Some(agent_session);
+                    // Events already pushed to pending_events by the concurrent drainer.
                 }
             });
 
@@ -1006,12 +1268,23 @@ pub fn destroy_session(handle: u32) -> Result<(), JsValue> {
     })
 }
 
-/// Drain and return all pending events (placeholder for future event streaming).
+/// Drain and return all pending agent events from the last turn(s).
+///
+/// Returns a JSON array of `AgentEvent` objects. Each call drains the buffer;
+/// subsequent calls return `[]` until the next `start_turn` produces more events.
 #[wasm_bindgen]
-pub fn poll_events(_handle: u32) -> Result<String, JsValue> {
-    // Events will be populated once we wire AgentEvent streaming through
-    // the build_config event channel. For now, return empty array.
-    Ok("[]".to_string())
+pub fn poll_events(handle: u32) -> Result<String, JsValue> {
+    REGISTRY
+        .with(|cell| {
+            let mut registry = cell.borrow_mut();
+            let session = registry
+                .sessions
+                .get_mut(&handle)
+                .ok_or_else(|| format!("unknown session handle: {handle}"))?;
+            let events = std::mem::take(&mut session.pending_events);
+            serde_json::to_string(&events).map_err(|e| format!("serialize error: {e}"))
+        })
+        .map_err(|e: String| err_str("poll_events_error", e))
 }
 
 // ═══════════════════════════════════════════════════════════

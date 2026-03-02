@@ -1,6 +1,6 @@
 # Meerkat Examples Library
 
-31 fully functional examples covering every Meerkat surface and feature,
+32 fully functional examples covering every Meerkat surface and feature,
 from "Hello World" to production multi-agent systems.
 
 ## Quick Start
@@ -79,6 +79,7 @@ For runnable Rust examples, see `meerkat/examples/` (e.g., `cargo run -p meerkat
 | 029 | [web-incident-war-room-sh](029-web-incident-war-room-sh/) | Shell | Build browser-deployable incident-response mob bundle |
 | 030 | [web-dashboard-copilot-sh](030-web-dashboard-copilot-sh/) | Shell | Build embeddable web assistant for ops dashboards |
 | 031 | [wasm-mini-diplomacy-sh](031-wasm-mini-diplomacy-sh/) | Shell + Web | 9 autonomous agents across 4 WASM mobs wage a 3-faction territory war with strategy, diplomacy, and deception |
+| 032 | [wasm-webcm-agent](032-wasm-webcm-agent/) | Web (WASM) | Multi-provider coding agent mob in the browser — 4 agents (Anthropic + OpenAI + Gemini) collaborate via comms in a sandboxed Linux VM |
 
 ## Examples by Feature
 
@@ -96,12 +97,12 @@ For runnable Rust examples, see `meerkat/examples/` (e.g., `cargo run -p meerkat
 | **Semantic Memory** | 014 |
 | **Persistence** | 015 |
 | **Sub-Agents** | 016 |
-| **Mobs** | 017, 018, 019, 028, 029, 030, 031 |
+| **Mobs** | 017, 018, 019, 028, 029, 030, 031, 032 |
 | **Mobpack** | 028, 029, 030, 031 |
-| **WASM Web Build** | 029, 030, 031 |
-| **Comms** | 020, 024 |
-| **Host Mode** | 024 |
-| **Multi-Provider** | 021 |
+| **WASM Web Build** | 029, 030, 031, 032 |
+| **Comms** | 020, 024, 032 |
+| **Host Mode** | 024, 032 |
+| **Multi-Provider** | 021, 032 |
 | **REST API** | 022 |
 | **JSON-RPC** | 023 |
 | **Structured Output** | 008 |
@@ -114,6 +115,7 @@ For runnable Rust examples, see `meerkat/examples/` (e.g., `cargo run -p meerkat
 | **Python SDK** | 002, 007, 021, 022, 026 |
 | **TypeScript SDK** | 003, 008, 023, 027 |
 | **CLI (Shell)** | 004, 010, 028, 029, 030, 031 |
+| **WASM (Browser)** | 029, 030, 031, 032 |
 
 ## Prerequisites
 

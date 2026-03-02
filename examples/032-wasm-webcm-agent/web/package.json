@@ -1,0 +1,21 @@
+{
+  "name": "032-wasm-webcm-agent",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "vite": "^6.0.0",
+    "typescript": "^5.7.0"
+  },
+  "dependencies": {
+    "@xterm/xterm": "^5.5.0",
+    "@xterm/addon-fit": "^0.10.0",
+    "xterm-pty": "^0.11.1",
+    "marked": "^15.0.0",
+    "highlight.js": "^11.11.0"
+  }
+}

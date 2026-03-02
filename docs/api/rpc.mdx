@@ -55,22 +55,27 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <redb|js
 | `session/archive` | Session | Remove session from runtime |
 | `turn/start` | Turn | Start a new turn on existing session |
 | `turn/interrupt` | Turn | Cancel in-flight turn |
+| `mob/prefabs` | Mob | List mob prefab templates (mob feature) |
+| `mob/tools` | Mob | List mob tools (mob feature) |
+| `mob/call` | Mob | Call a mob tool (mob feature) |
+| `mob/stream_open` | Mob | Open mob event stream (mob feature) |
+| `mob/stream_close` | Mob | Close mob event stream (mob feature) |
 | `comms/send` | Comms | Push an external event into a session |
 | `comms/peers` | Comms | List discoverable peers (comms feature) |
 | `comms/stream_open` | Comms | Open scoped event stream (comms feature) |
 | `comms/stream_close` | Comms | Close scoped event stream (comms feature) |
 | `skills/list` | Skills | List skills with provenance |
 | `skills/inspect` | Skills | Inspect a skill's full content |
-| `mcp/add` | MCP | Stage live MCP server addition |
-| `mcp/remove` | MCP | Stage live MCP server removal |
-| `mcp/reload` | MCP | Reload one or all MCP servers |
+| `mcp/add` | MCP | Stage live MCP server addition (mcp feature) |
+| `mcp/remove` | MCP | Stage live MCP server removal (mcp feature) |
+| `mcp/reload` | MCP | Reload one or all MCP servers (mcp feature) |
 | `capabilities/get` | Capabilities | Runtime capability report |
 | `config/get` | Config | Read current config |
 | `config/set` | Config | Replace config |
 | `config/patch` | Config | Merge-patch config (RFC 7396) |
 
 <Note>
-RPC uses generic session/turn methods as the control plane. Mob capability is added by composing `meerkat-mob-mcp` (`MobMcpState` + `MobMcpDispatcher`) into `SessionBuildOptions.external_tools`, which exposes `mob_*` tools to the running agent session.
+The `mob/*` methods (feature-gated on `mob`) provide direct protocol-level mob orchestration. Additionally, mob capability within sessions is added by composing `meerkat-mob-mcp` (`MobMcpState` + `MobMcpDispatcher`) into `SessionBuildOptions.external_tools`, which exposes `mob_*` tools to the running agent.
 </Note>
 
 ## Protocol
@@ -124,18 +129,21 @@ Handshake. Returns server capabilities.
   "result": {
     "server_info": {
       "name": "meerkat-rpc",
-      "version": "0.4.0"
+      "version": "0.4.1"
     },
-    "contract_version": "0.4.0",
+    "contract_version": "0.4.1",
     "methods": [
       "initialize", "initialized",
       "session/create", "session/list", "session/read",
       "session/archive", "turn/start", "turn/interrupt",
-      "comms/send", "comms/peers", "comms/stream_open", "comms/stream_close",
-      "skills/list", "skills/inspect",
-      "mcp/add", "mcp/remove", "mcp/reload",
+      "config/get", "config/set", "config/patch",
       "capabilities/get",
-      "config/get", "config/set", "config/patch"
+      "skills/list", "skills/inspect",
+      "mob/prefabs", "mob/tools", "mob/call",
+      "mob/stream_open", "mob/stream_close",
+      "mcp/add", "mcp/remove", "mcp/reload",
+      "comms/send", "comms/peers",
+      "comms/stream_open", "comms/stream_close"
     ]
   }
 }
@@ -848,7 +856,7 @@ Return runtime capabilities with status resolved against config. This lists ever
   "jsonrpc": "2.0",
   "id": 8,
   "result": {
-    "contract_version": {"major": 0, "minor": 2, "patch": 0},
+    "contract_version": {"major": 0, "minor": 4, "patch": 1},
     "capabilities": [
       {
         "id": "sessions",
@@ -1086,12 +1094,30 @@ When a scoped event stream is open (via `comms/stream_open`), the server emits `
       "type": "text_delta",
       "delta": "Hello"
     },
-    "contract_version": "0.4.0"
+    "contract_version": "0.3.0"
   }
 }
 ```
 
 These events are scoped to the stream and only emitted while the stream is open.
+
+### mob/stream_event notifications
+
+When a mob event stream is open (via `mob/stream_open`), the server emits `mob/stream_event` notifications. Requires the `mob` feature.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "mob/stream_event",
+  "params": {
+    "stream_id": "550e8400-e29b-41d4-a716-446655440000",
+    "sequence": 1,
+    "event": { "...": "..." }
+  }
+}
+```
+
+For mob-wide streams the event is an `AttributedEvent` (source + profile + envelope). For per-member streams the event is the raw `EventEnvelope<AgentEvent>`.
 
 ## Error codes
 

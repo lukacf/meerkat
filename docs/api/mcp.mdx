@@ -32,14 +32,35 @@ The `meerkat-mcp-server` crate exposes Meerkat as MCP tools that other clients c
 |------|-------------|
 | `meerkat_run` | Start a new agent session |
 | `meerkat_resume` | Continue a session or provide tool results |
+| `meerkat_read` | Read a session's state |
+| `meerkat_sessions` | List sessions in the active realm |
+| `meerkat_interrupt` | Interrupt an in-flight turn |
+| `meerkat_archive` | Archive (remove) a session |
 | `meerkat_config` | Get or update server config |
 | `meerkat_capabilities` | Query runtime capabilities |
 | `meerkat_skills` | List or inspect available skills |
+| `meerkat_mcp_add` | Stage a live MCP server addition on an active session |
+| `meerkat_mcp_remove` | Stage a live MCP server removal on an active session |
+| `meerkat_mcp_reload` | Stage a live MCP server reload on an active session |
+| `meerkat_event_stream_open` | Open a session-level agent event stream |
+| `meerkat_event_stream_read` | Read the next item from an open event stream |
+| `meerkat_event_stream_close` | Close a previously opened event stream |
+| `meerkat_mob_prefabs` | List built-in mob prefab templates (mob feature) |
+| `meerkat_mob_event_stream_open` | Open a mob-level event stream (mob feature) |
+| `meerkat_mob_event_stream_read` | Read the next event from an open mob stream (mob feature) |
+| `meerkat_mob_event_stream_close` | Close a previously opened mob event stream (mob feature) |
+| `meerkat_comms_send` | Send a canonical comms command to a session (comms feature) |
+| `meerkat_comms_peers` | List peers visible to a session (comms feature) |
+| `meerkat_comms_stream_open` | Open a comms event stream (comms feature) |
+| `meerkat_comms_stream_read` | Read the next event from a comms stream (comms feature) |
+| `meerkat_comms_stream_close` | Close a previously opened comms stream (comms feature) |
 
 <Note>
-Mob capability for MCP session tools is provided by composing
-`meerkat-mob-mcp` (`MobMcpState` + `MobMcpDispatcher`) into the session build
-path (`SessionBuildOptions.external_tools`) used by `meerkat_run`/`meerkat_resume`.
+When the `mob` feature is enabled, `meerkat-mob-mcp` mob lifecycle tools (e.g.
+`mob_create`, `mob_list`, `mob_lifecycle`) are also exposed alongside the
+`meerkat_*` tools listed above. Additionally, mob capability within sessions is
+provided by composing `MobMcpDispatcher` into `SessionBuildOptions.external_tools`
+used by `meerkat_run`/`meerkat_resume`.
 </Note>
 
 ## Use MCP servers as tools (client)
@@ -526,7 +547,7 @@ Returns the runtime capability set with status resolved against config.
 
 ```json Response
 {
-  "contract_version": {"major": 0, "minor": 2, "patch": 0},
+  "contract_version": {"major": 0, "minor": 4, "patch": 1},
   "capabilities": [
     {
       "id": "sessions",

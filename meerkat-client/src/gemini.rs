@@ -301,8 +301,203 @@ fn normalize_gemini_function_parameters_schema(schema: &Value) -> Result<Value, 
             ),
         });
     }
+    lower_gemini_function_parameters_schema(&mut normalized);
     strip_gemini_function_parameters_unsupported_keywords(&mut normalized, 0);
     Ok(normalized)
+}
+
+fn lower_gemini_function_parameters_schema(value: &mut Value) {
+    match value {
+        Value::Object(obj) => {
+            collapse_single_literal_composition(obj, "oneOf");
+            collapse_single_literal_composition(obj, "anyOf");
+            normalize_const_keyword(obj);
+            normalize_type_array_keyword(obj);
+
+            for child in obj.values_mut() {
+                lower_gemini_function_parameters_schema(child);
+            }
+
+            normalize_nullable_composition(obj, "oneOf");
+            normalize_nullable_composition(obj, "anyOf");
+        }
+        Value::Array(items) => {
+            for item in items {
+                lower_gemini_function_parameters_schema(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collapse_single_literal_composition(obj: &mut Map<String, Value>, key: &str) {
+    let Some(variants) = obj.get(key).and_then(Value::as_array) else {
+        return;
+    };
+
+    let mut literals = Vec::new();
+    for variant in variants {
+        let Some(variant_obj) = variant.as_object() else {
+            return;
+        };
+        let Some(literal) = variant_obj.get("const").cloned() else {
+            return;
+        };
+        if variant_obj
+            .keys()
+            .any(|k| k != "const" && k != "title" && k != "description")
+        {
+            return;
+        }
+        literals.push(literal);
+    }
+
+    if literals.is_empty() {
+        return;
+    }
+
+    obj.remove(key);
+    obj.insert("enum".to_string(), Value::Array(literals.clone()));
+    if !obj.contains_key("type")
+        && let Some(common_type) = infer_common_literal_type(&literals)
+    {
+        obj.insert("type".to_string(), Value::String(common_type.to_string()));
+    }
+}
+
+fn infer_common_literal_type(values: &[Value]) -> Option<&'static str> {
+    let mut common: Option<&'static str> = None;
+    for value in values {
+        let value_type = infer_schema_type_from_literal(value)?;
+        match common {
+            Some(existing) if existing != value_type => return None,
+            Some(_) => {}
+            None => common = Some(value_type),
+        }
+    }
+    common
+}
+
+fn infer_schema_type_from_literal(value: &Value) -> Option<&'static str> {
+    match value {
+        Value::String(_) => Some("string"),
+        Value::Number(n) if n.is_i64() || n.is_u64() => Some("integer"),
+        Value::Number(_) => Some("number"),
+        Value::Bool(_) => Some("boolean"),
+        Value::Array(_) => Some("array"),
+        Value::Object(_) => Some("object"),
+        Value::Null => None,
+    }
+}
+
+fn normalize_const_keyword(obj: &mut Map<String, Value>) {
+    let Some(const_value) = obj.remove("const") else {
+        return;
+    };
+
+    if !obj.contains_key("enum") {
+        obj.insert("enum".to_string(), Value::Array(vec![const_value.clone()]));
+    }
+
+    if !obj.contains_key("type")
+        && let Some(value_type) = infer_schema_type_from_literal(&const_value)
+    {
+        obj.insert("type".to_string(), Value::String(value_type.to_string()));
+    }
+    if const_value.is_null() {
+        obj.insert("nullable".to_string(), Value::Bool(true));
+    }
+}
+
+fn normalize_type_array_keyword(obj: &mut Map<String, Value>) {
+    let Some(Value::Array(type_values)) = obj.get("type").cloned() else {
+        return;
+    };
+
+    let mut has_null = false;
+    let mut non_null_types: Vec<String> = Vec::new();
+    for value in type_values {
+        let Value::String(type_name) = value else {
+            return;
+        };
+        if type_name == "null" {
+            has_null = true;
+        } else if !non_null_types.iter().any(|t| t == &type_name) {
+            non_null_types.push(type_name);
+        }
+    }
+
+    if non_null_types.is_empty() {
+        obj.remove("type");
+        obj.insert("nullable".to_string(), Value::Bool(true));
+        return;
+    }
+
+    if non_null_types.len() == 1 {
+        obj.insert("type".to_string(), Value::String(non_null_types[0].clone()));
+        if has_null {
+            obj.insert("nullable".to_string(), Value::Bool(true));
+        }
+        return;
+    }
+
+    let mut variants = Vec::new();
+    for type_name in non_null_types {
+        let mut variant = Map::new();
+        variant.insert("type".to_string(), Value::String(type_name));
+        variants.push(Value::Object(variant));
+    }
+
+    obj.remove("type");
+    match obj.get_mut("anyOf") {
+        Some(Value::Array(existing)) => existing.extend(variants),
+        _ => {
+            obj.insert("anyOf".to_string(), Value::Array(variants));
+        }
+    }
+    if has_null {
+        obj.insert("nullable".to_string(), Value::Bool(true));
+    }
+}
+
+fn normalize_nullable_composition(obj: &mut Map<String, Value>, key: &str) {
+    let Some(Value::Array(variants)) = obj.get(key).cloned() else {
+        return;
+    };
+
+    let mut saw_null_branch = false;
+    let mut retained = Vec::new();
+    for variant in variants {
+        if is_null_schema(&variant) {
+            saw_null_branch = true;
+        } else {
+            retained.push(variant);
+        }
+    }
+
+    if !saw_null_branch {
+        return;
+    }
+
+    obj.insert("nullable".to_string(), Value::Bool(true));
+    if retained.is_empty() {
+        obj.remove(key);
+    } else {
+        obj.insert(key.to_string(), Value::Array(retained));
+    }
+}
+
+fn is_null_schema(value: &Value) -> bool {
+    let Value::Object(obj) = value else {
+        return false;
+    };
+    if matches!(obj.get("type"), Some(Value::String(t)) if t == "null") {
+        return true;
+    }
+    matches!(
+        obj.get("enum"),
+        Some(Value::Array(values)) if values.len() == 1 && values[0].is_null()
+    )
 }
 
 fn inline_local_schema_refs(
@@ -403,6 +598,7 @@ fn strip_gemini_function_parameters_unsupported_keywords(value: &mut Value, dept
             obj.remove("$ref");
             obj.remove("$id");
             obj.remove("$anchor");
+            obj.remove("const");
             obj.remove("title");
             // Keep root-level additionalProperties to avoid dropping top-level
             // caller intent. Nested additionalProperties remains unsupported on
@@ -733,6 +929,32 @@ struct GeminiUsage {
 mod tests {
     use super::*;
     use meerkat_core::{AssistantBlock, BlockAssistantMessage, ProviderMeta, UserMessage};
+
+    fn assert_no_const_or_type_arrays(value: &Value) {
+        match value {
+            Value::Object(obj) => {
+                assert!(
+                    obj.get("const").is_none(),
+                    "const must be lowered/removed for Gemini function parameters: {value:?}"
+                );
+                if let Some(schema_type) = obj.get("type") {
+                    assert!(
+                        !schema_type.is_array(),
+                        "type must be scalar in Gemini function parameters: {value:?}"
+                    );
+                }
+                for child in obj.values() {
+                    assert_no_const_or_type_arrays(child);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    assert_no_const_or_type_arrays(item);
+                }
+            }
+            _ => {}
+        }
+    }
 
     #[test]
     fn test_build_request_body_with_thinking_budget() -> Result<(), Box<dyn std::error::Error>> {
@@ -1345,9 +1567,9 @@ mod tests {
         Ok(())
     }
 
-    /// Regression: tool schema in request body should preserve union type arrays.
+    /// Regression: type arrays must be lowered for functionDeclaration parameters.
     #[test]
-    fn test_tool_schema_preserves_array_types() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_tool_schema_lowers_type_arrays() -> Result<(), Box<dyn std::error::Error>> {
         use meerkat_core::ToolDef;
         use std::sync::Arc;
 
@@ -1356,7 +1578,8 @@ mod tests {
             "properties": {
                 "name": {"type": "string"},
                 "age": {"type": ["integer", "null"]},
-                "email": {"type": ["string", "null"]}
+                "email": {"type": ["string", "null"]},
+                "score": {"type": ["string", "number"]}
             }
         });
 
@@ -1373,30 +1596,45 @@ mod tests {
             input_schema: schema,
         })]);
         let body = client.build_request_body(&request)?;
-        let preserved = &body["tools"][0]["functionDeclarations"][0]["parameters"];
+        let lowered = &body["tools"][0]["functionDeclarations"][0]["parameters"];
 
-        // Array types should be preserved
         assert_eq!(
-            preserved["properties"]["age"]["type"],
-            serde_json::json!(["integer", "null"]),
-            "['integer', 'null'] should be preserved"
+            lowered["properties"]["age"]["type"], "integer",
+            "['integer', 'null'] should lower to scalar type"
         );
         assert_eq!(
-            preserved["properties"]["email"]["type"],
-            serde_json::json!(["string", "null"]),
-            "['string', 'null'] should be preserved"
+            lowered["properties"]["age"]["nullable"],
+            serde_json::json!(true),
+            "null in type array should map to nullable=true"
         );
-        // Non-array types should be unchanged
         assert_eq!(
-            preserved["properties"]["name"]["type"], "string",
+            lowered["properties"]["email"]["type"], "string",
+            "['string', 'null'] should lower to scalar type"
+        );
+        assert_eq!(
+            lowered["properties"]["email"]["nullable"],
+            serde_json::json!(true),
+            "null in type array should map to nullable=true"
+        );
+        assert!(
+            lowered["properties"]["score"].get("type").is_none(),
+            "multi-type union should move from type array to anyOf variants"
+        );
+        assert!(
+            lowered["properties"]["score"].get("anyOf").is_some(),
+            "multi-type union should become anyOf"
+        );
+        assert_eq!(
+            lowered["properties"]["name"]["type"], "string",
             "'string' should remain 'string'"
         );
+        assert_no_const_or_type_arrays(lowered);
         Ok(())
     }
 
-    /// Regression: tool schema in request body should preserve composition keywords.
+    /// Regression: const-based enum encodings must be lowered for Gemini tool schemas.
     #[test]
-    fn test_tool_schema_preserves_oneof_anyof_allof() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_tool_schema_lowers_const_compositions() -> Result<(), Box<dyn std::error::Error>> {
         use meerkat_core::ToolDef;
         use std::sync::Arc;
 
@@ -1407,6 +1645,18 @@ mod tests {
                     "oneOf": [
                         {"const": "active"},
                         {"const": "inactive"}
+                    ]
+                },
+                "category": {
+                    "anyOf": [
+                        {
+                            "oneOf": [
+                                {"const": "alpha"},
+                                {"const": "beta"},
+                                {"const": "gamma"}
+                            ]
+                        },
+                        {"type": "null"}
                     ]
                 },
                 "value": {
@@ -1434,20 +1684,30 @@ mod tests {
             input_schema: schema,
         })]);
         let body = client.build_request_body(&request)?;
-        let preserved = &body["tools"][0]["functionDeclarations"][0]["parameters"];
+        let lowered = &body["tools"][0]["functionDeclarations"][0]["parameters"];
 
         assert!(
-            preserved["properties"]["status"].get("oneOf").is_some(),
-            "oneOf should be preserved"
+            lowered["properties"]["status"].get("enum").is_some(),
+            "const oneOf branches should collapse into enum"
+        );
+        assert_eq!(
+            lowered["properties"]["status"]["enum"],
+            serde_json::json!(["active", "inactive"])
+        );
+        assert_eq!(
+            lowered["properties"]["status"]["type"], "string",
+            "collapsed const enum should infer string type"
         );
         assert!(
-            preserved["properties"]["value"].get("anyOf").is_some(),
+            lowered["properties"]["category"]["nullable"] == serde_json::json!(true),
+            "null composition branch should set nullable=true"
+        );
+        assert!(
+            lowered["properties"]["value"].get("anyOf").is_some(),
             "anyOf should be preserved"
         );
-        assert!(
-            preserved.get("allOf").is_some(),
-            "allOf should be preserved"
-        );
+        assert!(lowered.get("allOf").is_some(), "allOf should be preserved");
+        assert_no_const_or_type_arrays(lowered);
         Ok(())
     }
 

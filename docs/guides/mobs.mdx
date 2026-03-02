@@ -1,473 +1,318 @@
 ---
 title: "Mobs"
-description: "Detailed guide to Meerkat mobs across Rust SDK, CLI, MCP, REST, RPC, and SDK surfaces."
+description: "Multi-agent orchestration: teams of agents with roles, communication, and coordinated workflows."
 icon: "users"
 ---
 
-`Mobs` are Meerkat's optional multi-agent extension for orchestrating named peers ("meerkats") under a shared definition.
+A **mob** is a team of agents that work together. Each agent has a role (profile) and agents communicate over signed channels (wiring). How they coordinate is up to you — autonomous agents can self-organize through peer messaging alone, you can define declarative flows (DAGs) for structured multi-step work, or combine both. For many use cases, wiring and skills are enough and preferable, as it gives agents more robust problem-solving through natural collaboration rather than rigid orchestration.
 
-## Surface behavior
+## Core concepts
 
-| Surface | Mob access pattern | Notes |
-|---|---|---|
-| CLI `run` / `resume` | Tool-driven (`mob_*` tools) | Primary CLI mob UX |
-| CLI `rkat mob ...` | Direct command lifecycle control | Secondary operational surface |
-| CLI `rkat mob pack/deploy/web build` | Portable artifact workflows (`.mobpack`, browser bundles) | Distribution + reproducible deployment |
-| Rust SDK (`meerkat-mob`) | Native runtime APIs (`MobBuilder`, `MobHandle`) | Full control; recommended for embedded systems |
-| MCP server (`rkat-mcp`) | `meerkat_run` / `meerkat_resume` session tools | Mob tools available via `meerkat-mob-mcp` composition |
-| REST (`rkat-rest`) | Session endpoints (`/sessions`, `/sessions/{id}/messages`) | Mob tools available via `meerkat-mob-mcp` composition |
-| RPC (`rkat-rpc`) | JSON-RPC session/turn methods | Mob tools available via `meerkat-mob-mcp` composition |
-| Python SDK | RPC-backed session/turn APIs | Inherits mob capability from RPC host composition |
-| TypeScript SDK | RPC-backed session/turn APIs | Inherits mob capability from RPC host composition |
+### Profiles
 
-## Shared mob capability model (`meerkat-mob-mcp`)
-
-Across non-Rust-SDK surfaces, mob capability is provided by composing the
-`meerkat-mob-mcp` dispatcher into session build options.
-
-Core components:
-
-- `MobMcpState`: mob runtime state manager.
-- `MobMcpDispatcher`: exposes `mob_*` tools through the standard tool interface.
-- `SessionBuildOptions.external_tools`: injection point for mob tool capability.
-
-```rust
-use std::sync::Arc;
-use meerkat_core::service::SessionBuildOptions;
-use meerkat_core::AgentToolDispatcher;
-use meerkat_mob::MobSessionService;
-use meerkat_mob_mcp::{MobMcpDispatcher, MobMcpState};
-
-fn mob_tool_dispatcher(
-    session_service: Arc<dyn MobSessionService>,
-) -> Arc<dyn AgentToolDispatcher> {
-    let state = Arc::new(MobMcpState::new(session_service));
-    Arc::new(MobMcpDispatcher::new(state))
-}
-
-let build = SessionBuildOptions {
-    external_tools: Some(mob_tool_dispatcher(session_service)),
-    ..Default::default()
-};
-```
-
-## Definition model
-
-Mob definitions usually contain:
-
-- `[mob]`: mob identity and optional orchestrator profile.
-- `[profiles.<name>]`: profile model, tools, addressing behavior.
-  - Optional `max_inline_peer_notifications`: controls inline peer lifecycle context (`None` default=50, `0` never inline, `-1` always inline, `>0` thresholded by peer count, `< -1` invalid).
-- `[skills.<name>]`: optional inline or referenced skills.
-- `[wiring]`: default auto-wiring and role wiring rules.
-- `[topology]`: optional policy for role-to-role communication.
-- `[supervisor]`: optional escalation behavior.
-- `[limits]`: optional execution limits and guardrails.
-- `[flows.<flow_id>]`: optional DAG flow definitions.
-
-Example:
-
-```toml
-[mob]
-id = "demo-mob"
-orchestrator = "lead"
-
-[profiles.lead]
-model = "claude-sonnet-4-5"
-skills = ["orchestrator"]
-peer_description = "Lead coordinator"
-external_addressable = true
-[profiles.lead.tools]
-builtins = true
-comms = true
-mob = true
-mob_tasks = true
-
-[profiles.worker]
-model = "claude-sonnet-4-5"
-skills = ["worker"]
-peer_description = "Execution worker"
-external_addressable = false
-runtime_mode = "autonomous_host"
-max_inline_peer_notifications = 20
-[profiles.worker.tools]
-builtins = true
-comms = true
-mob_tasks = true
-
-[wiring]
-auto_wire_orchestrator = true
-```
-
-## Rust SDK (detailed)
-
-Use `meerkat-mob` directly when you want full control over lifecycle, storage, and flow execution.
-
-Core Rust types:
-
-- `MobDefinition`
-- `MobStorage`
-- `MobBuilder`
-- `MobHandle`
-- `MobSessionService`
-- `MobRun` / `MobRunStatus`
-
-### Rust example: create and operate a mob
-
-```rust
-use std::sync::Arc;
-use meerkat_mob::{
-    FlowId, MeerkatId, MobBuilder, MobDefinition, MobSessionService, MobStorage, ProfileName,
-};
-
-async fn run_mob(
-    definition_toml: &str,
-    session_service: Arc<dyn MobSessionService>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let definition = MobDefinition::from_toml(definition_toml)?;
-    let storage = MobStorage::redb("./mob.redb")?;
-
-    let handle = MobBuilder::new(definition, storage)
-        .with_session_service(session_service)
-        .create()
-        .await?;
-
-    handle
-        .spawn(ProfileName::from("lead"), MeerkatId::from("lead-1"), None)
-        .await?;
-    handle
-        .spawn(ProfileName::from("worker"), MeerkatId::from("worker-1"), None)
-        .await?;
-    handle
-        .wire(MeerkatId::from("lead-1"), MeerkatId::from("worker-1"))
-        .await?;
-    handle
-        .send_message(
-            MeerkatId::from("lead-1"),
-            "Coordinate a short task plan.".to_string(),
-        )
-        .await?;
-
-    let run_id = handle
-        .run_flow(FlowId::from("demo_flow"), serde_json::json!({"severity":"critical"}))
-        .await?;
-    let _status = handle.flow_status(run_id).await?;
-
-    Ok(())
-}
-```
-
-### Rust example: in-memory orchestration helper
-
-`meerkat-mob-mcp` also provides a high-level in-memory state wrapper for mob tool dispatch:
-
-```rust
-use meerkat_mob::{MeerkatId, Prefab, ProfileName};
-use meerkat_mob_mcp::MobMcpState;
-
-async fn in_memory_demo() -> Result<(), Box<dyn std::error::Error>> {
-    let state = MobMcpState::new_in_memory();
-    let mob_id = state.mob_create_prefab(Prefab::Pipeline).await?;
-    state
-        .mob_spawn_spec(
-            &mob_id,
-            ProfileName::from("lead"),
-            MeerkatId::from("lead-1"),
-            None,
-        )
-        .await?;
-    let _status = state.mob_status(&mob_id).await?;
-    Ok(())
-}
-```
-
-## Core runtime concepts
-
-- **Mob**: persisted group state with member roster and event history.
-- **Meerkat member**: runtime participant identified by `meerkat_id`.
-- **Profile**: contract describing model/tooling for members.
-- **Wiring edge**: peer relationship controlling communication paths.
-- **Mob event stream**: append-only operational history.
-
-## Runtime modes (default path)
-
-Mob members now default to `autonomous_host` mode.
-
-- `autonomous_host` (default): long-lived host loop peer; collaboration arrives through comms/event injection.
-- `turn_driven` (explicit): member only runs when the mob runtime issues a direct turn.
-
-Selection rules:
-
-- Omitted `runtime_mode` -> `autonomous_host`
-- Override at profile level (`[profiles.<name>].runtime_mode`)
-- Override at spawn/tool-call level (`runtime_mode` argument)
-
-## Spawn Semantics (Deferred Initial Turn)
-
-Mob spawns now use deferred session startup:
-
-- `create_session()` registers the member session without running an LLM turn.
-- The mob actor starts autonomous host loops explicitly after spawn bookkeeping.
-- First model work happens on real input (`external_turn`, peer injection, or flow dispatch).
-- Provisioning runs in parallel across concurrent spawn requests; actor-side finalization remains serialized for deterministic event/roster/wiring updates.
-- Duplicate `meerkat_id` requests are rejected even while an earlier spawn for the same id is still provisioning.
-
-This keeps spawn latency bounded by session provisioning (not first-turn model latency), which is important for larger mobs.
-
-## Backends and identity
-
-Mob members can run with different backend kinds:
-
-- `subagent` backend => member kind `session`
-- `external` backend => member kind `backend_peer`
-
-Backends can be configured as:
-
-- definition default backend,
-- per-spawn override (where supported),
-- mixed backend deployments in a single mob.
-
-## Topology and policy
-
-Topology enforces role communication policy:
-
-- `mode = "strict"`: disallow disallowed edges.
-- `mode = "permissive"`: allow unless explicitly denied.
-- wildcard `"*"` role matching is supported.
-
-Use topology for structural governance of multi-agent communication.
-
-## Lifecycle states and operations
-
-Common lifecycle operations:
-
-- `create`, `list`, `status`, `destroy`
-- `spawn`, `retire`
-- `wire`, `unwire`
-- `turn`
-- `stop`, `resume`, `complete`
-
-Mobs persist status and events so lifecycle is inspectable and resumable.
-
-## Examples across surfaces
-
-### CLI (primary mob UX: tool-driven)
-
-```bash
-rkat run "Create a mob with one lead and three workers, wire lead to workers, then report mob status."
-rkat resume <session_id> "Retire worker-2, add worker-4, and summarize topology."
-```
-
-### CLI direct commands (operational)
-
-```bash
-rkat mob create --definition mob.toml
-rkat mob spawn team-mob lead lead-1
-rkat mob spawn team-mob worker worker-1 --runtime-mode turn_driven
-rkat mob wire team-mob lead-1 worker-1
-rkat mob status team-mob
-```
-
-## Portable mob deployment (mobpack)
-
-Mobpacks let you freeze a working mob as a single artifact, then deploy it consistently across environments.
-
-### Build + inspect + validate
-
-```bash
-rkat mob pack ./mobs/release-triage -o ./dist/release-triage.mobpack --sign ./keys/release.key
-rkat mob inspect ./dist/release-triage.mobpack
-rkat mob validate ./dist/release-triage.mobpack
-```
-
-### Deploy in strict trust mode
-
-```bash
-export RKAT_TRUST_POLICY=strict
-rkat mob deploy ./dist/release-triage.mobpack "triage the top 5 open production regressions"
-```
-
-### Deploy as RPC service
-
-```bash
-rkat mob deploy ./dist/release-triage.mobpack "boot service" --surface rpc
-```
-
-## Browser deployment (WASM web build)
-
-`rkat mob web build` compiles a browser-deployable bundle from `.mobpack`.
-
-### Prereqs
-
-```bash
-cargo install wasm-pack
-export PATH="$HOME/.cargo/bin:$PATH"
-```
-
-### Build
-
-```bash
-rkat mob web build ./dist/release-triage.mobpack -o ./dist/release-triage-web
-```
-
-Output includes:
-
-- `index.html`
-- `runtime.js`
-- `runtime_bg.wasm`
-- `mobpack.bin`
-- `manifest.web.toml` (derived)
-
-### Cool web pattern 1: In-browser incident war room
-
-1. Build `ops-war-room.mobpack` with lead + triage + comms profiles.
-2. Run `rkat mob web build`.
-3. Host the output behind your internal auth gateway.
-4. Open from a browser during incidents so responders get a zero-install multi-agent workspace.
-
-### Cool web pattern 2: Embedded release assistant in internal dashboard
-
-1. Build `release-assistant.mobpack`.
-2. Compile web bundle.
-3. Embed bundle route in your release dashboard app.
-4. Use it as a context-aware co-pilot for changelog synthesis, rollout checklist generation, and regression triage in the same UI.
-
-### REST
-
-With `meerkat-mob-mcp` composed into session build options:
-
-```bash
-curl -X POST http://127.0.0.1:8080/sessions \
-  -H "Content-Type: application/json" \
-  -d '{"prompt":"Use mob_* tools to create a lead/worker mob, wire workers, and report mob status."}'
-```
-
-REST uses session APIs as the control plane; mob operations happen via `mob_*` tools.
-
-### RPC
-
-With `meerkat-mob-mcp` composed into session build options:
+A profile is a template for an agent. It defines the model, tools, skills, and communication settings. When you spawn a member, you pick a profile and give it a unique ID.
 
 ```json
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
-{"jsonrpc":"2.0","id":2,"method":"session/create","params":{"prompt":"Use mob_* tools to set up a lead + workers topology and report status."}}
+"lead": {
+  "model": "claude-opus-4-6",
+  "peer_description": "Coordinates the team, assigns tasks",
+  "tools": { "builtins": true, "comms": true, "mob": true, "mob_tasks": true },
+  "skills": ["triage-workflow"],
+  "runtime_mode": "autonomous_host"
+}
 ```
 
-### MCP
+| Field | Description |
+|-------|-------------|
+| `model` | LLM model name |
+| `tools` | Tool categories: `builtins`, `shell`, `comms`, `memory`, `mob`, `mob_tasks`, `mcp` (server names) |
+| `skills` | Skill references to inject |
+| `peer_description` | Visible to peers during communication |
+| `runtime_mode` | `"autonomous_host"` (default) or `"turn_driven"` |
+| `output_schema` | JSON Schema for structured output extraction |
+| `external_addressable` | Whether this member is visible for cross-mob comms |
+
+### Wiring
+
+Wiring creates a trusted communication channel between two members. An agent can only send messages to peers it's wired to. Wiring is bidirectional — if A is wired to B, both can send to each other.
 
 ```json
-{
-  "name": "meerkat_run",
-  "arguments": {
-    "prompt": "Use mob_* tools to create a mob, spawn members, and summarize topology state."
+"wiring": {
+  "auto_wire_orchestrator": true,
+  "role_wiring": [
+    { "a": "analyst", "b": "analyst" }
+  ]
+}
+```
+
+- `auto_wire_orchestrator`: automatically wire every spawned member to the orchestrator
+- `role_wiring`: rules applied at spawn time — every member of role `a` gets wired to every member of role `b`
+
+### Runtime modes
+
+| Mode | Behavior | Use case |
+|------|----------|----------|
+| `autonomous_host` (default) | Continuous loop: wake on inbox message → process → respond → sleep | Long-lived agents that react to peer messages and events |
+| `turn_driven` | Only runs when explicitly given a turn | Controlled execution, deterministic ordering, flow steps |
+
+### Flows
+
+A flow is a DAG of steps. Each step targets a role, sends a message, and can depend on other steps. The flow engine dispatches steps in topological order, respecting dependencies and conditions.
+
+```json
+"flows": {
+  "triage": {
+    "steps": {
+      "scan": {
+        "role": "lead",
+        "message": "Scan the issue tracker and prioritize the top 5 issues"
+      },
+      "investigate": {
+        "role": "analyst",
+        "message": "Investigate your assigned issue in depth",
+        "depends_on": ["scan"],
+        "dispatch_mode": "fan_out"
+      },
+      "summarize": {
+        "role": "lead",
+        "message": "Synthesize all findings into an executive summary",
+        "depends_on": ["investigate"],
+        "depends_on_mode": "all"
+      }
+    }
   }
 }
 ```
 
-MCP uses session tools (`meerkat_run`/`meerkat_resume`) as the control plane; mob capability is provided by the same composed dispatcher.
+#### Step fields
 
-### Python SDK
+| Field | Description |
+|-------|-------------|
+| `role` | Profile name — the step runs on a member with this role |
+| `message` | Prompt sent to the member |
+| `depends_on` | Step IDs that must complete before this step starts |
+| `depends_on_mode` | `"all"` (default) — wait for every dependency. `"any"` — start when any one completes |
+| `dispatch_mode` | `"fan_out"` (default) — send to all members of the role. `"one_to_one"` — single member. `"fan_in"` — aggregate |
+| `condition` | Guard expression (`eq`, `in`, `gt`, `lt`, `and`, `or`, `not`) — step is skipped if false |
+| `branch` | Label for conditional routing |
+| `timeout_ms` | Per-step timeout |
+| `allowed_tools` / `blocked_tools` | Per-step tool overlay |
 
-```python
-from meerkat import MeerkatClient
+---
 
-client = MeerkatClient()
-await client.connect(realm_id="team-alpha")
-result = await client.create_session("Design a mob structure for incident triage.")
-print(result.text)
-await client.close()
+## Mob definition
+
+A mob definition is a JSON or TOML document that declares everything: profiles, wiring, flows, limits.
+
+```json
+{
+  "id": "release-triage",
+  "profiles": {
+    "lead": {
+      "model": "claude-opus-4-6",
+      "peer_description": "Coordinates triage",
+      "tools": { "builtins": true, "comms": true, "mob": true, "mob_tasks": true },
+      "skills": ["triage-workflow"]
+    },
+    "analyst": {
+      "model": "claude-sonnet-4-5",
+      "peer_description": "Investigates issues",
+      "tools": { "builtins": true, "shell": true, "comms": true },
+      "runtime_mode": "autonomous_host"
+    }
+  },
+  "wiring": {
+    "auto_wire_orchestrator": false,
+    "role_wiring": [{ "a": "lead", "b": "analyst" }]
+  },
+  "flows": {
+    "triage": {
+      "steps": {
+        "scan": { "role": "lead", "message": "Prioritize issues" },
+        "investigate": { "role": "analyst", "message": "Investigate", "depends_on": ["scan"], "dispatch_mode": "fan_out" },
+        "summarize": { "role": "lead", "message": "Summarize findings", "depends_on": ["investigate"] }
+      }
+    }
+  },
+  "limits": {
+    "max_flow_duration_ms": 300000,
+    "max_step_retries": 2,
+    "max_orphaned_turns": 10
+  }
+}
 ```
 
-The SDK itself is RPC-backed; mob capability comes from the host runtime composing `meerkat-mob-mcp`.
+### Prefabs and mobpacks
 
-### TypeScript SDK
+**Prefabs** are built-in definition templates for common patterns:
 
-```typescript
-import { MeerkatClient } from "@meerkat/sdk";
+| Prefab | Pattern | Profiles |
+|--------|---------|----------|
+| `coding_swarm` | Lead + workers for coding tasks | lead, worker |
+| `research_team` | Diverge/converge research | lead, researcher |
+| `pipeline` | Sequential stage handoffs | stages |
+| `review_board` | Multi-reviewer consensus | author, reviewer |
 
-const client = new MeerkatClient();
-await client.connect({ realmId: "team-alpha" });
-const result = await client.createSession({
-  prompt: "Design a mob structure for incident triage.",
-});
-console.log(result.text);
-await client.close();
+Prefabs are starting points — create from a prefab, then customize.
+
+**Mobpacks** are portable archives (`.mobpack`) that bundle a mob definition with its skills, config, and optional Ed25519 signatures into a single deployable artifact. Mobpacks can be deployed to any surface or compiled into a browser-runnable WASM bundle. See the [Mobpack guide](/guides/mobpack) for packaging, signing, trust policies, and web deployment.
+
+---
+
+## Lifecycle
+
+A mob goes through these phases:
+
+1. **Create** — register the definition, allocate storage
+2. **Spawn** — instantiate members from profiles (each member is a real agent session)
+3. **Wire** — establish communication channels between members
+4. **Operate** — members communicate, execute turns, run flows
+5. **Complete/Destroy** — mark as done or tear down
+
+Members can be added (`spawn`) or removed (`retire`) at any time. Wiring can change dynamically (`wire`, `unwire`). Flows can be started, polled, and cancelled.
+
+### Spawn semantics
+
+Spawning is deferred — `create_session()` registers the member without running an LLM turn. The first real work happens when the member receives input (a peer message, event injection, or flow dispatch). This keeps spawn latency bounded by session provisioning, not model latency.
+
+### State transitions
+
+| Operation | Effect |
+|-----------|--------|
+| `stop` | Pause all members |
+| `resume` | Restart paused members |
+| `complete` | Mark mob as done (members stop) |
+| `destroy` | Tear down all resources |
+
+---
+
+## Mob tools
+
+When mob capability is enabled on a session, the agent gets these tools:
+
+| Tool | Parameters | Description |
+|------|-----------|-------------|
+| `mob_create` | `definition` (JSON) | Create a mob |
+| `mob_list` | `mob_id?` | List mobs or get status of one |
+| `mob_lifecycle` | `mob_id`, `action` | Control state (stop/resume/complete/destroy) |
+| `mob_events` | `mob_id`, `after_cursor?`, `limit?` | Read event log |
+| `mob_run_flow` | `mob_id`, `flow_id`, `params?` | Execute a DAG flow |
+| `mob_flow_status` | `mob_id`, `run_id` | Check flow run status |
+| `mob_cancel_flow` | `mob_id`, `run_id` | Cancel a running flow |
+| `meerkat_spawn` | `mob_id`, `specs[]` | Spawn members (batch) |
+| `meerkat_retire` | `mob_id`, `meerkat_id` | Remove a member |
+| `meerkat_wire` | `mob_id`, `a`, `b` | Establish comms channel |
+| `meerkat_list` | `mob_id` | List members and state |
+| `meerkat_message` | `mob_id`, `meerkat_id`, `message` | Send a turn to a member |
+
+These tools are available on **every surface** — CLI, RPC, REST, MCP, Python SDK, TypeScript SDK. The agent orchestrates the mob by calling these tools in response to natural language instructions.
+
+---
+
+## Direct control plane
+
+In addition to tool-driven orchestration (where an agent calls mob tools), there is a direct control plane for programmatic access without going through an LLM:
+
+<Tabs>
+  <Tab title="JSON-RPC">
+    ```json
+    // List prefabs
+    {"jsonrpc":"2.0","id":1,"method":"mob/prefabs","params":{}}
+
+    // List available mob tools
+    {"jsonrpc":"2.0","id":2,"method":"mob/tools","params":{}}
+
+    // Call a mob tool directly (no LLM)
+    {"jsonrpc":"2.0","id":3,"method":"mob/call","params":{
+      "name": "mob_create",
+      "arguments": {"definition": {"id":"my-mob","profiles":{}}}
+    }}
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    # List prefabs
+    curl http://localhost:8080/mob/prefabs
+
+    # List mob tools
+    curl http://localhost:8080/mob/tools
+
+    # Call a mob tool directly
+    curl -X POST http://localhost:8080/mob/call \
+      -H "Content-Type: application/json" \
+      -d '{"name":"mob_create","arguments":{"definition":{"id":"my-mob","profiles":{}}}}'
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    prefabs = await client.list_mob_prefabs()
+    tools = await client.list_mob_tools()
+    result = await client.call_mob_tool("mob_create", {"definition": {...}})
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    const prefabs = await client.listMobPrefabs();
+    const tools = await client.listMobTools();
+    const result = await client.callMobTool("mob_create", { definition: {...} });
+    ```
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    let definition = MobDefinition::from_json(json)?;
+    let handle = MobBuilder::new(definition, MobStorage::in_memory())
+        .with_session_service(service)
+        .allow_ephemeral_sessions(true)
+        .create()
+        .await?;
+
+    handle.spawn("lead", "lead-1", None).await?;
+    handle.wire("lead-1", "worker-1").await?;
+    handle.run_flow("triage", json!({})).await?;
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Topology
+
+Topology rules govern which roles can communicate. Use topology for structural governance in sensitive deployments.
+
+| Mode | Behavior |
+|------|----------|
+| `advisory` (default) | Log violations but allow communication |
+| `strict` | Block disallowed edges |
+
+```json
+"topology": {
+  "mode": "strict",
+  "rules": [
+    { "from_role": "analyst", "to_role": "lead", "allowed": true },
+    { "from_role": "analyst", "to_role": "analyst", "allowed": false }
+  ]
+}
 ```
 
-The SDK itself is RPC-backed; mob capability comes from the host runtime composing `meerkat-mob-mcp`.
+Wildcard `"*"` matches any role.
 
-## Observability and persistence
+---
 
-- operational event audit trail (spawn/wire/retire/state transitions),
-- member identity and profile mapping,
-- terminal status persistence for post-run inspection.
+## When to use mobs
 
-Observability is available through:
+| Situation | Use |
+|-----------|-----|
+| Single agent with tools | Plain session |
+| Multiple agents that need to collaborate | Mob |
+| Agents with different roles/capabilities | Mob with profiles |
+| Coordinated multi-step workflows | Mob with flows |
+| Structured communication policies | Mob with topology |
 
-- tool responses in `run`/`resume`,
-- explicit command outputs (`mob status`, `mob list`),
-- flow run status when using flows.
-
-## When to use mobs vs plain sessions
-
-Use plain sessions when you need one agent with tools.
-
-Use mobs when you need:
-
-- stable multi-agent coordination,
-- role-based capability separation,
-- explicit wiring and lifecycle control,
-- persistent graph/event state beyond one turn.
-
-## Mob flows (optional subfeature)
-
-Flows are an advanced DAG orchestration layer on top of standard mob lifecycle.
-
-Flow capabilities include:
-
-- step dependencies (`depends_on`, `depends_on_mode`),
-- conditional branches (`condition`, `branch`),
-- dispatch modes (`one_to_one`, `fan_out`, `fan_in`),
-- collection policies (`any`, `all`, `quorum`),
-- run and step ledgers for execution history.
-
-CLI flow commands:
-
-```bash
-rkat mob flows <mob_id>
-rkat mob run-flow <mob_id> --flow <flow_id> [--params '{"key":"value"}'] [--stream] [--stream-view <primary|mux|focus>] [--stream-focus <scope_id>]
-rkat mob flow-status <mob_id> <run_id>
-```
-
-Flow definitions live under `[flows.<flow_id>]` in the mob definition.
-
-Scoped streaming for flow runs:
-
-- `--stream-view primary` (default): show only the run primary member scope.
-- `--stream-view mux`: show all member and sub-agent scopes with `[<scope_id>]` prefixes.
-- `--stream-view focus --stream-focus <scope_id>`: show one exact scope.
-
-Scope selector format:
-
-- `primary`
-- `mob:<member_ref>`
-- `primary/sub:<agent_id>`
-- `mob:<member_ref>/sub:<agent_id>`
-
-Examples:
-
-```bash
-rkat mob run-flow team-mob --flow incident_response --stream --stream-view mux
-rkat mob run-flow team-mob --flow incident_response --stream --stream-view focus --stream-focus mob:lead-1
-```
-
-Troubleshooting:
-
-- Focus scope not seen: command exits non-zero and prints discovered scopes from the run.
-- Too much interleaving in `mux`: narrow output with `focus` on a member or nested sub-agent scope.
+---
 
 ## See also
 
-- [CLI commands](/cli/commands)
-- [Comms guide](/guides/comms)
-- [API reference](/reference/api-reference)
+- [Examples: Mobs](/examples/mobs) — code examples across all surfaces
+- [Examples: Mobpack](/examples/mobpack) — portable deployment
+- [Examples: WASM](/examples/wasm) — browser deployment
+- [Comms guide](/guides/comms) — inter-agent messaging details

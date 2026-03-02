@@ -125,4 +125,3 @@ export function registerWebCMTools(runtime: ToolRuntime, vm: WebCMHost): void {
     },
   );
 }
-

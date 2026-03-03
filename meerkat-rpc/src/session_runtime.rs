@@ -779,13 +779,14 @@ impl SessionRuntime {
                 .await;
         }
 
-        let delta = adapter.apply_staged().await.map_err(|e| RpcError {
+        let result = adapter.apply_staged().await.map_err(|e| RpcError {
             code: error::INTERNAL_ERROR,
             message: format!("failed to apply staged MCP operations: {e}"),
             data: None,
         })?;
 
-        if delta
+        if result
+            .delta
             .lifecycle_actions
             .iter()
             .any(|action| matches!(action, McpLifecycleAction::RemovingStarted { .. }))
@@ -793,7 +794,7 @@ impl SessionRuntime {
             Self::spawn_mcp_drain_task_if_needed(adapter.clone(), drain_task_running, lifecycle_tx);
         }
 
-        queued_actions.extend(delta.lifecycle_actions);
+        queued_actions.extend(result.delta.lifecycle_actions);
         if queued_actions.is_empty() {
             return Ok(());
         }

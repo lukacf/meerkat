@@ -48,4 +48,28 @@ if [ -f "$PACKAGE_JSON" ]; then
     echo "  Updated: $PACKAGE_JSON"
 fi
 
+# ── Web SDK (@rkat/web) ───────────────────────────────────────────────────
+
+WEB_PACKAGE_JSON="$ROOT/sdks/web/package.json"
+if [ -f "$WEB_PACKAGE_JSON" ]; then
+    node -e "
+        const fs = require('fs');
+        const pkg = JSON.parse(fs.readFileSync('$WEB_PACKAGE_JSON', 'utf8'));
+        pkg.version = '$VERSION';
+        fs.writeFileSync('$WEB_PACKAGE_JSON', JSON.stringify(pkg, null, 2) + '\n');
+    "
+    echo "  Updated: $WEB_PACKAGE_JSON"
+fi
+
+# Update EXPECTED_VERSION in web SDK runtime.ts
+WEB_RUNTIME_TS="$ROOT/sdks/web/src/runtime.ts"
+if [ -f "$WEB_RUNTIME_TS" ]; then
+    if sed --version >/dev/null 2>&1; then
+        sed -i "s/^const EXPECTED_VERSION = '.*';/const EXPECTED_VERSION = '$VERSION';/" "$WEB_RUNTIME_TS"
+    else
+        sed -i '' "s/^const EXPECTED_VERSION = '.*';/const EXPECTED_VERSION = '$VERSION';/" "$WEB_RUNTIME_TS"
+    fi
+    echo "  Updated: $WEB_RUNTIME_TS (EXPECTED_VERSION)"
+fi
+
 echo "Done. Run 'make verify-version-parity' to confirm."

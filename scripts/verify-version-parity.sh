@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Verify version parity across Rust workspace, Python SDK, TypeScript SDK,
-# contract version, and generated schema artifacts.
+# Web SDK, contract version, and generated schema artifacts.
 #
 # Exit 0 if everything is in sync, exit 1 with diagnostics on any mismatch.
 
@@ -31,15 +31,34 @@ print(d['project']['version'])
 
 TS_VER=$(node -p "require('$ROOT/sdks/typescript/package.json').version")
 
+WEB_VER=""
+if [ -f "$ROOT/sdks/web/package.json" ]; then
+    WEB_VER=$(node -p "require('$ROOT/sdks/web/package.json').version")
+fi
+
 echo "Package versions:"
 echo "  Cargo (meerkat):  $CARGO_VER"
 echo "  Python SDK:       $PY_VER"
 echo "  TypeScript SDK:   $TS_VER"
+echo "  Web SDK:          ${WEB_VER:-<missing>}"
 
-if [ "$CARGO_VER" != "$PY_VER" ] || [ "$CARGO_VER" != "$TS_VER" ]; then
-    red "FAIL: package version mismatch"
+PKG_OK=true
+if [ "$CARGO_VER" != "$PY_VER" ]; then
+    red "FAIL: Python SDK version mismatch ($PY_VER != $CARGO_VER)"
+    PKG_OK=false
     FAIL=1
-else
+fi
+if [ "$CARGO_VER" != "$TS_VER" ]; then
+    red "FAIL: TypeScript SDK version mismatch ($TS_VER != $CARGO_VER)"
+    PKG_OK=false
+    FAIL=1
+fi
+if [ -n "$WEB_VER" ] && [ "$CARGO_VER" != "$WEB_VER" ]; then
+    red "FAIL: Web SDK version mismatch ($WEB_VER != $CARGO_VER)"
+    PKG_OK=false
+    FAIL=1
+fi
+if $PKG_OK; then
     green "  Package versions: OK"
 fi
 

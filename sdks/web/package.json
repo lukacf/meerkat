@@ -1,0 +1,29 @@
+{
+  "name": "@rkat/web",
+  "version": "0.4.1",
+  "description": "Browser SDK for Meerkat agent runtime (WASM)",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "wasm"
+  ],
+  "scripts": {
+    "build:wasm": "RUSTFLAGS='--cfg getrandom_backend=\"wasm_js\"' wasm-pack build ../../meerkat-web-runtime --target web --out-dir ../../sdks/web/wasm",
+    "build:ts": "tsc",
+    "build": "npm run build:wasm && npm run build:ts",
+    "prepublishOnly": "npm run build",
+    "test": "tsc --noEmit -p tests/tsconfig.json"
+  },
+  "license": "MIT OR Apache-2.0",
+  "devDependencies": {
+    "typescript": "^5.5"
+  }
+}

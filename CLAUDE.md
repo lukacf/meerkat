@@ -90,7 +90,7 @@ meerkat-web-runtime → WASM browser deployment target (wasm_bindgen exports)
 
 **Agent construction:** All surfaces use `AgentFactory::build_agent()` for centralized prompt assembly, provider resolution, tool dispatcher setup, comms wiring, and hook resolution. Zero `AgentBuilder::new()` calls in surface crates.
 
-**Session lifecycle:** All surfaces (CLI, REST, MCP Server, JSON-RPC, Rust/Python/TypeScript SDKs) route through `SessionService` for the full session lifecycle (create/turn/interrupt/read/list/archive). `FactoryAgentBuilder` bridges `AgentFactory` into the `SessionAgentBuilder` trait. Per-request build data is passed in-band via `CreateSessionRequest.build` / `SessionBuildOptions`.
+**Session lifecycle:** All surfaces (CLI, REST, MCP Server, JSON-RPC, WASM, Rust/Python/TypeScript/Web SDKs) route through `SessionService` for the full session lifecycle (create/turn/interrupt/read/list/archive). `FactoryAgentBuilder` bridges `AgentFactory` into the `SessionAgentBuilder` trait. Per-request build data is passed in-band via `CreateSessionRequest.build` / `SessionBuildOptions`.
 
 **Capability matrix:** See `docs/reference/capability-matrix.mdx` for build profiles, error codes, and feature behavior. See `docs/reference/session-contracts.mdx` for concurrency, durability, and compaction semantics.
 
@@ -186,6 +186,9 @@ The RPC server speaks JSON-RPC 2.0 over newline-delimited JSON (JSONL) on stdin/
 - `meerkat-core/src/tool_scope.rs` - Runtime tool visibility control
 - `meerkat-mob-pack/src/lib.rs` - Mobpack archive format, signing, trust
 - `meerkat-web-runtime/src/lib.rs` - WASM browser deployment (wasm_bindgen exports)
+- `sdks/web/src/runtime.ts` - @rkat/web MeerkatRuntime class (browser SDK entry point)
+- `sdks/web/src/mob.ts` - @rkat/web Mob class (mob lifecycle wrapper)
+- `sdks/web/src/session.ts` - @rkat/web Session class (direct session wrapper)
 
 ## CI/CD and Versioning
 
@@ -255,7 +258,7 @@ Installed via `make install-hooks`. Two stages:
 
 ### Version Parity Contract
 
-Five files must agree on the same version:
+Six files must agree on the same version:
 
 | File | Field |
 |------|-------|
@@ -263,6 +266,7 @@ Five files must agree on the same version:
 | `meerkat-contracts/src/version.rs` | `ContractVersion::CURRENT` |
 | `sdks/python/pyproject.toml` | `version` |
 | `sdks/typescript/package.json` | `version` |
+| `sdks/web/package.json` | `version` |
 | `artifacts/schemas/version.json` | `contract_version` |
 
 Additionally, all 18 internal crate dependencies in `Cargo.toml` must match the workspace version.

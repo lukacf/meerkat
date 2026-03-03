@@ -296,6 +296,10 @@ pub struct AgentBuildConfig {
     /// Additional instruction sections appended to the system prompt after skill
     /// assembly, before tool instructions. Order preserved.
     pub additional_instructions: Option<Vec<String>>,
+    /// When true, the surface should block after MCP tool loading until all
+    /// servers finish connecting before starting the first agent turn.
+    /// Default: false (servers connect in the background).
+    pub wait_for_mcp: bool,
 }
 
 impl std::fmt::Debug for AgentBuildConfig {
@@ -352,6 +356,7 @@ impl std::fmt::Debug for AgentBuildConfig {
             )
             .field("app_context", &self.app_context.is_some())
             .field("additional_instructions", &self.additional_instructions)
+            .field("wait_for_mcp", &self.wait_for_mcp)
             .finish()
     }
 }
@@ -397,6 +402,7 @@ impl AgentBuildConfig {
             skill_engine_override: None,
             app_context: None,
             additional_instructions: None,
+            wait_for_mcp: false,
         }
     }
 
@@ -1549,6 +1555,35 @@ impl AgentFactory {
             }
             prompt
         };
+
+        // 11f. Wait for pending MCP connections when requested.
+        //
+        // poll_external_updates() is forwarded through the full dispatcher
+        // chain (CompositeDispatcher → ToolGateway → McpRouterAdapter), so
+        // this drains background MCP connection results regardless of how
+        // many dispatchers are composed.
+        if build_config.wait_for_mcp {
+            let timeout = std::time::Duration::from_secs(60);
+            let started = meerkat_core::time_compat::Instant::now();
+            loop {
+                let update = tools.poll_external_updates().await;
+                if update.pending.is_empty() {
+                    break;
+                }
+                if started.elapsed() >= timeout {
+                    tracing::warn!(
+                        "wait_for_mcp timed out after {}s with {} server(s) still pending",
+                        timeout.as_secs(),
+                        update.pending.len()
+                    );
+                    break;
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                #[cfg(target_arch = "wasm32")]
+                tokio_with_wasm::alias::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        }
 
         // 12. Build AgentBuilder
         let budget_limits = build_config

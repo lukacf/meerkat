@@ -177,6 +177,17 @@ rkat mcp reload --session <SESSION_ID> --live-server-url http://localhost:8080 -
 
 Config is stored in `.rkat/mcp.toml` (project) or `~/.rkat/mcp.toml` (user). Project scope wins on name collisions.
 
+Each server supports an optional `connect_timeout_secs` field (default: 10 seconds) covering the entire connect + handshake + tool enumeration budget:
+
+```toml
+# .rkat/mcp.toml
+[[servers]]
+name = "slow-server"
+command = "npx"
+args = ["-y", "@my/slow-mcp-server"]
+connect_timeout_secs = 30
+```
+
 ## Live MCP controls
 
 Add, remove, or reload MCP servers on a running session without restarting the agent. Changes are staged and applied at the next turn boundary.

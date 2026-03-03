@@ -138,6 +138,35 @@ impl McpRouterAdapter {
         Ok(router.has_removing_servers())
     }
 
+    /// Block until all pending MCP connections complete or timeout expires.
+    ///
+    /// Returns notices for completed/failed servers. Useful for CLI `--wait-for-mcp`
+    /// and SDK `wait_for_mcp` workflows where the caller needs tools to be available
+    /// before the first agent turn.
+    pub async fn wait_until_ready(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Vec<meerkat_core::ExternalToolNotice> {
+        let mut all_notices = Vec::new();
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let update = self.poll_external_updates().await;
+            all_notices.extend(update.notices);
+            if update.pending.is_empty() {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    "wait_until_ready timed out after {}s with pending servers",
+                    timeout.as_secs()
+                );
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        all_notices
+    }
+
     /// Test helper for cross-crate runtime integration tests.
     pub async fn set_inflight_calls_for_testing(
         &self,
@@ -220,5 +249,76 @@ impl AgentToolDispatcher for McpRouterAdapter {
             Ordering::Release,
         );
         update
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::McpRouter;
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+
+    fn test_server_path() -> PathBuf {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = manifest_dir.parent().expect("workspace root");
+        workspace_root.join("target/debug/mcp-test-server")
+    }
+
+    fn skip_if_no_test_server() -> Option<PathBuf> {
+        let path = test_server_path();
+        if path.exists() {
+            Some(path)
+        } else {
+            eprintln!(
+                "Skipping: mcp-test-server not built. \
+                 Run `cargo build -p mcp-test-server` first."
+            );
+            None
+        }
+    }
+
+    fn test_server_config(name: &str, path: &Path) -> crate::McpServerConfig {
+        crate::McpServerConfig::stdio(
+            name,
+            path.to_string_lossy().to_string(),
+            vec![],
+            HashMap::new(),
+        )
+    }
+
+    #[tokio::test]
+    async fn wait_until_ready_returns_notices_when_server_connects() {
+        let Some(server_path) = skip_if_no_test_server() else {
+            return;
+        };
+
+        let mut router = McpRouter::new();
+        router.stage_add(test_server_config("test-srv", &server_path));
+        router.apply_staged().await.expect("apply staged");
+
+        let adapter = McpRouterAdapter::new(router);
+
+        let notices = adapter.wait_until_ready(Duration::from_secs(5)).await;
+
+        // Server should have connected successfully.
+        assert!(
+            !notices.is_empty(),
+            "expected at least one notice from the connecting server"
+        );
+        assert!(
+            notices.iter().any(|n| n.server == "test-srv"),
+            "notice should reference the staged server"
+        );
+
+        // After waiting, pending should be empty.
+        let update = adapter.poll_external_updates().await;
+        assert!(
+            update.pending.is_empty(),
+            "no servers should be pending after wait_until_ready"
+        );
+
+        adapter.shutdown().await;
     }
 }

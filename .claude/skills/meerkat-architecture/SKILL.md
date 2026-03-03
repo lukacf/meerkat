@@ -101,6 +101,18 @@ MobBuilder::new(definition, storage)
 
 **Key files:** `meerkat-core/src/tool_scope.rs`, `meerkat-core/src/agent/state.rs` (boundary apply), `meerkat-mcp/src/router.rs` (staged MCP ops).
 
+### Non-blocking MCP loading pipeline
+
+MCP servers connect in parallel via `stage_add()` + `apply_staged()` which spawns background tasks per server. Completions flow through a pending channel pattern:
+
+1. **`McpRouter`** — `pending_tx`/`pending_rx` channel, `pending_servers` map, generation-based staleness detection.
+2. **`McpRouterAdapter`** — bridges to `AgentToolDispatcher`. `has_pending` `AtomicBool` (Acquire/Release) gates fast-path skip of write lock in `poll_external_updates()`.
+3. **Agent loop** — `CallingLlm` calls `tools.poll_external_updates()` before tool capture. Returns `ExternalToolUpdate { notices, pending }`. Emits `ToolConfigChanged` for each notice. Manages `[MCP_PENDING]` synthetic user message lifecycle (strip + re-add on every iteration).
+4. **Forwarding** — `poll_external_updates()` forwarded through `CompositeDispatcher` → `ToolGateway` (aggregates + deduplicates by `(server, operation, status)`) → `FilteredToolDispatcher` (passthrough).
+5. **`wait_until_ready(timeout)`** — poll loop on `McpRouterAdapter` for surfaces that need blocking (CLI `--wait-for-mcp`, SDK `AgentBuildConfig.wait_for_mcp`).
+
+**Key files:** `meerkat-mcp/src/router.rs`, `meerkat-mcp/src/adapter.rs`, `meerkat-core/src/agent/state.rs` (CallingLlm boundary), `meerkat-core/src/gateway.rs` (ToolGateway dedup).
+
 ## Comms Model
 
 - **InprocRegistry** — process-global peer discovery. All sessions in the same process share it.

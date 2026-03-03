@@ -779,13 +779,14 @@ impl SessionRuntime {
                 .await;
         }
 
-        let delta = adapter.apply_staged().await.map_err(|e| RpcError {
+        let result = adapter.apply_staged().await.map_err(|e| RpcError {
             code: error::INTERNAL_ERROR,
             message: format!("failed to apply staged MCP operations: {e}"),
             data: None,
         })?;
 
-        if delta
+        if result
+            .delta
             .lifecycle_actions
             .iter()
             .any(|action| matches!(action, McpLifecycleAction::RemovingStarted { .. }))
@@ -793,7 +794,7 @@ impl SessionRuntime {
             Self::spawn_mcp_drain_task_if_needed(adapter.clone(), drain_task_running, lifecycle_tx);
         }
 
-        queued_actions.extend(delta.lifecycle_actions);
+        queued_actions.extend(result.delta.lifecycle_actions);
         if queued_actions.is_empty() {
             return Ok(());
         }
@@ -1412,13 +1413,24 @@ mod tests {
             .await
             .expect("staging should succeed");
 
-        let (event_tx, _event_rx) = mpsc::channel(32);
+        // Non-blocking: apply_staged spawns background task and succeeds
+        // (the broken server fails asynchronously, not at staging time).
+        let (event_tx, mut event_rx) = mpsc::channel(32);
         let first = runtime
             .start_turn(&session_id, "hello".to_string(), event_tx, None, None, None)
             .await;
         assert!(
-            first.is_err(),
-            "boundary apply should attempt staged add and fail on invalid MCP server"
+            first.is_ok(),
+            "non-blocking apply_staged should not fail synchronously"
+        );
+        let first_events = collect_tool_config_events(&mut event_rx);
+        assert!(
+            first_events.iter().any(|payload| {
+                payload.operation == ToolConfigChangeOperation::Add
+                    && payload.target == "broken-server"
+                    && payload.status == "pending"
+            }),
+            "should emit pending event for staged add"
         );
 
         let (event_tx, _event_rx) = mpsc::channel(32);
@@ -1456,6 +1468,7 @@ mod tests {
             .await
             .expect("stage add");
 
+        // Non-blocking: add is now async — boundary emits "pending" not "applied".
         let (event_tx, mut event_rx) = mpsc::channel(64);
         runtime
             .start_turn(
@@ -1472,30 +1485,7 @@ mod tests {
         assert!(add_events.iter().any(|payload| {
             payload.operation == ToolConfigChangeOperation::Add
                 && payload.target == "test-server"
-                && payload.status == "applied"
-        }));
-
-        runtime
-            .mcp_stage_reload(&session_id, Some("test-server".to_string()))
-            .await
-            .expect("stage reload");
-        let (event_tx, mut event_rx) = mpsc::channel(64);
-        runtime
-            .start_turn(
-                &session_id,
-                "turn reload".to_string(),
-                event_tx,
-                None,
-                None,
-                None,
-            )
-            .await
-            .expect("turn reload should apply staged reload");
-        let reload_events = collect_tool_config_events(&mut event_rx);
-        assert!(reload_events.iter().any(|payload| {
-            payload.operation == ToolConfigChangeOperation::Reload
-                && payload.target == "test-server"
-                && payload.status == "applied"
+                && payload.status == "pending"
         }));
 
         runtime

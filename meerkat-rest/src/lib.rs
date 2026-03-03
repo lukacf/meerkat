@@ -1823,13 +1823,14 @@ async fn apply_mcp_boundary(
     }
 
     // Apply staged operations — fail the turn on error.
-    let delta = adapter
+    let result = adapter
         .apply_staged()
         .await
         .map_err(|e| ApiError::Internal(format!("failed to apply staged MCP operations: {e}")))?;
 
     // Spawn drain task if any removals started.
-    if delta
+    if result
+        .delta
         .lifecycle_actions
         .iter()
         .any(|a| matches!(a, McpLifecycleAction::RemovingStarted { .. }))
@@ -1837,7 +1838,7 @@ async fn apply_mcp_boundary(
         spawn_mcp_drain_task(adapter, drain_task_running, lifecycle_tx);
     }
 
-    queued_actions.extend(delta.lifecycle_actions);
+    queued_actions.extend(result.delta.lifecycle_actions);
     if !queued_actions.is_empty() {
         let source_id = format!("session:{session_id}");
         meerkat::surface::emit_mcp_lifecycle_events(

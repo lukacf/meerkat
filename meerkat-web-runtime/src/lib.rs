@@ -83,6 +83,45 @@ fn init_tracing() {
 fn init_tracing() {}
 
 // ═══════════════════════════════════════════════════════════
+// reqwest wasm32 workaround — Response.url backfill
+// ═══════════════════════════════════════════════════════════
+
+/// Wrap `globalThis.fetch` so that `Response.url` is never empty.
+///
+/// reqwest on wasm32 calls `Url::parse(response.url)` and panics when the
+/// string is empty (`RelativeUrlWithoutBase`). Browser-native fetch always
+/// fills `Response.url`, but constructed responses (`new Response(body, init)`)
+/// have `.url === ""` because the property is read-only per spec. This breaks
+/// any host that proxies fetch (reverse proxy, service worker, test harness).
+///
+/// Workaround for <https://github.com/seanmonstar/reqwest/issues/2489>.
+/// Remove once reqwest ships a fix upstream.
+#[cfg(target_arch = "wasm32")]
+fn patch_fetch_response_url() {
+    use std::sync::Once;
+    static PATCH: Once = Once::new();
+    PATCH.call_once(|| {
+        if let Err(e) = js_sys::eval(
+            r"(function(){
+  var f=globalThis.fetch;
+  globalThis.fetch=function(i,o){
+    var u=typeof i==='string'?i:i instanceof Request?i.url:String(i);
+    return f.call(globalThis,i,o).then(function(r){
+      if(!r.url&&u)Object.defineProperty(r,'url',{value:u});
+      return r;
+    });
+  };
+})()",
+        ) {
+            tracing::warn!("fetch response-url patch failed: {:?}", e);
+        }
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn patch_fetch_response_url() {}
+
+// ═══════════════════════════════════════════════════════════
 // Constants
 // ═══════════════════════════════════════════════════════════
 
@@ -772,6 +811,7 @@ fn build_wasm_tool_dispatcher() -> Result<Arc<dyn meerkat_core::AgentToolDispatc
 #[wasm_bindgen]
 pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsValue, JsValue> {
     init_tracing();
+    patch_fetch_response_url();
     let _parsed = parse_mobpack(mobpack_bytes).map_err(|e| err_str("invalid_mobpack", e))?;
     let creds: Credentials =
         serde_json::from_str(credentials_json).map_err(|e| err_str("invalid_credentials", e))?;
@@ -833,6 +873,7 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
 #[wasm_bindgen]
 pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
     init_tracing();
+    patch_fetch_response_url();
     let rt_config: RuntimeConfig =
         serde_json::from_str(config_json).map_err(|e| err_str("invalid_config", e))?;
 

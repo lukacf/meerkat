@@ -214,6 +214,11 @@ pub async fn emit_mcp_lifecycle_events(
 
     for action in actions {
         let (operation, target, status) = match action {
+            McpLifecycleAction::PendingConnect { server } => (
+                ToolConfigChangeOperation::Add,
+                server,
+                "pending".to_string(),
+            ),
             McpLifecycleAction::Activated { server } => (
                 ToolConfigChangeOperation::Add,
                 server,

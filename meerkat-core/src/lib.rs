@@ -55,7 +55,7 @@ pub mod types;
 // Re-export main types at crate root
 pub use agent::{
     Agent, AgentBuilder, AgentLlmClient, AgentRunner, AgentSessionStore, AgentToolDispatcher,
-    CommsRuntime, ExternalToolNotice, ExternalToolUpdate, FilteredToolDispatcher, LlmStreamResult,
+    CommsRuntime, FilteredToolDispatcher, LlmStreamResult,
 };
 pub use budget::{Budget, BudgetLimits, BudgetPool};
 pub use checkpoint::SessionCheckpointer;

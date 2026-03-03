@@ -88,10 +88,6 @@ pub struct McpServerConfig {
     /// Transport configuration (stdio or HTTP)
     #[serde(flatten)]
     pub transport: McpTransportConfig,
-    /// Connection timeout in seconds (connect + handshake + list_tools).
-    /// Defaults to 10 seconds when not specified.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connect_timeout_secs: Option<u32>,
 }
 
 impl McpServerConfig {
@@ -108,7 +104,6 @@ impl McpServerConfig {
                 args,
                 env,
             }),
-            connect_timeout_secs: None,
         }
     }
 
@@ -124,7 +119,6 @@ impl McpServerConfig {
                 headers,
                 transport: None,
             }),
-            connect_timeout_secs: None,
         }
     }
 
@@ -140,7 +134,6 @@ impl McpServerConfig {
                 headers,
                 transport: Some(McpHttpTransport::Sse),
             }),
-            connect_timeout_secs: None,
         }
     }
 
@@ -412,7 +405,6 @@ where
     Ok(McpServerConfig {
         name: server.name,
         transport,
-        connect_timeout_secs: server.connect_timeout_secs,
     })
 }
 

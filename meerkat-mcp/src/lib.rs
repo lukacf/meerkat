@@ -14,8 +14,7 @@ pub use connection::McpConnection;
 pub use error::McpError;
 pub use protocol::McpProtocol;
 pub use router::{
-    McpApplyDelta, McpApplyResult, McpLifecycleAction, McpReloadTarget, McpRouter,
-    McpServerLifecycleState,
+    McpApplyDelta, McpLifecycleAction, McpReloadTarget, McpRouter, McpServerLifecycleState,
 };
 
 // Re-export McpServerConfig from meerkat-core for backwards compatibility

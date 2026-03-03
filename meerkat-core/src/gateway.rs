@@ -369,19 +369,23 @@ impl AgentToolDispatcher for ToolGateway {
 
     /// Aggregate external updates across all dispatcher entries.
     ///
-    /// Deduplicates by server name for pending, by `(server, status)`
+    /// Deduplicates by server name for pending, by `(server, operation, status)`
     /// for notices. First-seen wins, stable order.
     async fn poll_external_updates(&self) -> ExternalToolUpdate {
         let mut all_notices: Vec<ExternalToolNotice> = Vec::new();
         let mut all_pending: Vec<String> = Vec::new();
         let mut seen_pending: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut seen_notices: std::collections::HashSet<(String, String)> =
+        let mut seen_notices: std::collections::HashSet<(String, String, String)> =
             std::collections::HashSet::new();
 
         for entry in &self.entries {
             let update = entry.dispatcher.poll_external_updates().await;
             for notice in update.notices {
-                let key = (notice.server.clone(), notice.status.clone());
+                let key = (
+                    notice.server.clone(),
+                    format!("{:?}", notice.operation),
+                    notice.status.clone(),
+                );
                 if seen_notices.insert(key) {
                     all_notices.push(notice);
                 }

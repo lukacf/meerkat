@@ -205,16 +205,16 @@ where
                     }
 
                     // 3. Manage [MCP_PENDING] notice lifecycle.
-                    //    Only scan messages when there's something to clean up or inject.
-                    if !ext.notices.is_empty() || !ext.pending.is_empty() {
-                        self.session.messages_mut().retain(
-                            |m| !matches!(m, Message::User(u) if u.content.contains("[MCP_PENDING]")),
-                        );
-                    }
+                    //    Always strip prior synthetic notices to avoid stale state.
+                    //    Uses starts_with on a strict prefix to avoid matching user text.
+                    const MCP_PENDING_PREFIX: &str = "[SYSTEM NOTICE][MCP_PENDING] ";
+                    self.session.messages_mut().retain(
+                        |m| !matches!(m, Message::User(u) if u.content.starts_with(MCP_PENDING_PREFIX)),
+                    );
                     if !ext.pending.is_empty() {
                         self.session.push(Message::User(UserMessage {
                             content: format!(
-                                "[SYSTEM NOTICE][MCP_PENDING] Servers connecting: {}. \
+                                "{MCP_PENDING_PREFIX}Servers connecting: {}. \
                                  Tools will appear when ready.",
                                 ext.pending.join(", ")
                             ),

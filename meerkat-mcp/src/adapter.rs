@@ -26,7 +26,7 @@ pub struct McpRouterAdapter {
 
 impl McpRouterAdapter {
     pub fn new(router: McpRouter) -> Self {
-        let has_pending = router.has_pending();
+        let has_pending = router.has_pending_or_notices();
         Self {
             router: RwLock::new(Some(router)),
             cached_tools: RwLock::new(Arc::from([])),
@@ -109,8 +109,10 @@ impl McpRouterAdapter {
         let tools: Arc<[Arc<ToolDef>]> = router.list_tools().to_vec().into();
         let mut cached = self.cached_tools.write().await;
         *cached = tools;
-        self.has_pending
-            .store(result.pending_count > 0, Ordering::Release);
+        self.has_pending.store(
+            result.pending_count > 0 || router.has_pending_or_notices(),
+            Ordering::Release,
+        );
         Ok(result)
     }
 
@@ -213,8 +215,10 @@ impl AgentToolDispatcher for McpRouterAdapter {
             *cached = tools;
         }
 
-        self.has_pending
-            .store(!update.pending.is_empty(), Ordering::Release);
+        self.has_pending.store(
+            !update.pending.is_empty() || router.has_pending_or_notices(),
+            Ordering::Release,
+        );
         update
     }
 }

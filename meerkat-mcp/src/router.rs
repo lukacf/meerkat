@@ -107,8 +107,6 @@ enum PendingOp {
 
 struct PendingState {
     generation: u64,
-    #[allow(dead_code)]
-    op: PendingOp,
 }
 
 struct PendingResult {
@@ -333,7 +331,7 @@ impl McpRouter {
 
         let server_name = config.name.clone();
         self.pending_servers
-            .insert(server_name.clone(), PendingState { generation, op });
+            .insert(server_name.clone(), PendingState { generation });
 
         let tx = self.pending_tx.clone();
         tokio::spawn(async move {
@@ -507,9 +505,9 @@ impl McpRouter {
         }
     }
 
-    /// Returns true if there are pending background operations.
-    pub fn has_pending(&self) -> bool {
-        !self.pending_servers.is_empty()
+    /// Returns true if there are pending background operations or undelivered notices.
+    pub fn has_pending_or_notices(&self) -> bool {
+        !self.pending_servers.is_empty() || !self.completed_updates.is_empty()
     }
 
     async fn install_active_server(&mut self, config: McpServerConfig) -> Result<(), McpError> {

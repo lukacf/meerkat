@@ -138,6 +138,35 @@ impl McpRouterAdapter {
         Ok(router.has_removing_servers())
     }
 
+    /// Block until all pending MCP connections complete or timeout expires.
+    ///
+    /// Returns notices for completed/failed servers. Useful for CLI `--wait-for-mcp`
+    /// and SDK `wait_for_mcp` workflows where the caller needs tools to be available
+    /// before the first agent turn.
+    pub async fn wait_until_ready(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Vec<meerkat_core::ExternalToolNotice> {
+        let mut all_notices = Vec::new();
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let update = self.poll_external_updates().await;
+            all_notices.extend(update.notices);
+            if update.pending.is_empty() {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    "wait_until_ready timed out after {}s with pending servers",
+                    timeout.as_secs()
+                );
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        all_notices
+    }
+
     /// Test helper for cross-crate runtime integration tests.
     pub async fn set_inflight_calls_for_testing(
         &self,

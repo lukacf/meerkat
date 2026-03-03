@@ -69,6 +69,14 @@ meerkat = { version = "0.4", default-features = false, features = ["anthropic", 
 meerkat = { version = "0.4", features = ["all-providers", "session-store", "session-compaction", "comms", "mcp"] }
 ```
 
+## MCP server loading
+
+MCP server connections are **non-blocking across all surfaces**. Servers connect in parallel in the background after `apply_staged()`. The agent loop polls `poll_external_updates()` at each `CallingLlm` boundary and injects a `[MCP_PENDING]` system notice while servers are still connecting. Tools become visible as each server completes its handshake.
+
+- Per-server timeout: `connect_timeout_secs` in MCP config (default: 10s)
+- CLI: `--wait-for-mcp` blocks before the first turn until all servers finish connecting
+- SDK: `McpRouterAdapter::wait_until_ready(timeout)` provides the same blocking behavior programmatically
+
 ## Compaction behavior
 
 When `session-compaction` is enabled:

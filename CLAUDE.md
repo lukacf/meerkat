@@ -112,6 +112,11 @@ rkat mcp remove <name>
 
 Config stored in `.rkat/mcp.toml` (project) or `~/.rkat/mcp.toml` (user).
 
+**Connection behavior:** MCP servers connect in parallel in the background. Tools become available as each server completes its handshake. The `[MCP_PENDING]` system notice informs the LLM while servers are still connecting.
+
+- `connect_timeout_secs` per server in `.rkat/mcp.toml` (default: 10s)
+- `--wait-for-mcp` flag on `run`/`resume` blocks until all servers finish connecting before the first turn
+
 ## JSON-RPC Stdio Server
 
 ```bash

@@ -1365,6 +1365,7 @@ async fn create_session(
         max_inline_peer_notifications: None,
         app_context: req.app_context,
         additional_instructions: req.additional_instructions,
+        wait_for_mcp: false,
     };
 
     let svc_req = SvcCreateSessionRequest {
@@ -1669,6 +1670,7 @@ async fn continue_session(
                 max_inline_peer_notifications: None,
                 app_context: None,
                 additional_instructions: None,
+                wait_for_mcp: false,
             };
 
             let svc_req = SvcCreateSessionRequest {

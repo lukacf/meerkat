@@ -296,6 +296,10 @@ pub struct AgentBuildConfig {
     /// Additional instruction sections appended to the system prompt after skill
     /// assembly, before tool instructions. Order preserved.
     pub additional_instructions: Option<Vec<String>>,
+    /// When true, the surface should block after MCP tool loading until all
+    /// servers finish connecting before starting the first agent turn.
+    /// Default: false (servers connect in the background).
+    pub wait_for_mcp: bool,
 }
 
 impl std::fmt::Debug for AgentBuildConfig {
@@ -352,6 +356,7 @@ impl std::fmt::Debug for AgentBuildConfig {
             )
             .field("app_context", &self.app_context.is_some())
             .field("additional_instructions", &self.additional_instructions)
+            .field("wait_for_mcp", &self.wait_for_mcp)
             .finish()
     }
 }
@@ -397,6 +402,7 @@ impl AgentBuildConfig {
             skill_engine_override: None,
             app_context: None,
             additional_instructions: None,
+            wait_for_mcp: false,
         }
     }
 
@@ -450,6 +456,7 @@ impl AgentBuildConfig {
         self.max_inline_peer_notifications = build.max_inline_peer_notifications;
         self.app_context = build.app_context.clone();
         self.additional_instructions = build.additional_instructions.clone();
+        self.wait_for_mcp = build.wait_for_mcp;
     }
 
     /// Convert build options to the service transport representation.
@@ -486,6 +493,7 @@ impl AgentBuildConfig {
             max_inline_peer_notifications: self.max_inline_peer_notifications,
             app_context: self.app_context.clone(),
             additional_instructions: self.additional_instructions.clone(),
+            wait_for_mcp: self.wait_for_mcp,
         }
     }
 }

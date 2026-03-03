@@ -70,6 +70,7 @@ Frequently used options:
 - `-x` (short for `--enable-shell`)
 - `--enable-mob`
 - `-M` (short for `--enable-mob`; opt-in mob tools, default: disabled)
+- `--wait-for-mcp` (block until all MCP servers finish connecting before the first turn)
 - `--no-subagents`
 - `-N` (short for `--no-subagents`)
 - `--output-schema <SCHEMA>` (file path or inline JSON for structured output)
@@ -129,6 +130,18 @@ rkat run "create a mob for release triage with 1 lead and 3 workers"
 ```
 
 If external MCP servers define a tool with the same name, the mob tool dispatcher wins.
+
+MCP server loading:
+
+MCP servers connect in parallel in the background. Their tools become available as each server completes its handshake. The agent sees a `[MCP_PENDING]` system notice while servers are still connecting.
+
+Use `--wait-for-mcp` when the first prompt requires MCP tools to be available immediately:
+
+```bash
+rkat run --wait-for-mcp -x "use the filesystem tool to list /tmp"
+```
+
+The wait timeout is derived from the configured servers: `max(connect_timeout_secs) + 5s`, capped at 60 seconds.
 
 Comms options:
 

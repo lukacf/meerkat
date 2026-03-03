@@ -508,6 +508,13 @@ enum Commands {
         #[arg(long, short = 'M')]
         enable_mob: bool,
 
+        /// Wait for all MCP servers to connect before running the first prompt.
+        /// By default MCP servers connect in the background and their tools
+        /// become available as each server is ready. Use this flag when the
+        /// first prompt requires MCP tools to be available.
+        #[arg(long)]
+        wait_for_mcp: bool,
+
         // === Output verbosity ===
         /// Verbose output: show each turn, tool calls, and results as they happen
         #[arg(long, short = 'v')]
@@ -591,6 +598,10 @@ enum Commands {
         /// Verbose output: show each turn, tool calls, and results as they happen
         #[arg(long, short = 'v')]
         verbose: bool,
+
+        /// Wait for all MCP servers to connect before running the resumed turn.
+        #[arg(long)]
+        wait_for_mcp: bool,
     },
 
     /// Continue the most recent session (shortcut for `resume last`)
@@ -1241,6 +1252,7 @@ async fn main() -> anyhow::Result<ExitCode> {
             no_subagents,
             enable_memory,
             enable_mob,
+            wait_for_mcp,
             verbose,
             host,
             stdin,
@@ -1301,6 +1313,7 @@ async fn main() -> anyhow::Result<ExitCode> {
                 no_subagents,
                 enable_memory,
                 enable_mob,
+                wait_for_mcp,
                 verbose,
                 host,
                 stdin,
@@ -1342,6 +1355,7 @@ async fn main() -> anyhow::Result<ExitCode> {
             no_subagents,
             enable_memory,
             enable_mob,
+            wait_for_mcp,
             verbose,
         } => {
             let prompt = maybe_prepend_stdin_context(prompt);
@@ -1379,6 +1393,7 @@ async fn main() -> anyhow::Result<ExitCode> {
                 no_subagents,
                 enable_memory,
                 enable_mob,
+                wait_for_mcp,
                 verbose,
                 false, // host_mode
                 false, // stdin_events
@@ -1403,6 +1418,7 @@ async fn main() -> anyhow::Result<ExitCode> {
             params,
             provider_params_json,
             verbose,
+            wait_for_mcp,
         } => {
             let overrides = parse_hook_run_overrides(hooks_override_file, hooks_override_json)?;
             resume_session(
@@ -1422,6 +1438,7 @@ async fn main() -> anyhow::Result<ExitCode> {
                 provider_params_json,
                 &cli_scope,
                 verbose,
+                wait_for_mcp,
             )
             .await
         }
@@ -1455,6 +1472,7 @@ async fn main() -> anyhow::Result<ExitCode> {
                 None,
                 &cli_scope,
                 verbose,
+                false, // wait_for_mcp
             )
             .await
         }
@@ -1575,6 +1593,7 @@ async fn handle_run_command(
     no_subagents: bool,
     enable_memory: bool,
     enable_mob: bool,
+    wait_for_mcp: bool,
     verbose: bool,
     host: bool,
     stdin: bool,
@@ -1648,6 +1667,7 @@ async fn handle_run_command(
                 !no_subagents,
                 enable_memory,
                 enable_mob,
+                wait_for_mcp,
                 verbose,
                 host,
                 stdin,
@@ -2288,11 +2308,19 @@ fn realm_store_path(manifest: &meerkat_store::RealmManifest, scope: &RuntimeScop
     }
 }
 
-/// Create MCP tool dispatcher from config files
+/// Create MCP tool dispatcher from config files.
+///
+/// Servers are staged and launched in parallel via `apply_staged()`. When
+/// `wait_for_mcp` is true, blocks until all servers finish connecting (or
+/// timeout). Otherwise returns immediately and the agent loop picks up
+/// completions via `poll_external_updates()`.
 #[cfg(feature = "mcp")]
-async fn create_mcp_tools(scope: &RuntimeScope) -> anyhow::Result<Option<McpRouterAdapter>> {
+async fn create_mcp_tools(
+    scope: &RuntimeScope,
+    wait_for_mcp: bool,
+) -> anyhow::Result<Option<McpRouterAdapter>> {
     use meerkat_core::mcp_config::{McpConfig, McpScope};
-    use meerkat_mcp::McpRouter;
+    use meerkat_mcp::{McpConnection, McpRouter};
 
     // Load MCP config with scope info for security warnings
     let servers_with_scope = McpConfig::load_with_scopes_from_roots(
@@ -2334,18 +2362,48 @@ async fn create_mcp_tools(scope: &RuntimeScope) -> anyhow::Result<Option<McpRout
 
     tracing::info!("Loading {} MCP server(s)", servers_with_scope.len());
 
-    // Create router and add servers
+    // Stage all servers for parallel connection
     let mut router = McpRouter::new();
-    for s in servers_with_scope {
-        tracing::info!("Connecting to MCP server: {}", s.server.name);
-        if let Err(e) = router.add_server(s.server.clone()).await {
-            tracing::warn!("Failed to connect to MCP server '{}': {}", s.server.name, e);
-            // Continue with other servers instead of failing entirely
+    for s in &servers_with_scope {
+        tracing::info!("Staging MCP server: {}", s.server.name);
+        router.stage_add(s.server.clone());
+    }
+
+    // Apply staged ops — spawns background connection tasks
+    let result = router
+        .apply_staged()
+        .await
+        .map_err(|e| anyhow::anyhow!("MCP apply error: {e}"))?;
+
+    let adapter = McpRouterAdapter::new(router);
+
+    if wait_for_mcp && result.pending_count > 0 {
+        // Compute timeout: max(connect_timeout_secs) + 5s, capped at 60s
+        let max_server_timeout = servers_with_scope
+            .iter()
+            .filter_map(|s| s.server.connect_timeout_secs)
+            .max()
+            .unwrap_or(McpConnection::DEFAULT_CONNECT_TIMEOUT_SECS);
+        let total_timeout = std::time::Duration::from_secs((max_server_timeout as u64 + 5).min(60));
+
+        tracing::info!(
+            "Waiting for {} MCP server(s) to connect (timeout: {}s)...",
+            result.pending_count,
+            total_timeout.as_secs()
+        );
+
+        let notices = adapter.wait_until_ready(total_timeout).await;
+        for notice in &notices {
+            if notice.status.starts_with("failed") {
+                eprintln!(
+                    "Warning: MCP server '{}' failed: {}",
+                    notice.server, notice.status
+                );
+            }
         }
     }
 
-    // Create adapter and cache tools
-    let adapter = McpRouterAdapter::new(router);
+    // Refresh cached tools to include any that connected immediately
     adapter
         .refresh_tools()
         .await
@@ -2361,13 +2419,14 @@ fn resolve_host_mode(requested: bool) -> anyhow::Result<bool> {
 /// Load MCP tools as an external tool dispatcher for session build options.
 async fn load_mcp_external_tools(
     scope: &RuntimeScope,
+    wait_for_mcp: bool,
 ) -> (
     Option<Arc<dyn AgentToolDispatcher>>,
     Option<Arc<McpRouterAdapter>>,
 ) {
     #[cfg(feature = "mcp")]
     {
-        match create_mcp_tools(scope).await {
+        match create_mcp_tools(scope, wait_for_mcp).await {
             Ok(Some(adapter)) => {
                 let adapter = Arc::new(adapter);
                 let external: Arc<dyn AgentToolDispatcher> = adapter.clone();
@@ -2382,6 +2441,7 @@ async fn load_mcp_external_tools(
     }
     #[cfg(not(feature = "mcp"))]
     {
+        let _ = wait_for_mcp;
         (None, None)
     }
 }
@@ -2864,6 +2924,7 @@ async fn run_agent(
     enable_subagents: bool,
     enable_memory: bool,
     enable_mob: bool,
+    wait_for_mcp: bool,
     verbose: bool,
     host_mode: bool,
     stdin_events: bool,
@@ -2937,7 +2998,7 @@ async fn run_agent(
     }
 
     // Load optional MCP tools; we compose these with CLI-local mob tools below.
-    let (mcp_external_tools, mcp_adapter) = load_mcp_external_tools(scope).await;
+    let (mcp_external_tools, mcp_adapter) = load_mcp_external_tools(scope, wait_for_mcp).await;
 
     // Resolve comms_name for the factory
     let comms_name = if cfg!(feature = "comms") && !comms_overrides.disabled {
@@ -3045,6 +3106,7 @@ async fn run_agent(
         } else {
             Some(instructions)
         },
+        wait_for_mcp: false,
     };
 
     let parsed_labels = if labels.is_empty() {
@@ -3286,6 +3348,7 @@ async fn resume_session(
     provider_params_json: Option<String>,
     scope: &RuntimeScope,
     verbose: bool,
+    wait_for_mcp: bool,
 ) -> anyhow::Result<()> {
     resume_session_with_llm_override(
         session_id,
@@ -3305,6 +3368,7 @@ async fn resume_session(
         scope,
         None,
         verbose,
+        wait_for_mcp,
     )
     .await
 }
@@ -3328,6 +3392,7 @@ async fn resume_session_with_llm_override(
     scope: &RuntimeScope,
     llm_override: Option<Arc<dyn meerkat_client::LlmClient>>,
     verbose: bool,
+    wait_for_mcp: bool,
 ) -> anyhow::Result<()> {
     let resume_started = std::time::Instant::now();
     let log_stage = |stage: &str| {
@@ -3426,7 +3491,7 @@ async fn resume_session_with_llm_override(
     log_stage("load_mcp_external_tools");
 
     // Load optional MCP tools; compose with CLI-local mob tools after service setup.
-    let (mcp_external_tools, mcp_adapter) = load_mcp_external_tools(scope).await;
+    let (mcp_external_tools, mcp_adapter) = load_mcp_external_tools(scope, wait_for_mcp).await;
 
     // Build factory with flags restored from stored session metadata
     let project_root = scope.context_root.clone().unwrap_or_else(|| {
@@ -3515,6 +3580,7 @@ async fn resume_session_with_llm_override(
         max_inline_peer_notifications: None,
         app_context: None,
         additional_instructions: None,
+        wait_for_mcp: false,
     };
 
     // Route through SessionService::create_session() with the resumed session
@@ -8964,6 +9030,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             &scope,
             Some(llm_override),
             false,
+            false, // wait_for_mcp
         )
         .await
         .expect("resume should succeed with llm override");

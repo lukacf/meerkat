@@ -157,6 +157,10 @@ pub struct SessionBuildOptions {
     /// Additional instruction sections appended to the system prompt after skill
     /// assembly, before tool instructions. Order preserved.
     pub additional_instructions: Option<Vec<String>>,
+    /// When true, the surface should block after MCP tool loading until all
+    /// servers finish connecting before starting the first agent turn.
+    /// Default: false (servers connect in the background).
+    pub wait_for_mcp: bool,
 }
 
 impl Default for SessionBuildOptions {
@@ -190,6 +194,7 @@ impl Default for SessionBuildOptions {
             max_inline_peer_notifications: None,
             app_context: None,
             additional_instructions: None,
+            wait_for_mcp: false,
         }
     }
 }
@@ -228,6 +233,7 @@ impl std::fmt::Debug for SessionBuildOptions {
             )
             .field("app_context", &self.app_context.is_some())
             .field("additional_instructions", &self.additional_instructions)
+            .field("wait_for_mcp", &self.wait_for_mcp)
             .finish()
     }
 }

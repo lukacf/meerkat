@@ -22,6 +22,7 @@ const DEFAULT_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 const SSE_BUFFER_CAPACITY: usize = 4096;
 
 /// Client for Anthropic API
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub struct AnthropicClient {
     api_key: String,
     base_url: String,

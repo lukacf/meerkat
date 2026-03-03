@@ -3,8 +3,6 @@
 //! Supports layered configuration: defaults → file → env (secrets only) → CLI
 
 use crate::mcp_config::McpServerConfig;
-#[cfg(target_arch = "wasm32")]
-use crate::tokio;
 use crate::{
     budget::BudgetLimits,
     hooks::{HookCapability, HookExecutionMode, HookFailurePolicy, HookId, HookPoint},

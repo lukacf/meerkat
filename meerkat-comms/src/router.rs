@@ -68,6 +68,7 @@ fn map_inproc_send_error(err: InprocSendError) -> SendError {
     }
 }
 
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub struct Router {
     keypair: Arc<Keypair>,
     trusted_peers: Arc<RwLock<TrustedPeers>>,

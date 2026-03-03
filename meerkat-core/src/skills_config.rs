@@ -4,11 +4,13 @@
 //! Lives in `meerkat-core` following the `McpServerConfig` precedent.
 //! Resolution logic is in `meerkat-skills::resolve`.
 
-#[cfg(target_arch = "wasm32")]
-use crate::tokio;
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_arch = "wasm32"))]
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::Path;
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::PathBuf;
 use std::{fmt::Write as _, hash::Hasher};
 
 use crate::skills::{
@@ -291,6 +293,7 @@ async fn read_skills_file(path: Option<&Path>) -> Result<Option<SkillsConfig>, S
     Ok(Some(parsed))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn merge_project_over_user(
     user: SkillsConfig,
     project: SkillsConfig,
@@ -349,6 +352,7 @@ fn merge_project_over_user(
 // Env expansion
 // ---------------------------------------------------------------------------
 
+#[cfg(not(target_arch = "wasm32"))]
 fn expand_env_in_config(config: &mut SkillsConfig) -> Result<(), SkillsConfigError> {
     for repo in &mut config.repositories {
         match &mut repo.transport {
@@ -398,6 +402,7 @@ fn expand_env_in_config(config: &mut SkillsConfig) -> Result<(), SkillsConfigErr
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn expand_env_in_string(value: &str, field: &str) -> Result<String, SkillsConfigError> {
     let mut output = String::with_capacity(value.len());
     let mut remaining = value;
@@ -433,11 +438,13 @@ fn expand_env_in_string(value: &str, field: &str) -> Result<String, SkillsConfig
 // ---------------------------------------------------------------------------
 
 /// Get the user-level skills config path: ~/.rkat/skills.toml
+#[cfg(not(target_arch = "wasm32"))]
 fn user_skills_path() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".rkat/skills.toml"))
 }
 
 /// Get the project-level skills config path: .rkat/skills.toml
+#[cfg(not(target_arch = "wasm32"))]
 fn project_skills_path() -> Option<PathBuf> {
     std::env::current_dir()
         .ok()

@@ -1,5 +1,6 @@
 //! Core comms configuration types.
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::CommsConfig;
 use meerkat_core::CommsAuthMode;
 use serde::{Deserialize, Serialize};

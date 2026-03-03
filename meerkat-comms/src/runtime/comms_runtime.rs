@@ -2,12 +2,14 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 use super::comms_config::ResolvedCommsConfig;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::InboxSender;
 use crate::agent::types::{CommsContent, CommsMessage};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::handle_connection;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
-use crate::{InboxSender, InprocRegistry, Keypair, PubKey, Router, TrustedPeer, TrustedPeers};
+use crate::{InprocRegistry, Keypair, PubKey, Router, TrustedPeer, TrustedPeers};
 use async_trait::async_trait;
 use futures::Stream;
 use futures::task::{Context, Poll};
@@ -651,6 +653,7 @@ pub enum CommsRuntimeError {
     UnsafeBinding(String),
 }
 
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub struct CommsRuntime {
     public_key: PubKey,
     router: Arc<Router>,

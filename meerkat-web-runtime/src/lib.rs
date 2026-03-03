@@ -750,8 +750,8 @@ pub fn register_tool_callback(
             .map_err(|e| err_str("invalid_schema", format!("invalid JSON schema: {e}")))?;
 
         let def = Arc::new(meerkat_core::ToolDef {
-            name: name.clone(),
-            description: description.clone(),
+            name,
+            description,
             input_schema: schema,
         });
 
@@ -1559,6 +1559,7 @@ pub async fn mob_spawn(mob_id: &str, specs_json: &str) -> Result<JsValue, JsValu
             context: s.context,
             labels: s.labels,
             resume_session_id,
+            additional_instructions: s.additional_instructions,
         });
     }
 
@@ -1610,6 +1611,9 @@ struct SpawnSpecInput {
     /// Opaque application context passed through to the agent build pipeline.
     #[serde(default)]
     context: Option<serde_json::Value>,
+    /// Additional instruction sections appended to the system prompt.
+    #[serde(default)]
+    additional_instructions: Option<Vec<String>>,
 }
 
 /// Retire a meerkat from a mob.

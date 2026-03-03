@@ -90,6 +90,7 @@ pub(super) fn spawn_event_router(
     MobEventRouterHandle { event_rx, cancel }
 }
 
+#[allow(clippy::ignored_unit_patterns)]
 async fn run_event_router(
     session_service: Arc<dyn MobSessionService>,
     events: Arc<dyn MobEventStore>,

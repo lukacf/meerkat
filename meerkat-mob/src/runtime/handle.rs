@@ -44,6 +44,8 @@ pub struct SpawnMemberSpec {
     pub labels: Option<std::collections::BTreeMap<String, String>>,
     /// Resume an existing session instead of creating a new one.
     pub resume_session_id: Option<meerkat_core::types::SessionId>,
+    /// Additional instruction sections appended to the system prompt for this member.
+    pub additional_instructions: Option<Vec<String>>,
 }
 
 impl SpawnMemberSpec {
@@ -63,6 +65,7 @@ impl SpawnMemberSpec {
             context: None,
             labels: None,
             resume_session_id: None,
+            additional_instructions: None,
         }
     }
 }
@@ -332,6 +335,7 @@ impl MobHandle {
             context: None,
             labels: None,
             resume_session_id: None,
+            additional_instructions: None,
         })
         .await
     }

@@ -23,6 +23,7 @@ pub struct BuildAgentConfigParams<'a> {
     pub external_tools: Option<Arc<dyn meerkat_core::AgentToolDispatcher>>,
     pub context: Option<serde_json::Value>,
     pub labels: Option<std::collections::BTreeMap<String, String>>,
+    pub additional_instructions: Option<Vec<String>>,
 }
 
 /// Build an [`AgentBuildConfig`] from a mob profile.
@@ -45,6 +46,7 @@ pub async fn build_agent_config(
         external_tools,
         context,
         labels,
+        additional_instructions,
     } = params;
 
     if !profile.tools.comms {
@@ -114,6 +116,7 @@ pub async fn build_agent_config(
 
     // Opaque application context passed through to the agent build pipeline
     config.app_context = context;
+    config.additional_instructions = additional_instructions;
     config.provider_params = profile.provider_params.clone();
 
     // Structured output: convert JSON schema value to OutputSchema
@@ -301,6 +304,7 @@ mod tests {
             external_tools: None,
             context: None,
             labels: None,
+            additional_instructions: None,
         })
         .await
         .expect("build_agent_config");
@@ -321,6 +325,7 @@ mod tests {
             external_tools: None,
             context: None,
             labels: None,
+            additional_instructions: None,
         })
         .await
         .expect("build_agent_config");
@@ -345,6 +350,7 @@ mod tests {
             external_tools: None,
             context: None,
             labels: None,
+            additional_instructions: None,
         })
         .await
         .expect("build_agent_config");
@@ -375,6 +381,7 @@ mod tests {
             external_tools: None,
             context: None,
             labels: None,
+            additional_instructions: None,
         })
         .await
         .expect("build_agent_config");
@@ -401,6 +408,7 @@ mod tests {
             external_tools: None,
             context: None,
             labels: None,
+            additional_instructions: None,
         })
         .await
         .expect("build_agent_config");
@@ -420,6 +428,7 @@ mod tests {
             external_tools: None,
             context: None,
             labels: None,
+            additional_instructions: None,
         })
         .await
         .expect("build_agent_config");
@@ -450,6 +459,7 @@ mod tests {
             external_tools: None,
             context: None,
             labels: None,
+            additional_instructions: None,
         })
         .await;
         assert!(
@@ -471,6 +481,7 @@ mod tests {
             external_tools: None,
             context: None,
             labels: None,
+            additional_instructions: None,
         })
         .await
         .expect("build_agent_config");
@@ -498,6 +509,7 @@ mod tests {
             external_tools: None,
             context: None,
             labels: None,
+            additional_instructions: None,
         })
         .await
         .expect("build_agent_config");
@@ -525,6 +537,7 @@ mod tests {
             external_tools: None,
             context: None,
             labels: None,
+            additional_instructions: None,
         })
         .await
         .expect("build_agent_config");
@@ -562,6 +575,7 @@ mod tests {
             external_tools: None,
             context: None,
             labels: None,
+            additional_instructions: None,
         })
         .await
         .expect("build_agent_config");
@@ -582,6 +596,7 @@ mod tests {
             external_tools: None,
             context: None,
             labels: None,
+            additional_instructions: None,
         })
         .await
         .expect("build_agent_config");
@@ -602,6 +617,7 @@ mod tests {
             external_tools: None,
             context: None,
             labels: None,
+            additional_instructions: None,
         })
         .await
         .expect("build_agent_config");
@@ -634,6 +650,7 @@ mod tests {
             external_tools: None,
             context: None,
             labels: None,
+            additional_instructions: None,
         })
         .await
         .expect("build_agent_config");
@@ -677,6 +694,7 @@ mod tests {
             external_tools: None,
             context: None,
             labels: None,
+            additional_instructions: None,
         })
         .await
         .expect("build_agent_config should resolve path skill");
@@ -718,6 +736,7 @@ mod tests {
             external_tools: None,
             context: None,
             labels: None,
+            additional_instructions: None,
         })
         .await
         .expect_err("missing path skill should fail");
@@ -745,6 +764,7 @@ mod tests {
             external_tools: None,
             context: Some(ctx.clone()),
             labels: None,
+            additional_instructions: None,
         })
         .await
         .expect("build_agent_config");
@@ -769,6 +789,7 @@ mod tests {
             external_tools: None,
             context: None,
             labels: None,
+            additional_instructions: None,
         })
         .await
         .expect("build_agent_config");
@@ -801,6 +822,7 @@ mod tests {
             external_tools: None,
             context: None,
             labels: None,
+            additional_instructions: None,
         })
         .await
         .expect("build_agent_config");
@@ -844,6 +866,7 @@ mod tests {
             external_tools: None,
             context: None,
             labels: Some(app_labels),
+            additional_instructions: None,
         })
         .await
         .expect("build_agent_config");

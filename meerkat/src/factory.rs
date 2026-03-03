@@ -1421,22 +1421,28 @@ impl AgentFactory {
         }
 
         // 10. Resolve hooks (override > filesystem layered config)
-        let hook_engine = if let Some(engine) = build_config.hook_engine_override.take() {
-            Some(engine)
-        } else {
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                let layered_hooks = resolve_layered_hooks_config(
-                    _conventions_context_root,
-                    _conventions_user_root,
-                    config,
-                )
-                .await;
-                create_default_hook_engine(layered_hooks)
-            }
-            #[cfg(target_arch = "wasm32")]
-            {
-                None
+        #[allow(
+            clippy::manual_map,
+            clippy::unnecessary_literal_unwrap,
+            clippy::needless_match
+        )]
+        let hook_engine = match build_config.hook_engine_override.take() {
+            Some(engine) => Some(engine),
+            None => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let layered_hooks = resolve_layered_hooks_config(
+                        _conventions_context_root,
+                        _conventions_user_root,
+                        config,
+                    )
+                    .await;
+                    create_default_hook_engine(layered_hooks)
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    None
+                }
             }
         };
 
@@ -1543,11 +1549,11 @@ impl AgentFactory {
                     prompt.push_str(section);
                 }
             }
-            if let Some(ref config_tools) = config.agent.tool_instructions {
-                if !config_tools.is_empty() {
-                    prompt.push_str("\n\n");
-                    prompt.push_str(config_tools);
-                }
+            if let Some(ref config_tools) = config.agent.tool_instructions
+                && !config_tools.is_empty()
+            {
+                prompt.push_str("\n\n");
+                prompt.push_str(config_tools);
             }
             if !tool_usage_instructions.is_empty() {
                 prompt.push_str("\n\n");

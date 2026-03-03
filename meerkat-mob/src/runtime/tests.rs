@@ -6555,6 +6555,7 @@ async fn test_spawn_many_member_refs_returns_results_in_input_order() {
             context: None,
             labels: None,
             resume_session_id: None,
+            additional_instructions: None,
         },
         SpawnMemberSpec {
             profile_name: ProfileName::from("worker"),
@@ -6565,6 +6566,7 @@ async fn test_spawn_many_member_refs_returns_results_in_input_order() {
             context: None,
             labels: None,
             resume_session_id: None,
+            additional_instructions: None,
         },
         SpawnMemberSpec {
             profile_name: ProfileName::from("worker"),
@@ -6575,6 +6577,7 @@ async fn test_spawn_many_member_refs_returns_results_in_input_order() {
             context: None,
             labels: None,
             resume_session_id: None,
+            additional_instructions: None,
         },
     ];
 
@@ -6609,6 +6612,7 @@ async fn test_spawn_many_parallel_finalize_emits_single_worker_pair_wire_event()
             context: None,
             labels: None,
             resume_session_id: None,
+            additional_instructions: None,
         },
         SpawnMemberSpec {
             profile_name: ProfileName::from("worker"),
@@ -6619,6 +6623,7 @@ async fn test_spawn_many_parallel_finalize_emits_single_worker_pair_wire_event()
             context: None,
             labels: None,
             resume_session_id: None,
+            additional_instructions: None,
         },
     ];
 

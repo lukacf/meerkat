@@ -1005,6 +1005,7 @@ impl MobActor {
             context,
             labels,
             resume_session_id,
+            additional_instructions,
         } = spec;
         let prepare_result = async {
             if meerkat_id
@@ -1113,6 +1114,7 @@ impl MobActor {
                 external_tools,
                 context,
                 labels: labels.clone(),
+                additional_instructions,
             })
             .await?;
             if let Some(ref client) = self.default_llm_client {
@@ -1598,6 +1600,7 @@ impl MobActor {
                 context: None,
                 labels: None,
                 resume_session_id: None,
+                additional_instructions: None,
             },
             spawn_reply_tx,
         )
@@ -2231,6 +2234,7 @@ impl MobActor {
                             context: None,
                             labels: None,
                             resume_session_id: None,
+                            additional_instructions: None,
                         },
                         spawn_reply_tx,
                     )

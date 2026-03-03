@@ -222,6 +222,11 @@ jobs:
           RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
         run: cargo check -p meerkat-web-runtime --target wasm32-unknown-unknown
 
+      - name: Clippy meerkat-web-runtime for wasm32
+        env:
+          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
+        run: cargo clippy -p meerkat-web-runtime --target wasm32-unknown-unknown -- -D warnings
+
   audit:
     name: Security audit
     runs-on: ubuntu-latest

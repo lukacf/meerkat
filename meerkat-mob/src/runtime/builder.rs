@@ -444,6 +444,7 @@ impl MobBuilder {
                 )?,
                 context: None,
                 labels: None,
+                additional_instructions: None,
             })
             .await?;
             // Resume reconciliation needs live comms runtimes, but this path is

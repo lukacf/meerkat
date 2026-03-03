@@ -6,10 +6,10 @@
 //!
 //! Precedence: project > user (project wins on name collision)
 
-#[cfg(target_arch = "wasm32")]
-use crate::tokio;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// MCP configuration containing server definitions
@@ -345,6 +345,7 @@ async fn read_mcp_file(path: Option<&Path>) -> Result<McpConfig, McpConfigError>
     expand_env_in_config(parsed)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn merge_project_over_user(user: McpConfig, project: McpConfig) -> McpConfig {
     let mut seen: HashSet<String> = HashSet::new();
     let mut merged: Vec<McpServerConfig> = Vec::new();
@@ -366,10 +367,12 @@ fn merge_project_over_user(user: McpConfig, project: McpConfig) -> McpConfig {
     McpConfig { servers: merged }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn expand_env_in_config(config: McpConfig) -> Result<McpConfig, McpConfigError> {
     expand_env_in_config_with(config, &|key| std::env::var(key).ok())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn expand_env_in_config_with<F>(config: McpConfig, env: &F) -> Result<McpConfig, McpConfigError>
 where
     F: Fn(&str) -> Option<String>,
@@ -381,6 +384,7 @@ where
     Ok(McpConfig { servers })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn expand_env_in_server_with<F>(
     server: McpServerConfig,
     env: &F,
@@ -416,6 +420,7 @@ where
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn expand_env_in_map_with<F>(
     map: HashMap<String, String>,
     field: &str,
@@ -432,6 +437,7 @@ where
     Ok(expanded)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn expand_env_in_string_with<F>(value: &str, field: &str, env: &F) -> Result<String, McpConfigError>
 where
     F: Fn(&str) -> Option<String>,

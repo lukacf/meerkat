@@ -159,6 +159,7 @@ impl MobMcpState {
                 context: None,
                 labels: None,
                 resume_session_id: None,
+                additional_instructions: None,
             },
         )
         .await
@@ -723,6 +724,8 @@ struct MobSpawnMeerkatArgs {
     labels: Option<BTreeMap<String, String>>,
     #[serde(default)]
     context: Option<serde_json::Value>,
+    #[serde(default)]
+    additional_instructions: Option<Vec<String>>,
 }
 #[derive(Deserialize)]
 struct SpawnManyMeerkatsArgs {
@@ -972,6 +975,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                             context: spec.context,
                             labels: spec.labels,
                             resume_session_id,
+                            additional_instructions: spec.additional_instructions,
                         })
                     })
                     .collect::<Result<Vec<_>, ToolError>>()?;

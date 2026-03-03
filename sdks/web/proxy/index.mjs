@@ -107,8 +107,8 @@ export function createProxyHandler(provider, opts = {}) {
     // Copy headers, inject auth
     const headers = new Headers();
     for (const [key, value] of req.headers) {
-      // Skip hop-by-hop and host headers
-      if (['host', 'connection', 'keep-alive', 'transfer-encoding'].includes(key.toLowerCase())) continue;
+      // Skip hop-by-hop, host, and encoding headers
+      if (['host', 'connection', 'keep-alive', 'transfer-encoding', 'accept-encoding'].includes(key.toLowerCase())) continue;
       headers.set(key, value);
     }
     config.injectAuth(headers, apiKey);
@@ -129,6 +129,8 @@ export function createProxyHandler(provider, opts = {}) {
     // Build response headers: upstream headers + CORS
     const respHeaders = new Headers();
     for (const [key, value] of upstream.headers) {
+      // Strip encoding headers — we don't forward compression negotiation
+      if (['content-encoding', 'transfer-encoding'].includes(key.toLowerCase())) continue;
       respHeaders.set(key, value);
     }
     for (const [key, value] of Object.entries(cors)) {

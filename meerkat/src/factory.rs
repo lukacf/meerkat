@@ -1564,13 +1564,13 @@ impl AgentFactory {
         // many dispatchers are composed.
         if build_config.wait_for_mcp {
             let timeout = std::time::Duration::from_secs(60);
-            let deadline = tokio::time::Instant::now() + timeout;
+            let started = meerkat_core::time_compat::Instant::now();
             loop {
                 let update = tools.poll_external_updates().await;
                 if update.pending.is_empty() {
                     break;
                 }
-                if tokio::time::Instant::now() >= deadline {
+                if started.elapsed() >= timeout {
                     tracing::warn!(
                         "wait_for_mcp timed out after {}s with {} server(s) still pending",
                         timeout.as_secs(),
@@ -1578,7 +1578,10 @@ impl AgentFactory {
                     );
                     break;
                 }
+                #[cfg(not(target_arch = "wasm32"))]
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                #[cfg(target_arch = "wasm32")]
+                tokio_with_wasm::alias::time::sleep(std::time::Duration::from_millis(500)).await;
             }
         }
 

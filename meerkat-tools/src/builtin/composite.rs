@@ -10,6 +10,7 @@ use crate::builtin::sub_agent::SubAgentToolSet;
 use crate::builtin::{BuiltinTool, BuiltinToolConfig, BuiltinToolError};
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
+use meerkat_core::ExternalToolUpdate;
 use meerkat_core::error::ToolError;
 use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
 use serde_json::Value;
@@ -398,6 +399,14 @@ impl AgentToolDispatcher for CompositeDispatcher {
         Err(ToolError::NotFound {
             name: call.name.to_string(),
         })
+    }
+
+    async fn poll_external_updates(&self) -> ExternalToolUpdate {
+        if let Some(ref ext) = self.external {
+            ext.poll_external_updates().await
+        } else {
+            ExternalToolUpdate::default()
+        }
     }
 }
 

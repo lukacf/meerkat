@@ -2,13 +2,16 @@
 
 use async_trait::async_trait;
 use meerkat_core::error::ToolError;
-use meerkat_core::{ToolCallView, ToolDef, ToolResult, agent::AgentToolDispatcher};
+use meerkat_core::{
+    ExternalToolUpdate, ToolCallView, ToolDef, ToolResult, agent::AgentToolDispatcher,
+};
 use serde_json::Value;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::RwLock;
 
-use crate::{McpApplyDelta, McpReloadTarget, McpRouter, McpServerConfig};
+use crate::{McpApplyResult, McpReloadTarget, McpRouter, McpServerConfig};
 
 /// Adapter that wraps an [`McpRouter`] to implement [`AgentToolDispatcher`].
 ///
@@ -18,13 +21,16 @@ use crate::{McpApplyDelta, McpReloadTarget, McpRouter, McpServerConfig};
 pub struct McpRouterAdapter {
     router: RwLock<Option<McpRouter>>,
     cached_tools: RwLock<Arc<[Arc<ToolDef>]>>,
+    has_pending: AtomicBool,
 }
 
 impl McpRouterAdapter {
     pub fn new(router: McpRouter) -> Self {
+        let has_pending = router.has_pending();
         Self {
             router: RwLock::new(Some(router)),
             cached_tools: RwLock::new(Arc::from([])),
+            has_pending: AtomicBool::new(has_pending),
         }
     }
 
@@ -48,6 +54,7 @@ impl McpRouterAdapter {
         if let Some(router) = router.take() {
             router.shutdown().await;
         }
+        self.has_pending.store(false, Ordering::Release);
     }
 
     /// Stage an MCP server add operation.
@@ -90,23 +97,25 @@ impl McpRouterAdapter {
     }
 
     /// Apply staged MCP operations and refresh the visible tool cache.
-    pub async fn apply_staged(&self) -> Result<McpApplyDelta, String> {
+    pub async fn apply_staged(&self) -> Result<McpApplyResult, String> {
         let mut router = self.router.write().await;
         let router = router
             .as_mut()
             .ok_or_else(|| "MCP router has been shut down".to_string())?;
-        let delta = router
+        let result = router
             .apply_staged()
             .await
             .map_err(|error| error.to_string())?;
         let tools: Arc<[Arc<ToolDef>]> = router.list_tools().to_vec().into();
         let mut cached = self.cached_tools.write().await;
         *cached = tools;
-        Ok(delta)
+        self.has_pending
+            .store(result.pending_count > 0, Ordering::Release);
+        Ok(result)
     }
 
     /// Progress only Removing server finalization (drain/timeout) without applying staged ops.
-    pub async fn progress_removals(&self) -> Result<McpApplyDelta, String> {
+    pub async fn progress_removals(&self) -> Result<crate::McpApplyDelta, String> {
         let mut router = self.router.write().await;
         let router = router
             .as_mut()
@@ -158,9 +167,6 @@ impl McpRouterAdapter {
 #[async_trait]
 impl AgentToolDispatcher for McpRouterAdapter {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-        // Return the cached tools (blocking read in sync context).
-        // Requires refresh_tools() to be called before first use.
-        // Uses try_read to avoid deadlocks, falling back to empty vec.
         match self.cached_tools.try_read() {
             Ok(tools) => Arc::clone(&tools),
             Err(_) => Arc::from([]),
@@ -185,5 +191,30 @@ impl AgentToolDispatcher for McpRouterAdapter {
             }
             None => Err(ToolError::execution_failed("MCP router has been shut down")),
         }
+    }
+
+    async fn poll_external_updates(&self) -> ExternalToolUpdate {
+        // Fast path: skip write lock if nothing is pending.
+        if !self.has_pending.load(Ordering::Acquire) {
+            return ExternalToolUpdate::default();
+        }
+
+        let mut router = self.router.write().await;
+        let Some(router) = router.as_mut() else {
+            return ExternalToolUpdate::default();
+        };
+
+        let update = router.take_external_updates();
+
+        // Refresh tool cache since new tools may have become visible.
+        if !update.notices.is_empty() {
+            let tools: Arc<[Arc<ToolDef>]> = router.list_tools().to_vec().into();
+            let mut cached = self.cached_tools.write().await;
+            *cached = tools;
+        }
+
+        self.has_pending
+            .store(!update.pending.is_empty(), Ordering::Release);
+        update
     }
 }

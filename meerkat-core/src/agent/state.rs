@@ -187,7 +187,41 @@ where
 
             match self.state {
                 LoopState::CallingLlm => {
-                    // Apply tool scope staged updates atomically at the CallingLlm boundary.
+                    // 1. Poll external updates BEFORE tool capture so newly
+                    //    connected tools are visible in the same LLM call.
+                    let ext = self.tools.poll_external_updates().await;
+
+                    // 2. Emit ToolConfigChanged for completed background connections.
+                    for notice in &ext.notices {
+                        emit_event!(AgentEvent::ToolConfigChanged {
+                            payload: ToolConfigChangedPayload {
+                                operation: notice.operation.clone(),
+                                target: notice.server.clone(),
+                                status: notice.status.clone(),
+                                persisted: false,
+                                applied_at_turn: Some(turn_count),
+                            },
+                        });
+                    }
+
+                    // 3. Manage [MCP_PENDING] notice lifecycle.
+                    //    Always strip prior synthetic notices to avoid stale state.
+                    //    Uses starts_with on a strict prefix to avoid matching user text.
+                    const MCP_PENDING_PREFIX: &str = "[SYSTEM NOTICE][MCP_PENDING] ";
+                    self.session.messages_mut().retain(
+                        |m| !matches!(m, Message::User(u) if u.content.starts_with(MCP_PENDING_PREFIX)),
+                    );
+                    if !ext.pending.is_empty() {
+                        self.session.push(Message::User(UserMessage {
+                            content: format!(
+                                "{MCP_PENDING_PREFIX}Servers connecting: {}. \
+                                 Tools will appear when ready.",
+                                ext.pending.join(", ")
+                            ),
+                        }));
+                    }
+
+                    // 4. Apply tool scope staged updates atomically at the CallingLlm boundary.
                     let tool_defs = {
                         let dispatcher_tools = self.tools.tools();
                         match self.tool_scope.apply_staged(dispatcher_tools.clone()) {

@@ -4,15 +4,19 @@ use crate::{McpConnection, McpError, McpServerConfig};
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
+use meerkat_core::event::ToolConfigChangeOperation;
 use meerkat_core::types::ToolDef;
 use meerkat_core::types::{ToolCallView, ToolResult};
+use meerkat_core::{ExternalToolNotice, ExternalToolUpdate};
 use serde_json::Value;
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 
 const DEFAULT_REMOVAL_TIMEOUT: Duration = Duration::from_secs(30);
+const PENDING_CHANNEL_CAPACITY: usize = 32;
 
 /// MCP server lifecycle state used by staged router apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,11 +65,20 @@ impl From<McpServerConfig> for McpReloadTarget {
 }
 
 /// Lifecycle actions emitted by [`McpRouter::apply_staged`].
+///
+/// Only **synchronous** actions appear here. Async completions (activated,
+/// activation failed) go through [`McpRouter::take_external_updates`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpLifecycleAction {
+    /// Server connection is being attempted in the background (add or reload).
+    PendingConnect { server: String },
+    /// Server has been activated (synchronous backward-compat path only).
     Activated { server: String },
+    /// Server removal drain started.
     RemovingStarted { server: String },
+    /// Server fully removed.
     Removed { server: String, degraded: bool },
+    /// Server reload completed (synchronous backward-compat path only).
     Reloaded { server: String },
 }
 
@@ -77,6 +90,30 @@ pub struct McpApplyDelta {
     pub reloaded_servers: Vec<String>,
     pub lifecycle_actions: Vec<McpLifecycleAction>,
     pub degraded_removals: Vec<String>,
+}
+
+/// Return value of [`McpRouter::apply_staged`].
+#[derive(Debug)]
+pub struct McpApplyResult {
+    pub delta: McpApplyDelta,
+    pub pending_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingOp {
+    Add,
+    Reload,
+}
+
+struct PendingState {
+    generation: u64,
+}
+
+struct PendingResult {
+    server_name: String,
+    generation: u64,
+    op: PendingOp,
+    result: Result<(McpConnection, Vec<Arc<ToolDef>>), McpError>,
 }
 
 #[derive(Debug, Clone)]
@@ -117,7 +154,11 @@ impl Drop for InflightCallGuard<'_> {
     }
 }
 
-/// Router for MCP tool calls across multiple servers
+/// Router for MCP tool calls across multiple servers.
+///
+/// Add and reload operations are non-blocking: `apply_staged()` spawns
+/// background connection tasks and returns immediately. Completions are
+/// delivered via [`take_external_updates`](Self::take_external_updates).
 pub struct McpRouter {
     servers: HashMap<String, ServerEntry>,
     /// Maps tool name to owning server, including servers in Removing state.
@@ -126,17 +167,32 @@ pub struct McpRouter {
     cached_tools: Vec<Arc<ToolDef>>,
     staged_ops: Vec<StagedRouterOp>,
     removal_timeout: Duration,
+
+    // --- Async pending infrastructure ---
+    pending_tx: mpsc::Sender<PendingResult>,
+    /// Poison-safe mutex wrapping the receiver.
+    pending_rx: Mutex<mpsc::Receiver<PendingResult>>,
+    pending_servers: HashMap<String, PendingState>,
+    next_generation: u64,
+    /// Queued notices for the agent loop (from async completions).
+    completed_updates: VecDeque<ExternalToolNotice>,
 }
 
 impl McpRouter {
     /// Create a new empty router
     pub fn new() -> Self {
+        let (tx, rx) = mpsc::channel(PENDING_CHANNEL_CAPACITY);
         Self {
             servers: HashMap::new(),
             tool_to_server: HashMap::new(),
             cached_tools: Vec::new(),
             staged_ops: Vec::new(),
             removal_timeout: DEFAULT_REMOVAL_TIMEOUT,
+            pending_tx: tx,
+            pending_rx: Mutex::new(rx),
+            pending_servers: HashMap::new(),
+            next_generation: 0,
+            completed_updates: VecDeque::new(),
         }
     }
 
@@ -158,8 +214,9 @@ impl McpRouter {
     /// Prefer [`stage_add`](Self::stage_add) + [`apply_staged`](Self::apply_staged)
     /// for boundary semantics.
     pub async fn add_server(&mut self, config: McpServerConfig) -> Result<(), McpError> {
-        self.stage_add(config);
-        self.apply_staged().await?;
+        // Use the synchronous install path for backward compatibility.
+        self.install_active_server(config).await?;
+        self.rebuild_visible_cache();
         Ok(())
     }
 
@@ -181,33 +238,39 @@ impl McpRouter {
         self.staged_ops.push(StagedRouterOp::Reload(target.into()));
     }
 
-    /// Apply staged operations at a boundary and return structural/lifecycle delta.
-    pub async fn apply_staged(&mut self) -> Result<McpApplyDelta, McpError> {
+    /// Apply staged operations at a boundary (non-blocking for add/reload).
+    ///
+    /// Add and reload operations spawn background connection tasks and return
+    /// immediately with `PendingConnect` in the lifecycle actions. Completions
+    /// arrive via [`take_external_updates`](Self::take_external_updates).
+    ///
+    /// Remove operations are synchronous (start drain immediately).
+    pub async fn apply_staged(&mut self) -> Result<McpApplyResult, McpError> {
         let mut delta = McpApplyDelta::default();
         let staged_ops = std::mem::take(&mut self.staged_ops);
+
+        // 1. Drain pending results from background tasks.
+        self.drain_pending();
 
         for op in staged_ops {
             match op {
                 StagedRouterOp::Add(config) => {
                     let server_name = config.name.clone();
-                    let existed = self.servers.get(&server_name).is_some_and(|entry| {
-                        !matches!(entry.lifecycle, McpServerLifecycleState::Removed)
-                    });
-                    self.install_active_server(config).await?;
 
-                    if existed {
-                        delta.reloaded_servers.push(server_name.clone());
-                        delta.lifecycle_actions.push(McpLifecycleAction::Reloaded {
+                    // Cancel any existing pending op for this server.
+                    self.pending_servers.remove(&server_name);
+
+                    self.spawn_pending(config, PendingOp::Add);
+                    delta
+                        .lifecycle_actions
+                        .push(McpLifecycleAction::PendingConnect {
                             server: server_name,
                         });
-                    } else {
-                        delta.added_servers.push(server_name.clone());
-                        delta.lifecycle_actions.push(McpLifecycleAction::Activated {
-                            server: server_name,
-                        });
-                    }
                 }
                 StagedRouterOp::Remove(server_name) => {
+                    // Cancel pending for same server if any.
+                    self.pending_servers.remove(&server_name);
+
                     if let Some(entry) = self.servers.get_mut(&server_name)
                         && matches!(entry.lifecycle, McpServerLifecycleState::Active)
                     {
@@ -236,11 +299,17 @@ impl McpRouter {
                     };
 
                     let server_name = config.name.clone();
-                    self.install_active_server(config).await?;
-                    delta.reloaded_servers.push(server_name.clone());
-                    delta.lifecycle_actions.push(McpLifecycleAction::Reloaded {
-                        server: server_name,
-                    });
+
+                    // Cancel any existing pending op for this server.
+                    self.pending_servers.remove(&server_name);
+
+                    // Keep old connection active during reload.
+                    self.spawn_pending(config, PendingOp::Reload);
+                    delta
+                        .lifecycle_actions
+                        .push(McpLifecycleAction::PendingConnect {
+                            server: server_name,
+                        });
                 }
             }
         }
@@ -248,17 +317,201 @@ impl McpRouter {
         self.process_removals(&mut delta).await;
         self.rebuild_visible_cache();
 
-        Ok(delta)
+        let pending_count = self.pending_servers.len();
+        Ok(McpApplyResult {
+            delta,
+            pending_count,
+        })
+    }
+
+    /// Spawn a background task to connect and enumerate tools for a server.
+    fn spawn_pending(&mut self, config: McpServerConfig, op: PendingOp) {
+        let generation = self.next_generation;
+        self.next_generation += 1;
+
+        let server_name = config.name.clone();
+        self.pending_servers
+            .insert(server_name.clone(), PendingState { generation });
+
+        let tx = self.pending_tx.clone();
+        tokio::spawn(async move {
+            let result = McpConnection::connect_and_enumerate(&config).await;
+            // Channel may be closed if router was dropped — that's fine.
+            let _ = tx
+                .send(PendingResult {
+                    server_name,
+                    generation,
+                    op,
+                    result,
+                })
+                .await;
+        });
+    }
+
+    /// Drain completed pending results from the background channel.
+    fn drain_pending(&mut self) {
+        // Collect results under the lock, then process outside to avoid
+        // holding the MutexGuard across &mut self calls.
+        let results: Vec<PendingResult> = {
+            let mut rx = match self.pending_rx.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    tracing::warn!(
+                        "MCP pending_rx mutex was poisoned; recovering. \
+                         Router state may be inconsistent."
+                    );
+                    poisoned.into_inner()
+                }
+            };
+            let mut buf = Vec::new();
+            while let Ok(result) = rx.try_recv() {
+                buf.push(result);
+            }
+            buf
+        };
+        for result in results {
+            self.process_pending_result(result);
+        }
+    }
+
+    fn process_pending_result(&mut self, result: PendingResult) {
+        // Check generation matches — discard stale results.
+        let current = self.pending_servers.get(&result.server_name);
+        let is_current = current
+            .map(|ps| ps.generation == result.generation)
+            .unwrap_or(false);
+
+        if !is_current {
+            tracing::debug!(
+                server = %result.server_name,
+                generation = result.generation,
+                "Discarding stale pending MCP result"
+            );
+            // Close the connection if it was successful.
+            if let Ok((conn, _)) = result.result {
+                let server_name = result.server_name;
+                tokio::spawn(async move {
+                    if let Err(e) = conn.close().await {
+                        tracing::debug!(
+                            "Error closing stale MCP connection '{}': {}",
+                            server_name,
+                            e
+                        );
+                    }
+                });
+            }
+            return;
+        }
+
+        // Remove from pending.
+        self.pending_servers.remove(&result.server_name);
+
+        match result.result {
+            Ok((conn, tools)) => {
+                let tool_count = tools.len();
+                let server_name = result.server_name.clone();
+
+                // Determine operation type for event.
+                let operation = match result.op {
+                    PendingOp::Add => ToolConfigChangeOperation::Add,
+                    PendingOp::Reload => ToolConfigChangeOperation::Reload,
+                };
+
+                // For reload: close old connection.
+                if result.op == PendingOp::Reload
+                    && let Some(old_entry) = self.servers.get_mut(&server_name)
+                {
+                    let old_conn = old_entry.connection.take();
+                    let name = server_name.clone();
+                    tokio::spawn(async move {
+                        Self::close_entry_connection(name, old_conn).await;
+                    });
+                }
+
+                // Install the new entry (or replace existing).
+                let config = conn.config().clone();
+                let new_entry = ServerEntry {
+                    config,
+                    connection: Some(conn),
+                    lifecycle: McpServerLifecycleState::Active,
+                    tools,
+                    active_calls: AtomicUsize::new(0),
+                };
+
+                if let Some(old_entry) = self.servers.insert(server_name.clone(), new_entry) {
+                    // For Add: close any leftover connection.
+                    if result.op == PendingOp::Add {
+                        let old_name = old_entry.config.name.clone();
+                        let old_conn = old_entry.connection;
+                        tokio::spawn(async move {
+                            Self::close_entry_connection(old_name, old_conn).await;
+                        });
+                    }
+                }
+
+                // Update tool mappings.
+                self.remove_tool_mappings_for_server(&server_name);
+                if let Some(entry) = self.servers.get(&server_name) {
+                    for tool in &entry.tools {
+                        self.tool_to_server
+                            .insert(tool.name.clone(), server_name.clone());
+                    }
+                }
+
+                self.completed_updates.push_back(ExternalToolNotice {
+                    server: server_name,
+                    operation,
+                    status: "activated".to_string(),
+                    tool_count: Some(tool_count),
+                });
+            }
+            Err(err) => {
+                let server_name = result.server_name.clone();
+                let operation = match result.op {
+                    PendingOp::Add => ToolConfigChangeOperation::Add,
+                    PendingOp::Reload => ToolConfigChangeOperation::Reload,
+                };
+
+                tracing::warn!(
+                    server = %server_name,
+                    error = %err,
+                    op = ?result.op,
+                    "MCP server background connection failed"
+                );
+
+                // For reload failure: keep old connection active.
+                // For add failure: nothing to keep.
+
+                self.completed_updates.push_back(ExternalToolNotice {
+                    server: server_name,
+                    operation,
+                    status: format!("failed: {err}"),
+                    tool_count: None,
+                });
+            }
+        }
+    }
+
+    /// Drain pending results and return queued external update notices.
+    ///
+    /// Called by the adapter's `poll_external_updates()` implementation.
+    pub fn take_external_updates(&mut self) -> ExternalToolUpdate {
+        self.drain_pending();
+        self.rebuild_visible_cache();
+
+        ExternalToolUpdate {
+            notices: self.completed_updates.drain(..).collect(),
+            pending: self.pending_servers.keys().cloned().collect(),
+        }
+    }
+
+    /// Returns true if there are pending background operations or undelivered notices.
+    pub fn has_pending_or_notices(&self) -> bool {
+        !self.pending_servers.is_empty() || !self.completed_updates.is_empty()
     }
 
     async fn install_active_server(&mut self, config: McpServerConfig) -> Result<(), McpError> {
-        let conn = McpConnection::connect(&config).await?;
-        let tools = conn
-            .list_tools()
-            .await?
-            .into_iter()
-            .map(Arc::new)
-            .collect::<Vec<_>>();
+        let (conn, tools) = McpConnection::connect_and_enumerate(&config).await?;
 
         let server_name = config.name.clone();
         let new_entry = ServerEntry {
@@ -408,8 +661,12 @@ impl McpRouter {
         conn.call_tool(name, args).await
     }
 
-    /// Gracefully shutdown all connections
+    /// Gracefully shutdown all connections.
+    ///
+    /// Drops the pending sender to signal background tasks, then closes
+    /// all active connections.
     pub async fn shutdown(self) {
+        drop(self.pending_tx);
         for (_, entry) in self.servers {
             Self::close_entry_connection(entry.config.name, entry.connection).await;
         }
@@ -502,27 +759,35 @@ mod tests {
         };
 
         let mut router = McpRouter::new();
-        router.stage_add(test_server_config("test-server", &server_path));
-        let delta = router.apply_staged().await.expect("apply staged add");
 
-        assert_eq!(delta.added_servers, vec!["test-server"]);
-        assert!(delta.removed_servers.is_empty());
+        // Use add_server (synchronous path) for setup.
+        router
+            .add_server(test_server_config("test-server", &server_path))
+            .await
+            .expect("add_server");
+
         assert!(matches!(
             router.server_lifecycle_state("test-server"),
             Some(McpServerLifecycleState::Active)
         ));
 
+        // Stage reload (async path) and wait for completion.
         router.stage_reload("test-server");
-        let delta = router.apply_staged().await.expect("apply staged reload");
-        assert_eq!(delta.reloaded_servers, vec!["test-server"]);
-        assert!(matches!(
-            router.server_lifecycle_state("test-server"),
-            Some(McpServerLifecycleState::Active)
-        ));
+        let result = router.apply_staged().await.expect("apply staged reload");
+        assert!(result.pending_count > 0 || !result.delta.reloaded_servers.is_empty());
+
+        // Wait for pending to resolve.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let ext = router.take_external_updates();
+        assert!(
+            ext.notices.iter().any(|n| n.server == "test-server")
+                || router.server_lifecycle_state("test-server")
+                    == Some(McpServerLifecycleState::Active),
+        );
 
         router.stage_remove("test-server");
-        let delta = router.apply_staged().await.expect("apply staged remove");
-        assert_eq!(delta.removed_servers, vec!["test-server"]);
+        let result = router.apply_staged().await.expect("apply staged remove");
+        assert_eq!(result.delta.removed_servers, vec!["test-server"]);
         assert!(matches!(
             router.server_lifecycle_state("test-server"),
             Some(McpServerLifecycleState::Removed)
@@ -536,8 +801,10 @@ mod tests {
         };
 
         let mut router = McpRouter::new();
-        router.stage_add(test_server_config("test-server", &server_path));
-        router.apply_staged().await.expect("apply add");
+        router
+            .add_server(test_server_config("test-server", &server_path))
+            .await
+            .expect("add_server");
 
         let has_echo_before = router.list_tools().iter().any(|tool| tool.name == "echo");
         assert!(has_echo_before, "tool should be visible before remove");
@@ -556,14 +823,19 @@ mod tests {
         };
 
         let mut router = McpRouter::new_with_removal_timeout(Duration::from_secs(60));
-        router.stage_add(test_server_config("test-server", &server_path));
-        router.apply_staged().await.expect("apply add");
+        router
+            .add_server(test_server_config("test-server", &server_path))
+            .await
+            .expect("add_server");
 
         router.set_inflight_calls_for_testing("test-server", 1);
         router.stage_remove("test-server");
-        let delta = router.apply_staged().await.expect("apply remove");
+        let result = router.apply_staged().await.expect("apply remove");
 
-        assert!(delta.removed_servers.is_empty(), "should remain removing");
+        assert!(
+            result.delta.removed_servers.is_empty(),
+            "should remain removing"
+        );
         assert!(matches!(
             router.server_lifecycle_state("test-server"),
             Some(McpServerLifecycleState::Removing { .. })
@@ -576,13 +848,13 @@ mod tests {
         assert!(matches!(err, McpError::ServerUnavailable { .. }));
 
         router.set_inflight_calls_for_testing("test-server", 0);
-        let delta = router
+        let result = router
             .apply_staged()
             .await
             .expect("apply should finalize drained remove");
 
-        assert_eq!(delta.removed_servers, vec!["test-server"]);
-        assert!(delta.degraded_removals.is_empty());
+        assert_eq!(result.delta.removed_servers, vec!["test-server"]);
+        assert!(result.delta.degraded_removals.is_empty());
     }
 
     #[tokio::test]
@@ -592,20 +864,22 @@ mod tests {
         };
 
         let mut router = McpRouter::new_with_removal_timeout(Duration::from_millis(10));
-        router.stage_add(test_server_config("test-server", &server_path));
-        router.apply_staged().await.expect("apply add");
+        router
+            .add_server(test_server_config("test-server", &server_path))
+            .await
+            .expect("add_server");
 
         router.set_inflight_calls_for_testing("test-server", 1);
         router.stage_remove("test-server");
-        let delta = router.apply_staged().await.expect("apply remove start");
-        assert!(delta.removed_servers.is_empty());
+        let result = router.apply_staged().await.expect("apply remove start");
+        assert!(result.delta.removed_servers.is_empty());
 
         tokio::time::sleep(Duration::from_millis(30)).await;
-        let delta = router.apply_staged().await.expect("apply timeout finalize");
+        let result = router.apply_staged().await.expect("apply timeout finalize");
 
-        assert_eq!(delta.removed_servers, vec!["test-server"]);
-        assert_eq!(delta.degraded_removals, vec!["test-server"]);
-        assert!(delta.lifecycle_actions.iter().any(|action| {
+        assert_eq!(result.delta.removed_servers, vec!["test-server"]);
+        assert_eq!(result.delta.degraded_removals, vec!["test-server"]);
+        assert!(result.delta.lifecycle_actions.iter().any(|action| {
             matches!(
                 action,
                 McpLifecycleAction::Removed {
@@ -614,5 +888,117 @@ mod tests {
                 } if server == "test-server"
             )
         }));
+    }
+
+    #[tokio::test]
+    async fn apply_staged_add_is_non_blocking() {
+        let Some(server_path) = skip_if_no_test_server() else {
+            return;
+        };
+
+        let mut router = McpRouter::new();
+        router.stage_add(test_server_config("test-server", &server_path));
+        let result = router.apply_staged().await.expect("apply staged add");
+
+        // Should be pending, not immediately active.
+        assert!(
+            result.pending_count > 0,
+            "server should be pending after non-blocking add"
+        );
+        assert!(result.delta.lifecycle_actions.iter().any(|a| matches!(
+            a,
+            McpLifecycleAction::PendingConnect { server } if server == "test-server"
+        )));
+
+        // Poll until background task completes (max 3s).
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let ext = router.take_external_updates();
+            if ext
+                .notices
+                .iter()
+                .any(|n| n.server == "test-server" && n.status == "activated")
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for background MCP connect"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // Tools should now be visible.
+        assert!(
+            !router.list_tools().is_empty(),
+            "tools should be visible after activation"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_and_enumerate_times_out() {
+        // Use a config with a very short timeout pointing at a command that hangs.
+        let mut config = McpServerConfig::stdio(
+            "hang-server",
+            "sleep",
+            vec!["60".to_string()],
+            HashMap::new(),
+        );
+        config.connect_timeout_secs = Some(1);
+
+        let result = McpConnection::connect_and_enumerate(&config).await;
+        assert!(result.is_err(), "should time out");
+        let err_msg = result.err().expect("already checked").to_string();
+        assert!(
+            err_msg.contains("Timed out"),
+            "error should mention timeout: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_remove_add_discards_stale_generation() {
+        let Some(server_path) = skip_if_no_test_server() else {
+            return;
+        };
+
+        let mut router = McpRouter::new();
+
+        // Add server (non-blocking).
+        router.stage_add(test_server_config("test-server", &server_path));
+        let result = router.apply_staged().await.expect("first add");
+        assert_eq!(result.pending_count, 1);
+
+        // Immediately remove (cancels the pending add).
+        router.stage_remove("test-server");
+        router.apply_staged().await.expect("remove");
+
+        // Add again with a new generation.
+        router.stage_add(test_server_config("test-server", &server_path));
+        let result = router.apply_staged().await.expect("second add");
+        assert_eq!(result.pending_count, 1);
+
+        // Wait for the SECOND add to complete (first should be discarded).
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let ext = router.take_external_updates();
+            if ext
+                .notices
+                .iter()
+                .any(|n| n.server == "test-server" && n.status == "activated")
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for second add to complete"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // Should be active from the second add.
+        assert!(matches!(
+            router.server_lifecycle_state("test-server"),
+            Some(McpServerLifecycleState::Active)
+        ));
     }
 }

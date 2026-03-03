@@ -118,6 +118,32 @@ impl LlmStreamResult {
     }
 }
 
+/// A notice about an externally-completed tool configuration change.
+///
+/// Produced by background MCP connection tasks and consumed by the agent loop.
+#[derive(Debug, Clone)]
+pub struct ExternalToolNotice {
+    /// Server or source name.
+    pub server: String,
+    /// What kind of operation completed.
+    pub operation: crate::event::ToolConfigChangeOperation,
+    /// Human-readable status (e.g. "activated", "failed").
+    pub status: String,
+    /// Number of tools provided (on success).
+    pub tool_count: Option<usize>,
+}
+
+/// Result of polling for external tool updates.
+///
+/// Returned by [`AgentToolDispatcher::poll_external_updates`].
+#[derive(Debug, Clone, Default)]
+pub struct ExternalToolUpdate {
+    /// Notices about completed background operations since last poll.
+    pub notices: Vec<ExternalToolNotice>,
+    /// Names of servers still connecting in the background.
+    pub pending: Vec<String>,
+}
+
 /// Trait for tool dispatchers
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -127,6 +153,15 @@ pub trait AgentToolDispatcher: Send + Sync {
     /// Execute a tool call
     async fn dispatch(&self, call: ToolCallView<'_>)
     -> Result<ToolResult, crate::error::ToolError>;
+
+    /// Poll for external tool updates from background operations (e.g. async MCP loading).
+    ///
+    /// The default implementation returns an empty update. Implementations that
+    /// support background tool loading (like `McpRouterAdapter`) override this
+    /// to drain completed results and report pending servers.
+    async fn poll_external_updates(&self) -> ExternalToolUpdate {
+        ExternalToolUpdate::default()
+    }
 }
 
 /// A tool dispatcher that filters tools based on a policy
@@ -176,6 +211,10 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for Filtered
             return Err(crate::error::ToolError::access_denied(call.name));
         }
         self.inner.dispatch(call).await
+    }
+
+    async fn poll_external_updates(&self) -> ExternalToolUpdate {
+        self.inner.poll_external_updates().await
     }
 }
 

@@ -15,11 +15,12 @@ use rmcp::{
     transport::TokioChildProcess,
 };
 use serde_json::Value;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::process::Command;
 
 /// Connection to an MCP server
 pub struct McpConnection {
-    #[allow(dead_code)]
     config: McpServerConfig,
     service: RunningService<RoleClient, ()>,
 }
@@ -89,6 +90,46 @@ impl McpConnection {
             config: config.clone(),
             service,
         })
+    }
+
+    /// Default connection timeout in seconds.
+    pub const DEFAULT_CONNECT_TIMEOUT_SECS: u32 = 10;
+
+    /// Connect to an MCP server, perform handshake, and enumerate tools in a
+    /// single timeout-bounded operation.
+    ///
+    /// This is the preferred entry point for all add/reload paths. The timeout
+    /// covers connect + initialize handshake + list_tools as a single budget.
+    pub async fn connect_and_enumerate(
+        config: &McpServerConfig,
+    ) -> Result<(Self, Vec<Arc<ToolDef>>), McpError> {
+        let timeout_secs = config
+            .connect_timeout_secs
+            .unwrap_or(Self::DEFAULT_CONNECT_TIMEOUT_SECS);
+        let timeout = Duration::from_secs(timeout_secs as u64);
+
+        tokio::time::timeout(timeout, async {
+            let conn = Self::connect(config).await?;
+            let tools = conn
+                .list_tools()
+                .await?
+                .into_iter()
+                .map(Arc::new)
+                .collect::<Vec<_>>();
+            Ok((conn, tools))
+        })
+        .await
+        .map_err(|_| McpError::ConnectionFailed {
+            reason: format!(
+                "Timed out connecting to '{}' ({timeout_secs}s)",
+                config.name
+            ),
+        })?
+    }
+
+    /// Get the config used to create this connection.
+    pub fn config(&self) -> &McpServerConfig {
+        &self.config
     }
 
     /// Get server info

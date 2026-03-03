@@ -1,0 +1,128 @@
+/**
+ * Type-level compilation tests for @rkat/web.
+ *
+ * These tests verify that the public API types compile correctly.
+ * They are checked with `tsc --noEmit` — no runtime execution needed.
+ */
+
+import type {
+  RuntimeConfig,
+  SessionConfig,
+  MobDefinition,
+  SpawnSpec,
+  AgentEvent,
+  ToolCallback,
+  MobLifecycleAction,
+} from '../src/index.js';
+
+// ─── RuntimeConfig ──────────────────────────────────────────────
+
+const minimalConfig: RuntimeConfig = {
+  anthropicApiKey: 'sk-test',
+};
+
+const fullConfig: RuntimeConfig = {
+  apiKey: 'sk-fallback',
+  anthropicApiKey: 'sk-ant',
+  openaiApiKey: 'sk-oai',
+  geminiApiKey: 'sk-gem',
+  model: 'claude-sonnet-4-5',
+  maxSessions: 16,
+  baseUrl: 'https://proxy.example.com',
+  anthropicBaseUrl: 'https://proxy.example.com/anthropic',
+  openaiBaseUrl: 'https://proxy.example.com/openai',
+  geminiBaseUrl: 'https://proxy.example.com/gemini',
+};
+
+// ─── SessionConfig ──────────────────────────────────────────────
+
+const sessionConfig: SessionConfig = {
+  model: 'claude-sonnet-4-5',
+  apiKey: 'sk-test',
+  systemPrompt: 'You are helpful.',
+  maxTokens: 1024,
+  anthropicBaseUrl: 'https://proxy.example.com/anthropic',
+  labels: { env: 'test' },
+  additionalInstructions: ['Be concise.'],
+};
+
+// ─── MobDefinition (matches Rust MobDefinition) ────────────────
+
+const mobDef: MobDefinition = {
+  id: 'test-mob',
+  profiles: {
+    worker: {
+      model: 'claude-sonnet-4-5',
+      peer_description: 'A worker agent.',
+      skills: ['research'],
+      tools: { builtins: false, shell: false, comms: true, memory: false, mob: false, mob_tasks: false },
+    },
+  },
+  wiring: {
+    auto_wire_orchestrator: false,
+    role_wiring: [{ a: 'worker', b: 'reviewer' }],
+  },
+};
+
+// ─── SpawnSpec ───────────────────────────────────────────────────
+
+const spawnSpec: SpawnSpec = {
+  profile: 'worker',
+  meerkat_id: 'w1',
+  runtime_mode: 'autonomous_host',
+  initial_message: 'Hello',
+  labels: { role: 'worker' },
+};
+
+// ─── Event narrowing (matches Rust AgentEvent serde) ────────────
+
+function handleEvent(event: AgentEvent): string {
+  switch (event.type) {
+    case 'text_delta':
+      return event.delta;
+    case 'text_complete':
+      return event.content;
+    case 'tool_call_requested':
+      return `${event.name}:${event.id}`;
+    case 'tool_result_received':
+      return `${event.name}:${event.is_error}`;
+    case 'turn_started':
+      return `turn ${event.turn_number}`;
+    case 'turn_completed':
+      return `${event.stop_reason} ${event.usage.input_tokens}+${event.usage.output_tokens}`;
+    case 'run_completed':
+      return event.result;
+    case 'run_failed':
+      return event.error;
+    case 'tool_execution_started':
+      return `exec:${event.name}`;
+    case 'tool_execution_completed':
+      return `done:${event.name}:${event.duration_ms}ms`;
+    case 'reasoning_delta':
+      return event.delta;
+    case 'reasoning_complete':
+      return event.content;
+  }
+}
+
+// ─── ToolCallback ───────────────────────────────────────────────
+
+const myTool: ToolCallback = async (args: string) => {
+  const parsed = JSON.parse(args) as { input: string };
+  return { content: parsed.input.toUpperCase(), is_error: false };
+};
+
+// ─── MobLifecycleAction ─────────────────────────────────────────
+
+const actions: MobLifecycleAction[] = ['stop', 'resume', 'complete', 'destroy'];
+
+// ─── Ensure all exports type-check (suppress unused warnings) ───
+
+void minimalConfig;
+void fullConfig;
+void sessionConfig;
+void mobDef;
+void spawnSpec;
+void handleEvent;
+void myTool;
+void actions;

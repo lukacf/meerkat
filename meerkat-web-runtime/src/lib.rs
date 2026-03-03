@@ -9,6 +9,7 @@
 //! ### Bootstrap
 //! - `init_runtime(mobpack_bytes, credentials_json)` — primary mobpack bootstrap
 //! - `init_runtime_from_config(config_json)` — bare-bones bootstrap without mobpack
+//! - `runtime_version()` → crate version string (for JS/WASM version mismatch detection)
 //!
 //! ### Session (direct agent loop, existing per-session approach)
 //! - `create_session(mobpack_bytes, config_json)` → handle
@@ -173,8 +174,16 @@ struct SessionConfig {
     system_prompt: Option<String>,
     #[serde(default = "default_max_tokens")]
     max_tokens: u32,
+    /// Backward-compat single base URL — mapped to the inferred provider.
     #[serde(default)]
     base_url: Option<String>,
+    /// Per-provider base URLs — take precedence over `base_url`.
+    #[serde(default)]
+    anthropic_base_url: Option<String>,
+    #[serde(default)]
+    openai_base_url: Option<String>,
+    #[serde(default)]
+    gemini_base_url: Option<String>,
     /// Enable comms for this session (registers in InprocRegistry).
     #[serde(default)]
     comms_name: Option<String>,
@@ -214,9 +223,16 @@ struct Credentials {
     gemini_api_key: Option<String>,
     #[serde(default = "default_model")]
     model: Option<String>,
-    /// Optional custom base URL — mapped to the default model's provider.
+    /// Backward-compat single base URL — mapped to the default model's provider.
     #[serde(default)]
     base_url: Option<String>,
+    /// Per-provider base URLs — take precedence over `base_url`.
+    #[serde(default)]
+    anthropic_base_url: Option<String>,
+    #[serde(default)]
+    openai_base_url: Option<String>,
+    #[serde(default)]
+    gemini_base_url: Option<String>,
 }
 
 fn default_model() -> Option<String> {
@@ -237,9 +253,16 @@ struct RuntimeConfig {
     gemini_api_key: Option<String>,
     #[serde(default = "default_model")]
     model: Option<String>,
-    /// Optional custom base URL — mapped to the default model's provider.
+    /// Backward-compat single base URL — mapped to the default model's provider.
     #[serde(default)]
     base_url: Option<String>,
+    /// Per-provider base URLs — take precedence over `base_url`.
+    #[serde(default)]
+    anthropic_base_url: Option<String>,
+    #[serde(default)]
+    openai_base_url: Option<String>,
+    #[serde(default)]
+    gemini_base_url: Option<String>,
     #[serde(default = "default_max_sessions")]
     max_sessions: usize,
 }
@@ -345,6 +368,72 @@ fn build_provider_api_keys(
         ));
     }
     Ok(keys)
+}
+
+/// Resolve per-provider base URLs into a `Config.providers.base_urls` map.
+///
+/// Per-provider fields (`anthropic_base_url`, etc.) take precedence. The
+/// backward-compat single `base_url` is mapped to the default model's inferred
+/// provider as a fallback.
+fn build_provider_base_urls(
+    base_url: Option<&str>,
+    anthropic_base_url: Option<&str>,
+    openai_base_url: Option<&str>,
+    gemini_base_url: Option<&str>,
+    model: &str,
+) -> Option<HashMap<String, String>> {
+    fn non_blank(s: Option<&str>) -> Option<&str> {
+        match s {
+            Some(v) if !v.trim().is_empty() => Some(v),
+            _ => None,
+        }
+    }
+
+    let mut urls = HashMap::new();
+    if let Some(url) = non_blank(anthropic_base_url) {
+        urls.insert("anthropic".into(), url.to_string());
+    }
+    if let Some(url) = non_blank(openai_base_url) {
+        urls.insert("openai".into(), url.to_string());
+    }
+    if let Some(url) = non_blank(gemini_base_url) {
+        urls.insert("gemini".into(), url.to_string());
+    }
+    // Backward-compat: single base_url maps to the default model's provider,
+    // but only if no per-provider URL was set for that provider.
+    if let Some(url) = non_blank(base_url) {
+        if let Some(provider) = infer_provider_name(model) {
+            urls.entry(provider.to_string())
+                .or_insert_with(|| url.to_string());
+        } else {
+            tracing::warn!(model, "base_url ignored: cannot infer provider from model");
+        }
+    }
+    if urls.is_empty() { None } else { Some(urls) }
+}
+
+/// Resolve the effective base URL for a single session's LLM client.
+///
+/// Per-provider fields take precedence; `base_url` is the backward-compat fallback
+/// for the model's inferred provider.
+fn resolve_session_base_url(
+    base_url: Option<&str>,
+    anthropic_base_url: Option<&str>,
+    openai_base_url: Option<&str>,
+    gemini_base_url: Option<&str>,
+    model: &str,
+) -> Option<String> {
+    let provider = infer_provider_name(model)?;
+    let per_provider = match provider {
+        "anthropic" => anthropic_base_url,
+        "openai" => openai_base_url,
+        "gemini" => gemini_base_url,
+        _ => None,
+    };
+    per_provider
+        .or(base_url)
+        .filter(|s| !s.trim().is_empty())
+        .map(ToString::to_string)
 }
 
 /// Infer the provider name from a model string.
@@ -621,8 +710,8 @@ fn create_llm_client(
 // JS Tool Callbacks — register tool implementations from JavaScript
 // ═══════════════════════════════════════════════════════════
 
-/// Registry of JS-implemented tools. Populated via `register_tool_callback`
-/// before `init_runtime` / `init_runtime_from_config`.
+// Registry of JS-implemented tools. Populated via `register_tool_callback`
+// before `init_runtime` / `init_runtime_from_config`.
 #[cfg(target_arch = "wasm32")]
 thread_local! {
     static JS_TOOLS: RefCell<Vec<JsToolEntry>> = const { RefCell::new(Vec::new()) };
@@ -687,6 +776,15 @@ pub fn clear_tool_callbacks() {
     JS_TOOLS.with(|cell| cell.borrow_mut().clear());
 }
 
+/// Return the crate version embedded at compile time.
+///
+/// Used by the `@rkat/web` TypeScript wrapper to validate that the JS glue
+/// and the WASM binary were built from the same version.
+#[wasm_bindgen]
+pub fn runtime_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 /// Tool dispatcher that delegates to JS callbacks stored in the thread-local registry.
 ///
 /// The dispatcher itself only stores tool definitions (Send+Sync).
@@ -695,7 +793,6 @@ pub fn clear_tool_callbacks() {
 #[cfg(target_arch = "wasm32")]
 struct JsToolDispatcher {
     tools: Arc<[Arc<meerkat_core::ToolDef>]>,
-    tool_names: Vec<String>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -708,8 +805,7 @@ impl JsToolDispatcher {
             }
             let tools: Arc<[Arc<meerkat_core::ToolDef>]> =
                 entries.iter().map(|e| e.def.clone()).collect();
-            let tool_names: Vec<String> = entries.iter().map(|e| e.def.name.clone()).collect();
-            Some(Self { tools, tool_names })
+            Some(Self { tools })
         })
     }
 
@@ -831,19 +927,13 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
     let mut config = Config::default();
     config.agent.model.clone_from(&model);
     config.providers.api_keys = Some(api_keys);
-    // Map single base_url to the default model's inferred provider.
-    if let Some(url) = &creds.base_url
-        && !url.trim().is_empty()
-    {
-        if let Some(provider) = infer_provider_name(&model) {
-            config.providers.base_urls = Some(HashMap::from([(provider.to_string(), url.clone())]));
-        } else {
-            tracing::warn!(
-                model = &*model,
-                "base_url ignored: cannot infer provider from model"
-            );
-        }
-    }
+    config.providers.base_urls = build_provider_base_urls(
+        creds.base_url.as_deref(),
+        creds.anthropic_base_url.as_deref(),
+        creds.openai_base_url.as_deref(),
+        creds.gemini_base_url.as_deref(),
+        &model,
+    );
 
     let (session_service, mob_state) = build_service_infrastructure(config, MAX_SESSIONS)?;
 
@@ -893,19 +983,13 @@ pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
     let mut config = Config::default();
     config.agent.model.clone_from(&model);
     config.providers.api_keys = Some(api_keys);
-    // Map single base_url to the default model's inferred provider.
-    if let Some(url) = &rt_config.base_url
-        && !url.trim().is_empty()
-    {
-        if let Some(provider) = infer_provider_name(&model) {
-            config.providers.base_urls = Some(HashMap::from([(provider.to_string(), url.clone())]));
-        } else {
-            tracing::warn!(
-                model = &*model,
-                "base_url ignored: cannot infer provider from model"
-            );
-        }
-    }
+    config.providers.base_urls = build_provider_base_urls(
+        rt_config.base_url.as_deref(),
+        rt_config.anthropic_base_url.as_deref(),
+        rt_config.openai_base_url.as_deref(),
+        rt_config.gemini_base_url.as_deref(),
+        &model,
+    );
 
     let (session_service, mob_state) = build_service_infrastructure(config, max_sessions)?;
 
@@ -959,8 +1043,17 @@ pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<u32, Js
         config.system_prompt.as_deref(),
     );
 
+    // Resolve effective base URL: per-provider fields take precedence over single base_url.
+    let effective_base_url = resolve_session_base_url(
+        config.base_url.as_deref(),
+        config.anthropic_base_url.as_deref(),
+        config.openai_base_url.as_deref(),
+        config.gemini_base_url.as_deref(),
+        &config.model,
+    );
+
     // Create LLM client.
-    let llm_client = create_llm_client(&config.model, api_key, config.base_url.as_deref())
+    let llm_client = create_llm_client(&config.model, api_key, effective_base_url.as_deref())
         .map_err(|e| err_str("provider_error", e))?;
 
     // Build tool dispatcher (in-memory tasks, no shell).
@@ -1035,8 +1128,17 @@ pub fn create_session_simple(config_json: &str) -> Result<u32, JsValue> {
         return Err(err_js("invalid_config", "api_key must not be empty"));
     }
 
+    // Resolve effective base URL: per-provider fields take precedence over single base_url.
+    let effective_base_url = resolve_session_base_url(
+        config.base_url.as_deref(),
+        config.anthropic_base_url.as_deref(),
+        config.openai_base_url.as_deref(),
+        config.gemini_base_url.as_deref(),
+        &config.model,
+    );
+
     // Create LLM client.
-    let llm_client = create_llm_client(&config.model, api_key, config.base_url.as_deref())
+    let llm_client = create_llm_client(&config.model, api_key, effective_base_url.as_deref())
         .map_err(|e| err_str("provider_error", e))?;
 
     // Build tool dispatcher (includes JS-registered tools).

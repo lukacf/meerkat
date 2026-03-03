@@ -5,15 +5,22 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "bin": {
+    "rkat-web-proxy": "./proxy/cli.mjs"
+  },
   "exports": {
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
+    },
+    "./proxy": {
+      "import": "./proxy/index.mjs"
     }
   },
   "files": [
     "dist",
-    "wasm"
+    "wasm",
+    "proxy"
   ],
   "scripts": {
     "build:wasm": "RUSTFLAGS='--cfg getrandom_backend=\"wasm_js\"' wasm-pack build ../../meerkat-web-runtime --target web --out-dir ../../sdks/web/wasm",

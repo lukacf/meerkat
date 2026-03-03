@@ -46,18 +46,22 @@ const sessionConfig: SessionConfig = {
   additionalInstructions: ['Be concise.'],
 };
 
-// ─── MobDefinition ──────────────────────────────────────────────
+// ─── MobDefinition (matches Rust MobDefinition) ────────────────
 
 const mobDef: MobDefinition = {
   id: 'test-mob',
   profiles: {
     worker: {
       model: 'claude-sonnet-4-5',
-      system_prompt: 'You are a worker.',
-      tools: { builtins: false, shell: false, comms: true, memory: false },
+      peer_description: 'A worker agent.',
+      skills: ['research'],
+      tools: { builtins: false, shell: false, comms: true, memory: false, mob: false, mob_tasks: false },
     },
   },
-  wiring: [{ a: 'w1', b: 'w2' }],
+  wiring: {
+    auto_wire_orchestrator: false,
+    role_wiring: [{ a: 'worker', b: 'reviewer' }],
+  },
 };
 
 // ─── SpawnSpec ───────────────────────────────────────────────────
@@ -70,24 +74,34 @@ const spawnSpec: SpawnSpec = {
   labels: { role: 'worker' },
 };
 
-// ─── Event narrowing ────────────────────────────────────────────
+// ─── Event narrowing (matches Rust AgentEvent serde) ────────────
 
 function handleEvent(event: AgentEvent): string {
   switch (event.type) {
     case 'text_delta':
-      return event.text;
+      return event.delta;
     case 'text_complete':
-      return event.text;
-    case 'tool_use_start':
-      return `${event.name}:${event.tool_use_id}`;
-    case 'tool_result':
       return event.content;
-    case 'turn_complete':
-      return `${event.usage.input_tokens}+${event.usage.output_tokens}`;
-    case 'turn_error':
+    case 'tool_call_requested':
+      return `${event.name}:${event.id}`;
+    case 'tool_result_received':
+      return `${event.name}:${event.is_error}`;
+    case 'turn_started':
+      return `turn ${event.turn_number}`;
+    case 'turn_completed':
+      return `${event.stop_reason} ${event.usage.input_tokens}+${event.usage.output_tokens}`;
+    case 'run_completed':
+      return event.result;
+    case 'run_failed':
       return event.error;
-    case 'comms_received':
-      return `${event.from}: ${event.body}`;
+    case 'tool_execution_started':
+      return `exec:${event.name}`;
+    case 'tool_execution_completed':
+      return `done:${event.name}:${event.duration_ms}ms`;
+    case 'reasoning_delta':
+      return event.delta;
+    case 'reasoning_complete':
+      return event.content;
   }
 }
 

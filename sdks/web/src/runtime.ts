@@ -193,19 +193,25 @@ export class MeerkatRuntime {
   }
 
   /**
-   * Register a tool callback.
+   * Register a tool callback on the WASM module.
    *
-   * Call this before {@link init} or {@link initFromMobpack}.
-   * The callback receives tool arguments as a JSON string and must return
-   * a JSON string of `{ content: string, is_error: boolean }`.
+   * **Must be called before {@link init} or {@link initFromMobpack}** because
+   * the tool dispatcher is built during initialization.
+   *
+   * @param wasm - The WASM module (same one passed to init).
+   * @param name - Tool name.
+   * @param description - Human-readable tool description.
+   * @param schema - JSON Schema for tool input.
+   * @param callback - Receives tool arguments as JSON string, returns result.
    */
-  registerTool(
+  static registerTool(
+    wasm: WasmModule,
     name: string,
     description: string,
     schema: JsonSchema,
     callback: ToolCallback,
   ): void {
-    this.wasm.register_tool_callback(
+    wasm.register_tool_callback(
       name,
       description,
       JSON.stringify(schema),
@@ -213,9 +219,9 @@ export class MeerkatRuntime {
     );
   }
 
-  /** Clear all registered tool callbacks. */
-  clearTools(): void {
-    this.wasm.clear_tool_callbacks();
+  /** Clear all registered tool callbacks on the WASM module. */
+  static clearTools(wasm: WasmModule): void {
+    wasm.clear_tool_callbacks();
   }
 
   /** Create a mob from a definition. */

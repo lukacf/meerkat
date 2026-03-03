@@ -755,13 +755,14 @@ impl LlmClient for GeminiClient {
         let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
             let body = self.build_request_body(request)?;
             let url = format!(
-                "{}/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
-                self.base_url, request.model, self.api_key
+                "{}/v1beta/models/{}:streamGenerateContent?alt=sse",
+                self.base_url, request.model
             );
 
             let response = self.http
                 .post(url)
                 .header("Content-Type", "application/json")
+                .header("x-goog-api-key", &self.api_key)
                 .json(&body)
                 .send()
                 .await

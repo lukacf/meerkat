@@ -82,32 +82,90 @@ export interface Usage {
   output_tokens: number;
 }
 
-// ─── Mob types ──────────────────────────────────────────────────
+// ─── Mob types (matches meerkat-mob Rust wire format) ───────────
 
-/** Mob definition passed to {@link MeerkatRuntime.createMob}. */
+/**
+ * Mob definition passed to {@link MeerkatRuntime.createMob}.
+ *
+ * Matches Rust `MobDefinition` in `meerkat-mob/src/definition.rs`.
+ */
 export interface MobDefinition {
   id: string;
-  profiles: Record<string, MobProfile>;
+  profiles: Record<string, Profile>;
+  /** Wiring rules for automatic peer connections. */
+  wiring?: WiringRules;
+  /** Named flow definitions. */
   flows?: Record<string, unknown>;
-  wiring?: WiringSpec[];
+  /** Named MCP server configurations. */
+  mcp_servers?: Record<string, unknown>;
+  /** Named skill sources. */
+  skills?: Record<string, unknown>;
+  /** Orchestrator configuration. */
+  orchestrator?: unknown;
+  /** Backend selection config. */
+  backend?: unknown;
 }
 
-export interface MobProfile {
+/**
+ * Profile template for spawning agents.
+ *
+ * Matches Rust `Profile` in `meerkat-mob/src/profile.rs`.
+ * Note: there is NO `system_prompt` field — prompts are built from skills.
+ */
+export interface Profile {
+  /** LLM model name (e.g. "claude-sonnet-4-5"). */
   model: string;
-  system_prompt?: string;
-  tools?: ToolSpec;
-  max_tokens?: number;
+  /** Skill references to load. */
+  skills?: string[];
+  /** Tool configuration. */
+  tools?: ToolConfig;
+  /** Human-readable role description visible to peers. */
+  peer_description?: string;
+  /** Whether this agent can receive turns from external callers. */
+  external_addressable?: boolean;
+  /** Runtime mode: 'turn_driven' or 'autonomous_host'. */
+  runtime_mode?: string;
+  /** Max peer-count threshold for inline peer lifecycle notifications. */
+  max_inline_peer_notifications?: number;
+  /** JSON Schema for structured output extraction. */
+  output_schema?: unknown;
+  /** Provider-specific parameters (e.g. thinking_budget, reasoning_effort). */
+  provider_params?: unknown;
 }
 
-export interface ToolSpec {
+/** Tool configuration for a profile. Matches Rust `ToolConfig`. */
+export interface ToolConfig {
+  /** Enable built-in tools (file read, etc.). */
   builtins?: boolean;
+  /** Enable shell execution tool. */
   shell?: boolean;
+  /** Enable comms tools (peer messaging). */
   comms?: boolean;
+  /** Enable memory/semantic search tools. */
   memory?: boolean;
+  /** Enable mob management tools (spawn, retire, wire, unwire, list). */
+  mob?: boolean;
+  /** Enable shared task list tools. */
+  mob_tasks?: boolean;
+  /** MCP server names this profile connects to. */
+  mcp?: string[];
+  /** Named Rust tool bundles (re-registered at mob construction time). */
+  rust_bundles?: string[];
 }
 
-export interface WiringSpec {
+/** Wiring rules controlling automatic peer connections. */
+export interface WiringRules {
+  /** Automatically wire every spawned agent to the orchestrator. */
+  auto_wire_orchestrator?: boolean;
+  /** Fan-out wiring rules between profile roles. */
+  role_wiring?: RoleWiringRule[];
+}
+
+/** Wiring rule between two profile roles. */
+export interface RoleWiringRule {
+  /** First profile name. */
   a: string;
+  /** Second profile name. */
   b: string;
 }
 
@@ -143,7 +201,7 @@ export interface MobStatus {
 /** Mob lifecycle actions. */
 export type MobLifecycleAction = 'stop' | 'resume' | 'complete' | 'destroy';
 
-// ─── Event types ────────────────────────────────────────────────
+// ─── Event types (matches meerkat-core AgentEvent serde) ────────
 
 /** Envelope wrapping an agent event with metadata. */
 export interface EventEnvelope {
@@ -153,29 +211,45 @@ export interface EventEnvelope {
   event: AgentEvent | { type: string; [key: string]: unknown };
 }
 
-/** Known agent event types (discriminated union on `type`). */
+/**
+ * Known agent event types (discriminated union on `type`).
+ *
+ * Matches Rust `AgentEvent` with `#[serde(tag = "type", rename_all = "snake_case")]`.
+ */
 export type AgentEvent =
   | TextDeltaEvent
   | TextCompleteEvent
-  | ToolUseStartEvent
-  | ToolResultEvent
-  | TurnCompleteEvent
-  | TurnErrorEvent
-  | CommsReceivedEvent;
+  | ToolCallRequestedEvent
+  | ToolResultReceivedEvent
+  | TurnStartedEvent
+  | TurnCompletedEvent
+  | RunCompletedEvent
+  | RunFailedEvent
+  | ToolExecutionStartedEvent
+  | ToolExecutionCompletedEvent
+  | ReasoningDeltaEvent
+  | ReasoningCompleteEvent;
 
-export interface TextDeltaEvent { type: 'text_delta'; text: string }
-export interface TextCompleteEvent { type: 'text_complete'; text: string }
-export interface ToolUseStartEvent { type: 'tool_use_start'; tool_use_id: string; name: string }
-export interface ToolResultEvent { type: 'tool_result'; tool_use_id: string; content: string; is_error: boolean }
-export interface TurnCompleteEvent { type: 'turn_complete'; usage: Usage }
-export interface TurnErrorEvent { type: 'turn_error'; error: string }
-export interface CommsReceivedEvent { type: 'comms_received'; from: string; body: string }
+export interface TextDeltaEvent { type: 'text_delta'; delta: string }
+export interface TextCompleteEvent { type: 'text_complete'; content: string }
+export interface ToolCallRequestedEvent { type: 'tool_call_requested'; id: string; name: string; args: unknown }
+export interface ToolResultReceivedEvent { type: 'tool_result_received'; id: string; name: string; is_error: boolean }
+export interface TurnStartedEvent { type: 'turn_started'; turn_number: number }
+export interface TurnCompletedEvent { type: 'turn_completed'; stop_reason: string; usage: Usage }
+export interface RunCompletedEvent { type: 'run_completed'; session_id: string; result: string; usage: Usage }
+export interface RunFailedEvent { type: 'run_failed'; session_id: string; error: string }
+export interface ToolExecutionStartedEvent { type: 'tool_execution_started'; id: string; name: string }
+export interface ToolExecutionCompletedEvent { type: 'tool_execution_completed'; id: string; name: string; result: string; is_error: boolean; duration_ms: number }
+export interface ReasoningDeltaEvent { type: 'reasoning_delta'; delta: string }
+export interface ReasoningCompleteEvent { type: 'reasoning_complete'; content: string }
 
-/** Type guard for known event types. Unknown events have a `type` not in the known set. */
+/** Type guard for known event types. */
 export function isKnownEvent(event: { type: string }): event is AgentEvent {
   return [
-    'text_delta', 'text_complete', 'tool_use_start', 'tool_result',
-    'turn_complete', 'turn_error', 'comms_received',
+    'text_delta', 'text_complete', 'tool_call_requested', 'tool_result_received',
+    'turn_started', 'turn_completed', 'run_completed', 'run_failed',
+    'tool_execution_started', 'tool_execution_completed',
+    'reasoning_delta', 'reasoning_complete',
   ].includes(event.type);
 }
 

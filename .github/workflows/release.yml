@@ -335,3 +335,20 @@ jobs:
           else
             npm publish --access public
           fi
+
+      - name: Publish Web SDK
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        working-directory: sdks/web
+        run: |
+          set -euo pipefail
+          DRY_RUN="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.registry_dry_run == 'true' }}"
+          npm install --ignore-scripts
+          npm config set //registry.npmjs.org/:_authToken ${NODE_AUTH_TOKEN}
+          # Web SDK TypeScript build only (WASM build requires separate wasm-pack step)
+          npm run build:ts
+          if [[ "$DRY_RUN" == "true" ]]; then
+            npm publish --access public --dry-run
+          else
+            npm publish --access public
+          fi

@@ -39,12 +39,14 @@ const PROVIDERS = {
   gemini: {
     target: 'https://generativelanguage.googleapis.com',
     envKey: 'GEMINI_API_KEY',
-    injectAuth(_headers, _apiKey) {
-      // Gemini auth is in the query string, handled by rewriteUrl
+    injectAuth(headers, apiKey) {
+      headers.set('x-goog-api-key', apiKey);
+      // Remove any client-side dummy key from query string
     },
-    rewriteUrl(url, apiKey) {
+    rewriteUrl(url, _apiKey) {
+      // Strip any ?key= query param (legacy client-side auth)
       const u = new URL(url);
-      u.searchParams.set('key', apiKey);
+      u.searchParams.delete('key');
       return u.toString();
     },
   },

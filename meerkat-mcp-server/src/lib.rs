@@ -2355,7 +2355,6 @@ async fn handle_meerkat_run(
         max_inline_peer_notifications: None,
         app_context: input.app_context.clone(),
         additional_instructions: input.additional_instructions.clone(),
-        wait_for_mcp: false,
     };
 
     let req = CreateSessionRequest {
@@ -2556,7 +2555,6 @@ async fn handle_meerkat_resume(
         max_inline_peer_notifications: None,
         app_context: None,
         additional_instructions: input.additional_instructions.clone(),
-        wait_for_mcp: false,
     };
 
     let needs_rebuild = existing_adapter.is_none()

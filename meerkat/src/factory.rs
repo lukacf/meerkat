@@ -456,7 +456,6 @@ impl AgentBuildConfig {
         self.max_inline_peer_notifications = build.max_inline_peer_notifications;
         self.app_context = build.app_context.clone();
         self.additional_instructions = build.additional_instructions.clone();
-        self.wait_for_mcp = build.wait_for_mcp;
     }
 
     /// Convert build options to the service transport representation.
@@ -493,7 +492,6 @@ impl AgentBuildConfig {
             max_inline_peer_notifications: self.max_inline_peer_notifications,
             app_context: self.app_context.clone(),
             additional_instructions: self.additional_instructions.clone(),
-            wait_for_mcp: self.wait_for_mcp,
         }
     }
 }
@@ -1557,6 +1555,32 @@ impl AgentFactory {
             }
             prompt
         };
+
+        // 11f. Wait for pending MCP connections when requested.
+        //
+        // poll_external_updates() is forwarded through the full dispatcher
+        // chain (CompositeDispatcher → ToolGateway → McpRouterAdapter), so
+        // this drains background MCP connection results regardless of how
+        // many dispatchers are composed.
+        if build_config.wait_for_mcp {
+            let timeout = std::time::Duration::from_secs(60);
+            let deadline = tokio::time::Instant::now() + timeout;
+            loop {
+                let update = tools.poll_external_updates().await;
+                if update.pending.is_empty() {
+                    break;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    tracing::warn!(
+                        "wait_for_mcp timed out after {}s with {} server(s) still pending",
+                        timeout.as_secs(),
+                        update.pending.len()
+                    );
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        }
 
         // 12. Build AgentBuilder
         let budget_limits = build_config

@@ -251,3 +251,74 @@ impl AgentToolDispatcher for McpRouterAdapter {
         update
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::McpRouter;
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+
+    fn test_server_path() -> PathBuf {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = manifest_dir.parent().expect("workspace root");
+        workspace_root.join("target/debug/mcp-test-server")
+    }
+
+    fn skip_if_no_test_server() -> Option<PathBuf> {
+        let path = test_server_path();
+        if path.exists() {
+            Some(path)
+        } else {
+            eprintln!(
+                "Skipping: mcp-test-server not built. \
+                 Run `cargo build -p mcp-test-server` first."
+            );
+            None
+        }
+    }
+
+    fn test_server_config(name: &str, path: &Path) -> crate::McpServerConfig {
+        crate::McpServerConfig::stdio(
+            name,
+            path.to_string_lossy().to_string(),
+            vec![],
+            HashMap::new(),
+        )
+    }
+
+    #[tokio::test]
+    async fn wait_until_ready_returns_notices_when_server_connects() {
+        let Some(server_path) = skip_if_no_test_server() else {
+            return;
+        };
+
+        let mut router = McpRouter::new();
+        router.stage_add(test_server_config("test-srv", &server_path));
+        router.apply_staged().await.expect("apply staged");
+
+        let adapter = McpRouterAdapter::new(router);
+
+        let notices = adapter.wait_until_ready(Duration::from_secs(5)).await;
+
+        // Server should have connected successfully.
+        assert!(
+            !notices.is_empty(),
+            "expected at least one notice from the connecting server"
+        );
+        assert!(
+            notices.iter().any(|n| n.server == "test-srv"),
+            "notice should reference the staged server"
+        );
+
+        // After waiting, pending should be empty.
+        let update = adapter.poll_external_updates().await;
+        assert!(
+            update.pending.is_empty(),
+            "no servers should be pending after wait_until_ready"
+        );
+
+        adapter.shutdown().await;
+    }
+}

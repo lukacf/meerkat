@@ -9,7 +9,9 @@ use super::terminalization::{
 };
 use super::topology::{PolicyDecision, evaluate_topology};
 use super::turn_executor::{FlowTurnExecutor, FlowTurnOutcome, TimeoutDisposition};
-use crate::definition::{CollectionPolicy, DependencyMode, DispatchMode, FlowStepSpec, PolicyMode};
+use crate::definition::{
+    CollectionPolicy, DependencyMode, DispatchMode, FlowStepSpec, PolicyMode, StepOutputFormat,
+};
 use crate::error::MobError;
 use crate::ids::{BranchId, FlowId, MeerkatId, RunId, StepId};
 use crate::run::{
@@ -310,6 +312,7 @@ impl FlowEngine {
                 let target_for_task = target.clone();
                 let prompt_for_task = prompt.clone();
                 let flow_tool_overlay_for_task = flow_tool_overlay.clone();
+                let output_format_for_task = step.output_format.clone();
                 in_flight.push(async move {
                     let result = engine
                         .execute_target_with_retries(
@@ -318,6 +321,7 @@ impl FlowEngine {
                             &target_for_task,
                             &prompt_for_task,
                             flow_tool_overlay_for_task,
+                            output_format_for_task,
                             step_timeout,
                             max_step_retries,
                         )
@@ -516,6 +520,7 @@ impl FlowEngine {
         target: &MeerkatId,
         prompt: &str,
         flow_tool_overlay: Option<TurnToolOverlay>,
+        output_format: StepOutputFormat,
         step_timeout: Duration,
         max_retries: u32,
     ) -> Result<TargetExecutionResult, MobError> {
@@ -553,17 +558,18 @@ impl FlowEngine {
                 .await
             {
                 Ok(FlowTurnOutcome::Completed { output }) => {
-                    let parsed_output = match parse_output_value(&output, step_id, target) {
-                        Ok(parsed_output) => parsed_output,
-                        Err(reason) => {
-                            self.record_target_failure(run_id, step_id, target, reason.clone())
-                                .await?;
-                            if attempt < max_retries {
-                                continue;
+                    let parsed_output =
+                        match parse_output_value(&output, step_id, target, &output_format) {
+                            Ok(parsed_output) => parsed_output,
+                            Err(reason) => {
+                                self.record_target_failure(run_id, step_id, target, reason.clone())
+                                    .await?;
+                                if attempt < max_retries {
+                                    continue;
+                                }
+                                return Ok(TargetExecutionResult::Failed(reason));
                             }
-                            return Ok(TargetExecutionResult::Failed(reason));
-                        }
-                    };
+                        };
                     self.emitter
                         .step_target_completed(run_id.clone(), step_id.clone(), target.clone())
                         .await?;
@@ -906,7 +912,16 @@ fn step_tool_overlay(step: &FlowStepSpec) -> Option<TurnToolOverlay> {
     })
 }
 
-fn parse_output_value(raw: &str, step_id: &StepId, target: &MeerkatId) -> Result<Value, String> {
+fn parse_output_value(
+    raw: &str,
+    step_id: &StepId,
+    target: &MeerkatId,
+    format: &StepOutputFormat,
+) -> Result<Value, String> {
+    if matches!(format, StepOutputFormat::Text) {
+        return Ok(Value::String(raw.to_string()));
+    }
+
     // Try parsing the raw output as-is first.
     if let Ok(value) = serde_json::from_str(raw) {
         return Ok(value);

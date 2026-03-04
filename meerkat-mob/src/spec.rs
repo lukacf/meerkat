@@ -313,6 +313,7 @@ mod tests {
             depends_on_mode: DependencyMode::All,
             allowed_tools: None,
             blocked_tools: None,
+            output_format: crate::definition::StepOutputFormat::Json,
         }
     }
 

@@ -80,6 +80,56 @@ struct MockLlmClientWithRetry {
     calls: Arc<AtomicUsize>,
 }
 
+/// Mock LLM client that returns schema output wrapped in a named envelope.
+struct MockLlmClientWithNamedWrapper {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl LlmClient for MockLlmClientWithNamedWrapper {
+    fn stream<'a>(
+        &'a self,
+        _request: &'a LlmRequest,
+    ) -> std::pin::Pin<
+        Box<dyn futures::Stream<Item = Result<LlmEvent, meerkat_client::LlmError>> + Send + 'a>,
+    > {
+        let call_index = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call_index == 0 {
+            Box::pin(stream::iter(vec![
+                Ok(LlmEvent::TextDelta {
+                    delta: "Working...".to_string(),
+                    meta: None,
+                }),
+                Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success {
+                        stop_reason: meerkat::StopReason::EndTurn,
+                    },
+                }),
+            ]))
+        } else {
+            Box::pin(stream::iter(vec![
+                Ok(LlmEvent::TextDelta {
+                    delta: r#"{"advisor":{"name":"Eve","age":34}}"#.to_string(),
+                    meta: None,
+                }),
+                Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success {
+                        stop_reason: meerkat::StopReason::EndTurn,
+                    },
+                }),
+            ]))
+        }
+    }
+
+    fn provider(&self) -> &'static str {
+        "mock"
+    }
+
+    async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl LlmClient for MockLlmClientWithRetry {
     fn stream<'a>(
@@ -305,5 +355,47 @@ async fn sdk_output_schema_builder_pattern() -> Result<(), Box<dyn std::error::E
     assert!(output_schema.strict);
     assert_eq!(output_schema.name, Some("person".to_string()));
     assert_eq!(output_schema.schema.as_value(), &schema);
+    Ok(())
+}
+
+#[tokio::test]
+async fn sdk_structured_output_unwraps_named_envelope() -> Result<(), Box<dyn std::error::Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+
+    let factory = AgentFactory::new(".rkat/sessions");
+    let llm_client = Arc::new(MockLlmClientWithNamedWrapper {
+        calls: calls.clone(),
+    });
+    let llm_adapter = Arc::new(factory.build_llm_adapter(llm_client, "mock-model").await);
+
+    let store = Arc::new(TestSessionStore::new());
+    let store_adapter = Arc::new(factory.build_store_adapter(store).await);
+
+    let tools: Arc<dyn AgentToolDispatcher> = Arc::new(EmptyDispatcher);
+
+    let mut agent = AgentBuilder::new()
+        .model("mock-model")
+        .max_tokens_per_turn(64)
+        .output_schema(OutputSchema::new(person_schema())?.with_name("advisor"))
+        .build(llm_adapter, tools, store_adapter)
+        .await;
+
+    let result = agent
+        .run("Tell me about a person.".to_string())
+        .await
+        .expect("agent run should succeed");
+
+    let person: Person =
+        serde_json::from_value(result.structured_output.expect("structured output present"))
+            .expect("deserialize Person");
+
+    assert_eq!(
+        person,
+        Person {
+            name: "Eve".to_string(),
+            age: 34
+        }
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
     Ok(())
 }

@@ -2,7 +2,7 @@ use super::*;
 use crate::definition::{
     BackendConfig, CollectionPolicy, ConditionExpr, DependencyMode, DispatchMode, FlowSpec,
     FlowStepSpec, LimitsSpec, MobDefinition, OrchestratorConfig, PolicyMode, RoleWiringRule,
-    SkillSource, TopologyRule, TopologySpec, WiringRules,
+    SkillSource, StepOutputFormat, TopologyRule, TopologySpec, WiringRules,
 };
 use crate::event::MobEvent;
 use crate::profile::{Profile, ToolConfig};
@@ -1410,6 +1410,7 @@ fn flow_step(role: impl Into<crate::ids::ProfileName>, message: &str) -> FlowSte
         depends_on_mode: DependencyMode::All,
         allowed_tools: None,
         blocked_tools: None,
+        output_format: StepOutputFormat::Json,
     }
 }
 
@@ -7749,6 +7750,40 @@ async fn test_malformed_turn_output_fails_without_json_coercion() {
                 && entry.reason.contains("raw_output=\"not-json\"")
         }),
         "malformed output should fail run with parse diagnostics and raw payload excerpt"
+    );
+}
+
+#[tokio::test]
+async fn test_plain_text_step_output_can_skip_json_parsing() {
+    let mut definition = sample_definition_with_single_step_flow(500, 8);
+    let step = definition
+        .flows
+        .get_mut(&FlowId::from("demo"))
+        .and_then(|flow| flow.steps.get_mut(&crate::StepId::from("start")))
+        .expect("start step exists");
+    step.output_format = StepOutputFormat::Text;
+
+    let (handle, service) = create_test_mob(definition).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_completed_result("not-json").await;
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+
+    assert!(
+        terminal.step_ledger.iter().any(|entry| {
+            entry.step_id == crate::StepId::from("start")
+                && entry.status == StepRunStatus::Completed
+                && entry.output == Some(serde_json::Value::String("not-json".to_string()))
+        }),
+        "completed start ledger entry should persist raw plain-text output as JSON string"
     );
 }
 

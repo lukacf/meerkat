@@ -1,6 +1,7 @@
 pub mod advisor;
 pub mod architect;
 pub mod brainstorm;
+pub mod panel;
 pub mod rct;
 pub mod red_team;
 pub mod review;
@@ -41,6 +42,7 @@ impl PackRegistry {
         packs.insert("architect".into(), Box::new(architect::ArchitectPack));
         packs.insert("brainstorm".into(), Box::new(brainstorm::BrainstormPack));
         packs.insert("red-team".into(), Box::new(red_team::RedTeamPack));
+        packs.insert("panel".into(), Box::new(panel::PanelPack));
         packs.insert("rct".into(), Box::new(rct::RctPack));
         Self { packs }
     }

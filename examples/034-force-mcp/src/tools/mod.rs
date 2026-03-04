@@ -70,8 +70,8 @@ pub fn tools_list() -> Vec<Value> {
                 "properties": {
                     "pack": {
                         "type": "string",
-                        "enum": ["advisor", "review", "architect", "brainstorm", "red-team", "rct"],
-                        "description": "Team pack to use. advisor=quick opinion, review=parallel code review, architect=design deliberation, brainstorm=multi-model ideation, red-team=balanced risk assessment, rct=full RCT implementation pipeline"
+                        "enum": ["advisor", "review", "architect", "brainstorm", "red-team", "panel", "rct"],
+                        "description": "Team pack to use. advisor=quick opinion, review=parallel code review, architect=design deliberation, brainstorm=multi-model ideation, red-team=balanced risk assessment, panel=free-form review panel with moderator, rct=full RCT implementation pipeline"
                     },
                     "task": {
                         "type": "string",

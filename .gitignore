@@ -45,4 +45,12 @@ node_modules/
 # TypeScript SDK build output
 sdks/typescript/dist/
 sdks/typescript/package-lock.json
+
+# Web SDK build output
+sdks/web/dist/
+sdks/web/wasm/
+sdks/web/package-lock.json
+
+# Vite cache
+.vite/
 /target-mcp/

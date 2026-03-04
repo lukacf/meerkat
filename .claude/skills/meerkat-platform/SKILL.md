@@ -39,6 +39,7 @@ rkat-mcp --realm team-alpha
 | MCP | Model Context Protocol | Expose Meerkat as tools |
 | Python SDK | Async Python over RPC | Python applications |
 | TypeScript SDK | TypeScript over RPC | Node.js applications |
+| Web SDK | `@rkat/web` (WASM) | Browser applications |
 | Rust SDK | Direct library API | Embedded Rust systems |
 
 For full per-surface schemas and examples, load: `references/api_reference.md`.
@@ -102,11 +103,31 @@ Web build env overrides:
 - `RKAT_WASM_PACK_BIN`: explicit wasm-pack binary path
 - `RKAT_WEB_RUNTIME_CRATE_DIR`: explicit web runtime crate directory for build
 
-### WASM runtime (embedded deployment target)
+### WASM runtime + Web SDK (embedded deployment target)
 
 The `meerkat-web-runtime` crate is an **embedded deployment target for mobpacks** — the JavaScript equivalent of the Rust SDK. It compiles the real meerkat agent stack to wasm32, routing through the same `AgentFactory::build_agent()` pipeline as all other surfaces.
 
-**Not a protocol server** — unlike RPC/REST, the WASM runtime is deployed INTO a host application (browser, Node.js). A mobpack defines what it is. The host provides credentials and drives interaction.
+**`@rkat/web` npm package** (`sdks/web/`): TypeScript wrapper with `MeerkatRuntime`, `Mob`, `Session`, `EventSubscription` classes. Ships with pre-built WASM binary and a Node.js provider proxy.
+
+**Not a protocol server** — unlike RPC/REST, the WASM runtime is deployed INTO a host application (browser). A mobpack defines what it is. The host provides credentials and drives interaction.
+
+**Provider proxy** (`sdks/web/proxy/`): Node.js auth-injecting reverse proxy so API keys stay server-side. The WASM runtime uses per-provider base URLs (`anthropicBaseUrl`, `openaiBaseUrl`, `geminiBaseUrl`) to point at the proxy natively — no fetch override needed.
+
+```bash
+ANTHROPIC_API_KEY=sk-... npx @rkat/web proxy --port 3100
+```
+
+```typescript
+import { MeerkatRuntime } from '@rkat/web';
+import * as wasm from '@rkat/web/wasm/meerkat_web_runtime.js';
+
+const runtime = await MeerkatRuntime.init(wasm, {
+  anthropicApiKey: 'proxy',
+  anthropicBaseUrl: 'http://localhost:3100/anthropic',
+});
+const mob = await runtime.createMob(definition);
+await mob.spawn([{ profile: 'worker', meerkat_id: 'w1' }]);
+```
 
 **Architecture:**
 - Routes through `EphemeralSessionService<FactoryAgentBuilder>` → `AgentFactory::build_agent()` with override-first resource injection
@@ -115,6 +136,7 @@ The `meerkat-web-runtime` crate is an **embedded deployment target for mobpacks*
 - `reqwest` uses browser `fetch` on wasm32
 - `InprocRegistry` provides peer discovery for comms (all sessions share one process-global registry)
 - 10 dependency crates compile for wasm32 (core, client, store, tools, session, hooks, comms, mob, mob-mcp, facade)
+- Gemini uses `x-goog-api-key` header (not query param) for auth
 
 **Fully available on wasm32:**
 - Agent loop (streaming, retries, error recovery, budget enforcement)
@@ -134,47 +156,7 @@ The `meerkat-web-runtime` crate is an **embedded deployment target for mobpacks*
 - MCP protocol client (rmcp blocked by tokio/mio)
 - Network comms (TCP/UDS sockets — inproc only)
 
-**API surface (29 wasm_bindgen exports):**
-```
-# Bootstrap
-init_runtime(mobpack_bytes, credentials_json)
-init_runtime_from_config(config_json)
-
-# Sessions
-create_session(mobpack_bytes, config_json) → handle
-start_turn(handle, prompt, options_json) → RunResult JSON  [async]
-get_session_state(handle) → JSON
-destroy_session(handle)
-poll_events(handle) → AgentEvent[] JSON
-
-# Mob lifecycle
-mob_create(definition_json) → mob_id  [async]
-mob_spawn(mob_id, specs_json) → result JSON  [async]
-mob_wire(mob_id, a, b)  [async]
-mob_unwire(mob_id, a, b)  [async]
-mob_retire(mob_id, meerkat_id)  [async]
-mob_respawn(mob_id, meerkat_id, initial_message?)  [async]
-mob_inject_and_subscribe(mob_id, meerkat_id, message) → interaction_id  [async]
-mob_list_members(mob_id) → JSON
-mob_send_message(mob_id, meerkat_id, msg)  [async]
-mob_events(mob_id, after_cursor, limit) → JSON
-mob_status(mob_id) → JSON
-mob_list() → JSON
-mob_lifecycle(mob_id, action)  [async]
-mob_run_flow(mob_id, flow_id, params_json) → run_id  [async]
-mob_flow_status(mob_id, run_id) → JSON
-mob_cancel_flow(mob_id, run_id)  [async]
-wire_cross_mob(mob_id, a, b)  [async]
-
-# Subscriptions
-mob_member_subscribe(mob_id, meerkat_id) → handle (u32)  [async]
-mob_subscribe_events(mob_id) → handle (u32)  [async]
-poll_subscription(handle) → JSON
-close_subscription(handle)
-
-# Inspection
-inspect_mobpack(bytes) → JSON
-```
+**WASM API surface:** See the meerkat-wasm skill (`references/api_surface.md`) for the complete export table. Key additions in 0.4.2: `runtime_version()`, `register_tool_callback()`, `clear_tool_callbacks()`, `create_session_simple()`, per-provider base URLs on all config types.
 
 **Build:**
 ```bash

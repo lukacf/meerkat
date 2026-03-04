@@ -1,9 +1,10 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use tokio::io::AsyncWriteExt;
 
 use meerkat_mob::ids::{FlowId, MobId};
-use meerkat_mob::MobRunStatus;
+use meerkat_mob::{MobRunStatus, StepRunStatus};
 
 use crate::state::ForceState;
 use super::ToolCallError;
@@ -19,7 +20,7 @@ struct DeliberateInput {
 pub async fn handle(
     state: &ForceState,
     arguments: &Value,
-    _progress_token: Option<Value>,
+    progress_token: Option<Value>,
 ) -> Result<Value, ToolCallError> {
     let input: DeliberateInput = serde_json::from_value(arguments.clone())
         .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
@@ -37,6 +38,7 @@ pub async fn handle(
 
     let context = input.context.as_deref().unwrap_or("");
     let overrides = input.model_overrides.unwrap_or_default();
+    let total_steps = pack.flow_step_count();
     let definition = pack.definition(&input.task, context, &overrides);
     let mob_id = definition.id.clone();
 
@@ -48,7 +50,7 @@ pub async fn handle(
         .map_err(|e| ToolCallError::internal(format!("Mob creation failed: {e}")))?;
 
     // Ensure cleanup on all exit paths
-    let result = run_flow(state, &mob_id, pack.flow_step_count()).await;
+    let result = run_flow(state, &mob_id, total_steps, progress_token.as_ref()).await;
 
     // Destroy mob (best-effort)
     if let Err(e) = state.mob_state.mob_destroy(&mob_id).await {
@@ -61,15 +63,23 @@ pub async fn handle(
 async fn run_flow(
     state: &ForceState,
     mob_id: &MobId,
-    _total_steps: usize,
+    total_steps: usize,
+    progress_token: Option<&Value>,
 ) -> Result<Value, ToolCallError> {
     let flow_id = FlowId::from("main");
+
+    // Send initial progress
+    if let Some(token) = progress_token {
+        send_progress(token, 0, total_steps).await;
+    }
 
     let run_id = state
         .mob_state
         .mob_run_flow(mob_id, flow_id, json!({}))
         .await
         .map_err(|e| ToolCallError::internal(format!("Flow start failed: {e}")))?;
+
+    let mut last_completed = 0usize;
 
     // Poll for completion
     loop {
@@ -85,6 +95,20 @@ async fn run_flow(
             continue;
         };
 
+        // Track completed steps for progress
+        let completed = run
+            .step_ledger
+            .iter()
+            .filter(|e| e.status == StepRunStatus::Completed)
+            .count();
+
+        if completed > last_completed {
+            last_completed = completed;
+            if let Some(token) = progress_token {
+                send_progress(token, completed, total_steps).await;
+            }
+        }
+
         if !run.status.is_terminal() {
             continue;
         }
@@ -96,7 +120,7 @@ async fn run_flow(
                     .step_ledger
                     .iter()
                     .rev()
-                    .find(|e| e.status == meerkat_mob::StepRunStatus::Completed)
+                    .find(|e| e.status == StepRunStatus::Completed)
                     .and_then(|e| e.output.as_ref());
 
                 let text = match last_output {
@@ -117,7 +141,7 @@ async fn run_flow(
                     .collect();
                 return Err(ToolCallError::internal(format!(
                     "Flow failed: {}",
-                    errors.join("; ")
+                    if errors.is_empty() { "unknown error".into() } else { errors.join("; ") }
                 )));
             }
             MobRunStatus::Canceled => {
@@ -126,4 +150,23 @@ async fn run_flow(
             _ => continue,
         }
     }
+}
+
+/// Send an MCP progress notification to stdout.
+async fn send_progress(token: &Value, progress: usize, total: usize) {
+    let notification = json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/progress",
+        "params": {
+            "progressToken": token,
+            "progress": progress,
+            "total": total,
+        }
+    });
+    // Write directly to stdout — this is safe because the main loop is awaiting
+    // the tool handler, so no concurrent writes.
+    let mut stdout = tokio::io::stdout();
+    let msg = format!("{notification}\n");
+    let _ = stdout.write_all(msg.as_bytes()).await;
+    let _ = stdout.flush().await;
 }

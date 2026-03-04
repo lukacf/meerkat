@@ -1,4 +1,9 @@
 pub mod advisor;
+pub mod architect;
+pub mod brainstorm;
+pub mod rct;
+pub mod red_team;
+pub mod review;
 
 use std::collections::BTreeMap;
 
@@ -32,6 +37,11 @@ impl PackRegistry {
     pub fn new() -> Self {
         let mut packs = BTreeMap::<String, Box<dyn Pack>>::new();
         packs.insert("advisor".into(), Box::new(advisor::AdvisorPack));
+        packs.insert("review".into(), Box::new(review::ReviewPack));
+        packs.insert("architect".into(), Box::new(architect::ArchitectPack));
+        packs.insert("brainstorm".into(), Box::new(brainstorm::BrainstormPack));
+        packs.insert("red-team".into(), Box::new(red_team::RedTeamPack));
+        packs.insert("rct".into(), Box::new(rct::RctPack));
         Self { packs }
     }
 

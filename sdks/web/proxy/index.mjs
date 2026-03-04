@@ -107,8 +107,8 @@ export function createProxyHandler(provider, opts = {}) {
     // Copy headers, inject auth
     const headers = new Headers();
     for (const [key, value] of req.headers) {
-      // Skip hop-by-hop, host, and encoding headers
-      if (['host', 'connection', 'keep-alive', 'transfer-encoding', 'accept-encoding'].includes(key.toLowerCase())) continue;
+      // Skip hop-by-hop, host, encoding, and browser-origin headers
+      if (['host', 'connection', 'keep-alive', 'transfer-encoding', 'accept-encoding', 'origin', 'referer'].includes(key.toLowerCase())) continue;
       headers.set(key, value);
     }
     config.injectAuth(headers, apiKey);

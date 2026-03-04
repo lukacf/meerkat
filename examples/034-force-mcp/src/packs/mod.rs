@@ -1,3 +1,5 @@
+pub mod advisor;
+
 use std::collections::BTreeMap;
 
 use meerkat_mob::definition::MobDefinition;
@@ -10,6 +12,8 @@ pub trait Pack: Send + Sync {
     fn description(&self) -> &str;
     /// Number of agents this pack spawns.
     fn agent_count(&self) -> usize;
+    /// Number of flow steps (for progress tracking total).
+    fn flow_step_count(&self) -> usize;
     /// Build the MobDefinition with task/context interpolated and model overrides applied.
     fn definition(
         &self,
@@ -27,12 +31,7 @@ pub struct PackRegistry {
 impl PackRegistry {
     pub fn new() -> Self {
         let mut packs = BTreeMap::<String, Box<dyn Pack>>::new();
-
-        // Packs will be registered here as they're implemented
-        // packs.insert("advisor".into(), Box::new(advisor::AdvisorPack));
-        // packs.insert("review".into(), Box::new(review::ReviewPack));
-        // ...
-
+        packs.insert("advisor".into(), Box::new(advisor::AdvisorPack));
         Self { packs }
     }
 

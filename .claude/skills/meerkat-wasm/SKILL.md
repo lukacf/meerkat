@@ -53,6 +53,33 @@ mod filesystem_module;
 
 `FactoryAgentBuilder` has `default_tool_dispatcher` and `default_session_store` — injected into ALL `build_agent()` calls including mob-spawned sessions.
 
+## `@rkat/web` npm Package
+
+The `sdks/web/` directory contains `@rkat/web` — a TypeScript wrapper around the wasm_bindgen exports with an idiomatic camelCase API. Ships with the pre-built WASM binary and a Node.js provider proxy.
+
+**Key classes:** `MeerkatRuntime`, `Mob`, `Session`, `EventSubscription`.
+
+**Provider proxy** (`sdks/web/proxy/`): Node.js auth-injecting reverse proxy. Sits between browser WASM and LLM providers so API keys stay server-side. Strips `Origin`/`Referer`/`Accept-Encoding` headers from forwarded requests.
+
+```bash
+# Standalone proxy
+ANTHROPIC_API_KEY=sk-... npx @rkat/web proxy --port 3100
+
+# Or compose into existing Node.js server
+import { createProxyHandler } from '@rkat/web/proxy';
+app.use('/anthropic', createProxyHandler('anthropic'));
+```
+
+WASM client uses per-provider base URLs to point at the proxy natively — no fetch override needed:
+```typescript
+const runtime = await MeerkatRuntime.init(wasm, {
+  anthropicApiKey: 'proxy',  // dummy, proxy replaces it
+  anthropicBaseUrl: 'http://localhost:3100/anthropic',
+});
+```
+
+**Version validation:** `runtime_version()` export returns `CARGO_PKG_VERSION`. `MeerkatRuntime.init()` checks it against the expected version to catch stale cached WASM.
+
 ## Building
 
 ```bash
@@ -62,7 +89,10 @@ RUSTFLAGS='--cfg getrandom_backend="wasm_js"' \
 
 **CRITICAL: `--out-dir` is relative to CRATE root (`meerkat-web-runtime/`), not workspace root.**
 
+**CRITICAL: wasm-pack creates a `.gitignore` with `*` inside the output directory.** Delete it before `npm publish` or add an `.npmignore` to the package — otherwise npm excludes the WASM binary.
+
 Verify: `cargo check -p <crate> --target wasm32-unknown-unknown`
+Clippy: `cargo clippy -p meerkat-web-runtime --target wasm32-unknown-unknown -- -D warnings` (enforced in CI)
 
 ## Common Gotchas
 
@@ -83,6 +113,8 @@ Excluded: shell tools, filesystem persistence, MCP client (rmcp), network comms 
 
 For detailed API surface and architecture, load: `references/api_surface.md`.
 
-- `meerkat-web-runtime/src/lib.rs` — 29 wasm_bindgen exports
+- `meerkat-web-runtime/src/lib.rs` — wasm_bindgen exports (bootstrap, sessions, mob, subscriptions, comms)
+- `sdks/web/src/runtime.ts` — `MeerkatRuntime` class (TypeScript wrapper entry point)
+- `sdks/web/proxy/index.mjs` — Node.js provider proxy
 - `meerkat/src/factory.rs` — `build_agent()` with overrides, `AgentFactory::minimal()`
 - `meerkat/src/service_factory.rs` — `FactoryAgentBuilder` with default injection

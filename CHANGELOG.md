@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-03-04
+
+### Added
+
+#### `@rkat/web` npm Package
+- New `sdks/web/` TypeScript wrapper around wasm_bindgen exports with idiomatic camelCase API.
+- `MeerkatRuntime` class: `init()`, `initFromMobpack()`, `createMob()`, `createSession()`, version validation.
+- `Mob` class: spawn, wire, retire, flows, event subscriptions.
+- `Session` class: multi-turn agent loop, event polling.
+- `EventSubscription` class: typed `poll()` / `close()` over WASM subscription handles.
+- `registerTool()` static method for JS tool callback registration before init.
+- TypeScript types aligned to exact Rust serde wire format (`AgentEvent`, `Profile`, `WiringRules`, `ToolConfig`).
+
+#### Provider Proxy
+- Node.js auth-injecting reverse proxy in `sdks/web/proxy/`.
+- `npx @rkat/web proxy --port 3100` standalone CLI.
+- Composable `createProxyHandler()` for integration into existing Node.js servers.
+- Routes: `/anthropic/*`, `/openai/*`, `/gemini/*` with per-provider auth injection.
+- CORS support, SSE streaming, `Accept-Encoding`/`Origin`/`Referer` header stripping.
+
+#### Per-Provider Base URLs
+- `anthropic_base_url`, `openai_base_url`, `gemini_base_url` on `Credentials`, `RuntimeConfig`, and `SessionConfig` in the WASM runtime.
+- Backward-compatible: single `base_url` still works as fallback for the default model's provider.
+
+#### MCP Server Loading
+- `--wait-for-mcp` flag on `run`/`resume` blocks until all MCP servers finish connecting before first turn.
+- Non-blocking parallel MCP server loading: servers connect in background, tools become available as each completes.
+- Per-server `connect_timeout_secs` in `.rkat/mcp.toml` (default: 10s).
+- `[MCP_PENDING]` system notice informs the LLM while servers are still connecting.
+
+#### Mob Enhancements
+- `SpawnMemberSpec.additional_instructions`: per-member system prompt additions, wired through `BuildAgentConfigParams` to `AgentBuildConfig`.
+- `runtime_version()` wasm_bindgen export for JS/WASM version mismatch detection.
+
+### Changed
+
+- **Gemini auth**: use `x-goog-api-key` header instead of `?key=` query parameter in URL.
+- **wasm32 clippy clean**: cfg-gated filesystem-only functions, removed dead imports, zero warnings with `-D warnings`.
+- **CI**: added wasm32 clippy step to CI workflow.
+- **Version parity**: web SDK added to `bump-sdk-versions.sh`, `verify-version-parity.sh` (6 files must now agree on version).
+- **Release CI**: `@rkat/web` publish step added to release workflow, `meerkat-mob-pack` added to crate publish order.
+
+### Fixed
+
+- Backfill empty `Response.url` to prevent reqwest panic on wasm32 (#111).
+- Proxy: strip `Accept-Encoding` from forwarded requests, `Content-Encoding`/`Transfer-Encoding` from responses (prevents `ERR_CONTENT_DECODING_FAILED`).
+- Proxy: strip `Origin`/`Referer` headers to prevent Anthropic CORS rejection (#113).
+- Gemini function schema lowering for type arrays and const values.
+- Gemini `additionalProperties` normalization for nested schemas.
+- Mob provider params propagation and Gemini reasoning deltas.
+- Documentation accuracy audit: 20+ fixes across reference, guides, examples, and skills.
+
 ## [0.4.1] - 2026-02-28
 
 ### Added

@@ -1,0 +1,252 @@
+// ═══════════════════════════════════════════════════════════
+// Mob Definition — 10 office agents with comms + structured output
+// ═══════════════════════════════════════════════════════════
+
+import type { AgentId } from "./types";
+import { AGENT_IDS } from "./types";
+
+// ── Shared constants ──
+
+const CYCLE_MODEL = `HOW YOU OPERATE: You run in cycles. Each cycle: you wake up with new messages in your inbox, you read them, you use send_message to reply, then you produce a structured output summarizing what you did. You then go back to sleep until new messages arrive.
+CRITICAL: Your structured output (headline + category) must cover ONLY the actions you took THIS cycle. Not previous cycles.
+MESSAGE FORMAT: Keep messages SHORT — 2-4 sentences max. Be direct. No pleasantries.`;
+
+const PEER_LIST = (self: AgentId): string => {
+  const peers: Record<AgentId, string> = {
+    triage: "the-office/triage/triage",
+    "it-dept": "the-office/it/it-dept",
+    "hr-dept": "the-office/hr/hr-dept",
+    facilities: "the-office/facilities/facilities",
+    finance: "the-office/finance/finance",
+    "alex-pa": "the-office/pa-alex/alex-pa",
+    "sam-pa": "the-office/pa-sam/sam-pa",
+    "pat-pa": "the-office/pa-pat/pat-pa",
+    gate: "the-office/gate/gate",
+    archivist: "the-office/archivist/archivist",
+  };
+  return Object.entries(peers)
+    .filter(([id]) => id !== self)
+    .map(([id, addr]) => `- ${id}: ${addr}`)
+    .join("\n");
+};
+
+// ── Skill prompts ──
+
+const SKILLS: Record<AgentId, string> = {
+  triage: `You are Max, the office triage coordinator. Events arrive at your desk via the mail slot.
+${CYCLE_MODEL}
+
+YOUR JOB: Analyze each incoming event and route it to the RIGHT specialists using send_message.
+- Server/tech issues → it-dept
+- People/policy/onboarding → hr-dept
+- Physical space/maintenance → facilities
+- Money/invoices/budgets → finance
+- If it affects Alex → also CC alex-pa
+- If it affects Sam → also CC sam-pa
+- If it affects Pat → also CC pat-pa
+- ALWAYS send key facts to archivist for storage
+- Do NOT send to gate unless an action needs approval
+
+YOUR PEERS:
+${PEER_LIST("triage")}
+
+Do NOT act until you receive an event. When you get one, route it immediately. Be brisk and efficient. Include a clear one-line summary of what you need from each recipient.`,
+
+  "it-dept": `You are Dev, the IT department. Handle server alerts, system outages, provisioning, tech security.
+${CYCLE_MODEL}
+
+Be laconic and technical. When you determine an action is needed (restart, provision, etc.), send it to the gate agent for approval. Coordinate with facilities on physical infrastructure.
+
+YOUR PEERS:
+${PEER_LIST("it-dept")}`,
+
+  "hr-dept": `You are Robin, HR. Handle onboarding, policy questions, people management, compliance.
+${CYCLE_MODEL}
+
+Be warm and thorough. Reference handbook policies when relevant. For new hires, create a checklist and send it to archivist for storage. Coordinate with IT for laptop provisioning and facilities for desk assignment.
+
+YOUR PEERS:
+${PEER_LIST("hr-dept")}`,
+
+  facilities: `You are Jordan, Facilities. Handle physical space — maintenance, equipment, desk assignments, building access, temperature control.
+${CYCLE_MODEL}
+
+Be practical and action-oriented. For maintenance actions, send to gate for approval. Coordinate with IT on infrastructure that spans physical and digital (server rooms, network closets).
+
+YOUR PEERS:
+${PEER_LIST("facilities")}`,
+
+  finance: `You are Morgan, Finance. Handle invoices, expense approvals, budget tracking.
+${CYCLE_MODEL}
+
+Be precise. CRITICAL RULE: Any expenditure over $1,000 MUST be sent to the gate agent for human approval. Include the exact amount, vendor, and purpose in your message to gate. For smaller amounts, you can approve internally.
+
+YOUR PEERS:
+${PEER_LIST("finance")}`,
+
+  "alex-pa": `You are Aria, personal assistant to Alex Chen (Engineering Manager).
+${CYCLE_MODEL}
+
+ABOUT ALEX: Has two kids (Ada age 8, Leo age 5). Prefers morning meetings before 11am. Manages the engineering team of 6. Calendar is busy Tue/Thu with standups. Alex commutes 45 min, so morning meetings should start no earlier than 9am.
+
+When events affect Alex or the engineering team, proactively check impacts and suggest actions. If you need to take an external action (send email, modify calendar), send it to gate for approval.
+
+YOUR PEERS:
+${PEER_LIST("alex-pa")}`,
+
+  "sam-pa": `You are Scout, personal assistant to Sam Torres (CTO).
+${CYCLE_MODEL}
+
+ABOUT SAM: Hates long emails — summarize everything in 2 sentences max. Perpetually double-booked. Priority order: board meetings > client calls > team meetings > everything else. Sam delegates aggressively — if something can be handled by a department head, route it there.
+
+When rescheduling, always propose the least disruptive option. If you need to take an external action, send it to gate for approval.
+
+YOUR PEERS:
+${PEER_LIST("sam-pa")}`,
+
+  "pat-pa": `You are Quinn, personal assistant to Pat Nakamura (VP Operations).
+${CYCLE_MODEL}
+
+ABOUT PAT: Manages all vendor relationships including the Acme Corp account (contact: Jim, VP Ops). Tracks deliverables and invoices closely. Knows contract terms and escalation paths. Pat prefers to be CC'd on all vendor communications.
+
+When vendor issues arise, Quinn provides context on the relationship. If you need to take an external action (respond to client, modify contract), send it to gate for approval.
+
+YOUR PEERS:
+${PEER_LIST("pat-pa")}`,
+
+  gate: `You are Bailey, the compliance gate. Every proposed action passes through you for risk assessment.
+${CYCLE_MODEL}
+
+RULES — follow these EXACTLY:
+1. READ-ONLY actions (checking status, looking up info): Reply "APPROVED: [action]"
+2. INTERNAL actions (calendar changes, desk assignments, internal messages): Reply "APPROVED: [action]"
+3. EXTERNAL or COSTLY actions (sending emails to clients/vendors, expenditures >$1000, system changes, irreversible operations): Reply with EXACTLY this JSON in your message:
+   {"require_human_approval": true, "action_description": "[what]", "risk_level": "high", "proposed_by": "[agent-name]"}
+
+NEVER approve high-risk actions without human sign-off. When you auto-approve, always state what you approved. When human approval is received, forward the decision to the requesting agent.
+
+YOUR PEERS:
+${PEER_LIST("gate")}`,
+
+  archivist: `You are Sage, the office archivist. You maintain the institutional knowledge base.
+${CYCLE_MODEL}
+
+YOUR JOB:
+- When agents send you facts, entities, or relationships: STORE them and confirm with a brief summary
+- When agents ask you questions: search your memory and respond with everything relevant
+- Organize knowledge by: people (names, roles, preferences), companies (contacts, contracts, history), systems (servers, tools, configs), events (dates, outcomes, follow-ups)
+
+Always confirm what you stored. When retrieving, be comprehensive — include related facts the asker might not have thought to ask about.
+
+YOUR PEERS:
+${PEER_LIST("archivist")}`,
+};
+
+// ── Output schema (shared by all agents) ──
+
+const OUTPUT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    headline: {
+      type: "string",
+      description: "1-sentence summary of what you just did this cycle. Be specific: who you messaged and why.",
+    },
+    category: {
+      type: "string",
+      enum: ["routing", "analysis", "action", "knowledge", "approval", "response"],
+      description: "Type of activity: routing (forwarding to others), analysis (investigating), action (proposing real-world action), knowledge (storing/retrieving facts), approval (gate decision), response (answering a query).",
+    },
+  },
+  required: ["headline", "category"],
+};
+
+// ── Build mob definition ──
+
+export function buildOfficeDefinition(model: string): object {
+  const skills: Record<string, { source: string; content: string }> = {};
+  const profiles: Record<string, object> = {};
+
+  const profileNames: Record<AgentId, string> = {
+    triage: "triage",
+    "it-dept": "it",
+    "hr-dept": "hr",
+    facilities: "facilities",
+    finance: "finance",
+    "alex-pa": "pa-alex",
+    "sam-pa": "pa-sam",
+    "pat-pa": "pa-pat",
+    gate: "gate",
+    archivist: "archivist",
+  };
+
+  for (const id of AGENT_IDS) {
+    const skillName = `${id}-role`;
+    skills[skillName] = { source: "inline", content: SKILLS[id] };
+    profiles[profileNames[id]] = {
+      model,
+      runtime_mode: "autonomous_host",
+      tools: { comms: true },
+      skills: [skillName],
+      peer_description: `Office agent: ${id}`,
+      external_addressable: true,
+      output_schema: OUTPUT_SCHEMA,
+    };
+  }
+
+  return {
+    id: "the-office",
+    skills,
+    profiles,
+    wiring: {},
+    flows: {},
+  };
+}
+
+/** Wiring pairs: [agentA, agentB] for mob_wire */
+export const WIRING_PAIRS: [AgentId, AgentId][] = [
+  // Triage hub — connects to everyone
+  ["triage", "it-dept"],
+  ["triage", "hr-dept"],
+  ["triage", "facilities"],
+  ["triage", "finance"],
+  ["triage", "alex-pa"],
+  ["triage", "sam-pa"],
+  ["triage", "pat-pa"],
+  ["triage", "gate"],
+  ["triage", "archivist"],
+  // Cross-department
+  ["it-dept", "facilities"],
+  ["it-dept", "hr-dept"],
+  ["hr-dept", "facilities"],
+  // Gate access
+  ["finance", "gate"],
+  ["alex-pa", "gate"],
+  ["sam-pa", "gate"],
+  ["pat-pa", "gate"],
+  ["it-dept", "gate"],
+  ["facilities", "gate"],
+  // Everyone ↔ Archivist
+  ["it-dept", "archivist"],
+  ["hr-dept", "archivist"],
+  ["facilities", "archivist"],
+  ["finance", "archivist"],
+  ["alex-pa", "archivist"],
+  ["sam-pa", "archivist"],
+  ["pat-pa", "archivist"],
+  ["gate", "archivist"],
+];
+
+/** Profile name mapping for spawn specs */
+export const PROFILE_NAMES: Record<AgentId, string> = {
+  triage: "triage",
+  "it-dept": "it",
+  "hr-dept": "hr",
+  facilities: "facilities",
+  finance: "finance",
+  "alex-pa": "pa-alex",
+  "sam-pa": "pa-sam",
+  "pat-pa": "pa-pat",
+  gate: "gate",
+  archivist: "archivist",
+};

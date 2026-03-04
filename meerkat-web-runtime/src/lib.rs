@@ -684,12 +684,7 @@ fn create_llm_client(
             .build()
             .map_err(|e| format!("failed to create Anthropic client: {e}"))?;
         Ok(Arc::new(client))
-    } else if model.starts_with("gpt")
-        || model.starts_with("o1")
-        || model.starts_with("o3")
-        || model.starts_with("o4")
-        || model.starts_with("chatgpt")
-    {
+    } else if model.starts_with("gpt") || model.starts_with("chatgpt") {
         let client = if let Some(url) = base_url {
             meerkat_client::openai::OpenAiClient::new_with_base_url(api_key.into(), url.into())
         } else {

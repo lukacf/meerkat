@@ -6,7 +6,7 @@ use meerkat_mob::ids::*;
 use meerkat_mob::profile::{Profile, ToolConfig};
 use meerkat_mob::MobRuntimeMode;
 
-use super::{Pack, text_schema};
+use super::Pack;
 
 pub struct RctPack;
 
@@ -80,7 +80,7 @@ impl Pack for RctPack {
                     backend: None,
                     runtime_mode: *mode,
                     max_inline_peer_notifications: None,
-                    output_schema: Some(text_schema()),
+                    output_schema: None,
                     provider_params: None,
                 },
             );
@@ -107,7 +107,7 @@ impl Pack for RctPack {
                 branch: None,
                 depends_on_mode: DependencyMode::default(),
                 allowed_tools: None,
-                blocked_tools: None,
+                blocked_tools: None, output_format: StepOutputFormat::Text,
             }
         };
 

@@ -6,7 +6,7 @@ use meerkat_mob::ids::*;
 use meerkat_mob::profile::{Profile, ToolConfig};
 use meerkat_mob::MobRuntimeMode;
 
-use super::{Pack, text_schema};
+use super::Pack;
 
 pub struct ArchitectPack;
 
@@ -63,7 +63,7 @@ impl Pack for ArchitectPack {
                     backend: None,
                     runtime_mode: MobRuntimeMode::TurnDriven,
                     max_inline_peer_notifications: None,
-                    output_schema: Some(text_schema()),
+                    output_schema: None,
                     provider_params: None,
                 },
             );
@@ -87,7 +87,7 @@ impl Pack for ArchitectPack {
                 branch: None,
                 depends_on_mode: DependencyMode::default(),
                 allowed_tools: None,
-                blocked_tools: None,
+                blocked_tools: None, output_format: StepOutputFormat::Text,
             }
         };
 

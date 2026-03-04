@@ -174,7 +174,12 @@ async fn run_flow(
                     .find(|e| e.status == StepRunStatus::Completed)
                     .and_then(|e| e.output.as_ref());
 
-                let text = extract_response_text(last_output);
+                // With StepOutputFormat::Text, output is stored as Value::String
+                let text = match last_output {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(v) => serde_json::to_string_pretty(v).unwrap_or_default(),
+                    None => "Flow completed but produced no output.".to_string(),
+                };
 
                 return Ok(json!({
                     "content": [{"type": "text", "text": text}]
@@ -197,38 +202,6 @@ async fn run_flow(
             _ => continue,
         }
     }
-}
-
-/// Extract readable text from a flow step's JSON output.
-/// Handles various LLM output shapes: {"response": "..."}, {"role": {"response": "..."}}, etc.
-fn extract_response_text(output: Option<&Value>) -> String {
-    let Some(val) = output else {
-        return "Flow completed but produced no output.".to_string();
-    };
-    // Direct string
-    if let Some(s) = val.as_str() {
-        return s.to_string();
-    }
-    // {"response": "..."}
-    if let Some(obj) = val.as_object() {
-        if let Some(Value::String(s)) = obj.get("response") {
-            return s.clone();
-        }
-        // {"<role>": {"response": "..."}} — LLMs sometimes wrap in role key
-        if obj.len() == 1 {
-            if let Some(inner) = obj.values().next() {
-                if let Some(inner_obj) = inner.as_object() {
-                    if let Some(Value::String(s)) = inner_obj.get("response") {
-                        return s.clone();
-                    }
-                }
-                if let Some(s) = inner.as_str() {
-                    return s.to_string();
-                }
-            }
-        }
-    }
-    serde_json::to_string_pretty(val).unwrap_or_default()
 }
 
 /// Send an MCP progress notification to stdout.

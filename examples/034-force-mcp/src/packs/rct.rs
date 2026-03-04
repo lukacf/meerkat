@@ -120,7 +120,7 @@ impl Pack for RctPack {
         ));
         steps.insert(StepId::from("implement"), step(
             "implementer",
-            "Implement the plan created by the orchestrator. Read .rct/checklist.yaml for tasks. Run verification commands after each task. Mark tasks as done.".into(),
+            "Implement the plan created by the orchestrator. Read .rct/checklist.yaml for tasks. Run verification commands after each task. Mark tasks as done.\n\n## Plan\n{{ steps.plan.response }}".into(),
             vec!["plan"],
             600_000, // 10 min
         ));
@@ -145,7 +145,7 @@ impl Pack for RctPack {
         ));
         steps.insert(StepId::from("aggregate"), step(
             "aggregator",
-            "Aggregate the 3 reviewer verdicts into a final gate result. Output: overall verdict (APPROVE/BLOCK), blocking issues, non-blocking notes, recommendations.".into(),
+            "Aggregate the 3 reviewer verdicts below into a final gate result. Output: overall verdict (APPROVE/BLOCK), blocking issues, non-blocking notes, recommendations.\n\n## RCT Guardian\n{{ steps.review_rct.response }}\n\n## Integration Sheriff\n{{ steps.review_integration.response }}\n\n## Spec Auditor\n{{ steps.review_spec.response }}".into(),
             vec!["review_rct", "review_integration", "review_spec"],
             120_000, // 2 min
         ));

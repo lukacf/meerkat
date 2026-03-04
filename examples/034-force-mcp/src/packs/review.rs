@@ -104,7 +104,7 @@ impl Pack for ReviewPack {
         });
         steps.insert(StepId::from("synthesize"), FlowStepSpec {
             role: ProfileName::from("synthesizer"),
-            message: "Synthesize all review findings into a unified code review assessment. Include: summary, critical issues, recommendations, overall verdict (approve/request changes/reject).".into(),
+            message: "Synthesize all review findings below into a unified code review assessment. Include: summary, critical issues, recommendations, overall verdict (approve/request changes/reject).\n\n## General Review\n{{ steps.general_review.response }}\n\n## Security Review\n{{ steps.security_review.response }}\n\n## Performance Review\n{{ steps.perf_review.response }}".into(),
             depends_on: vec![StepId::from("general_review"), StepId::from("security_review"), StepId::from("perf_review")],
             ..steps.get(&StepId::from("general_review")).unwrap().clone()
         });

@@ -62,7 +62,7 @@ export function corsHeaders(allowOrigin = '*') {
   return {
     'access-control-allow-origin': allowOrigin,
     'access-control-allow-methods': 'GET, POST, PUT, DELETE, OPTIONS',
-    'access-control-allow-headers': 'content-type, authorization, x-api-key, anthropic-version, anthropic-beta, anthropic-dangerous-direct-browser-access',
+    'access-control-allow-headers': 'content-type, authorization, x-api-key, x-goog-api-key, anthropic-version, anthropic-beta, anthropic-dangerous-direct-browser-access',
     'access-control-expose-headers': '*',
     'access-control-max-age': '86400',
   };

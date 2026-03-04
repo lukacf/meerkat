@@ -237,13 +237,21 @@ export class MobOrchestrator {
   /**
    * Initialize the mob runtime and create + spawn the dev team.
    * Must be called after WebCM tools are registered.
+   *
+   * When `proxyBaseUrl` is set, per-provider base URLs are injected so all
+   * LLM traffic routes through the proxy (keys are server-side).
    */
-  async init(keys: ApiKeys, models: ModelAssignments): Promise<void> {
+  async init(keys: ApiKeys, models: ModelAssignments, proxyBaseUrl?: string): Promise<void> {
     // Build config with all available API keys
     const config: Record<string, any> = { model: models.main, max_sessions: 32 };
     if (keys.anthropic) config.anthropic_api_key = keys.anthropic;
     if (keys.openai) config.openai_api_key = keys.openai;
     if (keys.gemini) config.gemini_api_key = keys.gemini;
+    if (proxyBaseUrl) {
+      config.anthropic_base_url = `${proxyBaseUrl}/anthropic`;
+      config.openai_base_url = `${proxyBaseUrl}/openai`;
+      config.gemini_base_url = `${proxyBaseUrl}/gemini`;
+    }
 
     this.runtime.init_runtime_from_config(JSON.stringify(config));
 

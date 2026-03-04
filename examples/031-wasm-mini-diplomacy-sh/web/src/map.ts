@@ -61,7 +61,7 @@ export function renderMap(state: ArenaState, targets?: Record<Team, string>, cap
   svg += `</defs>`;
 
   // Ocean background
-  svg += `<rect width="960" height="540" fill="#0c1520"/>`;
+  svg += `<rect width="960" height="600" fill="#0c1520"/>`;
 
   // Territory fills with parchment texture
   for (const region of state.regions) {

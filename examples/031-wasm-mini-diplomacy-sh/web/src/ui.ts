@@ -289,8 +289,15 @@ const MAP_ASPECT = 960 / 600; // viewBox ratio
 function resizeMap(): void {
   const mapEl = document.querySelector('.map-stage') as HTMLElement | null;
   if (!mapEl) return;
+  const leftCol = mapEl.closest('.left-col') as HTMLElement | null;
   const w = mapEl.clientWidth;
-  mapEl.style.height = `${Math.round(w / MAP_ASPECT)}px`;
+  let h = Math.round(w / MAP_ASPECT);
+  // Cap height so the narrator panel (min 80px) isn't pushed off-screen
+  if (leftCol) {
+    const maxH = leftCol.clientHeight - 80;
+    if (h > maxH) h = Math.max(200, maxH);
+  }
+  mapEl.style.height = `${h}px`;
 }
 
 // Resize on load and window resize

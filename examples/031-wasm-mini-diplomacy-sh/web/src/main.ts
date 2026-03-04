@@ -6,7 +6,7 @@ import "./styles.css";
 
 import type { FactionMob, MatchSession, RuntimeModule, Team } from "./types";
 import { TEAMS, TEAM_LABELS } from "./types";
-import { getApiKeys, initApiKeyInputs } from "./config";
+import { getApiKeys, initApiKeyInputs, isServerMode, getServerProxyConfig } from "./config";
 import { defaultState, resolveOrders } from "./game";
 import { renderMap } from "./map";
 import { buildFactionDefinition, buildNarratorDefinition, serializeState } from "./agents";
@@ -81,7 +81,31 @@ app.innerHTML = `
     <p class="start-hint">Then configure API keys via \u2699 and press Start</p>
   </div>
 </div>
-<p class="status-bar" id="statusLine">Open settings (\u2699) to configure API keys, then start.</p>`;
+<p class="status-bar" id="statusLine">Open settings (\u2699) to configure API keys, then start.</p>
+<div class="guide-overlay hidden" id="guideOverlay">
+  <div class="guide-card">
+    <h2>How to Read the War Room</h2>
+    <div class="guide-grid">
+      <div class="guide-item">
+        <span class="guide-icon">\u{1F5FA}\uFE0F</span>
+        <div><strong>Territory Map</strong><br>Shows faction control, contested frontlines, and battle animations. Expands to full width during combat resolution.</div>
+      </div>
+      <div class="guide-item">
+        <span class="guide-icon">\u{1F4DC}</span>
+        <div><strong>War Correspondent</strong><br>Below the map. An AI narrator summarizes each round's events in dramatic prose.</div>
+      </div>
+      <div class="guide-item">
+        <span class="guide-icon">\u2694\uFE0F</span>
+        <div><strong>Agent Chat Grid</strong><br>3\u00D73 grid on the right. Row 1: Strategy (planner\u2194operator). Row 2: Briefings (planner\u2194ambassador). Row 3: Cross-faction negotiations (ambassador\u2194ambassador).</div>
+      </div>
+      <div class="guide-item">
+        <span class="guide-icon">\u25B6</span>
+        <div><strong>Compact / Verbose</strong><br>Click the \u25B6 arrow on any chat cell to toggle between headline summaries (compact) and full message transcripts (verbose).</div>
+      </div>
+    </div>
+    <button class="guide-dismiss" id="guideDismiss">Got it \u2014 Begin Campaign</button>
+  </div>
+</div>`;
 
 // ═══════════════════════════════════════════════════════════
 // State
@@ -307,6 +331,12 @@ async function startMatch(): Promise<void> {
     if (keys.openai) initConfig.openai_api_key = keys.openai;
     if (keys.gemini) initConfig.gemini_api_key = keys.gemini;
     initConfig.model = models.france;
+    const proxy = getServerProxyConfig();
+    if (proxy) {
+      initConfig.anthropic_base_url = `${proxy.proxyUrl}/anthropic`;
+      initConfig.openai_base_url = `${proxy.proxyUrl}/openai`;
+      initConfig.gemini_base_url = `${proxy.proxyUrl}/gemini`;
+    }
     mod.init_runtime_from_config(JSON.stringify(initConfig));
 
     const factions: FactionMob[] = [];
@@ -356,6 +386,14 @@ async function startMatch(): Promise<void> {
     showBanner("The Campaign Begins", `${TEAMS.map(t => TEAM_LABELS[t]).join(", ")} \u2014 9 agents, 3 powers`, 3000);
     setBadge("Live"); setStatus("Campaign started.");
     $<HTMLDivElement>("drawer").classList.remove("open");
+
+    // Show UI guide overlay (user dismisses it to begin)
+    const guide = $<HTMLDivElement>("guideOverlay");
+    guide.classList.remove("hidden");
+    await new Promise<void>(resolve => {
+      document.getElementById("guideDismiss")!.addEventListener("click", () => resolve(), { once: true });
+    });
+
     await tick();
   } catch (e) { setBadge("Error"); setStatus(`Failed: ${e instanceof Error ? e.message : String(e)}`); }
 }
@@ -366,6 +404,30 @@ async function startMatch(): Promise<void> {
 
 initApiKeyInputs();
 
+if (isServerMode()) {
+  // Hide API key inputs and related text — keys are provided by the proxy
+  for (const id of ["keyAnthropic", "keyOpenai", "keyGemini"]) {
+    const row = document.getElementById(id)?.closest(".setting") as HTMLElement | null;
+    if (row) row.style.display = "none";
+  }
+  // Hide "API Keys" heading (first h3 in the drawer)
+  const drawer = document.getElementById("drawer");
+  const h3s = drawer?.querySelectorAll("h3");
+  if (h3s?.[0]?.textContent === "API Keys") h3s[0].style.display = "none";
+  // Hide settings note about entering API keys
+  const note = drawer?.querySelector(".settings-note") as HTMLElement | null;
+  if (note) note.style.display = "none";
+  // Hide start hint about configuring keys
+  const hint = document.querySelector(".start-hint") as HTMLElement | null;
+  if (hint) hint.textContent = "Models configured by server";
+  // Update status line
+  const statusLine = document.getElementById("statusLine");
+  if (statusLine) statusLine.textContent = "API keys provided by server. Starting...";
+  // Hide start button (auto-start instead)
+  const startBtn = document.getElementById("startBtn");
+  if (startBtn) startBtn.style.display = "none";
+}
+
 document.getElementById("startBtn")!.addEventListener("click", () => void startMatch());
 document.getElementById("startBigBtn")!.addEventListener("click", () => {
   $<HTMLDivElement>("startOverlay").classList.add("hidden");
@@ -375,8 +437,15 @@ document.getElementById("stepBtn")!.addEventListener("click", () => { if (!sessi
 document.getElementById("exportBtn")!.addEventListener("click", () => { if (!session) return; const b = new Blob([JSON.stringify({state:session.state,messages:session.messages},null,2)],{type:"application/json"}); const a = document.createElement("a"); a.href = URL.createObjectURL(b); a.download = "replay.json"; a.click(); });
 document.getElementById("gearBtn")!.addEventListener("click", () => $<HTMLDivElement>("drawer").classList.toggle("open"));
 document.getElementById("closeDrawer")!.addEventListener("click", () => $<HTMLDivElement>("drawer").classList.remove("open"));
+document.getElementById("guideDismiss")!.addEventListener("click", () => $<HTMLDivElement>("guideOverlay").classList.add("hidden"));
 
 renderMap(defaultState());
 renderScore(defaultState());
 renderGrid();
 initMapResize();
+
+// Server mode: skip overlay and auto-start
+if (isServerMode()) {
+  $<HTMLDivElement>("startOverlay").classList.add("hidden");
+  void startMatch();
+}

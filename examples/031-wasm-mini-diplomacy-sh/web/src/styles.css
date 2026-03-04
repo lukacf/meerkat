@@ -317,4 +317,37 @@ body {
 /* ═══ Status Bar ═══ */
 .status-bar { font-family: "Space Grotesk", sans-serif; font-size: 9px; color: var(--ink-muted); padding: 2px 12px; border-top: 1px solid var(--border); flex-shrink: 0; background: var(--parchment-dk); }
 
+/* ═══ UI Guide Overlay ═══ */
+.guide-overlay {
+  position: fixed; inset: 0; z-index: 22;
+  display: grid; place-items: center;
+  background: rgba(20,16,10,0.92); backdrop-filter: blur(6px);
+  transition: opacity 0.4s ease;
+}
+.guide-overlay.hidden { opacity: 0; pointer-events: none; }
+.guide-card {
+  max-width: 520px; padding: 24px 28px; text-align: center;
+  background: var(--parchment); border: 2px solid var(--border-heavy);
+  border-radius: 8px; box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+}
+.guide-card h2 {
+  font-size: 18px; color: var(--gold); letter-spacing: 0.04em; margin-bottom: 16px;
+  border-bottom: 1px solid var(--border); padding-bottom: 8px;
+}
+.guide-grid { display: flex; flex-direction: column; gap: 12px; text-align: left; margin-bottom: 20px; }
+.guide-item {
+  display: flex; gap: 10px; align-items: flex-start;
+  font-family: "Space Grotesk", sans-serif; font-size: 12px; line-height: 1.5; color: var(--ink-dim);
+}
+.guide-item strong { color: var(--ink); }
+.guide-icon { font-size: 18px; flex-shrink: 0; width: 28px; text-align: center; }
+.guide-dismiss {
+  font-family: "Playfair Display", serif; font-size: 14px; font-weight: 700;
+  padding: 8px 24px; border-radius: 5px;
+  background: linear-gradient(135deg, #3a6a3a, #2a5a2a);
+  color: var(--parchment); border: 2px solid rgba(100,160,100,0.4);
+  cursor: pointer; transition: transform 0.15s;
+}
+.guide-dismiss:hover { transform: translateY(-1px); }
+
 @media (max-width: 700px) { .faction .name { display: none; } .row-label { display: none; } }

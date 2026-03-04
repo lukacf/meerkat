@@ -18,15 +18,39 @@ declare const __ANTHROPIC_API_KEY__: string;
 declare const __OPENAI_API_KEY__: string;
 declare const __GEMINI_API_KEY__: string;
 
+// ── Server mode (proxy) detection ───────────────────────────────────────────
+
+const PARAMS = new URLSearchParams(window.location.search);
+const PROXY_URL = PARAMS.get("proxy")?.replace(/\/+$/, "") ?? null;
+const MODEL_OVERRIDES = {
+  orchestrator: PARAMS.get("orchestrator") ?? undefined,
+  planner: PARAMS.get("planner") ?? undefined,
+  coder: PARAMS.get("coder") ?? undefined,
+  reviewer: PARAMS.get("reviewer") ?? undefined,
+};
+
+const DUMMY_KEY = "proxy-provided";
+
 const setupOverlay = document.getElementById("setup-overlay") as HTMLDivElement;
 const anthropicKeyInput = document.getElementById("anthropic-key") as HTMLInputElement;
 const openaiKeyInput = document.getElementById("openai-key") as HTMLInputElement;
 const geminiKeyInput = document.getElementById("gemini-key") as HTMLInputElement;
 
-// Pre-fill from environment variables (baked in at build/dev time)
-if (__ANTHROPIC_API_KEY__) anthropicKeyInput.value = __ANTHROPIC_API_KEY__;
-if (__OPENAI_API_KEY__) openaiKeyInput.value = __OPENAI_API_KEY__;
-if (__GEMINI_API_KEY__) geminiKeyInput.value = __GEMINI_API_KEY__;
+if (PROXY_URL) {
+  // Server mode: fill dummy keys, hide key section
+  anthropicKeyInput.value = DUMMY_KEY;
+  openaiKeyInput.value = DUMMY_KEY;
+  geminiKeyInput.value = DUMMY_KEY;
+  const keySection = document.querySelector(".key-section") as HTMLElement | null;
+  if (keySection) keySection.style.display = "none";
+  const hint = document.querySelector(".key-hint") as HTMLElement | null;
+  if (hint) hint.textContent = "API keys provided by server";
+} else {
+  // Standalone: pre-fill from environment variables (baked in at build/dev time)
+  if (__ANTHROPIC_API_KEY__) anthropicKeyInput.value = __ANTHROPIC_API_KEY__;
+  if (__OPENAI_API_KEY__) openaiKeyInput.value = __OPENAI_API_KEY__;
+  if (__GEMINI_API_KEY__) geminiKeyInput.value = __GEMINI_API_KEY__;
+}
 const bootBtn = document.getElementById("boot-btn") as HTMLButtonElement;
 const bootStatus = document.getElementById("boot-status") as HTMLDivElement;
 const workspace = document.getElementById("workspace") as HTMLDivElement;
@@ -79,6 +103,11 @@ async function boot() {
 
   bootBtn.disabled = true;
   const models = resolveModels(keys);
+  // Apply URL model overrides (server mode or manual)
+  if (MODEL_OVERRIDES.orchestrator) { models.main = MODEL_OVERRIDES.orchestrator; }
+  if (MODEL_OVERRIDES.planner) { models.planner = MODEL_OVERRIDES.planner; }
+  if (MODEL_OVERRIDES.coder) { models.coder = MODEL_OVERRIDES.coder; }
+  if (MODEL_OVERRIDES.reviewer) { models.reviewer = MODEL_OVERRIDES.reviewer; }
 
   try {
     // Step 1: Boot WebCM VM
@@ -124,7 +153,7 @@ async function boot() {
 
     // Step 5: Create mob (orchestrator + planner + coder + reviewer)
     mob = new MobOrchestrator(mobRuntime, panelStates);
-    await mob.init(keys, models);
+    await mob.init(keys, models, PROXY_URL ?? undefined);
 
     // Step 6: Show workspace
     setupOverlay.classList.add("hidden");

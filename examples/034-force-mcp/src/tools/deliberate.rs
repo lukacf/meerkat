@@ -108,7 +108,7 @@ async fn run_flow(
 
     // Send initial progress
     if let Some(token) = progress_token {
-        send_progress(token, 0, total_steps).await;
+        send_progress(token, 0, total_steps, "starting flow").await;
     }
 
     let run_id = state
@@ -133,17 +133,30 @@ async fn run_flow(
             continue;
         };
 
-        // Track completed steps for progress
+        // Track completed + in-progress steps for progress reporting
         let completed = run
             .step_ledger
             .iter()
             .filter(|e| e.status == StepRunStatus::Completed)
             .count();
+        let in_progress: Vec<_> = run
+            .step_ledger
+            .iter()
+            .filter(|e| e.status == StepRunStatus::Dispatched)
+            .map(|e| e.step_id.to_string())
+            .collect();
 
-        if completed > last_completed {
-            last_completed = completed;
+        if completed > last_completed || !in_progress.is_empty() {
+            if completed > last_completed {
+                last_completed = completed;
+            }
             if let Some(token) = progress_token {
-                send_progress(token, completed, total_steps).await;
+                let label = if !in_progress.is_empty() {
+                    in_progress.join(", ")
+                } else {
+                    "waiting".into()
+                };
+                send_progress(token, completed, total_steps, &label).await;
             }
         }
 
@@ -161,15 +174,7 @@ async fn run_flow(
                     .find(|e| e.status == StepRunStatus::Completed)
                     .and_then(|e| e.output.as_ref());
 
-                let text = match last_output {
-                    // Flow steps return {"response": "..."} due to text_schema()
-                    Some(Value::Object(obj)) if obj.contains_key("response") => {
-                        obj["response"].as_str().unwrap_or("").to_string()
-                    }
-                    Some(Value::String(s)) => s.clone(),
-                    Some(v) => serde_json::to_string_pretty(v).unwrap_or_default(),
-                    None => "Flow completed but produced no output.".to_string(),
-                };
+                let text = extract_response_text(last_output);
 
                 return Ok(json!({
                     "content": [{"type": "text", "text": text}]
@@ -194,8 +199,40 @@ async fn run_flow(
     }
 }
 
+/// Extract readable text from a flow step's JSON output.
+/// Handles various LLM output shapes: {"response": "..."}, {"role": {"response": "..."}}, etc.
+fn extract_response_text(output: Option<&Value>) -> String {
+    let Some(val) = output else {
+        return "Flow completed but produced no output.".to_string();
+    };
+    // Direct string
+    if let Some(s) = val.as_str() {
+        return s.to_string();
+    }
+    // {"response": "..."}
+    if let Some(obj) = val.as_object() {
+        if let Some(Value::String(s)) = obj.get("response") {
+            return s.clone();
+        }
+        // {"<role>": {"response": "..."}} — LLMs sometimes wrap in role key
+        if obj.len() == 1 {
+            if let Some(inner) = obj.values().next() {
+                if let Some(inner_obj) = inner.as_object() {
+                    if let Some(Value::String(s)) = inner_obj.get("response") {
+                        return s.clone();
+                    }
+                }
+                if let Some(s) = inner.as_str() {
+                    return s.to_string();
+                }
+            }
+        }
+    }
+    serde_json::to_string_pretty(val).unwrap_or_default()
+}
+
 /// Send an MCP progress notification to stdout.
-async fn send_progress(token: &Value, progress: usize, total: usize) {
+async fn send_progress(token: &Value, progress: usize, total: usize, label: &str) {
     let notification = json!({
         "jsonrpc": "2.0",
         "method": "notifications/progress",
@@ -203,6 +240,7 @@ async fn send_progress(token: &Value, progress: usize, total: usize) {
             "progressToken": token,
             "progress": progress,
             "total": total,
+            "message": label,
         }
     });
     // Write directly to stdout — this is safe because the main loop is awaiting

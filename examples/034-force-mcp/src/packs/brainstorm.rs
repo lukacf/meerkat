@@ -104,7 +104,7 @@ impl Pack for BrainstormPack {
         steps.insert(StepId::from("ideate_c"), step("ideator_c", ideate_msg, vec![]));
         steps.insert(StepId::from("synthesize"), step(
             "synthesizer",
-            "Synthesize all ideas below into a ranked list. For each idea: describe it, assess feasibility, note trade-offs. Recommend the top 2-3 approaches.\n\n## Practical Perspective\n{{ steps.ideate_a.response }}\n\n## Creative Perspective\n{{ steps.ideate_b.response }}\n\n## Contrarian Perspective\n{{ steps.ideate_c.response }}".into(),
+            "Synthesize all ideas below into a ranked list. For each idea: describe it, assess feasibility, note trade-offs. Recommend the top 2-3 approaches.\n\n## Practical Perspective\n{{ steps.ideate_a }}\n\n## Creative Perspective\n{{ steps.ideate_b }}\n\n## Contrarian Perspective\n{{ steps.ideate_c }}".into(),
             vec!["ideate_a", "ideate_b", "ideate_c"],
         ));
 

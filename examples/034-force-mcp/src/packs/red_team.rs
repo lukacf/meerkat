@@ -96,7 +96,7 @@ impl Pack for RedTeamPack {
         let mut steps = IndexMap::new();
         steps.insert(StepId::from("advocate_case"), step("advocate", format!("Argue IN FAVOR of this approach. Build the strongest possible case:\n\n{task}{ctx}"), vec![]));
         steps.insert(StepId::from("adversary_case"), step("adversary", format!("Argue AGAINST this approach. Find every risk, cost, and failure mode:\n\n{task}{ctx}"), vec![]));
-        steps.insert(StepId::from("judgment"), step("judge", "Weigh both arguments below and produce a balanced risk assessment with a clear recommendation.\n\n## Advocate (Pro)\n{{ steps.advocate_case.response }}\n\n## Adversary (Con)\n{{ steps.adversary_case.response }}".into(), vec!["advocate_case", "adversary_case"]));
+        steps.insert(StepId::from("judgment"), step("judge", "Weigh both arguments below and produce a balanced risk assessment with a clear recommendation.\n\n## Advocate (Pro)\n{{ steps.advocate_case }}\n\n## Adversary (Con)\n{{ steps.adversary_case }}".into(), vec!["advocate_case", "adversary_case"]));
 
         let mut flows = BTreeMap::new();
         flows.insert(FlowId::from("main"), FlowSpec { description: Some("Adversarial risk assessment".into()), steps });

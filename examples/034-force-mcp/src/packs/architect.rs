@@ -93,9 +93,9 @@ impl Pack for ArchitectPack {
 
         let mut steps = IndexMap::new();
         steps.insert(StepId::from("plan"), step("planner", format!("Create an architecture plan for:\n\n{task}{ctx}"), vec![]));
-        steps.insert(StepId::from("critique"), step("critic", "Critique this architecture plan. Find weaknesses, missing considerations, and risky assumptions.\n\n## Plan\n{{ steps.plan.response }}".into(), vec!["plan"]));
-        steps.insert(StepId::from("revise"), step("planner", "Address the critique below. Revise your plan to address the weaknesses identified.\n\n## Critique\n{{ steps.critique.response }}".into(), vec!["critique"]));
-        steps.insert(StepId::from("synthesize"), step("synthesizer", "Produce a final Architecture Decision Record (ADR) with: context, decision, consequences, alternatives considered.\n\n## Revised Plan\n{{ steps.revise.response }}".into(), vec!["revise"]));
+        steps.insert(StepId::from("critique"), step("critic", "Critique this architecture plan. Find weaknesses, missing considerations, and risky assumptions.\n\n## Plan\n{{ steps.plan }}".into(), vec!["plan"]));
+        steps.insert(StepId::from("revise"), step("planner", "Address the critique below. Revise your plan to address the weaknesses identified.\n\n## Critique\n{{ steps.critique }}".into(), vec!["critique"]));
+        steps.insert(StepId::from("synthesize"), step("synthesizer", "Produce a final Architecture Decision Record (ADR) with: context, decision, consequences, alternatives considered.\n\n## Revised Plan\n{{ steps.revise }}".into(), vec!["revise"]));
 
         let mut flows = BTreeMap::new();
         flows.insert(FlowId::from("main"), FlowSpec { description: Some("Architecture deliberation".into()), steps });

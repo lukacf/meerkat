@@ -65,4 +65,8 @@ impl PackRegistry {
     pub fn list_names(&self) -> Vec<&str> {
         self.packs.keys().map(|s| s.as_str()).collect()
     }
+
+    pub fn all(&self) -> impl Iterator<Item = &dyn Pack> {
+        self.packs.values().map(|p| p.as_ref())
+    }
 }

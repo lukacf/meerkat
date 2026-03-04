@@ -36,6 +36,11 @@ impl ToolCallError {
 pub fn tools_list() -> Vec<Value> {
     vec![
         json!({
+            "name": "list_packs",
+            "description": "List all available deliberation packs with their descriptions and agent counts.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
             "name": "consult",
             "description": "Get a quick opinion from a single AI agent. No coordination overhead — like asking a colleague. Use this when you want a second opinion, a sanity check, or a fresh perspective on something specific.",
             "inputSchema": {
@@ -95,6 +100,14 @@ pub async fn handle_tool_call(
     progress_token: Option<Value>,
 ) -> Result<Value, ToolCallError> {
     match name {
+        "list_packs" => {
+            let packs: Vec<Value> = state
+                .pack_registry
+                .all()
+                .map(|p| json!({"name": p.name(), "description": p.description(), "agents": p.agent_count(), "flow_steps": p.flow_step_count()}))
+                .collect();
+            Ok(json!({"content": [{"type": "text", "text": serde_json::to_string_pretty(&packs).unwrap_or_default()}]}))
+        }
         "consult" => consult::handle(state, arguments).await,
         "deliberate" => deliberate::handle(state, arguments, progress_token).await,
         _ => Err(ToolCallError::method_not_found(format!(

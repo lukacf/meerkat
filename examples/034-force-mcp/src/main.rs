@@ -17,6 +17,9 @@ mod tools;
 use serde_json::{Value, json};
 use state::ForceState;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::OnceCell;
+
+static STATE: OnceCell<ForceState> = OnceCell::const_new();
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -28,9 +31,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_writer(std::io::stderr)
         .init();
 
-    let state = ForceState::new()?;
-    eprintln!("force-mcp starting (stdio json-rpc)");
-
+    // Start reading stdin immediately — state is initialized lazily on first tool call.
+    // This ensures the MCP handshake (initialize, tools/list) completes instantly.
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     let mut reader = BufReader::new(stdin).lines();
@@ -62,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        let response = handle_request(&state, &request).await;
+        let response = handle_request(&request).await;
         stdout
             .write_all(format!("{response}\n").as_bytes())
             .await?;
@@ -72,7 +74,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn handle_request(state: &ForceState, request: &Value) -> Value {
+/// Get or initialize the server state (lazy — first call creates it).
+async fn get_state() -> Result<&'static ForceState, String> {
+    STATE
+        .get_or_try_init(|| async {
+            ForceState::new().map_err(|e| format!("State init failed: {e}"))
+        })
+        .await
+}
+
+async fn handle_request(request: &Value) -> Value {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let method = request
         .get("method")
@@ -80,6 +91,7 @@ async fn handle_request(state: &ForceState, request: &Value) -> Value {
         .unwrap_or("");
 
     match method {
+        // Handshake — no state needed, responds instantly
         "initialize" => json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -93,12 +105,25 @@ async fn handle_request(state: &ForceState, request: &Value) -> Value {
             }
         }),
         "ping" => json!({"jsonrpc": "2.0", "id": id, "result": {}}),
+        // Tool listing — no state needed
         "tools/list" => json!({
             "jsonrpc": "2.0",
             "id": id,
             "result": { "tools": tools::tools_list() }
         }),
+        // Tool calls — lazy-init state on first use
         "tools/call" => {
+            let state = match get_state().await {
+                Ok(s) => s,
+                Err(e) => {
+                    return json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": {"code": -32603, "message": e}
+                    });
+                }
+            };
+
             let params = request
                 .get("params")
                 .cloned()

@@ -212,91 +212,87 @@ async fn run_comms(
     task: &str,
     progress_token: Option<&Value>,
 ) -> Result<Value, ToolCallError> {
-    // Send the task to the moderator (orchestrator) — kicks off the discussion
-    let moderator_id = MeerkatId::from("moderator");
+    use meerkat_core::event::AgentEvent;
 
     if let Some(token) = progress_token {
         send_progress(token, 0, 1, "panel deliberating").await;
     }
 
+    // Subscribe to mob-wide agent events (all members' streams merged)
+    let mut router_handle = state
+        .mob_state
+        .subscribe_mob_events(mob_id)
+        .await
+        .map_err(|e| ToolCallError::internal(format!("Event subscription failed: {e}")))?;
+
+    // Kick off the discussion by sending the task to the moderator
     state
         .mob_state
-        .mob_send_message(mob_id, moderator_id, task.to_string())
+        .mob_send_message(mob_id, MeerkatId::from("moderator"), task.to_string())
         .await
         .map_err(|e| ToolCallError::internal(format!("Failed to trigger moderator: {e}")))?;
 
-    // Poll mob events until quiescence (no new events for QUIET_THRESHOLD)
-    const MAX_WAIT_MS: u64 = 300_000; // 5 min max
-    const QUIET_THRESHOLD_MS: u64 = 15_000; // 15s of quiet = done
-    const POLL_INTERVAL_MS: u64 = 500;
+    // Drain events until quiescence
+    const MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
+    const QUIET_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(15);
 
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(MAX_WAIT_MS);
+    let deadline = tokio::time::Instant::now() + MAX_WAIT;
     let mut last_event_time = tokio::time::Instant::now();
-    let mut event_cursor = 0u64;
     let mut last_moderator_text = String::new();
     let mut total_events = 0u64;
 
     loop {
-        tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
+        let timeout = QUIET_THRESHOLD.min(
+            deadline
+                .saturating_duration_since(tokio::time::Instant::now()),
+        );
 
-        if tokio::time::Instant::now() > deadline {
-            tracing::warn!("panel hit max wait time");
-            break;
-        }
+        match tokio::time::timeout(timeout, router_handle.event_rx.recv()).await {
+            Ok(Some(attributed)) => {
+                last_event_time = tokio::time::Instant::now();
+                total_events += 1;
 
-        // Poll mob events
-        let events = state
-            .mob_state
-            .mob_events(mob_id, event_cursor, 100)
-            .await
-            .map_err(|e| ToolCallError::internal(format!("Event poll failed: {e}")))?;
-
-        if !events.is_empty() {
-            last_event_time = tokio::time::Instant::now();
-            total_events += events.len() as u64;
-
-            for event in &events {
-                // Track moderator's text output for final extraction
-                let event_json = serde_json::to_value(event).unwrap_or_default();
-                if let Some(payload) = event_json.get("payload") {
-                    let is_moderator = event_json
-                        .pointer("/meerkat_id")
-                        .or_else(|| event_json.pointer("/member/meerkat_id"))
-                        .and_then(Value::as_str)
-                        .is_some_and(|id| id == "moderator");
-
-                    if is_moderator {
-                        if let Some(text) = payload.get("content").and_then(Value::as_str) {
-                            if text.contains("## Panel Review Summary")
-                                || text.contains("## Consensus")
-                                || text.contains("## Recommendation")
-                                || text.len() > 200
-                            {
-                                last_moderator_text = text.to_string();
+                // Extract moderator's text outputs
+                let is_moderator = attributed.source.as_str() == "moderator";
+                if is_moderator {
+                    match &attributed.envelope.payload {
+                        AgentEvent::RunCompleted { result, .. } => {
+                            if result.len() > last_moderator_text.len() {
+                                last_moderator_text = result.clone();
                             }
                         }
+                        AgentEvent::TextComplete { content, .. } => {
+                            if content.len() > last_moderator_text.len() {
+                                last_moderator_text = content.clone();
+                            }
+                        }
+                        _ => {}
                     }
                 }
 
-                event_cursor = event_json
-                    .get("cursor")
-                    .and_then(Value::as_u64)
-                    .map(|c| c + 1)
-                    .unwrap_or(event_cursor);
+                if total_events % 10 == 0 {
+                    if let Some(token) = progress_token {
+                        send_progress(token, 0, 1, &format!("{total_events} events")).await;
+                    }
+                }
             }
-
-            if let Some(token) = progress_token {
-                send_progress(token, 0, 1, &format!("{total_events} messages exchanged")).await;
+            Ok(None) => {
+                // Channel closed — all agents done
+                tracing::info!(total_events, "event channel closed");
+                break;
             }
-        }
-
-        // Check quiescence
-        let quiet_duration = tokio::time::Instant::now() - last_event_time;
-        if quiet_duration > std::time::Duration::from_millis(QUIET_THRESHOLD_MS)
-            && total_events > 0
-        {
-            tracing::info!(total_events, "panel reached quiescence");
-            break;
+            Err(_) => {
+                // Timeout — check quiescence or deadline
+                let quiet = tokio::time::Instant::now() - last_event_time;
+                if quiet >= QUIET_THRESHOLD && total_events > 0 {
+                    tracing::info!(total_events, "panel reached quiescence");
+                    break;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    tracing::warn!(total_events, "panel hit max wait time");
+                    break;
+                }
+            }
         }
     }
 
@@ -305,8 +301,8 @@ async fn run_comms(
     }
 
     if last_moderator_text.is_empty() {
-        // Fallback: collect any text from moderator events
-        last_moderator_text = "Panel discussion completed but moderator summary not captured. Check agent logs for details.".to_string();
+        last_moderator_text =
+            "Panel discussion completed but moderator summary not captured.".to_string();
     }
 
     Ok(json!({"content": [{"type": "text", "text": last_moderator_text}]}))

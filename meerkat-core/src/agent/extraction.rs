@@ -289,13 +289,13 @@ mod tests {
     }
 
     #[test]
-    fn test_unwrap_named_object_wrapper_when_inner_matches_schema() {
+    fn test_unwrap_named_object_wrapper_when_inner_matches_schema()
+    -> Result<(), Box<dyn std::error::Error>> {
         let schema = OutputSchema::new(json!({
             "type": "object",
             "properties": { "response": { "type": "string" } },
             "required": ["response"]
-        }))
-        .expect("valid schema")
+        }))?
         .with_name("advisor");
 
         let parsed = json!({
@@ -306,16 +306,17 @@ mod tests {
 
         let normalized = unwrap_named_object_wrapper(parsed, &schema);
         assert_eq!(normalized, json!({"response": "hello"}));
+        Ok(())
     }
 
     #[test]
-    fn test_unwrap_named_object_wrapper_preserves_declared_wrapper_key() {
+    fn test_unwrap_named_object_wrapper_preserves_declared_wrapper_key()
+    -> Result<(), Box<dyn std::error::Error>> {
         let schema = OutputSchema::new(json!({
             "type": "object",
             "properties": { "advisor": { "type": "object" } },
             "required": ["advisor"]
-        }))
-        .expect("valid schema")
+        }))?
         .with_name("advisor");
 
         let parsed = json!({
@@ -326,5 +327,6 @@ mod tests {
 
         let normalized = unwrap_named_object_wrapper(parsed.clone(), &schema);
         assert_eq!(normalized, parsed);
+        Ok(())
     }
 }

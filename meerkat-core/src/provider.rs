@@ -45,10 +45,12 @@ impl Provider {
             return Some(Self::Anthropic);
         }
 
-        // OpenAI: gpt-*, o1-*, o3-*, chatgpt-*
+        // OpenAI: gpt-*, o1-*, o3-*, o4-*, chatgpt-*, codex-*
         if lower.starts_with("gpt-")
             || lower.starts_with("o1-")
             || lower.starts_with("o3-")
+            || lower.starts_with("o4-")
+            || lower.starts_with("codex-")
             || lower.starts_with("chatgpt-")
         {
             return Some(Self::OpenAI);

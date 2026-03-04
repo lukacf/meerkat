@@ -338,7 +338,7 @@ Required GitHub Actions secrets for full release:
 ### Crate Publish Order
 
 The 18 crates are published in dependency order:
-`meerkat-core` → `meerkat-contracts` → `meerkat-client` → `meerkat-store` → `meerkat-tools` → `meerkat-session` → `meerkat-memory` → `meerkat-mcp` → `meerkat-mcp-server` → `meerkat-hooks` → `meerkat-skills` → `meerkat-comms` → `meerkat-rpc` → `meerkat-rest` → `meerkat` → `meerkat-mob` → `meerkat-mob-mcp` → `rkat`
+`meerkat-core` → `meerkat-contracts` → `meerkat-client` → `meerkat-store` → `meerkat-tools` → `meerkat-session` → `meerkat-memory` → `meerkat-mcp` → `meerkat-mcp-server` → `meerkat-hooks` → `meerkat-skills` → `meerkat-comms` → `meerkat-rpc` → `meerkat-rest` → `meerkat` → `meerkat-mob` → `meerkat-mob-mcp` → `meerkat-mob-pack` → `rkat`
 
 ### Key Rules for AI Agents
 

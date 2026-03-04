@@ -1,0 +1,5 @@
+# Only ship what's in package.json "files" — this file exists to
+# override .gitignore which excludes wasm/ and dist/.
+src/
+tests/
+tsconfig.json

@@ -117,6 +117,17 @@ pub enum DependencyMode {
     Any,
 }
 
+/// How to parse a step target's terminal output.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepOutputFormat {
+    /// Parse output as JSON.
+    #[default]
+    Json,
+    /// Keep output as plain text (stored as a JSON string value).
+    Text,
+}
+
 /// Predicate expression for a step guard.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -173,6 +184,8 @@ pub struct FlowStepSpec {
     pub allowed_tools: Option<Vec<String>>,
     #[serde(default)]
     pub blocked_tools: Option<Vec<String>>,
+    #[serde(default)]
+    pub output_format: StepOutputFormat,
 }
 
 /// Flow definition for a named workflow.
@@ -745,6 +758,48 @@ max_orphaned_turns = 8
         let encoded = serde_json::to_string(&definition).unwrap();
         let decoded: MobDefinition = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, definition);
+    }
+
+    #[test]
+    fn test_flow_step_output_format_defaults_to_json_and_parses_text() {
+        let default_toml = r#"
+[mob]
+id = "flow-default-output"
+
+[profiles.worker]
+model = "claude-sonnet-4-5"
+
+[flows.demo.steps.start]
+role = "worker"
+message = "hello"
+        "#;
+        let default_definition = MobDefinition::from_toml(default_toml).unwrap();
+        let default_step = default_definition
+            .flows
+            .get(&FlowId::from("demo"))
+            .and_then(|flow| flow.steps.get(&StepId::from("start")))
+            .expect("step exists");
+        assert_eq!(default_step.output_format, StepOutputFormat::Json);
+
+        let text_toml = r#"
+[mob]
+id = "flow-text-output"
+
+[profiles.worker]
+model = "claude-sonnet-4-5"
+
+[flows.demo.steps.start]
+role = "worker"
+message = "hello"
+output_format = "text"
+        "#;
+        let text_definition = MobDefinition::from_toml(text_toml).unwrap();
+        let text_step = text_definition
+            .flows
+            .get(&FlowId::from("demo"))
+            .and_then(|flow| flow.steps.get(&StepId::from("start")))
+            .expect("step exists");
+        assert_eq!(text_step.output_format, StepOutputFormat::Text);
     }
 
     #[test]

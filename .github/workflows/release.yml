@@ -279,6 +279,7 @@ jobs:
             meerkat
             meerkat-mob
             meerkat-mob-mcp
+            meerkat-mob-pack
             rkat
           )
           for c in "${crates[@]}"; do
@@ -336,17 +337,23 @@ jobs:
             npm publish --access public
           fi
 
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Add wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
       - name: Publish Web SDK
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
         working-directory: sdks/web
         run: |
           set -euo pipefail
           DRY_RUN="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.registry_dry_run == 'true' }}"
           npm install --ignore-scripts
           npm config set //registry.npmjs.org/:_authToken ${NODE_AUTH_TOKEN}
-          # Web SDK TypeScript build only (WASM build requires separate wasm-pack step)
-          npm run build:ts
+          npm run build
           if [[ "$DRY_RUN" == "true" ]]; then
             npm publish --access public --dry-run
           else

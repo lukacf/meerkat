@@ -8,6 +8,19 @@ pub mod review;
 use std::collections::BTreeMap;
 
 use meerkat_mob::definition::MobDefinition;
+use serde_json::{Value, json};
+
+/// JSON schema requiring `{"response": "..."}` — ensures flow engine can parse output.
+pub fn text_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "response": { "type": "string", "description": "Your full response text" }
+        },
+        "required": ["response"],
+        "additionalProperties": false
+    })
+}
 
 /// A named pack that builds a MobDefinition for a specific collaboration pattern.
 pub trait Pack: Send + Sync {

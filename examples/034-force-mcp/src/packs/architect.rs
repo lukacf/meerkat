@@ -6,7 +6,7 @@ use meerkat_mob::ids::*;
 use meerkat_mob::profile::{Profile, ToolConfig};
 use meerkat_mob::MobRuntimeMode;
 
-use super::Pack;
+use super::{Pack, text_schema};
 
 pub struct ArchitectPack;
 
@@ -57,13 +57,13 @@ impl Pack for ArchitectPack {
                 Profile {
                     model: m,
                     skills: vec![skill.to_string()],
-                    tools: ToolConfig::default(),
+                    tools: ToolConfig { comms: true, ..ToolConfig::default() },
                     peer_description: desc.to_string(),
                     external_addressable: true,
                     backend: None,
                     runtime_mode: MobRuntimeMode::TurnDriven,
                     max_inline_peer_notifications: None,
-                    output_schema: None,
+                    output_schema: Some(text_schema()),
                     provider_params: None,
                 },
             );

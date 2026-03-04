@@ -6,7 +6,7 @@ use meerkat_mob::ids::*;
 use meerkat_mob::profile::{Profile, ToolConfig};
 use meerkat_mob::MobRuntimeMode;
 
-use super::Pack;
+use super::{Pack, text_schema};
 
 pub struct RctPack;
 
@@ -64,7 +64,7 @@ impl Pack for RctPack {
             ("spec_auditor", "rct-auditor-skill", "Spec Auditor reviewer",
              model("spec_auditor", "claude-sonnet-4-5"), tools_with_shell.clone(), MobRuntimeMode::TurnDriven),
             ("aggregator", "rct-aggregator-skill", "Gate verdict aggregator",
-             model("aggregator", "claude-sonnet-4-5"), ToolConfig::default(), MobRuntimeMode::TurnDriven),
+             model("aggregator", "claude-sonnet-4-5"), ToolConfig { comms: true, ..ToolConfig::default() }, MobRuntimeMode::TurnDriven),
         ];
 
         let mut profiles = BTreeMap::new();
@@ -80,7 +80,7 @@ impl Pack for RctPack {
                     backend: None,
                     runtime_mode: *mode,
                     max_inline_peer_notifications: None,
-                    output_schema: None,
+                    output_schema: Some(text_schema()),
                     provider_params: None,
                 },
             );

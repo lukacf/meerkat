@@ -3,8 +3,8 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use tokio::io::AsyncWriteExt;
 
-use meerkat_mob::ids::{FlowId, MobId};
-use meerkat_mob::{MobRunStatus, StepRunStatus};
+use meerkat_mob::ids::{FlowId, MeerkatId, MobId, ProfileName};
+use meerkat_mob::{MobRunStatus, SpawnMemberSpec, StepRunStatus};
 
 use crate::state::ForceState;
 use super::ToolCallError;
@@ -42,12 +42,50 @@ pub async fn handle(
     let definition = pack.definition(&input.task, context, &overrides);
     let mob_id = definition.id.clone();
 
+    // Collect profile names before moving definition
+    let profile_names: Vec<String> = definition.profiles.keys().map(|p| p.to_string()).collect();
+
     // Create mob
     state
         .mob_state
         .mob_create_definition(definition)
         .await
         .map_err(|e| ToolCallError::internal(format!("Mob creation failed: {e}")))?;
+
+    // Spawn one agent per profile (meerkat_id = profile name for simplicity)
+    let specs: Vec<SpawnMemberSpec> = profile_names
+        .iter()
+        .map(|name| SpawnMemberSpec {
+            profile_name: ProfileName::from(name.as_str()),
+            meerkat_id: MeerkatId::from(name.as_str()),
+            initial_message: None,
+            runtime_mode: None, // use profile default
+            backend: None,
+            context: None,
+            labels: None,
+            resume_session_id: None,
+            additional_instructions: None,
+        })
+        .collect();
+
+    let spawn_results = state
+        .mob_state
+        .mob_spawn_many(&mob_id, specs)
+        .await
+        .map_err(|e| ToolCallError::internal(format!("Spawn failed: {e}")))?;
+
+    // Check for individual spawn failures
+    let mut spawn_ok = 0;
+    for (i, result) in spawn_results.iter().enumerate() {
+        match result {
+            Ok(_) => { tracing::info!(profile = %profile_names[i], "spawned"); spawn_ok += 1; },
+            Err(e) => tracing::error!(profile = %profile_names[i], error = %e, "spawn failed"),
+        }
+    }
+    tracing::info!(spawned = spawn_ok, total = profile_names.len(), "spawn complete");
+
+    // Brief yield to let actor process spawn roster updates
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     // Ensure cleanup on all exit paths
     let result = run_flow(state, &mob_id, total_steps, progress_token.as_ref()).await;
@@ -124,6 +162,10 @@ async fn run_flow(
                     .and_then(|e| e.output.as_ref());
 
                 let text = match last_output {
+                    // Flow steps return {"response": "..."} due to text_schema()
+                    Some(Value::Object(obj)) if obj.contains_key("response") => {
+                        obj["response"].as_str().unwrap_or("").to_string()
+                    }
                     Some(Value::String(s)) => s.clone(),
                     Some(v) => serde_json::to_string_pretty(v).unwrap_or_default(),
                     None => "Flow completed but produced no output.".to_string(),

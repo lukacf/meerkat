@@ -2171,8 +2171,42 @@ impl IntoResponse for ApiError {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use futures::stream;
+    use meerkat_client::{LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
     use std::path::PathBuf;
+    use std::pin::Pin;
     use tempfile::TempDir;
+
+    struct MockLlmClient;
+
+    #[async_trait]
+    impl LlmClient for MockLlmClient {
+        fn stream<'a>(
+            &'a self,
+            _request: &'a LlmRequest,
+        ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+            Box::pin(stream::iter(vec![
+                Ok(LlmEvent::TextDelta {
+                    delta: "ok".to_string(),
+                    meta: None,
+                }),
+                Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success {
+                        stop_reason: meerkat_core::StopReason::EndTurn,
+                    },
+                }),
+            ]))
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
 
     fn hooks_override_fixture() -> HookRunOverrides {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -2339,9 +2373,10 @@ mod tests {
         use tower::ServiceExt;
 
         let temp = TempDir::new().unwrap();
-        let state = AppState::load_from(temp.path().to_path_buf())
+        let mut state = AppState::load_from(temp.path().to_path_buf())
             .await
             .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
         let app = router(state);
 
         let create_request = axum::http::Request::builder()

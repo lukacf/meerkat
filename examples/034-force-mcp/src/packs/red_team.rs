@@ -25,7 +25,7 @@ impl Pack for RedTeamPack {
 
         let mut profiles = BTreeMap::new();
         // Different providers for advocate/adversary ensures genuinely different reasoning
-        profiles.insert(ProfileName::from("advocate"),  turn_driven_profile(resolve_model(overrides, "advocate", "claude-sonnet-4-6"), "advocate-skill", "Advocate — argues in favor", pp));
+        profiles.insert(ProfileName::from("advocate"),  turn_driven_profile(resolve_model(overrides, "advocate", "gemini-3-flash-preview"), "advocate-skill", "Advocate — argues in favor", pp));
         profiles.insert(ProfileName::from("adversary"), turn_driven_profile(resolve_model(overrides, "adversary", "gpt-5.2"), "adversary-skill", "Adversary — argues against", pp));
         profiles.insert(ProfileName::from("judge"),     turn_driven_profile(resolve_model(overrides, "judge", "claude-opus-4-6"), "judge-skill", "Judge — balanced assessment", pp));
 

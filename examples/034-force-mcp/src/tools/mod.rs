@@ -41,7 +41,7 @@ gpt-5.3-codex (OpenAI, code-specialized), \
 gpt-5.2-pro (OpenAI, deep reasoning — slow, use sparingly), \
 gemini-3.1-pro-preview (Google, strong general), \
 gemini-3-flash-preview (Google, fastest). \
-Default: claude-sonnet-4-6. \
+Default: gpt-5.3-codex. \
 Guidance: use opus/gpt-5.2-pro for complex reasoning (architecture, judging). \
 Use sonnet/gpt-5.3-codex for code tasks. \
 Use gemini-3-flash for speed-sensitive roles. \
@@ -74,7 +74,7 @@ pub fn tools_list() -> Vec<Value> {
                     },
                     "model": {
                         "type": "string",
-                        "description": format!("Model to use (default: claude-sonnet-4-6). {MODEL_DESCRIPTION}")
+                        "description": format!("Model to use (default: gpt-5.3-codex). {MODEL_DESCRIPTION}")
                     },
                     "provider_params": {
                         "type": "object",

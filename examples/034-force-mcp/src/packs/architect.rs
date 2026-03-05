@@ -25,8 +25,8 @@ impl Pack for ArchitectPack {
 
         let mut profiles = BTreeMap::new();
         profiles.insert(ProfileName::from("planner"),     turn_driven_profile(resolve_model(overrides, "planner", "claude-opus-4-6"), "planner-skill", "Architecture planner", pp));
-        profiles.insert(ProfileName::from("critic"),      turn_driven_profile(resolve_model(overrides, "critic", "claude-sonnet-4-6"), "critic-skill", "Architecture critic", pp));
-        profiles.insert(ProfileName::from("synthesizer"), turn_driven_profile(resolve_model(overrides, "synthesizer", "claude-sonnet-4-6"), "synthesizer-skill", "Decision record writer", pp));
+        profiles.insert(ProfileName::from("critic"),      turn_driven_profile(resolve_model(overrides, "critic", "gpt-5.3-codex"), "critic-skill", "Architecture critic", pp));
+        profiles.insert(ProfileName::from("synthesizer"), turn_driven_profile(resolve_model(overrides, "synthesizer", "gemini-3.1-pro-preview"), "synthesizer-skill", "Decision record writer", pp));
 
         let mut skills = BTreeMap::new();
         skills.insert("planner-skill".into(),     SkillSource::Inline { content: include_str!("../../skills/planner.md").into() });

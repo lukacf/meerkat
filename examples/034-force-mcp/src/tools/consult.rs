@@ -26,7 +26,7 @@ pub async fn handle(state: &ForceState, arguments: &Value) -> Result<Value, Tool
 
     let model = input
         .model
-        .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
+        .unwrap_or_else(|| "gpt-5.3-codex".to_string());
 
     let build = input.provider_params.map(|pp| {
         let mut opts = SessionBuildOptions::default();

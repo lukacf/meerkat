@@ -31,10 +31,10 @@ impl Pack for PanelPack {
         // Diverse models across providers for genuine perspective differences
         let agents: Vec<(&str, &str, &str, String)> = vec![
             ("moderator",  "moderator-skill",  "Neutral moderator — keeps discussion productive", resolve_model(overrides, "moderator", "claude-opus-4-6")),
-            ("purist",     "purist-skill",     "Architecture purist — demands clean design",      resolve_model(overrides, "purist", "claude-sonnet-4-6")),
+            ("purist",     "purist-skill",     "Architecture purist — demands clean design",      resolve_model(overrides, "purist", "gemini-3.1-pro-preview")),
             ("pragmatist", "pragmatist-skill", "Pragmatist — ship it and iterate",                resolve_model(overrides, "pragmatist", "gpt-5.2")),
             ("skeptic",    "skeptic-skill",    "Skeptic — doubts everything, finds edge cases",   resolve_model(overrides, "skeptic", "gemini-3-flash-preview")),
-            ("veteran",    "veteran-skill",    "Industry veteran — 20 years of war stories",      resolve_model(overrides, "veteran", "claude-sonnet-4-6")),
+            ("veteran",    "veteran-skill",    "Industry veteran — 20 years of war stories",      resolve_model(overrides, "veteran", "gpt-5.3-codex")),
         ];
 
         let tools = ToolConfig { comms: true, ..ToolConfig::default() };

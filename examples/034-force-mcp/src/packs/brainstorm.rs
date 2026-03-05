@@ -25,10 +25,10 @@ impl Pack for BrainstormPack {
 
         // Intentionally diverse default models for different perspectives
         let agents = [
-            ("ideator_a",   "ideator-a-skill",   "Practical ideator",   "claude-sonnet-4-6"),
+            ("ideator_a",   "ideator-a-skill",   "Practical ideator",   "gemini-3.1-pro-preview"),
             ("ideator_b",   "ideator-b-skill",   "Creative ideator",    "gpt-5.2"),
             ("ideator_c",   "ideator-c-skill",   "Contrarian ideator",  "gemini-3-flash-preview"),
-            ("synthesizer", "synthesizer-skill",  "Idea synthesizer",    "claude-sonnet-4-6"),
+            ("synthesizer", "synthesizer-skill",  "Idea synthesizer",    "claude-opus-4-6"),
         ];
 
         let mut profiles = BTreeMap::new();

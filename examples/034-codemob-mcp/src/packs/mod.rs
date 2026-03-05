@@ -164,7 +164,7 @@ pub fn mob_definition(
     spawn_policy: Option<SpawnPolicyConfig>,
 ) -> MobDefinition {
     MobDefinition {
-        id: MobId::from(format!("force-{id_prefix}-{}", uuid::Uuid::new_v4().as_simple())),
+        id: MobId::from(format!("codemob-{id_prefix}-{}", uuid::Uuid::new_v4().as_simple())),
         orchestrator: None,
         profiles,
         mcp_servers: BTreeMap::new(),

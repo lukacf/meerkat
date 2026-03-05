@@ -1,4 +1,4 @@
-# 034 — force-mcp
+# 034 — codemob-mcp
 
 Multi-agent MCP server powered by Meerkat mobs. Gives Claude Code (or any MCP client) access to collaborative AI teams for second opinions, code reviews, architecture decisions, brainstorming, and full RCT implementation pipelines.
 
@@ -6,14 +6,14 @@ Multi-agent MCP server powered by Meerkat mobs. Gives Claude Code (or any MCP cl
 
 ```bash
 # Build
-cd examples/034-force-mcp
+cd examples/034-codemob-mcp
 cargo build
 
 # Register in Claude Code (.mcp.json in your project root)
 {
   "mcpServers": {
-    "force": {
-      "command": "/path/to/target/debug/force-mcp",
+    "codemob": {
+      "command": "/path/to/target/debug/codemob-mcp",
       "env": {
         "ANTHROPIC_API_KEY": "sk-ant-...",
         "OPENAI_API_KEY": "sk-...",

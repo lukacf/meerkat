@@ -1,5 +1,5 @@
 [package]
-name = "force-mcp"
+name = "codemob-mcp"
 version = "0.0.1"
 edition = "2021"
 publish = false
@@ -7,7 +7,7 @@ publish = false
 [workspace]  # standalone, not part of the main workspace
 
 [[bin]]
-name = "force-mcp"
+name = "codemob-mcp"
 path = "src/main.rs"
 
 [dependencies]

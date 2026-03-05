@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════
-// force-mcp — Multi-agent MCP server powered by Meerkat mobs
+// codemob-mcp — Multi-agent MCP server powered by Meerkat mobs
 // ═══════════════════════════════════════════════════════════
 //
 // Exposes two tools to Claude Code (or any MCP client):
@@ -7,7 +7,7 @@
 //   - `deliberate` — spawn a mob from a named pack, agents collaborate, structured result
 //
 // Usage:
-//   ANTHROPIC_API_KEY=... cargo run -p force-mcp
+//   ANTHROPIC_API_KEY=... cargo run -p codemob-mcp
 //   # Then register in Claude Code via .mcp.json
 
 mod packs;
@@ -26,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "force_mcp=info,warn".parse().unwrap()),
+                .unwrap_or_else(|_| "codemob_mcp=info,warn".parse().unwrap()),
         )
         .with_writer(std::io::stderr)
         .init();
@@ -106,7 +106,7 @@ async fn handle_request(request: &Value) -> Value {
                 "protocolVersion": "2024-11-05",
                 "capabilities": { "tools": {} },
                 "serverInfo": {
-                    "name": "force-mcp",
+                    "name": "codemob-mcp",
                     "version": env!("CARGO_PKG_VERSION")
                 }
             }

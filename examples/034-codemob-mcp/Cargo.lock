@@ -256,6 +256,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "codemob-mcp"
+version = "0.0.1"
+dependencies = [
+ "indexmap",
+ "meerkat",
+ "meerkat-core",
+ "meerkat-mob",
+ "meerkat-mob-mcp",
+ "meerkat-session",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -541,25 +560,6 @@ name = "foldhash"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
-
-[[package]]
-name = "force-mcp"
-version = "0.0.1"
-dependencies = [
- "indexmap",
- "meerkat",
- "meerkat-core",
- "meerkat-mob",
- "meerkat-mob-mcp",
- "meerkat-session",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
 
 [[package]]
 name = "form_urlencoded"

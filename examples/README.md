@@ -80,7 +80,7 @@ For runnable Rust examples, see `meerkat/examples/` (e.g., `cargo run -p meerkat
 | 030 | [web-dashboard-copilot-sh](030-web-dashboard-copilot-sh/) | Shell | Build embeddable web assistant for ops dashboards |
 | 031 | [wasm-mini-diplomacy-sh](031-wasm-mini-diplomacy-sh/) | Shell + Web | 9 autonomous agents across 4 WASM mobs wage a 3-faction territory war with strategy, diplomacy, and deception |
 | 032 | [wasm-webcm-agent](032-wasm-webcm-agent/) | Web (WASM) | Multi-provider coding agent mob in the browser — 4 agents (Anthropic + OpenAI + Gemini) collaborate via comms in a sandboxed Linux VM |
-| 034 | [force-mcp](034-force-mcp/) | Rust (MCP) | Multi-agent MCP server — 7 mobpacks (advisor, review, architect, brainstorm, red-team, panel, rct) with flow and comms execution, progress notifications, multi-provider model diversity |
+| 034 | [codemob-mcp](034-codemob-mcp/) | Rust (MCP) | Multi-agent MCP server — 7 mobpacks (advisor, review, architect, brainstorm, red-team, panel, rct) with flow and comms execution, progress notifications, multi-provider model diversity |
 
 ## Examples by Feature
 

@@ -75,7 +75,7 @@ impl Pack for PanelPack {
         }
 
         MobDefinition {
-            id: MobId::from(format!("force-panel-{}", uuid::Uuid::new_v4().as_simple())),
+            id: MobId::from(format!("codemob-panel-{}", uuid::Uuid::new_v4().as_simple())),
             orchestrator: Some(OrchestratorConfig { profile: ProfileName::from("moderator") }),
             profiles,
             mcp_servers: BTreeMap::new(),

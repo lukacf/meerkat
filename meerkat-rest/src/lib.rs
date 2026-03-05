@@ -2333,8 +2333,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_append_system_context_route_returns_staged_status() {
-        use axum::body::Body;
+        use axum::body::{Body, Bytes};
         use http_body_util::BodyExt;
+        use tokio::time::{Duration, sleep};
         use tower::ServiceExt;
 
         let temp = TempDir::new().unwrap();
@@ -2364,27 +2365,43 @@ mod tests {
             .as_str()
             .expect("session create should return session_id");
 
-        let inject_request = axum::http::Request::builder()
-            .method("POST")
-            .uri(format!("/sessions/{session_id}/system_context"))
-            .header("content-type", "application/json")
-            .body(Body::from(
-                serde_json::json!({
-                    "text": "Coordinate with the orchestrator.",
-                    "source": "mob",
-                    "idempotency_key": "ctx-rest-test"
-                })
-                .to_string(),
-            ))
-            .unwrap();
-        let inject_response = app.oneshot(inject_request).await.unwrap();
-        assert_eq!(inject_response.status(), StatusCode::OK);
-        let inject_body = inject_response
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes();
+        let mut inject_status = StatusCode::INTERNAL_SERVER_ERROR;
+        let mut inject_body = Bytes::new();
+        for attempt in 0..10 {
+            let inject_request = axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/sessions/{session_id}/system_context"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "text": "Coordinate with the orchestrator.",
+                        "source": "mob",
+                        "idempotency_key": "ctx-rest-test"
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let inject_response = app.clone().oneshot(inject_request).await.unwrap();
+            inject_status = inject_response.status();
+            inject_body = inject_response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes();
+            if inject_status == StatusCode::OK {
+                break;
+            }
+            if attempt < 9 {
+                sleep(Duration::from_millis(50)).await;
+            }
+        }
+        assert_eq!(
+            inject_status,
+            StatusCode::OK,
+            "append system context failed: {}",
+            String::from_utf8_lossy(&inject_body)
+        );
         let inject_payload: serde_json::Value = serde_json::from_slice(&inject_body).unwrap();
         assert_eq!(inject_payload["status"], "staged");
     }

@@ -36,6 +36,7 @@ pub fn handle_initialize(id: Option<RpcId>) -> RpcResponse {
                 "session/list".to_string(),
                 "session/read".to_string(),
                 "session/archive".to_string(),
+                "session/inject_context".to_string(),
                 "turn/start".to_string(),
                 "turn/interrupt".to_string(),
                 "config/get".to_string(),

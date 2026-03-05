@@ -24,7 +24,9 @@ use meerkat_client::LlmClient;
 use meerkat_core::EventEnvelope;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{
-    CreateSessionRequest, SessionError, SessionQuery, SessionService, StartTurnRequest,
+    AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
+    SessionControlError, SessionError, SessionQuery, SessionService, SessionServiceControlExt,
+    StartTurnRequest,
 };
 use meerkat_core::skills::{SkillError, SourceIdentityRegistry};
 use meerkat_core::types::{RunResult, SessionId};
@@ -407,6 +409,42 @@ impl SessionRuntime {
             Err(SessionError::NotRunning { .. }) => Ok(()),
             Err(e) => Err(session_error_to_rpc(e)),
         }
+    }
+
+    /// Append runtime system context to a pending, live, or persisted session.
+    pub async fn append_system_context(
+        &self,
+        session_id: &SessionId,
+        req: AppendSystemContextRequest,
+    ) -> Result<AppendSystemContextResult, RpcError> {
+        {
+            let mut pending = self.pending.write().await;
+            if let Some(pending_session) = pending.get_mut(session_id) {
+                let session = pending_session
+                    .build_config
+                    .resume_session
+                    .get_or_insert_with(|| Session::with_id(session_id.clone()));
+                let mut state = session.system_context_state().unwrap_or_default();
+                let status = state
+                    .stage_append(&req, meerkat_core::time_compat::SystemTime::now())
+                    .map_err(|err| {
+                        system_context_error_to_rpc(err.into_control_error(session_id))
+                    })?;
+                session
+                    .set_system_context_state(state)
+                    .map_err(|err| RpcError {
+                        code: error::INTERNAL_ERROR,
+                        message: format!("failed to serialize system-context state: {err}"),
+                        data: None,
+                    })?;
+                return Ok(AppendSystemContextResult { status });
+            }
+        }
+
+        self.service
+            .append_system_context(session_id, req)
+            .await
+            .map_err(system_context_error_to_rpc)
     }
 
     /// Get the current state of a session, or `None` if the session does not exist.
@@ -899,6 +937,22 @@ fn session_error_to_rpc(err: SessionError) -> RpcError {
         code,
         message: err.to_string(),
         data: None,
+    }
+}
+
+fn system_context_error_to_rpc(err: SessionControlError) -> RpcError {
+    match err {
+        SessionControlError::Session(session_err) => session_error_to_rpc(session_err),
+        SessionControlError::InvalidRequest { message } => RpcError {
+            code: error::INVALID_PARAMS,
+            message,
+            data: None,
+        },
+        SessionControlError::Conflict { key, .. } => RpcError {
+            code: error::INVALID_PARAMS,
+            message: format!("system-context idempotency conflict for key '{key}'"),
+            data: None,
+        },
     }
 }
 

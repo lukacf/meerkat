@@ -10,9 +10,12 @@ use async_trait::async_trait;
 use indexmap::IndexSet;
 #[allow(unused_imports)] // Used in read() fallback path
 use meerkat_core::Session;
+use meerkat_core::SessionSystemContextState;
 use meerkat_core::service::{
-    CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService,
-    SessionServiceCommsExt, SessionSummary, SessionUsage, SessionView, StartTurnRequest,
+    AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
+    SessionControlError, SessionError, SessionInfo, SessionQuery, SessionService,
+    SessionServiceCommsExt, SessionServiceControlExt, SessionSummary, SessionUsage, SessionView,
+    StartTurnRequest,
 };
 use meerkat_core::types::{RunResult, SessionId};
 use meerkat_store::SessionStore;
@@ -22,6 +25,19 @@ use tokio::sync::Mutex;
 
 use crate::SESSION_LABELS_KEY;
 use crate::ephemeral::{EphemeralSessionService, SessionAgentBuilder};
+
+fn write_system_context_state(
+    session: &mut Session,
+    state: SessionSystemContextState,
+) -> Result<(), SessionControlError> {
+    session.set_system_context_state(state).map_err(|err| {
+        SessionControlError::Session(SessionError::Agent(
+            meerkat_core::error::AgentError::InternalError(format!(
+                "failed to serialize system-context state: {err}"
+            )),
+        ))
+    })
+}
 
 /// Shared gate between the checkpointer and archive.
 ///
@@ -118,6 +134,15 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             store,
             checkpointer_gates: Mutex::new(HashMap::new()),
         }
+    }
+
+    async fn gate_for_session(&self, id: &SessionId) -> Arc<CheckpointerGate> {
+        let mut gates = self.checkpointer_gates.lock().await;
+        Arc::clone(gates.entry(id.clone()).or_insert_with(|| {
+            Arc::new(CheckpointerGate {
+                cancelled: Mutex::new(false),
+            })
+        }))
     }
 }
 
@@ -294,14 +319,9 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         // delete. This prevents a concurrent checkpoint() from saving the
         // session back after we delete it. Setting cancelled under the
         // lock ensures all future checkpoints are no-ops.
-        let gate = self.checkpointer_gates.lock().await.remove(id);
-        let _gate_guard = if let Some(ref g) = gate {
-            let mut guard = g.cancelled.lock().await;
-            *guard = true;
-            Some(guard)
-        } else {
-            None
-        };
+        let gate = self.gate_for_session(id).await;
+        let mut gate_guard = gate.cancelled.lock().await;
+        *gate_guard = true;
 
         let live_result = self.inner.archive(id).await;
 
@@ -322,7 +342,8 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
 
         // Gate guard is dropped here — any in-flight checkpoint that was
         // blocked on the lock will now see cancelled == true and bail out.
-        drop(_gate_guard);
+        drop(gate_guard);
+        self.checkpointer_gates.lock().await.remove(id);
 
         match (&live_result, in_store) {
             // At least one side had the session — success.
@@ -354,6 +375,74 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceCommsExt for PersistentSess
         session_id: &SessionId,
     ) -> Option<std::sync::Arc<dyn meerkat_core::SubscribableInjector>> {
         self.inner.event_injector(session_id).await
+    }
+}
+
+#[async_trait]
+impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSessionService<B> {
+    async fn append_system_context(
+        &self,
+        id: &SessionId,
+        req: AppendSystemContextRequest,
+    ) -> Result<AppendSystemContextResult, SessionControlError> {
+        let gate = self.gate_for_session(id).await;
+        let gate_guard = gate.cancelled.lock().await;
+        if *gate_guard {
+            return Err(SessionControlError::Session(SessionError::NotFound {
+                id: id.clone(),
+            }));
+        }
+
+        if let Some(state_arc) = self.inner.system_context_state(id).await {
+            let (status, state_snapshot) = {
+                let mut guard = match state_arc.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => {
+                        tracing::warn!(
+                            session_id = %id,
+                            "system-context state lock poisoned while staging append"
+                        );
+                        poisoned.into_inner()
+                    }
+                };
+                let status = guard
+                    .stage_append(&req, meerkat_core::time_compat::SystemTime::now())
+                    .map_err(|err| err.into_control_error(id))?;
+                (status, guard.clone())
+            };
+
+            let mut session = self
+                .store
+                .load(id)
+                .await
+                .map_err(|e| SessionError::Store(Box::new(e)))?
+                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+            write_system_context_state(&mut session, state_snapshot)?;
+            self.store
+                .save(&session)
+                .await
+                .map_err(|e| SessionControlError::Session(SessionError::Store(Box::new(e))))?;
+            drop(gate_guard);
+            return Ok(AppendSystemContextResult { status });
+        }
+
+        let mut session = self
+            .store
+            .load(id)
+            .await
+            .map_err(|e| SessionError::Store(Box::new(e)))?
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let mut state = session.system_context_state().unwrap_or_default();
+        let status = state
+            .stage_append(&req, meerkat_core::time_compat::SystemTime::now())
+            .map_err(|err| err.into_control_error(id))?;
+        write_system_context_state(&mut session, state)?;
+        self.store
+            .save(&session)
+            .await
+            .map_err(|e| SessionControlError::Session(SessionError::Store(Box::new(e))))?;
+        drop(gate_guard);
+        Ok(AppendSystemContextResult { status })
     }
 }
 
@@ -451,7 +540,81 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::ephemeral::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
     use meerkat_store::MemoryStore;
+
+    struct DummyAgent;
+
+    #[async_trait::async_trait]
+    impl SessionAgent for DummyAgent {
+        async fn run_with_events(
+            &mut self,
+            _prompt: String,
+            _event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
+        ) -> Result<RunResult, meerkat_core::error::AgentError> {
+            unreachable!("dummy agent is never run in persistent service unit tests")
+        }
+
+        async fn run_host_mode(
+            &mut self,
+            _prompt: String,
+        ) -> Result<RunResult, meerkat_core::error::AgentError> {
+            unreachable!("dummy agent is never run in persistent service unit tests")
+        }
+
+        fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
+
+        fn set_flow_tool_overlay(
+            &mut self,
+            _overlay: Option<meerkat_core::service::TurnToolOverlay>,
+        ) -> Result<(), meerkat_core::error::AgentError> {
+            Ok(())
+        }
+
+        fn cancel(&mut self) {}
+
+        fn session_id(&self) -> SessionId {
+            SessionId::new()
+        }
+
+        fn snapshot(&self) -> SessionSnapshot {
+            SessionSnapshot {
+                created_at: std::time::SystemTime::now(),
+                updated_at: std::time::SystemTime::now(),
+                message_count: 0,
+                total_tokens: 0,
+                usage: meerkat_core::types::Usage::default(),
+                last_assistant_text: None,
+            }
+        }
+
+        fn session_clone(&self) -> Session {
+            Session::new()
+        }
+
+        fn system_context_state(
+            &self,
+        ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
+            Arc::new(std::sync::Mutex::new(
+                meerkat_core::SessionSystemContextState::default(),
+            ))
+        }
+    }
+
+    struct DummyBuilder;
+
+    #[async_trait::async_trait]
+    impl SessionAgentBuilder for DummyBuilder {
+        type Agent = DummyAgent;
+
+        async fn build_agent(
+            &self,
+            _req: &CreateSessionRequest,
+            _event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
+        ) -> Result<Self::Agent, SessionError> {
+            Ok(DummyAgent)
+        }
+    }
 
     #[tokio::test]
     async fn test_persistent_load_persisted_returns_stored_session() {
@@ -637,5 +800,33 @@ mod tests {
         // but store.delete() should still succeed.
         store.delete(&id).await.unwrap();
         assert!(store.load(&id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_append_system_context_does_not_recreate_archived_store_row() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let service = PersistentSessionService::new(DummyBuilder, 4, Arc::clone(&store));
+        let session = Session::new();
+        let id = session.id().clone();
+        store.save(&session).await.unwrap();
+        service.archive(&id).await.unwrap();
+        assert!(store.load(&id).await.unwrap().is_none());
+
+        let err = service
+            .append_system_context(
+                &id,
+                AppendSystemContextRequest {
+                    text: "runtime notice".to_string(),
+                    source: Some("mob".to_string()),
+                    idempotency_key: Some("ctx-persistent-archive".to_string()),
+                },
+            )
+            .await
+            .expect_err("archived session must not be recreated by append");
+        assert_eq!(err.code(), "SESSION_NOT_FOUND");
+        assert!(
+            store.load(&id).await.unwrap().is_none(),
+            "append after archive must not recreate the store row"
+        );
     }
 }

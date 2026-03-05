@@ -137,6 +137,17 @@ pub struct ArchiveSessionParams {
     pub session_id: String,
 }
 
+/// Parameters for `session/inject_context`.
+#[derive(Debug, Deserialize)]
+pub struct InjectSystemContextParams {
+    pub session_id: String,
+    pub text: String,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Response types
 // ---------------------------------------------------------------------------
@@ -170,6 +181,12 @@ pub struct ReadSessionResult {
     pub state: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
+}
+
+/// Result for `session/inject_context`.
+#[derive(Debug, Serialize)]
+pub struct InjectSystemContextResult {
+    pub status: meerkat_core::AppendSystemContextStatus,
 }
 
 // ---------------------------------------------------------------------------
@@ -496,6 +513,39 @@ pub async fn handle_archive(
 
     match runtime.archive_session(&session_id).await {
         Ok(()) => RpcResponse::success(id, serde_json::json!({"archived": true})),
+        Err(rpc_err) => RpcResponse::error(id, rpc_err.code, rpc_err.message),
+    }
+}
+
+/// Handle `session/inject_context`.
+pub async fn handle_inject_context(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    runtime: &SessionRuntime,
+) -> RpcResponse {
+    let params: InjectSystemContextParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+
+    let session_id = match parse_session_id_for_runtime(id.clone(), &params.session_id, runtime) {
+        Ok(sid) => sid,
+        Err(resp) => return resp,
+    };
+
+    let req = meerkat_core::AppendSystemContextRequest {
+        text: params.text,
+        source: params.source,
+        idempotency_key: params.idempotency_key,
+    };
+
+    match runtime.append_system_context(&session_id, req).await {
+        Ok(result) => RpcResponse::success(
+            id,
+            InjectSystemContextResult {
+                status: result.status,
+            },
+        ),
         Err(rpc_err) => RpcResponse::error(id, rpc_err.code, rpc_err.message),
     }
 }

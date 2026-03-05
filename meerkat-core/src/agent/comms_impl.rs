@@ -234,9 +234,7 @@ where
 
         // Checkpoint after the initial host-mode turn so the first run
         // is persisted even if no inbox traffic ever arrives.
-        if let Some(ref cp) = self.checkpointer {
-            cp.checkpoint(&self.session).await;
-        }
+        self.checkpoint_current_session().await;
 
         let inbox_notify = comms.inbox_notify();
         const POLL_INTERVAL: Duration = Duration::from_secs(60);
@@ -326,8 +324,8 @@ where
                 // Responses bypass the LLM loop (no run call), so without
                 // this checkpoint they would only be persisted if a later
                 // request/message triggers its own checkpoint.
-                if had_session_injections && let Some(ref cp) = self.checkpointer {
-                    cp.checkpoint(&self.session).await;
+                if had_session_injections {
+                    self.checkpoint_current_session().await;
                 }
 
                 // Process individual interactions (requests, or subscriber-bound)
@@ -398,9 +396,7 @@ where
                     self.event_tap.lock().take();
 
                     // Checkpoint after each individual interaction
-                    if let Some(ref cp) = self.checkpointer {
-                        cp.checkpoint(&self.session).await;
-                    }
+                    self.checkpoint_current_session().await;
                 }
 
                 // Process batched messages as one run (no tap)
@@ -418,9 +414,7 @@ where
                         Ok(result) => {
                             last_result = result;
                             // Checkpoint after batched messages
-                            if let Some(ref cp) = self.checkpointer {
-                                cp.checkpoint(&self.session).await;
-                            }
+                            self.checkpoint_current_session().await;
                         }
                         Err(e) => {
                             if e.is_graceful() {

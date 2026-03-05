@@ -222,6 +222,9 @@ impl MethodRouter {
             "session/list" => handlers::session::handle_list(id, params, &self.runtime).await,
             "session/read" => handlers::session::handle_read(id, params, &self.runtime).await,
             "session/archive" => handlers::session::handle_archive(id, params, &self.runtime).await,
+            "session/inject_context" => {
+                handlers::session::handle_inject_context(id, params, &self.runtime).await
+            }
             "turn/start" => {
                 handlers::turn::handle_start(id, params, &self.runtime, &self.notification_sink)
                     .await
@@ -959,6 +962,7 @@ mod tests {
         let method_names: Vec<&str> = methods.iter().map(|m| m.as_str().unwrap()).collect();
         assert!(method_names.contains(&"initialize"));
         assert!(method_names.contains(&"session/create"));
+        assert!(method_names.contains(&"session/inject_context"));
         assert!(method_names.contains(&"turn/start"));
         #[cfg(feature = "mob")]
         {
@@ -1364,6 +1368,30 @@ mod tests {
             .iter()
             .any(|s| s["session_id"].as_str() == Some(created_id));
         assert!(found, "Created session should appear in list");
+    }
+
+    /// 5b. `session/inject_context` stages runtime system context for the session.
+    #[tokio::test]
+    async fn session_inject_context_returns_staged_status() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_req = make_request("session/create", serde_json::json!({"prompt": "Hello"}));
+        let create_resp = router.dispatch(create_req).await.unwrap();
+        let created = result_value(&create_resp);
+        let session_id = created["session_id"].as_str().unwrap().to_string();
+
+        let inject_req = make_request(
+            "session/inject_context",
+            serde_json::json!({
+                "session_id": session_id,
+                "text": "Coordinate with the orchestrator.",
+                "source": "mob",
+                "idempotency_key": "ctx-router-test"
+            }),
+        );
+        let inject_resp = router.dispatch(inject_req).await.unwrap();
+        let injected = result_value(&inject_resp);
+        assert_eq!(injected["status"], "staged");
     }
 
     /// 6. `session/archive` removes a session.

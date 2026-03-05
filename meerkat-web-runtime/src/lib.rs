@@ -295,6 +295,8 @@ struct RuntimeSession {
     build_config_template: AgentBuildConfig,
     /// Preserved session for multi-turn context.
     meerkat_session: Option<meerkat_core::session::Session>,
+    /// Canonical staged runtime system-context control state for the direct handle.
+    system_context_state: meerkat_core::SessionSystemContextState,
     run_counter: u64,
     usage: Usage,
     /// Buffered agent events from the last turn, drained by poll_events.
@@ -1092,6 +1094,7 @@ pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<u32, Js
             config: meerkat_config,
             build_config_template: build_config,
             meerkat_session: None,
+            system_context_state: meerkat_core::SessionSystemContextState::default(),
             run_counter: 0,
             usage: Usage::default(),
             pending_events: Vec::new(),
@@ -1172,6 +1175,7 @@ pub fn create_session_simple(config_json: &str) -> Result<u32, JsValue> {
             config: meerkat_config,
             build_config_template: build_config,
             meerkat_session: None,
+            system_context_state: meerkat_core::SessionSystemContextState::default(),
             run_counter: 0,
             usage: Usage::default(),
             pending_events: Vec::new(),
@@ -1192,6 +1196,78 @@ struct TurnOptions {
     additional_instructions: Option<Vec<String>>,
 }
 
+#[derive(Debug, Deserialize)]
+struct AppendSystemContextOptions {
+    text: String,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    idempotency_key: Option<String>,
+}
+
+fn merge_runtime_system_context_state(
+    mut agent_state: meerkat_core::SessionSystemContextState,
+    starting_state: &meerkat_core::SessionSystemContextState,
+    current_state: &meerkat_core::SessionSystemContextState,
+) -> meerkat_core::SessionSystemContextState {
+    for pending in &current_state.pending {
+        if !starting_state.pending.contains(pending) {
+            agent_state.pending.push(pending.clone());
+        }
+    }
+
+    for (key, seen) in &current_state.seen {
+        if !starting_state.seen.contains_key(key) {
+            agent_state.seen.insert(key.clone(), seen.clone());
+        }
+    }
+
+    agent_state
+}
+
+/// Append runtime system context to a direct session handle.
+#[wasm_bindgen]
+pub fn append_system_context(handle: u32, request_json: &str) -> Result<JsValue, JsValue> {
+    let req: AppendSystemContextOptions =
+        serde_json::from_str(request_json).map_err(|e| err_str("invalid_request", e))?;
+
+    let status = REGISTRY.with(|cell| {
+        let mut registry = cell.borrow_mut();
+        let session = registry
+            .sessions
+            .get_mut(&handle)
+            .ok_or_else(|| format!("unknown session handle: {handle}"))?;
+        let status = session
+            .system_context_state
+            .stage_append(
+                &meerkat_core::AppendSystemContextRequest {
+                    text: req.text,
+                    source: req.source,
+                    idempotency_key: req.idempotency_key,
+                },
+                meerkat_core::time_compat::SystemTime::now(),
+            )
+            .map_err(|err| match err {
+                meerkat_core::SystemContextStageError::InvalidRequest(message) => {
+                    err_str("INVALID_PARAMS", message)
+                }
+                meerkat_core::SystemContextStageError::Conflict { key, .. } => err_str(
+                    "SESSION_SYSTEM_CONTEXT_CONFLICT",
+                    format!("system-context idempotency conflict for key '{key}'"),
+                ),
+            })?;
+        Ok::<meerkat_core::AppendSystemContextStatus, JsValue>(status)
+    })?;
+
+    Ok(JsValue::from_str(
+        &serde_json::json!({
+            "handle": handle,
+            "status": status,
+        })
+        .to_string(),
+    ))
+}
+
 /// Run a turn through the real meerkat agent loop via AgentFactory::build_agent().
 ///
 /// Returns JSON: `{ "text", "usage", "status", "session_id", "turns", "tool_calls" }`
@@ -1207,7 +1283,7 @@ pub async fn start_turn(handle: u32, prompt: &str, options_json: &str) -> Result
         serde_json::from_str(options_json).map_err(|e| err_str("invalid_options", e))?
     };
     // Extract what we need from the session (release borrow quickly).
-    let (mut build_config, config, run_id) = REGISTRY
+    let (mut build_config, config, run_id, starting_system_context_state) = REGISTRY
         .with(|cell| {
             let mut registry = cell.borrow_mut();
             let session = registry
@@ -1238,10 +1314,27 @@ pub async fn start_turn(handle: u32, prompt: &str, options_json: &str) -> Result
             bc.session_store_override =
                 session.build_config_template.session_store_override.clone();
 
-            // Resume from prior session if available.
-            bc.resume_session = session.meerkat_session.take();
+            // Resume from prior session if available and sync the canonical staged
+            // system-context control state into the resumed session snapshot.
+            let starting_system_context_state = session.system_context_state.clone();
+            let mut resumed_session = session.meerkat_session.take();
+            if !starting_system_context_state.pending.is_empty()
+                || !starting_system_context_state.seen.is_empty()
+            {
+                let meerkat_session =
+                    resumed_session.get_or_insert_with(meerkat_core::Session::new);
+                meerkat_session
+                    .set_system_context_state(starting_system_context_state.clone())
+                    .map_err(|err| err.to_string())?;
+            }
+            bc.resume_session = resumed_session;
 
-            Ok((bc, session.config.clone(), run_id))
+            Ok((
+                bc,
+                session.config.clone(),
+                run_id,
+                starting_system_context_state,
+            ))
         })
         .map_err(|e: String| err_str("session_not_found", e))?;
 
@@ -1282,31 +1375,44 @@ pub async fn start_turn(handle: u32, prompt: &str, options_json: &str) -> Result
     let run_result = agent.run(prompt.into()).await;
 
     // Preserve the session BEFORE dropping the agent.
-    let agent_session = agent.session().clone();
+    let mut agent_session = agent.session().clone();
 
     // Drop the agent to release its event_tx sender, which closes the channel
     // and allows the drainer's recv() loop to terminate.
     drop(agent);
     let _ = event_drainer.await;
 
+    let agent_system_context_state = agent_session.system_context_state().unwrap_or_default();
+    REGISTRY.with(|cell| -> Result<(), JsValue> {
+        let mut registry = cell.borrow_mut();
+        if let Some(session) = registry.sessions.get_mut(&handle) {
+            let merged_system_context_state = merge_runtime_system_context_state(
+                agent_system_context_state,
+                &starting_system_context_state,
+                &session.system_context_state,
+            );
+            session.system_context_state = merged_system_context_state.clone();
+            agent_session
+                .set_system_context_state(merged_system_context_state)
+                .map_err(|err| err_str("internal_error", format!("{err}")))?;
+            session.meerkat_session = Some(agent_session.clone());
+            if let Ok(result) = &run_result {
+                session.usage.input_tokens = session
+                    .usage
+                    .input_tokens
+                    .saturating_add(result.usage.input_tokens);
+                session.usage.output_tokens = session
+                    .usage
+                    .output_tokens
+                    .saturating_add(result.usage.output_tokens);
+            }
+            // Events already pushed to pending_events by the concurrent drainer.
+        }
+        Ok(())
+    })?;
+
     match run_result {
         Ok(result) => {
-            REGISTRY.with(|cell| {
-                let mut registry = cell.borrow_mut();
-                if let Some(session) = registry.sessions.get_mut(&handle) {
-                    session.meerkat_session = Some(agent_session);
-                    session.usage.input_tokens = session
-                        .usage
-                        .input_tokens
-                        .saturating_add(result.usage.input_tokens);
-                    session.usage.output_tokens = session
-                        .usage
-                        .output_tokens
-                        .saturating_add(result.usage.output_tokens);
-                    // Events already pushed to pending_events by the concurrent drainer.
-                }
-            });
-
             let result_json = serde_json::json!({
                 "run_id": run_id,
                 "text": result.text,
@@ -1323,14 +1429,6 @@ pub async fn start_turn(handle: u32, prompt: &str, options_json: &str) -> Result
         }
         Err(err) => {
             let error_msg = format!("{err}");
-            REGISTRY.with(|cell| {
-                let mut registry = cell.borrow_mut();
-                if let Some(session) = registry.sessions.get_mut(&handle) {
-                    session.meerkat_session = Some(agent_session);
-                    // Events already pushed to pending_events by the concurrent drainer.
-                }
-            });
-
             let result_json = serde_json::json!({
                 "run_id": run_id,
                 "text": "",
@@ -2076,4 +2174,92 @@ pub fn close_subscription(handle: u32) -> Result<(), JsValue> {
         })?;
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_runtime_system_context_state;
+    use meerkat_core::{
+        PendingSystemContextAppend, SeenSystemContextKey, SeenSystemContextState,
+        SessionSystemContextState,
+    };
+    use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn merge_runtime_system_context_state_preserves_concurrent_appends() {
+        let base_time = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
+
+        let initial_pending = PendingSystemContextAppend {
+            text: "initial".to_string(),
+            source: Some("mob".to_string()),
+            idempotency_key: Some("ctx-initial".to_string()),
+            accepted_at: base_time,
+        };
+        let concurrent_pending = PendingSystemContextAppend {
+            text: "concurrent".to_string(),
+            source: Some("mob".to_string()),
+            idempotency_key: Some("ctx-concurrent".to_string()),
+            accepted_at: base_time + Duration::from_secs(1),
+        };
+
+        let starting_state = SessionSystemContextState {
+            pending: vec![initial_pending.clone()],
+            seen: std::collections::BTreeMap::from([(
+                "ctx-initial".to_string(),
+                SeenSystemContextKey {
+                    text: initial_pending.text.clone(),
+                    source: initial_pending.source.clone(),
+                    state: SeenSystemContextState::Pending,
+                },
+            )]),
+        };
+        let agent_state = SessionSystemContextState {
+            pending: Vec::new(),
+            seen: std::collections::BTreeMap::from([(
+                "ctx-initial".to_string(),
+                SeenSystemContextKey {
+                    text: initial_pending.text.clone(),
+                    source: initial_pending.source.clone(),
+                    state: SeenSystemContextState::Applied,
+                },
+            )]),
+        };
+        let current_registry_state = SessionSystemContextState {
+            pending: vec![initial_pending, concurrent_pending.clone()],
+            seen: std::collections::BTreeMap::from([
+                (
+                    "ctx-initial".to_string(),
+                    SeenSystemContextKey {
+                        text: "initial".to_string(),
+                        source: Some("mob".to_string()),
+                        state: SeenSystemContextState::Pending,
+                    },
+                ),
+                (
+                    "ctx-concurrent".to_string(),
+                    SeenSystemContextKey {
+                        text: concurrent_pending.text.clone(),
+                        source: concurrent_pending.source.clone(),
+                        state: SeenSystemContextState::Pending,
+                    },
+                ),
+            ]),
+        };
+
+        let merged = merge_runtime_system_context_state(
+            agent_state,
+            &starting_state,
+            &current_registry_state,
+        );
+
+        assert_eq!(merged.pending, vec![concurrent_pending]);
+        assert_eq!(
+            merged.seen.get("ctx-initial").map(|seen| seen.state),
+            Some(SeenSystemContextState::Applied)
+        );
+        assert_eq!(
+            merged.seen.get("ctx-concurrent").map(|seen| seen.state),
+            Some(SeenSystemContextState::Pending)
+        );
+    }
 }

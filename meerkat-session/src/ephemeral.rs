@@ -6,11 +6,13 @@
 
 use async_trait::async_trait;
 use indexmap::IndexMap;
+use meerkat_core::SessionSystemContextState;
 use meerkat_core::event::{AgentEvent, EventEnvelope};
 use meerkat_core::service::{
-    CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService,
-    SessionServiceCommsExt, SessionSummary, SessionUsage, SessionView, StartTurnRequest,
-    TurnToolOverlay,
+    AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
+    SessionControlError, SessionError, SessionInfo, SessionQuery, SessionService,
+    SessionServiceCommsExt, SessionServiceControlExt, SessionSummary, SessionUsage, SessionView,
+    StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::time_compat::SystemTime;
 use meerkat_core::types::{RunResult, SessionId, Usage};
@@ -104,6 +106,8 @@ struct SessionHandle {
     event_injector: Option<Arc<dyn meerkat_core::SubscribableInjector>>,
     /// Optional comms runtime for host-mode commands and stream attachment.
     comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
+    /// Shared runtime control state for system-context appends.
+    system_context_state: Arc<std::sync::Mutex<SessionSystemContextState>>,
     /// Out-of-band interrupt signal consumed by the running turn loop.
     interrupt_requested: Arc<AtomicBool>,
     /// Wakes the running turn loop when an interrupt is requested.
@@ -186,6 +190,11 @@ pub trait SessionAgent: Send {
     /// full message history. Only called by `PersistentSessionService`
     /// after each turn.
     fn session_clone(&self) -> meerkat_core::Session;
+
+    /// Get shared runtime control state for system-context append requests.
+    fn system_context_state(
+        &self,
+    ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>;
 
     /// Get a subscribable event injector for pushing external events.
     ///
@@ -282,6 +291,17 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         sessions
             .get(session_id)
             .and_then(|h| h.event_injector.clone())
+    }
+
+    /// Get shared system-context control state for a session, if available.
+    pub async fn system_context_state(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<std::sync::Mutex<SessionSystemContextState>>> {
+        let sessions = self.sessions.read().await;
+        sessions
+            .get(session_id)
+            .map(|h| Arc::clone(&h.system_context_state))
     }
 
     /// Get the comms runtime for a session, if available.
@@ -409,6 +429,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         // Extract the event injector before the agent moves into its task.
         let event_injector = agent.event_injector();
         let comms_runtime = agent.comms_runtime();
+        let system_context_state = agent.system_context_state();
 
         // Create session task channels
         let (command_tx, command_rx) = mpsc::channel::<SessionCommand>(COMMAND_CHANNEL_CAPACITY);
@@ -452,6 +473,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             labels,
             event_injector,
             comms_runtime,
+            system_context_state,
             interrupt_requested,
             interrupt_notify,
             session_event_tx,
@@ -713,6 +735,39 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         id: &SessionId,
     ) -> Result<meerkat_core::comms::EventStream, meerkat_core::comms::StreamError> {
         EphemeralSessionService::<B>::subscribe_session_events(self, id).await
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for EphemeralSessionService<B> {
+    async fn append_system_context(
+        &self,
+        id: &SessionId,
+        req: AppendSystemContextRequest,
+    ) -> Result<AppendSystemContextResult, SessionControlError> {
+        let state = self
+            .system_context_state(id)
+            .await
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+
+        let status = {
+            let mut guard = match state.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    tracing::warn!(
+                        session_id = %id,
+                        "system-context state lock poisoned while staging append"
+                    );
+                    poisoned.into_inner()
+                }
+            };
+            guard
+                .stage_append(&req, SystemTime::now())
+                .map_err(|err| err.into_control_error(id))?
+        };
+
+        Ok(AppendSystemContextResult { status })
     }
 }
 

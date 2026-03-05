@@ -15,7 +15,6 @@ use crate::store::{
 use async_trait::async_trait;
 use chrono::Utc;
 use indexmap::IndexMap;
-use meerkat_core::Session;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
     CommsCommand, PeerDirectoryEntry, PeerDirectorySource, PeerName, SendError, SendReceipt,
@@ -37,6 +36,7 @@ use meerkat_core::{
     EventInjectorError, InteractionSubscription, LlmStreamResult, PlainEventSource,
     SubscribableInjector,
 };
+use meerkat_core::{Session, SessionSystemContextState};
 use meerkat_session::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
 use meerkat_store::{MemoryStore, SessionStore};
 use serde_json::value::RawValue;
@@ -1865,6 +1865,7 @@ impl AgentToolDispatcher for EchoBundleDispatcher {
 
 struct PersistentMockAgent {
     session_id: SessionId,
+    system_context_state: Arc<std::sync::Mutex<SessionSystemContextState>>,
 }
 
 #[async_trait]
@@ -1917,6 +1918,10 @@ impl SessionAgent for PersistentMockAgent {
     fn session_clone(&self) -> Session {
         Session::with_id(self.session_id.clone())
     }
+
+    fn system_context_state(&self) -> Arc<std::sync::Mutex<SessionSystemContextState>> {
+        Arc::clone(&self.system_context_state)
+    }
 }
 
 struct PersistentMockBuilder;
@@ -1932,6 +1937,9 @@ impl SessionAgentBuilder for PersistentMockBuilder {
     ) -> Result<Self::Agent, SessionError> {
         Ok(PersistentMockAgent {
             session_id: SessionId::new(),
+            system_context_state: Arc::new(std::sync::Mutex::new(
+                SessionSystemContextState::default(),
+            )),
         })
     }
 }
@@ -2092,7 +2100,11 @@ impl SessionAgent for OverlayProbeSessionAgent {
     }
 
     fn session_clone(&self) -> Session {
-        self.agent.session().clone()
+        self.agent.session_with_system_context_state()
+    }
+
+    fn system_context_state(&self) -> Arc<std::sync::Mutex<SessionSystemContextState>> {
+        self.agent.system_context_state()
     }
 }
 

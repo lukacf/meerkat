@@ -9,8 +9,9 @@ use futures::StreamExt;
 use meerkat_core::error::ToolError;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{
-    CreateSessionRequest, InitialTurnPolicy, SessionError, SessionQuery, SessionService,
-    StartTurnRequest, TurnToolOverlay,
+    AppendSystemContextRequest, AppendSystemContextStatus, CreateSessionRequest, InitialTurnPolicy,
+    SessionError, SessionQuery, SessionService, SessionServiceControlExt, StartTurnRequest,
+    TurnToolOverlay,
 };
 use meerkat_core::types::{
     AssistantBlock, RunResult, SessionId, StopReason, ToolCallView, ToolDef, ToolResult, Usage,
@@ -35,6 +36,7 @@ struct MockAgent {
     delay_ms: Option<u64>,
     fail_overlay_clear: bool,
     overlay_updates: Arc<std::sync::Mutex<Vec<Option<TurnToolOverlay>>>>,
+    system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
 }
 
 #[async_trait]
@@ -129,7 +131,22 @@ impl SessionAgent for MockAgent {
     }
 
     fn session_clone(&self) -> meerkat_core::Session {
-        meerkat_core::Session::with_id(self.session_id.clone())
+        let mut session = meerkat_core::Session::with_id(self.session_id.clone());
+        session
+            .set_system_context_state(
+                self.system_context_state
+                    .lock()
+                    .expect("system-context lock poisoned")
+                    .clone(),
+            )
+            .expect("serialize system-context state");
+        session
+    }
+
+    fn system_context_state(
+        &self,
+    ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
+        Arc::clone(&self.system_context_state)
     }
 }
 
@@ -196,6 +213,7 @@ impl SessionAgentBuilder for MockAgentBuilder {
             delay_ms: self.delay_ms,
             fail_overlay_clear: self.fail_overlay_clear,
             overlay_updates: self.overlay_updates.clone(),
+            system_context_state: Arc::new(std::sync::Mutex::new(Default::default())),
         })
     }
 }
@@ -260,13 +278,14 @@ impl AgentToolDispatcher for StaticToolDispatcher {
 
 struct RecordingLlmClient {
     provider_visible_tools: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    provider_visible_system_prompts: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
 }
 
 #[async_trait]
 impl AgentLlmClient for RecordingLlmClient {
     async fn stream_response(
         &self,
-        _messages: &[meerkat_core::types::Message],
+        messages: &[meerkat_core::types::Message],
         tools: &[Arc<ToolDef>],
         _max_tokens: u32,
         _temperature: Option<f32>,
@@ -277,6 +296,20 @@ impl AgentLlmClient for RecordingLlmClient {
             .lock()
             .expect("provider_visible_tools lock poisoned")
             .push(names);
+        self.provider_visible_system_prompts
+            .lock()
+            .expect("provider_visible_system_prompts lock poisoned")
+            .push(
+                messages
+                    .iter()
+                    .filter_map(|message| match message {
+                        meerkat_core::types::Message::System(system) => {
+                            Some(system.content.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+            );
 
         Ok(LlmStreamResult::new(
             vec![AssistantBlock::Text {
@@ -350,12 +383,19 @@ impl SessionAgent for RealSessionAgent {
     }
 
     fn session_clone(&self) -> meerkat_core::Session {
-        self.agent.session().clone()
+        self.agent.session_with_system_context_state()
+    }
+
+    fn system_context_state(
+        &self,
+    ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
+        self.agent.system_context_state()
     }
 }
 
 struct RealAgentBuilder {
     provider_visible_tools: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    provider_visible_system_prompts: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
 }
 
 #[async_trait]
@@ -377,6 +417,7 @@ impl SessionAgentBuilder for RealAgentBuilder {
 
         let client = Arc::new(RecordingLlmClient {
             provider_visible_tools: Arc::clone(&self.provider_visible_tools),
+            provider_visible_system_prompts: Arc::clone(&self.provider_visible_system_prompts),
         });
         let tools = Arc::new(StaticToolDispatcher::new(&["alpha", "beta"]));
         let store = Arc::new(NoopSessionStore);
@@ -804,6 +845,7 @@ async fn test_flow_tool_overlay_enforced_by_runtime_and_resets_next_turn() {
     let service = Arc::new(EphemeralSessionService::new(
         RealAgentBuilder {
             provider_visible_tools: Arc::clone(&provider_visible_tools),
+            provider_visible_system_prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
         },
         10,
     ));
@@ -920,6 +962,170 @@ async fn test_start_turn_returns_error_when_overlay_clear_fails() {
             blocked_tools: None,
         })]
     );
+}
+
+#[tokio::test]
+async fn test_append_system_context_stages_dedupes_and_conflicts_per_session() {
+    let service = make_service(MockAgentBuilder::new());
+    let _ = service
+        .create_session(create_req_deferred("Hello"))
+        .await
+        .expect("create deferred session");
+    let session_id = service
+        .list(SessionQuery::default())
+        .await
+        .expect("list sessions")[0]
+        .session_id
+        .clone();
+
+    let request = AppendSystemContextRequest {
+        text: "Observe the orchestrator handoff.".to_string(),
+        source: Some("mob".to_string()),
+        idempotency_key: Some("ctx-1".to_string()),
+    };
+
+    let first = service
+        .append_system_context(&session_id, request.clone())
+        .await
+        .expect("stage first append");
+    assert_eq!(first.status, AppendSystemContextStatus::Staged);
+
+    let duplicate = service
+        .append_system_context(&session_id, request.clone())
+        .await
+        .expect("duplicate append should be accepted");
+    assert_eq!(duplicate.status, AppendSystemContextStatus::Duplicate);
+
+    let conflict = service
+        .append_system_context(
+            &session_id,
+            AppendSystemContextRequest {
+                text: "Different content".to_string(),
+                source: Some("mob".to_string()),
+                idempotency_key: Some("ctx-1".to_string()),
+            },
+        )
+        .await
+        .expect_err("same key with different content must conflict");
+    assert_eq!(conflict.code(), "SESSION_SYSTEM_CONTEXT_CONFLICT");
+
+    let state = service
+        .system_context_state(&session_id)
+        .await
+        .expect("shared system-context state");
+    let state = state.lock().expect("system-context state lock poisoned");
+    assert_eq!(state.pending.len(), 1, "duplicate must not enqueue twice");
+    assert_eq!(state.pending[0].text, "Observe the orchestrator handoff.");
+    assert_eq!(state.pending[0].source.as_deref(), Some("mob"));
+    let seen = state
+        .seen
+        .get("ctx-1")
+        .expect("idempotency key should be tracked");
+    assert_eq!(seen.state, meerkat_core::SeenSystemContextState::Pending);
+}
+
+#[tokio::test]
+async fn test_staged_system_context_applies_at_next_llm_boundary() {
+    let provider_visible_tools = Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
+    let provider_visible_system_prompts =
+        Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
+    let service = Arc::new(EphemeralSessionService::new(
+        RealAgentBuilder {
+            provider_visible_tools: Arc::clone(&provider_visible_tools),
+            provider_visible_system_prompts: Arc::clone(&provider_visible_system_prompts),
+        },
+        10,
+    ));
+
+    let mut request = create_req_deferred("runtime tool scope");
+    request.system_prompt = Some("Base system prompt".to_string());
+    let _ = service
+        .create_session(request)
+        .await
+        .expect("create deferred session");
+    let session_id = service
+        .list(SessionQuery::default())
+        .await
+        .expect("list sessions")[0]
+        .session_id
+        .clone();
+
+    let staged = service
+        .append_system_context(
+            &session_id,
+            AppendSystemContextRequest {
+                text: "You are coordinating with an external orchestrator.".to_string(),
+                source: Some("mob".to_string()),
+                idempotency_key: Some("ctx-boundary".to_string()),
+            },
+        )
+        .await
+        .expect("append system context");
+    assert_eq!(staged.status, AppendSystemContextStatus::Staged);
+
+    let state = service
+        .system_context_state(&session_id)
+        .await
+        .expect("shared system-context state");
+    assert_eq!(
+        state
+            .lock()
+            .expect("system-context state lock poisoned")
+            .pending
+            .len(),
+        1,
+        "append should remain pending until the next LLM boundary"
+    );
+
+    service
+        .start_turn(
+            &session_id,
+            StartTurnRequest {
+                host_mode: false,
+                skill_references: None,
+                flow_tool_overlay: None,
+                prompt: "apply staged context".to_string(),
+                event_tx: None,
+                additional_instructions: None,
+            },
+        )
+        .await
+        .expect("turn should run");
+
+    let prompts = provider_visible_system_prompts
+        .lock()
+        .expect("provider_visible_system_prompts lock poisoned")
+        .clone();
+    assert_eq!(prompts.len(), 1, "expected one provider call");
+    assert_eq!(
+        prompts[0].len(),
+        1,
+        "expected a single canonical system prompt"
+    );
+    let system_prompt = &prompts[0][0];
+    assert!(system_prompt.contains("Base system prompt"));
+    assert!(system_prompt.contains("[Runtime System Context]"));
+    assert!(system_prompt.contains("source: mob"));
+    assert!(system_prompt.contains("You are coordinating with an external orchestrator."));
+    assert!(
+        system_prompt.contains(meerkat_core::SYSTEM_CONTEXT_SEPARATOR),
+        "runtime append should be rendered with the canonical separator"
+    );
+
+    let state = service
+        .system_context_state(&session_id)
+        .await
+        .expect("shared system-context state");
+    let state = state.lock().expect("system-context state lock poisoned");
+    assert!(
+        state.pending.is_empty(),
+        "boundary application should clear the pending queue"
+    );
+    let seen = state
+        .seen
+        .get("ctx-boundary")
+        .expect("idempotency key should remain tracked");
+    assert_eq!(seen.state, meerkat_core::SeenSystemContextState::Applied);
 }
 
 #[tokio::test]

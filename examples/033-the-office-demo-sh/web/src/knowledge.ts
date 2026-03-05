@@ -191,7 +191,7 @@ function countTotalRels(): number {
 }
 
 // =====================================================================
-// Knowledge Graph Renderer (ink-on-paper)
+// Knowledge Graph Renderer (deterministic layout, ink-on-paper)
 // =====================================================================
 
 interface GraphNode {
@@ -200,8 +200,6 @@ interface GraphNode {
   type: string;
   x: number;
   y: number;
-  vx: number;
-  vy: number;
 }
 
 interface GraphEdge {
@@ -210,12 +208,11 @@ interface GraphEdge {
   label: string;
 }
 
-let graphNodes: GraphNode[] = [];
-let graphEdges: GraphEdge[] = [];
 let graphCanvas: HTMLCanvasElement | null = null;
 let graphRafId = 0;
-let graphLastTime = 0;
-let graphAge = 0; // seconds since graph opened — for cooling
+let graphNodes: GraphNode[] = [];
+let graphEdges: GraphEdge[] = [];
+let nodeIndex: Map<string, GraphNode> = new Map();
 
 function buildGraph(): void {
   const nodeMap = new Map<string, GraphNode>();
@@ -225,27 +222,14 @@ function buildGraph(): void {
     for (const e of rec.entities) {
       const key = e.name.toLowerCase();
       if (!nodeMap.has(key)) {
-        // Spread nodes in a circle around origin
-        const idx = nodeMap.size;
-        const angle = (idx / Math.max(1, idx + 5)) * Math.PI * 2 + Math.random() * 0.3;
-        const r = 40 + Math.random() * 120;
-        nodeMap.set(key, {
-          id: key, label: e.name, type: e.type,
-          x: Math.cos(angle) * r,
-          y: Math.sin(angle) * r,
-          vx: 0, vy: 0,
-        });
+        nodeMap.set(key, { id: key, label: e.name, type: e.type, x: 0, y: 0 });
       }
     }
     for (const r of rec.relationships) {
       const fk = r.from.toLowerCase();
       const tk = r.to.toLowerCase();
-      if (!nodeMap.has(fk)) {
-        nodeMap.set(fk, { id: fk, label: r.from, type: "unknown", x: (Math.random() - 0.5) * 100, y: (Math.random() - 0.5) * 100, vx: 0, vy: 0 });
-      }
-      if (!nodeMap.has(tk)) {
-        nodeMap.set(tk, { id: tk, label: r.to, type: "unknown", x: (Math.random() - 0.5) * 100, y: (Math.random() - 0.5) * 100, vx: 0, vy: 0 });
-      }
+      if (!nodeMap.has(fk)) nodeMap.set(fk, { id: fk, label: r.from, type: "unknown", x: 0, y: 0 });
+      if (!nodeMap.has(tk)) nodeMap.set(tk, { id: tk, label: r.to, type: "unknown", x: 0, y: 0 });
       if (!edgeList.some(e => e.from === fk && e.to === tk && e.label === r.type)) {
         edgeList.push({ from: fk, to: tk, label: r.type });
       }
@@ -254,135 +238,76 @@ function buildGraph(): void {
 
   graphNodes = [...nodeMap.values()];
   graphEdges = edgeList;
+  nodeIndex = nodeMap;
 }
 
-// Build a fast lookup for edge endpoints
-let edgeIndex: Map<string, GraphNode> = new Map();
-function rebuildEdgeIndex(): void {
-  edgeIndex = new Map();
-  for (const n of graphNodes) edgeIndex.set(n.id, n);
-}
-
-function renderGraph(canvas: HTMLCanvasElement): void {
-  graphCanvas = canvas;
-  canvas.width = canvas.parentElement!.clientWidth;
-  canvas.height = canvas.parentElement!.clientHeight;
-  buildGraph();
-  rebuildEdgeIndex();
-  graphAge = 0;
-  graphLastTime = 0;
-
-  // Pre-simulate 500 steps to settle before first draw
-  for (let i = 0; i < 500; i++) simulateGraph(0.016, Math.max(0.05, 1.0 - i * 0.002));
-
-  if (graphRafId) cancelAnimationFrame(graphRafId);
-  graphRafId = requestAnimationFrame(graphFrame);
-}
-
-function stopGraphAnimation(): void {
-  if (graphRafId) {
-    cancelAnimationFrame(graphRafId);
-    graphRafId = 0;
-  }
-  graphCanvas = null;
-}
-
-function graphFrame(time: number): void {
-  if (!graphCanvas) return;
-  const dt = graphLastTime === 0 ? 0 : Math.min((time - graphLastTime) / 1000, 0.05);
-  graphLastTime = time;
-  graphAge += dt;
-
-  // Cooling: simulation strength decays over time, settling after ~3 seconds
-  const alpha = Math.max(0.01, 1.0 - graphAge * 0.3);
-  if (alpha > 0.02) {
-    simulateGraph(dt, alpha);
-  }
-  drawGraph(graphCanvas);
-  graphRafId = requestAnimationFrame(graphFrame);
-}
-
-function simulateGraph(dt: number, alpha: number): void {
+/** Deterministic layout: place nodes in a circle, connected nodes closer together */
+function layoutGraph(w: number, h: number): void {
   const n = graphNodes.length;
   if (n === 0) return;
 
-  // Minimum distance between any two nodes — generous to avoid label overlap
-  const minSep = 120 + n * 5;
+  // Find connected components via BFS
+  const adj = new Map<string, Set<string>>();
+  for (const nd of graphNodes) adj.set(nd.id, new Set());
+  for (const e of graphEdges) {
+    adj.get(e.from)?.add(e.to);
+    adj.get(e.to)?.add(e.from);
+  }
 
-  // Repulsion — very strong, keeps nodes well separated
-  for (let i = 0; i < n; i++) {
-    for (let j = i + 1; j < n; j++) {
-      const a = graphNodes[i], b = graphNodes[j];
-      let dx = b.x - a.x, dy = b.y - a.y;
-      let dist = Math.sqrt(dx * dx + dy * dy);
-      if (dist < 1) { dx = Math.random() * 2 - 1; dy = Math.random() * 2 - 1; dist = 1; }
-      // Strong repulsion that falls off with distance
-      const force = (minSep * minSep) / (dist * dist) * 50 * alpha;
-      const fx = (dx / dist) * force;
-      const fy = (dy / dist) * force;
-      a.vx -= fx; a.vy -= fy;
-      b.vx += fx; b.vy += fy;
+  const visited = new Set<string>();
+  const components: GraphNode[][] = [];
+  for (const nd of graphNodes) {
+    if (visited.has(nd.id)) continue;
+    const comp: GraphNode[] = [];
+    const queue = [nd.id];
+    visited.add(nd.id);
+    while (queue.length > 0) {
+      const cur = queue.shift()!;
+      const node = nodeIndex.get(cur);
+      if (node) comp.push(node);
+      for (const nb of adj.get(cur) ?? []) {
+        if (!visited.has(nb)) { visited.add(nb); queue.push(nb); }
+      }
+    }
+    components.push(comp);
+  }
+
+  // Sort: largest component first
+  components.sort((a, b) => b.length - a.length);
+
+  // Layout each component in a circle, then arrange components horizontally
+  const padding = 40;
+  let cursorX = padding;
+  const centerY = h / 2;
+
+  for (const comp of components) {
+    if (comp.length === 1) {
+      comp[0].x = cursorX;
+      comp[0].y = centerY;
+      cursorX += 80;
+    } else {
+      // Circle radius proportional to node count
+      const radius = Math.max(40, comp.length * 25);
+
+      // Place nodes in a circle
+      for (let i = 0; i < comp.length; i++) {
+        const angle = (i / comp.length) * Math.PI * 2 - Math.PI / 2;
+        comp[i].x = cursorX + radius + Math.cos(angle) * radius;
+        comp[i].y = centerY + Math.sin(angle) * radius;
+      }
+      cursorX += radius * 2 + 60;
     }
   }
 
-  // Spring attraction along edges — pull connected nodes together
-  const springLen = minSep * 0.8;
-  for (const e of graphEdges) {
-    const a = edgeIndex.get(e.from);
-    const b = edgeIndex.get(e.to);
-    if (!a || !b) continue;
-    const dx = b.x - a.x, dy = b.y - a.y;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-    if (dist < 1) continue;
-    const force = (dist - springLen) * 0.03 * alpha;
-    const fx = (dx / dist) * force;
-    const fy = (dy / dist) * force;
-    a.vx += fx; a.vy += fy;
-    b.vx -= fx; b.vy -= fy;
-  }
-
-  // Gentle gravity toward origin
+  // Center everything
+  let minX = Infinity, maxX = -Infinity;
   for (const nd of graphNodes) {
-    nd.vx += (0 - nd.x) * 0.001 * alpha;
-    nd.vy += (0 - nd.y) * 0.001 * alpha;
+    minX = Math.min(minX, nd.x);
+    maxX = Math.max(maxX, nd.x);
   }
-
-  // Apply velocity with damping
-  for (const nd of graphNodes) {
-    nd.vx *= 0.6;
-    nd.vy *= 0.6;
-    nd.x += nd.vx * dt * 20;
-    nd.y += nd.vy * dt * 20;
-  }
-}
-
-/** Compute viewport transform that fits all nodes with padding */
-function computeViewport(canvasW: number, canvasH: number): { offsetX: number; offsetY: number; scale: number } {
-  if (graphNodes.length === 0) return { offsetX: canvasW / 2, offsetY: canvasH / 2, scale: 1 };
-
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  for (const n of graphNodes) {
-    minX = Math.min(minX, n.x);
-    maxX = Math.max(maxX, n.x);
-    minY = Math.min(minY, n.y);
-    maxY = Math.max(maxY, n.y);
-  }
-
-  // Generous padding for labels and breathing room
-  const pad = 80;
-  minX -= pad; maxX += pad; minY -= pad; maxY += pad + 20;
-
-  const graphW = maxX - minX || 1;
-  const graphH = maxY - minY || 1;
-  const scale = Math.min(canvasW / graphW, canvasH / graphH, 1.5); // cap at 1.5x zoom
-  const cx = (minX + maxX) / 2;
-  const cy = (minY + maxY) / 2;
-
-  return {
-    offsetX: canvasW / 2 - cx * scale,
-    offsetY: canvasH / 2 - cy * scale,
-    scale,
-  };
+  const totalW = maxX - minX;
+  const offsetX = (w - totalW) / 2 - minX;
+  for (const nd of graphNodes) nd.x += offsetX;
 }
 
 // Node shape by type
@@ -394,6 +319,30 @@ const TYPE_SHAPES: Record<string, string> = {
   amount: "circle",
 };
 
+const TYPE_COLORS: Record<string, string> = {
+  person: "#4466aa",
+  company: "#aa6633",
+  system: "#448844",
+  location: "#886644",
+  amount: "#884488",
+  unknown: "#666666",
+};
+
+function renderGraph(canvas: HTMLCanvasElement): void {
+  graphCanvas = canvas;
+  canvas.width = canvas.parentElement!.clientWidth;
+  canvas.height = canvas.parentElement!.clientHeight;
+  buildGraph();
+  layoutGraph(canvas.width, canvas.height);
+  if (graphRafId) cancelAnimationFrame(graphRafId);
+  drawGraph(canvas);
+}
+
+function stopGraphAnimation(): void {
+  if (graphRafId) { cancelAnimationFrame(graphRafId); graphRafId = 0; }
+  graphCanvas = null;
+}
+
 function drawGraph(canvas: HTMLCanvasElement): void {
   const ctx = canvas.getContext("2d")!;
   const w = canvas.width, h = canvas.height;
@@ -402,17 +351,16 @@ function drawGraph(canvas: HTMLCanvasElement): void {
   ctx.fillStyle = "#f0e8d0";
   ctx.fillRect(0, 0, w, h);
 
-  // Subtle ruled lines (typewriter paper)
-  ctx.strokeStyle = "rgba(180, 170, 150, 0.3)";
+  // Subtle ruled lines
+  ctx.strokeStyle = "rgba(180, 170, 150, 0.25)";
   ctx.lineWidth = 0.5;
-  for (let y = 20; y < h; y += 18) {
+  for (let y = 20; y < h; y += 16) {
     ctx.beginPath();
     ctx.moveTo(0, y);
     ctx.lineTo(w, y);
     ctx.stroke();
   }
 
-  // Empty state
   if (graphNodes.length === 0) {
     ctx.font = "10px 'Press Start 2P', monospace";
     ctx.fillStyle = "rgba(100, 90, 75, 0.5)";
@@ -424,52 +372,56 @@ function drawGraph(canvas: HTMLCanvasElement): void {
     return;
   }
 
-  // Compute viewport transform to fit all nodes
-  const vp = computeViewport(w, h);
-
-  ctx.save();
-  ctx.translate(vp.offsetX, vp.offsetY);
-  ctx.scale(vp.scale, vp.scale);
-
-  // Edges — thin ink lines
-  ctx.lineWidth = 1 / vp.scale;
-  for (const e of graphEdges) {
-    const a = edgeIndex.get(e.from);
-    const b = edgeIndex.get(e.to);
+  // Edges — curved ink lines with labels
+  for (let ei = 0; ei < graphEdges.length; ei++) {
+    const e = graphEdges[ei];
+    const a = nodeIndex.get(e.from);
+    const b = nodeIndex.get(e.to);
     if (!a || !b) continue;
 
-    ctx.strokeStyle = "rgba(40, 35, 30, 0.5)";
+    const dx = b.x - a.x, dy = b.y - a.y;
+    // Offset curve for multiple edges between same node pair
+    const perpX = -dy * 0.15, perpY = dx * 0.15;
+    const mx = (a.x + b.x) / 2 + perpX;
+    const my = (a.y + b.y) / 2 + perpY;
+
+    ctx.strokeStyle = "rgba(60, 50, 40, 0.35)";
+    ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(a.x, a.y);
-    ctx.lineTo(b.x, b.y);
+    ctx.quadraticCurveTo(mx, my, b.x, b.y);
     ctx.stroke();
 
-    // Edge label at midpoint
+    // Edge label — offset from midpoint, small italic
     if (e.label) {
-      const mx = (a.x + b.x) / 2;
-      const my = (a.y + b.y) / 2;
-      ctx.font = `${8 / vp.scale}px 'IBM Plex Mono', monospace`;
-      ctx.fillStyle = "rgba(100, 90, 75, 0.7)";
+      ctx.font = "italic 8px 'IBM Plex Mono', monospace";
+      ctx.fillStyle = "rgba(120, 100, 80, 0.7)";
       ctx.textAlign = "center";
-      ctx.fillText(e.label, mx, my - 3 / vp.scale);
+      ctx.fillText(e.label, mx, my - 4);
     }
   }
 
-  // Nodes
-  const nodeR = 5 / vp.scale;
+  // Nodes — draw node circles/shapes with colored fill
+  const nodeR = 6;
   for (const n of graphNodes) {
     const shape = TYPE_SHAPES[n.type] || "circle";
+    const color = TYPE_COLORS[n.type] || TYPE_COLORS.unknown;
 
+    // White background behind node to clear any overlapping edges
     ctx.fillStyle = "#f0e8d0";
+    ctx.beginPath();
+    ctx.arc(n.x, n.y, nodeR + 3, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = color;
     ctx.strokeStyle = "#28231e";
-    ctx.lineWidth = 1.5 / vp.scale;
+    ctx.lineWidth = 1.5;
 
     if (shape === "diamond") {
+      const r = nodeR + 1;
       ctx.beginPath();
-      ctx.moveTo(n.x, n.y - nodeR - 1);
-      ctx.lineTo(n.x + nodeR + 1, n.y);
-      ctx.lineTo(n.x, n.y + nodeR + 1);
-      ctx.lineTo(n.x - nodeR - 1, n.y);
+      ctx.moveTo(n.x, n.y - r); ctx.lineTo(n.x + r, n.y);
+      ctx.lineTo(n.x, n.y + r); ctx.lineTo(n.x - r, n.y);
       ctx.closePath();
       ctx.fill(); ctx.stroke();
     } else if (shape === "square") {
@@ -481,14 +433,16 @@ function drawGraph(canvas: HTMLCanvasElement): void {
       ctx.fill(); ctx.stroke();
     }
 
-    // Label
-    ctx.font = `${9 / vp.scale}px 'IBM Plex Mono', monospace`;
-    ctx.fillStyle = "#28231e";
+    // Label below node — dark ink, white background for readability
+    ctx.font = "10px 'IBM Plex Mono', monospace";
     ctx.textAlign = "center";
-    ctx.fillText(n.label, n.x, n.y + nodeR + 12 / vp.scale);
+    const labelW = ctx.measureText(n.label).width;
+    ctx.fillStyle = "rgba(240, 232, 208, 0.85)";
+    ctx.fillRect(n.x - labelW / 2 - 2, n.y + nodeR + 2, labelW + 4, 13);
+    ctx.fillStyle = "#28231e";
+    ctx.fillText(n.label, n.x, n.y + nodeR + 13);
   }
 
-  ctx.restore();
   ctx.textAlign = "left";
 }
 

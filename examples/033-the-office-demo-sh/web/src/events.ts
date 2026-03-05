@@ -25,6 +25,7 @@ function addressToAgentId(addr: string): AgentId | null {
 // ── Track seen tool call IDs to avoid duplicates ──
 
 const seenToolCallIds = new Set<string>();
+const seenApprovalDescs = new Set<string>();
 
 // ── Incident callback (set by incidents module) ──
 
@@ -42,6 +43,13 @@ let onApprovalNeeded: ApprovalCallback | null = null;
 
 export function setOnApprovalNeeded(cb: ApprovalCallback): void {
   onApprovalNeeded = cb;
+}
+
+function fireApproval(data: { short_summary?: string; action_description: string; risk_level: string; proposed_by: string }): void {
+  const key = data.action_description.slice(0, 60).toLowerCase();
+  if (seenApprovalDescs.has(key)) return;
+  seenApprovalDescs.add(key);
+  fireApproval(data);
 }
 
 // ── Poll all subscriptions ──
@@ -89,14 +97,18 @@ export function drainAllEvents(mod: RuntimeModule, subs: AgentSub[]): { events: 
               // Notify incident system
               onMessage?.(sub.agentId, recipientId, body, preview, "routing");
 
-              // Check if gate is being asked for human approval
-              if (recipientId === "gate") {
+              // Check if gate is SENDING a human approval request
+              if (sub.agentId === "gate") {
                 try {
-                  const parsed = JSON.parse(body);
-                  if (parsed.require_human_approval) {
-                    onApprovalNeeded?.(parsed);
+                  // Gate embeds JSON in its message body
+                  const approvalMatch = body.match(/\{[^{}]*require_human_approval[^{}]*\}/);
+                  if (approvalMatch) {
+                    const data = JSON.parse(approvalMatch[0]);
+                    if (data.require_human_approval) {
+                      fireApproval(data);
+                    }
                   }
-                } catch { /* not JSON, that's fine */ }
+                } catch { /* not approval JSON */ }
               }
             }
           } catch { /* parse error */ }
@@ -114,18 +126,18 @@ export function drainAllEvents(mod: RuntimeModule, subs: AgentSub[]): { events: 
               showSpeechBubble(sub.agentId, result.headline, 4000);
               onMessage?.(sub.agentId, null, result.headline, result.headline, result.category || "response");
 
-              // Check if gate's structured output contains approval request
+              // Check gate structured output for approval keywords
               if (sub.agentId === "gate" && result.headline) {
-                try {
-                  // Gate might embed JSON in its regular message content too
-                  const match = payload.result.match(/\{[^}]*require_human_approval[^}]*\}/);
-                  if (match) {
-                    const data = JSON.parse(match[0]);
-                    if (data.require_human_approval) {
-                      onApprovalNeeded?.(data);
-                    }
-                  }
-                } catch { /* not a gate approval */ }
+                const hl = result.headline.toLowerCase();
+                if (hl.includes("require") && hl.includes("approval")) {
+                  // Gate signaled approval needed in its headline
+                  fireApproval({
+                    short_summary: result.headline.slice(0, 40),
+                    action_description: result.headline,
+                    risk_level: "high",
+                    proposed_by: "gate",
+                  });
+                }
               }
             }
           } catch { /* not JSON */ }
@@ -145,6 +157,19 @@ export function drainAllEvents(mod: RuntimeModule, subs: AgentSub[]): { events: 
         if (payload.type === "text_delta") {
           showThinkBubble(sub.agentId);
           setAgentState(sub.agentId, "thinking");
+
+          // Check gate text deltas for approval JSON
+          if (sub.agentId === "gate" && payload.text) {
+            try {
+              const approvalMatch = payload.text.match(/\{[^{}]*require_human_approval[^{}]*\}/);
+              if (approvalMatch) {
+                const data = JSON.parse(approvalMatch[0]);
+                if (data.require_human_approval) {
+                  fireApproval(data);
+                }
+              }
+            } catch { /* not approval JSON */ }
+          }
         }
 
         // ── Tool call start (agent called a tool) ──

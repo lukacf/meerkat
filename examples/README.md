@@ -1,6 +1,6 @@
 # Meerkat Examples Library
 
-32 fully functional examples covering every Meerkat surface and feature,
+34 fully functional examples covering every Meerkat surface and feature,
 from "Hello World" to production multi-agent systems.
 
 ## Quick Start
@@ -80,6 +80,7 @@ For runnable Rust examples, see `meerkat/examples/` (e.g., `cargo run -p meerkat
 | 030 | [web-dashboard-copilot-sh](030-web-dashboard-copilot-sh/) | Shell | Build embeddable web assistant for ops dashboards |
 | 031 | [wasm-mini-diplomacy-sh](031-wasm-mini-diplomacy-sh/) | Shell + Web | 9 autonomous agents across 4 WASM mobs wage a 3-faction territory war with strategy, diplomacy, and deception |
 | 032 | [wasm-webcm-agent](032-wasm-webcm-agent/) | Web (WASM) | Multi-provider coding agent mob in the browser — 4 agents (Anthropic + OpenAI + Gemini) collaborate via comms in a sandboxed Linux VM |
+| 034 | [force-mcp](034-force-mcp/) | Rust (MCP) | Multi-agent MCP server — 7 mobpacks (advisor, review, architect, brainstorm, red-team, panel, rct) with flow and comms execution, progress notifications, multi-provider model diversity |
 
 ## Examples by Feature
 
@@ -97,12 +98,14 @@ For runnable Rust examples, see `meerkat/examples/` (e.g., `cargo run -p meerkat
 | **Semantic Memory** | 014 |
 | **Persistence** | 015 |
 | **Sub-Agents** | 016 |
-| **Mobs** | 017, 018, 019, 028, 029, 030, 031, 032 |
-| **Mobpack** | 028, 029, 030, 031 |
+| **Mobs** | 017, 018, 019, 028, 029, 030, 031, 032, 034 |
+| **Mobpack** | 028, 029, 030, 031, 034 |
 | **WASM Web Build** | 029, 030, 031, 032 |
-| **Comms** | 020, 024, 032 |
-| **Host Mode** | 024, 032 |
-| **Multi-Provider** | 021, 032 |
+| **Comms** | 020, 024, 032, 034 |
+| **Host Mode** | 024, 032, 034 |
+| **Multi-Provider** | 021, 032, 034 |
+| **MCP Server** | 034 |
+| **Flow Engine** | 034 |
 | **REST API** | 022 |
 | **JSON-RPC** | 023 |
 | **Structured Output** | 008 |
@@ -111,7 +114,7 @@ For runnable Rust examples, see `meerkat/examples/` (e.g., `cargo run -p meerkat
 
 | Surface | Examples |
 |---------|----------|
-| **Rust SDK** | 001, 005, 006, 009, 011-020, 024, 025 |
+| **Rust SDK** | 001, 005, 006, 009, 011-020, 024, 025, 034 |
 | **Python SDK** | 002, 007, 021, 022, 026 |
 | **TypeScript SDK** | 003, 008, 023, 027 |
 | **CLI (Shell)** | 004, 010, 028, 029, 030, 031 |

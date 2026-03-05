@@ -23,10 +23,11 @@ impl Pack for ReviewPack {
     fn definition(&self, task: &str, context: &str, overrides: &BTreeMap<String, String>, pp: Option<&Value>) -> MobDefinition {
         let ctx = format_context(context);
 
+        // Different models per reviewer for diverse perspectives
         let agents = [
             ("reviewer",    "reviewer-skill",          "General code reviewer",          "claude-sonnet-4-6"),
-            ("security",    "security-skill",          "Security-focused reviewer",      "claude-sonnet-4-6"),
-            ("perf",        "perf-skill",              "Performance-focused reviewer",   "claude-sonnet-4-6"),
+            ("security",    "security-skill",          "Security-focused reviewer",      "gpt-5.3-codex"),
+            ("perf",        "perf-skill",              "Performance-focused reviewer",   "gemini-3-flash-preview"),
             ("synthesizer", "synthesizer-skill",       "Review synthesizer",             "claude-sonnet-4-6"),
         ];
 

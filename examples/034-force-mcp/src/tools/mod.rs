@@ -41,7 +41,11 @@ gpt-5.3-codex (OpenAI, code-specialized), \
 gpt-5.2-pro (OpenAI, deep reasoning — slow, use sparingly), \
 gemini-3.1-pro-preview (Google, strong general), \
 gemini-3-flash-preview (Google, fastest). \
-Default: claude-sonnet-4-6";
+Default: claude-sonnet-4-6. \
+Guidance: use opus/gpt-5.2-pro for complex reasoning (architecture, judging). \
+Use sonnet/gpt-5.3-codex for code tasks. \
+Use gemini-3-flash for speed-sensitive roles. \
+Mix providers in multi-agent packs for perspective diversity";
 
 pub fn tools_list() -> Vec<Value> {
     vec![

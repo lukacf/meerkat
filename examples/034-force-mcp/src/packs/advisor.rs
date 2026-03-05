@@ -24,7 +24,7 @@ impl Pack for AdvisorPack {
 
         let mut profiles = BTreeMap::new();
         profiles.insert(ProfileName::from("advisor"),
-            turn_driven_profile(resolve_model(overrides, "advisor", "claude-sonnet-4-6"), "advisor-skill", "Technical advisor", pp));
+            turn_driven_profile(resolve_model(overrides, "advisor", "gpt-5.3-codex"), "advisor-skill", "Technical advisor", pp));
 
         let mut skills = BTreeMap::new();
         skills.insert("advisor-skill".into(), SkillSource::Inline { content: include_str!("../../skills/advisor.md").into() });

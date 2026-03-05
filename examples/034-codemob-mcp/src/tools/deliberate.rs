@@ -94,10 +94,30 @@ pub async fn handle(
         )));
     }
 
-    // Yield briefly so the mob actor processes spawn roster updates before
-    // the flow engine queries list_members(). Without this, the flow may see
-    // an empty roster and fail with "no targets available for role".
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // Wait for all spawned agents to appear in the roster before running
+    // the flow. The spawn command is processed by the mob actor, but the
+    // roster update may not be visible yet when we query list_members().
+    let expected = profile_names.len();
+    let mut visible = 0;
+    for _ in 0..20 {
+        // 20 attempts × 50ms = 1s max wait
+        match state.mob_state.mob_list_members(&mob_id).await {
+            Ok(members) => {
+                visible = members.len();
+                if visible >= expected {
+                    break;
+                }
+            }
+            Err(_) => {}
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    if visible < expected {
+        let _ = state.mob_state.mob_destroy(&mob_id).await;
+        return Err(ToolCallError::internal(format!(
+            "Roster not ready: expected {expected} agents, only {visible} visible after 1s"
+        )));
+    }
 
     // Route to flow-based or comms-based execution
     let result = if has_flows {

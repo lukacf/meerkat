@@ -49,7 +49,8 @@ function fireApproval(data: { short_summary?: string; action_description: string
   const key = data.action_description.slice(0, 60).toLowerCase();
   if (seenApprovalDescs.has(key)) return;
   seenApprovalDescs.add(key);
-  fireApproval(data);
+  console.log("[APPROVAL] Detected:", data.short_summary || data.action_description.slice(0, 50));
+  onApprovalNeeded?.(data);
 }
 
 // ── Poll all subscriptions ──

@@ -58,7 +58,7 @@ app.innerHTML = `
         </div>
         <div class="chat-input-row">
           <span class="chat-prompt">&gt;</span>
-          <input type="text" id="chatInput" placeholder="Type a message..." />
+          <textarea id="chatInput" placeholder="Type a message..." rows="1"></textarea>
           <button class="chat-send" id="chatSend">Send</button>
         </div>
       </div>
@@ -360,7 +360,7 @@ document.getElementById("agentPicker")!.addEventListener("click", (e) => {
     selectedChatAgent = card.dataset.agent as AgentId;
     updateAgentLabel();
     $<HTMLDivElement>("agentPicker").classList.add("hidden");
-    $<HTMLInputElement>("chatInput").focus();
+    $<HTMLTextAreaElement>("chatInput").focus();
   } else if (!(e.target as HTMLElement).closest(".picker-frame")) {
     // Clicked outside frame
     $<HTMLDivElement>("agentPicker").classList.add("hidden");
@@ -663,15 +663,25 @@ document.querySelector(".scenario-grid")!.addEventListener("click", (e) => {
 
 // Chat
 document.getElementById("chatSend")!.addEventListener("click", () => {
-  const input = $<HTMLInputElement>("chatInput");
+  const input = $<HTMLTextAreaElement>("chatInput");
   const msg = input.value.trim();
   if (!msg) return;
   input.value = "";
+  input.style.height = "auto";
   dismissOnboardingHints();
   void chatWithAgent(selectedChatAgent, msg);
 });
-$<HTMLInputElement>("chatInput").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") document.getElementById("chatSend")!.click();
+$<HTMLTextAreaElement>("chatInput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    document.getElementById("chatSend")!.click();
+  }
+});
+// Auto-grow textarea
+$<HTMLTextAreaElement>("chatInput").addEventListener("input", (e) => {
+  const el = e.target as HTMLTextAreaElement;
+  el.style.height = "auto";
+  el.style.height = Math.min(el.scrollHeight, 80) + "px";
 });
 
 // Approval

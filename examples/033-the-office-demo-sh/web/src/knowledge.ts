@@ -221,22 +221,18 @@ function buildGraph(): void {
   const nodeMap = new Map<string, GraphNode>();
   const edgeList: GraphEdge[] = [];
 
-  const w = graphCanvas?.width ?? 600;
-  const h = graphCanvas?.height ?? 400;
-  const cx = w / 2, cy = h / 2;
-
   for (const [, rec] of records) {
     for (const e of rec.entities) {
       const key = e.name.toLowerCase();
       if (!nodeMap.has(key)) {
-        // Spread nodes in a circle around center
+        // Spread nodes in a circle around origin
         const idx = nodeMap.size;
-        const angle = (idx / Math.max(1, nodeMap.size + 5)) * Math.PI * 2 + Math.random() * 0.3;
-        const r = 40 + Math.random() * Math.min(w, h) * 0.3;
+        const angle = (idx / Math.max(1, idx + 5)) * Math.PI * 2 + Math.random() * 0.3;
+        const r = 40 + Math.random() * 120;
         nodeMap.set(key, {
           id: key, label: e.name, type: e.type,
-          x: cx + Math.cos(angle) * r,
-          y: cy + Math.sin(angle) * r,
+          x: Math.cos(angle) * r,
+          y: Math.sin(angle) * r,
           vx: 0, vy: 0,
         });
       }
@@ -245,10 +241,10 @@ function buildGraph(): void {
       const fk = r.from.toLowerCase();
       const tk = r.to.toLowerCase();
       if (!nodeMap.has(fk)) {
-        nodeMap.set(fk, { id: fk, label: r.from, type: "unknown", x: cx + (Math.random() - 0.5) * 100, y: cy + (Math.random() - 0.5) * 100, vx: 0, vy: 0 });
+        nodeMap.set(fk, { id: fk, label: r.from, type: "unknown", x: (Math.random() - 0.5) * 100, y: (Math.random() - 0.5) * 100, vx: 0, vy: 0 });
       }
       if (!nodeMap.has(tk)) {
-        nodeMap.set(tk, { id: tk, label: r.to, type: "unknown", x: cx + (Math.random() - 0.5) * 100, y: cy + (Math.random() - 0.5) * 100, vx: 0, vy: 0 });
+        nodeMap.set(tk, { id: tk, label: r.to, type: "unknown", x: (Math.random() - 0.5) * 100, y: (Math.random() - 0.5) * 100, vx: 0, vy: 0 });
       }
       if (!edgeList.some(e => e.from === fk && e.to === tk && e.label === r.type)) {
         edgeList.push({ from: fk, to: tk, label: r.type });
@@ -307,16 +303,13 @@ function graphFrame(time: number): void {
 }
 
 function simulateGraph(dt: number, alpha: number): void {
-  const w = graphCanvas?.width ?? 600;
-  const h = graphCanvas?.height ?? 400;
-  const cx = w / 2, cy = h / 2;
   const n = graphNodes.length;
   if (n === 0) return;
 
-  // Ideal distance scales with node count
-  const idealDist = Math.max(60, Math.min(w, h) / Math.sqrt(n + 1) * 0.8);
+  // Ideal distance scales with node count — more nodes = more space
+  const idealDist = 80 + n * 8;
 
-  // Repulsion (Coulomb)
+  // Repulsion (Coulomb) — unbounded space
   for (let i = 0; i < n; i++) {
     for (let j = i + 1; j < n; j++) {
       const a = graphNodes[i], b = graphNodes[j];
@@ -339,28 +332,55 @@ function simulateGraph(dt: number, alpha: number): void {
     const dx = b.x - a.x, dy = b.y - a.y;
     const dist = Math.sqrt(dx * dx + dy * dy);
     if (dist < 1) continue;
-    const force = (dist - idealDist) * 0.05 * alpha;
+    const force = (dist - idealDist) * 0.04 * alpha;
     const fx = (dx / dist) * force;
     const fy = (dy / dist) * force;
     a.vx += fx; a.vy += fy;
     b.vx -= fx; b.vy -= fy;
   }
 
-  // Gentle gravity toward center
+  // Gentle gravity toward origin (keeps graph centered)
   for (const nd of graphNodes) {
-    nd.vx += (cx - nd.x) * 0.005 * alpha;
-    nd.vy += (cy - nd.y) * 0.005 * alpha;
+    nd.vx += (0 - nd.x) * 0.002 * alpha;
+    nd.vy += (0 - nd.y) * 0.002 * alpha;
   }
 
-  // Apply velocity with strong damping
+  // Apply velocity with damping — NO boundary clamping
   for (const nd of graphNodes) {
-    nd.vx *= 0.7;
-    nd.vy *= 0.7;
+    nd.vx *= 0.75;
+    nd.vy *= 0.75;
     nd.x += nd.vx * dt * 30;
     nd.y += nd.vy * dt * 30;
-    nd.x = Math.max(50, Math.min(w - 50, nd.x));
-    nd.y = Math.max(30, Math.min(h - 30, nd.y));
   }
+}
+
+/** Compute viewport transform that fits all nodes with padding */
+function computeViewport(canvasW: number, canvasH: number): { offsetX: number; offsetY: number; scale: number } {
+  if (graphNodes.length === 0) return { offsetX: canvasW / 2, offsetY: canvasH / 2, scale: 1 };
+
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const n of graphNodes) {
+    minX = Math.min(minX, n.x);
+    maxX = Math.max(maxX, n.x);
+    minY = Math.min(minY, n.y);
+    maxY = Math.max(maxY, n.y);
+  }
+
+  // Add padding for labels
+  const pad = 60;
+  minX -= pad; maxX += pad; minY -= pad; maxY += pad + 15; // extra bottom for labels
+
+  const graphW = maxX - minX || 1;
+  const graphH = maxY - minY || 1;
+  const scale = Math.min(canvasW / graphW, canvasH / graphH, 2); // cap at 2x zoom
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+
+  return {
+    offsetX: canvasW / 2 - cx * scale,
+    offsetY: canvasH / 2 - cy * scale,
+    scale,
+  };
 }
 
 // Node shape by type
@@ -390,11 +410,30 @@ function drawGraph(canvas: HTMLCanvasElement): void {
     ctx.stroke();
   }
 
+  // Empty state
+  if (graphNodes.length === 0) {
+    ctx.font = "10px 'Press Start 2P', monospace";
+    ctx.fillStyle = "rgba(100, 90, 75, 0.5)";
+    ctx.textAlign = "center";
+    ctx.fillText("NO DATA YET", w / 2, h / 2 - 10);
+    ctx.font = "9px 'IBM Plex Mono', monospace";
+    ctx.fillText("Records will populate this graph", w / 2, h / 2 + 10);
+    ctx.textAlign = "left";
+    return;
+  }
+
+  // Compute viewport transform to fit all nodes
+  const vp = computeViewport(w, h);
+
+  ctx.save();
+  ctx.translate(vp.offsetX, vp.offsetY);
+  ctx.scale(vp.scale, vp.scale);
+
   // Edges — thin ink lines
-  ctx.lineWidth = 1;
+  ctx.lineWidth = 1 / vp.scale;
   for (const e of graphEdges) {
-    const a = graphNodes.find(n => n.id === e.from);
-    const b = graphNodes.find(n => n.id === e.to);
+    const a = edgeIndex.get(e.from);
+    const b = edgeIndex.get(e.to);
     if (!a || !b) continue;
 
     ctx.strokeStyle = "rgba(40, 35, 30, 0.5)";
@@ -407,56 +446,47 @@ function drawGraph(canvas: HTMLCanvasElement): void {
     if (e.label) {
       const mx = (a.x + b.x) / 2;
       const my = (a.y + b.y) / 2;
-      ctx.font = "8px 'IBM Plex Mono', monospace";
+      ctx.font = `${8 / vp.scale}px 'IBM Plex Mono', monospace`;
       ctx.fillStyle = "rgba(100, 90, 75, 0.7)";
       ctx.textAlign = "center";
-      ctx.fillText(e.label, mx, my - 3);
+      ctx.fillText(e.label, mx, my - 3 / vp.scale);
     }
   }
 
   // Nodes
+  const nodeR = 5 / vp.scale;
   for (const n of graphNodes) {
     const shape = TYPE_SHAPES[n.type] || "circle";
-    const r = 5;
 
     ctx.fillStyle = "#f0e8d0";
     ctx.strokeStyle = "#28231e";
-    ctx.lineWidth = 1.5;
+    ctx.lineWidth = 1.5 / vp.scale;
 
     if (shape === "diamond") {
       ctx.beginPath();
-      ctx.moveTo(n.x, n.y - r - 1);
-      ctx.lineTo(n.x + r + 1, n.y);
-      ctx.lineTo(n.x, n.y + r + 1);
-      ctx.lineTo(n.x - r - 1, n.y);
+      ctx.moveTo(n.x, n.y - nodeR - 1);
+      ctx.lineTo(n.x + nodeR + 1, n.y);
+      ctx.lineTo(n.x, n.y + nodeR + 1);
+      ctx.lineTo(n.x - nodeR - 1, n.y);
       ctx.closePath();
       ctx.fill(); ctx.stroke();
     } else if (shape === "square") {
-      ctx.fillRect(n.x - r, n.y - r, r * 2, r * 2);
-      ctx.strokeRect(n.x - r, n.y - r, r * 2, r * 2);
+      ctx.fillRect(n.x - nodeR, n.y - nodeR, nodeR * 2, nodeR * 2);
+      ctx.strokeRect(n.x - nodeR, n.y - nodeR, nodeR * 2, nodeR * 2);
     } else {
       ctx.beginPath();
-      ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+      ctx.arc(n.x, n.y, nodeR, 0, Math.PI * 2);
       ctx.fill(); ctx.stroke();
     }
 
     // Label
-    ctx.font = "9px 'IBM Plex Mono', monospace";
+    ctx.font = `${9 / vp.scale}px 'IBM Plex Mono', monospace`;
     ctx.fillStyle = "#28231e";
     ctx.textAlign = "center";
-    ctx.fillText(n.label, n.x, n.y + r + 12);
+    ctx.fillText(n.label, n.x, n.y + nodeR + 12 / vp.scale);
   }
 
-  // Empty state
-  if (graphNodes.length === 0) {
-    ctx.font = "10px 'Press Start 2P', monospace";
-    ctx.fillStyle = "rgba(100, 90, 75, 0.5)";
-    ctx.textAlign = "center";
-    ctx.fillText("NO DATA YET", w / 2, h / 2 - 10);
-    ctx.font = "9px 'IBM Plex Mono', monospace";
-    ctx.fillText("Records will populate this graph", w / 2, h / 2 + 10);
-  }
-
+  ctx.restore();
   ctx.textAlign = "left";
 }
 

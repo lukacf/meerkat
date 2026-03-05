@@ -1,0 +1,17 @@
+{
+  "name": "the-office-demo",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "sync:runtime": "node ./scripts/sync-runtime-from-rkat-web.mjs",
+    "dev": "npm run sync:runtime && vite",
+    "build": "npm run sync:runtime && vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@rkat/web": "^0.4.3",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.11"
+  }
+}

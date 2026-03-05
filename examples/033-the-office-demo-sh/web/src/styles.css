@@ -298,6 +298,22 @@ body {
   font-size: 9px; color: var(--ink-muted);
   font-family: var(--mono);
 }
+.chat-spacer { flex: 1; }
+.trust-toggle {
+  display: flex; align-items: center; gap: 4px;
+  cursor: pointer; font-size: 9px;
+}
+.trust-toggle input[type="checkbox"] {
+  width: 14px; height: 14px;
+  accent-color: var(--copper);
+  cursor: pointer;
+}
+.trust-label {
+  font-family: var(--pixel-font);
+  font-size: 7px;
+  color: var(--copper-dark);
+  letter-spacing: 0.04em;
+}
 .chat-input-row {
   flex: 1; display: flex; align-items: stretch;
 }

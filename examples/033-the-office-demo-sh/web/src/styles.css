@@ -299,20 +299,24 @@ body {
   font-family: var(--mono);
 }
 .chat-spacer { flex: 1; }
-.trust-toggle {
-  display: flex; align-items: center; gap: 4px;
-  cursor: pointer; font-size: 9px;
-}
-.trust-toggle input[type="checkbox"] {
-  width: 14px; height: 14px;
-  accent-color: var(--copper);
-  cursor: pointer;
-}
-.trust-label {
+.trust-btn {
   font-family: var(--pixel-font);
   font-size: 7px;
+  padding: 2px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  letter-spacing: 0.03em;
+  border: 1px solid;
+}
+.trust-btn.trusted {
+  background: var(--amber-dim);
   color: var(--copper-dark);
-  letter-spacing: 0.04em;
+  border-color: var(--copper);
+}
+.trust-btn.untrusted {
+  background: rgba(100,100,120,0.1);
+  color: var(--ink-muted);
+  border-color: var(--border-light);
 }
 .chat-input-row {
   flex: 1; display: flex; align-items: stretch;

@@ -71,10 +71,7 @@ app.innerHTML = `
           <button class="agent-label" id="agentLabel">[TRIAGE]</button>
           <span class="chat-agent-hint">click to change</span>
           <span class="chat-spacer"></span>
-          <label class="trust-toggle" title="Admin messages are trusted as coming from the system owner. External messages are treated as untrusted outside communication.">
-            <input type="checkbox" id="trustToggle" checked />
-            <span class="trust-label" id="trustLabel">Admin</span>
-          </label>
+          <button class="trust-btn trusted" id="trustToggle" title="Toggle: send as the office owner or as an outside caller">The Boss</button>
         </div>
         <div class="chat-input-row">
           <span class="chat-prompt">&gt;</span>
@@ -578,9 +575,8 @@ async function injectEvent(scenarioId: string): Promise<void> {
 // Chat with Agent
 // =====================================================================
 
-function isAdminMode(): boolean {
-  return $<HTMLInputElement>("trustToggle").checked;
-}
+let adminMode = true;
+function isAdminMode(): boolean { return adminMode; }
 
 async function chatWithAgent(agentId: AgentId, message: string): Promise<void> {
   if (!runtime || !mobId) { setStatus("Start the office first."); return; }
@@ -706,9 +702,12 @@ $<HTMLTextAreaElement>("chatInput").addEventListener("keydown", (e) => {
     document.getElementById("chatSend")!.click();
   }
 });
-// Trust toggle label
-$<HTMLInputElement>("trustToggle").addEventListener("change", () => {
-  $<HTMLSpanElement>("trustLabel").textContent = isAdminMode() ? "Admin" : "External";
+// Trust toggle
+document.getElementById("trustToggle")!.addEventListener("click", () => {
+  adminMode = !adminMode;
+  const btn = document.getElementById("trustToggle")!;
+  btn.textContent = adminMode ? "The Boss" : "Outsider";
+  btn.className = `trust-btn ${adminMode ? "trusted" : "untrusted"}`;
 });
 // Auto-grow textarea
 $<HTMLTextAreaElement>("chatInput").addEventListener("input", (e) => {

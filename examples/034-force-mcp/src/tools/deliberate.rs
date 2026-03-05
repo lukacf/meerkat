@@ -83,6 +83,9 @@ pub async fn handle(
         }
     }
 
+    // Yield briefly so the mob actor processes spawn roster updates before
+    // the flow engine queries list_members(). Without this, the flow may see
+    // an empty roster and fail with "no targets available for role".
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     // Route to flow-based or comms-based execution
@@ -255,17 +258,16 @@ async fn run_comms(
 
                 // Extract moderator's text outputs
                 let is_moderator = attributed.source.as_str() == "moderator";
+                // Capture the moderator's latest text output (final summary).
+                // We always take the most recent output — the moderator's last
+                // message is the synthesis, even if earlier messages were longer.
                 if is_moderator {
                     match &attributed.envelope.payload {
-                        AgentEvent::RunCompleted { result, .. } => {
-                            if result.len() > last_moderator_text.len() {
-                                last_moderator_text = result.clone();
-                            }
+                        AgentEvent::RunCompleted { result, .. } if !result.is_empty() => {
+                            last_moderator_text = result.clone();
                         }
-                        AgentEvent::TextComplete { content, .. } => {
-                            if content.len() > last_moderator_text.len() {
-                                last_moderator_text = content.clone();
-                            }
+                        AgentEvent::TextComplete { content, .. } if !content.is_empty() => {
+                            last_moderator_text = content.clone();
                         }
                         _ => {}
                     }

@@ -83,6 +83,13 @@ async fn get_state() -> Result<&'static ForceState, String> {
         .await
 }
 
+/// Dispatch a single MCP JSON-RPC request.
+///
+/// This is a minimal hand-rolled MCP protocol implementation (no SDK).
+/// Targets MCP protocol version 2024-11-05. Supports:
+/// - `initialize` / `ping` — handshake (no state needed)
+/// - `tools/list` — static tool schema (no state needed)
+/// - `tools/call` — lazy-inits ForceState on first use, then dispatches
 async fn handle_request(request: &Value) -> Value {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let method = request

@@ -9,7 +9,15 @@ use crate::packs::PackRegistry;
 
 type SessionSvc = EphemeralSessionService<FactoryAgentBuilder>;
 
-/// Global server state — created once at startup.
+/// Global server state — lazy-initialized on first tool call.
+///
+/// Both `session_service` and `mob_state` share the same underlying
+/// `EphemeralSessionService`. The `session_service` field provides direct
+/// access for the `consult` tool (single-agent, no mob). The `mob_state`
+/// wraps it for multi-agent orchestration in the `deliberate` tool.
+///
+/// API keys are read from environment variables by `Config::default()`:
+/// `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`.
 pub struct ForceState {
     /// Session service for direct single-agent use (consult tool).
     pub session_service: Arc<SessionSvc>,

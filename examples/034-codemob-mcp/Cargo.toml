@@ -1,0 +1,26 @@
+[package]
+name = "codemob-mcp"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[workspace]  # standalone, not part of the main workspace
+
+[[bin]]
+name = "codemob-mcp"
+path = "src/main.rs"
+
+[dependencies]
+meerkat = { path = "../../meerkat", features = ["comms"] }
+meerkat-core = { path = "../../meerkat-core" }
+meerkat-mob = { path = "../../meerkat-mob" }
+meerkat-mob-mcp = { path = "../../meerkat-mob-mcp" }
+meerkat-session = { path = "../../meerkat-session" }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+indexmap = { version = "2", features = ["serde"] }
+tempfile = "3"
+uuid = { version = "1", features = ["v4"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

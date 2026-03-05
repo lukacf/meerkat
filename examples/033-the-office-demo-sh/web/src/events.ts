@@ -127,19 +127,6 @@ export function drainAllEvents(mod: RuntimeModule, subs: AgentSub[]): { events: 
               showSpeechBubble(sub.agentId, result.headline, 4000);
               onMessage?.(sub.agentId, null, result.headline, result.headline, result.category || "response");
 
-              // Check gate structured output for approval keywords
-              if (sub.agentId === "gate" && result.headline) {
-                const hl = result.headline.toLowerCase();
-                if (hl.includes("require") && hl.includes("approval")) {
-                  // Gate signaled approval needed in its headline
-                  fireApproval({
-                    short_summary: result.headline.slice(0, 40),
-                    action_description: result.headline,
-                    risk_level: "high",
-                    proposed_by: "gate",
-                  });
-                }
-              }
             }
           } catch { /* not JSON */ }
         }
@@ -159,18 +146,6 @@ export function drainAllEvents(mod: RuntimeModule, subs: AgentSub[]): { events: 
           showThinkBubble(sub.agentId);
           setAgentState(sub.agentId, "thinking");
 
-          // Check gate text deltas for approval JSON
-          if (sub.agentId === "gate" && payload.text) {
-            try {
-              const approvalMatch = payload.text.match(/\{[^{}]*require_human_approval[^{}]*\}/);
-              if (approvalMatch) {
-                const data = JSON.parse(approvalMatch[0]);
-                if (data.require_human_approval) {
-                  fireApproval(data);
-                }
-              }
-            } catch { /* not approval JSON */ }
-          }
         }
 
         // ── Tool call start (agent called a tool) ──

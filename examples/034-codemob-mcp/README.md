@@ -2,6 +2,8 @@
 
 Multi-agent MCP server powered by Meerkat mobs. Gives Claude Code (or any MCP client) access to collaborative AI teams for second opinions, code reviews, architecture decisions, brainstorming, and full RCT implementation pipelines.
 
+Each `deliberate` call spins up an ephemeral mob, agents collaborate (via structured flows or free-form comms), and the result is returned as a single tool response. MCP progress notifications provide live feedback during execution.
+
 ## Quick Start
 
 ```bash
@@ -24,18 +26,21 @@ cargo build
 }
 ```
 
+Provide API keys for at least one provider. More providers = more model diversity in multi-agent packs.
+
 ## Tools
 
 ### `list_packs`
 
-List all available packs with descriptions and agent counts.
+List available packs with descriptions and agent counts.
 
 ### `consult`
 
-Quick single-agent opinion. No mob overhead.
+Quick opinion from a single agent. No mob overhead — like asking a colleague.
 
 ```
-consult(question: "Should I use a B-tree or hash map?", model: "gpt-5.3-codex")
+consult(question: "Should I use a B-tree or hash map for this index?")
+consult(question: "Review this function", context: "<code>", model: "claude-opus-4-6")
 ```
 
 ### `deliberate`
@@ -47,38 +52,46 @@ deliberate(pack: "review", task: "Review this auth module", context: "<code>")
 deliberate(pack: "architect", task: "Design the caching layer")
 deliberate(pack: "brainstorm", task: "How should we handle offline sync?")
 deliberate(pack: "red-team", task: "Should we migrate to microservices?")
-deliberate(pack: "panel", task: "Review our API design")
+deliberate(pack: "panel", task: "Review our API design", context: "<specs>")
 deliberate(pack: "rct", task: "Implement the session compaction feature")
 ```
 
 ## Packs
 
-| Pack | Agents | Default Models | Pattern | Best for |
-|------|--------|---------------|---------|----------|
-| **advisor** | 1 | Codex | Single opinion | Quick sanity check |
-| **review** | 4 | Sonnet + Codex + Flash | 3 parallel reviewers + synthesis | Code review |
-| **architect** | 3 | Opus + Sonnet | Plan → critique → revise → ADR | Design decisions |
-| **brainstorm** | 4 | Sonnet + GPT + Gemini | 3 diverse-model ideators + synthesis | Exploring solutions |
-| **red-team** | 3 | Sonnet + GPT + Opus | Advocate + adversary + judge | Risk assessment |
-| **panel** | 5 | Opus + Sonnet + GPT + Gemini | Free-form moderated debate | Thorough review |
-| **rct** | 6 | Opus + Sonnet + Codex + Gemini | Plan → implement → 3 parallel gate reviews → aggregate | RCT pipeline |
+### Flow-based (structured step execution)
+
+| Pack | Agents | Pattern | Default Models |
+|------|--------|---------|---------------|
+| **advisor** | 1 | Single opinion | Codex |
+| **review** | 4 | 3 parallel reviewers → synthesis | Gemini Pro, Codex, Flash, Opus |
+| **architect** | 3 | Plan → critique → revise → ADR | Opus, Codex, Gemini Pro |
+| **brainstorm** | 4 | 3 diverse ideators → ranked synthesis | Gemini Pro, GPT-5.2, Flash, Opus |
+| **red-team** | 3 | Advocate + adversary → judge | Flash, GPT-5.2, Opus |
+| **rct** | 6 | Plan → implement → 3 parallel gate reviews → aggregate | Opus, Codex, Gemini Pro, GPT-5.2, Flash, Sonnet |
+
+### Comms-based (autonomous debate)
+
+| Pack | Agents | Pattern | Default Models |
+|------|--------|---------|---------------|
+| **panel** | 5 | Free-form moderated debate (full mesh, moderator authority) | Opus, Gemini Pro, GPT-5.2, Flash, Codex |
+
+Every agent in every pack uses a distinct model by default — different training data produces genuinely different perspectives.
 
 ## Available Models
 
-| Model | Provider | Best for |
-|-------|----------|----------|
-| `claude-opus-4-6` | Anthropic | Complex reasoning, architecture, judging |
-| `claude-sonnet-4-6` | Anthropic | General tasks, fast + capable (default) |
-| `gpt-5.3-codex` | OpenAI | Code-specialized tasks |
-| `gpt-5.2-pro` | OpenAI | Deep reasoning (slow — use sparingly) |
-| `gemini-3.1-pro-preview` | Google | Strong general reasoning |
-| `gemini-3-flash-preview` | Google | Speed-sensitive roles, quick checks |
-
-**Guidance:** Mix providers in multi-agent packs for perspective diversity. Different training data = different blind spots. Use heavyweight models (Opus, GPT-5.2-pro) for decision-making roles (judge, planner, orchestrator). Use fast models (Gemini Flash, Sonnet) for parallel workers.
+| Model | Provider | Strengths | Used as default for |
+|-------|----------|-----------|-------------------|
+| `claude-opus-4-6` | Anthropic | Strongest reasoning | Judge, moderator, synthesizer, orchestrator |
+| `gpt-5.3-codex` | OpenAI | Code-specialized | Implementer, critic, advisor, security reviewer |
+| `gpt-5.2` | OpenAI | Deep reasoning | Adversary, creative ideator, integration sheriff |
+| `gemini-3.1-pro-preview` | Google | Strong general | General reviewer, purist, guardian, spec auditor |
+| `gemini-3-flash-preview` | Google | Fastest | Advocate, skeptic, perf reviewer, contrarian |
+| `claude-sonnet-4-6` | Anthropic | Fast + capable | RCT aggregator (lightest role) |
+| `gpt-5.2-pro` | OpenAI | Deepest reasoning | Available for override (slow — use sparingly) |
 
 ## Model Overrides
 
-Override the default model for any role:
+Override the default model for any role in a pack:
 
 ```
 deliberate(
@@ -88,9 +101,11 @@ deliberate(
 )
 ```
 
+Role names match the agent names in each pack (visible via `list_packs`).
+
 ## Provider Parameters
 
-Pass provider-specific settings (applied to all agents in a pack):
+Pass provider-specific settings applied to all agents in a pack:
 
 ```
 deliberate(
@@ -108,15 +123,56 @@ consult(
 
 ## Progress Notifications
 
-The server sends MCP `notifications/progress` during `deliberate` calls. Claude Code displays these as a progress bar showing flow step completion.
+The server sends MCP `notifications/progress` during `deliberate` calls. Claude Code displays these as a progress bar. Flow-based packs report per-step completion. The panel pack reports event counts during the debate.
 
 ## Architecture
 
+```
+Claude Code ──(stdio)──► codemob-mcp
+                              │
+                   ┌──────────┴──────────┐
+                   │                     │
+               consult              deliberate
+            (SessionService)     (MobMcpState)
+                   │                     │
+              Single agent        ┌──────┴──────┐
+              Single turn         │             │
+                                Flow          Comms
+                             (steps with    (autonomous
+                              deps +        agents, full
+                              templates)    mesh, quiescence)
+                                  │             │
+                              Structured    Moderator's
+                              last step     final summary
+                              output        extracted
+```
+
 - **MCP stdio server** — JSONL JSON-RPC 2.0 over stdin/stdout (hand-rolled, no SDK)
-- **Lazy state init** — MCP handshake responds instantly; state created on first tool call
-- **Meerkat mobs** — Each `deliberate` call creates an ephemeral mob from the pack definition
-- **Two execution modes** — Flow-based (structured steps) or comms-based (autonomous debate)
-- **Flow engine** — Steps with dependency tracking, parallel fan-out, template output forwarding
-- **Comms engine** — Full-mesh wiring, moderator authority, quiescence detection
+- **Lazy state init** — MCP handshake responds instantly; `ForceState` created on first tool call
+- **Ephemeral mobs** — Created per `deliberate` call, destroyed on completion (success or error)
+- **Two execution modes** — Flow-based (structured steps with dependency DAG) or comms-based (autonomous agents with quiescence detection)
+- **Template forwarding** — Flow steps reference prior outputs via `{{ steps.<id> }}`
 - **Progress** — MCP `notifications/progress` with step-level granularity
-- **Cleanup** — Mob destroyed on tool call completion (success or error)
+- **Model diversity** — Every agent uses a distinct model; no duplicates within any pack
+
+## File Structure
+
+```
+src/
+├── main.rs              # MCP stdio loop, lazy state init, JSON-RPC dispatch
+├── state.rs             # ForceState: AgentFactory + SessionService + MobMcpState
+├── tools/
+│   ├── mod.rs           # Tool schemas (with model guidance), dispatch
+│   ├── consult.rs       # Single session via SessionService
+│   └── deliberate.rs    # Mob lifecycle: create → spawn → flow|comms → cleanup
+└── packs/
+    ├── mod.rs           # Pack trait, registry, shared helpers (6 reusable builders)
+    ├── advisor.rs       # 1 agent  — quick opinion
+    ├── review.rs        # 4 agents — parallel review + synthesis
+    ├── architect.rs     # 3 agents — plan → critique → revise → ADR
+    ├── brainstorm.rs    # 4 agents — diverse ideation + synthesis
+    ├── red_team.rs      # 3 agents — advocate + adversary + judge
+    ├── panel.rs         # 5 agents — comms-based moderated debate
+    └── rct.rs           # 6 agents — RCT pipeline with parallel gate reviews
+skills/                  # 23 embedded .md files (agent system prompts)
+```

@@ -148,8 +148,8 @@ cd sdks/typescript && npm link
 ### API Keys
 ```bash
 export ANTHROPIC_API_KEY=sk-...     # Required for most examples
-export OPENAI_API_KEY=sk-...        # Optional (example 021)
-export GEMINI_API_KEY=...           # Optional (example 021)
+export OPENAI_API_KEY=sk-...        # Optional (examples 021, 034)
+export GEMINI_API_KEY=...           # Optional (examples 021, 034)
 ```
 
 ## Architecture Overview

@@ -2,8 +2,9 @@
 // codemob-mcp — Multi-agent MCP server powered by Meerkat mobs
 // ═══════════════════════════════════════════════════════════
 //
-// Exposes two tools to Claude Code (or any MCP client):
-//   - `consult`    — single agent, quick opinion
+// Exposes three tools to Claude Code (or any MCP client):
+//   - `list_packs` — list available mobpacks with descriptions and agent counts
+//   - `consult`    — single agent, quick opinion (no mob overhead)
 //   - `deliberate` — spawn a mob from a named pack, agents collaborate, structured result
 //
 // Usage:

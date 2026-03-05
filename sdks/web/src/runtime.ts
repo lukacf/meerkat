@@ -69,6 +69,11 @@ export interface WasmModule {
     schemaJson: string,
     callback: (args: string) => Promise<string>,
   ) => void;
+  register_js_tool: (
+    name: string,
+    description: string,
+    schemaJson: string,
+  ) => void;
   clear_tool_callbacks: () => void;
   create_session_simple: (configJson: string) => number;
   create_session: (mobpackBytes: Uint8Array, configJson: string) => number;
@@ -217,6 +222,30 @@ export class MeerkatRuntime {
       JSON.stringify(schema),
       async (args: string) => JSON.stringify(await callback(args)),
     );
+  }
+
+  /**
+   * Register a fire-and-forget tool on the WASM module.
+   *
+   * **Must be called before {@link init} or {@link initFromMobpack}.**
+   *
+   * When the agent calls this tool, it receives `"acknowledged"` immediately
+   * and continues processing. The host should watch `ToolCallRequested` events
+   * in the event stream to capture args and act on them. Any response (e.g.
+   * human approval) comes back via {@link Mob.sendMessage}.
+   *
+   * @param wasm - The WASM module (same one passed to init).
+   * @param name - Tool name the agent will call.
+   * @param description - Human-readable description shown to the LLM.
+   * @param schema - JSON Schema for tool input parameters.
+   */
+  static registerFireAndForgetTool(
+    wasm: WasmModule,
+    name: string,
+    description: string,
+    schema: JsonSchema,
+  ): void {
+    wasm.register_js_tool(name, description, JSON.stringify(schema));
   }
 
   /** Clear all registered tool callbacks on the WASM module. */

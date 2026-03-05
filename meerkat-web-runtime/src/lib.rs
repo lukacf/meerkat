@@ -706,16 +706,26 @@ fn create_llm_client(
 // ═══════════════════════════════════════════════════════════
 
 // Registry of JS-implemented tools. Populated via `register_tool_callback`
-// before `init_runtime` / `init_runtime_from_config`.
+// or `register_js_tool` before `init_runtime` / `init_runtime_from_config`.
 #[cfg(target_arch = "wasm32")]
 thread_local! {
     static JS_TOOLS: RefCell<Vec<JsToolEntry>> = const { RefCell::new(Vec::new()) };
 }
 
+/// How a JS-registered tool is dispatched.
+#[cfg(target_arch = "wasm32")]
+enum JsToolMode {
+    /// Calls a JS callback and awaits its Promise result.
+    Callback(js_sys::Function),
+    /// Returns `"acknowledged"` immediately. The tool call appears in the event
+    /// stream (`ToolCallRequested`) for the host to act on asynchronously.
+    FireAndForget,
+}
+
 #[cfg(target_arch = "wasm32")]
 struct JsToolEntry {
     def: Arc<meerkat_core::ToolDef>,
-    callback: js_sys::Function,
+    mode: JsToolMode,
 }
 
 /// Register a tool implementation from JavaScript.
@@ -753,13 +763,69 @@ pub fn register_tool_callback(
         JS_TOOLS.with(|cell| {
             cell.borrow_mut().push(JsToolEntry {
                 def,
-                callback: func,
+                mode: JsToolMode::Callback(func),
             });
         });
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
         let _ = (name, description, schema_json, callback);
+    }
+    Ok(())
+}
+
+/// Register a fire-and-forget tool from JavaScript.
+///
+/// Call this BEFORE `init_runtime` or `init_runtime_from_config`.
+/// When the agent calls this tool, `dispatch()` returns `"acknowledged"`
+/// immediately and the agent loop continues without waiting.
+///
+/// The host should watch `ToolCallRequested` events in the event stream to
+/// capture the tool call arguments and act on them asynchronously. Any
+/// response (e.g. human approval) should be sent back via `mob_send_message`.
+///
+/// Example (JS):
+/// ```js
+/// register_js_tool(
+///   "request_human_approval",
+///   "Escalate a high-risk action for human sign-off",
+///   JSON.stringify({
+///     type: "object",
+///     properties: {
+///       summary: { type: "string" },
+///       risk_level: { type: "string", enum: ["low", "medium", "high"] },
+///     },
+///     required: ["summary", "risk_level"],
+///   }),
+/// );
+/// ```
+#[wasm_bindgen]
+pub fn register_js_tool(
+    name: String,
+    description: String,
+    schema_json: String,
+) -> Result<(), JsValue> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let schema: serde_json::Value = serde_json::from_str(&schema_json)
+            .map_err(|e| err_str("invalid_schema", format!("invalid JSON schema: {e}")))?;
+
+        let def = Arc::new(meerkat_core::ToolDef {
+            name,
+            description,
+            input_schema: schema,
+        });
+
+        JS_TOOLS.with(|cell| {
+            cell.borrow_mut().push(JsToolEntry {
+                def,
+                mode: JsToolMode::FireAndForget,
+            });
+        });
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (name, description, schema_json);
     }
     Ok(())
 }
@@ -804,14 +870,32 @@ impl JsToolDispatcher {
         })
     }
 
-    /// Look up the JS callback for a tool by name from the thread-local registry.
-    fn get_callback(name: &str) -> Option<js_sys::Function> {
+    /// Check whether a tool is registered as fire-and-forget.
+    fn is_fire_and_forget(name: &str) -> bool {
         JS_TOOLS.with(|cell| {
             let entries = cell.borrow();
             entries
                 .iter()
                 .find(|e| e.def.name == name)
-                .map(|e| e.callback.clone())
+                .map(|e| matches!(e.mode, JsToolMode::FireAndForget))
+                .unwrap_or(false)
+        })
+    }
+
+    /// Look up the JS callback for a tool by name from the thread-local registry.
+    fn get_callback(name: &str) -> Option<js_sys::Function> {
+        JS_TOOLS.with(|cell| {
+            let entries = cell.borrow();
+            entries.iter().find_map(|e| {
+                if e.def.name == name {
+                    match &e.mode {
+                        JsToolMode::Callback(f) => Some(f.clone()),
+                        JsToolMode::FireAndForget => None,
+                    }
+                } else {
+                    None
+                }
+            })
         })
     }
 }
@@ -827,6 +911,16 @@ impl meerkat_core::AgentToolDispatcher for JsToolDispatcher {
         &self,
         call: meerkat_core::ToolCallView<'_>,
     ) -> Result<meerkat_core::ToolResult, meerkat_core::error::ToolError> {
+        // Fire-and-forget tools return immediately. The host watches
+        // ToolCallRequested events in the stream to act on the call.
+        if Self::is_fire_and_forget(call.name) {
+            return Ok(meerkat_core::ToolResult {
+                tool_use_id: call.id.to_string(),
+                content: "acknowledged".to_string(),
+                is_error: false,
+            });
+        }
+
         let callback = Self::get_callback(call.name)
             .ok_or_else(|| meerkat_core::error::ToolError::not_found(call.name))?;
 

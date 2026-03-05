@@ -33,6 +33,16 @@ impl ToolCallError {
     }
 }
 
+const MODEL_DESCRIPTION: &str = "\
+Available models: \
+claude-opus-4-6 (Anthropic, strongest reasoning), \
+claude-sonnet-4-6 (Anthropic, fast + capable), \
+gpt-5.3-codex (OpenAI, code-specialized), \
+gpt-5.2-pro (OpenAI, deep reasoning — slow, use sparingly), \
+gemini-3.1-pro-preview (Google, strong general), \
+gemini-3-flash-preview (Google, fastest). \
+Default: claude-sonnet-4-6";
+
 pub fn tools_list() -> Vec<Value> {
     vec![
         json!({
@@ -42,7 +52,11 @@ pub fn tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "consult",
-            "description": "Get a quick opinion from a single AI agent. No coordination overhead — like asking a colleague. Use this when you want a second opinion, a sanity check, or a fresh perspective on something specific.",
+            "description": format!(
+                "Get a quick opinion from a single AI agent. No coordination overhead \
+                — like asking a colleague. Use this when you want a second opinion, \
+                a sanity check, or a fresh perspective on something specific. {MODEL_DESCRIPTION}"
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -56,7 +70,12 @@ pub fn tools_list() -> Vec<Value> {
                     },
                     "model": {
                         "type": "string",
-                        "description": "Model to use (default: claude-sonnet-4-5)"
+                        "description": format!("Model to use (default: claude-sonnet-4-6). {MODEL_DESCRIPTION}")
+                    },
+                    "provider_params": {
+                        "type": "object",
+                        "description": "Provider-specific parameters. Examples: {\"reasoning_effort\": \"high\"} for deep thinking (OpenAI o-series, Anthropic extended thinking), {\"temperature\": 0.2} for more deterministic output",
+                        "additionalProperties": true
                     }
                 },
                 "required": ["question"]
@@ -64,7 +83,11 @@ pub fn tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "deliberate",
-            "description": "Spawn a team of AI agents to collaboratively solve a problem. Each pack defines a different team composition optimized for specific tasks. Returns structured results after agents deliberate.",
+            "description": format!(
+                "Spawn a team of AI agents to collaboratively solve a problem. Each pack defines \
+                a different team composition optimized for specific tasks. Returns structured results \
+                after agents deliberate. {MODEL_DESCRIPTION}"
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -84,7 +107,15 @@ pub fn tools_list() -> Vec<Value> {
                     "model_overrides": {
                         "type": "object",
                         "additionalProperties": { "type": "string" },
-                        "description": "Override models per role, e.g. {\"critic\": \"claude-opus-4-6\", \"planner\": \"gpt-5.2\"}"
+                        "description": format!(
+                            "Override models per role, e.g. {{\"critic\": \"claude-opus-4-6\", \"planner\": \"gpt-5.3-codex\"}}. \
+                            Role names depend on the pack. {MODEL_DESCRIPTION}"
+                        )
+                    },
+                    "provider_params": {
+                        "type": "object",
+                        "description": "Provider-specific parameters applied to ALL agents in the pack. Examples: {\"reasoning_effort\": \"high\"} for deep thinking, {\"temperature\": 0.2} for deterministic output. Per-agent overrides not yet supported.",
+                        "additionalProperties": true
                     }
                 },
                 "required": ["pack", "task"]

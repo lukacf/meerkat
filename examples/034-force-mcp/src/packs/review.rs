@@ -31,7 +31,7 @@ impl Pack for ReviewPack {
         &self,
         task: &str,
         context: &str,
-        model_overrides: &BTreeMap<String, String>,
+        model_overrides: &BTreeMap<String, String>, provider_params: Option<&serde_json::Value>,
     ) -> MobDefinition {
         let ctx = if context.is_empty() {
             String::new()
@@ -57,15 +57,15 @@ impl Pack for ReviewPack {
                 runtime_mode: MobRuntimeMode::TurnDriven,
                 max_inline_peer_notifications: None,
                 output_schema: None,
-                provider_params: None,
+                provider_params: provider_params.cloned(),
             }
         };
 
         let mut profiles = BTreeMap::new();
-        profiles.insert(ProfileName::from("reviewer"), profile("reviewer", "reviewer-skill", "General code reviewer", &model("reviewer", "claude-sonnet-4-5")));
-        profiles.insert(ProfileName::from("security"), profile("security", "security-skill", "Security-focused reviewer", &model("security", "claude-sonnet-4-5")));
-        profiles.insert(ProfileName::from("perf"), profile("perf", "perf-skill", "Performance-focused reviewer", &model("perf", "claude-sonnet-4-5")));
-        profiles.insert(ProfileName::from("synthesizer"), profile("synthesizer", "synthesizer-skill", "Review synthesizer", &model("synthesizer", "claude-sonnet-4-5")));
+        profiles.insert(ProfileName::from("reviewer"), profile("reviewer", "reviewer-skill", "General code reviewer", &model("reviewer", "claude-sonnet-4-6")));
+        profiles.insert(ProfileName::from("security"), profile("security", "security-skill", "Security-focused reviewer", &model("security", "claude-sonnet-4-6")));
+        profiles.insert(ProfileName::from("perf"), profile("perf", "perf-skill", "Performance-focused reviewer", &model("perf", "claude-sonnet-4-6")));
+        profiles.insert(ProfileName::from("synthesizer"), profile("synthesizer", "synthesizer-skill", "Review synthesizer", &model("synthesizer", "claude-sonnet-4-6")));
 
         let mut skills = BTreeMap::new();
         skills.insert("reviewer-skill".into(), SkillSource::Inline { content: include_str!("../../skills/reviewer.md").into() });

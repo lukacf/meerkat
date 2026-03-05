@@ -31,7 +31,7 @@ impl Pack for RedTeamPack {
         &self,
         task: &str,
         context: &str,
-        model_overrides: &BTreeMap<String, String>,
+        model_overrides: &BTreeMap<String, String>, provider_params: Option<&serde_json::Value>,
     ) -> MobDefinition {
         let ctx = if context.is_empty() {
             String::new()
@@ -47,8 +47,8 @@ impl Pack for RedTeamPack {
         };
 
         let agents = [
-            ("advocate", "advocate-skill", "Advocate — argues in favor", model("advocate", "claude-sonnet-4-5")),
-            ("adversary", "adversary-skill", "Adversary — argues against", model("adversary", "claude-sonnet-4-5")),
+            ("advocate", "advocate-skill", "Advocate — argues in favor", model("advocate", "claude-sonnet-4-6")),
+            ("adversary", "adversary-skill", "Adversary — argues against", model("adversary", "claude-sonnet-4-6")),
             ("judge", "judge-skill", "Judge — balanced assessment", model("judge", "claude-opus-4-6")),
         ];
 
@@ -66,7 +66,7 @@ impl Pack for RedTeamPack {
                     runtime_mode: MobRuntimeMode::TurnDriven,
                     max_inline_peer_notifications: None,
                     output_schema: None,
-                    provider_params: None,
+                    provider_params: provider_params.cloned(),
                 },
             );
         }

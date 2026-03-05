@@ -30,7 +30,7 @@ impl Pack for PanelPack {
         &self,
         _task: &str,
         _context: &str,
-        model_overrides: &BTreeMap<String, String>,
+        model_overrides: &BTreeMap<String, String>, provider_params: Option<&serde_json::Value>,
     ) -> MobDefinition {
         let model = |role: &str, default: &str| -> String {
             model_overrides
@@ -44,13 +44,13 @@ impl Pack for PanelPack {
             ("moderator", "moderator-skill", "Neutral moderator — keeps discussion productive",
              model("moderator", "claude-opus-4-6")),
             ("purist", "purist-skill", "Architecture purist — demands clean design",
-             model("purist", "claude-sonnet-4-5")),
+             model("purist", "claude-sonnet-4-6")),
             ("pragmatist", "pragmatist-skill", "Pragmatist — ship it and iterate",
              model("pragmatist", "gpt-5.2")),
             ("skeptic", "skeptic-skill", "Skeptic — doubts everything, finds edge cases",
              model("skeptic", "gemini-3-flash-preview")),
             ("veteran", "veteran-skill", "Industry veteran — 20 years of war stories",
-             model("veteran", "claude-sonnet-4-5")),
+             model("veteran", "claude-sonnet-4-6")),
         ];
 
         let tools = ToolConfig {
@@ -72,7 +72,7 @@ impl Pack for PanelPack {
                     runtime_mode: MobRuntimeMode::AutonomousHost,
                     max_inline_peer_notifications: None,
                     output_schema: None,
-                    provider_params: None,
+                    provider_params: provider_params.cloned(),
                 },
             );
         }

@@ -15,6 +15,7 @@ struct DeliberateInput {
     task: String,
     context: Option<String>,
     model_overrides: Option<BTreeMap<String, String>>,
+    provider_params: Option<Value>,
 }
 
 pub async fn handle(
@@ -40,7 +41,7 @@ pub async fn handle(
     let overrides = input.model_overrides.unwrap_or_default();
     let total_steps = pack.flow_step_count();
     let has_flows = total_steps > 0;
-    let definition = pack.definition(&input.task, context, &overrides);
+    let definition = pack.definition(&input.task, context, &overrides, input.provider_params.as_ref());
     let mob_id = definition.id.clone();
 
     // Collect profile names before moving definition

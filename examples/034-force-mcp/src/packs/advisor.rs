@@ -31,12 +31,12 @@ impl Pack for AdvisorPack {
         &self,
         task: &str,
         context: &str,
-        model_overrides: &BTreeMap<String, String>,
+        model_overrides: &BTreeMap<String, String>, provider_params: Option<&serde_json::Value>,
     ) -> MobDefinition {
         let model = model_overrides
             .get("advisor")
             .cloned()
-            .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
+            .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
 
         let context_block = if context.is_empty() {
             String::new()
@@ -57,7 +57,7 @@ impl Pack for AdvisorPack {
                 runtime_mode: MobRuntimeMode::TurnDriven,
                 max_inline_peer_notifications: None,
                 output_schema: None,
-                provider_params: None,
+                provider_params: provider_params.cloned(),
             },
         );
 

@@ -2,7 +2,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use meerkat::SessionService;
-use meerkat_core::service::{CreateSessionRequest, InitialTurnPolicy};
+use meerkat_core::service::{CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions};
 
 use crate::state::ForceState;
 use super::ToolCallError;
@@ -12,6 +12,7 @@ struct ConsultInput {
     question: String,
     context: Option<String>,
     model: Option<String>,
+    provider_params: Option<Value>,
 }
 
 pub async fn handle(state: &ForceState, arguments: &Value) -> Result<Value, ToolCallError> {
@@ -25,7 +26,13 @@ pub async fn handle(state: &ForceState, arguments: &Value) -> Result<Value, Tool
 
     let model = input
         .model
-        .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
+        .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
+
+    let build = input.provider_params.map(|pp| {
+        let mut opts = SessionBuildOptions::default();
+        opts.provider_params = Some(pp);
+        opts
+    });
 
     let req = CreateSessionRequest {
         model,
@@ -40,7 +47,7 @@ pub async fn handle(state: &ForceState, arguments: &Value) -> Result<Value, Tool
         host_mode: false,
         skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
-        build: None,
+        build,
         labels: None,
     };
 

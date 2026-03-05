@@ -9,6 +9,7 @@ pub mod review;
 use std::collections::BTreeMap;
 
 use meerkat_mob::definition::MobDefinition;
+use serde_json::Value;
 
 /// A named pack that builds a MobDefinition for a specific collaboration pattern.
 pub trait Pack: Send + Sync {
@@ -26,6 +27,7 @@ pub trait Pack: Send + Sync {
         task: &str,
         context: &str,
         model_overrides: &BTreeMap<String, String>,
+        provider_params: Option<&Value>,
     ) -> MobDefinition;
 }
 

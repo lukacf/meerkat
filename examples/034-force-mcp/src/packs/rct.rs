@@ -31,7 +31,7 @@ impl Pack for RctPack {
         &self,
         task: &str,
         context: &str,
-        model_overrides: &BTreeMap<String, String>,
+        model_overrides: &BTreeMap<String, String>, provider_params: Option<&serde_json::Value>,
     ) -> MobDefinition {
         let ctx = if context.is_empty() {
             String::new()
@@ -56,15 +56,15 @@ impl Pack for RctPack {
             ("orchestrator", "rct-orchestrator-skill", "RCT pipeline orchestrator",
              model("orchestrator", "claude-opus-4-6"), tools_with_shell.clone(), MobRuntimeMode::TurnDriven),
             ("implementer", "rct-implementer-skill", "Implementation agent",
-             model("implementer", "claude-sonnet-4-5"), tools_with_shell.clone(), MobRuntimeMode::TurnDriven),
+             model("implementer", "claude-sonnet-4-6"), tools_with_shell.clone(), MobRuntimeMode::TurnDriven),
             ("rct_guardian", "rct-guardian-skill", "RCT Guardian reviewer",
-             model("rct_guardian", "claude-sonnet-4-5"), tools_with_shell.clone(), MobRuntimeMode::TurnDriven),
+             model("rct_guardian", "claude-sonnet-4-6"), tools_with_shell.clone(), MobRuntimeMode::TurnDriven),
             ("integration_sheriff", "rct-sheriff-skill", "Integration Sheriff reviewer",
-             model("integration_sheriff", "claude-sonnet-4-5"), tools_with_shell.clone(), MobRuntimeMode::TurnDriven),
+             model("integration_sheriff", "claude-sonnet-4-6"), tools_with_shell.clone(), MobRuntimeMode::TurnDriven),
             ("spec_auditor", "rct-auditor-skill", "Spec Auditor reviewer",
-             model("spec_auditor", "claude-sonnet-4-5"), tools_with_shell.clone(), MobRuntimeMode::TurnDriven),
+             model("spec_auditor", "claude-sonnet-4-6"), tools_with_shell.clone(), MobRuntimeMode::TurnDriven),
             ("aggregator", "rct-aggregator-skill", "Gate verdict aggregator",
-             model("aggregator", "claude-sonnet-4-5"), ToolConfig { comms: true, ..ToolConfig::default() }, MobRuntimeMode::TurnDriven),
+             model("aggregator", "claude-sonnet-4-6"), ToolConfig { comms: true, ..ToolConfig::default() }, MobRuntimeMode::TurnDriven),
         ];
 
         let mut profiles = BTreeMap::new();
@@ -81,7 +81,7 @@ impl Pack for RctPack {
                     runtime_mode: *mode,
                     max_inline_peer_notifications: None,
                     output_schema: None,
-                    provider_params: None,
+                    provider_params: provider_params.cloned(),
                 },
             );
         }

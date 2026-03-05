@@ -31,7 +31,7 @@ impl Pack for BrainstormPack {
         &self,
         task: &str,
         context: &str,
-        model_overrides: &BTreeMap<String, String>,
+        model_overrides: &BTreeMap<String, String>, provider_params: Option<&serde_json::Value>,
     ) -> MobDefinition {
         let ctx = if context.is_empty() {
             String::new()
@@ -48,10 +48,10 @@ impl Pack for BrainstormPack {
 
         // Intentionally diverse default models for different perspectives
         let agents = [
-            ("ideator_a", "ideator-a-skill", "Practical ideator", model("ideator_a", "claude-sonnet-4-5")),
+            ("ideator_a", "ideator-a-skill", "Practical ideator", model("ideator_a", "claude-sonnet-4-6")),
             ("ideator_b", "ideator-b-skill", "Creative ideator", model("ideator_b", "gpt-5.2")),
             ("ideator_c", "ideator-c-skill", "Contrarian ideator", model("ideator_c", "gemini-3-flash-preview")),
-            ("synthesizer", "synthesizer-skill", "Idea synthesizer", model("synthesizer", "claude-sonnet-4-5")),
+            ("synthesizer", "synthesizer-skill", "Idea synthesizer", model("synthesizer", "claude-sonnet-4-6")),
         ];
 
         let mut profiles = BTreeMap::new();
@@ -68,7 +68,7 @@ impl Pack for BrainstormPack {
                     runtime_mode: MobRuntimeMode::TurnDriven,
                     max_inline_peer_notifications: None,
                     output_schema: None,
-                    provider_params: None,
+                    provider_params: provider_params.cloned(),
                 },
             );
         }

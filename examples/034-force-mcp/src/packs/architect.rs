@@ -31,7 +31,7 @@ impl Pack for ArchitectPack {
         &self,
         task: &str,
         context: &str,
-        model_overrides: &BTreeMap<String, String>,
+        model_overrides: &BTreeMap<String, String>, provider_params: Option<&serde_json::Value>,
     ) -> MobDefinition {
         let ctx = if context.is_empty() {
             String::new()
@@ -49,8 +49,8 @@ impl Pack for ArchitectPack {
         let mut profiles = BTreeMap::new();
         for (name, skill, desc, m) in [
             ("planner", "planner-skill", "Architecture planner", model("planner", "claude-opus-4-6")),
-            ("critic", "critic-skill", "Architecture critic", model("critic", "claude-sonnet-4-5")),
-            ("synthesizer", "synthesizer-skill", "Decision record writer", model("synthesizer", "claude-sonnet-4-5")),
+            ("critic", "critic-skill", "Architecture critic", model("critic", "claude-sonnet-4-6")),
+            ("synthesizer", "synthesizer-skill", "Decision record writer", model("synthesizer", "claude-sonnet-4-6")),
         ] {
             profiles.insert(
                 ProfileName::from(name),
@@ -64,7 +64,7 @@ impl Pack for ArchitectPack {
                     runtime_mode: MobRuntimeMode::TurnDriven,
                     max_inline_peer_notifications: None,
                     output_schema: None,
-                    provider_params: None,
+                    provider_params: provider_params.cloned(),
                 },
             );
         }

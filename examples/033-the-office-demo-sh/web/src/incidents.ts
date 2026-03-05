@@ -1,6 +1,6 @@
-// ═══════════════════════════════════════════════════════════
-// Incidents — Event tracking with message trees
-// ═══════════════════════════════════════════════════════════
+// =====================================================================
+// Incidents -- RPG Battle Log format
+// =====================================================================
 
 import type { AgentId, Incident } from "./types";
 import { AGENTS } from "./types";
@@ -21,7 +21,7 @@ export function getActiveIncident(): Incident | null {
   return incidents.find(i => i.status === "active") ?? null;
 }
 
-export function createIncident(title: string, icon = "\u26A1"): string {
+export function createIncident(title: string, icon = "!"): string {
   const id = `incident-${nextId++}`;
   incidents.unshift({
     id,
@@ -43,7 +43,6 @@ export function addMessage(
   headline: string,
   category: string,
 ): void {
-  // If no incident specified, add to the most recent active one
   const target = incidentId
     ? incidents.find(i => i.id === incidentId)
     : incidents.find(i => i.status === "active");
@@ -69,50 +68,59 @@ export function resolveIncident(incidentId: string): void {
   }
 }
 
-// ── Render incident panel HTML ──
+// -- Render as RPG battle log --
+
+const AGENT_COLORS: Record<string, string> = {};
+for (const id of Object.keys(AGENTS) as AgentId[]) {
+  AGENT_COLORS[id] = AGENTS[id].color;
+}
+AGENT_COLORS["user"] = "#dddddd";
+AGENT_COLORS["system"] = "#888888";
+
+function agentName(id: string): string {
+  if (id === "user") return "YOU";
+  if (id === "system") return "SYSTEM";
+  const a = AGENTS[id as AgentId];
+  return a ? a.name.toUpperCase() : id.toUpperCase();
+}
+
+function agentColor(id: string): string {
+  return AGENT_COLORS[id] ?? "#888888";
+}
 
 export function renderIncidentPanel(container: HTMLElement): void {
   if (incidents.length === 0) {
-    container.innerHTML = `<div class="panel-empty">Events will appear here as agents process them...</div>`;
+    container.innerHTML = `<div class="log-empty">AWAITING EVENTS...</div>`;
     return;
   }
 
-  container.innerHTML = incidents.map(inc => {
+  let html = "";
+  for (const inc of incidents) {
     const timeAgo = formatTimeAgo(inc.timestamp);
-    const isActive = inc.status === "active";
-    const msgCount = inc.messages.length;
+    html += `<div class="log-incident-header">${escapeHtml(inc.icon)} ${escapeHtml(inc.title.toUpperCase())} [${timeAgo}]</div>`;
 
-    const messagesHtml = inc.messages.map(m => {
-      const fromName = m.from === "user" ? "You" : m.from === "system" ? "System" : AGENTS[m.from as AgentId]?.name ?? m.from;
-      const toName = m.to && m.to !== "system" ? AGENTS[m.to as AgentId]?.name ?? m.to : "";
-      const fromColor = m.from !== "user" && m.from !== "system" ? AGENTS[m.from]?.color ?? "#888" : "#888";
-      const arrow = toName ? ` \u2192 ${toName}` : "";
-      const categoryClass = m.category || "routing";
+    for (const m of inc.messages) {
+      const fromColor = agentColor(m.from);
+      const fromName = agentName(m.from);
+      const toName = m.to && m.to !== "system" ? agentName(m.to) : "";
+      const arrow = toName ? ` <span class="log-arrow">&gt;</span> <span style="color:${agentColor(m.to)}">${toName}</span>` : "";
+      const headlineText = escapeHtml(m.headline.length > 70 ? m.headline.slice(0, 67) + "..." : m.headline);
 
-      return `<div class="incident-msg">
-        <span class="msg-dot" style="background:${fromColor}"></span>
-        <span class="msg-from">${fromName}${arrow}</span>
-        <span class="msg-category ${categoryClass}">${m.category}</span>
-        <div class="msg-headline">${escapeHtml(m.headline)}</div>
-      </div>`;
-    }).join("");
+      html += `<div class="log-entry">` +
+        `<span class="log-sender" style="color:${fromColor}">${fromName}</span>${arrow}` +
+        `<span class="log-headline">${headlineText}</span>` +
+        `</div>`;
+    }
+  }
 
-    return `<div class="incident-card ${isActive ? "active" : "resolved"}">
-      <div class="incident-header">
-        <span class="incident-icon">${inc.icon}</span>
-        <span class="incident-title">${escapeHtml(inc.title)}</span>
-        <span class="incident-meta">${timeAgo} \u2022 ${msgCount} msg${msgCount !== 1 ? "s" : ""}</span>
-      </div>
-      <div class="incident-messages">${messagesHtml}</div>
-    </div>`;
-  }).join("");
+  container.innerHTML = html;
 }
 
 function formatTimeAgo(ts: number): string {
   const sec = Math.floor((Date.now() - ts) / 1000);
-  if (sec < 60) return `${sec}s ago`;
-  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
-  return `${Math.floor(sec / 3600)}h ago`;
+  if (sec < 60) return `${sec}s`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m`;
+  return `${Math.floor(sec / 3600)}h`;
 }
 
 function escapeHtml(s: string): string {

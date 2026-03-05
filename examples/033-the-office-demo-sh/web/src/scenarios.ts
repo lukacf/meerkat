@@ -12,7 +12,7 @@ export interface Scenario {
 export const SCENARIOS: Scenario[] = [
   {
     id: "client-escalation",
-    title: "Client Escalation (Acme Corp)",
+    title: "Client Escalation",
     icon: "\u{1F4E7}",
     text: `INCOMING EMAIL from client@acme.com
 Subject: Q4 Deliverables Late
@@ -21,7 +21,7 @@ Body: We expected the Q4 deliverables last Friday. This is now 5 business days o
   },
   {
     id: "server-alert",
-    title: "Server Room Temperature Alert",
+    title: "Server Room Alert",
     icon: "\u{1F321}\uFE0F",
     text: `ALERT from monitoring system:
 Server room B temperature reading: 85\u00B0F (threshold: 75\u00B0F)
@@ -31,7 +31,7 @@ Risk: hardware damage if temperature exceeds 90\u00B0F within next 2.5 hours`,
   },
   {
     id: "expense-report",
-    title: "Expense Report ($4,200)",
+    title: "Expense Report",
     icon: "\u{1F4B0}",
     text: `INVOICE RECEIVED:
 Vendor: CloudCorp Inc
@@ -44,7 +44,7 @@ Note: This is 15% higher than last quarter's invoice ($3,650)`,
   },
   {
     id: "calendar-conflict",
-    title: "Calendar Conflict (Sam)",
+    title: "Calendar Conflict",
     icon: "\u{1F4C5}",
     text: `CALENDAR ALERT:
 Sam Torres has 2 conflicting meetings at 2:00 PM today:
@@ -54,7 +54,7 @@ Both meetings were confirmed. Sprint planning has been on the calendar for 2 wee
   },
   {
     id: "new-hire",
-    title: "New Hire Onboarding (Casey)",
+    title: "New Hire Onboarding",
     icon: "\u{1F464}",
     text: `HR NOTIFICATION — New Employee Starting Monday:
 Name: Casey Rivera
@@ -62,5 +62,14 @@ Role: Senior Developer
 Team: Engineering (reports to Alex Chen)
 Start date: Monday
 Requirements: laptop (MacBook Pro 16"), badge access (building A, floors 2-4), desk assignment (engineering area preferred), onboarding packet, team introduction email, IT account provisioning (email, Slack, GitHub, cloud console)`,
+  },
+  {
+    id: "security-incident",
+    title: "Security Breach",
+    icon: "\u{1F6A8}",
+    text: `SECURITY ALERT from IT monitoring:
+Unusual login activity detected on the admin console. 47 failed login attempts from IP 203.0.113.42 (geo: unknown) in the past 15 minutes, followed by 1 successful login using service account "deploy-bot".
+No deployments are scheduled today. The account has read/write access to production infrastructure.
+Recommend immediate investigation and potential credential rotation.`,
   },
 ];

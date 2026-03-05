@@ -24,7 +24,7 @@ import { initBubbles, showSpeechBubble, showThinkBubble, hideThinkBubble } from 
 import { initPhoneLines, startCall, endCall, triggerEnvelopeArrival } from "./office/phonelines";
 import { buildOfficeDefinition, WIRING_PAIRS, PROFILE_NAMES } from "./agents";
 import { SCENARIOS } from "./scenarios";
-import { drainAllEvents, setOnMessage, setOnApprovalNeeded } from "./events";
+import { drainAllEvents, setOnMessage, setOnApprovalNeeded, setOnAccessControl } from "./events";
 import { createIncident, addMessage, renderIncidentPanel, setRenderCallback } from "./incidents";
 import { parseArchivistMessage, showCaseFiles, showGraph, hideKnowledgeBase } from "./knowledge";
 
@@ -315,6 +315,42 @@ setOnApprovalNeeded((data) => {
     proposed_by: data.proposed_by,
   });
   renderApprovalFloat();
+});
+
+// Wire IT access control
+const revokedAgents = new Set<string>();
+
+setOnAccessControl(async (action, target, reason) => {
+  if (!runtime || !mobId) return;
+  const targetId = target as AgentId;
+  if (!AGENT_IDS.includes(targetId)) {
+    console.warn("[ACCESS CONTROL] Unknown target:", target);
+    return;
+  }
+
+  if (action === "revoke" && !revokedAgents.has(target)) {
+    // Unwire target from all peers
+    for (const [a, b] of WIRING_PAIRS) {
+      if (a === target || b === target) {
+        try { await runtime.mob_unwire(mobId, a, b); } catch { /* already unwired */ }
+      }
+    }
+    revokedAgents.add(target);
+    showSpeechBubble("it-dept" as AgentId, `ACCESS REVOKED: ${AGENTS[targetId].name}`, 5000);
+    addMessage(null, "it-dept" as AgentId, targetId, `Access revoked: ${reason}`, `Access revoked for ${AGENTS[targetId].name}`, "action");
+    setStatus(`IT revoked network access for ${AGENTS[targetId].name}: ${reason}`);
+  } else if (action === "restore" && revokedAgents.has(target)) {
+    // Rewire target to all original peers
+    for (const [a, b] of WIRING_PAIRS) {
+      if (a === target || b === target) {
+        try { await runtime.mob_wire(mobId, a, b); } catch { /* already wired */ }
+      }
+    }
+    revokedAgents.delete(target);
+    showSpeechBubble("it-dept" as AgentId, `ACCESS RESTORED: ${AGENTS[targetId].name}`, 5000);
+    addMessage(null, "it-dept" as AgentId, targetId, `Access restored: ${reason}`, `Access restored for ${AGENTS[targetId].name}`, "action");
+    setStatus(`IT restored network access for ${AGENTS[targetId].name}: ${reason}`);
+  }
 });
 
 // Agent selection from canvas

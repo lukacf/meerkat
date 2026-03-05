@@ -53,6 +53,15 @@ function fireApproval(data: { short_summary?: string; action_description: string
   onApprovalNeeded?.(data);
 }
 
+// ── Access control callback ──
+
+type AccessControlCallback = (action: "revoke" | "restore", target: string, reason: string) => void;
+let onAccessControl: AccessControlCallback | null = null;
+
+export function setOnAccessControl(cb: AccessControlCallback): void {
+  onAccessControl = cb;
+}
+
 // ── Poll all subscriptions ──
 
 export function drainAllEvents(mod: RuntimeModule, subs: AgentSub[]): { events: number; errors: string[] } {
@@ -97,6 +106,20 @@ export function drainAllEvents(mod: RuntimeModule, subs: AgentSub[]): { events: 
 
               // Notify incident system
               onMessage?.(sub.agentId, recipientId, body, preview, "routing");
+
+              // Check if IT is issuing an access control command
+              if (sub.agentId === "it-dept") {
+                try {
+                  const acMatch = body.match(/\{[^{}]*"access_control"[^{}]*\}/);
+                  if (acMatch) {
+                    const ac = JSON.parse(acMatch[0]);
+                    if (ac.access_control && ac.target) {
+                      console.log("[ACCESS CONTROL]", ac.access_control, ac.target, ac.reason);
+                      onAccessControl?.(ac.access_control, ac.target, ac.reason || "");
+                    }
+                  }
+                } catch { /* not access control JSON */ }
+              }
 
               // Check if gate is SENDING a human approval request
               if (sub.agentId === "gate") {

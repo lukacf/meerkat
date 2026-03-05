@@ -100,6 +100,7 @@ export interface RuntimeModule {
   mob_create: (definitionJson: string) => Promise<unknown>;
   mob_spawn: (mobId: string, specsJson: string) => Promise<unknown>;
   mob_wire: (mobId: string, a: string, b: string) => Promise<void>;
+  mob_unwire: (mobId: string, a: string, b: string) => Promise<void>;
   mob_send_message: (mobId: string, meerkatId: string, message: string) => Promise<void>;
   mob_member_subscribe: (mobId: string, meerkatId: string) => Promise<number>;
   poll_subscription: (handle: number) => string;

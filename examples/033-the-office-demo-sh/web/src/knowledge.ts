@@ -215,23 +215,28 @@ let graphEdges: GraphEdge[] = [];
 let graphCanvas: HTMLCanvasElement | null = null;
 let graphRafId = 0;
 let graphLastTime = 0;
+let graphAge = 0; // seconds since graph opened — for cooling
 
 function buildGraph(): void {
   const nodeMap = new Map<string, GraphNode>();
   const edgeList: GraphEdge[] = [];
 
+  const w = graphCanvas?.width ?? 600;
+  const h = graphCanvas?.height ?? 400;
+  const cx = w / 2, cy = h / 2;
+
   for (const [, rec] of records) {
     for (const e of rec.entities) {
       const key = e.name.toLowerCase();
       if (!nodeMap.has(key)) {
-        const angle = Math.random() * Math.PI * 2;
-        const r = 60 + Math.random() * 100;
+        // Spread nodes in a circle around center
+        const idx = nodeMap.size;
+        const angle = (idx / Math.max(1, nodeMap.size + 5)) * Math.PI * 2 + Math.random() * 0.3;
+        const r = 40 + Math.random() * Math.min(w, h) * 0.3;
         nodeMap.set(key, {
-          id: key,
-          label: e.name,
-          type: e.type,
-          x: 300 + Math.cos(angle) * r,
-          y: 200 + Math.sin(angle) * r,
+          id: key, label: e.name, type: e.type,
+          x: cx + Math.cos(angle) * r,
+          y: cy + Math.sin(angle) * r,
           vx: 0, vy: 0,
         });
       }
@@ -239,12 +244,11 @@ function buildGraph(): void {
     for (const r of rec.relationships) {
       const fk = r.from.toLowerCase();
       const tk = r.to.toLowerCase();
-      // Ensure nodes exist for relationship endpoints
       if (!nodeMap.has(fk)) {
-        nodeMap.set(fk, { id: fk, label: r.from, type: "unknown", x: 300 + Math.random() * 80, y: 200 + Math.random() * 80, vx: 0, vy: 0 });
+        nodeMap.set(fk, { id: fk, label: r.from, type: "unknown", x: cx + (Math.random() - 0.5) * 100, y: cy + (Math.random() - 0.5) * 100, vx: 0, vy: 0 });
       }
       if (!nodeMap.has(tk)) {
-        nodeMap.set(tk, { id: tk, label: r.to, type: "unknown", x: 300 + Math.random() * 80, y: 200 + Math.random() * 80, vx: 0, vy: 0 });
+        nodeMap.set(tk, { id: tk, label: r.to, type: "unknown", x: cx + (Math.random() - 0.5) * 100, y: cy + (Math.random() - 0.5) * 100, vx: 0, vy: 0 });
       }
       if (!edgeList.some(e => e.from === fk && e.to === tk && e.label === r.type)) {
         edgeList.push({ from: fk, to: tk, label: r.type });
@@ -256,12 +260,25 @@ function buildGraph(): void {
   graphEdges = edgeList;
 }
 
+// Build a fast lookup for edge endpoints
+let edgeIndex: Map<string, GraphNode> = new Map();
+function rebuildEdgeIndex(): void {
+  edgeIndex = new Map();
+  for (const n of graphNodes) edgeIndex.set(n.id, n);
+}
+
 function renderGraph(canvas: HTMLCanvasElement): void {
   graphCanvas = canvas;
   canvas.width = canvas.parentElement!.clientWidth;
   canvas.height = canvas.parentElement!.clientHeight;
   buildGraph();
+  rebuildEdgeIndex();
+  graphAge = 0;
   graphLastTime = 0;
+
+  // Pre-simulate 200 steps to settle before first draw
+  for (let i = 0; i < 200; i++) simulateGraph(0.016, 1.0);
+
   if (graphRafId) cancelAnimationFrame(graphRafId);
   graphRafId = requestAnimationFrame(graphFrame);
 }
@@ -278,23 +295,35 @@ function graphFrame(time: number): void {
   if (!graphCanvas) return;
   const dt = graphLastTime === 0 ? 0 : Math.min((time - graphLastTime) / 1000, 0.05);
   graphLastTime = time;
-  simulateGraph(dt);
+  graphAge += dt;
+
+  // Cooling: simulation strength decays over time, settling after ~3 seconds
+  const alpha = Math.max(0.01, 1.0 - graphAge * 0.3);
+  if (alpha > 0.02) {
+    simulateGraph(dt, alpha);
+  }
   drawGraph(graphCanvas);
   graphRafId = requestAnimationFrame(graphFrame);
 }
 
-function simulateGraph(dt: number): void {
-  const cx = graphCanvas ? graphCanvas.width / 2 : 300;
-  const cy = graphCanvas ? graphCanvas.height / 2 : 200;
+function simulateGraph(dt: number, alpha: number): void {
+  const w = graphCanvas?.width ?? 600;
+  const h = graphCanvas?.height ?? 400;
+  const cx = w / 2, cy = h / 2;
+  const n = graphNodes.length;
+  if (n === 0) return;
 
-  // Repulsion
-  for (let i = 0; i < graphNodes.length; i++) {
-    for (let j = i + 1; j < graphNodes.length; j++) {
+  // Ideal distance scales with node count
+  const idealDist = Math.max(60, Math.min(w, h) / Math.sqrt(n + 1) * 0.8);
+
+  // Repulsion (Coulomb)
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
       const a = graphNodes[i], b = graphNodes[j];
       let dx = b.x - a.x, dy = b.y - a.y;
       let dist = Math.sqrt(dx * dx + dy * dy);
-      if (dist < 1) { dx = 1; dy = 0; dist = 1; }
-      const force = 3000 / (dist * dist);
+      if (dist < 1) { dx = Math.random() - 0.5; dy = Math.random() - 0.5; dist = 1; }
+      const force = (idealDist * idealDist) / dist * alpha;
       const fx = (dx / dist) * force;
       const fy = (dy / dist) * force;
       a.vx -= fx; a.vy -= fy;
@@ -302,37 +331,35 @@ function simulateGraph(dt: number): void {
     }
   }
 
-  // Spring attraction along edges
+  // Spring attraction along edges (Hooke)
   for (const e of graphEdges) {
-    const a = graphNodes.find(n => n.id === e.from);
-    const b = graphNodes.find(n => n.id === e.to);
+    const a = edgeIndex.get(e.from);
+    const b = edgeIndex.get(e.to);
     if (!a || !b) continue;
     const dx = b.x - a.x, dy = b.y - a.y;
     const dist = Math.sqrt(dx * dx + dy * dy);
     if (dist < 1) continue;
-    const force = (dist - 100) * 0.02;
+    const force = (dist - idealDist) * 0.05 * alpha;
     const fx = (dx / dist) * force;
     const fy = (dy / dist) * force;
     a.vx += fx; a.vy += fy;
     b.vx -= fx; b.vy -= fy;
   }
 
-  // Gravity toward center
-  for (const n of graphNodes) {
-    n.vx += (cx - n.x) * 0.003;
-    n.vy += (cy - n.y) * 0.003;
+  // Gentle gravity toward center
+  for (const nd of graphNodes) {
+    nd.vx += (cx - nd.x) * 0.005 * alpha;
+    nd.vy += (cy - nd.y) * 0.005 * alpha;
   }
 
-  // Apply velocity with damping
-  const w = graphCanvas?.width ?? 600;
-  const h = graphCanvas?.height ?? 400;
-  for (const n of graphNodes) {
-    n.vx *= 0.88;
-    n.vy *= 0.88;
-    n.x += n.vx * dt * 60;
-    n.y += n.vy * dt * 60;
-    n.x = Math.max(40, Math.min(w - 40, n.x));
-    n.y = Math.max(30, Math.min(h - 30, n.y));
+  // Apply velocity with strong damping
+  for (const nd of graphNodes) {
+    nd.vx *= 0.7;
+    nd.vy *= 0.7;
+    nd.x += nd.vx * dt * 30;
+    nd.y += nd.vy * dt * 30;
+    nd.x = Math.max(50, Math.min(w - 50, nd.x));
+    nd.y = Math.max(30, Math.min(h - 30, nd.y));
   }
 }
 

@@ -45,6 +45,21 @@ app.innerHTML = `
 <div class="main-area">
   <div class="canvas-wrap">
     <canvas id="officeCanvas"></canvas>
+    <!-- Approval floating panel (positioned over canvas near Compliance desk) -->
+    <div class="approval-float hidden" id="approvalFloat">
+      <div class="approval-float-header">
+        <span class="approval-float-title">PENDING APPROVAL</span>
+      </div>
+      <div class="approval-float-list" id="approvalList"></div>
+      <div class="approval-float-detail hidden" id="approvalDetail">
+        <div class="approval-detail-body" id="approvalDetailBody"></div>
+        <div class="approval-detail-actions">
+          <button class="approve-btn" id="approveBtn">APPROVE</button>
+          <button class="deny-btn" id="denyBtn">DENY</button>
+          <button class="back-btn" id="approvalBack">BACK</button>
+        </div>
+      </div>
+    </div>
   </div>
   <div class="bottom-panel">
     <div class="controls-panel">
@@ -146,18 +161,6 @@ app.innerHTML = `
   </div>
 </div>
 
-<!-- Approval Dialog -->
-<div class="approval-overlay hidden" id="approvalOverlay">
-  <div class="approval-card">
-    <div class="approval-header">APPROVAL REQUIRED</div>
-    <div class="approval-body" id="approvalBody"></div>
-    <div class="approval-actions">
-      <button class="approve-btn" id="approveBtn">&gt; APPROVE</button>
-      <button class="deny-btn" id="denyBtn">&gt; DENY</button>
-    </div>
-  </div>
-</div>
-
 `;
 
 // =====================================================================
@@ -225,7 +228,16 @@ let subs: AgentSub[] = [];
 let running = false;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let eventCount = 0;
-let pendingApproval: { action_description: string; risk_level: string; proposed_by: string } | null = null;
+interface PendingApproval {
+  id: number;
+  short_summary: string;
+  action_description: string;
+  risk_level: string;
+  proposed_by: string;
+}
+const pendingApprovals: PendingApproval[] = [];
+let nextApprovalId = 0;
+let expandedApprovalId: number | null = null;
 let providerIssuePromptShown = false;
 let selectedChatAgent: AgentId = "triage";
 
@@ -293,14 +305,14 @@ setOnMessage((from, to, content, headline, category) => {
 
 // Wire gate approval
 setOnApprovalNeeded((data) => {
-  pendingApproval = data;
-  const overlay = $<HTMLDivElement>("approvalOverlay");
-  $<HTMLDivElement>("approvalBody").innerHTML = `
-    <p><strong>Action:</strong> ${data.action_description}</p>
-    <p><strong>Risk:</strong> <span class="risk-${data.risk_level}">${data.risk_level.toUpperCase()}</span></p>
-    <p><strong>Proposed by:</strong> ${data.proposed_by}</p>
-  `;
-  overlay.classList.remove("hidden");
+  pendingApprovals.push({
+    id: nextApprovalId++,
+    short_summary: data.short_summary || data.action_description.slice(0, 40),
+    action_description: data.action_description,
+    risk_level: data.risk_level,
+    proposed_by: data.proposed_by,
+  });
+  renderApprovalFloat();
 });
 
 // Agent selection from canvas
@@ -684,24 +696,88 @@ $<HTMLTextAreaElement>("chatInput").addEventListener("input", (e) => {
   el.style.height = Math.min(el.scrollHeight, 80) + "px";
 });
 
-// Approval
-document.getElementById("approveBtn")!.addEventListener("click", () => {
-  if (pendingApproval && runtime && mobId) {
-    runtime.mob_send_message(mobId, "gate", `HUMAN DECISION: APPROVED -- ${pendingApproval.action_description}`);
-    addMessage(null, "user", "gate", `APPROVED: ${pendingApproval.action_description}`, "Human approved", "approval");
-    showSpeechBubble("gate", "APPROVED", 3000);
+// Approval floating panel
+function renderApprovalFloat(): void {
+  const panel = $<HTMLDivElement>("approvalFloat");
+  const list = $<HTMLDivElement>("approvalList");
+  const detail = $<HTMLDivElement>("approvalDetail");
+
+  if (pendingApprovals.length === 0) {
+    panel.classList.add("hidden");
+    return;
   }
-  pendingApproval = null;
-  $<HTMLDivElement>("approvalOverlay").classList.add("hidden");
+  panel.classList.remove("hidden");
+
+  if (expandedApprovalId !== null) {
+    // Show detail view
+    const item = pendingApprovals.find(a => a.id === expandedApprovalId);
+    if (!item) { expandedApprovalId = null; renderApprovalFloat(); return; }
+    list.classList.add("hidden");
+    detail.classList.remove("hidden");
+    $<HTMLDivElement>("approvalDetailBody").innerHTML = `
+      <p><strong>${item.action_description}</strong></p>
+      <p>Risk: <span class="risk-${item.risk_level}">${item.risk_level.toUpperCase()}</span> &middot; By: ${item.proposed_by}</p>
+    `;
+  } else {
+    // Show compact list
+    detail.classList.add("hidden");
+    list.classList.remove("hidden");
+    list.innerHTML = pendingApprovals.map(a =>
+      `<div class="approval-item" data-id="${a.id}">
+        <span class="approval-item-text">${escapeHtmlApproval(a.short_summary)}</span>
+        <button class="approve-mini" data-id="${a.id}" title="Approve">\u2713</button>
+        <button class="deny-mini" data-id="${a.id}" title="Deny">\u2717</button>
+      </div>`
+    ).join("");
+  }
+}
+
+function resolveApproval(id: number, approved: boolean): void {
+  const idx = pendingApprovals.findIndex(a => a.id === id);
+  if (idx < 0) return;
+  const item = pendingApprovals[idx];
+  pendingApprovals.splice(idx, 1);
+  expandedApprovalId = null;
+
+  if (runtime && mobId) {
+    const decision = approved ? "APPROVED" : "DENIED";
+    runtime.mob_send_message(mobId, "gate", `HUMAN DECISION: ${decision} -- ${item.action_description}`);
+    addMessage(null, "user", "gate", `${decision}: ${item.action_description}`, `Human ${decision.toLowerCase()}`, "approval");
+    showSpeechBubble("gate", decision, 3000);
+  }
+  renderApprovalFloat();
+}
+
+function escapeHtmlApproval(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// Click handlers on approval float (delegated)
+document.getElementById("approvalFloat")!.addEventListener("click", (e) => {
+  const target = e.target as HTMLElement;
+  const approveMini = target.closest(".approve-mini") as HTMLElement | null;
+  const denyMini = target.closest(".deny-mini") as HTMLElement | null;
+  const item = target.closest(".approval-item") as HTMLElement | null;
+
+  if (approveMini) {
+    resolveApproval(Number(approveMini.dataset.id), true);
+  } else if (denyMini) {
+    resolveApproval(Number(denyMini.dataset.id), false);
+  } else if (item && expandedApprovalId === null) {
+    expandedApprovalId = Number(item.dataset.id);
+    renderApprovalFloat();
+  }
+});
+
+document.getElementById("approveBtn")!.addEventListener("click", () => {
+  if (expandedApprovalId !== null) resolveApproval(expandedApprovalId, true);
 });
 document.getElementById("denyBtn")!.addEventListener("click", () => {
-  if (pendingApproval && runtime && mobId) {
-    runtime.mob_send_message(mobId, "gate", `HUMAN DECISION: DENIED -- ${pendingApproval.action_description}`);
-    addMessage(null, "user", "gate", `DENIED: ${pendingApproval.action_description}`, "Human denied", "approval");
-    showSpeechBubble("gate", "DENIED", 3000);
-  }
-  pendingApproval = null;
-  $<HTMLDivElement>("approvalOverlay").classList.add("hidden");
+  if (expandedApprovalId !== null) resolveApproval(expandedApprovalId, false);
+});
+document.getElementById("approvalBack")!.addEventListener("click", () => {
+  expandedApprovalId = null;
+  renderApprovalFloat();
 });
 
 // Settings (now overlay instead of drawer)

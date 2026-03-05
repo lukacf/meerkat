@@ -37,7 +37,7 @@ export function setOnMessage(cb: IncidentCallback): void {
 
 // ── Gate approval callback ──
 
-type ApprovalCallback = (data: { action_description: string; risk_level: string; proposed_by: string }) => void;
+type ApprovalCallback = (data: { short_summary?: string; action_description: string; risk_level: string; proposed_by: string }) => void;
 let onApprovalNeeded: ApprovalCallback | null = null;
 
 export function setOnApprovalNeeded(cb: ApprovalCallback): void {

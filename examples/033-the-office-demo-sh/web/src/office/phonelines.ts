@@ -59,9 +59,9 @@ export function triggerEnvelopeArrival(toAgent: AgentId): void {
   const desk = DESKS[toAgent];
   envelopes.push({
     startX: 40, startY: 40, // mail slot area
-    endX: desk.x, endY: desk.y - 10,
+    endX: desk.x, endY: desk.y - 30,
     elapsed: 0,
-    duration: 0.8,
+    duration: 1.4,
   });
 }
 
@@ -175,26 +175,42 @@ function renderCallArc(ctx: CanvasRenderingContext2D, c: ActiveCall): void {
 function renderEnvelope(ctx: CanvasRenderingContext2D, env: EnvelopeAnim): void {
   const t = easeOutCubic(Math.min(1, env.elapsed / env.duration));
   const x = env.startX + (env.endX - env.startX) * t;
-  const y = env.startY + (env.endY - env.startY) * t - Math.sin(t * Math.PI) * 30;
+  const y = env.startY + (env.endY - env.startY) * t - Math.sin(t * Math.PI) * 60;
+  const pulse = 0.7 + 0.3 * Math.sin(env.elapsed * 12);
 
   ctx.save();
-  ctx.globalAlpha = 1 - t * 0.2;
 
-  // Envelope body
+  // Outer glow — pulsing amber
+  ctx.shadowColor = "rgba(220, 160, 60, 0.8)";
+  ctx.shadowBlur = 20 * pulse;
+  ctx.fillStyle = `rgba(255, 200, 80, ${0.3 * pulse})`;
+  ctx.fillRect(x - 22, y - 14, 44, 28);
+  ctx.shadowBlur = 0;
+
+  // Envelope body — bigger
   ctx.fillStyle = "#F5E6C8";
-  ctx.fillRect(x - 10, y - 6, 20, 14);
-  ctx.strokeStyle = "#AA8855";
-  ctx.lineWidth = 1;
-  ctx.strokeRect(x - 10, y - 6, 20, 14);
+  ctx.fillRect(x - 18, y - 10, 36, 22);
+  ctx.strokeStyle = "#8B6A3A";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(x - 18, y - 10, 36, 22);
 
   // Envelope flap (V shape)
   ctx.beginPath();
-  ctx.moveTo(x - 10, y - 6);
-  ctx.lineTo(x, y + 2);
-  ctx.lineTo(x + 10, y - 6);
-  ctx.strokeStyle = "#AA8855";
-  ctx.lineWidth = 1;
+  ctx.moveTo(x - 18, y - 10);
+  ctx.lineTo(x, y + 4);
+  ctx.lineTo(x + 18, y - 10);
+  ctx.strokeStyle = "#8B6A3A";
+  ctx.lineWidth = 1.5;
   ctx.stroke();
+
+  // Red "NEW" badge
+  ctx.fillStyle = "#CC3333";
+  ctx.fillRect(x + 10, y - 16, 18, 10);
+  ctx.font = "bold 7px sans-serif";
+  ctx.fillStyle = "#fff";
+  ctx.textAlign = "center";
+  ctx.fillText("NEW", x + 19, y - 8);
+  ctx.textAlign = "left";
 
   ctx.restore();
 }

@@ -272,8 +272,8 @@ function renderGraph(canvas: HTMLCanvasElement): void {
   graphAge = 0;
   graphLastTime = 0;
 
-  // Pre-simulate 200 steps to settle before first draw
-  for (let i = 0; i < 200; i++) simulateGraph(0.016, 1.0);
+  // Pre-simulate 500 steps to settle before first draw
+  for (let i = 0; i < 500; i++) simulateGraph(0.016, Math.max(0.05, 1.0 - i * 0.002));
 
   if (graphRafId) cancelAnimationFrame(graphRafId);
   graphRafId = requestAnimationFrame(graphFrame);
@@ -306,17 +306,18 @@ function simulateGraph(dt: number, alpha: number): void {
   const n = graphNodes.length;
   if (n === 0) return;
 
-  // Ideal distance scales with node count — more nodes = more space
-  const idealDist = 80 + n * 8;
+  // Minimum distance between any two nodes — generous to avoid label overlap
+  const minSep = 120 + n * 5;
 
-  // Repulsion (Coulomb) — unbounded space
+  // Repulsion — very strong, keeps nodes well separated
   for (let i = 0; i < n; i++) {
     for (let j = i + 1; j < n; j++) {
       const a = graphNodes[i], b = graphNodes[j];
       let dx = b.x - a.x, dy = b.y - a.y;
       let dist = Math.sqrt(dx * dx + dy * dy);
-      if (dist < 1) { dx = Math.random() - 0.5; dy = Math.random() - 0.5; dist = 1; }
-      const force = (idealDist * idealDist) / dist * alpha;
+      if (dist < 1) { dx = Math.random() * 2 - 1; dy = Math.random() * 2 - 1; dist = 1; }
+      // Strong repulsion that falls off with distance
+      const force = (minSep * minSep) / (dist * dist) * 50 * alpha;
       const fx = (dx / dist) * force;
       const fy = (dy / dist) * force;
       a.vx -= fx; a.vy -= fy;
@@ -324,7 +325,8 @@ function simulateGraph(dt: number, alpha: number): void {
     }
   }
 
-  // Spring attraction along edges (Hooke)
+  // Spring attraction along edges — pull connected nodes together
+  const springLen = minSep * 0.8;
   for (const e of graphEdges) {
     const a = edgeIndex.get(e.from);
     const b = edgeIndex.get(e.to);
@@ -332,25 +334,25 @@ function simulateGraph(dt: number, alpha: number): void {
     const dx = b.x - a.x, dy = b.y - a.y;
     const dist = Math.sqrt(dx * dx + dy * dy);
     if (dist < 1) continue;
-    const force = (dist - idealDist) * 0.04 * alpha;
+    const force = (dist - springLen) * 0.03 * alpha;
     const fx = (dx / dist) * force;
     const fy = (dy / dist) * force;
     a.vx += fx; a.vy += fy;
     b.vx -= fx; b.vy -= fy;
   }
 
-  // Gentle gravity toward origin (keeps graph centered)
+  // Gentle gravity toward origin
   for (const nd of graphNodes) {
-    nd.vx += (0 - nd.x) * 0.002 * alpha;
-    nd.vy += (0 - nd.y) * 0.002 * alpha;
+    nd.vx += (0 - nd.x) * 0.001 * alpha;
+    nd.vy += (0 - nd.y) * 0.001 * alpha;
   }
 
-  // Apply velocity with damping — NO boundary clamping
+  // Apply velocity with damping
   for (const nd of graphNodes) {
-    nd.vx *= 0.75;
-    nd.vy *= 0.75;
-    nd.x += nd.vx * dt * 30;
-    nd.y += nd.vy * dt * 30;
+    nd.vx *= 0.6;
+    nd.vy *= 0.6;
+    nd.x += nd.vx * dt * 20;
+    nd.y += nd.vy * dt * 20;
   }
 }
 
@@ -366,13 +368,13 @@ function computeViewport(canvasW: number, canvasH: number): { offsetX: number; o
     maxY = Math.max(maxY, n.y);
   }
 
-  // Add padding for labels
-  const pad = 60;
-  minX -= pad; maxX += pad; minY -= pad; maxY += pad + 15; // extra bottom for labels
+  // Generous padding for labels and breathing room
+  const pad = 80;
+  minX -= pad; maxX += pad; minY -= pad; maxY += pad + 20;
 
   const graphW = maxX - minX || 1;
   const graphH = maxY - minY || 1;
-  const scale = Math.min(canvasW / graphW, canvasH / graphH, 2); // cap at 2x zoom
+  const scale = Math.min(canvasW / graphW, canvasH / graphH, 1.5); // cap at 1.5x zoom
   const cx = (minX + maxX) / 2;
   const cy = (minY + maxY) / 2;
 

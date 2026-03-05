@@ -761,7 +761,9 @@ pub fn register_tool_callback(
         });
 
         JS_TOOLS.with(|cell| {
-            cell.borrow_mut().push(JsToolEntry {
+            let mut tools = cell.borrow_mut();
+            tools.retain(|e| e.def.name != def.name);
+            tools.push(JsToolEntry {
                 def,
                 mode: JsToolMode::Callback(func),
             });
@@ -817,7 +819,9 @@ pub fn register_js_tool(
         });
 
         JS_TOOLS.with(|cell| {
-            cell.borrow_mut().push(JsToolEntry {
+            let mut tools = cell.borrow_mut();
+            tools.retain(|e| e.def.name != def.name);
+            tools.push(JsToolEntry {
                 def,
                 mode: JsToolMode::FireAndForget,
             });

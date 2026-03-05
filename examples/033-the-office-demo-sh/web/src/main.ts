@@ -26,7 +26,7 @@ import { buildOfficeDefinition, WIRING_PAIRS, PROFILE_NAMES } from "./agents";
 import { SCENARIOS } from "./scenarios";
 import { drainAllEvents, setOnMessage, setOnApprovalNeeded } from "./events";
 import { createIncident, addMessage, renderIncidentPanel, setRenderCallback } from "./incidents";
-import { extractFacts, showKnowledgeBase, hideKnowledgeBase, isKBVisible } from "./knowledge";
+import { parseArchivistMessage, showCaseFiles, showGraph, hideKnowledgeBase } from "./knowledge";
 
 // =====================================================================
 // HTML Shell
@@ -64,10 +64,21 @@ app.innerHTML = `
       </div>
     </div>
     <div class="log-panel">
-      <div class="log-title">OFFICE LOG</div>
+      <div class="log-tabs">
+        <button class="log-tab active" id="tabLog">LOG</button>
+        <button class="log-tab" id="tabCases">RECORDS</button>
+        <button class="log-tab" id="tabGraph">GRAPH</button>
+      </div>
       <div class="log-content" id="panelContent">
         <div class="log-empty">AWAITING EVENTS...</div>
       </div>
+      <div class="log-content hidden" id="kbContent">
+        <div class="kb-empty">NO RECORDS YET.<br><br>THE ARCHIVIST WILL CREATE<br>STRUCTURED RECORDS AS EVENTS<br>ARE PROCESSED.</div>
+      </div>
+      <div class="graph-wrap hidden" id="graphWrap">
+        <canvas id="graphCanvas"></canvas>
+      </div>
+      <div class="kb-footer hidden" id="kbFooter">0 RECORDS</div>
     </div>
   </div>
 </div>
@@ -147,19 +158,7 @@ app.innerHTML = `
   </div>
 </div>
 
-<!-- Knowledge Base Overlay -->
-<div class="kb-overlay hidden" id="kbOverlay">
-  <div class="kb-frame">
-    <div class="kb-header">
-      <span class="kb-header-title">FILING CABINET -- KNOWLEDGE BASE</span>
-      <button class="kb-close" id="kbClose">[CLOSE]</button>
-    </div>
-    <div class="kb-content" id="kbContent">
-      <div class="kb-empty">THE FILING CABINET IS EMPTY.<br><br>PROCESS SOME EVENTS AND THE<br>ARCHIVIST WILL STORE KNOWLEDGE HERE.</div>
-    </div>
-    <div class="kb-footer" id="kbFooter">0 ENTITIES</div>
-  </div>
-</div>`;
+`;
 
 // =====================================================================
 // Helpers
@@ -242,21 +241,39 @@ initPhoneLines();
 loadBackground("./office-bg.png").catch(() => console.warn("Office background not found, using placeholder"));
 loadSprites().catch(() => console.warn("Sprites not found, using fallback"));
 
-// Filing cabinet click -> toggle knowledge base
-setOnFilingCabinetClick(() => {
-  if (isKBVisible()) {
-    hideKnowledgeBase();
-  } else {
-    showKnowledgeBase($<HTMLDivElement>("kbContent"), $<HTMLDivElement>("kbFooter"));
-    $<HTMLDivElement>("kbOverlay").classList.remove("hidden");
-  }
-});
+// Filing cabinet click -> switch to records tab
+setOnFilingCabinetClick(() => switchTab("cases"));
 
-// KB close button
-document.getElementById("kbClose")!.addEventListener("click", () => {
-  $<HTMLDivElement>("kbOverlay").classList.add("hidden");
+// Tab switching
+function switchTab(tab: "log" | "cases" | "graph"): void {
+  const tabs = ["tabLog", "tabCases", "tabGraph"];
+  const panels = ["panelContent", "kbContent", "graphWrap"];
+  const footer = $<HTMLDivElement>("kbFooter");
+
+  // Deactivate all
+  for (const id of tabs) document.getElementById(id)!.classList.remove("active");
+  for (const id of panels) $<HTMLDivElement>(id).classList.add("hidden");
+  footer.classList.add("hidden");
   hideKnowledgeBase();
-});
+
+  if (tab === "cases") {
+    document.getElementById("tabCases")!.classList.add("active");
+    $<HTMLDivElement>("kbContent").classList.remove("hidden");
+    footer.classList.remove("hidden");
+    showCaseFiles($<HTMLDivElement>("kbContent"), footer);
+  } else if (tab === "graph") {
+    document.getElementById("tabGraph")!.classList.add("active");
+    $<HTMLDivElement>("graphWrap").classList.remove("hidden");
+    showGraph($<HTMLCanvasElement>("graphCanvas"));
+  } else {
+    document.getElementById("tabLog")!.classList.add("active");
+    $<HTMLDivElement>("panelContent").classList.remove("hidden");
+  }
+}
+
+document.getElementById("tabLog")!.addEventListener("click", () => switchTab("log"));
+document.getElementById("tabCases")!.addEventListener("click", () => switchTab("cases"));
+document.getElementById("tabGraph")!.addEventListener("click", () => switchTab("graph"));
 
 // Incident panel rendering
 setRenderCallback(() => {
@@ -265,11 +282,12 @@ setRenderCallback(() => {
   panel.scrollTop = panel.scrollHeight;
 });
 
-// Wire event system -> incident tracking + knowledge extraction
+// Wire event system -> incident tracking + archivist record parsing
 setOnMessage((from, to, content, headline, category) => {
   addMessage(null, from, to, content, headline, category);
+  // Parse archivist messages for structured records
   if (from === "archivist" || to === "archivist") {
-    extractFacts(content);
+    parseArchivistMessage(content);
   }
 });
 
@@ -309,6 +327,7 @@ if (isServerMode()) {
   if (settingsSection[0]?.textContent === "API KEYS") (settingsSection[0] as HTMLElement).style.display = "none";
   const hint = document.querySelector(".start-hint") as HTMLElement | null;
   if (hint) hint.textContent = "Model configured by server";
+  document.getElementById("gearBtn")!.style.display = "none";
   setStatus("API keys provided by server.");
 }
 
@@ -566,18 +585,18 @@ function showOnboardingHints(): void {
   if (!grid || !chat) return;
 
   grid.classList.add("hint-glow");
-  grid.style.position = "relative";
-  const scenarioLabel = document.createElement("span");
-  scenarioLabel.className = "hint-label hint-scenarios";
-  scenarioLabel.textContent = "BEGIN HERE";
-  grid.appendChild(scenarioLabel);
-
   chat.classList.add("hint-glow");
-  chat.style.position = "relative";
-  const chatLabel = document.createElement("span");
-  chatLabel.className = "hint-label hint-chat";
-  chatLabel.textContent = "OR WRITE YOUR OWN";
-  chat.appendChild(chatLabel);
+
+  // Insert hint labels as siblings before their targets
+  const scenarioHint = document.createElement("div");
+  scenarioHint.className = "hint-label";
+  scenarioHint.innerHTML = "\u2193 PICK A SCENARIO TO BEGIN";
+  grid.parentElement!.insertBefore(scenarioHint, grid);
+
+  const chatHint = document.createElement("div");
+  chatHint.className = "hint-label";
+  chatHint.innerHTML = "\u2193 OR WRITE YOUR OWN INSTRUCTIONS";
+  chat.parentElement!.insertBefore(chatHint, chat);
 }
 
 function dismissOnboardingHints(): void {

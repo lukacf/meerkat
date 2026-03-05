@@ -30,8 +30,6 @@
 ## Prerequisites
 
 ```bash
-cargo build -p meerkat-cli
-cargo install wasm-pack
 node --version  # 20+
 ```
 
@@ -48,10 +46,12 @@ python3 -m http.server 4174 --directory web/dist
 open http://127.0.0.1:4174
 ```
 
-### Dev mode (no WASM, UI-only):
+### Dev mode (with WASM runtime):
 ```bash
-cd web && npm install && npx vite
+cd web && npm install && npm run dev
 ```
+
+`npm run dev`/`npm run build` auto-sync the paired WASM runtime bundle from `@rkat/web` into `web/public/meerkat-pkg`.
 
 ## Usage
 

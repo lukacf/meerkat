@@ -17,6 +17,8 @@ interface CharState {
   frameTimer: number;
   /** Random offset so characters don't animate in sync */
   phaseOffset: number;
+  /** Stable per-agent timing variance (0.9x..1.1x) */
+  speedMultiplier: number;
 }
 
 const agents = new Map<AgentId, CharState>();
@@ -28,7 +30,18 @@ for (const id of AGENT_IDS) {
     frame: 0,
     frameTimer: Math.random() * 2, // random start offset
     phaseOffset: Math.random() * 2,
+    speedMultiplier: speedVarianceFor(id),
   });
+}
+
+function speedVarianceFor(id: AgentId): number {
+  // Stable hash-based spread so each character keeps a unique tempo.
+  let h = 0;
+  for (let i = 0; i < id.length; i++) {
+    h = ((h << 5) - h + id.charCodeAt(i)) | 0;
+  }
+  const t = (Math.abs(h) % 1000) / 1000; // 0..1
+  return 0.9 + t * 0.2; // 0.9..1.1
 }
 
 // ── Public API ──
@@ -57,7 +70,7 @@ const FRAME_DURATIONS: Record<CharacterState, number> = {
 function update(dt: number): void {
   for (const [, a] of agents) {
     a.frameTimer += dt;
-    const dur = FRAME_DURATIONS[a.state];
+    const dur = FRAME_DURATIONS[a.state] * a.speedMultiplier;
     if (a.frameTimer >= dur) {
       a.frameTimer -= dur;
       a.frame++;

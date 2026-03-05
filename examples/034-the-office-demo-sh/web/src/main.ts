@@ -5,7 +5,17 @@
 import "./styles.css";
 import { AGENTS, AGENT_IDS } from "./types";
 import type { AgentId, RuntimeModule, AgentSub } from "./types";
-import { getApiKeys, getSelectedModel, initApiKeyInputs, isServerMode, getServerProxyConfig } from "./config";
+import {
+  getApiKeys,
+  getSelectedModel,
+  initApiKeyInputs,
+  isServerMode,
+  getServerProxyConfig,
+  setApiKeys,
+  hasAnyApiKey,
+  MODEL_PROVIDER,
+} from "./config";
+import type { Provider } from "./config";
 import { setupBridge } from "./llm-bridge";
 import { initCanvas, setOnSelectAgent, loadBackground, setOnFilingCabinetClick } from "./office/canvas";
 import { initCharacters, setAgentState } from "./office/characters";
@@ -79,6 +89,19 @@ app.innerHTML = `
     <p class="start-hint">Configure API keys via \u2699 and press Start</p>
   </div>
 </div>
+<div class="key-overlay hidden" id="keyOverlay">
+  <div class="key-card">
+    <div class="key-title">API Key Required</div>
+    <p class="key-desc" id="keyOverlayMessage">No API keys detected. Enter at least one key to start.</p>
+    <div class="setting"><label>Anthropic</label><input type="password" id="keyDialogAnthropic" placeholder="sk-ant-..." /></div>
+    <div class="setting"><label>OpenAI</label><input type="password" id="keyDialogOpenai" placeholder="sk-..." /></div>
+    <div class="setting"><label>Gemini</label><input type="password" id="keyDialogGemini" placeholder="..." /></div>
+    <div class="key-actions">
+      <button class="ctrl-btn" id="keyDialogCancel">Cancel</button>
+      <button class="ctrl-btn primary" id="keyDialogSave">Save & Start</button>
+    </div>
+  </div>
+</div>
 <div class="approval-overlay hidden" id="approvalOverlay">
   <div class="approval-card">
     <div class="approval-header">APPROVAL REQUIRED</div>
@@ -103,6 +126,48 @@ function setBadge(text: string, thinking = false): void {
 }
 function sleep(ms: number): Promise<void> { return new Promise(r => setTimeout(r, ms)); }
 function parseJsResult(val: unknown): string { return typeof val === "string" ? val : String(val); }
+function providerLabel(provider: Provider): string {
+  if (provider === "anthropic") return "Anthropic";
+  if (provider === "openai") return "OpenAI";
+  return "Gemini";
+}
+function extractProviderFromError(err: string): Provider | null {
+  const match = err.match(/\b(anthropic|openai|gemini)\b/i);
+  if (!match) return null;
+  return match[1].toLowerCase() as Provider;
+}
+
+function showKeyDialog(message: string): void {
+  const overlay = $<HTMLDivElement>("keyOverlay");
+  $<HTMLParagraphElement>("keyOverlayMessage").textContent = message;
+  $<HTMLInputElement>("keyDialogAnthropic").value = $<HTMLInputElement>("keyAnthropic").value.trim();
+  $<HTMLInputElement>("keyDialogOpenai").value = $<HTMLInputElement>("keyOpenai").value.trim();
+  $<HTMLInputElement>("keyDialogGemini").value = $<HTMLInputElement>("keyGemini").value.trim();
+  overlay.classList.remove("hidden");
+  const first = [
+    "keyDialogAnthropic",
+    "keyDialogOpenai",
+    "keyDialogGemini",
+  ].map((id) => $<HTMLInputElement>(id)).find((el) => !el.value.trim());
+  (first ?? $<HTMLInputElement>("keyDialogAnthropic")).focus();
+}
+
+function hideKeyDialog(): void {
+  $<HTMLDivElement>("keyOverlay").classList.add("hidden");
+}
+
+function applyDialogKeys(): boolean {
+  const anthropic = $<HTMLInputElement>("keyDialogAnthropic").value.trim();
+  const openai = $<HTMLInputElement>("keyDialogOpenai").value.trim();
+  const gemini = $<HTMLInputElement>("keyDialogGemini").value.trim();
+  setApiKeys({ anthropic, openai, gemini });
+  if (!hasAnyApiKey()) {
+    $<HTMLParagraphElement>("keyOverlayMessage").textContent = "Please enter at least one key.";
+    return false;
+  }
+  hideKeyDialog();
+  return true;
+}
 
 // ═══════════════════════════════════════════════════════════
 // State
@@ -115,6 +180,7 @@ let running = false;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let eventCount = 0;
 let pendingApproval: { action_description: string; risk_level: string; proposed_by: string } | null = null;
+let providerIssuePromptShown = false;
 
 // ═══════════════════════════════════════════════════════════
 // Init Canvas + Subsystems
@@ -209,8 +275,27 @@ if (isServerMode()) {
 
 async function loadRuntime(): Promise<RuntimeModule> {
   if (runtime) return runtime;
-  const url = new URL("./runtime.js", window.location.href).toString();
-  const mod = (await import(/* @vite-ignore */ url)) as RuntimeModule;
+  const urls = [
+    new URL("/meerkat-pkg/meerkat_web_runtime.js", window.location.href).toString(),
+    new URL("./runtime.js", window.location.href).toString(), // legacy fallback
+  ];
+  let mod: RuntimeModule | null = null;
+  let lastError = "";
+  for (const url of urls) {
+    try {
+      mod = (await import(/* @vite-ignore */ url)) as RuntimeModule;
+      break;
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+    }
+  }
+  if (!mod) {
+    throw new Error(
+      `Failed to load WASM runtime bundle. Tried: ${urls.join(", ")}. ` +
+      `Run ./examples.sh in examples/034-the-office-demo-sh to build meerkat-pkg. ` +
+      `Last error: ${lastError}`,
+    );
+  }
   await mod.default();
   runtime = mod;
   return mod;
@@ -222,12 +307,29 @@ async function loadRuntime(): Promise<RuntimeModule> {
 
 async function startOffice(): Promise<void> {
   try {
+    providerIssuePromptShown = false;
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+    running = false;
+
     const keys = getApiKeys();
     if (!keys.anthropic && !keys.openai && !keys.gemini) {
-      setStatus("Enter at least one API key in settings."); return;
+      setBadge("Ready");
+      setStatus("No API keys detected. Enter one key to start.");
+      showKeyDialog("No API keys detected. Enter at least one key to start.");
+      return;
     }
     const model = getSelectedModel();
     if (!model) { setStatus("Select a model."); return; }
+    const provider = MODEL_PROVIDER[model];
+    if (provider && !keys[provider]) {
+      setBadge("Ready");
+      setStatus(`Model ${model} requires ${providerLabel(provider)} API key.`);
+      showKeyDialog(`Model "${model}" uses ${providerLabel(provider)} and needs that API key.`);
+      return;
+    }
 
     setBadge("Loading...", true);
     setStatus("Loading WASM runtime...");
@@ -287,6 +389,42 @@ async function startOffice(): Promise<void> {
       if (!running || !runtime) return;
       const { errors } = drainAllEvents(runtime, subs);
       if (errors.length > 0) {
+        if (!providerIssuePromptShown) {
+          const missingKeyError = errors.find((err) => {
+            const lower = err.toLowerCase();
+            return lower.includes("api key")
+              && (lower.includes("missing")
+                || lower.includes("not configured")
+                || lower.includes("no provider api key")
+                || lower.includes("must be provided"));
+          });
+          const authError = errors.find((err) => {
+            const lower = err.toLowerCase();
+            return lower.includes(" 401")
+              || lower.includes("authentication")
+              || lower.includes("unauthorized")
+              || lower.includes("invalid x-api-key")
+              || lower.includes("invalid api key");
+          });
+          const keyIssue = missingKeyError ?? authError;
+          if (keyIssue) {
+            providerIssuePromptShown = true;
+            const provider = extractProviderFromError(keyIssue);
+            const providerText = provider ? `${providerLabel(provider)} ` : "";
+            const looksAuth = keyIssue === authError;
+            running = false;
+            const pauseBtn = document.getElementById("pauseBtn") as HTMLButtonElement | null;
+            if (pauseBtn) pauseBtn.textContent = "Resume";
+            setBadge("Config");
+            if (looksAuth) {
+              setStatus(`${providerText}key rejected. Update key or switch model, then Start again.`);
+              showKeyDialog(`${providerText}API key appears invalid. Update key and press Save & Start.`);
+            } else {
+              setStatus(`${providerText}key missing for active model. Add key and Start again.`);
+              showKeyDialog(`${providerText}API key is missing for the active model. Enter it to continue.`);
+            }
+          }
+        }
         for (const e of errors) console.warn("Agent error:", e);
       }
     }, 300);
@@ -359,6 +497,27 @@ document.getElementById("startBigBtn")!.addEventListener("click", () => {
 });
 
 document.getElementById("startBtn")!.addEventListener("click", () => void startOffice());
+document.getElementById("keyDialogCancel")!.addEventListener("click", () => {
+  hideKeyDialog();
+  setStatus("Start is blocked until at least one API key is provided.");
+});
+document.getElementById("keyDialogSave")!.addEventListener("click", () => {
+  if (applyDialogKeys()) {
+    setStatus("API key saved. Starting office...");
+    void startOffice();
+  }
+});
+for (const id of ["keyDialogAnthropic", "keyDialogOpenai", "keyDialogGemini"] as const) {
+  $<HTMLInputElement>(id).addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (applyDialogKeys()) {
+        setStatus("API key saved. Starting office...");
+        void startOffice();
+      }
+    }
+  });
+}
 
 document.getElementById("pauseBtn")!.addEventListener("click", () => {
   if (!running && pollTimer === null) return;
@@ -434,4 +593,8 @@ if (isServerMode()) {
   $<HTMLDivElement>("startOverlay").classList.add("hidden");
   document.getElementById("startBtn")!.style.display = "none";
   void startOffice();
+} else if (!hasAnyApiKey()) {
+  setStatus("No API keys detected. Press Start to open key entry dialog.");
+} else {
+  setStatus("API keys loaded. Press Start.");
 }

@@ -17,6 +17,11 @@ export const ALL_MODELS = Object.keys(MODEL_PROVIDER);
 
 const $ = <T extends Element>(id: string) => document.getElementById(id) as unknown as T;
 
+// Compile-time env injection (Vite `define`) + Vite env fallback.
+declare const __ANTHROPIC_API_KEY__: string;
+declare const __OPENAI_API_KEY__: string;
+declare const __GEMINI_API_KEY__: string;
+
 // ── Server mode (proxy) detection ──
 
 const PARAMS = new URLSearchParams(window.location.search);
@@ -88,20 +93,57 @@ export function initApiKeyInputs(): void {
     return;
   }
 
-  for (const [provider, envKey, inputId] of [
-    ["anthropic", "VITE_ANTHROPIC_API_KEY", "keyAnthropic"],
-    ["openai", "VITE_OPENAI_API_KEY", "keyOpenai"],
-    ["gemini", "VITE_GEMINI_API_KEY", "keyGemini"],
+  // Migration cleanup: remove legacy browser-stored keys from earlier builds.
+  for (const provider of ["anthropic", "openai", "gemini"] as const) {
+    sessionStorage.removeItem(`api_key_${provider}`);
+  }
+
+  for (const [provider, inputId] of [
+    ["anthropic", "keyAnthropic"],
+    ["openai", "keyOpenai"],
+    ["gemini", "keyGemini"],
   ] as const) {
     const input = $<HTMLInputElement>(inputId);
     if (!input) continue;
-    const stored = sessionStorage.getItem(`api_key_${provider}`);
-    const envVal = (import.meta as any).env?.[envKey] ?? "";
-    input.value = stored || envVal;
+    const envVal = envApiKey(provider);
+    input.value = envVal;
     input.addEventListener("change", () => {
-      sessionStorage.setItem(`api_key_${provider}`, input.value);
       updateModelDropdown();
     });
   }
   updateModelDropdown();
+}
+
+export function setApiKeys(keys: Partial<Record<Provider, string>>): void {
+  const mapping: Record<Provider, string> = {
+    anthropic: "keyAnthropic",
+    openai: "keyOpenai",
+    gemini: "keyGemini",
+  };
+  for (const provider of ["anthropic", "openai", "gemini"] as const) {
+    const value = keys[provider]?.trim() ?? "";
+    const input = document.getElementById(mapping[provider]) as HTMLInputElement | null;
+    if (input) input.value = value;
+  }
+  updateModelDropdown();
+}
+
+export function hasAnyApiKey(): boolean {
+  const keys = getApiKeys();
+  return !!(keys.anthropic || keys.openai || keys.gemini);
+}
+
+function envApiKey(provider: Provider): string {
+  const compileTime = provider === "anthropic"
+    ? (typeof __ANTHROPIC_API_KEY__ === "string" ? __ANTHROPIC_API_KEY__ : "")
+    : provider === "openai"
+      ? (typeof __OPENAI_API_KEY__ === "string" ? __OPENAI_API_KEY__ : "")
+      : (typeof __GEMINI_API_KEY__ === "string" ? __GEMINI_API_KEY__ : "");
+
+  if (compileTime) return compileTime;
+
+  const env = (import.meta as any).env ?? {};
+  if (provider === "anthropic") return env.VITE_RKAT_ANTHROPIC_API_KEY ?? env.VITE_ANTHROPIC_API_KEY ?? "";
+  if (provider === "openai") return env.VITE_RKAT_OPENAI_API_KEY ?? env.VITE_OPENAI_API_KEY ?? "";
+  return env.VITE_RKAT_GEMINI_API_KEY ?? env.VITE_GEMINI_API_KEY ?? "";
 }

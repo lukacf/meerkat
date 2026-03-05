@@ -19,31 +19,27 @@ export interface DeskPos {
 }
 
 export const DESKS: Record<AgentId, DeskPos> = {
-  // Mail Room — right desk, chair on floor below desk drawers (front edge y≈150)
-  triage:     { x: 335, y: 195, phoneX: 320, phoneY: 110, label: "Max",    zone: "Mail Room" },
+  // Mail Room (top-left office)
+  triage:     { x: 404,  y: 198, phoneX: 506,  phoneY: 106, label: "Max",    zone: "Mail Room" },
 
-  // Archive — desk at top-right with lamp (front edge y≈150)
-  archivist:  { x: 720, y: 195, phoneX: 740, phoneY: 110, label: "Sage",   zone: "Archive" },
+  // Archive (top-right office)
+  archivist:  { x: 923,  y: 198, phoneX: 976,  phoneY: 106, label: "Sage",   zone: "Archive" },
 
-  // Dept Row TL — chair below desk+monitor area (keyboard at y≈355, floor at y≈365)
-  "it-dept":  { x: 95,  y: 400, phoneX: 110, phoneY: 320, label: "Dev",    zone: "Dept Row" },
+  // Dept Row (middle-left offices)
+  "it-dept":  { x: 96,   y: 435, phoneX: 166,  phoneY: 343, label: "Dev",    zone: "Dept Row" },
+  "hr-dept":  { x: 435,  y: 435, phoneX: 488,  phoneY: 343, label: "Robin",  zone: "Dept Row" },
 
-  // Dept Row TR — mirror of TL
-  "hr-dept":  { x: 290, y: 400, phoneX: 260, phoneY: 320, label: "Robin",  zone: "Dept Row" },
+  // Dept Row (bottom-left offices)
+  facilities: { x: 96,   y: 666, phoneX: 168,  phoneY: 611, label: "Jordan", zone: "Dept Row" },
+  finance:    { x: 264,  y: 666, phoneX: 334,  phoneY: 611, label: "Morgan", zone: "Dept Row" },
 
-  // Dept Row BL — below lower desks (keyboard at y≈455)
-  facilities: { x: 65,  y: 490, phoneX: 85,  phoneY: 430, label: "Jordan", zone: "Dept Row" },
+  // PA Bullpen (middle-right row of desks)
+  "alex-pa":  { x: 962,  y: 435, phoneX: 1015, phoneY: 354, label: "Aria",   zone: "PA Bullpen" },
+  "sam-pa":   { x: 1088, y: 435, phoneX: 1115, phoneY: 354, label: "Scout",  zone: "PA Bullpen" },
+  "pat-pa":   { x: 1217, y: 435, phoneX: 1245, phoneY: 354, label: "Quinn",  zone: "PA Bullpen" },
 
-  // Dept Row BR — mirror of BL
-  finance:    { x: 260, y: 490, phoneX: 230, phoneY: 430, label: "Morgan", zone: "Dept Row" },
-
-  // PA Bullpen — 3 of 4 desks, desk front at y≈385, keyboard at y≈390
-  "alex-pa":  { x: 470, y: 415, phoneX: 490, phoneY: 355, label: "Aria",   zone: "PA Bullpen" },
-  "sam-pa":   { x: 625, y: 415, phoneX: 640, phoneY: 355, label: "Scout",  zone: "PA Bullpen" },
-  "pat-pa":   { x: 775, y: 415, phoneX: 790, phoneY: 355, label: "Quinn",  zone: "PA Bullpen" },
-
-  // Compliance — desk surface at y≈535, floor below at y≈580
-  gate:       { x: 590, y: 590, phoneX: 570, phoneY: 540, label: "Bailey", zone: "Compliance" },
+  // Compliance desk (center)
+  gate:       { x: 688,  y: 622, phoneX: 762,  phoneY: 541, label: "Bailey", zone: "Compliance" },
 };
 
 export const MAIL_SLOT = { x: 45, y: 55 };

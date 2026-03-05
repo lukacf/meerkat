@@ -2,56 +2,17 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-WORK="$ROOT/.work"
-MOB_RUNTIME="$WORK/mob-runtime"
-PACK_RUNTIME="$WORK/runtime.mobpack"
-RUNTIME_OUT="$WORK/runtime"
 WEB_DIR="$ROOT/web"
 WEB_DIST="$WEB_DIR/dist"
-WORKSPACE_ROOT="$(cd "$ROOT/../.." && pwd)"
 
-if [[ -x "$WORKSPACE_ROOT/target/debug/rkat" ]]; then
-  RKAT_BIN="$WORKSPACE_ROOT/target/debug/rkat"
-elif [[ -x "$WORKSPACE_ROOT/target/release/rkat" ]]; then
-  RKAT_BIN="$WORKSPACE_ROOT/target/release/rkat"
-else
-  RKAT_BIN="${RKAT_BIN:-rkat}"
+if [[ "${1:-}" == "--clean" ]]; then
+  echo "Cleaning generated web artifacts..."
+  rm -rf "$WEB_DIR/public/meerkat-pkg" "$WEB_DIST"
 fi
-
-mkdir -p "$WORK" "$MOB_RUNTIME"
-
-# ── Minimal mobpack (only needed to trigger `rkat mob web build`) ──
-# The actual office definition is constructed inline in TypeScript
-# via init_runtime_from_config + mob_create.
-
-cat > "$MOB_RUNTIME/manifest.toml" <<TOML
-[mobpack]
-name = "the-office-runtime"
-version = "1.0.0"
-description = "WASM runtime for The Office multi-agent demo"
-TOML
-
-cat > "$MOB_RUNTIME/definition.json" <<JSON
-{
-  "id": "the-office-runtime",
-  "profiles": {
-    "default": {
-      "model": "claude-sonnet-4-6",
-      "peer_description": "default"
-    }
-  }
-}
-JSON
-
-"$RKAT_BIN" mob pack "$MOB_RUNTIME" -o "$PACK_RUNTIME"
-"$RKAT_BIN" mob web build "$PACK_RUNTIME" -o "$RUNTIME_OUT"
 
 cd "$WEB_DIR"
 npm install
 npm run build
-
-cp "$RUNTIME_OUT/runtime.js" "$WEB_DIST/runtime.js"
-cp "$RUNTIME_OUT/runtime_bg.wasm" "$WEB_DIST/runtime_bg.wasm"
 
 PORT="${PORT:-4174}"
 echo "Built The Office demo: $WEB_DIST"

@@ -394,7 +394,7 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
         }
 
         if let Some(state_arc) = self.inner.system_context_state(id).await {
-            let (status, state_snapshot) = {
+            let status = {
                 let mut guard = match state_arc.lock() {
                     Ok(guard) => guard,
                     Err(poisoned) => {
@@ -405,22 +405,47 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                         poisoned.into_inner()
                     }
                 };
-                let status = guard
+                guard
                     .stage_append(&req, meerkat_core::time_compat::SystemTime::now())
-                    .map_err(|err| err.into_control_error(id))?;
-                (status, guard.clone())
+                    .map_err(|err| err.into_control_error(id))?
             };
 
-            // Active sessions should persist from the authoritative live
-            // snapshot, not from the last saved store row. This avoids a race
-            // where create_session() has returned but the initial snapshot
-            // is not yet visible in the store when control-plane mutation
-            // arrives immediately afterward.
-            let mut session = self
-                .inner
-                .export_session(id)
+            // Persist the durable control state alongside the latest
+            // persisted session snapshot. This keeps append acceptance
+            // non-blocking for busy live sessions; the in-memory session
+            // itself will pick up the staged state at the next LLM boundary.
+            //
+            // If the store row is unexpectedly missing, fall back to the live
+            // snapshot to reconstruct it. That preserves the create-session
+            // race fix without forcing every active-session append through
+            // export_session().
+            let mut session = match self
+                .store
+                .load(id)
                 .await
-                .map_err(SessionControlError::Session)?;
+                .map_err(|e| SessionControlError::Session(SessionError::Store(Box::new(e))))?
+            {
+                Some(session) => session,
+                None => self
+                    .inner
+                    .export_session(id)
+                    .await
+                    .map_err(SessionControlError::Session)?,
+            };
+
+            let state_snapshot = {
+                let guard = match state_arc.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => {
+                        tracing::warn!(
+                            session_id = %id,
+                            "system-context state lock poisoned while snapshotting append state"
+                        );
+                        poisoned.into_inner()
+                    }
+                };
+                guard.clone()
+            };
             write_system_context_state(&mut session, state_snapshot)?;
             self.store
                 .save(&session)

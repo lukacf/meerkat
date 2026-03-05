@@ -76,11 +76,22 @@ pub async fn handle(
         .await
         .map_err(|e| ToolCallError::internal(format!("Spawn failed: {e}")))?;
 
+    // Fail fast if any agent failed to spawn — every flow step targets a
+    // specific role, so a missing agent means a guaranteed downstream failure.
+    let mut failed = Vec::new();
     for (i, result) in spawn_results.iter().enumerate() {
         match result {
             Ok(_) => tracing::info!(profile = %profile_names[i], "spawned"),
-            Err(e) => tracing::error!(profile = %profile_names[i], error = %e, "spawn failed"),
+            Err(e) => failed.push(format!("{}: {e}", profile_names[i])),
         }
+    }
+    if !failed.is_empty() {
+        // Clean up the partially-created mob before returning
+        let _ = state.mob_state.mob_destroy(&mob_id).await;
+        return Err(ToolCallError::internal(format!(
+            "Spawn failed for: {}",
+            failed.join("; ")
+        )));
     }
 
     // Yield briefly so the mob actor processes spawn roster updates before
@@ -142,16 +153,22 @@ async fn run_flow(
 
         let Some(run) = mob_run else { continue };
 
+        // Count unique completed step IDs (not ledger entries, which can
+        // have multiple entries per step for retries and per-target dispatch).
         let completed = run
             .step_ledger
             .iter()
             .filter(|e| e.status == StepRunStatus::Completed)
-            .count();
+            .map(|e| &e.step_id)
+            .collect::<std::collections::HashSet<_>>()
+            .len();
         let in_progress: Vec<_> = run
             .step_ledger
             .iter()
             .filter(|e| e.status == StepRunStatus::Dispatched)
             .map(|e| e.step_id.to_string())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
             .collect();
 
         if completed > last_completed || !in_progress.is_empty() {

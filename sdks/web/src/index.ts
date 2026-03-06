@@ -8,6 +8,8 @@ export type {
   RuntimeConfig,
   InitResult,
   SessionConfig,
+  AppendSystemContextOptions,
+  AppendSystemContextResult,
   TurnOptions,
   TurnResult,
   Usage,

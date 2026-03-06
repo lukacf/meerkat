@@ -76,6 +76,7 @@ export interface WasmModule {
   get_session_state: (handle: number) => string;
   destroy_session: (handle: number) => void;
   poll_events: (handle: number) => string;
+  append_system_context: (handle: number, requestJson: string) => string;
   inspect_mobpack: (mobpackBytes: Uint8Array) => string;
   mob_create: (definitionJson: string) => Promise<string>;
   mob_status: (mobId: string) => Promise<string>;
@@ -277,6 +278,7 @@ export class MeerkatRuntime {
       this.wasm.get_session_state,
       this.wasm.destroy_session,
       this.wasm.poll_events,
+      this.wasm.append_system_context,
     );
   }
 

@@ -395,41 +395,42 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
         id: &SessionId,
         req: AppendSystemContextRequest,
     ) -> Result<AppendSystemContextResult, SessionControlError> {
-        let gate = self.gate_for_session(id).await;
-        let gate_guard = gate.cancelled.lock().await;
-        if *gate_guard {
-            return Err(SessionControlError::Session(SessionError::NotFound {
-                id: id.clone(),
-            }));
-        }
-
+        let existing_gate = self.existing_gate_for_session(id).await;
         if let Some(state_arc) = self.inner.system_context_state(id).await {
-            let (status, state_snapshot) = {
-                let mut guard = match state_arc.lock() {
+            let created_gate = existing_gate.is_none();
+            let gate = match existing_gate {
+                Some(gate) => gate,
+                None => self.gate_for_session(id).await,
+            };
+            let gate_guard = gate.cancelled.lock().await;
+            if *gate_guard {
+                return Err(SessionControlError::Session(SessionError::NotFound {
+                    id: id.clone(),
+                }));
+            }
+
+            let accepted_at = meerkat_core::time_compat::SystemTime::now();
+            let (status, persisted_state) = {
+                let guard = match state_arc.lock() {
                     Ok(guard) => guard,
                     Err(poisoned) => {
                         tracing::warn!(
                             session_id = %id,
-                            "system-context state lock poisoned while staging append"
+                            "system-context state lock poisoned while snapshotting live append"
                         );
                         poisoned.into_inner()
                     }
                 };
-                let status = guard
-                    .stage_append(&req, meerkat_core::time_compat::SystemTime::now())
+                let mut candidate = guard.clone();
+                let status = candidate
+                    .stage_append(&req, accepted_at)
                     .map_err(|err| err.into_control_error(id))?;
-                (status, guard.clone())
+                (status, candidate)
             };
 
-            // Persist the durable control state alongside the latest
-            // persisted session snapshot. This keeps append acceptance
-            // non-blocking for busy live sessions; the in-memory session
-            // itself will pick up the staged state at the next LLM boundary.
-            //
-            // If the store row is unexpectedly missing, fall back to the live
-            // snapshot to reconstruct it. That preserves the create-session
-            // race fix without forcing every active-session append through
-            // export_session().
+            // Persist the durable control state before mutating the live
+            // runtime state so an error never leaves the caller observing a
+            // failure while the next LLM boundary still applies the append.
             let mut session = match self
                 .store
                 .load(id)
@@ -437,28 +438,68 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                 .map_err(|e| SessionControlError::Session(SessionError::Store(Box::new(e))))?
             {
                 Some(session) => session,
-                None => self
-                    .inner
-                    .export_session(id)
-                    .await
-                    .map_err(SessionControlError::Session)?,
+                None => match self.inner.export_session(id).await {
+                    Ok(session) => session,
+                    Err(err) => {
+                        if created_gate && matches!(err, SessionError::NotFound { .. }) {
+                            drop(gate_guard);
+                            self.checkpointer_gates.lock().await.remove(id);
+                        }
+                        return Err(SessionControlError::Session(err));
+                    }
+                },
             };
 
-            write_system_context_state(&mut session, state_snapshot)?;
+            write_system_context_state(&mut session, persisted_state)?;
             self.store
                 .save(&session)
                 .await
                 .map_err(|e| SessionControlError::Session(SessionError::Store(Box::new(e))))?;
+
+            let live_status = {
+                let mut guard = match state_arc.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => {
+                        tracing::warn!(
+                            session_id = %id,
+                            "system-context state lock poisoned while committing live append"
+                        );
+                        poisoned.into_inner()
+                    }
+                };
+                guard
+                    .stage_append(&req, accepted_at)
+                    .map_err(|err| err.into_control_error(id))?
+            };
+            debug_assert_eq!(live_status, status);
             drop(gate_guard);
             return Ok(AppendSystemContextResult { status });
         }
 
-        let mut session = self
+        if let Some(gate) = existing_gate {
+            let gate_guard = gate.cancelled.lock().await;
+            if *gate_guard {
+                return Err(SessionControlError::Session(SessionError::NotFound {
+                    id: id.clone(),
+                }));
+            }
+            drop(gate_guard);
+        }
+
+        let mut session = match self
             .store
             .load(id)
             .await
             .map_err(|e| SessionError::Store(Box::new(e)))?
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        {
+            Some(session) => session,
+            None => {
+                self.checkpointer_gates.lock().await.remove(id);
+                return Err(SessionControlError::Session(SessionError::NotFound {
+                    id: id.clone(),
+                }));
+            }
+        };
         let mut state = session.system_context_state().unwrap_or_default();
         let status = state
             .stage_append(&req, meerkat_core::time_compat::SystemTime::now())
@@ -468,7 +509,6 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
             .save(&session)
             .await
             .map_err(|e| SessionControlError::Session(SessionError::Store(Box::new(e))))?;
-        drop(gate_guard);
         Ok(AppendSystemContextResult { status })
     }
 }
@@ -569,6 +609,51 @@ mod tests {
     use super::*;
     use crate::ephemeral::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
     use meerkat_store::MemoryStore;
+    use meerkat_store::StoreError;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct FailSaveStore {
+        inner: MemoryStore,
+        fail_save: AtomicBool,
+    }
+
+    impl FailSaveStore {
+        fn new() -> Self {
+            Self {
+                inner: MemoryStore::new(),
+                fail_save: AtomicBool::new(false),
+            }
+        }
+
+        fn set_fail_save(&self, fail: bool) {
+            self.fail_save.store(fail, Ordering::Release);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SessionStore for FailSaveStore {
+        async fn save(&self, session: &Session) -> Result<(), StoreError> {
+            if self.fail_save.load(Ordering::Acquire) {
+                return Err(StoreError::Internal("forced save failure".to_string()));
+            }
+            self.inner.save(session).await
+        }
+
+        async fn load(&self, id: &SessionId) -> Result<Option<Session>, StoreError> {
+            self.inner.load(id).await
+        }
+
+        async fn list(
+            &self,
+            filter: meerkat_store::SessionFilter,
+        ) -> Result<Vec<meerkat_core::SessionMeta>, StoreError> {
+            self.inner.list(filter).await
+        }
+
+        async fn delete(&self, id: &SessionId) -> Result<(), StoreError> {
+            self.inner.delete(id).await
+        }
+    }
 
     struct DummyAgent {
         session: Arc<std::sync::Mutex<Session>>,
@@ -956,5 +1041,85 @@ mod tests {
             .expect("restored row should contain pending system-context state");
         assert_eq!(state.pending.len(), 1);
         assert_eq!(state.pending[0].text, "runtime notice");
+    }
+
+    #[tokio::test]
+    async fn test_append_system_context_live_save_failure_does_not_mutate_runtime_state() {
+        let store = Arc::new(FailSaveStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store) as Arc<dyn SessionStore>,
+        );
+
+        let result = service
+            .create_session(CreateSessionRequest {
+                model: "test".to_string(),
+                prompt: "hello".to_string(),
+                system_prompt: None,
+                max_tokens: None,
+                event_tx: None,
+                host_mode: false,
+                skill_references: None,
+                initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
+                build: None,
+                labels: None,
+            })
+            .await
+            .expect("create_session should succeed");
+        let id = result.session_id;
+
+        store.set_fail_save(true);
+        let err = service
+            .append_system_context(
+                &id,
+                AppendSystemContextRequest {
+                    text: "runtime notice".to_string(),
+                    source: Some("mob".to_string()),
+                    idempotency_key: Some("ctx-save-failure".to_string()),
+                },
+            )
+            .await
+            .expect_err("append should surface the store failure");
+        assert_eq!(err.code(), "SESSION_STORE_ERROR");
+
+        let state = service
+            .inner
+            .system_context_state(&id)
+            .await
+            .expect("live session should still exist");
+        let guard = state.lock().expect("system-context state lock");
+        assert!(
+            guard.pending.is_empty(),
+            "failed append must not mutate live runtime state"
+        );
+        assert!(
+            !guard.seen.contains_key("ctx-save-failure"),
+            "failed append must not reserve the idempotency key in live state"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_append_system_context_unknown_session_does_not_allocate_gate() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let service = PersistentSessionService::new(DummyBuilder, 4, Arc::clone(&store));
+        let unknown = SessionId::new();
+
+        let err = service
+            .append_system_context(
+                &unknown,
+                AppendSystemContextRequest {
+                    text: "runtime notice".to_string(),
+                    source: Some("mob".to_string()),
+                    idempotency_key: Some("ctx-unknown".to_string()),
+                },
+            )
+            .await
+            .expect_err("unknown session must fail");
+        assert_eq!(err.code(), "SESSION_NOT_FOUND");
+        assert!(
+            service.checkpointer_gates.lock().await.is_empty(),
+            "unknown-session append must not allocate a checkpointer gate"
+        );
     }
 }

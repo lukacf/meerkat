@@ -95,7 +95,9 @@ export function renderIncidentPanel(container: HTMLElement): void {
   }
 
   let html = "";
-  for (const inc of incidents) {
+  // Render oldest first so newest activity is at the bottom (scroll target)
+  const ordered = [...incidents].reverse();
+  for (const inc of ordered) {
     const timeAgo = formatTimeAgo(inc.timestamp);
     html += `<div class="log-incident-header">${escapeHtml(inc.icon)} ${escapeHtml(inc.title.toUpperCase())} [${timeAgo}]</div>`;
 

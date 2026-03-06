@@ -21,24 +21,7 @@ let activeTab: "cases" | "graph" = "cases";
 
 // -- Parse archivist messages for record blocks --
 
-export function parseArchivistMessage(content: string): void {
-  // Look for ```record ... ``` blocks
-  const pattern = /```record\s*\n?([\s\S]*?)```/g;
-  let match;
-  while ((match = pattern.exec(content)) !== null) {
-    try {
-      const json = JSON.parse(match[1].trim());
-      if (json.op === "upsert" && json.id) {
-        upsertRecord(json);
-      }
-    } catch {
-      // Malformed JSON — try to salvage partial data
-      tryPartialParse(match[1].trim());
-    }
-  }
-}
-
-function upsertRecord(data: any): void {
+export function upsertRecord(data: any): void {
   const existing = records.get(data.id);
   if (existing) {
     // Merge: append new entities/relationships/decisions, update summary
@@ -76,21 +59,6 @@ function upsertRecord(data: any): void {
       decisions: Array.isArray(data.decisions) ? data.decisions : [],
       status: data.status || "open",
       lastUpdated: Date.now(),
-    });
-  }
-}
-
-function tryPartialParse(text: string): void {
-  // Try to extract at least some structured data from malformed JSON
-  const idMatch = text.match(/"id"\s*:\s*"([^"]+)"/);
-  const titleMatch = text.match(/"title"\s*:\s*"([^"]+)"/);
-  const summaryMatch = text.match(/"summary"\s*:\s*"([^"]+)"/);
-  if (idMatch) {
-    upsertRecord({
-      op: "upsert",
-      id: idMatch[1],
-      title: titleMatch?.[1] || idMatch[1],
-      summary: summaryMatch?.[1] || "",
     });
   }
 }

@@ -97,6 +97,7 @@ export interface Incident {
 export interface RuntimeModule {
   default: () => Promise<unknown>;
   init_runtime_from_config: (configJson: string) => unknown;
+  register_js_tool: (name: string, description: string, schemaJson: string) => void;
   mob_create: (definitionJson: string) => Promise<unknown>;
   mob_spawn: (mobId: string, specsJson: string) => Promise<unknown>;
   mob_wire: (mobId: string, a: string, b: string) => Promise<void>;

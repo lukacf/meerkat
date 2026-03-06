@@ -53,6 +53,15 @@ function fireApproval(data: { short_summary?: string; action_description: string
   onApprovalNeeded?.(data);
 }
 
+// ── Upsert record callback ──
+
+type UpsertRecordCallback = (data: any) => void;
+let onUpsertRecord: UpsertRecordCallback | null = null;
+
+export function setOnUpsertRecord(cb: UpsertRecordCallback): void {
+  onUpsertRecord = cb;
+}
+
 // ── Access control callback ──
 
 type AccessControlCallback = (action: "revoke" | "restore", target: string, reason: string) => void;
@@ -78,64 +87,75 @@ export function drainAllEvents(mod: RuntimeModule, subs: AgentSub[]): { events: 
         events++;
         const payload = event.payload;
 
-        // ── Tool call: agent used "send" ──
-        if (payload.type === "tool_call_requested" && payload.name === "send") {
+        // ── Tool calls ──
+        if (payload.type === "tool_call_requested") {
           const callId = payload.id;
           if (callId && seenToolCallIds.has(callId)) continue;
           if (callId) seenToolCallIds.add(callId);
 
-          try {
-            const args = typeof payload.args === "string" ? JSON.parse(payload.args) : payload.args;
-            const toAddr = args.to || "";
-            const body = args.body || "";
-            const recipientId = addressToAgentId(toAddr);
+          const toolName = payload.name;
 
-            if (recipientId && body) {
-              // Determine call color from context
-              const color = recipientId === "gate" ? CALL_COLORS.approval
-                : recipientId === "archivist" ? CALL_COLORS.knowledge
-                : CALL_COLORS.routing;
+          // ── Comms: agent used "send" ──
+          if (toolName === "send") {
+            try {
+              const args = typeof payload.args === "string" ? JSON.parse(payload.args) : payload.args;
+              const toAddr = args.to || "";
+              const body = args.body || "";
+              const recipientId = addressToAgentId(toAddr);
 
-              // Visual: phone call arc
-              startCall(sub.agentId, recipientId, color);
-              setAgentState(sub.agentId, "on_call");
+              if (recipientId && body) {
+                const color = recipientId === "gate" ? CALL_COLORS.approval
+                  : recipientId === "archivist" ? CALL_COLORS.knowledge
+                  : CALL_COLORS.routing;
 
-              // Speech bubble on sender with truncated message
-              const preview = body.length > 50 ? body.slice(0, 47) + "..." : body;
-              showSpeechBubble(sub.agentId, preview, 5000);
+                startCall(sub.agentId, recipientId, color);
+                setAgentState(sub.agentId, "on_call");
 
-              // Notify incident system
-              onMessage?.(sub.agentId, recipientId, body, preview, "routing");
-
-              // Check if IT is issuing an access control command
-              if (sub.agentId === "it-dept") {
-                try {
-                  const acMatch = body.match(/\{[^{}]*"access_control"[^{}]*\}/);
-                  if (acMatch) {
-                    const ac = JSON.parse(acMatch[0]);
-                    if (ac.access_control && ac.target) {
-                      console.log("[ACCESS CONTROL]", ac.access_control, ac.target, ac.reason);
-                      onAccessControl?.(ac.access_control, ac.target, ac.reason || "");
-                    }
-                  }
-                } catch { /* not access control JSON */ }
+                const preview = body.length > 50 ? body.slice(0, 47) + "..." : body;
+                showSpeechBubble(sub.agentId, preview, 5000);
+                onMessage?.(sub.agentId, recipientId, body, preview, "routing");
               }
+            } catch { /* parse error */ }
+          }
 
-              // Check if gate is SENDING a human approval request
-              if (sub.agentId === "gate") {
-                try {
-                  // Gate embeds JSON in its message body
-                  const approvalMatch = body.match(/\{[^{}]*require_human_approval[^{}]*\}/);
-                  if (approvalMatch) {
-                    const data = JSON.parse(approvalMatch[0]);
-                    if (data.require_human_approval) {
-                      fireApproval(data);
-                    }
-                  }
-                } catch { /* not approval JSON */ }
-              }
-            }
-          } catch { /* parse error */ }
+          // ── Fire-and-forget: request_human_approval ──
+          if (toolName === "request_human_approval") {
+            try {
+              const args = typeof payload.args === "string" ? JSON.parse(payload.args) : payload.args;
+              console.log("[APPROVAL] Tool call from", sub.agentId, args);
+              fireApproval({
+                short_summary: args.short_summary,
+                action_description: args.action_description,
+                risk_level: args.risk_level,
+                proposed_by: args.proposed_by,
+              });
+            } catch { /* parse error */ }
+          }
+
+          // ── Fire-and-forget: upsert_record ──
+          if (toolName === "upsert_record") {
+            try {
+              const args = typeof payload.args === "string" ? JSON.parse(payload.args) : payload.args;
+              console.log("[RECORD] Tool call from", sub.agentId, args);
+              onUpsertRecord?.(args);
+            } catch { /* parse error */ }
+          }
+
+          // ── Fire-and-forget: revoke_access / restore_access ──
+          if (toolName === "revoke_access") {
+            try {
+              const args = typeof payload.args === "string" ? JSON.parse(payload.args) : payload.args;
+              console.log("[ACCESS CONTROL] revoke", args);
+              onAccessControl?.("revoke", args.target, args.reason || "");
+            } catch { /* parse error */ }
+          }
+          if (toolName === "restore_access") {
+            try {
+              const args = typeof payload.args === "string" ? JSON.parse(payload.args) : payload.args;
+              console.log("[ACCESS CONTROL] restore", args);
+              onAccessControl?.("restore", args.target, args.reason || "");
+            } catch { /* parse error */ }
+          }
         }
 
         // ── Run completed: structured output ──

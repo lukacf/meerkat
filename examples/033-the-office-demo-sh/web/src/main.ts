@@ -24,9 +24,9 @@ import { initBubbles, showSpeechBubble, showThinkBubble, hideThinkBubble } from 
 import { initPhoneLines, startCall, endCall, triggerEnvelopeArrival } from "./office/phonelines";
 import { buildOfficeDefinition, WIRING_PAIRS, PROFILE_NAMES } from "./agents";
 import { SCENARIOS } from "./scenarios";
-import { drainAllEvents, setOnMessage, setOnApprovalNeeded, setOnAccessControl } from "./events";
+import { drainAllEvents, setOnMessage, setOnApprovalNeeded, setOnAccessControl, setOnUpsertRecord } from "./events";
 import { createIncident, addMessage, renderIncidentPanel, setRenderCallback } from "./incidents";
-import { parseArchivistMessage, showCaseFiles, showGraph, hideKnowledgeBase } from "./knowledge";
+import { upsertRecord, showCaseFiles, showGraph, hideKnowledgeBase } from "./knowledge";
 
 // =====================================================================
 // HTML Shell
@@ -296,13 +296,14 @@ setRenderCallback(() => {
   panel.scrollTop = panel.scrollHeight;
 });
 
-// Wire event system -> incident tracking + archivist record parsing
+// Wire event system -> incident tracking
 setOnMessage((from, to, content, headline, category) => {
   addMessage(null, from, to, content, headline, category);
-  // Parse archivist messages for structured records
-  if (from === "archivist" || to === "archivist") {
-    parseArchivistMessage(content);
-  }
+});
+
+// Wire upsert_record tool calls -> knowledge base
+setOnUpsertRecord((data) => {
+  upsertRecord(data);
 });
 
 // Wire gate approval
@@ -497,6 +498,57 @@ async function startOffice(): Promise<void> {
       initConfig.gemini_base_url = `${proxy.proxyUrl}/gemini`;
     }
     mod.init_runtime_from_config(JSON.stringify(initConfig));
+
+    // Register fire-and-forget JS tools (before mob creation)
+    setStatus("Registering tools...");
+    mod.register_js_tool("request_human_approval",
+      "Escalate a high-risk action for human sign-off. Use when an action needs human approval before proceeding.",
+      JSON.stringify({
+        type: "object",
+        properties: {
+          short_summary: { type: "string", description: "1-line summary for compact UI, max 40 chars" },
+          action_description: { type: "string", description: "Full description of the proposed action" },
+          risk_level: { type: "string", enum: ["low", "medium", "high"] },
+          proposed_by: { type: "string", description: "Name of the agent who requested this" },
+        },
+        required: ["short_summary", "action_description", "risk_level", "proposed_by"],
+      }));
+    mod.register_js_tool("upsert_record",
+      "Create or update a knowledge record in the office filing cabinet. The archivist uses this to store structured knowledge.",
+      JSON.stringify({
+        type: "object",
+        properties: {
+          id: { type: "string", description: "Kebab-case record identifier" },
+          title: { type: "string", description: "Human readable title" },
+          type: { type: "string", enum: ["incident", "person", "company", "system", "policy"] },
+          summary: { type: "string", description: "2-3 sentence summary" },
+          entities: { type: "array", items: { type: "object", properties: { name: { type: "string" }, type: { type: "string" }, role: { type: "string" } }, required: ["name", "type"] } },
+          relationships: { type: "array", items: { type: "object", properties: { from: { type: "string" }, to: { type: "string" }, type: { type: "string" } }, required: ["from", "to", "type"] } },
+          decisions: { type: "array", items: { type: "object", properties: { action: { type: "string" }, outcome: { type: "string" }, by: { type: "string" } }, required: ["action", "outcome", "by"] } },
+          status: { type: "string", enum: ["open", "resolved", "monitoring"] },
+        },
+        required: ["id", "title", "type", "summary"],
+      }));
+    mod.register_js_tool("revoke_access",
+      "Revoke an agent's network access. IT security use only.",
+      JSON.stringify({
+        type: "object",
+        properties: {
+          target: { type: "string", description: "Agent ID to revoke (e.g. finance, hr-dept)" },
+          reason: { type: "string", description: "Why access is being revoked" },
+        },
+        required: ["target", "reason"],
+      }));
+    mod.register_js_tool("restore_access",
+      "Restore a previously revoked agent's network access. IT security use only.",
+      JSON.stringify({
+        type: "object",
+        properties: {
+          target: { type: "string", description: "Agent ID to restore" },
+          reason: { type: "string", description: "Why access is being restored" },
+        },
+        required: ["target", "reason"],
+      }));
 
     setStatus("Creating office mob (10 agents)...");
     const def = buildOfficeDefinition(model);

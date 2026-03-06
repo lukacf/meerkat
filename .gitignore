@@ -54,3 +54,4 @@ sdks/web/package-lock.json
 # Vite cache
 .vite/
 /target-mcp/
+examples/*/web/dist/

@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-03-06
+
+### Added
+
+#### Session System-Context Control Plane (#121)
+- `SessionServiceControlExt::append_system_context()` — inject runtime system context into a live session without rebuilding it.
+- Staged appends are applied at the `CallingLlm` boundary just before the next model call.
+- Idempotency enforced per session via `idempotency_key`. Duplicate keys return `Duplicate` status.
+- Canonical system prompt remains the first `Message::System`; appended context follows as additional system messages.
+- State carried through checkpoints, clones, forks, and persistence.
+- Wired across all surfaces:
+  - CLI: `session inject-context`
+  - REST: `POST /sessions/{id}/system_context`
+  - RPC: `session/inject_context`
+  - WASM: `append_system_context(handle, request_json)`
+  - Web SDK: `Session.appendSystemContext(options)`
+
+#### Mob Member System-Context Control (#122)
+- `mob_append_system_context(mob_id, meerkat_id, request_json)` WASM export — append system context to an individual mob member's session by resolving its live session through the mob roster.
+- Web SDK: `Mob.appendSystemContext(meerkatId, options)` with `MobAppendSystemContextResult` type.
+- Shared `resolve_mob_member_session_id()` helper deduplicates roster lookup logic with `mob_member_subscribe`.
+
+#### Fire-and-Forget JS Tool Registration (#120)
+- `register_js_tool(name, description, schema_json)` WASM export for tools that return `"acknowledged"` immediately without a JS callback.
+- Agents get proper schema-validated tool calling; the host watches `ToolCallRequested` events in the stream and responds asynchronously via `mob_send_message`.
+- Existing `register_tool_callback` (callback-based) unchanged — backwards compatible.
+- Duplicate tool names are latest-wins across both registration modes.
+- Web SDK: `MeerkatRuntime.registerFireAndForgetTool()` static method.
+
+#### Structured Output Extraction Fix (#118)
+- Structured-output extraction now unwraps provider-style named envelopes (e.g., `{"advisor": {...}}`) when the inner object matches the configured schema shape.
+- `FlowStepSpec.output_format` option: `"json"` (default) or `"text"` to allow non-JSON agent outputs without parse failures.
+
+#### Example 033: The Office — 10-Agent WASM Multi-Agent Demo (#123)
+- Browser-based demo: 10 autonomous AI agents in a pixel-art office process events, coordinate via desk phone calls, store knowledge, and route actions through compliance.
+- Demonstrates: mob orchestration in WASM, `autonomous_host` mode, inter-agent comms with visual phone arcs, fire-and-forget JS tools (`request_human_approval`, `upsert_record`, `revoke_access`, `restore_access`), system context injection for admin trust policy.
+- Dieter Rams inspired UI: warm cream/copper chrome, tabbed log/records/graph panel, Cytoscape.js knowledge graph, floating approval panel, trust toggle (The Boss / Outsider).
+- 6 pre-built scenarios: Client Escalation, Server Room Alert, Expense Report, Calendar Conflict, New Hire Onboarding, Security Breach.
+
+#### Example 034: force-mcp — Multi-Agent Teams as MCP Tools (#119)
+- Standalone MCP server exposing Meerkat mobs as `consult`, `deliberate`, and `list_packs` tools for Claude Code.
+- 7 mobpacks: advisor, review, architect, brainstorm, red-team, panel (comms-driven), rct (full pipeline).
+- MCP progress notifications for live progress bars during deliberation.
+
+### Changed
+
+- **Model names**: Updated model table — added `gpt-5.3-codex`, `gemini-3.1-pro-preview`, `gemini-3.1-flash-lite-preview`, `claude-sonnet-4-6`. Removed deprecated `o1-*`/`o3-*`/`o4-*` prefixes from provider inference (#117).
+- **Demo server mode**: Diplomacy (031) and WebCM (032) demos support `?proxy=` query param for hosting behind `@rkat/web` proxy with server-side key injection (#116).
+- **MCP readiness**: Aligned readiness waits with the real async connect budget; reduced adapter polling latency. Fixes flakiness under full-suite load (#121).
+
+### Fixed
+
+- Session context persistence: live persistent appends no longer mutate runtime state before durable save succeeds.
+- Unknown session IDs no longer leak checkpointer gates.
+- Pending-session promotion preserves injected context during first turn/start.
+- Successful promotion no longer reports a false turn failure if replay staging has a post-create problem.
+- Diplomacy demo map: filled Kosovo, North Macedonia, Albania gaps; Croatia/Slovenia render as Austria-Hungary; resolution mode cropping fix.
+- Proxy CORS: `x-goog-api-key` added to allowed headers.
+
 ## [0.4.2] - 2026-03-04
 
 ### Added

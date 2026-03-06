@@ -510,7 +510,7 @@ async function startOffice(): Promise<void> {
         required: ["short_summary", "action_description", "risk_level", "proposed_by"],
       }));
     mod.register_js_tool("upsert_record",
-      "Create or update a knowledge record in the office filing cabinet. The archivist uses this to store structured knowledge.",
+      "Create or update a knowledge record. MUST include entities AND relationships between them.",
       JSON.stringify({
         type: "object",
         properties: {
@@ -518,12 +518,12 @@ async function startOffice(): Promise<void> {
           title: { type: "string", description: "Human readable title" },
           type: { type: "string", enum: ["incident", "person", "company", "system", "policy"] },
           summary: { type: "string", description: "2-3 sentence summary" },
-          entities: { type: "array", items: { type: "object", properties: { name: { type: "string" }, type: { type: "string" }, role: { type: "string" } }, required: ["name", "type"] } },
-          relationships: { type: "array", items: { type: "object", properties: { from: { type: "string" }, to: { type: "string" }, type: { type: "string" } }, required: ["from", "to", "type"] } },
+          entities: { type: "array", description: "Every entity mentioned. REQUIRED.", items: { type: "object", properties: { name: { type: "string" }, type: { type: "string", enum: ["person", "company", "system", "department", "amount", "event"] }, role: { type: "string" } }, required: ["name", "type"] } },
+          relationships: { type: "array", description: "How entities connect. REQUIRED — no free-floating entities.", items: { type: "object", properties: { from: { type: "string", description: "Source entity name" }, to: { type: "string", description: "Target entity name" }, type: { type: "string", enum: ["works_for", "manages", "reports_to", "member_of", "vendor_of", "client_of", "billed_by", "contracted_with", "responsible_for", "assigned_to", "escalated_to", "escalated_by", "approved_by", "denied_by", "requested_by", "monitors", "located_in", "affects", "caused_by", "contacted", "notified", "scheduled_for"] } }, required: ["from", "to", "type"] } },
           decisions: { type: "array", items: { type: "object", properties: { action: { type: "string" }, outcome: { type: "string" }, by: { type: "string" } }, required: ["action", "outcome", "by"] } },
           status: { type: "string", enum: ["open", "resolved", "monitoring"] },
         },
-        required: ["id", "title", "type", "summary"],
+        required: ["id", "title", "type", "summary", "entities", "relationships"],
       }));
     mod.register_js_tool("revoke_access",
       "Revoke an agent's network access. IT security use only.",

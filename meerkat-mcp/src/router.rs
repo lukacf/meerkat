@@ -716,8 +716,13 @@ impl Default for McpRouter {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::connection::McpConnection;
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
+
+    fn async_connect_test_timeout() -> Duration {
+        Duration::from_secs((McpConnection::DEFAULT_CONNECT_TIMEOUT_SECS as u64) + 5)
+    }
 
     fn test_server_path() -> PathBuf {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
@@ -910,8 +915,8 @@ mod tests {
             McpLifecycleAction::PendingConnect { server } if server == "test-server"
         )));
 
-        // Poll until background task completes (max 3s).
-        let deadline = Instant::now() + Duration::from_secs(3);
+        // Poll until the background connect completes.
+        let deadline = Instant::now() + async_connect_test_timeout();
         loop {
             let ext = router.take_external_updates();
             if ext
@@ -978,7 +983,7 @@ mod tests {
         assert_eq!(result.pending_count, 1);
 
         // Wait for the SECOND add to complete (first should be discarded).
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + async_connect_test_timeout();
         loop {
             let ext = router.take_external_updates();
             if ext

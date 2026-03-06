@@ -30,6 +30,7 @@
 //! - `mob_wire(mob_id, a, b)`
 //! - `mob_unwire(mob_id, a, b)`
 //! - `mob_list_members(mob_id)` → JSON
+//! - `mob_append_system_context(mob_id, meerkat_id, request_json)` → JSON
 //! - `mob_send_message(mob_id, meerkat_id, message)`
 //! - `mob_respawn(mob_id, meerkat_id, initial_message?)` — retire + re-spawn same profile
 //! - `mob_inject_and_subscribe(mob_id, meerkat_id, message)` → interaction_id
@@ -62,7 +63,7 @@ use std::io::Read;
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 
-use meerkat::AgentBuildConfig;
+use meerkat::{AgentBuildConfig, SessionServiceControlExt};
 use meerkat_core::Config;
 use meerkat_mob::{FlowId, MeerkatId, MobDefinition, MobId, RunId};
 use meerkat_mob_mcp::MobMcpState;
@@ -515,6 +516,50 @@ fn err_str(code: &str, msg: impl std::fmt::Display) -> JsValue {
 
 fn err_mob(e: meerkat_mob::MobError) -> JsValue {
     err_str("mob_error", e)
+}
+
+fn err_session_control(e: meerkat_core::SessionControlError) -> JsValue {
+    match e {
+        meerkat_core::SessionControlError::Session(meerkat_core::SessionError::NotFound {
+            ..
+        }) => err_js("SESSION_NOT_FOUND", "session not found"),
+        meerkat_core::SessionControlError::Session(other) => err_str("internal_error", other),
+        meerkat_core::SessionControlError::InvalidRequest { message } => {
+            err_js("INVALID_PARAMS", &message)
+        }
+        meerkat_core::SessionControlError::Conflict { key, .. } => err_js(
+            "SESSION_SYSTEM_CONTEXT_CONFLICT",
+            &format!("system-context idempotency conflict for key '{key}'"),
+        ),
+    }
+}
+
+async fn resolve_mob_member_session_id(
+    mob_state: &MobMcpState,
+    mob_id: &MobId,
+    meerkat_id: &MeerkatId,
+) -> Result<meerkat_core::SessionId, JsValue> {
+    let members = mob_state.mob_list_members(mob_id).await.map_err(err_mob)?;
+    let entry = members
+        .iter()
+        .find(|m| m.meerkat_id == *meerkat_id)
+        .ok_or_else(|| {
+            err_js(
+                "member_not_found",
+                &format!("meerkat '{meerkat_id}' not in mob '{mob_id}'"),
+            )
+        })?;
+
+    entry
+        .member_ref
+        .session_id()
+        .ok_or_else(|| {
+            err_js(
+                "no_session",
+                &format!("meerkat '{meerkat_id}' has no session"),
+            )
+        })
+        .cloned()
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1850,6 +1895,45 @@ pub async fn mob_list_members(mob_id: &str) -> Result<JsValue, JsValue> {
     Ok(JsValue::from_str(&json))
 }
 
+/// Append runtime system context to an individual mob member's session.
+#[wasm_bindgen]
+pub async fn mob_append_system_context(
+    mob_id: &str,
+    meerkat_id: &str,
+    request_json: &str,
+) -> Result<JsValue, JsValue> {
+    let req: AppendSystemContextOptions =
+        serde_json::from_str(request_json).map_err(|e| err_str("invalid_request", e))?;
+    let mob_id_typed = MobId::from(mob_id);
+    let meerkat_id_typed = MeerkatId::from(meerkat_id);
+
+    let (mob_state, session_service) =
+        with_runtime_state(|state| Ok((state.mob_state.clone(), state.session_service.clone())))?;
+    let session_id =
+        resolve_mob_member_session_id(&mob_state, &mob_id_typed, &meerkat_id_typed).await?;
+    let result = session_service
+        .append_system_context(
+            &session_id,
+            meerkat_core::AppendSystemContextRequest {
+                text: req.text,
+                source: req.source,
+                idempotency_key: req.idempotency_key,
+            },
+        )
+        .await
+        .map_err(err_session_control)?;
+
+    Ok(JsValue::from_str(
+        &serde_json::json!({
+            "mob_id": mob_id,
+            "meerkat_id": meerkat_id,
+            "session_id": session_id.to_string(),
+            "status": result.status,
+        })
+        .to_string(),
+    ))
+}
+
 /// Wire bidirectional comms trust between meerkats in DIFFERENT mobs.
 ///
 /// Unlike `mob_wire` (which is intra-mob), this establishes peer trust across
@@ -2101,31 +2185,7 @@ pub async fn mob_member_subscribe(mob_id: &str, meerkat_id: &str) -> Result<u32,
     let mob_id_typed = MobId::from(mob_id);
     let mid = MeerkatId::from(meerkat_id);
 
-    // Get the member's session_id from the mob roster.
-    let members = mob_state
-        .mob_list_members(&mob_id_typed)
-        .await
-        .map_err(err_mob)?;
-    let entry = members
-        .iter()
-        .find(|m| m.meerkat_id == mid)
-        .ok_or_else(|| {
-            err_js(
-                "member_not_found",
-                &format!("meerkat '{meerkat_id}' not in mob '{mob_id}'"),
-            )
-        })?;
-
-    let session_id = entry
-        .member_ref
-        .session_id()
-        .ok_or_else(|| {
-            err_js(
-                "no_session",
-                &format!("meerkat '{meerkat_id}' has no session"),
-            )
-        })?
-        .clone();
+    let session_id = resolve_mob_member_session_id(&mob_state, &mob_id_typed, &mid).await?;
 
     // Get a raw broadcast receiver via the concrete EphemeralSessionService.
     // This avoids the async EventStream wrapper — we use synchronous try_recv()
@@ -2276,11 +2336,16 @@ pub fn close_subscription(handle: u32) -> Result<(), JsValue> {
 
 #[cfg(test)]
 mod tests {
-    use super::merge_runtime_system_context_state;
+    use super::{build_service_infrastructure, merge_runtime_system_context_state};
+    use meerkat::SessionServiceControlExt;
+    use meerkat_core::Config;
     use meerkat_core::{
         PendingSystemContextAppend, SeenSystemContextKey, SeenSystemContextState,
         SessionSystemContextState,
     };
+    use meerkat_mob::{MeerkatId, SpawnMemberSpec};
+    use serde_json::json;
+    use std::collections::HashMap;
     use std::time::{Duration, SystemTime};
 
     #[test]
@@ -2358,6 +2423,94 @@ mod tests {
         assert_eq!(
             merged.seen.get("ctx-concurrent").map(|seen| seen.state),
             Some(SeenSystemContextState::Pending)
+        );
+    }
+
+    #[allow(clippy::expect_used)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn mob_append_system_context_targets_member_session() {
+        let mut config = Config::default();
+        config.providers.api_keys = Some(HashMap::from([(
+            "anthropic".to_string(),
+            "sk-test".to_string(),
+        )]));
+        let (service, mob_state) =
+            build_service_infrastructure(config, 8).expect("build runtime services");
+
+        let definition: meerkat_mob::MobDefinition = serde_json::from_value(json!({
+            "id": "mob-system-context",
+            "profiles": {
+                "worker": {
+                    "model": "claude-sonnet-4-5",
+                    "tools": {
+                        "comms": true
+                    }
+                }
+            }
+        }))
+        .expect("mob definition");
+        let mob_id = mob_state
+            .mob_create_definition(definition)
+            .await
+            .expect("create mob");
+
+        let spawn_results = mob_state
+            .mob_spawn_many(
+                &mob_id,
+                vec![SpawnMemberSpec {
+                    profile_name: meerkat_mob::ProfileName::from("worker"),
+                    meerkat_id: MeerkatId::from("worker-1"),
+                    initial_message: None,
+                    runtime_mode: Some(meerkat_mob::MobRuntimeMode::TurnDriven),
+                    backend: None,
+                    context: None,
+                    labels: None,
+                    resume_session_id: None,
+                    additional_instructions: None,
+                }],
+            )
+            .await
+            .expect("spawn worker");
+        let session_id = spawn_results[0]
+            .as_ref()
+            .expect("spawn result")
+            .session_id()
+            .cloned()
+            .expect("member session id");
+
+        let append = service
+            .append_system_context(
+                &session_id,
+                meerkat_core::AppendSystemContextRequest {
+                    text: "Prioritize coordinating with the lead.".to_string(),
+                    source: Some("mob".to_string()),
+                    idempotency_key: Some("ctx-worker-1".to_string()),
+                },
+            )
+            .await
+            .expect("append system context");
+
+        assert_eq!(
+            append.status,
+            meerkat_core::AppendSystemContextStatus::Staged
+        );
+
+        let exported = service
+            .export_session(&session_id)
+            .await
+            .expect("export member session");
+        let system_context_state = exported
+            .system_context_state()
+            .expect("system-context state metadata");
+
+        assert_eq!(system_context_state.pending.len(), 1);
+        assert_eq!(
+            system_context_state.pending[0].idempotency_key.as_deref(),
+            Some("ctx-worker-1")
+        );
+        assert_eq!(
+            system_context_state.pending[0].text,
+            "Prioritize coordinating with the lead."
         );
     }
 }

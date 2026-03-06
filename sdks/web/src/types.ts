@@ -86,6 +86,14 @@ export interface AppendSystemContextResult {
   status: 'staged' | 'duplicate';
 }
 
+/** Result of appending runtime system context to a mob member session. */
+export interface MobAppendSystemContextResult {
+  mob_id: string;
+  meerkat_id: string;
+  session_id: string;
+  status: 'applied' | 'staged' | 'duplicate';
+}
+
 /** Result of a turn execution. */
 export interface TurnResult {
   response: string;

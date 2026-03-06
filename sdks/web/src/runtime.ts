@@ -93,6 +93,11 @@ export interface WasmModule {
   mob_wire: (mobId: string, a: string, b: string) => Promise<void>;
   mob_unwire: (mobId: string, a: string, b: string) => Promise<void>;
   mob_list_members: (mobId: string) => Promise<string>;
+  mob_append_system_context: (
+    mobId: string,
+    meerkatId: string,
+    requestJson: string,
+  ) => Promise<string>;
   mob_send_message: (mobId: string, meerkatId: string, message: string) => Promise<void>;
   mob_respawn: (mobId: string, meerkatId: string, initialMessage?: string) => Promise<void>;
   mob_inject_and_subscribe: (mobId: string, meerkatId: string, message: string) => Promise<string>;
@@ -264,6 +269,7 @@ export class MeerkatRuntime {
       mob_wire: this.wasm.mob_wire,
       mob_unwire: this.wasm.mob_unwire,
       mob_list_members: this.wasm.mob_list_members,
+      mob_append_system_context: this.wasm.mob_append_system_context,
       mob_send_message: this.wasm.mob_send_message,
       mob_respawn: this.wasm.mob_respawn,
       mob_status: this.wasm.mob_status,

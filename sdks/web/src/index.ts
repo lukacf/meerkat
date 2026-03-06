@@ -10,6 +10,7 @@ export type {
   SessionConfig,
   AppendSystemContextOptions,
   AppendSystemContextResult,
+  MobAppendSystemContextResult,
   TurnOptions,
   TurnResult,
   Usage,

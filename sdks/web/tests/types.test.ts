@@ -10,6 +10,7 @@ import type {
   SessionConfig,
   AppendSystemContextOptions,
   AppendSystemContextResult,
+  MobAppendSystemContextResult,
   MobDefinition,
   SpawnSpec,
   AgentEvent,
@@ -57,6 +58,13 @@ const appendSystemContextOptions: AppendSystemContextOptions = {
 const appendSystemContextResult: AppendSystemContextResult = {
   handle: 1,
   status: 'staged',
+};
+
+const mobAppendSystemContextResult: MobAppendSystemContextResult = {
+  mob_id: 'mob-1',
+  meerkat_id: 'worker-1',
+  session_id: '00000000-0000-0000-0000-000000000001',
+  status: 'applied',
 };
 
 // ─── MobDefinition (matches Rust MobDefinition) ────────────────
@@ -136,6 +144,7 @@ void fullConfig;
 void sessionConfig;
 void appendSystemContextOptions;
 void appendSystemContextResult;
+void mobAppendSystemContextResult;
 void mobDef;
 void spawnSpec;
 void handleEvent;

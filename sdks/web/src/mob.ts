@@ -7,6 +7,8 @@ import type {
   MobLifecycleAction,
   FlowStatus,
   EventEnvelope,
+  AppendSystemContextOptions,
+  MobAppendSystemContextResult,
 } from './types.js';
 
 // WASM function signatures (bound at construction)
@@ -16,6 +18,11 @@ interface MobWasmBindings {
   mob_wire: (mobId: string, a: string, b: string) => Promise<void>;
   mob_unwire: (mobId: string, a: string, b: string) => Promise<void>;
   mob_list_members: (mobId: string) => Promise<string>;
+  mob_append_system_context: (
+    mobId: string,
+    meerkatId: string,
+    requestJson: string,
+  ) => Promise<string>;
   mob_send_message: (mobId: string, meerkatId: string, message: string) => Promise<void>;
   mob_respawn: (mobId: string, meerkatId: string, initialMessage?: string) => Promise<void>;
   mob_status: (mobId: string) => Promise<string>;
@@ -72,6 +79,23 @@ export class Mob {
   async listMembers(): Promise<MobMember[]> {
     const json = await this.bindings.mob_list_members(this.mobId);
     return JSON.parse(json) as MobMember[];
+  }
+
+  /** Stage runtime system context for a specific member session. */
+  async appendSystemContext(
+    meerkatId: string,
+    options: AppendSystemContextOptions,
+  ): Promise<MobAppendSystemContextResult> {
+    const json = await this.bindings.mob_append_system_context(
+      this.mobId,
+      meerkatId,
+      JSON.stringify({
+        text: options.text,
+        source: options.source,
+        idempotency_key: options.idempotencyKey,
+      }),
+    );
+    return JSON.parse(json) as MobAppendSystemContextResult;
   }
 
   /** Send a message to a specific agent. */

@@ -91,7 +91,7 @@ export interface MobAppendSystemContextResult {
   mob_id: string;
   meerkat_id: string;
   session_id: string;
-  status: 'applied' | 'staged' | 'duplicate';
+  status: 'staged' | 'duplicate';
 }
 
 /** Result of a turn execution. */

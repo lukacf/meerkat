@@ -64,7 +64,7 @@ const mobAppendSystemContextResult: MobAppendSystemContextResult = {
   mob_id: 'mob-1',
   meerkat_id: 'worker-1',
   session_id: '00000000-0000-0000-0000-000000000001',
-  status: 'applied',
+  status: 'staged',
 };
 
 // ─── MobDefinition (matches Rust MobDefinition) ────────────────

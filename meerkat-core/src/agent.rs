@@ -425,6 +425,9 @@ where
     pub pending_skill_references: Option<Vec<crate::skills::SkillKey>>,
     /// Per-interaction event tap for streaming events to subscribers.
     pub(crate) event_tap: crate::event_tap::EventTap,
+    /// Shared control state for runtime system-context appends.
+    pub(crate) system_context_state:
+        Arc<std::sync::Mutex<crate::session::SessionSystemContextState>>,
     /// Optional default event channel configured at build time.
     /// Used by run methods when no per-call event channel is provided.
     pub(crate) default_event_tx: Option<tokio::sync::mpsc::Sender<crate::event::AgentEvent>>,

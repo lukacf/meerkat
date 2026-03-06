@@ -33,14 +33,15 @@ use futures::StreamExt;
 use futures::stream::Stream;
 use meerkat::{
     AgentEvent, AgentFactory, FactoryAgentBuilder, LlmClient, OutputSchema,
-    PersistentSessionService, Session, SessionId, SessionService,
+    PersistentSessionService, Session, SessionId, SessionService, SessionServiceControlExt,
     encode_llm_client_override_for_service,
 };
 use meerkat_contracts::{SessionLocator, SkillsParams, format_session_ref};
 use meerkat_core::EventEnvelope;
 use meerkat_core::service::{
+    AppendSystemContextRequest as SvcAppendSystemContextRequest,
     CreateSessionRequest as SvcCreateSessionRequest, InitialTurnPolicy, SessionBuildOptions,
-    SessionError, StartTurnRequest as SvcStartTurnRequest,
+    SessionControlError, SessionError, StartTurnRequest as SvcStartTurnRequest,
 };
 use meerkat_core::{
     Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore, FileConfigStore,
@@ -461,6 +462,16 @@ pub struct ContinueSessionRequest {
     pub additional_instructions: Option<Vec<String>>,
 }
 
+/// Append runtime system context to a session.
+#[derive(Debug, Deserialize)]
+pub struct AppendSystemContextRequest {
+    pub text: String,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ListSessionsQuery {
     #[serde(default)]
@@ -505,6 +516,7 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions", get(list_sessions).post(create_session))
         .route("/sessions/{id}", get(get_session).delete(archive_session))
         .route("/sessions/{id}/interrupt", post(interrupt_session))
+        .route("/sessions/{id}/system_context", post(append_system_context))
         .route("/sessions/{id}/messages", post(continue_session))
         .route("/sessions/{id}/events", get(session_events))
         .route("/comms/send", post(comms_send))
@@ -1520,6 +1532,42 @@ async fn archive_session(
     }
 }
 
+fn system_context_error_to_api(err: SessionControlError) -> ApiError {
+    match err {
+        SessionControlError::Session(SessionError::NotFound { .. }) => {
+            ApiError::NotFound("Session not found".to_string())
+        }
+        SessionControlError::Session(other) => ApiError::Internal(other.to_string()),
+        SessionControlError::InvalidRequest { message } => ApiError::BadRequest(message),
+        SessionControlError::Conflict { key, .. } => ApiError::Conflict(format!(
+            "system-context idempotency conflict for key '{key}'"
+        )),
+    }
+}
+
+/// Append runtime system context to a session.
+async fn append_system_context(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<AppendSystemContextRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let session_id = resolve_session_id_for_state(&id, &state)?;
+    let svc_req = SvcAppendSystemContextRequest {
+        text: req.text,
+        source: req.source,
+        idempotency_key: req.idempotency_key,
+    };
+    let result = state
+        .session_service
+        .append_system_context(&session_id, svc_req)
+        .await
+        .map_err(system_context_error_to_api)?;
+    Ok(Json(json!({
+        "session_id": session_id.to_string(),
+        "status": result.status,
+    })))
+}
+
 /// Continue an existing session
 async fn continue_session(
     State(state): State<AppState>,
@@ -2123,8 +2171,42 @@ impl IntoResponse for ApiError {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use futures::stream;
+    use meerkat_client::{LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
     use std::path::PathBuf;
+    use std::pin::Pin;
     use tempfile::TempDir;
+
+    struct MockLlmClient;
+
+    #[async_trait]
+    impl LlmClient for MockLlmClient {
+        fn stream<'a>(
+            &'a self,
+            _request: &'a LlmRequest,
+        ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+            Box::pin(stream::iter(vec![
+                Ok(LlmEvent::TextDelta {
+                    delta: "ok".to_string(),
+                    meta: None,
+                }),
+                Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success {
+                        stop_reason: meerkat_core::StopReason::EndTurn,
+                    },
+                }),
+            ]))
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
 
     fn hooks_override_fixture() -> HookRunOverrides {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -2281,6 +2363,73 @@ mod tests {
         let req: CreateSessionRequest = serde_json::from_value(req_json).unwrap();
         assert!(!req.host_mode);
         assert!(req.comms_name.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_append_system_context_route_returns_staged_status() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let session_service = state.session_service.clone();
+        let create_result = session_service
+            .create_session(SvcCreateSessionRequest {
+                model: state.default_model.to_string(),
+                prompt: "Hello".to_string(),
+                system_prompt: None,
+                max_tokens: Some(state.max_tokens),
+                event_tx: None,
+                host_mode: false,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                build: Some(SessionBuildOptions {
+                    llm_client_override: state
+                        .llm_client_override
+                        .clone()
+                        .map(encode_llm_client_override_for_service),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("deferred session create should succeed");
+        let app = router(state);
+        let session_id = create_result.session_id.to_string();
+
+        let inject_request = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/sessions/{session_id}/system_context"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "text": "Coordinate with the orchestrator.",
+                    "source": "mob",
+                    "idempotency_key": "ctx-rest-test"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let inject_response = app.clone().oneshot(inject_request).await.unwrap();
+        let inject_status = inject_response.status();
+        let inject_body = inject_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        assert_eq!(
+            inject_status,
+            StatusCode::OK,
+            "append system context failed: {}",
+            String::from_utf8_lossy(&inject_body)
+        );
+        let inject_payload: serde_json::Value = serde_json::from_slice(&inject_body).unwrap();
+        assert_eq!(inject_payload["status"], "staged");
     }
 
     #[test]

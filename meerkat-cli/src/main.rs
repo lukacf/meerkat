@@ -12,8 +12,9 @@ use meerkat_core::AgentToolDispatcher;
 use meerkat_core::CommsRuntimeMode;
 use meerkat_core::config::CliOverrides;
 use meerkat_core::service::{
-    CreateSessionRequest, SessionBuildOptions, SessionError, SessionQuery, SessionService,
-    SessionServiceCommsExt, StartTurnRequest, TurnToolOverlay,
+    AppendSystemContextRequest, AppendSystemContextStatus, CreateSessionRequest,
+    SessionBuildOptions, SessionControlError, SessionError, SessionQuery, SessionService,
+    SessionServiceCommsExt, SessionServiceControlExt, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::{
     AgentEvent, EventEnvelope, RealmConfig, RealmLocator, RealmSelection, SchemaCompat,
@@ -794,6 +795,20 @@ enum SessionCommands {
         session_id: String,
     },
 
+    /// Append runtime system context to a session
+    InjectContext {
+        /// Session ID to update
+        session_id: String,
+        /// Context text to append
+        text: String,
+        /// Optional source label for provenance
+        #[arg(long)]
+        source: Option<String>,
+        /// Optional idempotency key (scoped per session)
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+
     /// Locate a session ID across realms under explicit state roots.
     Locate {
         /// Session locator (<session_id> or <realm_id>:<session_id>)
@@ -1486,6 +1501,21 @@ async fn main() -> anyhow::Result<ExitCode> {
             SessionCommands::Delete { session_id } => delete_session(&session_id, &cli_scope).await,
             SessionCommands::Interrupt { session_id } => {
                 interrupt_session(&session_id, &cli_scope).await
+            }
+            SessionCommands::InjectContext {
+                session_id,
+                text,
+                source,
+                idempotency_key,
+            } => {
+                inject_session_context(
+                    &session_id,
+                    &text,
+                    source.as_deref(),
+                    idempotency_key.as_deref(),
+                    &cli_scope,
+                )
+                .await
             }
             SessionCommands::Locate {
                 locator,
@@ -4077,6 +4107,56 @@ async fn interrupt_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()>
         }
         Err(e) => Err(anyhow::anyhow!("Failed to interrupt session: {e}")),
     }
+}
+
+fn system_context_error_to_anyhow(err: SessionControlError) -> anyhow::Error {
+    match err {
+        SessionControlError::Session(inner) => anyhow::anyhow!(inner),
+        SessionControlError::InvalidRequest { message } => anyhow::anyhow!(message),
+        SessionControlError::Conflict { key, .. } => {
+            anyhow::anyhow!("system-context idempotency conflict for key '{key}'")
+        }
+    }
+}
+
+/// Append runtime system context to a session.
+async fn inject_session_context(
+    id: &str,
+    text: &str,
+    source: Option<&str>,
+    idempotency_key: Option<&str>,
+    scope: &RuntimeScope,
+) -> anyhow::Result<()> {
+    let session_id = resolve_scoped_session_id(id, scope)?;
+
+    let (config, _) = load_config(scope).await?;
+    let service = build_cli_persistent_service(scope, config).await?;
+    let result = service
+        .append_system_context(
+            &session_id,
+            AppendSystemContextRequest {
+                text: text.to_string(),
+                source: source.map(ToOwned::to_owned),
+                idempotency_key: idempotency_key.map(ToOwned::to_owned),
+            },
+        )
+        .await
+        .map_err(system_context_error_to_anyhow)?;
+
+    println!("Updated session: {session_id}");
+    println!(
+        "Session Ref: {}",
+        format_session_ref(&scope.locator.realm_id, &session_id)
+    );
+    println!(
+        "Status: {}",
+        match result.status {
+            AppendSystemContextStatus::Applied => "applied",
+            AppendSystemContextStatus::Staged => "staged",
+            AppendSystemContextStatus::Duplicate => "duplicate",
+        }
+    );
+    Ok(())
 }
 
 #[cfg(feature = "comms")]

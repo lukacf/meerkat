@@ -1,10 +1,20 @@
-import type { TurnOptions, TurnResult, EventEnvelope } from './types.js';
+import type {
+  TurnOptions,
+  TurnResult,
+  EventEnvelope,
+  AppendSystemContextOptions,
+  AppendSystemContextResult,
+} from './types.js';
 
 // WASM function signatures (bound at construction)
 type StartTurnFn = (handle: number, prompt: string, options_json: string) => Promise<string>;
 type GetSessionStateFn = (handle: number) => string;
 type DestroySessionFn = (handle: number) => void;
 type PollEventsFn = (handle: number) => string;
+type AppendSystemContextFn = (
+  handle: number,
+  request_json: string,
+) => string;
 
 /** A direct (non-mob) agent session. */
 export class Session {
@@ -15,6 +25,7 @@ export class Session {
   private getStateFn: GetSessionStateFn;
   private destroyFn: DestroySessionFn;
   private pollFn: PollEventsFn;
+  private appendSystemContextFn: AppendSystemContextFn;
   private destroyed = false;
 
   /** @internal — use MeerkatRuntime.createSession() instead. */
@@ -24,12 +35,14 @@ export class Session {
     getStateFn: GetSessionStateFn,
     destroyFn: DestroySessionFn,
     pollFn: PollEventsFn,
+    appendSystemContextFn: AppendSystemContextFn,
   ) {
     this.handle = handle;
     this.startTurnFn = startTurnFn;
     this.getStateFn = getStateFn;
     this.destroyFn = destroyFn;
     this.pollFn = pollFn;
+    this.appendSystemContextFn = appendSystemContextFn;
   }
 
   /** Run a turn through the agent loop. */
@@ -56,6 +69,22 @@ export class Session {
     const json = this.pollFn(this.handle);
     const parsed: unknown = JSON.parse(json);
     return Array.isArray(parsed) ? (parsed as EventEnvelope[]) : [];
+  }
+
+  /** Stage runtime system context for application at the next LLM boundary. */
+  appendSystemContext(
+    options: AppendSystemContextOptions,
+  ): AppendSystemContextResult {
+    if (this.destroyed) throw new Error('Session has been destroyed');
+    const json = this.appendSystemContextFn(
+      this.handle,
+      JSON.stringify({
+        text: options.text,
+        source: options.source,
+        idempotency_key: options.idempotencyKey,
+      }),
+    );
+    return JSON.parse(json) as AppendSystemContextResult;
   }
 
   /** Destroy the session and release resources. */

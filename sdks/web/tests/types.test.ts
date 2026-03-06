@@ -8,6 +8,8 @@
 import type {
   RuntimeConfig,
   SessionConfig,
+  AppendSystemContextOptions,
+  AppendSystemContextResult,
   MobDefinition,
   SpawnSpec,
   AgentEvent,
@@ -44,6 +46,17 @@ const sessionConfig: SessionConfig = {
   anthropicBaseUrl: 'https://proxy.example.com/anthropic',
   labels: { env: 'test' },
   additionalInstructions: ['Be concise.'],
+};
+
+const appendSystemContextOptions: AppendSystemContextOptions = {
+  text: 'Coordinate with the orchestrator.',
+  source: 'mob',
+  idempotencyKey: 'ctx-1',
+};
+
+const appendSystemContextResult: AppendSystemContextResult = {
+  handle: 1,
+  status: 'staged',
 };
 
 // ─── MobDefinition (matches Rust MobDefinition) ────────────────
@@ -121,6 +134,8 @@ const actions: MobLifecycleAction[] = ['stop', 'resume', 'complete', 'destroy'];
 void minimalConfig;
 void fullConfig;
 void sessionConfig;
+void appendSystemContextOptions;
+void appendSystemContextResult;
 void mobDef;
 void spawnSpec;
 void handleEvent;

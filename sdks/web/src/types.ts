@@ -70,6 +70,22 @@ export interface TurnOptions {
   additionalInstructions?: string[];
 }
 
+/** Runtime system-context append request. */
+export interface AppendSystemContextOptions {
+  /** Instruction text injected at the next LLM boundary. */
+  text: string;
+  /** Optional source label for provenance/debugging. */
+  source?: string;
+  /** Optional per-session idempotency key. */
+  idempotencyKey?: string;
+}
+
+/** Result of a runtime system-context append request. */
+export interface AppendSystemContextResult {
+  handle: number;
+  status: 'staged' | 'duplicate';
+}
+
 /** Result of a turn execution. */
 export interface TurnResult {
   response: string;

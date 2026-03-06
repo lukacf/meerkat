@@ -162,7 +162,7 @@ impl McpRouterAdapter {
                 );
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
         all_notices
     }
@@ -257,8 +257,14 @@ impl AgentToolDispatcher for McpRouterAdapter {
 mod tests {
     use super::*;
     use crate::McpRouter;
+    use crate::connection::McpConnection;
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    fn async_connect_test_timeout() -> Duration {
+        Duration::from_secs((McpConnection::DEFAULT_CONNECT_TIMEOUT_SECS as u64) + 5)
+    }
 
     fn test_server_path() -> PathBuf {
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -300,7 +306,7 @@ mod tests {
 
         let adapter = McpRouterAdapter::new(router);
 
-        let notices = adapter.wait_until_ready(Duration::from_secs(5)).await;
+        let notices = adapter.wait_until_ready(async_connect_test_timeout()).await;
 
         // Server should have connected successfully.
         assert!(

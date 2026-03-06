@@ -24,13 +24,15 @@ use meerkat_client::LlmClient;
 use meerkat_core::EventEnvelope;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{
-    CreateSessionRequest, SessionError, SessionQuery, SessionService, StartTurnRequest,
+    AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
+    SessionControlError, SessionError, SessionQuery, SessionService, SessionServiceControlExt,
+    StartTurnRequest,
 };
 use meerkat_core::skills::{SkillError, SourceIdentityRegistry};
 use meerkat_core::types::{RunResult, SessionId};
 #[cfg(feature = "mcp")]
 use meerkat_core::{AgentToolDispatcher, ToolGateway};
-use meerkat_core::{Config, ConfigStore, Session};
+use meerkat_core::{Config, ConfigStore, Session, SessionSystemContextState};
 #[cfg(all(test, feature = "mcp"))]
 use meerkat_core::{ToolConfigChangeOperation, ToolConfigChangedPayload};
 use tokio::sync::{RwLock, mpsc};
@@ -92,8 +94,18 @@ pub struct SessionInfo {
 
 /// Staged session data: build config + metadata not yet materialized in the service.
 struct PendingSession {
-    build_config: AgentBuildConfig,
+    phase: PendingSessionPhase,
     labels: Option<BTreeMap<String, String>>,
+}
+
+enum PendingSessionPhase {
+    Staged {
+        build_config: Box<AgentBuildConfig>,
+    },
+    Promoting {
+        starting_system_context_state: SessionSystemContextState,
+        current_system_context_state: SessionSystemContextState,
+    },
 }
 
 // FactoryAgent and FactoryAgentBuilder are imported from meerkat::service_factory.
@@ -290,7 +302,9 @@ impl SessionRuntime {
             pending.insert(
                 session_id.clone(),
                 PendingSession {
-                    build_config,
+                    phase: PendingSessionPhase::Staged {
+                        build_config: Box::new(build_config),
+                    },
                     labels,
                 },
             );
@@ -321,14 +335,41 @@ impl SessionRuntime {
         // Check if this is a pending (not-yet-materialized) session.
         let pending_session = {
             let mut pending = self.pending.write().await;
-            pending.swap_remove(session_id)
+            match pending.get_mut(session_id) {
+                Some(pending_session) => {
+                    let starting_system_context_state = match &pending_session.phase {
+                        PendingSessionPhase::Staged { build_config } => build_config
+                            .resume_session
+                            .as_ref()
+                            .and_then(Session::system_context_state)
+                            .unwrap_or_default(),
+                        PendingSessionPhase::Promoting { .. } => {
+                            return Err(RpcError {
+                                code: error::SESSION_BUSY,
+                                message: format!(
+                                    "session {session_id} is already being materialized"
+                                ),
+                                data: None,
+                            });
+                        }
+                    };
+                    let phase = std::mem::replace(
+                        &mut pending_session.phase,
+                        PendingSessionPhase::Promoting {
+                            starting_system_context_state: starting_system_context_state.clone(),
+                            current_system_context_state: starting_system_context_state,
+                        },
+                    );
+                    let PendingSessionPhase::Staged { build_config } = phase else {
+                        unreachable!("phase was checked before replacement");
+                    };
+                    Some((*build_config, pending_session.labels.clone()))
+                }
+                None => None,
+            }
         };
 
-        if let Some(PendingSession {
-            mut build_config,
-            labels,
-        }) = pending_session
-        {
+        if let Some((mut build_config, labels)) = pending_session {
             // Inject default LLM client if the caller didn't provide one.
             if build_config.llm_client_override.is_none()
                 && let Some(ref client) = self.default_llm_client
@@ -352,25 +393,68 @@ impl SessionRuntime {
             build.config_generation = build.config_generation.or(runtime_generation);
 
             let req = CreateSessionRequest {
-                model: build_config.model,
+                model: build_config.model.clone(),
                 prompt: turn_prompt,
-                system_prompt: build_config.system_prompt,
+                system_prompt: build_config.system_prompt.clone(),
                 max_tokens: build_config.max_tokens,
                 event_tx: Some(event_tx),
                 host_mode: build_config.host_mode,
                 skill_references: skill_references.clone(),
                 initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
                 build: Some(build),
-                labels,
+                labels: labels.clone(),
             };
 
-            let result = self
-                .service
-                .create_session(req)
-                .await
-                .map_err(session_error_to_rpc)?;
-
-            return Ok(result);
+            match self.service.create_session(req).await {
+                Ok(result) => {
+                    if let Some((starting_system_context_state, current_system_context_state)) =
+                        self.take_promoting_system_context_state(session_id).await
+                        && let Err(err) = self
+                            .replay_promoted_system_context(
+                                session_id,
+                                &starting_system_context_state,
+                                &current_system_context_state,
+                            )
+                            .await
+                    {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            error = %err.message,
+                            "failed to replay promoted system-context state after create_session; preserving completed turn result"
+                        );
+                    }
+                    return Ok(result);
+                }
+                Err(err) => {
+                    if let Some((_starting_system_context_state, current_system_context_state)) =
+                        self.take_promoting_system_context_state(session_id).await
+                    {
+                        let session = build_config
+                            .resume_session
+                            .get_or_insert_with(|| Session::with_id(session_id.clone()));
+                        session
+                            .set_system_context_state(current_system_context_state)
+                            .map_err(|serialize_err| RpcError {
+                                code: error::INTERNAL_ERROR,
+                                message: format!(
+                                    "failed to serialize system-context state: {serialize_err}"
+                                ),
+                                data: None,
+                            })?;
+                        let mut pending = self.pending.write().await;
+                        pending.insert(
+                            session_id.clone(),
+                            PendingSession {
+                                phase: PendingSessionPhase::Staged {
+                                    build_config: Box::new(build_config),
+                                },
+                                labels,
+                            },
+                        );
+                    }
+                    return Err(session_error_to_rpc(err));
+                }
+            }
         }
 
         // Normal turn on an existing session.
@@ -387,6 +471,55 @@ impl SessionRuntime {
             .start_turn(session_id, req)
             .await
             .map_err(session_error_to_rpc)
+    }
+
+    async fn take_promoting_system_context_state(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<(SessionSystemContextState, SessionSystemContextState)> {
+        let mut pending = self.pending.write().await;
+        let pending_session = pending.swap_remove(session_id)?;
+        match pending_session.phase {
+            PendingSessionPhase::Promoting {
+                starting_system_context_state,
+                current_system_context_state,
+            } => Some((starting_system_context_state, current_system_context_state)),
+            PendingSessionPhase::Staged { build_config } => {
+                pending.insert(
+                    session_id.clone(),
+                    PendingSession {
+                        phase: PendingSessionPhase::Staged { build_config },
+                        labels: pending_session.labels,
+                    },
+                );
+                None
+            }
+        }
+    }
+
+    async fn replay_promoted_system_context(
+        &self,
+        session_id: &SessionId,
+        starting_state: &SessionSystemContextState,
+        current_state: &SessionSystemContextState,
+    ) -> Result<(), RpcError> {
+        for pending in &current_state.pending {
+            if starting_state.pending.contains(pending) {
+                continue;
+            }
+            self.service
+                .append_system_context(
+                    session_id,
+                    AppendSystemContextRequest {
+                        text: pending.text.clone(),
+                        source: pending.source.clone(),
+                        idempotency_key: pending.idempotency_key.clone(),
+                    },
+                )
+                .await
+                .map_err(system_context_error_to_rpc)?;
+        }
+        Ok(())
     }
 
     /// Interrupt a running turn on the given session.
@@ -409,6 +542,54 @@ impl SessionRuntime {
         }
     }
 
+    /// Append runtime system context to a pending, live, or persisted session.
+    pub async fn append_system_context(
+        &self,
+        session_id: &SessionId,
+        req: AppendSystemContextRequest,
+    ) -> Result<AppendSystemContextResult, RpcError> {
+        {
+            let mut pending = self.pending.write().await;
+            if let Some(pending_session) = pending.get_mut(session_id) {
+                let status = match &mut pending_session.phase {
+                    PendingSessionPhase::Staged { build_config } => {
+                        let session = build_config
+                            .resume_session
+                            .get_or_insert_with(|| Session::with_id(session_id.clone()));
+                        let mut state = session.system_context_state().unwrap_or_default();
+                        let status = state
+                            .stage_append(&req, meerkat_core::time_compat::SystemTime::now())
+                            .map_err(|err| {
+                                system_context_error_to_rpc(err.into_control_error(session_id))
+                            })?;
+                        session
+                            .set_system_context_state(state)
+                            .map_err(|err| RpcError {
+                                code: error::INTERNAL_ERROR,
+                                message: format!("failed to serialize system-context state: {err}"),
+                                data: None,
+                            })?;
+                        status
+                    }
+                    PendingSessionPhase::Promoting {
+                        current_system_context_state,
+                        ..
+                    } => current_system_context_state
+                        .stage_append(&req, meerkat_core::time_compat::SystemTime::now())
+                        .map_err(|err| {
+                            system_context_error_to_rpc(err.into_control_error(session_id))
+                        })?,
+                };
+                return Ok(AppendSystemContextResult { status });
+            }
+        }
+
+        self.service
+            .append_system_context(session_id, req)
+            .await
+            .map_err(system_context_error_to_rpc)
+    }
+
     /// Get the current state of a session, or `None` if the session does not exist.
     pub async fn session_state(&self, session_id: &SessionId) -> Option<SessionInfo> {
         // Check pending sessions first.
@@ -417,7 +598,10 @@ impl SessionRuntime {
             if let Some(ps) = pending.get(session_id) {
                 return Some(SessionInfo {
                     session_id: session_id.clone(),
-                    state: SessionState::Idle,
+                    state: match &ps.phase {
+                        PendingSessionPhase::Staged { .. } => SessionState::Idle,
+                        PendingSessionPhase::Promoting { .. } => SessionState::Running,
+                    },
                     labels: ps.labels.clone().unwrap_or_default(),
                 });
             }
@@ -491,7 +675,10 @@ impl SessionRuntime {
                 }
                 result.push(SessionInfo {
                     session_id: session_id.clone(),
-                    state: SessionState::Idle,
+                    state: match &ps.phase {
+                        PendingSessionPhase::Staged { .. } => SessionState::Idle,
+                        PendingSessionPhase::Promoting { .. } => SessionState::Running,
+                    },
                     labels: pending_labels.cloned().unwrap_or_default(),
                 });
             }
@@ -902,6 +1089,22 @@ fn session_error_to_rpc(err: SessionError) -> RpcError {
     }
 }
 
+fn system_context_error_to_rpc(err: SessionControlError) -> RpcError {
+    match err {
+        SessionControlError::Session(session_err) => session_error_to_rpc(session_err),
+        SessionControlError::InvalidRequest { message } => RpcError {
+            code: error::INVALID_PARAMS,
+            message,
+            data: None,
+        },
+        SessionControlError::Conflict { key, .. } => RpcError {
+            code: error::INVALID_PARAMS,
+            message: format!("system-context idempotency conflict for key '{key}'"),
+            data: None,
+        },
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1118,6 +1321,71 @@ mod tests {
             result.text.contains("Hello from mock"),
             "Expected mock response text, got: {}",
             result.text
+        );
+    }
+
+    #[tokio::test]
+    async fn append_system_context_survives_pending_session_promotion() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
+
+        let session_id = runtime
+            .create_session(slow_build_config(200), None)
+            .await
+            .unwrap();
+
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let runtime_clone = Arc::clone(&runtime);
+        let sid_clone = session_id.clone();
+        let turn_handle = tokio::spawn(async move {
+            runtime_clone
+                .start_turn(&sid_clone, "Hello".to_string(), event_tx, None, None, None)
+                .await
+        });
+
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+        loop {
+            let is_promoting = {
+                let pending = runtime.pending.read().await;
+                matches!(
+                    pending.get(&session_id).map(|ps| &ps.phase),
+                    Some(PendingSessionPhase::Promoting { .. })
+                )
+            };
+            if is_promoting {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "session did not enter the promoting state before deadline"
+            );
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+
+        let append_req = AppendSystemContextRequest {
+            text: "Coordinate with the orchestrator.".to_string(),
+            source: Some("mob".to_string()),
+            idempotency_key: Some("ctx-promotion".to_string()),
+        };
+        let append_result = runtime
+            .append_system_context(&session_id, append_req.clone())
+            .await
+            .expect("append during promotion should succeed");
+        assert_eq!(
+            append_result.status,
+            meerkat_core::AppendSystemContextStatus::Staged
+        );
+
+        let result = turn_handle.await.unwrap().unwrap();
+        assert!(result.text.contains("Slow response"));
+
+        let duplicate = runtime
+            .append_system_context(&session_id, append_req)
+            .await
+            .expect("replayed append should be visible after materialization");
+        assert_eq!(
+            duplicate.status,
+            meerkat_core::AppendSystemContextStatus::Duplicate
         );
     }
 

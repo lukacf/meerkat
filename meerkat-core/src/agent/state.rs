@@ -125,6 +125,10 @@ where
                 return Ok(self.build_result(turn_count, tool_call_count).await);
             }
 
+            if self.state == LoopState::CallingLlm {
+                let _applied_system_contexts = self.apply_pending_system_context_boundary();
+            }
+
             // Check compaction trigger (before CallingLlm)
             if self.state == LoopState::CallingLlm
                 && let Some(ref compactor) = self.compactor

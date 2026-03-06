@@ -164,6 +164,74 @@ where
         &self.event_tap
     }
 
+    /// Get shared runtime system-context control state.
+    pub fn system_context_state(
+        &self,
+    ) -> Arc<std::sync::Mutex<crate::session::SessionSystemContextState>> {
+        Arc::clone(&self.system_context_state)
+    }
+
+    /// Clone the current session with the latest shared system-context state merged into metadata.
+    pub fn session_with_system_context_state(&self) -> Session {
+        let mut session = self.session.clone();
+        let state = match self.system_context_state.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => {
+                tracing::warn!("system-context state lock poisoned while cloning session");
+                poisoned.into_inner().clone()
+            }
+        };
+        if let Err(err) = session.set_system_context_state(state) {
+            tracing::warn!(error = %err, "failed to serialize system-context state into session");
+        }
+        session
+    }
+
+    /// Synchronize the shared system-context state into the in-memory session metadata.
+    pub(crate) fn sync_system_context_state_to_session(&mut self) {
+        let state = match self.system_context_state.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => {
+                tracing::warn!("system-context state lock poisoned while syncing session");
+                poisoned.into_inner().clone()
+            }
+        };
+        if let Err(err) = self.session.set_system_context_state(state) {
+            tracing::warn!(error = %err, "failed to serialize system-context state into session");
+        }
+    }
+
+    /// Apply all pending system-context appends at the current LLM boundary.
+    pub(crate) fn apply_pending_system_context_boundary(&mut self) -> usize {
+        let pending = {
+            let mut state = match self.system_context_state.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    tracing::warn!("system-context state lock poisoned while applying boundary");
+                    poisoned.into_inner()
+                }
+            };
+            if state.pending.is_empty() {
+                return 0;
+            }
+            let pending = state.pending.clone();
+            state.mark_pending_applied();
+            pending
+        };
+
+        self.session.append_system_context_blocks(&pending);
+        self.sync_system_context_state_to_session();
+        pending.len()
+    }
+
+    /// Persist the current session through the configured checkpointer after syncing control state.
+    pub(crate) async fn checkpoint_current_session(&mut self) {
+        self.sync_system_context_state_to_session();
+        if let Some(ref cp) = self.checkpointer {
+            cp.checkpoint(&self.session).await;
+        }
+    }
+
     /// Spawn a new sub-agent with minimal context
     ///
     /// The sub-agent runs independently with its own budget and tool access.

@@ -11,6 +11,7 @@
 
 use crate::Provider;
 use crate::peer_meta::PeerMeta;
+use crate::service::AppendSystemContextRequest;
 use crate::time_compat::SystemTime;
 use crate::types::{Message, SessionId, Usage};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -94,6 +95,140 @@ impl<'de> Deserialize<'de> for Session {
 
 fn default_version() -> u32 {
     SESSION_VERSION
+}
+
+/// Metadata key used to store durable system-context control state.
+pub const SESSION_SYSTEM_CONTEXT_STATE_KEY: &str = "session_system_context_state";
+
+/// Canonical separator between appended runtime system-context blocks.
+pub const SYSTEM_CONTEXT_SEPARATOR: &str = "\n\n---\n\n";
+
+/// Durable control state for runtime system-context append requests.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionSystemContextState {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending: Vec<PendingSystemContextAppend>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub seen: std::collections::BTreeMap<String, SeenSystemContextKey>,
+}
+
+/// Pending append request accepted by the control plane but not yet applied at an LLM boundary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct PendingSystemContextAppend {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    pub accepted_at: SystemTime,
+}
+
+/// Seen idempotency-key entry for system-context append requests.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct SeenSystemContextKey {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    pub state: SeenSystemContextState,
+}
+
+/// Lifecycle state for an accepted idempotency key.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SeenSystemContextState {
+    Pending,
+    Applied,
+}
+
+impl SessionSystemContextState {
+    /// Stage an append request, enforcing per-session idempotency.
+    pub fn stage_append(
+        &mut self,
+        req: &AppendSystemContextRequest,
+        accepted_at: SystemTime,
+    ) -> Result<crate::service::AppendSystemContextStatus, SystemContextStageError> {
+        let text = req.text.trim();
+        if text.is_empty() {
+            return Err(SystemContextStageError::InvalidRequest(
+                "system context text must not be empty".to_string(),
+            ));
+        }
+
+        if let Some(key) = req.idempotency_key.as_ref() {
+            match self.seen.get(key) {
+                Some(existing)
+                    if existing.text == text
+                        && existing.source.as_deref() == req.source.as_deref() =>
+                {
+                    return Ok(crate::service::AppendSystemContextStatus::Duplicate);
+                }
+                Some(existing) => {
+                    return Err(SystemContextStageError::Conflict {
+                        key: key.clone(),
+                        existing_text: existing.text.clone(),
+                        existing_source: existing.source.clone(),
+                    });
+                }
+                None => {}
+            }
+        }
+
+        let append = PendingSystemContextAppend {
+            text: text.to_string(),
+            source: req.source.clone(),
+            idempotency_key: req.idempotency_key.clone(),
+            accepted_at,
+        };
+        if let Some(key) = req.idempotency_key.as_ref() {
+            self.seen.insert(
+                key.clone(),
+                SeenSystemContextKey {
+                    text: append.text.clone(),
+                    source: append.source.clone(),
+                    state: SeenSystemContextState::Pending,
+                },
+            );
+        }
+        self.pending.push(append);
+        Ok(crate::service::AppendSystemContextStatus::Staged)
+    }
+
+    /// Mark all currently-pending appends as applied and clear the pending queue.
+    pub fn mark_pending_applied(&mut self) {
+        for pending in &self.pending {
+            if let Some(key) = pending.idempotency_key.as_ref()
+                && let Some(seen) = self.seen.get_mut(key)
+            {
+                seen.state = SeenSystemContextState::Applied;
+            }
+        }
+        self.pending.clear();
+    }
+}
+
+/// Failure when staging a system-context append request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SystemContextStageError {
+    InvalidRequest(String),
+    Conflict {
+        key: String,
+        existing_text: String,
+        existing_source: Option<String>,
+    },
+}
+
+fn render_system_context_block(append: &PendingSystemContextAppend) -> String {
+    let mut rendered = String::from("[Runtime System Context]");
+    if let Some(source) = &append.source {
+        rendered.push_str("\nsource: ");
+        rendered.push_str(source);
+    }
+    rendered.push_str("\n\n");
+    rendered.push_str(&append.text);
+    rendered
 }
 
 impl Session {
@@ -211,6 +346,27 @@ impl Session {
         self.updated_at = SystemTime::now();
     }
 
+    /// Append one or more runtime system-context blocks to the canonical system prompt.
+    pub fn append_system_context_blocks(&mut self, appends: &[PendingSystemContextAppend]) {
+        if appends.is_empty() {
+            return;
+        }
+
+        let rendered = appends
+            .iter()
+            .map(render_system_context_block)
+            .collect::<Vec<_>>()
+            .join(SYSTEM_CONTEXT_SEPARATOR);
+
+        let next = match self.messages.first() {
+            Some(Message::System(sys)) if !sys.content.is_empty() => {
+                format!("{}{}{}", sys.content, SYSTEM_CONTEXT_SEPARATOR, rendered)
+            }
+            _ => rendered,
+        };
+        self.set_system_prompt(next);
+    }
+
     /// Get the last assistant message text content.
     pub fn last_assistant_text(&self) -> Option<String> {
         self.messages.iter().rev().find_map(|m| match m {
@@ -270,6 +426,23 @@ impl Session {
     pub fn session_metadata(&self) -> Option<SessionMetadata> {
         self.metadata
             .get(SESSION_METADATA_KEY)
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+    }
+
+    /// Store durable system-context control state in the session metadata map.
+    pub fn set_system_context_state(
+        &mut self,
+        state: SessionSystemContextState,
+    ) -> Result<(), serde_json::Error> {
+        let value = serde_json::to_value(state)?;
+        self.set_metadata(SESSION_SYSTEM_CONTEXT_STATE_KEY, value);
+        Ok(())
+    }
+
+    /// Load durable system-context control state from the session metadata map.
+    pub fn system_context_state(&self) -> Option<SessionSystemContextState> {
+        self.metadata
+            .get(SESSION_SYSTEM_CONTEXT_STATE_KEY)
             .and_then(|value| serde_json::from_value(value.clone()).ok())
     }
 

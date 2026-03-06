@@ -140,7 +140,13 @@ impl SessionAgent for FactoryAgent {
     }
 
     fn session_clone(&self) -> Session {
-        self.agent.session().clone()
+        self.agent.session_with_system_context_state()
+    }
+
+    fn system_context_state(
+        &self,
+    ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
+        self.agent.system_context_state()
     }
 
     // BRIDGE(M6→M12): Legacy injector accessor, routed through comms_runtime.

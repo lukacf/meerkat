@@ -7,6 +7,7 @@ pub mod transport;
 
 use crate::event::EventEnvelope;
 use crate::event::{AgentEvent, ScopedAgentEvent, StreamScopeFrame};
+use crate::session::SystemContextStageError;
 use crate::time_compat::SystemTime;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -73,6 +74,48 @@ impl SessionError {
             Self::NotRunning { .. } => "SESSION_NOT_RUNNING",
             Self::Store(_) => "SESSION_STORE_ERROR",
             Self::Agent(_) => "AGENT_ERROR",
+        }
+    }
+}
+
+/// Errors returned by session control-plane mutation methods.
+#[derive(Debug, thiserror::Error)]
+pub enum SessionControlError {
+    /// A lifecycle/session-store error occurred while handling the control request.
+    #[error(transparent)]
+    Session(#[from] SessionError),
+
+    /// The control request was malformed.
+    #[error("invalid system-context request: {message}")]
+    InvalidRequest { message: String },
+
+    /// The idempotency key was replayed with different request content.
+    #[error(
+        "system-context idempotency conflict on session {id}: key '{key}' already maps to different content"
+    )]
+    Conflict { id: SessionId, key: String },
+}
+
+impl SessionControlError {
+    /// Return a stable error code string for wire formats.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Session(err) => err.code(),
+            Self::InvalidRequest { .. } => "INVALID_PARAMS",
+            Self::Conflict { .. } => "SESSION_SYSTEM_CONTEXT_CONFLICT",
+        }
+    }
+}
+
+impl SystemContextStageError {
+    /// Convert a stage-time state conflict into a surface-level control error.
+    pub fn into_control_error(self, id: &SessionId) -> SessionControlError {
+        match self {
+            Self::InvalidRequest(message) => SessionControlError::InvalidRequest { message },
+            Self::Conflict { key, .. } => SessionControlError::Conflict {
+                id: id.clone(),
+                key,
+            },
         }
     }
 }
@@ -255,6 +298,31 @@ pub struct StartTurnRequest {
     pub additional_instructions: Option<Vec<String>>,
 }
 
+/// Request to append runtime system context to an existing session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppendSystemContextRequest {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
+/// Result of appending runtime system context to a session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppendSystemContextResult {
+    pub status: AppendSystemContextStatus,
+}
+
+/// Outcome of an append-system-context request.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AppendSystemContextStatus {
+    Applied,
+    Staged,
+    Duplicate,
+}
+
 /// Ephemeral per-turn tool overlay for flow-dispatched turns.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnToolOverlay {
@@ -391,6 +459,25 @@ pub trait SessionServiceCommsExt: SessionService {
             .await
             .and_then(|runtime| runtime.event_injector())
     }
+}
+
+/// Optional control-plane extension for `SessionService`.
+///
+/// Keeps the base lifecycle contract minimal while exposing first-class
+/// session mutation operations shared across external surfaces.
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+pub trait SessionServiceControlExt: SessionService {
+    /// Append runtime system context to a session.
+    ///
+    /// The request is idempotent per `(session_id, idempotency_key)`. When a
+    /// turn is active, implementations may stage the append for application at
+    /// the next LLM boundary rather than mutating in-flight request state.
+    async fn append_system_context(
+        &self,
+        id: &SessionId,
+        req: AppendSystemContextRequest,
+    ) -> Result<AppendSystemContextResult, SessionControlError>;
 }
 
 /// Extension trait for `Arc<dyn SessionService>` to allow calling methods directly.

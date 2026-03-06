@@ -190,6 +190,9 @@ impl AgentBuilder {
         S: AgentSessionStore + ?Sized,
     {
         let mut session = self.session.unwrap_or_default();
+        let system_context_state = Arc::new(std::sync::Mutex::new(
+            session.system_context_state().unwrap_or_default(),
+        ));
 
         // Apply system prompt: use builder's prompt if set, otherwise compose default for new sessions
         let has_system_prompt = matches!(session.messages().first(), Some(Message::System(_)));
@@ -253,6 +256,7 @@ impl AgentBuilder {
             event_tap: self
                 .event_tap
                 .unwrap_or_else(crate::event_tap::new_event_tap),
+            system_context_state,
             default_event_tx: self.default_event_tx,
             default_scoped_event_tx: self.default_scoped_event_tx,
             default_scope_path: self.default_scope_path,

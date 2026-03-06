@@ -122,11 +122,16 @@ pub use schema::{
     CompiledSchema, MeerkatSchema, SchemaCompat, SchemaError, SchemaFormat, SchemaWarning,
 };
 pub use service::{
-    CreateSessionRequest, SessionBuildOptions, SessionError, SessionInfo, SessionQuery,
-    SessionService, SessionServiceCommsExt, SessionSummary, SessionUsage, SessionView,
-    StartTurnRequest, TurnToolOverlay,
+    AppendSystemContextRequest, AppendSystemContextResult, AppendSystemContextStatus,
+    CreateSessionRequest, SessionBuildOptions, SessionControlError, SessionError, SessionInfo,
+    SessionQuery, SessionService, SessionServiceCommsExt, SessionServiceControlExt, SessionSummary,
+    SessionUsage, SessionView, StartTurnRequest, TurnToolOverlay,
 };
-pub use session::{SESSION_VERSION, Session, SessionMeta, SessionMetadata, SessionTooling};
+pub use session::{
+    PendingSystemContextAppend, SESSION_SYSTEM_CONTEXT_STATE_KEY, SESSION_VERSION,
+    SYSTEM_CONTEXT_SEPARATOR, SeenSystemContextKey, SeenSystemContextState, Session, SessionMeta,
+    SessionMetadata, SessionSystemContextState, SessionTooling, SystemContextStageError,
+};
 pub use state::LoopState;
 pub use sub_agent::{SubAgentCommsInfo, SubAgentCompletion, SubAgentInfo, SubAgentManager};
 pub use tool_scope::{

@@ -220,23 +220,10 @@ export function buildOfficeDefinition(model: string): object {
   const skills: Record<string, { source: string; content: string }> = {};
   const profiles: Record<string, object> = {};
 
-  const profileNames: Record<AgentId, string> = {
-    triage: "triage",
-    "it-dept": "it",
-    "hr-dept": "hr",
-    facilities: "facilities",
-    finance: "finance",
-    "alex-pa": "pa-alex",
-    "sam-pa": "pa-sam",
-    "pat-pa": "pa-pat",
-    gate: "gate",
-    archivist: "archivist",
-  };
-
   for (const id of AGENT_IDS) {
     const skillName = `${id}-role`;
     skills[skillName] = { source: "inline", content: SKILLS[id] };
-    profiles[profileNames[id]] = {
+    profiles[PROFILE_NAMES[id]] = {
       model,
       runtime_mode: "autonomous_host",
       tools: { comms: true },

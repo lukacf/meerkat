@@ -115,7 +115,7 @@ export function drainAllEvents(mod: RuntimeModule, subs: AgentSub[]): { events: 
                 showSpeechBubble(sub.agentId, preview, 5000);
                 onMessage?.(sub.agentId, recipientId, body, preview, "routing");
               }
-            } catch { /* parse error */ }
+            } catch (e) { console.debug("[events] parse error:", e); }
           }
 
           // ── Fire-and-forget: request_human_approval ──
@@ -129,7 +129,7 @@ export function drainAllEvents(mod: RuntimeModule, subs: AgentSub[]): { events: 
                 risk_level: args.risk_level,
                 proposed_by: args.proposed_by,
               });
-            } catch { /* parse error */ }
+            } catch (e) { console.debug("[events] parse error:", e); }
           }
 
           // ── Fire-and-forget: upsert_record ──
@@ -138,7 +138,7 @@ export function drainAllEvents(mod: RuntimeModule, subs: AgentSub[]): { events: 
               const args = typeof payload.args === "string" ? JSON.parse(payload.args) : payload.args;
               console.log("[RECORD] Tool call from", sub.agentId, args);
               onUpsertRecord?.(args);
-            } catch { /* parse error */ }
+            } catch (e) { console.debug("[events] parse error:", e); }
           }
 
           // ── Fire-and-forget: revoke_access / restore_access ──
@@ -147,14 +147,14 @@ export function drainAllEvents(mod: RuntimeModule, subs: AgentSub[]): { events: 
               const args = typeof payload.args === "string" ? JSON.parse(payload.args) : payload.args;
               console.log("[ACCESS CONTROL] revoke", args);
               onAccessControl?.("revoke", args.target, args.reason || "");
-            } catch { /* parse error */ }
+            } catch (e) { console.debug("[events] parse error:", e); }
           }
           if (toolName === "restore_access") {
             try {
               const args = typeof payload.args === "string" ? JSON.parse(payload.args) : payload.args;
               console.log("[ACCESS CONTROL] restore", args);
               onAccessControl?.("restore", args.target, args.reason || "");
-            } catch { /* parse error */ }
+            } catch (e) { console.debug("[events] parse error:", e); }
           }
         }
 
@@ -171,7 +171,7 @@ export function drainAllEvents(mod: RuntimeModule, subs: AgentSub[]): { events: 
               onMessage?.(sub.agentId, null, result.headline, result.headline, result.category || "response");
 
             }
-          } catch { /* not JSON */ }
+          } catch (e) { console.debug("[events] JSON parse:", e); }
         }
 
         // ── Run failed ──
@@ -196,7 +196,7 @@ export function drainAllEvents(mod: RuntimeModule, subs: AgentSub[]): { events: 
           setAgentState(sub.agentId, "on_call");
         }
       }
-    } catch { /* poll error */ }
+    } catch (e) { console.debug("[events] poll error:", e); }
   }
 
   return { events, errors };

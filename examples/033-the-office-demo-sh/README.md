@@ -1,4 +1,4 @@
-# 034 — The Office (WASM Multi-Agent Demo)
+# 033 — The Office (WASM Multi-Agent Demo)
 
 10 autonomous AI agents run an office together. Events arrive at the mail room, get triaged and routed to department specialists, personal assistants, and an archivist — all visualized as a pixel art office with phone call arcs, speech bubbles, and a knowledge graph.
 

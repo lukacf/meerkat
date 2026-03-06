@@ -607,8 +607,23 @@ fn strip_gemini_function_parameters_unsupported_keywords(value: &mut Value, dept
                 obj.remove("additionalProperties");
             }
 
-            for child in obj.values_mut() {
-                strip_gemini_function_parameters_unsupported_keywords(child, depth + 1);
+            for (key, child) in obj.iter_mut() {
+                if key == "properties" {
+                    // The `properties` value is a map of property_name → schema.
+                    // Keys are user-defined field names (e.g. "title", "id"), NOT
+                    // JSON Schema keywords. Only recurse into each property's
+                    // schema without stripping keys from the map itself.
+                    if let Value::Object(props) = child {
+                        for prop_schema in props.values_mut() {
+                            strip_gemini_function_parameters_unsupported_keywords(
+                                prop_schema,
+                                depth + 1,
+                            );
+                        }
+                    }
+                } else {
+                    strip_gemini_function_parameters_unsupported_keywords(child, depth + 1);
+                }
             }
         }
         Value::Array(items) => {
@@ -1910,6 +1925,61 @@ mod tests {
             }
             other => panic!("expected InvalidRequest, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_tool_schema_preserves_property_named_title() -> Result<(), Box<dyn std::error::Error>> {
+        use meerkat_core::ToolDef;
+        use std::sync::Arc;
+
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string" },
+                "title": { "type": "string", "description": "Human readable title" },
+                "summary": { "type": "string" }
+            },
+            "required": ["id", "title", "summary"]
+        });
+
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-3-pro-preview",
+            vec![Message::User(UserMessage {
+                content: "test".to_string(),
+            })],
+        )
+        .with_tools(vec![Arc::new(ToolDef {
+            name: "upsert_record".to_string(),
+            description: "test".to_string(),
+            input_schema: schema,
+        })]);
+        let body = client.build_request_body(&request)?;
+        let parameters = &body["tools"][0]["functionDeclarations"][0]["parameters"];
+        let props = parameters["properties"]
+            .as_object()
+            .ok_or("missing properties")?;
+
+        assert!(
+            props.contains_key("title"),
+            "property named 'title' must not be stripped — it's a user field, not a schema keyword"
+        );
+        assert!(
+            props.contains_key("id"),
+            "property 'id' should be preserved"
+        );
+        assert!(
+            props.contains_key("summary"),
+            "property 'summary' should be preserved"
+        );
+
+        // The JSON Schema keyword `title` at the root level should still be stripped
+        assert!(
+            parameters.get("title").is_none(),
+            "root-level title keyword should be stripped"
+        );
+
+        Ok(())
     }
 
     // =========================================================================

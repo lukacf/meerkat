@@ -23,7 +23,7 @@
     "proxy"
   ],
   "scripts": {
-    "build:wasm": "RUSTFLAGS='--cfg getrandom_backend=\"wasm_js\"' wasm-pack build ../../meerkat-web-runtime --target web --out-dir ../../sdks/web/wasm",
+    "build:wasm": "RUSTFLAGS='--cfg getrandom_backend=\"wasm_js\"' wasm-pack build ../../meerkat-web-runtime --target web --out-dir ../../sdks/web/wasm && rm -f wasm/.gitignore",
     "build:ts": "tsc",
     "build": "npm run build:wasm && npm run build:ts",
     "prepublishOnly": "npm run build",

@@ -17,11 +17,6 @@ export const ALL_MODELS = Object.keys(MODEL_PROVIDER);
 
 const $ = <T extends Element>(id: string) => document.getElementById(id) as unknown as T;
 
-// Compile-time env injection (Vite `define`) + Vite env fallback.
-declare const __ANTHROPIC_API_KEY__: string;
-declare const __OPENAI_API_KEY__: string;
-declare const __GEMINI_API_KEY__: string;
-
 // ── Server mode (proxy) detection ──
 
 const PARAMS = new URLSearchParams(window.location.search);
@@ -134,14 +129,6 @@ export function hasAnyApiKey(): boolean {
 }
 
 function envApiKey(provider: Provider): string {
-  const compileTime = provider === "anthropic"
-    ? (typeof __ANTHROPIC_API_KEY__ === "string" ? __ANTHROPIC_API_KEY__ : "")
-    : provider === "openai"
-      ? (typeof __OPENAI_API_KEY__ === "string" ? __OPENAI_API_KEY__ : "")
-      : (typeof __GEMINI_API_KEY__ === "string" ? __GEMINI_API_KEY__ : "");
-
-  if (compileTime) return compileTime;
-
   const env = (import.meta as any).env ?? {};
   if (provider === "anthropic") return env.VITE_RKAT_ANTHROPIC_API_KEY ?? env.VITE_ANTHROPIC_API_KEY ?? "";
   if (provider === "openai") return env.VITE_RKAT_OPENAI_API_KEY ?? env.VITE_OPENAI_API_KEY ?? "";

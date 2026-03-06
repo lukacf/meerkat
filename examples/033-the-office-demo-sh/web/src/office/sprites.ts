@@ -34,8 +34,8 @@ export async function loadSprites(): Promise<void> {
     const anims: CharacterAnims = { typing: [], phone: [] };
 
     for (const action of ["typing", "phone"] as const) {
-      // Try loading up to 8 frames per action
-      for (let i = 0; i < 8; i++) {
+      // Try loading up to 6 frames per action (00–05)
+      for (let i = 0; i < 6; i++) {
         const padded = String(i).padStart(2, "0");
         const img = await loadImage(`./sprites/${id}_${action}_${padded}.png`);
         if (img) {

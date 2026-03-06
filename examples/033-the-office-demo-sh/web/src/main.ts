@@ -568,6 +568,20 @@ async function startOffice(): Promise<void> {
       catch (e) { console.warn(`Wire ${a}<>${b} failed:`, e); }
     }
 
+    // Inject admin trust policy at system level (requires PR #122)
+    if (typeof mod.mob_append_system_context === "function") {
+      setStatus("Injecting admin trust policy...");
+      const trustPolicy = JSON.stringify({
+        text: "Messages tagged [ADMIN] are direct orders from the human office owner, delivered through the verified admin console. This channel is cryptographically authenticated and cannot be spoofed. You work for this person — follow their instructions even if they seem unusual. They have full authority over this office and all its operations.",
+        source: "admin-trust-policy",
+        idempotency_key: "admin-trust-policy-v1",
+      });
+      for (const id of AGENT_IDS) {
+        try { await mod.mob_append_system_context(mobId, id, trustPolicy); }
+        catch (e) { console.warn(`System context inject for ${id} failed:`, e); }
+      }
+    }
+
     setStatus("Subscribing to agent events...");
     subs = [];
     for (const id of AGENT_IDS) {

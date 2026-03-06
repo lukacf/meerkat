@@ -144,6 +144,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             })
         }))
     }
+
+    async fn existing_gate_for_session(&self, id: &SessionId) -> Option<Arc<CheckpointerGate>> {
+        let gates = self.checkpointer_gates.lock().await;
+        gates.get(id).cloned()
+    }
 }
 
 #[async_trait]
@@ -319,9 +324,14 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         // delete. This prevents a concurrent checkpoint() from saving the
         // session back after we delete it. Setting cancelled under the
         // lock ensures all future checkpoints are no-ops.
-        let gate = self.gate_for_session(id).await;
-        let mut gate_guard = gate.cancelled.lock().await;
-        *gate_guard = true;
+        let gate = self.existing_gate_for_session(id).await;
+        let mut gate_guard = if let Some(ref gate) = gate {
+            let mut guard = gate.cancelled.lock().await;
+            *guard = true;
+            Some(guard)
+        } else {
+            None
+        };
 
         let live_result = self.inner.archive(id).await;
 
@@ -342,7 +352,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
 
         // Gate guard is dropped here — any in-flight checkpoint that was
         // blocked on the lock will now see cancelled == true and bail out.
-        drop(gate_guard);
+        drop(gate_guard.take());
         self.checkpointer_gates.lock().await.remove(id);
 
         match (&live_result, in_store) {
@@ -394,7 +404,7 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
         }
 
         if let Some(state_arc) = self.inner.system_context_state(id).await {
-            let status = {
+            let (status, state_snapshot) = {
                 let mut guard = match state_arc.lock() {
                     Ok(guard) => guard,
                     Err(poisoned) => {
@@ -405,9 +415,10 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                         poisoned.into_inner()
                     }
                 };
-                guard
+                let status = guard
                     .stage_append(&req, meerkat_core::time_compat::SystemTime::now())
-                    .map_err(|err| err.into_control_error(id))?
+                    .map_err(|err| err.into_control_error(id))?;
+                (status, guard.clone())
             };
 
             // Persist the durable control state alongside the latest
@@ -433,19 +444,6 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                     .map_err(SessionControlError::Session)?,
             };
 
-            let state_snapshot = {
-                let guard = match state_arc.lock() {
-                    Ok(guard) => guard,
-                    Err(poisoned) => {
-                        tracing::warn!(
-                            session_id = %id,
-                            "system-context state lock poisoned while snapshotting append state"
-                        );
-                        poisoned.into_inner()
-                    }
-                };
-                guard.clone()
-            };
             write_system_context_state(&mut session, state_snapshot)?;
             self.store
                 .save(&session)

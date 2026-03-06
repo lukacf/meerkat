@@ -2367,9 +2367,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_append_system_context_route_returns_staged_status() {
-        use axum::body::{Body, Bytes};
+        use axum::body::Body;
         use http_body_util::BodyExt;
-        use tokio::time::{Duration, sleep};
         use tower::ServiceExt;
 
         let temp = TempDir::new().unwrap();
@@ -2377,60 +2376,52 @@ mod tests {
             .await
             .unwrap();
         state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let session_service = state.session_service.clone();
+        let create_result = session_service
+            .create_session(SvcCreateSessionRequest {
+                model: state.default_model.to_string(),
+                prompt: "Hello".to_string(),
+                system_prompt: None,
+                max_tokens: Some(state.max_tokens),
+                event_tx: None,
+                host_mode: false,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                build: Some(SessionBuildOptions {
+                    llm_client_override: state
+                        .llm_client_override
+                        .clone()
+                        .map(encode_llm_client_override_for_service),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("deferred session create should succeed");
         let app = router(state);
+        let session_id = create_result.session_id.to_string();
 
-        let create_request = axum::http::Request::builder()
+        let inject_request = axum::http::Request::builder()
             .method("POST")
-            .uri("/sessions")
+            .uri(format!("/sessions/{session_id}/system_context"))
             .header("content-type", "application/json")
             .body(Body::from(
-                serde_json::json!({ "prompt": "Hello" }).to_string(),
+                serde_json::json!({
+                    "text": "Coordinate with the orchestrator.",
+                    "source": "mob",
+                    "idempotency_key": "ctx-rest-test"
+                })
+                .to_string(),
             ))
             .unwrap();
-        let create_response = app.clone().oneshot(create_request).await.unwrap();
-        assert_eq!(create_response.status(), StatusCode::OK);
-        let create_body = create_response
+        let inject_response = app.clone().oneshot(inject_request).await.unwrap();
+        let inject_status = inject_response.status();
+        let inject_body = inject_response
             .into_body()
             .collect()
             .await
             .unwrap()
             .to_bytes();
-        let create_payload: serde_json::Value = serde_json::from_slice(&create_body).unwrap();
-        let session_id = create_payload["session_id"]
-            .as_str()
-            .expect("session create should return session_id");
-
-        let mut inject_status = StatusCode::INTERNAL_SERVER_ERROR;
-        let mut inject_body = Bytes::new();
-        for attempt in 0..10 {
-            let inject_request = axum::http::Request::builder()
-                .method("POST")
-                .uri(format!("/sessions/{session_id}/system_context"))
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "text": "Coordinate with the orchestrator.",
-                        "source": "mob",
-                        "idempotency_key": "ctx-rest-test"
-                    })
-                    .to_string(),
-                ))
-                .unwrap();
-            let inject_response = app.clone().oneshot(inject_request).await.unwrap();
-            inject_status = inject_response.status();
-            inject_body = inject_response
-                .into_body()
-                .collect()
-                .await
-                .unwrap()
-                .to_bytes();
-            if inject_status == StatusCode::OK {
-                break;
-            }
-            if attempt < 9 {
-                sleep(Duration::from_millis(50)).await;
-            }
-        }
         assert_eq!(
             inject_status,
             StatusCode::OK,

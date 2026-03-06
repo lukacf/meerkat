@@ -76,9 +76,9 @@ export function showCaseFiles(contentEl: HTMLElement, footerEl: HTMLElement): vo
   renderCaseFiles(contentEl, footerEl);
 }
 
-export function showGraph(canvas: HTMLCanvasElement): void {
+export function showGraph(container: HTMLElement): void {
   activeTab = "graph";
-  renderGraph(canvas);
+  renderGraph(container);
 }
 
 export function hideKnowledgeBase(): void {
@@ -159,133 +159,10 @@ function countTotalRels(): number {
 }
 
 // =====================================================================
-// Knowledge Graph Renderer (deterministic layout, ink-on-paper)
+// Knowledge Graph Renderer (Cytoscape.js)
 // =====================================================================
 
-interface GraphNode {
-  id: string;
-  label: string;
-  type: string;
-  x: number;
-  y: number;
-}
-
-interface GraphEdge {
-  from: string;
-  to: string;
-  label: string;
-}
-
-let graphCanvas: HTMLCanvasElement | null = null;
-let graphRafId = 0;
-let graphNodes: GraphNode[] = [];
-let graphEdges: GraphEdge[] = [];
-let nodeIndex: Map<string, GraphNode> = new Map();
-
-function buildGraph(): void {
-  const nodeMap = new Map<string, GraphNode>();
-  const edgeList: GraphEdge[] = [];
-
-  for (const [, rec] of records) {
-    for (const e of rec.entities) {
-      const key = e.name.toLowerCase();
-      if (!nodeMap.has(key)) {
-        nodeMap.set(key, { id: key, label: e.name, type: e.type, x: 0, y: 0 });
-      }
-    }
-    for (const r of rec.relationships) {
-      const fk = r.from.toLowerCase();
-      const tk = r.to.toLowerCase();
-      if (!nodeMap.has(fk)) nodeMap.set(fk, { id: fk, label: r.from, type: "unknown", x: 0, y: 0 });
-      if (!nodeMap.has(tk)) nodeMap.set(tk, { id: tk, label: r.to, type: "unknown", x: 0, y: 0 });
-      if (!edgeList.some(e => e.from === fk && e.to === tk && e.label === r.type)) {
-        edgeList.push({ from: fk, to: tk, label: r.type });
-      }
-    }
-  }
-
-  graphNodes = [...nodeMap.values()];
-  graphEdges = edgeList;
-  nodeIndex = nodeMap;
-}
-
-/** Deterministic layout: place nodes in a circle, connected nodes closer together */
-function layoutGraph(w: number, h: number): void {
-  const n = graphNodes.length;
-  if (n === 0) return;
-
-  // Find connected components via BFS
-  const adj = new Map<string, Set<string>>();
-  for (const nd of graphNodes) adj.set(nd.id, new Set());
-  for (const e of graphEdges) {
-    adj.get(e.from)?.add(e.to);
-    adj.get(e.to)?.add(e.from);
-  }
-
-  const visited = new Set<string>();
-  const components: GraphNode[][] = [];
-  for (const nd of graphNodes) {
-    if (visited.has(nd.id)) continue;
-    const comp: GraphNode[] = [];
-    const queue = [nd.id];
-    visited.add(nd.id);
-    while (queue.length > 0) {
-      const cur = queue.shift()!;
-      const node = nodeIndex.get(cur);
-      if (node) comp.push(node);
-      for (const nb of adj.get(cur) ?? []) {
-        if (!visited.has(nb)) { visited.add(nb); queue.push(nb); }
-      }
-    }
-    components.push(comp);
-  }
-
-  // Sort: largest component first
-  components.sort((a, b) => b.length - a.length);
-
-  // Layout each component in a circle, then arrange components horizontally
-  const padding = 40;
-  let cursorX = padding;
-  const centerY = h / 2;
-
-  for (const comp of components) {
-    if (comp.length === 1) {
-      comp[0].x = cursorX;
-      comp[0].y = centerY;
-      cursorX += 80;
-    } else {
-      // Circle radius proportional to node count
-      const radius = Math.max(40, comp.length * 25);
-
-      // Place nodes in a circle
-      for (let i = 0; i < comp.length; i++) {
-        const angle = (i / comp.length) * Math.PI * 2 - Math.PI / 2;
-        comp[i].x = cursorX + radius + Math.cos(angle) * radius;
-        comp[i].y = centerY + Math.sin(angle) * radius;
-      }
-      cursorX += radius * 2 + 60;
-    }
-  }
-
-  // Center everything
-  let minX = Infinity, maxX = -Infinity;
-  for (const nd of graphNodes) {
-    minX = Math.min(minX, nd.x);
-    maxX = Math.max(maxX, nd.x);
-  }
-  const totalW = maxX - minX;
-  const offsetX = (w - totalW) / 2 - minX;
-  for (const nd of graphNodes) nd.x += offsetX;
-}
-
-// Node shape by type
-const TYPE_SHAPES: Record<string, string> = {
-  person: "circle",
-  company: "diamond",
-  system: "square",
-  location: "triangle",
-  amount: "circle",
-};
+import cytoscape from "cytoscape";
 
 const TYPE_COLORS: Record<string, string> = {
   person: "#4466aa",
@@ -296,123 +173,143 @@ const TYPE_COLORS: Record<string, string> = {
   unknown: "#666666",
 };
 
-function renderGraph(canvas: HTMLCanvasElement): void {
-  graphCanvas = canvas;
-  canvas.width = canvas.parentElement!.clientWidth;
-  canvas.height = canvas.parentElement!.clientHeight;
-  buildGraph();
-  layoutGraph(canvas.width, canvas.height);
-  if (graphRafId) cancelAnimationFrame(graphRafId);
-  drawGraph(canvas);
-}
+const TYPE_SHAPES: Record<string, cytoscape.Css.NodeShape> = {
+  person: "ellipse",
+  company: "diamond",
+  system: "rectangle",
+  location: "triangle",
+  amount: "ellipse",
+  unknown: "ellipse",
+};
 
-function stopGraphAnimation(): void {
-  if (graphRafId) { cancelAnimationFrame(graphRafId); graphRafId = 0; }
-  graphCanvas = null;
-}
+let cyInstance: cytoscape.Core | null = null;
 
-function drawGraph(canvas: HTMLCanvasElement): void {
-  const ctx = canvas.getContext("2d")!;
-  const w = canvas.width, h = canvas.height;
+function buildCyElements(): cytoscape.ElementDefinition[] {
+  const elements: cytoscape.ElementDefinition[] = [];
+  const nodeIds = new Set<string>();
 
-  // Paper background
-  ctx.fillStyle = "#f0e8d0";
-  ctx.fillRect(0, 0, w, h);
-
-  // Subtle ruled lines
-  ctx.strokeStyle = "rgba(180, 170, 150, 0.25)";
-  ctx.lineWidth = 0.5;
-  for (let y = 20; y < h; y += 16) {
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(w, y);
-    ctx.stroke();
+  for (const [, rec] of records) {
+    for (const e of rec.entities) {
+      const key = e.name.toLowerCase();
+      if (!nodeIds.has(key)) {
+        nodeIds.add(key);
+        elements.push({
+          data: { id: key, label: e.name, entityType: e.type },
+        });
+      }
+    }
+    for (const r of rec.relationships) {
+      const fk = r.from.toLowerCase();
+      const tk = r.to.toLowerCase();
+      if (!nodeIds.has(fk)) {
+        nodeIds.add(fk);
+        elements.push({ data: { id: fk, label: r.from, entityType: "unknown" } });
+      }
+      if (!nodeIds.has(tk)) {
+        nodeIds.add(tk);
+        elements.push({ data: { id: tk, label: r.to, entityType: "unknown" } });
+      }
+      elements.push({
+        data: { id: `${fk}-${r.type}-${tk}`, source: fk, target: tk, label: r.type },
+      });
+    }
   }
 
-  if (graphNodes.length === 0) {
-    ctx.font = "10px 'Press Start 2P', monospace";
-    ctx.fillStyle = "rgba(100, 90, 75, 0.5)";
-    ctx.textAlign = "center";
-    ctx.fillText("NO DATA YET", w / 2, h / 2 - 10);
-    ctx.font = "9px 'IBM Plex Mono', monospace";
-    ctx.fillText("Records will populate this graph", w / 2, h / 2 + 10);
-    ctx.textAlign = "left";
+  return elements;
+}
+
+function renderGraph(container: HTMLElement): void {
+  destroyGraph();
+
+  const elements = buildCyElements();
+
+  if (elements.length === 0) {
+    container.innerHTML = `<div class="kb-empty" style="display:flex;align-items:center;justify-content:center;height:100%">NO DATA YET</div>`;
     return;
   }
 
-  // Edges — curved ink lines with labels
-  for (let ei = 0; ei < graphEdges.length; ei++) {
-    const e = graphEdges[ei];
-    const a = nodeIndex.get(e.from);
-    const b = nodeIndex.get(e.to);
-    if (!a || !b) continue;
+  // Clear any leftover HTML
+  container.innerHTML = "";
 
-    const dx = b.x - a.x, dy = b.y - a.y;
-    // Offset curve for multiple edges between same node pair
-    const perpX = -dy * 0.15, perpY = dx * 0.15;
-    const mx = (a.x + b.x) / 2 + perpX;
-    const my = (a.y + b.y) / 2 + perpY;
-
-    ctx.strokeStyle = "rgba(60, 50, 40, 0.35)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(a.x, a.y);
-    ctx.quadraticCurveTo(mx, my, b.x, b.y);
-    ctx.stroke();
-
-    // Edge label — offset from midpoint, small italic
-    if (e.label) {
-      ctx.font = "italic 8px 'IBM Plex Mono', monospace";
-      ctx.fillStyle = "rgba(120, 100, 80, 0.7)";
-      ctx.textAlign = "center";
-      ctx.fillText(e.label, mx, my - 4);
-    }
-  }
-
-  // Nodes — draw node circles/shapes with colored fill
-  const nodeR = 6;
-  for (const n of graphNodes) {
-    const shape = TYPE_SHAPES[n.type] || "circle";
-    const color = TYPE_COLORS[n.type] || TYPE_COLORS.unknown;
-
-    // White background behind node to clear any overlapping edges
-    ctx.fillStyle = "#f0e8d0";
-    ctx.beginPath();
-    ctx.arc(n.x, n.y, nodeR + 3, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.fillStyle = color;
-    ctx.strokeStyle = "#28231e";
-    ctx.lineWidth = 1.5;
-
-    if (shape === "diamond") {
-      const r = nodeR + 1;
-      ctx.beginPath();
-      ctx.moveTo(n.x, n.y - r); ctx.lineTo(n.x + r, n.y);
-      ctx.lineTo(n.x, n.y + r); ctx.lineTo(n.x - r, n.y);
-      ctx.closePath();
-      ctx.fill(); ctx.stroke();
-    } else if (shape === "square") {
-      ctx.fillRect(n.x - nodeR, n.y - nodeR, nodeR * 2, nodeR * 2);
-      ctx.strokeRect(n.x - nodeR, n.y - nodeR, nodeR * 2, nodeR * 2);
-    } else {
-      ctx.beginPath();
-      ctx.arc(n.x, n.y, nodeR, 0, Math.PI * 2);
-      ctx.fill(); ctx.stroke();
-    }
-
-    // Label below node — dark ink, white background for readability
-    ctx.font = "10px 'IBM Plex Mono', monospace";
-    ctx.textAlign = "center";
-    const labelW = ctx.measureText(n.label).width;
-    ctx.fillStyle = "rgba(240, 232, 208, 0.85)";
-    ctx.fillRect(n.x - labelW / 2 - 2, n.y + nodeR + 2, labelW + 4, 13);
-    ctx.fillStyle = "#28231e";
-    ctx.fillText(n.label, n.x, n.y + nodeR + 13);
-  }
-
-  ctx.textAlign = "left";
+  cyInstance = cytoscape({
+    container,
+    elements,
+    style: [
+      {
+        selector: "node",
+        style: {
+          label: "data(label)",
+          "background-color": (ele: cytoscape.NodeSingular) =>
+            TYPE_COLORS[ele.data("entityType")] || TYPE_COLORS.unknown,
+          shape: (ele: cytoscape.NodeSingular) =>
+            TYPE_SHAPES[ele.data("entityType")] || "ellipse",
+          width: 20,
+          height: 20,
+          "border-width": 1.5,
+          "border-color": "#28231e",
+          "font-family": "'IBM Plex Mono', monospace",
+          "font-size": "9px",
+          color: "#28231e",
+          "text-margin-y": 4,
+          "text-valign": "bottom",
+          "text-halign": "center",
+          "text-background-color": "#f0e8d0",
+          "text-background-opacity": 0.85,
+          "text-background-padding": "2px",
+          "text-background-shape": "roundrectangle",
+        } as any,
+      },
+      {
+        selector: "edge",
+        style: {
+          label: "data(label)",
+          width: 1,
+          "line-color": "rgba(60, 50, 40, 0.4)",
+          "curve-style": "bezier",
+          "target-arrow-shape": "triangle",
+          "target-arrow-color": "rgba(60, 50, 40, 0.4)",
+          "arrow-scale": 0.6,
+          "font-family": "'IBM Plex Mono', monospace",
+          "font-size": "7px",
+          "font-style": "italic",
+          color: "rgba(120, 100, 80, 0.7)",
+          "text-rotation": "autorotate",
+          "text-margin-y": -6,
+          "text-background-color": "#f0e8d0",
+          "text-background-opacity": 0.8,
+          "text-background-padding": "1px",
+          "text-background-shape": "roundrectangle",
+        } as any,
+      },
+    ],
+    layout: {
+      name: "cose",
+      animate: false,
+      nodeDimensionsIncludeLabels: true,
+      nodeRepulsion: () => 8000,
+      idealEdgeLength: () => 80,
+      edgeElasticity: () => 100,
+      gravity: 0.3,
+      padding: 20,
+      fit: true,
+    } as any,
+    userZoomingEnabled: true,
+    userPanningEnabled: true,
+    boxSelectionEnabled: false,
+  });
 }
+
+function destroyGraph(): void {
+  if (cyInstance) {
+    cyInstance.destroy();
+    cyInstance = null;
+  }
+}
+
+function stopGraphAnimation(): void {
+  destroyGraph();
+}
+
 
 function esc(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");

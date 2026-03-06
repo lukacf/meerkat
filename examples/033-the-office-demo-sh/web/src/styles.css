@@ -648,10 +648,7 @@ body {
 /* ═══ Graph wrap ═══ */
 .graph-wrap {
   flex: 1; overflow: hidden;
-}
-.graph-wrap canvas {
-  width: 100%; height: 100%;
-  image-rendering: auto;
+  background: #f0e8d0;
 }
 
 /* ═══ Case Files (inside log panel) ═══ */

@@ -92,9 +92,7 @@ app.innerHTML = `
       <div class="log-content hidden" id="kbContent">
         <div class="kb-empty">NO RECORDS YET.<br><br>THE ARCHIVIST WILL CREATE<br>STRUCTURED RECORDS AS EVENTS<br>ARE PROCESSED.</div>
       </div>
-      <div class="graph-wrap hidden" id="graphWrap">
-        <canvas id="graphCanvas"></canvas>
-      </div>
+      <div class="graph-wrap hidden" id="graphWrap"></div>
       <div class="kb-footer hidden" id="kbFooter">0 RECORDS</div>
     </div>
   </div>
@@ -278,7 +276,7 @@ function switchTab(tab: "log" | "cases" | "graph"): void {
   } else if (tab === "graph") {
     document.getElementById("tabGraph")!.classList.add("active");
     $<HTMLDivElement>("graphWrap").classList.remove("hidden");
-    showGraph($<HTMLCanvasElement>("graphCanvas"));
+    showGraph($<HTMLDivElement>("graphWrap"));
   } else {
     document.getElementById("tabLog")!.classList.add("active");
     $<HTMLDivElement>("panelContent").classList.remove("hidden");

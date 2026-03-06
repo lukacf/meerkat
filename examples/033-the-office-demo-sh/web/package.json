@@ -13,5 +13,8 @@
     "@rkat/web": "^0.4.3",
     "typescript": "^5.7.2",
     "vite": "^5.4.11"
+  },
+  "dependencies": {
+    "cytoscape": "^3.33.1"
   }
 }

@@ -409,13 +409,19 @@ impl SessionRuntime {
                 Ok(result) => {
                     if let Some((starting_system_context_state, current_system_context_state)) =
                         self.take_promoting_system_context_state(session_id).await
+                        && let Err(err) = self
+                            .replay_promoted_system_context(
+                                session_id,
+                                &starting_system_context_state,
+                                &current_system_context_state,
+                            )
+                            .await
                     {
-                        self.replay_promoted_system_context(
-                            session_id,
-                            &starting_system_context_state,
-                            &current_system_context_state,
-                        )
-                        .await?;
+                        tracing::warn!(
+                            session_id = %session_id,
+                            error = %err.message,
+                            "failed to replay promoted system-context state after create_session; preserving completed turn result"
+                        );
                     }
                     return Ok(result);
                 }

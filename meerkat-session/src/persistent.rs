@@ -410,35 +410,32 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
             }
 
             let accepted_at = meerkat_core::time_compat::SystemTime::now();
-            let (status, persisted_state) = {
-                let guard = match state_arc.lock() {
-                    Ok(guard) => guard,
-                    Err(poisoned) => {
-                        tracing::warn!(
-                            session_id = %id,
-                            "system-context state lock poisoned while snapshotting live append"
-                        );
-                        poisoned.into_inner()
-                    }
+            let mut attempts = 0usize;
+            loop {
+                attempts += 1;
+                let (status, snapshot_state, persisted_state) = {
+                    let guard = match state_arc.lock() {
+                        Ok(guard) => guard,
+                        Err(poisoned) => {
+                            tracing::warn!(
+                                session_id = %id,
+                                "system-context state lock poisoned while snapshotting live append"
+                            );
+                            poisoned.into_inner()
+                        }
+                    };
+                    let snapshot_state = guard.clone();
+                    let mut candidate = snapshot_state.clone();
+                    let status = candidate
+                        .stage_append(&req, accepted_at)
+                        .map_err(|err| err.into_control_error(id))?;
+                    (status, snapshot_state, candidate)
                 };
-                let mut candidate = guard.clone();
-                let status = candidate
-                    .stage_append(&req, accepted_at)
-                    .map_err(|err| err.into_control_error(id))?;
-                (status, candidate)
-            };
 
-            // Persist the durable control state before mutating the live
-            // runtime state so an error never leaves the caller observing a
-            // failure while the next LLM boundary still applies the append.
-            let mut session = match self
-                .store
-                .load(id)
-                .await
-                .map_err(|e| SessionControlError::Session(SessionError::Store(Box::new(e))))?
-            {
-                Some(session) => session,
-                None => match self.inner.export_session(id).await {
+                // Persist the durable control state before mutating the live
+                // runtime state so an error never leaves the caller observing a
+                // failure while the next LLM boundary still applies the append.
+                let mut session = match self.inner.export_session(id).await {
                     Ok(session) => session,
                     Err(err) => {
                         if created_gate && matches!(err, SessionError::NotFound { .. }) {
@@ -447,33 +444,50 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                         }
                         return Err(SessionControlError::Session(err));
                     }
-                },
-            };
+                };
 
-            write_system_context_state(&mut session, persisted_state)?;
-            self.store
-                .save(&session)
-                .await
-                .map_err(|e| SessionControlError::Session(SessionError::Store(Box::new(e))))?;
+                write_system_context_state(&mut session, persisted_state)?;
+                self.store
+                    .save(&session)
+                    .await
+                    .map_err(|e| SessionControlError::Session(SessionError::Store(Box::new(e))))?;
 
-            let live_status = {
-                let mut guard = match state_arc.lock() {
-                    Ok(guard) => guard,
-                    Err(poisoned) => {
-                        tracing::warn!(
-                            session_id = %id,
-                            "system-context state lock poisoned while committing live append"
-                        );
-                        poisoned.into_inner()
+                let commit_result = {
+                    let mut guard = match state_arc.lock() {
+                        Ok(guard) => guard,
+                        Err(poisoned) => {
+                            tracing::warn!(
+                                session_id = %id,
+                                "system-context state lock poisoned while committing live append"
+                            );
+                            poisoned.into_inner()
+                        }
+                    };
+                    if *guard == snapshot_state {
+                        let live_status = guard
+                            .stage_append(&req, accepted_at)
+                            .map_err(|err| err.into_control_error(id))?;
+                        Some(live_status)
+                    } else {
+                        None
                     }
                 };
-                guard
-                    .stage_append(&req, accepted_at)
-                    .map_err(|err| err.into_control_error(id))?
-            };
-            debug_assert_eq!(live_status, status);
-            drop(gate_guard);
-            return Ok(AppendSystemContextResult { status });
+
+                if let Some(live_status) = commit_result {
+                    debug_assert_eq!(live_status, status);
+                    drop(gate_guard);
+                    return Ok(AppendSystemContextResult { status });
+                }
+
+                if attempts >= 8 {
+                    return Err(SessionControlError::Session(SessionError::Agent(
+                        meerkat_core::error::AgentError::InternalError(
+                            "system-context state changed repeatedly while staging append"
+                                .to_string(),
+                        ),
+                    )));
+                }
+            }
         }
 
         if let Some(gate) = existing_gate {

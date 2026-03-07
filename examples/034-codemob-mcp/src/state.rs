@@ -66,7 +66,9 @@ impl ForceState {
 
     /// Access the pack registry (read lock).
     pub fn pack_registry(&self) -> std::sync::RwLockReadGuard<'_, PackRegistry> {
-        self.pack_registry.read().unwrap()
+        self.pack_registry
+            .read()
+            .expect("pack_registry lock poisoned")
     }
 
     /// Reload user packs from disk, preserving built-in packs.
@@ -74,7 +76,10 @@ impl ForceState {
         let mobs_dir = std::path::PathBuf::from(".codemob-mcp/mobs");
         let user_packs = mobs::load_user_packs(&mobs_dir);
 
-        let mut registry = self.pack_registry.write().unwrap();
+        let mut registry = self
+            .pack_registry
+            .write()
+            .expect("pack_registry lock poisoned");
 
         // Remove old user packs (anything not in builtin_names)
         let to_remove: Vec<String> = registry

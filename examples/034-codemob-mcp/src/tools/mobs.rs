@@ -248,6 +248,13 @@ pub async fn handle_create(arguments: &Value) -> Result<Value, ToolCallError> {
         .map_err(|e| ToolCallError::internal(format!("Failed to create mobs directory: {e}")))?;
 
     let path = mob_path(&config.name);
+    if path.exists() {
+        return Err(ToolCallError::invalid_params(format!(
+            "Mob '{}' already exists. Use update_mob to modify it.",
+            config.name
+        )));
+    }
+
     let json = serde_json::to_string_pretty(&config)
         .map_err(|e| ToolCallError::internal(format!("Serialization failed: {e}")))?;
     std::fs::write(&path, &json)

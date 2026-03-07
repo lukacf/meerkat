@@ -288,7 +288,12 @@ async fn run_comms(
     // drops to 0 AND at least one turn has completed, the mob is done.
     // A generous idle grace period handles the gap between one agent
     // finishing and another being triggered by a comms message.
+    // Hard ceiling. Comms-based mobs can run iterative review loops where each
+    // agent turn involves full LLM calls, tool use, or even code execution —
+    // individual turns can take minutes. 1 hour accommodates long pipelines.
     const MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(3600);
+    // After all agents go idle, wait this long for a new turn to start (covers
+    // the gap between one agent finishing and a comms message triggering another).
     const IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 
     let deadline = tokio::time::Instant::now() + MAX_WAIT;

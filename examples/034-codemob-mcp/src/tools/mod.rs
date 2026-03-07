@@ -1,5 +1,6 @@
 pub mod consult;
 pub mod deliberate;
+pub mod mobs;
 
 use serde_json::{Value, json};
 
@@ -51,7 +52,7 @@ pub fn tools_list() -> Vec<Value> {
     vec![
         json!({
             "name": "list_packs",
-            "description": "List all available deliberation packs with their descriptions and agent counts.",
+            "description": "List all available deliberation packs (built-in and user-created) with their descriptions and agent counts.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
@@ -89,16 +90,16 @@ pub fn tools_list() -> Vec<Value> {
             "name": "deliberate",
             "description": format!(
                 "Spawn a team of AI agents to collaboratively solve a problem. Each pack defines \
-                a different team composition optimized for specific tasks. Returns structured results \
-                after agents deliberate. {MODEL_DESCRIPTION}"
+                a different team composition optimized for specific tasks. Use list_packs to see all \
+                available packs including user-created ones. Returns structured results after agents \
+                deliberate. {MODEL_DESCRIPTION}"
             ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "pack": {
                         "type": "string",
-                        "enum": ["advisor", "review", "architect", "brainstorm", "red-team", "panel", "rct"],
-                        "description": "Team pack to use. advisor=quick opinion, review=parallel code review, architect=design deliberation, brainstorm=multi-model ideation, red-team=balanced risk assessment, panel=free-form review panel with moderator, rct=full RCT implementation pipeline"
+                        "description": "Team pack to use. Built-in: advisor, review, architect, brainstorm, red-team, panel, implement, rct. User-created packs also accepted — use list_packs to see all."
                     },
                     "task": {
                         "type": "string",
@@ -125,6 +126,109 @@ pub fn tools_list() -> Vec<Value> {
                 "required": ["pack", "task"]
             }
         }),
+        json!({
+            "name": "create_mob",
+            "description": "Create a custom mob definition. Saved to .codemob-mcp/mobs/ and immediately available in deliberate without restart.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "definition": {
+                        "type": "object",
+                        "description": "Mob definition",
+                        "properties": {
+                            "name": { "type": "string", "description": "Unique mob name (alphanumeric, hyphens, underscores)" },
+                            "description": { "type": "string", "description": "Human-readable description" },
+                            "mode": { "type": "string", "enum": ["comms", "flow"], "description": "comms=autonomous agents communicate freely (good for iterative loops), flow=structured DAG steps" },
+                            "orchestrator": { "type": "string", "description": "For comms mode: agent whose output is captured as the result and who receives the initial message" },
+                            "agents": {
+                                "type": "object",
+                                "description": "Map of agent_name → {model, skill, peer_description}",
+                                "additionalProperties": {
+                                    "type": "object",
+                                    "properties": {
+                                        "model": { "type": "string", "description": "LLM model name" },
+                                        "skill": { "type": "string", "description": "System prompt / role instructions for this agent" },
+                                        "peer_description": { "type": "string", "description": "Short description visible to peer agents" }
+                                    },
+                                    "required": ["model", "skill"]
+                                }
+                            },
+                            "wiring": {
+                                "type": "array",
+                                "description": "Pairs of agent names to wire for communication, e.g. [[\"coder\", \"reviewer\"]]",
+                                "items": { "type": "array", "items": { "type": "string" }, "minItems": 2, "maxItems": 2 }
+                            },
+                            "flows": {
+                                "type": "object",
+                                "description": "For flow mode: map of flow_name → steps array. Use 'main' as the flow name.",
+                                "additionalProperties": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "id": { "type": "string" },
+                                            "role": { "type": "string", "description": "Agent name that executes this step" },
+                                            "message": { "type": "string", "description": "Prompt. Use {{ task }} for the user's task, {{ steps.<id> }} for prior step output" },
+                                            "depends_on": { "type": "array", "items": { "type": "string" } },
+                                            "timeout_ms": { "type": "integer" }
+                                        },
+                                        "required": ["id", "role", "message"]
+                                    }
+                                }
+                            }
+                        },
+                        "required": ["name", "description", "agents"]
+                    }
+                },
+                "required": ["definition"]
+            }
+        }),
+        json!({
+            "name": "get_mob",
+            "description": "Read a user-created mob definition.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Mob name" }
+                },
+                "required": ["name"]
+            }
+        }),
+        json!({
+            "name": "update_mob",
+            "description": "Update an existing user-created mob definition. Same schema as create_mob.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "definition": {
+                        "type": "object",
+                        "description": "Complete mob definition (replaces the existing one)",
+                        "properties": {
+                            "name": { "type": "string" },
+                            "description": { "type": "string" },
+                            "mode": { "type": "string", "enum": ["comms", "flow"] },
+                            "orchestrator": { "type": "string" },
+                            "agents": { "type": "object", "additionalProperties": true },
+                            "wiring": { "type": "array" },
+                            "flows": { "type": "object" }
+                        },
+                        "required": ["name", "description", "agents"]
+                    }
+                },
+                "required": ["definition"]
+            }
+        }),
+        json!({
+            "name": "delete_mob",
+            "description": "Delete a user-created mob definition.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Mob name to delete" }
+                },
+                "required": ["name"]
+            }
+        }),
     ]
 }
 
@@ -136,15 +240,37 @@ pub async fn handle_tool_call(
 ) -> Result<Value, ToolCallError> {
     match name {
         "list_packs" => {
+            // Reload user packs from disk on every list call (no restart needed)
+            state.reload_user_packs();
             let packs: Vec<Value> = state
-                .pack_registry
+                .pack_registry()
                 .all()
                 .map(|p| json!({"name": p.name(), "description": p.description(), "agents": p.agent_count(), "flow_steps": p.flow_step_count()}))
                 .collect();
             Ok(json!({"content": [{"type": "text", "text": serde_json::to_string_pretty(&packs).unwrap_or_default()}]}))
         }
         "consult" => consult::handle(state, arguments).await,
-        "deliberate" => deliberate::handle(state, arguments, progress_token).await,
+        "deliberate" => {
+            // Reload user packs so newly created mobs are available
+            state.reload_user_packs();
+            deliberate::handle(state, arguments, progress_token).await
+        }
+        "create_mob" => {
+            let result = mobs::handle_create(arguments).await?;
+            state.reload_user_packs();
+            Ok(result)
+        }
+        "get_mob" => mobs::handle_get(arguments).await,
+        "update_mob" => {
+            let result = mobs::handle_update(arguments).await?;
+            state.reload_user_packs();
+            Ok(result)
+        }
+        "delete_mob" => {
+            let result = mobs::handle_delete(arguments).await?;
+            state.reload_user_packs();
+            Ok(result)
+        }
         _ => Err(ToolCallError::method_not_found(format!(
             "Unknown tool: {name}"
         ))),

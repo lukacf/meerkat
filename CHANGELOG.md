@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-03-07
+
+### Fixed
+
+- **Gemini tool schema validation** — `strip_gemini_function_parameters_unsupported_keywords` no longer strips property names from `properties` maps. A user-defined field named `"title"` was being removed as a JSON Schema keyword, causing Gemini to reject the schema with `required[1]: property is not defined`. The stripper now recurses into each property's schema individually without touching the properties map keys.
+- **Example 033 sprite 404s** — sprite loader capped at 6 frames (00–05) instead of 8; eliminates 40 console 404s per page load.
+- **API key leak in Vite bundle** — removed `define` block from example 033's `vite.config.ts` that baked raw `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` into the production bundle. Only `import.meta.env.VITE_*` (opt-in) pattern remains.
+- **WASM not shipped in `@rkat/web`** — `build:wasm` script now removes wasm-pack's generated `.gitignore` (which contained `*`) so npm includes wasm artifacts in the published package.
+
+### Added
+
+#### Example 034: codemob-mcp — Implement Pack & User Mob CRUD
+- **`implement` pack** — gated implementation with iterative review loop. Two comms-based agents (implementer + reviewer) iterate until the reviewer approves (max 3 rounds). Uses diverse models (claude-sonnet-4-6 + gpt-5.3-codex) for genuine review independence.
+- **User mob CRUD tools** — `create_mob`, `get_mob`, `update_mob`, `delete_mob` MCP tools. User-created mobs stored as JSON under `.codemob-mcp/mobs/` and loaded dynamically into the pack registry without MCP restart. Both `comms` and `flow` execution modes supported.
+- **Activity-based comms termination** — comms-based execution now tracks active agent turns via `RunStarted`/`RunCompleted` events instead of a fixed quiescence timeout. Agents can work for as long as needed (up to 1 hour hard cap); termination triggers when all agents are idle for a 30-second grace period.
+- **Dynamic orchestrator routing** — comms initial message target and result capture now use the mob definition's orchestrator profile instead of hardcoded `"moderator"`.
+
 ## [0.4.4] - 2026-03-06
 
 ### Added

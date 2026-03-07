@@ -16,6 +16,7 @@
 pub mod advisor;
 pub mod architect;
 pub mod brainstorm;
+pub mod implement;
 pub mod panel;
 pub mod rct;
 pub mod red_team;
@@ -67,8 +68,19 @@ impl PackRegistry {
         packs.insert("brainstorm".into(), Box::new(brainstorm::BrainstormPack));
         packs.insert("red-team".into(), Box::new(red_team::RedTeamPack));
         packs.insert("panel".into(), Box::new(panel::PanelPack));
+        packs.insert("implement".into(), Box::new(implement::ImplementPack));
         packs.insert("rct".into(), Box::new(rct::RctPack));
         Self { packs }
+    }
+
+    /// Register a dynamic pack (e.g. user-created). Overwrites if name exists.
+    pub fn register(&mut self, pack: Box<dyn Pack>) {
+        self.packs.insert(pack.name().to_string(), pack);
+    }
+
+    /// Remove a pack by name. Returns true if it existed.
+    pub fn remove(&mut self, name: &str) -> bool {
+        self.packs.remove(name).is_some()
     }
 
     pub fn get(&self, name: &str) -> Option<&dyn Pack> {

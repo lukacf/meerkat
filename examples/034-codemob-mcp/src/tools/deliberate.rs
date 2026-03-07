@@ -26,26 +26,34 @@ pub async fn handle(
     let input: DeliberateInput = serde_json::from_value(arguments.clone())
         .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
 
-    let pack = state
-        .pack_registry
-        .get(&input.pack)
-        .ok_or_else(|| {
+    let context = input.context.as_deref().unwrap_or("");
+    let overrides = input.model_overrides.unwrap_or_default();
+
+    // Borrow registry, extract what we need, then drop the borrow
+    let (total_steps, has_flows, definition) = {
+        let registry = state.pack_registry();
+        let pack = registry.get(&input.pack).ok_or_else(|| {
             ToolCallError::invalid_params(format!(
                 "Unknown pack: '{}'. Available: {}",
                 input.pack,
-                state.pack_registry.list_names().join(", ")
+                registry.list_names().join(", ")
             ))
         })?;
-
-    let context = input.context.as_deref().unwrap_or("");
-    let overrides = input.model_overrides.unwrap_or_default();
-    let total_steps = pack.flow_step_count();
-    let has_flows = total_steps > 0;
-    let definition = pack.definition(&input.task, context, &overrides, input.provider_params.as_ref());
+        let total_steps = pack.flow_step_count();
+        let has_flows = total_steps > 0;
+        let definition =
+            pack.definition(&input.task, context, &overrides, input.provider_params.as_ref());
+        (total_steps, has_flows, definition)
+    };
     let mob_id = definition.id.clone();
 
-    // Collect profile names before moving definition
+    // Collect profile names and orchestrator before moving definition
     let profile_names: Vec<String> = definition.profiles.keys().map(|p| p.to_string()).collect();
+    let orchestrator_name = definition
+        .orchestrator
+        .as_ref()
+        .map(|o| o.profile.to_string())
+        .unwrap_or_else(|| "moderator".to_string());
 
     // Create mob
     state
@@ -129,7 +137,7 @@ pub async fn handle(
         } else {
             format!("{}\n\n## Context\n\n{context}", input.task)
         };
-        run_comms(state, &mob_id, &prompt, progress_token.as_ref()).await
+        run_comms(state, &mob_id, &orchestrator_name, &prompt, progress_token.as_ref()).await
     };
 
     // Destroy mob (best-effort)
@@ -250,13 +258,14 @@ async fn run_flow(
 async fn run_comms(
     state: &ForceState,
     mob_id: &MobId,
+    orchestrator: &str,
     task: &str,
     progress_token: Option<&Value>,
 ) -> Result<Value, ToolCallError> {
     use meerkat_core::event::AgentEvent;
 
     if let Some(token) = progress_token {
-        send_progress(token, 0, 1, "panel deliberating").await;
+        send_progress(token, 0, 1, "agents deliberating").await;
     }
 
     // Subscribe to mob-wide agent events (all members' streams merged)
@@ -266,70 +275,105 @@ async fn run_comms(
         .await
         .map_err(|e| ToolCallError::internal(format!("Event subscription failed: {e}")))?;
 
-    // Kick off the discussion by sending the task to the moderator
+    // Kick off the discussion by sending the task to the orchestrator
     state
         .mob_state
-        .mob_send_message(mob_id, MeerkatId::from("moderator"), task.to_string())
+        .mob_send_message(mob_id, MeerkatId::from(orchestrator), task.to_string())
         .await
-        .map_err(|e| ToolCallError::internal(format!("Failed to trigger moderator: {e}")))?;
+        .map_err(|e| ToolCallError::internal(format!("Failed to trigger {orchestrator}: {e}")))?;
 
-    // Drain events until quiescence
-    const MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
-    const QUIET_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(15);
+    // Drain events until all agents are idle.
+    //
+    // Track active turns via RunStarted/RunCompleted. When active_turns
+    // drops to 0 AND at least one turn has completed, the mob is done.
+    // A generous idle grace period handles the gap between one agent
+    // finishing and another being triggered by a comms message.
+    const MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(3600);
+    const IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 
     let deadline = tokio::time::Instant::now() + MAX_WAIT;
-    let mut last_event_time = tokio::time::Instant::now();
-    let mut last_moderator_text = String::new();
+    let mut last_orchestrator_text = String::new();
     let mut total_events = 0u64;
+    let mut active_turns: i64 = 0;
+    let mut any_turn_completed = false;
+    let mut idle_since: Option<tokio::time::Instant> = None;
 
     loop {
-        let timeout = QUIET_THRESHOLD.min(
-            deadline
-                .saturating_duration_since(tokio::time::Instant::now()),
-        );
+        let poll_timeout = if active_turns <= 0 && any_turn_completed {
+            // All agents idle — wait grace period for a new turn to start
+            let remaining_grace = idle_since
+                .map(|t| IDLE_GRACE.saturating_sub(t.elapsed()))
+                .unwrap_or(IDLE_GRACE);
+            remaining_grace.min(
+                deadline.saturating_duration_since(tokio::time::Instant::now()),
+            )
+        } else {
+            // Agents are working — just enforce the hard deadline
+            deadline.saturating_duration_since(tokio::time::Instant::now())
+        };
 
-        match tokio::time::timeout(timeout, router_handle.event_rx.recv()).await {
+        if poll_timeout.is_zero() {
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!(total_events, active_turns, "hit max wait time");
+            } else {
+                tracing::info!(total_events, "all agents idle, grace period expired");
+            }
+            break;
+        }
+
+        match tokio::time::timeout(poll_timeout, router_handle.event_rx.recv()).await {
             Ok(Some(attributed)) => {
-                last_event_time = tokio::time::Instant::now();
                 total_events += 1;
 
-                // Extract moderator's text outputs
-                let is_moderator = attributed.source.as_str() == "moderator";
-                // Capture the moderator's latest text output (final summary).
-                // We always take the most recent output — the moderator's last
-                // message is the synthesis, even if earlier messages were longer.
-                if is_moderator {
+                match &attributed.envelope.payload {
+                    AgentEvent::RunStarted { .. } => {
+                        active_turns += 1;
+                        idle_since = None;
+                    }
+                    AgentEvent::RunCompleted { .. } => {
+                        active_turns -= 1;
+                        any_turn_completed = true;
+                        if active_turns <= 0 {
+                            idle_since = Some(tokio::time::Instant::now());
+                        }
+                    }
+                    _ => {}
+                }
+
+                // Capture the orchestrator's latest text output
+                if attributed.source.as_str() == orchestrator {
                     match &attributed.envelope.payload {
                         AgentEvent::RunCompleted { result, .. } if !result.is_empty() => {
-                            last_moderator_text = result.clone();
+                            last_orchestrator_text = result.clone();
                         }
                         AgentEvent::TextComplete { content, .. } if !content.is_empty() => {
-                            last_moderator_text = content.clone();
+                            last_orchestrator_text = content.clone();
                         }
                         _ => {}
                     }
                 }
 
-                if total_events % 10 == 0 {
+                if total_events % 20 == 0 {
                     if let Some(token) = progress_token {
-                        send_progress(token, 0, 1, &format!("{total_events} events")).await;
+                        send_progress(
+                            token, 0, 1,
+                            &format!("{total_events} events, {active_turns} active"),
+                        ).await;
                     }
                 }
             }
             Ok(None) => {
-                // Channel closed — all agents done
                 tracing::info!(total_events, "event channel closed");
                 break;
             }
             Err(_) => {
-                // Timeout — check quiescence or deadline
-                let quiet = tokio::time::Instant::now() - last_event_time;
-                if quiet >= QUIET_THRESHOLD && total_events > 0 {
-                    tracing::info!(total_events, "panel reached quiescence");
+                // Timeout expired — either grace period or deadline
+                if active_turns <= 0 && any_turn_completed {
+                    tracing::info!(total_events, "all agents idle, grace period expired");
                     break;
                 }
                 if tokio::time::Instant::now() >= deadline {
-                    tracing::warn!(total_events, "panel hit max wait time");
+                    tracing::warn!(total_events, active_turns, "hit max wait time");
                     break;
                 }
             }
@@ -337,15 +381,15 @@ async fn run_comms(
     }
 
     if let Some(token) = progress_token {
-        send_progress(token, 1, 1, "panel complete").await;
+        send_progress(token, 1, 1, "complete").await;
     }
 
-    if last_moderator_text.is_empty() {
-        last_moderator_text =
-            "Panel discussion completed but moderator summary not captured.".to_string();
+    if last_orchestrator_text.is_empty() {
+        last_orchestrator_text =
+            format!("Discussion completed but {orchestrator} output not captured.");
     }
 
-    Ok(json!({"content": [{"type": "text", "text": last_moderator_text}]}))
+    Ok(json!({"content": [{"type": "text", "text": last_orchestrator_text}]}))
 }
 
 // ── Progress notifications ──────────────────────────────────────────────────

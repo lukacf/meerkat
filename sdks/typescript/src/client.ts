@@ -45,7 +45,7 @@ import {
   type McpRemoveParams,
 } from "./generated/types.js";
 import { Session } from "./session.js";
-import { CommsEventStream, EventStream, AsyncQueue } from "./streaming.js";
+import { EventStream, AsyncQueue } from "./streaming.js";
 import type {
   Capability,
   RunResult,
@@ -555,76 +555,6 @@ export class MeerkatClient {
     sessionId: string,
   ): Promise<Record<string, unknown>> {
     return this.request("comms/peers", { session_id: sessionId });
-  }
-
-  async openCommsStream(
-    sessionId: string,
-    options?: { scope?: "session" | "interaction"; interactionId?: string },
-  ): Promise<CommsEventStream> {
-    const scope = options?.scope ?? "session";
-    const params: Record<string, unknown> = { session_id: sessionId, scope };
-    if (options?.interactionId) {
-      params.interaction_id = options.interactionId;
-    }
-    const opened = await this.request("comms/stream_open", params);
-    const streamId = String(opened.stream_id ?? "");
-    if (!streamId) {
-      throw new MeerkatError("INVALID_RESPONSE", "Missing stream_id in comms/stream_open response");
-    }
-    const queue = new AsyncQueue<Record<string, unknown> | null>();
-    this.commsStreamQueues.set(streamId, queue);
-    return new CommsEventStream({
-      streamId,
-      eventQueue: queue,
-      onClose: async (id: string) => {
-        await this.request("comms/stream_close", { stream_id: id });
-        const q = this.commsStreamQueues.get(id);
-        if (q) {
-          q.put(null);
-        }
-        this.commsStreamQueues.delete(id);
-      },
-    });
-  }
-
-  async open_comms_stream(
-    sessionId: string,
-    options?: { scope?: "session" | "interaction"; interactionId?: string },
-  ): Promise<CommsEventStream> {
-    return this.openCommsStream(sessionId, options);
-  }
-
-  async sendAndStream(
-    sessionId: string,
-    command: Record<string, unknown>,
-  ): Promise<{ receipt: Record<string, unknown>; stream: CommsEventStream }> {
-    const receipt = await this.send(sessionId, command);
-    const interactionId = String(receipt.interaction_id ?? "");
-    const streamReserved = Boolean(receipt.stream_reserved ?? false);
-    if (!interactionId) {
-      throw new MeerkatError(
-        "INVALID_RESPONSE",
-        "comms/send response missing interaction_id for sendAndStream",
-      );
-    }
-    if (!streamReserved) {
-      throw new MeerkatError(
-        "INVALID_RESPONSE",
-        "comms/send response did not reserve stream for sendAndStream",
-      );
-    }
-    const stream = await this.openCommsStream(sessionId, {
-      scope: "interaction",
-      interactionId,
-    });
-    return { receipt, stream };
-  }
-
-  async send_and_stream(
-    sessionId: string,
-    command: Record<string, unknown>,
-  ): Promise<{ receipt: Record<string, unknown>; stream: CommsEventStream }> {
-    return this.sendAndStream(sessionId, command);
   }
 
   // -- Transport ----------------------------------------------------------

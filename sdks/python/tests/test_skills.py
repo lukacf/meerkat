@@ -61,7 +61,6 @@ class _MockClient:
         self._calls: list[dict] = []
         self._send_calls: list[dict] = []
         self._peers_calls: list[str] = []
-        self._send_and_stream_calls: list[dict] = []
 
     def has_capability(self, cap: str) -> bool:
         return cap == "skills"
@@ -104,22 +103,6 @@ class _MockClient:
                 {"id": "peer-b", "name": "beta"},
             ]
         }
-
-    async def send_and_stream(self, session_id, **kwargs):
-        self._send_and_stream_calls.append({"session_id": session_id, "kwargs": kwargs})
-
-        class _DummyStream:
-            stream_id = "stream-1"
-
-        return (
-            {
-                "kind": "input_accepted",
-                "interaction_id": "i-1",
-                "stream_reserved": True,
-            },
-            _DummyStream(),
-        )
-
 
 def _make_session() -> tuple[Session, _MockClient]:
     client = _MockClient()
@@ -181,22 +164,6 @@ async def test_session_peers_returns_peer_list():
         {"id": "peer-a", "name": "alpha"},
         {"id": "peer-b", "name": "beta"},
     ]
-
-
-@pytest.mark.asyncio
-async def test_session_send_and_stream_routes_to_client_method():
-    session, client = _make_session()
-    receipt, stream = await session.send_and_stream(
-        kind="input",
-        body="hello",
-        source="rpc",
-        stream="reserve_interaction",
-    )
-
-    assert receipt["interaction_id"] == "i-1"
-    assert stream.stream_id == "stream-1"
-    assert len(client._send_and_stream_calls) == 1
-    assert client._send_and_stream_calls[0]["session_id"] == "s-1"
 
 
 @pytest.mark.asyncio

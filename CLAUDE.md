@@ -139,8 +139,6 @@ The RPC server speaks JSON-RPC 2.0 over newline-delimited JSON (JSONL) on stdin/
 | `turn/interrupt` | Cancel in-flight turn |
 | `comms/send` | Push external event into session (comms feature) |
 | `comms/peers` | List discoverable peers (comms feature) |
-| `comms/stream_open` | Open scoped comms event stream (comms feature) |
-| `comms/stream_close` | Close scoped comms stream (comms feature) |
 | `skills/list` | List skills with provenance |
 | `skills/inspect` | Inspect a skill's full content |
 | `mcp/add` | Stage live MCP server addition |

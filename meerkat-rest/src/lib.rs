@@ -28,8 +28,6 @@ use axum::{
     routing::{get, post},
 };
 use chrono::{DateTime, Utc};
-#[cfg(any(feature = "comms", feature = "mob"))]
-use futures::StreamExt;
 use futures::stream::Stream;
 use meerkat::{
     AgentEvent, AgentFactory, FactoryAgentBuilder, LlmClient, OutputSchema,
@@ -521,7 +519,6 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}/events", get(session_events))
         .route("/comms/send", post(comms_send))
         .route("/comms/peers", get(comms_peers))
-        .route("/comms/stream", get(comms_stream))
         // BRIDGE(M11→M12): Legacy event push endpoint.
         .route("/sessions/{id}/event", post(push_event))
         .route(
@@ -637,7 +634,7 @@ async fn mob_event_stream(
                     })).unwrap_or_default(),
                 ));
 
-                while let Some(envelope) = event_stream.next().await {
+                while let Some(envelope) = futures::StreamExt::next(&mut event_stream).await {
                     let event_type = agent_event_type(&envelope.payload);
                     let data = serde_json::to_string(&envelope).unwrap_or_default();
                     yield Ok(Event::default().event(event_type).data(data));
@@ -704,15 +701,6 @@ pub struct CommsSendRequest {
 #[derive(Debug, Deserialize)]
 pub struct CommsPeersRequest {
     pub session_id: String,
-}
-
-/// Canonical comms stream request query.
-#[derive(Debug, Deserialize)]
-pub struct CommsStreamRequest {
-    pub session_id: String,
-    pub scope: String,
-    #[serde(default)]
-    pub interaction_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -882,74 +870,6 @@ async fn comms_peers(
         .collect();
 
     Ok(Json(json!({ "peers": entries })))
-}
-
-/// GET /comms/stream — SSE stream of comms scoped events.
-#[cfg(feature = "comms")]
-async fn comms_stream(
-    State(state): State<AppState>,
-    axum::extract::Query(req): axum::extract::Query<CommsStreamRequest>,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    let session_id = resolve_session_id_for_state(&req.session_id, &state)?;
-
-    let comms = state
-        .session_service
-        .comms_runtime(&session_id)
-        .await
-        .ok_or_else(|| {
-            ApiError::NotFound(format!(
-                "Session not found or comms not enabled: {session_id}"
-            ))
-        })?;
-
-    let scope = match req.scope.as_str() {
-        "session" => meerkat_core::comms::StreamScope::Session(session_id.clone()),
-        "interaction" => {
-            let raw = req.interaction_id.as_deref().ok_or_else(|| {
-                ApiError::BadRequest("scope 'interaction' requires interaction_id".into())
-            })?;
-            let interaction_id = uuid::Uuid::parse_str(raw)
-                .map_err(|_| ApiError::BadRequest(format!("Invalid interaction_id: {raw}")))?;
-            meerkat_core::comms::StreamScope::Interaction(meerkat_core::InteractionId(
-                interaction_id,
-            ))
-        }
-        other => {
-            return Err(ApiError::BadRequest(format!(
-                "Unknown stream scope: {other}"
-            )));
-        }
-    };
-
-    let mut stream = comms
-        .stream(scope)
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-
-    let stream = async_stream::stream! {
-        yield Ok(Event::default().event("stream_opened").data("{}"));
-
-        while let Some(envelope) = stream.next().await {
-            let event_type = agent_event_type(&envelope.payload);
-            let event = Event::default()
-                .event(event_type)
-                .data(serde_json::to_string(&envelope).unwrap_or_default());
-            yield Ok(event);
-        }
-
-        yield Ok(Event::default().event("done").data("{}"));
-    };
-
-    Ok(Sse::new(stream))
-}
-
-#[cfg(not(feature = "comms"))]
-async fn comms_stream(
-    _state: State<AppState>,
-    _req: axum::extract::Query<CommsStreamRequest>,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    Err::<Sse<futures::stream::Empty<Result<Event, Infallible>>>, ApiError>(ApiError::NotFound(
-        "comms feature not enabled".to_string(),
-    ))
 }
 
 /// Push an external event to a session's inbox.

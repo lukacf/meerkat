@@ -293,7 +293,7 @@ pub trait CommsRuntime: Send + Sync {
         ))
     }
 
-    /// Open a stream for a session or interaction scope.
+    #[doc(hidden)]
     fn stream(&self, scope: StreamScope) -> Result<EventStream, StreamError> {
         let scope_desc = match scope {
             StreamScope::Session(session_id) => format!("session {session_id}"),
@@ -314,7 +314,7 @@ pub trait CommsRuntime: Send + Sync {
         self.peers().await.len()
     }
 
-    /// Send a command and open a scoped stream in one call.
+    #[doc(hidden)]
     async fn send_and_stream(
         &self,
         cmd: CommsCommand,

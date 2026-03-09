@@ -36,7 +36,7 @@ from .errors import CapabilityUnavailableError, MeerkatError
 from .events import Usage
 from .generated.types import CONTRACT_VERSION
 from .session import Session, _normalize_skill_ref
-from .streaming import CommsEventStream, EventStream, _StdoutDispatcher
+from .streaming import EventStream, _StdoutDispatcher
 from .types import (
     Capability,
     McpLiveOpResponse,
@@ -561,62 +561,6 @@ class MeerkatClient:
 
     async def peers(self, session_id: str) -> dict[str, Any]:
         return await self._request("comms/peers", {"session_id": session_id})
-
-    async def open_comms_stream(
-        self,
-        session_id: str,
-        *,
-        scope: str = "session",
-        interaction_id: str | None = None,
-    ) -> CommsEventStream:
-        if not self._dispatcher:
-            raise MeerkatError("NOT_CONNECTED", "Client not connected")
-
-        params: dict[str, Any] = {"session_id": session_id, "scope": scope}
-        if interaction_id is not None:
-            params["interaction_id"] = interaction_id
-        opened = await self._request("comms/stream_open", params)
-        stream_id = str(opened.get("stream_id", ""))
-        if not stream_id:
-            raise MeerkatError("INVALID_RESPONSE", "Missing stream_id in comms/stream_open response")
-
-        queue = self._dispatcher.subscribe_comms_stream(stream_id)
-        return CommsEventStream(
-            stream_id=stream_id,
-            event_queue=queue,
-            dispatcher=self._dispatcher,
-            closer=self._close_comms_stream,
-        )
-
-    async def send_and_stream(
-        self,
-        session_id: str,
-        **kwargs: Any,
-    ) -> tuple[dict[str, Any], CommsEventStream]:
-        receipt = await self.send(session_id, **kwargs)
-        interaction_id = str(receipt.get("interaction_id", ""))
-        stream_reserved = bool(receipt.get("stream_reserved", False))
-        if not interaction_id:
-            raise MeerkatError(
-                "INVALID_RESPONSE",
-                "comms/send response missing interaction_id for send_and_stream",
-            )
-        if not stream_reserved:
-            raise MeerkatError(
-                "INVALID_RESPONSE",
-                "comms/send response did not reserve stream for send_and_stream",
-            )
-        stream = await self.open_comms_stream(
-            session_id,
-            scope="interaction",
-            interaction_id=interaction_id,
-        )
-        return receipt, stream
-
-    async def _close_comms_stream(self, stream_id: str) -> None:
-        await self._request("comms/stream_close", {"stream_id": stream_id})
-        if self._dispatcher:
-            self._dispatcher.unsubscribe_comms_stream(stream_id)
 
     # -- Transport ---------------------------------------------------------
 

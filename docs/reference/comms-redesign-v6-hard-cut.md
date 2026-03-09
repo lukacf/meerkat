@@ -3,8 +3,10 @@
 > **Historical design document.** This plan was written before implementation.
 > The comms redesign has been implemented. The contract version references to
 > `0.3.0` below reflect the original plan; the actual contract version at
-> time of implementation was `0.4.x`. See the current `CommsRuntime` trait in
-> `meerkat-core/src/agent.rs` for the implemented API.
+> time of implementation was `0.4.x`. Public `comms/stream_*`, MCP comms-stream
+> tools, and SDK `send_and_stream` / `open_comms_stream` helpers were removed
+> before merge; remaining mentions below are historical only. See the current
+> session, agent, and mob observation APIs for the supported public model.
 
 ## Unified TDD Master Plan V6: Hard-Cut Comms Redesign (Final)
 

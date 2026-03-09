@@ -190,37 +190,6 @@ describe("Skills v2.1", () => {
     assert.deepEqual(calls, ["s-1"]);
   });
 
-  it("Session.sendAndStream delegates to client.sendAndStream", async () => {
-    const calls = [];
-    const mockClient = {
-      async sendAndStream(sessionId, command) {
-        calls.push({ sessionId, command });
-        return {
-          receipt: { kind: "input_accepted", interaction_id: "i-1", stream_reserved: true },
-          stream: { streamId: "stream-1" },
-        };
-      },
-    };
-
-    const session = new Session(mockClient, {
-      sessionId: "s-1", text: "init", turns: 0, toolCalls: 0,
-      usage: { inputTokens: 0, outputTokens: 0 },
-    });
-
-    const result = await session.sendAndStream({
-      kind: "input",
-      body: "hello",
-      source: "rpc",
-      stream: "reserve_interaction",
-    });
-
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0].sessionId, "s-1");
-    assert.equal(result.stream.streamId, "stream-1");
-  });
-});
-
-describe("Client parity", () => {
   it("createSessionStreaming buffers early events before session id is bound", async () => {
     const client = new MeerkatClient();
     client.process = { stdin: { write() {} } };

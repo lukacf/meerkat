@@ -7,6 +7,8 @@ import type {
   MobLifecycleAction,
   FlowStatus,
   EventEnvelope,
+  AttributedEvent,
+  MobEvent,
   AppendSystemContextOptions,
   MobAppendSystemContextResult,
 } from './types.js';
@@ -27,12 +29,12 @@ interface MobWasmBindings {
   mob_respawn: (mobId: string, meerkatId: string, initialMessage?: string) => Promise<void>;
   mob_status: (mobId: string) => Promise<string>;
   mob_lifecycle: (mobId: string, action: string) => Promise<void>;
-  mob_events: (mobId: string, afterCursor: string, limit: number) => Promise<string>;
+  mob_events: (mobId: string, afterCursor: number, limit: number) => Promise<string>;
   mob_run_flow: (mobId: string, flowId: string, params: string) => Promise<string>;
   mob_flow_status: (mobId: string, runId: string) => Promise<string>;
   mob_cancel_flow: (mobId: string, runId: string) => Promise<void>;
-  mob_member_subscribe: (mobId: string, meerkatId: string) => number;
-  mob_subscribe_events: (mobId: string) => number;
+  mob_member_subscribe: (mobId: string, meerkatId: string) => Promise<number>;
+  mob_subscribe_events: (mobId: string) => Promise<number>;
   poll_subscription: (handle: number) => string;
   close_subscription: (handle: number) => void;
 }
@@ -119,19 +121,19 @@ export class Mob {
   }
 
   /** Get mob events after a cursor. */
-  async events(afterCursor = '', limit = 100): Promise<EventEnvelope[]> {
-    const json = await this.bindings.mob_events(this.mobId, afterCursor, limit);
-    return JSON.parse(json) as EventEnvelope[];
+  async events(afterCursor = '', limit = 100): Promise<MobEvent[]> {
+    const numericCursor = afterCursor === '' ? 0 : Number(afterCursor);
+    const json = await this.bindings.mob_events(this.mobId, Number.isFinite(numericCursor) ? numericCursor : 0, limit);
+    return JSON.parse(json) as MobEvent[];
   }
 
   /** Run a flow. Returns the run ID. */
   async runFlow(flowId: string, params: Record<string, unknown> = {}): Promise<string> {
-    const json = await this.bindings.mob_run_flow(
+    return this.bindings.mob_run_flow(
       this.mobId,
       flowId,
       JSON.stringify(params),
     );
-    return JSON.parse(json) as string;
   }
 
   /** Get flow status. */
@@ -146,22 +148,22 @@ export class Mob {
   }
 
   /** Subscribe to events for a specific member. */
-  subscribe(meerkatId: string): EventSubscription {
-    const handle = this.bindings.mob_member_subscribe(this.mobId, meerkatId);
-    return new EventSubscription(
-      handle,
-      this.bindings.poll_subscription,
-      this.bindings.close_subscription,
+  async subscribe(meerkatId: string): Promise<EventSubscription<EventEnvelope>> {
+    const handle = await this.bindings.mob_member_subscribe(this.mobId, meerkatId);
+    return new EventSubscription<EventEnvelope>(
+      () => this.bindings.poll_subscription(handle),
+      (raw) => Array.isArray(raw) ? (raw as EventEnvelope[]) : [],
+      () => this.bindings.close_subscription(handle),
     );
   }
 
-  /** Subscribe to all mob-wide events. */
-  subscribeAll(): EventSubscription {
-    const handle = this.bindings.mob_subscribe_events(this.mobId);
-    return new EventSubscription(
-      handle,
-      this.bindings.poll_subscription,
-      this.bindings.close_subscription,
+  /** Subscribe to all mob-wide attributed events. */
+  async subscribeAll(): Promise<EventSubscription<AttributedEvent>> {
+    const handle = await this.bindings.mob_subscribe_events(this.mobId);
+    return new EventSubscription<AttributedEvent>(
+      () => this.bindings.poll_subscription(handle),
+      (raw) => Array.isArray(raw) ? (raw as AttributedEvent[]) : [],
+      () => this.bindings.close_subscription(handle),
     );
   }
 

@@ -19,7 +19,7 @@ from .generated.types import (
 )
 
 # Re-export Usage from events so there's a single canonical definition.
-from .events import Usage as Usage  # noqa: F401
+from .events import Event, Usage as Usage  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +119,26 @@ class SessionInfo:
     message_count: int = 0
     total_tokens: int = 0
     is_active: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class EventEnvelope:
+    """Session or agent event with delivery metadata."""
+
+    event_id: str = ""
+    source_id: str = ""
+    seq: int = 0
+    timestamp_ms: int = 0
+    payload: Event | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AttributedEvent:
+    """Mob event annotated with the emitting member identity."""
+
+    source: str = ""
+    profile: str = ""
+    envelope: EventEnvelope = field(default_factory=EventEnvelope)
 
 
 @dataclass(frozen=True, slots=True)

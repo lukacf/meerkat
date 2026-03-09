@@ -283,17 +283,7 @@ impl LockGuard {
 
 impl Drop for LockGuard {
     fn drop(&mut self) {
-        remove_file_nonblocking_on_drop(self.path.clone());
-    }
-}
-
-fn remove_file_nonblocking_on_drop(path: PathBuf) {
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        std::mem::drop(handle.spawn(async move {
-            let _ = tokio::fs::remove_file(path).await;
-        }));
-    } else {
-        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 

@@ -1,28 +1,24 @@
 //! Method router - dispatches JSON-RPC requests to the correct handler.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-#[cfg(any(feature = "comms", feature = "mob"))]
 use futures::StreamExt;
-#[cfg(any(feature = "comms", feature = "mob"))]
-use std::collections::HashMap;
-#[cfg(any(feature = "comms", feature = "mob"))]
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
-#[cfg(any(feature = "comms", feature = "mob"))]
 use tokio::sync::oneshot;
-#[cfg(any(feature = "comms", feature = "mob"))]
 use tokio::task::JoinHandle;
-#[cfg(any(feature = "comms", feature = "mob"))]
 use uuid::Uuid;
 
 use meerkat_core::ConfigStore;
 use meerkat_core::EventEnvelope;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::types::SessionId;
+use serde_json::json;
 
 use crate::error;
 use crate::handlers;
+use crate::handlers::RpcResponseExt;
 use crate::protocol::{RpcNotification, RpcRequest, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 
@@ -54,6 +50,24 @@ impl NotificationSink {
         let _ = self.tx.send(notification).await;
     }
 
+    /// Emit a standalone session stream event notification.
+    pub async fn emit_session_stream_event(
+        &self,
+        stream_id: &Uuid,
+        sequence: u64,
+        session_id: &SessionId,
+        event: &EventEnvelope<AgentEvent>,
+    ) {
+        let params = serde_json::json!({
+            "stream_id": stream_id.to_string(),
+            "sequence": sequence,
+            "session_id": session_id.to_string(),
+            "event": event,
+        });
+        let notification = RpcNotification::new("session/stream_event", params);
+        let _ = self.tx.send(notification).await;
+    }
+
     #[cfg(feature = "mob")]
     /// Emit a mob stream event as a JSON-RPC notification.
     ///
@@ -75,18 +89,61 @@ impl NotificationSink {
     }
 }
 
-#[cfg(any(feature = "comms", feature = "mob"))]
 struct StreamForwarder {
     state: StreamForwarderState,
 }
 
-#[cfg(any(feature = "comms", feature = "mob"))]
 enum StreamForwarderState {
     Active {
         stop_tx: Option<oneshot::Sender<()>>,
         task: JoinHandle<()>,
     },
-    Closed,
+}
+
+/// Bounded set of recently-closed stream IDs for idempotent close detection.
+///
+/// Prevents unbounded memory growth on long-lived RPC servers: when the set
+/// exceeds `MAX_ENTRIES`, the oldest entries are evicted. This means very old
+/// stream IDs may lose `already_closed` tracking, which is acceptable — the
+/// alternative is unbounded growth.
+struct ClosedStreamSet {
+    entries: std::collections::VecDeque<Uuid>,
+    set: HashSet<Uuid>,
+}
+
+const CLOSED_STREAM_SET_MAX: usize = 1024;
+
+impl ClosedStreamSet {
+    fn new() -> Self {
+        Self {
+            entries: std::collections::VecDeque::new(),
+            set: HashSet::new(),
+        }
+    }
+
+    /// Insert a stream ID. Returns false if already present.
+    fn insert(&mut self, id: Uuid) -> bool {
+        if !self.set.insert(id) {
+            return false;
+        }
+        self.entries.push_back(id);
+        while self.entries.len() > CLOSED_STREAM_SET_MAX {
+            if let Some(evicted) = self.entries.pop_front() {
+                self.set.remove(&evicted);
+            }
+        }
+        true
+    }
+
+    /// Check and remove a stream ID. Returns true if it was present.
+    fn remove(&mut self, id: &Uuid) -> bool {
+        if self.set.remove(id) {
+            self.entries.retain(|e| e != id);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -100,11 +157,16 @@ pub struct MethodRouter {
     config_store: Arc<dyn ConfigStore>,
     notification_sink: NotificationSink,
     skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
+    active_session_streams: Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
+    /// Recently-closed stream IDs for idempotent close detection.
+    /// Bounded to prevent unbounded growth on long-lived servers.
+    closed_session_streams: Arc<Mutex<ClosedStreamSet>>,
     #[cfg(feature = "mob")]
     mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
-    #[cfg(feature = "comms")]
     #[cfg(feature = "mob")]
     active_mob_streams: Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
+    #[cfg(feature = "mob")]
+    closed_mob_streams: Arc<Mutex<ClosedStreamSet>>,
 }
 
 impl MethodRouter {
@@ -119,11 +181,14 @@ impl MethodRouter {
             config_store,
             notification_sink,
             skill_runtime: None,
+            active_session_streams: Arc::new(Mutex::new(HashMap::new())),
+            closed_session_streams: Arc::new(Mutex::new(ClosedStreamSet::new())),
             #[cfg(feature = "mob")]
             mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
-            #[cfg(feature = "comms")]
             #[cfg(feature = "mob")]
             active_mob_streams: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(feature = "mob")]
+            closed_mob_streams: Arc::new(Mutex::new(ClosedStreamSet::new())),
         }
     }
 
@@ -168,11 +233,11 @@ impl MethodRouter {
                 .await
             }
             "session/list" => handlers::session::handle_list(id, params, &self.runtime).await,
-            "session/read" => handlers::session::handle_read(id, params, &self.runtime).await,
-            "session/archive" => handlers::session::handle_archive(id, params, &self.runtime).await,
-            "session/inject_context" => {
-                handlers::session::handle_inject_context(id, params, &self.runtime).await
-            }
+            "session/read" => self.handle_session_read(id, params).await,
+            "session/archive" => self.handle_session_archive(id, params).await,
+            "session/inject_context" => self.handle_session_inject_context(id, params).await,
+            "session/stream_open" => self.handle_session_stream_open(id, params).await,
+            "session/stream_close" => self.handle_session_stream_close(id, params).await,
             "turn/start" => {
                 handlers::turn::handle_start(id, params, &self.runtime, &self.notification_sink)
                     .await
@@ -185,13 +250,59 @@ impl MethodRouter {
             #[cfg(feature = "mob")]
             "mob/call" => handlers::mob::handle_call(id, params, &self.mob_state).await,
             #[cfg(feature = "mob")]
+            "mob/create" => handlers::mob::handle_create(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/list" => handlers::mob::handle_list(id, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/status" => handlers::mob::handle_status(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/lifecycle" => handlers::mob::handle_lifecycle(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/spawn" => handlers::mob::handle_spawn(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/members" => handlers::mob::handle_members(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/retire" => handlers::mob::handle_retire(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/respawn" => handlers::mob::handle_respawn(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/wire" => handlers::mob::handle_wire(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/unwire" => handlers::mob::handle_unwire(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/send" => handlers::mob::handle_send(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/events" => handlers::mob::handle_events(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/append_system_context" => {
+                handlers::mob::handle_append_system_context(
+                    id,
+                    params,
+                    &self.mob_state,
+                    &self.runtime,
+                )
+                .await
+            }
+            #[cfg(feature = "mob")]
+            "mob/flows" => handlers::mob::handle_flows(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/flow_run" => handlers::mob::handle_flow_run(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/flow_status" => {
+                handlers::mob::handle_flow_status(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/flow_cancel" => {
+                handlers::mob::handle_flow_cancel(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
             "mob/stream_open" => self.handle_mob_stream_open(id, params).await,
             #[cfg(feature = "mob")]
             "mob/stream_close" => self.handle_mob_stream_close(id, params).await,
             #[cfg(feature = "comms")]
-            "comms/send" => handlers::comms::handle_send(id, params, &self.runtime).await,
+            "comms/send" => self.handle_comms_send(id, params).await,
             #[cfg(feature = "comms")]
-            "comms/peers" => handlers::comms::handle_peers(id, params, &self.runtime).await,
+            "comms/peers" => self.handle_comms_peers(id, params).await,
             // M12: event/push removed. Use comms/send instead.
             "skills/list" => handlers::skills::handle_list(id, &self.skill_runtime).await,
             "skills/inspect" => {
@@ -243,6 +354,461 @@ impl MethodRouter {
         &self.runtime
     }
 
+    async fn handle_session_read(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        let params: handlers::session::ReadSessionParams = match handlers::parse_params(params) {
+            Ok(p) => p,
+            Err(resp) => return resp.with_id(id),
+        };
+
+        let session_id = match handlers::parse_session_id_for_runtime(
+            id.clone(),
+            &params.session_id,
+            &self.runtime,
+        ) {
+            Ok(sid) => sid,
+            Err(resp) => return resp,
+        };
+
+        if let Some(info) = self.runtime.session_state(&session_id).await {
+            return RpcResponse::success(
+                id,
+                json!({
+                    "session_id": session_id.to_string(),
+                    "session_ref": self.runtime.realm_id().map(|realm| meerkat_contracts::format_session_ref(realm, &session_id)),
+                    "state": info.state.as_str(),
+                    "labels": info.labels,
+                }),
+            );
+        }
+
+        #[cfg(feature = "mob")]
+        if let Ok(view) = self.mob_state.session_service().read(&session_id).await {
+            return RpcResponse::success(
+                id,
+                json!({
+                    "session_id": session_id.to_string(),
+                    "session_ref": self.runtime.realm_id().map(|realm| meerkat_contracts::format_session_ref(realm, &session_id)),
+                    "state": if view.state.is_active { "running" } else { "idle" },
+                    "labels": view.state.labels,
+                }),
+            );
+        }
+
+        RpcResponse::error(
+            id,
+            error::SESSION_NOT_FOUND,
+            format!("Session not found: {session_id}"),
+        )
+    }
+
+    async fn handle_session_archive(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        let params: handlers::session::ArchiveSessionParams = match handlers::parse_params(params) {
+            Ok(p) => p,
+            Err(resp) => return resp.with_id(id),
+        };
+        let session_id = match handlers::parse_session_id_for_runtime(
+            id.clone(),
+            &params.session_id,
+            &self.runtime,
+        ) {
+            Ok(sid) => sid,
+            Err(resp) => return resp,
+        };
+        match self.runtime.archive_session(&session_id).await {
+            Ok(()) => RpcResponse::success(id, json!({"archived": true})),
+            Err(rpc_err) if rpc_err.code == error::SESSION_NOT_FOUND => {
+                #[cfg(feature = "mob")]
+                {
+                    if let Ok(()) = self
+                        .mob_state
+                        .retire_member_by_session_id(&session_id)
+                        .await
+                    {
+                        return RpcResponse::success(id, json!({"archived": true}));
+                    }
+                }
+                RpcResponse::error(id, rpc_err.code, rpc_err.message)
+            }
+            Err(rpc_err) => RpcResponse::error(id, rpc_err.code, rpc_err.message),
+        }
+    }
+
+    async fn handle_session_inject_context(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        let params: handlers::session::InjectSystemContextParams =
+            match handlers::parse_params(params) {
+                Ok(p) => p,
+                Err(resp) => return resp.with_id(id),
+            };
+        let session_id = match handlers::parse_session_id_for_runtime(
+            id.clone(),
+            &params.session_id,
+            &self.runtime,
+        ) {
+            Ok(sid) => sid,
+            Err(resp) => return resp,
+        };
+        let req = meerkat_core::AppendSystemContextRequest {
+            text: params.text,
+            source: params.source,
+            idempotency_key: params.idempotency_key,
+        };
+        match self
+            .runtime
+            .append_system_context(&session_id, req.clone())
+            .await
+        {
+            Ok(result) => RpcResponse::success(id, json!({"status": result.status})),
+            Err(rpc_err) if rpc_err.code == error::SESSION_NOT_FOUND => {
+                #[cfg(feature = "mob")]
+                {
+                    if let Ok(result) = self
+                        .mob_state
+                        .session_service()
+                        .append_system_context(&session_id, req)
+                        .await
+                    {
+                        return RpcResponse::success(id, json!({"status": result.status}));
+                    }
+                }
+                RpcResponse::error(id, rpc_err.code, rpc_err.message)
+            }
+            Err(rpc_err) => RpcResponse::error(id, rpc_err.code, rpc_err.message),
+        }
+    }
+
+    #[cfg(feature = "comms")]
+    async fn handle_comms_send(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        let params: handlers::comms::CommsSendParams = match handlers::parse_params(params) {
+            Ok(p) => p,
+            Err(resp) => return resp,
+        };
+        let session_id = match handlers::parse_session_id_for_runtime(
+            id.clone(),
+            &params.session_id,
+            &self.runtime,
+        ) {
+            Ok(sid) => sid,
+            Err(resp) => return resp,
+        };
+        let comms = if let Some(c) = self.runtime.comms_runtime(&session_id).await {
+            Some(c)
+        } else {
+            #[cfg(feature = "mob")]
+            {
+                self.mob_state
+                    .session_service()
+                    .comms_runtime(&session_id)
+                    .await
+            }
+            #[cfg(not(feature = "mob"))]
+            {
+                None
+            }
+        };
+        let Some(comms) = comms else {
+            return RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                format!("Session not found or comms not enabled: {session_id}"),
+            );
+        };
+        let cmd = match handlers::comms::build_comms_command(&params, &session_id) {
+            Ok(cmd) => cmd,
+            Err(details) => {
+                return RpcResponse::error(id, error::INVALID_PARAMS, serde_json::json!({
+                    "code": "invalid_command",
+                    "message": "Command validation failed",
+                    "details": meerkat_core::comms::CommsCommandRequest::validation_errors_to_json(&details),
+                }).to_string())
+            }
+        };
+        match comms.send(cmd).await {
+            Ok(receipt) => {
+                let result = match receipt {
+                    meerkat_core::comms::SendReceipt::InputAccepted {
+                        interaction_id,
+                        stream_reserved,
+                    } => {
+                        json!({"kind":"input_accepted","interaction_id": interaction_id.0.to_string(),"stream_reserved": stream_reserved})
+                    }
+                    meerkat_core::comms::SendReceipt::PeerMessageSent { envelope_id, acked } => {
+                        json!({"kind":"peer_message_sent","envelope_id": envelope_id.to_string(),"acked": acked})
+                    }
+                    meerkat_core::comms::SendReceipt::PeerRequestSent {
+                        envelope_id,
+                        interaction_id,
+                        stream_reserved,
+                    } => {
+                        json!({"kind":"peer_request_sent","envelope_id": envelope_id.to_string(),"interaction_id": interaction_id.0.to_string(),"stream_reserved": stream_reserved})
+                    }
+                    meerkat_core::comms::SendReceipt::PeerResponseSent {
+                        envelope_id,
+                        in_reply_to,
+                    } => {
+                        json!({"kind":"peer_response_sent","envelope_id": envelope_id.to_string(),"in_reply_to": in_reply_to.0.to_string()})
+                    }
+                };
+                RpcResponse::success(id, result)
+            }
+            Err(e) => RpcResponse::error(id, error::INTERNAL_ERROR, e.to_string()),
+        }
+    }
+
+    #[cfg(feature = "comms")]
+    async fn handle_comms_peers(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        let params: handlers::comms::CommsPeersParams = match handlers::parse_params(params) {
+            Ok(p) => p,
+            Err(resp) => return resp,
+        };
+        let session_id = match handlers::parse_session_id_for_runtime(
+            id.clone(),
+            &params.session_id,
+            &self.runtime,
+        ) {
+            Ok(sid) => sid,
+            Err(resp) => return resp,
+        };
+        let comms = if let Some(c) = self.runtime.comms_runtime(&session_id).await {
+            Some(c)
+        } else {
+            #[cfg(feature = "mob")]
+            {
+                self.mob_state
+                    .session_service()
+                    .comms_runtime(&session_id)
+                    .await
+            }
+            #[cfg(not(feature = "mob"))]
+            {
+                None
+            }
+        };
+        let Some(comms) = comms else {
+            return RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                format!("Session not found or comms not enabled: {session_id}"),
+            );
+        };
+        let peers = comms.peers().await;
+        let entries: Vec<serde_json::Value> = peers
+            .iter()
+            .map(|p| {
+                json!({
+                    "name": p.name.to_string(),
+                    "peer_id": p.peer_id,
+                    "address": p.address,
+                    "source": format!("{:?}", p.source),
+                    "sendable_kinds": p.sendable_kinds,
+                    "capabilities": p.capabilities,
+                })
+            })
+            .collect();
+        RpcResponse::success(id, json!({"peers": entries}))
+    }
+
+    async fn handle_session_stream_open(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        use serde::Deserialize;
+        use serde_json::json;
+
+        #[derive(Deserialize)]
+        struct SessionStreamOpenParams {
+            session_id: String,
+        }
+
+        let params = match handlers::parse_params::<SessionStreamOpenParams>(params) {
+            Ok(p) => p,
+            Err(resp) => return resp.with_id(id),
+        };
+
+        let session_id = match handlers::parse_session_id_for_runtime(
+            id.clone(),
+            &params.session_id,
+            &self.runtime,
+        ) {
+            Ok(session_id) => session_id,
+            Err(resp) => return resp,
+        };
+
+        let stream = match self.runtime.subscribe_session_events(&session_id).await {
+            Ok(stream) => stream,
+            Err(runtime_err) => {
+                #[cfg(feature = "mob")]
+                {
+                    match meerkat_mob::MobSessionService::subscribe_session_events(
+                        self.mob_state.session_service(),
+                        &session_id,
+                    )
+                    .await
+                    {
+                        Ok(stream) => stream,
+                        Err(err) => {
+                            return RpcResponse::error(
+                                id,
+                                error::INVALID_PARAMS,
+                                format!(
+                                    "Failed to subscribe to session events: {runtime_err}; fallback: {err}"
+                                ),
+                            );
+                        }
+                    }
+                }
+                #[cfg(not(feature = "mob"))]
+                {
+                    return RpcResponse::error(
+                        id,
+                        error::INVALID_PARAMS,
+                        format!("Failed to subscribe to session events: {runtime_err}"),
+                    );
+                }
+            }
+        };
+
+        let stream_id = Uuid::new_v4();
+        self.closed_session_streams.lock().await.remove(&stream_id);
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        let notification_sink = self.notification_sink.clone();
+        let active_session_streams = self.active_session_streams.clone();
+        let closed_session_streams = self.closed_session_streams.clone();
+        let stream_id_for_task = stream_id;
+        let session_id_for_task = session_id.clone();
+
+        let task = tokio::spawn(async move {
+            let mut stream = stream;
+            let mut stop_rx = stop_rx;
+            let mut sequence = 0u64;
+
+            loop {
+                tokio::select! {
+                    _ = &mut stop_rx => {
+                        break;
+                    }
+                    event = stream.next() => {
+                        match event {
+                            Some(envelope) => {
+                                sequence += 1;
+                                notification_sink
+                                    .emit_session_stream_event(&stream_id_for_task, sequence, &session_id_for_task, &envelope)
+                                    .await;
+                            }
+                            None => break,
+                        }
+                    }
+                }
+            }
+
+            let mut streams = active_session_streams.lock().await;
+            if streams
+                .get(&stream_id_for_task)
+                .is_some_and(|s| matches!(s.state, StreamForwarderState::Active { .. }))
+            {
+                streams.remove(&stream_id_for_task);
+                // Track natural completion so subsequent close returns already_closed=true
+                closed_session_streams
+                    .lock()
+                    .await
+                    .insert(stream_id_for_task);
+            }
+        });
+
+        self.active_session_streams.lock().await.insert(
+            stream_id,
+            StreamForwarder {
+                state: StreamForwarderState::Active {
+                    stop_tx: Some(stop_tx),
+                    task,
+                },
+            },
+        );
+
+        RpcResponse::success(
+            id,
+            json!({
+                "stream_id": stream_id.to_string(),
+                "session_id": session_id.to_string(),
+                "opened": true,
+            }),
+        )
+    }
+
+    async fn handle_session_stream_close(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        use serde::Deserialize;
+        use serde_json::json;
+
+        #[derive(Deserialize)]
+        struct SessionStreamCloseParams {
+            stream_id: String,
+        }
+
+        let params = match handlers::parse_params::<SessionStreamCloseParams>(params) {
+            Ok(p) => p,
+            Err(resp) => return resp.with_id(id),
+        };
+
+        let stream_id = match Uuid::parse_str(&params.stream_id) {
+            Ok(stream_id) => stream_id,
+            Err(_) => {
+                return RpcResponse::error(
+                    id,
+                    error::INVALID_PARAMS,
+                    format!("Invalid stream_id: {}", params.stream_id),
+                );
+            }
+        };
+
+        let mut active_session_streams = self.active_session_streams.lock().await;
+        let already_closed = match active_session_streams.remove(&stream_id) {
+            Some(mut stream) => match &mut stream.state {
+                StreamForwarderState::Active { stop_tx, task } => {
+                    if let Some(stop_tx) = stop_tx.take() {
+                        let _ = stop_tx.send(());
+                    }
+                    task.abort();
+                    self.closed_session_streams.lock().await.insert(stream_id);
+                    false
+                }
+            },
+            None => self.closed_session_streams.lock().await.remove(&stream_id),
+        };
+
+        RpcResponse::success(
+            id,
+            json!({
+                "stream_id": stream_id.to_string(),
+                "closed": true,
+                "already_closed": already_closed,
+            }),
+        )
+    }
+
     #[cfg(feature = "mob")]
     async fn handle_mob_stream_open(
         &self,
@@ -277,9 +843,11 @@ impl MethodRouter {
         };
 
         let stream_id = Uuid::new_v4();
+        self.closed_mob_streams.lock().await.remove(&stream_id);
         let (stop_tx, stop_rx) = oneshot::channel::<()>();
         let notification_sink = self.notification_sink.clone();
         let active_mob_streams = self.active_mob_streams.clone();
+        let closed_mob_streams = self.closed_mob_streams.clone();
         let stream_id_for_task = stream_id;
 
         if let Some(member_id_str) = params.member_id {
@@ -327,12 +895,14 @@ impl MethodRouter {
                     }
                 }
 
+                let closed_mob_streams = closed_mob_streams.clone();
                 let mut streams = active_mob_streams.lock().await;
                 if streams
                     .get(&stream_id_for_task)
                     .is_some_and(|s| matches!(s.state, StreamForwarderState::Active { .. }))
                 {
                     streams.remove(&stream_id_for_task);
+                    closed_mob_streams.lock().await.insert(stream_id_for_task);
                 }
             });
 
@@ -384,6 +954,7 @@ impl MethodRouter {
                     .is_some_and(|s| matches!(s.state, StreamForwarderState::Active { .. }))
                 {
                     streams.remove(&stream_id_for_task);
+                    closed_mob_streams.lock().await.insert(stream_id_for_task);
                 }
             });
 
@@ -438,19 +1009,18 @@ impl MethodRouter {
         };
 
         let mut active_mob_streams = self.active_mob_streams.lock().await;
-        let already_closed = match active_mob_streams.get_mut(&stream_id) {
-            Some(stream) => match &mut stream.state {
+        let already_closed = match active_mob_streams.remove(&stream_id) {
+            Some(mut stream) => match &mut stream.state {
                 StreamForwarderState::Active { stop_tx, task } => {
                     if let Some(stop_tx) = stop_tx.take() {
                         let _ = stop_tx.send(());
                     }
                     task.abort();
-                    stream.state = StreamForwarderState::Closed;
+                    self.closed_mob_streams.lock().await.insert(stream_id);
                     false
                 }
-                StreamForwarderState::Closed => true,
             },
-            None => false,
+            None => self.closed_mob_streams.lock().await.remove(&stream_id),
         };
 
         RpcResponse::success(
@@ -783,6 +1353,341 @@ mod tests {
             .unwrap();
         let created = result_value(&create_resp);
         assert!(created["mob_id"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn session_stream_close_removes_forwarder_from_active_map() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({ "prompt": "hello" }),
+            ))
+            .await
+            .unwrap();
+        let created = result_value(&create_resp);
+        let session_id = created["session_id"].as_str().unwrap().to_string();
+
+        let open_resp = router
+            .dispatch(make_request(
+                "session/stream_open",
+                serde_json::json!({ "session_id": session_id }),
+            ))
+            .await
+            .unwrap();
+        let opened = result_value(&open_resp);
+        let stream_id = opened["stream_id"].as_str().unwrap().to_string();
+        assert_eq!(router.active_session_streams.lock().await.len(), 1);
+
+        let close_resp = router
+            .dispatch(make_request(
+                "session/stream_close",
+                serde_json::json!({ "stream_id": stream_id }),
+            ))
+            .await
+            .unwrap();
+        let closed = result_value(&close_resp);
+        assert_eq!(closed["closed"], true);
+        assert_eq!(closed["already_closed"], false);
+        assert_eq!(router.active_session_streams.lock().await.len(), 0);
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_append_system_context_targets_mob_backing_service() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": "mob-system-context",
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-5",
+                                "tools": { "comms": true }
+                            }
+                        }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let created = result_value(&create_resp);
+        let mob_id = created["mob_id"].as_str().unwrap().to_string();
+
+        let spawn_resp = router
+            .dispatch(make_request(
+                "mob/spawn",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "profile": "worker",
+                    "meerkat_id": "worker-1",
+                    "runtime_mode": "turn_driven"
+                }),
+            ))
+            .await
+            .unwrap();
+        let spawned = result_value(&spawn_resp);
+        assert_eq!(spawned["meerkat_id"], "worker-1");
+
+        let append_resp = router
+            .dispatch(make_request(
+                "mob/append_system_context",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "meerkat_id": "worker-1",
+                    "text": "Prioritize the lead.",
+                    "source": "mob",
+                    "idempotency_key": "ctx-worker-1"
+                }),
+            ))
+            .await
+            .unwrap();
+        let appended = result_value(&append_resp);
+        assert_eq!(appended["status"], "staged");
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_spawned_session_id_routes_through_session_and_comms_handlers() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": "mob-routed-session",
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-5",
+                                "tools": { "comms": true }
+                            }
+                        }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let created = result_value(&create_resp);
+        let mob_id = created["mob_id"].as_str().unwrap().to_string();
+
+        let spawn_resp = router
+            .dispatch(make_request(
+                "mob/spawn",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "profile": "worker",
+                    "meerkat_id": "worker-1",
+                    "runtime_mode": "turn_driven"
+                }),
+            ))
+            .await
+            .unwrap();
+        let spawned = result_value(&spawn_resp);
+        let session_id = spawned["session_id"].as_str().unwrap().to_string();
+        assert_eq!(spawned["meerkat_id"], "worker-1");
+
+        let read_resp = router
+            .dispatch(make_request(
+                "session/read",
+                serde_json::json!({ "session_id": session_id }),
+            ))
+            .await
+            .unwrap();
+        let read = result_value(&read_resp);
+        assert_eq!(read["session_id"], session_id);
+
+        let peers_resp = router
+            .dispatch(make_request(
+                "comms/peers",
+                serde_json::json!({ "session_id": session_id }),
+            ))
+            .await
+            .unwrap();
+        let peers = result_value(&peers_resp);
+        assert!(peers["peers"].is_array());
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_spawned_session_id_supports_session_stream_open() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": "mob-session-stream",
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-5",
+                                "tools": { "comms": true }
+                            }
+                        }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let mob_id = result_value(&create_resp)["mob_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let spawn_resp = router
+            .dispatch(make_request(
+                "mob/spawn",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "profile": "worker",
+                    "meerkat_id": "worker-1",
+                    "runtime_mode": "turn_driven"
+                }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&spawn_resp)["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let open_resp = router
+            .dispatch(make_request(
+                "session/stream_open",
+                serde_json::json!({ "session_id": session_id }),
+            ))
+            .await
+            .unwrap();
+        let opened = result_value(&open_resp);
+        assert_eq!(opened["opened"], true);
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn session_archive_for_mob_session_retires_member() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": "mob-archive-session",
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-5",
+                                "tools": { "comms": true }
+                            }
+                        }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let mob_id = result_value(&create_resp)["mob_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let spawn_resp = router
+            .dispatch(make_request(
+                "mob/spawn",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "profile": "worker",
+                    "meerkat_id": "worker-1",
+                    "runtime_mode": "turn_driven"
+                }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&spawn_resp)["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let archive_resp = router
+            .dispatch(make_request(
+                "session/archive",
+                serde_json::json!({ "session_id": session_id }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result_value(&archive_resp)["archived"], true);
+
+        let members_resp = router
+            .dispatch(make_request(
+                "mob/members",
+                serde_json::json!({ "mob_id": mob_id }),
+            ))
+            .await
+            .unwrap();
+        let members_value = result_value(&members_resp);
+        let members = members_value["members"].as_array().unwrap();
+        assert!(members.is_empty());
+    }
+
+    #[tokio::test]
+    async fn session_archive_unknown_returns_not_found() {
+        let (router, _notif_rx) = test_router().await;
+        let response = router
+            .dispatch(make_request(
+                "session/archive",
+                serde_json::json!({ "session_id": SessionId::new() }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.error.as_ref().map(|e| e.code),
+            Some(crate::error::SESSION_NOT_FOUND)
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_stream_close_removes_forwarder_from_active_map() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "mob/call",
+                serde_json::json!({
+                    "name": "mob_create",
+                    "arguments": { "prefab": "coding_swarm" }
+                }),
+            ))
+            .await
+            .unwrap();
+        let created = result_value(&create_resp);
+        let mob_id = created["mob_id"].as_str().unwrap().to_string();
+
+        let open_resp = router
+            .dispatch(make_request(
+                "mob/stream_open",
+                serde_json::json!({ "mob_id": mob_id }),
+            ))
+            .await
+            .unwrap();
+        let opened = result_value(&open_resp);
+        let stream_id = opened["stream_id"].as_str().unwrap().to_string();
+        assert_eq!(router.active_mob_streams.lock().await.len(), 1);
+
+        let close_resp = router
+            .dispatch(make_request(
+                "mob/stream_close",
+                serde_json::json!({ "stream_id": stream_id }),
+            ))
+            .await
+            .unwrap();
+        let closed = result_value(&close_resp);
+        assert_eq!(closed["closed"], true);
+        assert_eq!(closed["already_closed"], false);
+        assert_eq!(router.active_mob_streams.lock().await.len(), 0);
     }
 
     #[cfg(feature = "mob")]

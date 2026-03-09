@@ -204,22 +204,26 @@ export interface SpawnSpec {
 
 /** Result of a spawn operation. */
 export interface SpawnResult {
-  meerkat_id: string;
-  status: string;
+  status: 'ok' | 'error';
+  member_ref?: Record<string, unknown> | null;
+  error?: string;
 }
 
 /** A mob member entry from listMembers. */
 export interface MobMember {
   meerkat_id: string;
   profile: string;
-  status: string;
+  member_ref: Record<string, unknown>;
+  runtime_mode?: string;
+  state?: string;
+  wired_to?: string[];
+  labels?: Record<string, string>;
 }
 
 /** Mob status. */
 export interface MobStatus {
   mob_id: string;
-  status: string;
-  member_count: number;
+  state: string;
 }
 
 /** Mob lifecycle actions. */
@@ -231,8 +235,23 @@ export type MobLifecycleAction = 'stop' | 'resume' | 'complete' | 'destroy';
 export interface EventEnvelope {
   session_id?: string;
   meerkat_id?: string;
-  cursor?: string;
+  cursor?: string | number;
   event: AgentEvent | { type: string; [key: string]: unknown };
+}
+
+/** Attributed mob-wide event from mob subscriptions. */
+export interface AttributedEvent {
+  source: string;
+  profile: string;
+  envelope: EventEnvelope;
+}
+
+/** Structural mob event from the mob event log. */
+export interface MobEvent {
+  cursor: number;
+  timestamp: string;
+  mob_id: string;
+  kind: Record<string, unknown>;
 }
 
 /**

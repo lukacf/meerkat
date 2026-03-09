@@ -37,6 +37,8 @@ pub fn handle_initialize(id: Option<RpcId>) -> RpcResponse {
                 "session/read".to_string(),
                 "session/archive".to_string(),
                 "session/inject_context".to_string(),
+                "session/stream_open".to_string(),
+                "session/stream_close".to_string(),
                 "turn/start".to_string(),
                 "turn/interrupt".to_string(),
                 "config/get".to_string(),
@@ -49,6 +51,23 @@ pub fn handle_initialize(id: Option<RpcId>) -> RpcResponse {
             #[cfg(feature = "mob")]
             {
                 m.push("mob/prefabs".to_string());
+                m.push("mob/create".to_string());
+                m.push("mob/list".to_string());
+                m.push("mob/status".to_string());
+                m.push("mob/lifecycle".to_string());
+                m.push("mob/spawn".to_string());
+                m.push("mob/retire".to_string());
+                m.push("mob/respawn".to_string());
+                m.push("mob/wire".to_string());
+                m.push("mob/unwire".to_string());
+                m.push("mob/members".to_string());
+                m.push("mob/send".to_string());
+                m.push("mob/events".to_string());
+                m.push("mob/append_system_context".to_string());
+                m.push("mob/flows".to_string());
+                m.push("mob/flow_run".to_string());
+                m.push("mob/flow_status".to_string());
+                m.push("mob/flow_cancel".to_string());
                 m.push("mob/tools".to_string());
                 m.push("mob/call".to_string());
                 m.push("mob/stream_open".to_string());

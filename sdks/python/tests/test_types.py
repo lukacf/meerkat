@@ -1,3 +1,4 @@
+import asyncio
 """Conformance tests for Meerkat Python SDK types and events."""
 
 import pytest
@@ -517,3 +518,102 @@ def test_match_case_run_started():
             assert p == "yo"
         case _:
             assert False, "Should match RunStarted"
+
+
+@pytest.mark.asyncio
+async def test_client_session_and_mob_observe_methods_use_explicit_rpc_methods():
+    client = MeerkatClient()
+    calls = []
+
+    async def fake_request(method, params):
+        calls.append((method, params))
+        return {"stream_id": f"{method}-stream"}
+
+    class DummyDispatcher:
+        def subscribe_stream(self, stream_id):
+            queue = asyncio.Queue()
+            queue.put_nowait(None)
+            return queue
+
+        def unsubscribe_stream(self, _stream_id):
+            return None
+
+    client._request = fake_request  # type: ignore[method-assign]
+    client._dispatcher = DummyDispatcher()  # type: ignore[assignment]
+
+    session_sub = await client.subscribe_session_events("s1")
+    member_sub = await client.subscribe_mob_member_events("mob-1", "agent-a")
+    mob_sub = await client.subscribe_mob_events("mob-1")
+
+    assert session_sub.stream_id == "session/stream_open-stream"
+    assert member_sub.stream_id == "mob/stream_open-stream"
+    assert mob_sub.stream_id == "mob/stream_open-stream"
+    assert calls == [
+        ("session/stream_open", {"session_id": "s1"}),
+        ("mob/stream_open", {"mob_id": "mob-1", "member_id": "agent-a"}),
+        ("mob/stream_open", {"mob_id": "mob-1"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
+    client = MeerkatClient()
+    calls = []
+
+    async def fake_request(method, params):
+        calls.append((method, params))
+        if method == "mob/create":
+            return {"mob_id": "mob-1"}
+        if method == "mob/list":
+            return {"mobs": [{"mob_id": "mob-1"}]}
+        if method == "mob/status":
+            return {"mob_id": "mob-1", "status": "running"}
+        if method == "mob/members":
+            return {"members": [{"meerkat_id": "agent-a"}]}
+        if method == "mob/flows":
+            return {"flows": ["incident"]}
+        if method == "mob/flow_run":
+            return {"run_id": "run-1"}
+        if method == "mob/flow_status":
+            return {"run": {"status": "running"}}
+        return {}
+
+    client._request = fake_request  # type: ignore[method-assign]
+    client.require_capability = lambda _cap: None  # type: ignore[method-assign]
+
+    mob = await client.create_mob(prefab="office")
+    assert mob.id == "mob-1"
+    assert await client.list_mobs() == [{"mob_id": "mob-1"}]
+    assert await client.mob_status("mob-1") == {"mob_id": "mob-1", "status": "running"}
+    assert await client.list_mob_members("mob-1") == [{"meerkat_id": "agent-a"}]
+    await client.spawn_mob_member("mob-1", profile="planner", meerkat_id="agent-a")
+    await client.retire_mob_member("mob-1", "agent-a")
+    await client.respawn_mob_member("mob-1", "agent-a", "hello")
+    await client.wire_mob_members("mob-1", "a", "b")
+    await client.unwire_mob_members("mob-1", "a", "b")
+    await client.mob_lifecycle("mob-1", "start")
+    await client.send_mob_message("mob-1", "agent-a", "hello")
+    await client.append_mob_system_context("mob-1", "agent-a", "context")
+    assert await client.list_mob_flows("mob-1") == ["incident"]
+    assert await client.run_mob_flow("mob-1", "incident") == "run-1"
+    assert await client.get_mob_flow_status("mob-1", "run-1") == {"status": "running"}
+    await client.cancel_mob_flow("mob-1", "run-1")
+
+    assert [method for method, _ in calls] == [
+        "mob/create",
+        "mob/list",
+        "mob/status",
+        "mob/members",
+        "mob/spawn",
+        "mob/retire",
+        "mob/respawn",
+        "mob/wire",
+        "mob/unwire",
+        "mob/lifecycle",
+        "mob/send",
+        "mob/append_system_context",
+        "mob/flows",
+        "mob/flow_run",
+        "mob/flow_status",
+        "mob/flow_cancel",
+    ]

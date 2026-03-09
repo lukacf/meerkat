@@ -45,9 +45,19 @@ import {
   type McpRemoveParams,
 } from "./generated/types.js";
 import { Session } from "./session.js";
+import { Mob } from "./mob.js";
+import { parseCoreEvent } from "./events.js";
 import { EventStream, AsyncQueue } from "./streaming.js";
+import { EventSubscription } from "./subscription.js";
 import type {
+  AgentEventEnvelope,
+  AttributedMobEvent,
   Capability,
+  MobCreateOptions,
+  MobFlowStatus,
+  MobMember,
+  MobStatus,
+  MobSummary,
   RunResult,
   SchemaWarning,
   SessionInfo,
@@ -129,10 +139,11 @@ export class MeerkatClient {
     { resolve: (value: Record<string, unknown>) => void; reject: (reason: unknown) => void }
   >();
   private eventQueues = new Map<string, AsyncQueue<Record<string, unknown> | null>>();
-  private commsStreamQueues = new Map<string, AsyncQueue<Record<string, unknown> | null>>();
+  private streamQueues = new Map<string, AsyncQueue<Record<string, unknown> | null>>();
   private pendingStreamQueue: AsyncQueue<Record<string, unknown> | null> | null = null;
   private pendingStreamRequestId: number | null = null;
   private unmatchedStreamBuffer = new Map<string, Record<string, unknown>[]>();
+  private unmatchedStandaloneStreamBuffer = new Map<string, Record<string, unknown>[]>();
   private rl: ReadlineInterface | null = null;
 
   constructor(rkatPath = "rkat-rpc") {
@@ -205,10 +216,10 @@ export class MeerkatClient {
       queue.put(null);
     }
     this.eventQueues.clear();
-    for (const [, queue] of this.commsStreamQueues) {
+    for (const [, queue] of this.streamQueues) {
       queue.put(null);
     }
-    this.commsStreamQueues.clear();
+    this.streamQueues.clear();
     if (this.pendingStreamQueue) {
       this.pendingStreamQueue.put(null);
       this.pendingStreamQueue = null;
@@ -440,6 +451,229 @@ export class MeerkatClient {
     });
   }
 
+  async subscribeSessionEvents(sessionId: string): Promise<EventSubscription<AgentEventEnvelope>> {
+    return this.openEventSubscription(
+      "session/stream_open",
+      { session_id: sessionId },
+      "session/stream_close",
+      MeerkatClient.parseAgentEventEnvelope,
+    );
+  }
+
+  async createMob(options: MobCreateOptions): Promise<Mob> {
+    this.requireCapability("mob");
+    const result = await this.request("mob/create", options);
+    return new Mob(this, String(result.mob_id ?? ""));
+  }
+
+  mob(mobId: string): Mob {
+    return new Mob(this, mobId);
+  }
+
+  async listMobs(): Promise<MobSummary[]> {
+    this.requireCapability("mob");
+    const result = await this.request("mob/list", {});
+    const mobs = (result.mobs as Array<Record<string, unknown>>) ?? [];
+    return mobs.map((mob) => ({
+      mobId: String(mob.mob_id ?? mob.mobId ?? ""),
+      status: String(mob.status ?? ""),
+    }));
+  }
+
+  async mobStatus(mobId: string): Promise<{ mobId: string; status: string }> {
+    const result = await this.request("mob/status", { mob_id: mobId });
+    const rawStatus = result.status;
+    const status = typeof rawStatus === "string"
+      ? rawStatus
+      : (typeof rawStatus === "object" && rawStatus !== null
+        ? String(Object.keys(rawStatus)[0] ?? "unknown")
+        : String(rawStatus ?? "unknown"));
+    return { mobId: String(result.mob_id ?? mobId), status };
+  }
+
+  async listMobMembers(mobId: string): Promise<MobMember[]> {
+    const result = await this.request("mob/members", { mob_id: mobId });
+    const members = (result.members as Array<Record<string, unknown>>) ?? [];
+    return members.map((member) => ({
+      meerkatId: String(member.meerkat_id ?? member.meerkatId ?? ""),
+      profile: String(member.profile_name ?? member.profile ?? ""),
+      memberRef: (member.member_ref as Record<string, unknown> | undefined),
+      runtimeMode: member.runtime_mode != null ? String(member.runtime_mode) : undefined,
+      state: member.state != null ? String(member.state) : undefined,
+      wiredTo: Array.isArray(member.wired_to)
+        ? member.wired_to.map((peer) => String(peer))
+        : undefined,
+      labels: member.labels && typeof member.labels === 'object'
+        ? Object.fromEntries(Object.entries(member.labels as Record<string, unknown>).map(([key, value]) => [key, String(value)]))
+        : undefined,
+      sessionId: member.member_ref && typeof member.member_ref === 'object'
+        ? (member.member_ref as Record<string, unknown>).session_id != null
+          ? String((member.member_ref as Record<string, unknown>).session_id)
+          : undefined
+        : undefined,
+    }));
+  }
+
+  async spawnMobMember(
+    mobId: string,
+    options: {
+      profile: string;
+      meerkatId: string;
+      initialMessage?: string;
+      runtimeMode?: string;
+      backend?: string;
+      resumeSessionId?: string;
+      labels?: Record<string, string>;
+      context?: Record<string, unknown>;
+      additionalInstructions?: string[];
+    },
+  ): Promise<Record<string, unknown>> {
+    return this.request("mob/spawn", {
+      mob_id: mobId,
+      profile: options.profile,
+      meerkat_id: options.meerkatId,
+      initial_message: options.initialMessage,
+      runtime_mode: options.runtimeMode,
+      backend: options.backend,
+      resume_session_id: options.resumeSessionId,
+      labels: options.labels,
+      context: options.context,
+      additional_instructions: options.additionalInstructions,
+    });
+  }
+
+  async retireMobMember(mobId: string, meerkatId: string): Promise<void> {
+    await this.request("mob/retire", { mob_id: mobId, meerkat_id: meerkatId });
+  }
+
+  async respawnMobMember(mobId: string, meerkatId: string, initialMessage?: string): Promise<void> {
+    await this.request("mob/respawn", { mob_id: mobId, meerkat_id: meerkatId, initial_message: initialMessage });
+  }
+
+  async wireMobMembers(mobId: string, a: string, b: string): Promise<void> {
+    await this.request("mob/wire", { mob_id: mobId, a, b });
+  }
+
+  async unwireMobMembers(mobId: string, a: string, b: string): Promise<void> {
+    await this.request("mob/unwire", { mob_id: mobId, a, b });
+  }
+
+  async mobLifecycle(mobId: string, action: 'stop' | 'resume' | 'complete' | 'reset' | 'destroy'): Promise<void> {
+    await this.request("mob/lifecycle", { mob_id: mobId, action });
+  }
+
+  async sendMobMessage(mobId: string, meerkatId: string, message: string): Promise<void> {
+    await this.request("mob/send", { mob_id: mobId, meerkat_id: meerkatId, message });
+  }
+
+  async appendMobSystemContext(
+    mobId: string,
+    meerkatId: string,
+    text: string,
+    options?: { source?: string; idempotencyKey?: string },
+  ): Promise<Record<string, unknown>> {
+    return this.request("mob/append_system_context", {
+      mob_id: mobId,
+      meerkat_id: meerkatId,
+      text,
+      source: options?.source,
+      idempotency_key: options?.idempotencyKey,
+    });
+  }
+
+  async listMobFlows(mobId: string): Promise<string[]> {
+    const result = await this.request("mob/flows", { mob_id: mobId });
+    return (result.flows as string[]) ?? [];
+  }
+
+  async runMobFlow(mobId: string, flowId: string, params: Record<string, unknown> = {}): Promise<string> {
+    const result = await this.request("mob/flow_run", { mob_id: mobId, flow_id: flowId, params });
+    return String(result.run_id ?? "");
+  }
+
+  async getMobFlowStatus(mobId: string, runId: string): Promise<MobFlowStatus | null> {
+    const result = await this.request("mob/flow_status", { mob_id: mobId, run_id: runId });
+    return result.run == null ? null : { run: result.run as Record<string, unknown> };
+  }
+
+  async cancelMobFlow(mobId: string, runId: string): Promise<void> {
+    await this.request("mob/flow_cancel", { mob_id: mobId, run_id: runId });
+  }
+
+  async subscribeMobEvents(mobId: string): Promise<EventSubscription<AttributedMobEvent>> {
+    return this.openEventSubscription(
+      "mob/stream_open",
+      { mob_id: mobId },
+      "mob/stream_close",
+      MeerkatClient.parseAttributedMobEvent,
+    );
+  }
+
+  async subscribeMobMemberEvents(mobId: string, meerkatId: string): Promise<EventSubscription<AgentEventEnvelope>> {
+    return this.openEventSubscription(
+      "mob/stream_open",
+      { mob_id: mobId, member_id: meerkatId },
+      "mob/stream_close",
+      MeerkatClient.parseAgentEventEnvelope,
+    );
+  }
+
+  private async openEventSubscription<T>(
+    openMethod: string,
+    params: Record<string, unknown>,
+    closeMethod: string,
+    parse: (raw: Record<string, unknown>) => T,
+  ): Promise<EventSubscription<T>> {
+    const result = this.process?.stdin
+      ? await (async () => {
+          this.requestId++;
+          const requestId = this.requestId;
+          const responsePromise = this.registerRequest(requestId);
+          const rpcRequest = { jsonrpc: "2.0", id: requestId, method: openMethod, params };
+          this.process!.stdin!.write(JSON.stringify(rpcRequest) + "\n");
+          return responsePromise;
+        })()
+      : await this.request(openMethod, params);
+    const streamId = String(result.stream_id ?? "");
+    if (!streamId) {
+      throw new MeerkatError("INVALID_RESPONSE", `${openMethod} did not return stream_id`);
+    }
+    const queue = new AsyncQueue<Record<string, unknown> | null>();
+    this.streamQueues.set(streamId, queue);
+    const buffered = this.unmatchedStandaloneStreamBuffer.get(streamId) ?? [];
+    for (const event of buffered) {
+      queue.put(event);
+    }
+    this.unmatchedStandaloneStreamBuffer.delete(streamId);
+    return new EventSubscription<T>({
+      streamId,
+      queue,
+      closeRemote: async (id: string) => {
+        this.streamQueues.delete(id);
+        await this.request(closeMethod, { stream_id: id });
+      },
+      parseEvent: parse,
+    });
+  }
+
+  private static parseAgentEventEnvelope(raw: Record<string, unknown>): AgentEventEnvelope {
+    return {
+      eventId: String(raw.event_id ?? raw.eventId ?? ""),
+      sourceId: String(raw.source_id ?? raw.sourceId ?? ""),
+      seq: Number(raw.seq ?? 0),
+      timestampMs: Number(raw.timestamp_ms ?? raw.timestampMs ?? 0),
+      payload: parseCoreEvent((raw.payload ?? {}) as Record<string, unknown>),
+    };
+  }
+
+  private static parseAttributedMobEvent(raw: Record<string, unknown>): AttributedMobEvent {
+    return {
+      source: String(raw.source ?? ""),
+      profile: String(raw.profile ?? ""),
+      envelope: MeerkatClient.parseAgentEventEnvelope((raw.envelope ?? {}) as Record<string, unknown>),
+    };
+  }
+
   // -- Internal methods used by Session -----------------------------------
 
   /** @internal */
@@ -584,16 +818,21 @@ export class MeerkatClient {
         }
       }
     } else if ("method" in data) {
-      if (data.method === "comms/stream_event") {
-        const params = (data.params ?? {}) as Record<string, unknown>;
+      const method = String(data.method ?? "");
+      const params = (data.params ?? {}) as Record<string, unknown>;
+      if (method === "session/stream_event" || method === "mob/stream_event") {
         const streamId = String(params.stream_id ?? "");
-        const queue = this.commsStreamQueues.get(streamId);
-        if (queue) {
-          queue.put(params);
+        const queue = this.streamQueues.get(streamId);
+        const event = (params.event ?? params) as Record<string, unknown>;
+        if (queue && event) {
+          queue.put(event);
+        } else if (streamId && event) {
+          const buffered = this.unmatchedStandaloneStreamBuffer.get(streamId) ?? [];
+          buffered.push(event);
+          this.unmatchedStandaloneStreamBuffer.set(streamId, buffered);
         }
         return;
       }
-      const params = (data.params ?? {}) as Record<string, unknown>;
       const sessionId = String(params.session_id ?? "");
       const event = params.event as Record<string, unknown> | undefined;
       if (event) {

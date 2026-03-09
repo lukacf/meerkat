@@ -21,15 +21,26 @@
  * ```
  */
 
-// Core client and session
 export { MeerkatClient } from "./client.js";
 export type { ConnectOptions } from "./client.js";
 export { Session } from "./session.js";
+export { Mob } from "./mob.js";
 export { EventStream } from "./streaming.js";
+export { EventSubscription } from "./subscription.js";
 
-// Domain types (clean, Wire-free public names)
 export type {
+  AgentEventEnvelope,
+  AttributedEvent,
+  AttributedMobEvent,
   Capability,
+  EventEnvelope,
+  MobCreateOptions,
+  MobDefinition,
+  MobFlowStatus,
+  MobLifecycleAction,
+  MobMember,
+  MobStatus,
+  MobSummary,
   RunResult,
   SchemaWarning,
   SessionInfo,
@@ -39,10 +50,10 @@ export type {
   SkillKey,
   SkillRef,
   SourceHealthSnapshot,
+  SpawnSpec,
   Usage,
 } from "./types.js";
 
-// Error hierarchy
 export {
   MeerkatError,
   CapabilityUnavailableError,
@@ -50,7 +61,6 @@ export {
   SkillNotFoundError,
 } from "./generated/errors.js";
 
-// Contract version
 export { CONTRACT_VERSION } from "./generated/types.js";
 export type {
   McpAddParams,
@@ -59,7 +69,6 @@ export type {
   McpLiveOpResponse,
 } from "./generated/types.js";
 
-// Typed events — discriminated union and all interfaces
 export type {
   AgentEvent,
   CoreAgentEvent,
@@ -103,7 +112,6 @@ export type {
   HookPoint,
 } from "./events.js";
 
-// Event utilities
 export {
   parseEvent,
   parseCoreEvent,

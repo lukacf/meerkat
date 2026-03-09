@@ -4,17 +4,22 @@ mod tokio {
 }
 
 use async_trait::async_trait;
+
+use meerkat_core::AppendSystemContextStatus;
 use meerkat_core::ScopedAgentEvent;
 use meerkat_core::agent::{AgentToolDispatcher, CommsRuntime as CoreCommsRuntime};
 use meerkat_core::comms::{CommsCommand, SendError, SendReceipt, TrustedPeerSpec};
 use meerkat_core::error::ToolError;
 use meerkat_core::interaction::InteractionId;
 use meerkat_core::service::{
-    CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService,
-    SessionServiceCommsExt, SessionSummary, SessionUsage, SessionView, StartTurnRequest,
+    AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
+    SessionControlError, SessionError, SessionInfo, SessionQuery, SessionService,
+    SessionServiceCommsExt, SessionServiceControlExt, SessionSummary, SessionUsage, SessionView,
+    StartTurnRequest,
 };
 use meerkat_core::time_compat::{Instant, SystemTime};
 use meerkat_core::types::{RunResult, SessionId, ToolCallView, ToolDef, ToolResult, Usage};
+use meerkat_core::{AgentEvent, EventEnvelope, EventStream, StreamError};
 use meerkat_mob::{
     FlowId, MeerkatId, MobBackendKind, MobBuilder, MobDefinition, MobError, MobHandle, MobId,
     MobRuntimeMode, MobSessionService, MobState, MobStorage, Prefab, ProfileName, RunId,
@@ -185,6 +190,33 @@ impl MobMcpState {
         self.handle_for(mob_id).await?.retire(meerkat_id).await
     }
 
+    pub async fn retire_member_by_session_id(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), MobError> {
+        let mobs: Vec<(MobId, MobHandle)> = self
+            .mobs
+            .read()
+            .await
+            .iter()
+            .map(|(mob_id, managed)| (mob_id.clone(), managed.handle.clone()))
+            .collect();
+
+        for (mob_id, handle) in mobs {
+            let members = handle.list_all_members().await;
+            if let Some(member) = members
+                .into_iter()
+                .find(|entry| entry.member_ref.session_id() == Some(session_id))
+            {
+                return self.mob_retire(&mob_id, member.meerkat_id).await;
+            }
+        }
+
+        Err(MobError::Internal(format!(
+            "session not found in any mob: {session_id}"
+        )))
+    }
+
     pub async fn mob_wire(
         &self,
         mob_id: &MobId,
@@ -212,6 +244,31 @@ impl MobMcpState {
             .list_all_members()
             .await
             .pipe(Ok)
+    }
+
+    pub async fn mob_append_system_context(
+        &self,
+        mob_id: &MobId,
+        meerkat_id: &MeerkatId,
+        req: AppendSystemContextRequest,
+    ) -> Result<(SessionId, AppendSystemContextResult), SessionControlError> {
+        let members = self.mob_list_members(mob_id).await.map_err(|error| {
+            SessionControlError::InvalidRequest {
+                message: error.to_string(),
+            }
+        })?;
+        let session_id = members
+            .into_iter()
+            .find(|member| member.meerkat_id == *meerkat_id)
+            .and_then(|member| member.member_ref.session_id().cloned())
+            .ok_or_else(|| SessionControlError::InvalidRequest {
+                message: format!("member has no session: {meerkat_id}"),
+            })?;
+        let result = self
+            .session_service()
+            .append_system_context(&session_id, req)
+            .await?;
+        Ok((session_id, result))
     }
 
     pub async fn mob_send_message(
@@ -382,6 +439,10 @@ impl CoreCommsRuntime for LocalCommsRuntime {
 
 struct LocalSessionService {
     sessions: RwLock<HashMap<SessionId, Arc<LocalCommsRuntime>>>,
+    pending_context: RwLock<HashMap<SessionId, Vec<AppendSystemContextRequest>>>,
+    /// Per-session broadcast channels for event streaming.
+    event_txs:
+        RwLock<HashMap<SessionId, tokio::sync::broadcast::Sender<EventEnvelope<AgentEvent>>>>,
     counter: std::sync::atomic::AtomicU64,
 }
 
@@ -389,6 +450,8 @@ impl LocalSessionService {
     fn new() -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
+            pending_context: RwLock::new(HashMap::new()),
+            event_txs: RwLock::new(HashMap::new()),
             counter: std::sync::atomic::AtomicU64::new(0),
         }
     }
@@ -410,6 +473,12 @@ impl SessionService for LocalSessionService {
             .write()
             .await
             .insert(sid.clone(), Arc::new(LocalCommsRuntime::new(&name)));
+        self.pending_context
+            .write()
+            .await
+            .insert(sid.clone(), Vec::new());
+        let (tx, _) = tokio::sync::broadcast::channel::<EventEnvelope<AgentEvent>>(256);
+        self.event_txs.write().await.insert(sid.clone(), tx);
         Ok(RunResult {
             text: "ok".to_string(),
             session_id: sid,
@@ -425,10 +494,63 @@ impl SessionService for LocalSessionService {
     async fn start_turn(
         &self,
         id: &SessionId,
-        _req: StartTurnRequest,
+        req: StartTurnRequest,
     ) -> Result<RunResult, SessionError> {
         if !self.sessions.read().await.contains_key(id) {
             return Err(SessionError::NotFound { id: id.clone() });
+        }
+        // Drain any staged system context so the append_system_context contract
+        // is honored (staged context is consumed on the next turn).
+        self.pending_context
+            .write()
+            .await
+            .insert(id.clone(), Vec::new());
+
+        let event_tx = self.event_txs.read().await.get(id).cloned();
+        let next_seq = |seq: &mut u64| {
+            let current = *seq;
+            *seq += 1;
+            current
+        };
+        if let Some(event_tx) = event_tx {
+            let source_id = id.to_string();
+            let mut seq = 1u64;
+            let _ = event_tx.send(EventEnvelope::new(
+                source_id.clone(),
+                next_seq(&mut seq),
+                None,
+                AgentEvent::RunStarted {
+                    session_id: id.clone(),
+                    prompt: req.prompt.clone(),
+                },
+            ));
+            let _ = event_tx.send(EventEnvelope::new(
+                source_id.clone(),
+                next_seq(&mut seq),
+                None,
+                AgentEvent::TurnStarted { turn_number: 1 },
+            ));
+            let usage = Usage::default();
+            let turn_usage = usage.clone();
+            let _ = event_tx.send(EventEnvelope::new(
+                source_id.clone(),
+                next_seq(&mut seq),
+                None,
+                AgentEvent::TurnCompleted {
+                    stop_reason: meerkat_core::types::StopReason::EndTurn,
+                    usage: turn_usage,
+                },
+            ));
+            let _ = event_tx.send(EventEnvelope::new(
+                source_id,
+                next_seq(&mut seq),
+                None,
+                AgentEvent::RunCompleted {
+                    session_id: id.clone(),
+                    result: "ok".to_string(),
+                    usage,
+                },
+            ));
         }
         Ok(RunResult {
             text: "ok".to_string(),
@@ -486,8 +608,14 @@ impl SessionService for LocalSessionService {
     }
 
     async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
-        self.sessions.write().await.remove(id);
-        Ok(())
+        let removed = self.sessions.write().await.remove(id);
+        self.pending_context.write().await.remove(id);
+        self.event_txs.write().await.remove(id);
+        if removed.is_some() {
+            Ok(())
+        } else {
+            Err(SessionError::NotFound { id: id.clone() })
+        }
     }
 }
 
@@ -523,7 +651,56 @@ impl SessionServiceCommsExt for LocalSessionService {
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl SessionServiceControlExt for LocalSessionService {
+    async fn append_system_context(
+        &self,
+        id: &SessionId,
+        req: AppendSystemContextRequest,
+    ) -> Result<AppendSystemContextResult, SessionControlError> {
+        if !self.sessions.read().await.contains_key(id) {
+            return Err(SessionError::NotFound { id: id.clone() }.into());
+        }
+        let mut pending = self.pending_context.write().await;
+        let entry = pending.entry(id.clone()).or_default();
+        if let Some(key) = req.idempotency_key.as_deref()
+            && entry
+                .iter()
+                .any(|existing| existing.idempotency_key.as_deref() == Some(key))
+        {
+            return Ok(AppendSystemContextResult {
+                status: AppendSystemContextStatus::Staged,
+            });
+        }
+        entry.push(req);
+        Ok(AppendSystemContextResult {
+            status: AppendSystemContextStatus::Staged,
+        })
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MobSessionService for LocalSessionService {
+    async fn subscribe_session_events(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<EventStream, StreamError> {
+        let txs = self.event_txs.read().await;
+        let tx = txs
+            .get(session_id)
+            .ok_or_else(|| StreamError::NotFound(format!("session {session_id}")))?;
+        let rx = tx.subscribe();
+        Ok(Box::pin(futures::stream::unfold(rx, |mut rx| async {
+            loop {
+                match rx.recv().await {
+                    Ok(event) => return Some((event, rx)),
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                }
+            }
+        })))
+    }
+
     fn supports_persistent_sessions(&self) -> bool {
         true
     }
@@ -1177,6 +1354,7 @@ mod tests {
     use meerkat_core::event_injector::{
         EventInjector, EventInjectorError, InteractionSubscription, SubscribableInjector,
     };
+    use meerkat_core::service::InitialTurnPolicy;
     use meerkat_core::service::SessionService;
     use meerkat_core::service::{
         CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionSummary,
@@ -1461,6 +1639,22 @@ mod tests {
     }
 
     #[async_trait]
+    impl SessionServiceControlExt for MockSessionSvc {
+        async fn append_system_context(
+            &self,
+            id: &SessionId,
+            _req: AppendSystemContextRequest,
+        ) -> Result<AppendSystemContextResult, SessionControlError> {
+            if !self.sessions.read().await.contains_key(id) {
+                return Err(SessionError::NotFound { id: id.clone() }.into());
+            }
+            Ok(AppendSystemContextResult {
+                status: AppendSystemContextStatus::Staged,
+            })
+        }
+    }
+
+    #[async_trait]
     impl MobSessionService for MockSessionSvc {
         fn supports_persistent_sessions(&self) -> bool {
             true
@@ -1469,6 +1663,89 @@ mod tests {
         async fn session_belongs_to_mob(&self, _session_id: &SessionId, _mob_id: &MobId) -> bool {
             true
         }
+    }
+
+    #[tokio::test]
+    async fn local_session_service_persists_appended_context() {
+        let service = LocalSessionService::new();
+        let run = service
+            .create_session(CreateSessionRequest {
+                model: "claude-sonnet-4-5".to_string(),
+                prompt: "hello".to_string(),
+                system_prompt: None,
+                max_tokens: None,
+                event_tx: None,
+                host_mode: false,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                build: None,
+                labels: None,
+            })
+            .await
+            .expect("create session");
+        let session_id = run.session_id;
+
+        let result = service
+            .append_system_context(
+                &session_id,
+                AppendSystemContextRequest {
+                    text: "Remember the customer preference.".to_string(),
+                    source: Some("mob".to_string()),
+                    idempotency_key: Some("ctx-1".to_string()),
+                },
+            )
+            .await
+            .expect("append context");
+        assert_eq!(result.status, AppendSystemContextStatus::Staged);
+        let pending = service.pending_context.read().await;
+        assert_eq!(pending.get(&session_id).map(std::vec::Vec::len), Some(1));
+    }
+
+    #[tokio::test]
+    async fn local_session_service_stream_emits_events_on_turn() {
+        use futures::StreamExt;
+
+        let service = LocalSessionService::new();
+        let run = service
+            .create_session(CreateSessionRequest {
+                model: "claude-sonnet-4-5".to_string(),
+                prompt: "hello".to_string(),
+                system_prompt: None,
+                max_tokens: None,
+                event_tx: None,
+                host_mode: false,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                build: None,
+                labels: None,
+            })
+            .await
+            .expect("create session");
+        let session_id = run.session_id;
+
+        let mut stream =
+            meerkat_mob::MobSessionService::subscribe_session_events(&service, &session_id)
+                .await
+                .expect("subscribe events");
+        let turn = service
+            .start_turn(
+                &session_id,
+                StartTurnRequest {
+                    prompt: "hello".to_string(),
+                    event_tx: None,
+                    host_mode: false,
+                    skill_references: None,
+                    flow_tool_overlay: None,
+                    additional_instructions: None,
+                },
+            )
+            .await;
+        assert!(turn.is_ok());
+
+        let first = stream.next().await.expect("first event");
+        assert!(matches!(first.payload, AgentEvent::RunStarted { .. }));
+        let second = stream.next().await.expect("second event");
+        assert!(matches!(second.payload, AgentEvent::TurnStarted { .. }));
     }
 
     fn mk_call<'a>(name: &'a str, args: &'a serde_json::value::RawValue) -> ToolCallView<'a> {

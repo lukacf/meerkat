@@ -184,6 +184,25 @@ impl SessionServiceCommsExt for MockSessionService {
 }
 
 #[async_trait]
+impl meerkat_core::service::SessionServiceControlExt for MockSessionService {
+    async fn append_system_context(
+        &self,
+        id: &SessionId,
+        _req: meerkat_core::AppendSystemContextRequest,
+    ) -> Result<
+        meerkat_core::service::AppendSystemContextResult,
+        meerkat_core::service::SessionControlError,
+    > {
+        if !self.sessions.read().await.contains_key(id) {
+            return Err(meerkat_core::SessionError::NotFound { id: id.clone() }.into());
+        }
+        Ok(meerkat_core::service::AppendSystemContextResult {
+            status: meerkat_core::service::AppendSystemContextStatus::Staged,
+        })
+    }
+}
+
+#[async_trait]
 impl MobSessionService for MockSessionService {
     fn supports_persistent_sessions(&self) -> bool {
         true

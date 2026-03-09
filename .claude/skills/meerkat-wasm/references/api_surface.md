@@ -19,7 +19,7 @@
 | `start_turn` | handle, prompt, options JSON | RunResult JSON | async, LLM call |
 | `get_session_state` | handle | JSON | Session metadata |
 | `destroy_session` | handle | `()` | Remove session |
-| `poll_events` | handle | AgentEvent[] JSON | Drain events |
+| `poll_events` | handle | AgentEvent[] JSON | Drain buffered direct-session events |
 
 ### Mob Lifecycle (delegates to MobMcpState)
 | Export | Params | Returns | Notes |
@@ -176,9 +176,12 @@ await mob.spawn([{ profile: 'worker', meerkat_id: 'w1' }]);
 const sub = mob.subscribe('w1');
 const events = sub.poll();
 sub.close();
+const mobWide = mob.subscribeAll();
 
 // Direct sessions
 const session = runtime.createSession({ model: '...', apiKey: '...' });
 const result = await session.turn('Hello');
+const sessionEvents = session.subscribe();
+sessionEvents.poll();
 session.destroy();
 ```

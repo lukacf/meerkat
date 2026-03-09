@@ -177,7 +177,7 @@ pub async fn handle_peers(
     RpcResponse::success(id, serde_json::json!({ "peers": entries }))
 }
 
-fn build_comms_command(
+pub(crate) fn build_comms_command(
     params: &CommsSendParams,
     session_id: &meerkat_core::SessionId,
 ) -> Result<meerkat_core::comms::CommsCommand, Vec<meerkat_core::comms::CommsCommandValidationError>>

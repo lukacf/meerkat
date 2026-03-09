@@ -31,7 +31,7 @@ from .types import RunResult, SkillKey, SkillRef
 
 if TYPE_CHECKING:
     from .client import MeerkatClient
-    from .streaming import EventStream
+    from .streaming import EventStream, EventSubscription
 
 
 def _normalize_skill_ref(skill_ref: SkillRef) -> SkillKey:
@@ -190,6 +190,10 @@ class Session:
         """Archive (remove) this session from the server."""
         await self._client._archive(self._id)  # noqa: SLF001
 
+    async def subscribe_events(self) -> EventSubscription:
+        """Open a standalone session-wide event subscription."""
+        return await self._client.subscribe_session_events(self._id)  # noqa: SLF001
+
     # -- Skills convenience ------------------------------------------------
 
     async def invoke_skill(
@@ -213,6 +217,7 @@ class Session:
 
     async def send(self, **kwargs: Any) -> dict[str, Any]:
         """Send a comms command scoped to this session."""
+        kwargs.pop("session_id", None)
         return await self._client._send(self._id, **kwargs)  # noqa: SLF001
 
     async def peers(self) -> list[dict[str, Any]]:

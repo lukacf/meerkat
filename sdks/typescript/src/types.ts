@@ -84,6 +84,71 @@ export interface SessionInfo {
 }
 
 /** A runtime capability and its availability status. */
+
+
+export interface EventEnvelope<T = unknown> {
+  readonly timestamp_ms: number;
+  readonly source_id: string;
+  readonly seq: number;
+  readonly event_id: string;
+  readonly payload: T;
+}
+
+export interface AttributedEvent {
+  readonly source: string;
+  readonly profile: string;
+  readonly envelope: EventEnvelope;
+}
+
+export interface MobDefinition {
+  readonly id: string;
+  readonly profiles: Record<string, unknown>;
+  readonly wiring?: Record<string, unknown>;
+  readonly flows?: Record<string, unknown>;
+  readonly mcp_servers?: Record<string, unknown>;
+  readonly skills?: Record<string, unknown>;
+  readonly orchestrator?: unknown;
+  readonly backend?: unknown;
+}
+
+export interface SpawnSpec {
+  readonly profile: string;
+  readonly meerkatId: string;
+  readonly initialMessage?: string;
+  readonly runtimeMode?: "turn_driven" | "autonomous_host";
+  readonly backend?: "subagent" | "external";
+  readonly labels?: Record<string, string>;
+  readonly context?: Record<string, unknown>;
+  readonly resumeSessionId?: string;
+  readonly additionalInstructions?: string[];
+}
+
+export interface MobMember {
+  readonly meerkatId: string;
+  readonly profile: string;
+  readonly memberRef?: Record<string, unknown>;
+  readonly runtimeMode?: string;
+  readonly state?: string;
+  readonly wiredTo?: readonly string[];
+  readonly labels?: Record<string, string>;
+  readonly sessionId?: string;
+}
+
+export interface MobSummary {
+  readonly mobId: string;
+  readonly status: string;
+}
+
+export interface MobStatus {
+  readonly mobId: string;
+  readonly status: string;
+}
+
+export type MobLifecycleAction = "stop" | "resume" | "complete" | "destroy" | "reset";
+
+export interface MobFlowStatus {
+  readonly run?: Record<string, unknown> | null;
+}
 export interface Capability {
   readonly id: string;
   readonly description: string;
@@ -112,4 +177,27 @@ export interface SessionOptions {
   preloadSkills?: string[];
   skillRefs?: SkillRef[];
   skillReferences?: string[];
+}
+
+
+/** Explicit standalone session-event envelope. */
+export interface AgentEventEnvelope {
+  readonly eventId: string;
+  readonly sourceId: string;
+  readonly seq: number;
+  readonly timestampMs: number;
+  readonly payload: import("./events.js").AgentEvent;
+}
+
+/** Mob-wide attributed event emitted by member/mob observation streams. */
+export interface AttributedMobEvent {
+  readonly source: string;
+  readonly profile: string;
+  readonly envelope: AgentEventEnvelope;
+}
+
+/** Options for creating a mob through the RPC-backed SDK surface. */
+export interface MobCreateOptions {
+  prefab?: string;
+  definition?: Record<string, unknown>;
 }

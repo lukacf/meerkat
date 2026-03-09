@@ -27,9 +27,11 @@ class _StdoutDispatcher:
         self._stdout = stdout
         self._pending_responses: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._event_queues: dict[str, asyncio.Queue[dict[str, Any] | None]] = {}
+        self._stream_queues: dict[str, asyncio.Queue[dict[str, Any] | None]] = {}
         self._pending_stream_queue: asyncio.Queue[dict[str, Any] | None] | None = None
         self._pending_stream_request_id: int | None = None
         self._unmatched_buffer: dict[str, list[dict[str, Any]]] = {}
+        self._unmatched_stream_buffer: dict[str, list[dict[str, Any]]] = {}
         self._task: asyncio.Task[None] | None = None
         self._closed = False
 
@@ -58,6 +60,16 @@ class _StdoutDispatcher:
 
     def unsubscribe_events(self, session_id: str) -> None:
         self._event_queues.pop(session_id, None)
+
+    def subscribe_stream(self, stream_id: str) -> asyncio.Queue[dict[str, Any] | None]:
+        queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        self._stream_queues[stream_id] = queue
+        for event in self._unmatched_stream_buffer.pop(stream_id, []):
+            queue.put_nowait(event)
+        return queue
+
+    def unsubscribe_stream(self, stream_id: str) -> None:
+        self._stream_queues.pop(stream_id, None)
 
     def subscribe_pending_stream(self, request_id: int) -> asyncio.Queue[dict[str, Any] | None]:
         if self._pending_stream_queue is not None:
@@ -112,6 +124,15 @@ class _StdoutDispatcher:
             elif "method" in data:
                 method = str(data.get("method", ""))
                 params = data.get("params", {})
+                if method in {"session/stream_event", "mob/stream_event"}:
+                    stream_id = str(params.get("stream_id", ""))
+                    event = params.get("event") or params
+                    queue = self._stream_queues.get(stream_id)
+                    if queue is not None:
+                        await queue.put(event)
+                    elif stream_id:
+                        self._unmatched_stream_buffer.setdefault(stream_id, []).append(event)
+                    continue
                 session_id = params.get("session_id", "")
                 event = params.get("event")
                 queue = self._event_queues.get(session_id)
@@ -128,6 +149,10 @@ class _StdoutDispatcher:
         for queue in self._event_queues.values():
             queue.put_nowait(None)
         self._event_queues.clear()
+        for queue in self._stream_queues.values():
+            queue.put_nowait(None)
+        self._stream_queues.clear()
+        self._unmatched_stream_buffer.clear()
         if self._pending_stream_queue is not None:
             self._pending_stream_queue.put_nowait(None)
             self._pending_stream_queue = None
@@ -259,3 +284,51 @@ class EventStream:
                 if isinstance(event, TextDelta):
                     parts.append(event.delta)
         return "".join(parts), self.result
+
+
+class EventSubscription:
+    """Async iterable standalone event subscription (session/member/mob)."""
+
+    def __init__(
+        self,
+        *,
+        stream_id: str,
+        event_queue: asyncio.Queue[dict[str, Any] | None],
+        dispatcher: _StdoutDispatcher,
+        close_remote: Callable[[str], Any],
+        parse_event_fn: Callable[[dict[str, Any]], Any],
+    ):
+        self._stream_id = stream_id
+        self._event_queue = event_queue
+        self._dispatcher = dispatcher
+        self._close_remote = close_remote
+        self._parse_event_fn = parse_event_fn
+        self._closed = False
+
+    @property
+    def stream_id(self) -> str:
+        return self._stream_id
+
+    async def __aenter__(self) -> EventSubscription:
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        await self.close()
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._dispatcher.unsubscribe_stream(self._stream_id)
+        self._event_queue.put_nowait(None)
+        await self._close_remote(self._stream_id)
+
+    def __aiter__(self) -> AsyncIterator[Any]:
+        return self._iter_events()
+
+    async def _iter_events(self) -> AsyncIterator[Any]:
+        while True:
+            raw = await self._event_queue.get()
+            if raw is None:
+                return
+            yield self._parse_event_fn(raw)

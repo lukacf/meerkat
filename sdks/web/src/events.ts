@@ -1,26 +1,27 @@
-import type { EventEnvelope } from './types.js';
-
 /** Wraps a polling event source with typed JSON decoding. */
-export class EventSubscription {
+export class EventSubscription<T> {
   private closed = false;
   private readonly pollSource: () => string;
   private readonly closeSource: () => void;
+  private readonly parseEvents: (raw: unknown) => T[];
 
   /** @internal — use Session.subscribe(), Mob.subscribe(), or Mob.subscribeAll(). */
   constructor(
     pollSource: () => string,
+    parseEvents: (raw: unknown) => T[],
     closeSource: () => void = () => {},
   ) {
     this.pollSource = pollSource;
+    this.parseEvents = parseEvents;
     this.closeSource = closeSource;
   }
 
   /** Poll for new events. Returns an empty array when no events are available. */
-  poll(): EventEnvelope[] {
+  poll(): T[] {
     if (this.closed) return [];
     const json = this.pollSource();
     const parsed: unknown = JSON.parse(json);
-    return Array.isArray(parsed) ? (parsed as EventEnvelope[]) : [];
+    return this.parseEvents(parsed);
   }
 
   /** Close the subscription and release the underlying source if needed. */

@@ -114,7 +114,8 @@ export class Session {
   }
 
   async send(command: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return this._client._send(this._id, command);
+    const { session_id: _ignored, ...rest } = command;
+    return this._client._send(this._id, rest);
   }
 
   async peers(): Promise<Array<Record<string, unknown>>> {

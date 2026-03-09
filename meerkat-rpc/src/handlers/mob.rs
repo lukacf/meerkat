@@ -32,27 +32,6 @@ fn parse_mob_id(id: Option<RpcId>, raw: &str) -> Result<MobId, RpcResponse> {
     Ok(MobId::from(raw))
 }
 
-async fn resolve_member_session_id(
-    id: Option<RpcId>,
-    state: &Arc<MobMcpState>,
-    mob_id: &MobId,
-    meerkat_id: &MeerkatId,
-) -> Result<meerkat_core::SessionId, RpcResponse> {
-    let members = state
-        .mob_list_members(mob_id)
-        .await
-        .map_err(|e| invalid_params(id.clone(), format!("Mob not found: {e}")))?;
-    let entry = members
-        .into_iter()
-        .find(|member| member.meerkat_id == *meerkat_id)
-        .ok_or_else(|| invalid_params(id.clone(), format!("Member not found: {meerkat_id}")))?;
-    entry
-        .member_ref
-        .session_id()
-        .cloned()
-        .ok_or_else(|| invalid_params(id, format!("Member has no session: {meerkat_id}")))
-}
-
 #[derive(Debug, Serialize)]
 struct MobPrefabEntry {
     key: String,
@@ -275,6 +254,7 @@ pub async fn handle_spawn(
             id,
             serde_json::json!({
                 "mob_id": mob_id,
+                "meerkat_id": params.meerkat_id,
                 "member_ref": member_ref,
                 "session_id": member_ref.session_id(),
             }),
@@ -488,7 +468,7 @@ pub async fn handle_append_system_context(
     id: Option<RpcId>,
     params: Option<&RawValue>,
     state: &Arc<MobMcpState>,
-    runtime: &SessionRuntime,
+    _runtime: &SessionRuntime,
 ) -> RpcResponse {
     let params: MobAppendSystemContextParams = match parse_params(params) {
         Ok(p) => p,
@@ -499,14 +479,10 @@ pub async fn handle_append_system_context(
         Err(resp) => return resp,
     };
     let meerkat_id = MeerkatId::from(params.meerkat_id.as_str());
-    let session_id = match resolve_member_session_id(id.clone(), state, &mob_id, &meerkat_id).await
-    {
-        Ok(session_id) => session_id,
-        Err(resp) => return resp,
-    };
-    match runtime
-        .append_system_context(
-            &session_id,
+    match state
+        .mob_append_system_context(
+            &mob_id,
+            &meerkat_id,
             AppendSystemContextRequest {
                 text: params.text,
                 source: params.source,
@@ -515,7 +491,7 @@ pub async fn handle_append_system_context(
         )
         .await
     {
-        Ok(result) => RpcResponse::success(
+        Ok((session_id, result)) => RpcResponse::success(
             id,
             serde_json::json!({
                 "mob_id": mob_id,
@@ -524,7 +500,7 @@ pub async fn handle_append_system_context(
                 "status": result.status,
             }),
         ),
-        Err(err) => RpcResponse::error(id, err.code, err.message),
+        Err(err) => RpcResponse::error(id, error::INVALID_PARAMS, err.to_string()),
     }
 }
 

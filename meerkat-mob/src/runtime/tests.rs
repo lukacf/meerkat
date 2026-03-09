@@ -24,16 +24,18 @@ use meerkat_core::error::ToolError;
 use meerkat_core::event::{AgentEvent, EventEnvelope};
 use meerkat_core::interaction::InteractionId;
 use meerkat_core::service::{
-    CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService,
-    SessionServiceCommsExt, SessionSummary, SessionUsage, SessionView, StartTurnRequest,
-    TurnToolOverlay,
+    AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
+    SessionControlError, SessionError, SessionInfo, SessionQuery, SessionService,
+    SessionServiceCommsExt, SessionServiceControlExt, SessionSummary, SessionUsage, SessionView,
+    StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::types::{
     AssistantBlock, RunResult, SessionId, StopReason, ToolCallView, ToolDef, ToolResult, Usage,
 };
 use meerkat_core::{
-    Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, EventInjector,
-    EventInjectorError, LlmStreamResult, PlainEventSource,
+    Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
+    AppendSystemContextStatus, EventInjector, EventInjectorError, LlmStreamResult,
+    PlainEventSource,
     event_injector::{InteractionSubscription, SubscribableInjector},
 };
 use meerkat_core::{Session, SessionSystemContextState};
@@ -984,6 +986,22 @@ impl SessionServiceCommsExt for MockSessionService {
             fail,
             completed_result,
         }))
+    }
+}
+
+#[async_trait]
+impl SessionServiceControlExt for MockSessionService {
+    async fn append_system_context(
+        &self,
+        id: &SessionId,
+        _req: AppendSystemContextRequest,
+    ) -> Result<AppendSystemContextResult, SessionControlError> {
+        if !self.sessions.read().await.contains_key(id) {
+            return Err(SessionError::NotFound { id: id.clone() }.into());
+        }
+        Ok(AppendSystemContextResult {
+            status: AppendSystemContextStatus::Staged,
+        })
     }
 }
 
@@ -8932,6 +8950,22 @@ impl SessionServiceCommsExt for RealCommsSessionService {
         sessions
             .get(session_id)
             .map(|c| Arc::clone(c) as Arc<dyn CoreCommsRuntime>)
+    }
+}
+
+#[async_trait]
+impl SessionServiceControlExt for RealCommsSessionService {
+    async fn append_system_context(
+        &self,
+        id: &SessionId,
+        _req: AppendSystemContextRequest,
+    ) -> Result<AppendSystemContextResult, SessionControlError> {
+        if !self.sessions.read().await.contains_key(id) {
+            return Err(SessionError::NotFound { id: id.clone() }.into());
+        }
+        Ok(AppendSystemContextResult {
+            status: AppendSystemContextStatus::Staged,
+        })
     }
 }
 

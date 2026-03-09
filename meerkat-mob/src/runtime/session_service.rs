@@ -1,5 +1,5 @@
 use super::*;
-use meerkat_core::service::SessionServiceCommsExt;
+use meerkat_core::service::{SessionServiceCommsExt, SessionServiceControlExt};
 
 // ---------------------------------------------------------------------------
 // MobSessionService trait extension
@@ -11,7 +11,7 @@ use meerkat_core::service::SessionServiceCommsExt;
 /// comms/injector access without per-crate bridge traits.
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-pub trait MobSessionService: SessionServiceCommsExt {
+pub trait MobSessionService: SessionServiceCommsExt + SessionServiceControlExt {
     /// Subscribe to session-wide events regardless of triggering interaction.
     async fn subscribe_session_events(
         &self,

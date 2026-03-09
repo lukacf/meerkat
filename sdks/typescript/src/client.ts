@@ -225,7 +225,6 @@ export class MeerkatClient {
       this.pendingStreamQueue = null;
       this.pendingStreamRequestId = null;
       this.unmatchedStreamBuffer.clear();
-      this.unmatchedStandaloneStreamBuffer.clear();
     }
   }
 
@@ -492,13 +491,26 @@ export class MeerkatClient {
     return { mobId: String(result.mob_id ?? mobId), status };
   }
 
-  async listMobMembers(mobId: string): Promise<Array<{ meerkatId: string; profile: string; memberRef?: Record<string, unknown> }>> {
+  async listMobMembers(mobId: string): Promise<MobMember[]> {
     const result = await this.request("mob/members", { mob_id: mobId });
     const members = (result.members as Array<Record<string, unknown>>) ?? [];
     return members.map((member) => ({
       meerkatId: String(member.meerkat_id ?? member.meerkatId ?? ""),
       profile: String(member.profile_name ?? member.profile ?? ""),
       memberRef: (member.member_ref as Record<string, unknown> | undefined),
+      runtimeMode: member.runtime_mode != null ? String(member.runtime_mode) : undefined,
+      state: member.state != null ? String(member.state) : undefined,
+      wiredTo: Array.isArray(member.wired_to)
+        ? member.wired_to.map((peer) => String(peer))
+        : undefined,
+      labels: member.labels && typeof member.labels === 'object'
+        ? Object.fromEntries(Object.entries(member.labels as Record<string, unknown>).map(([key, value]) => [key, String(value)]))
+        : undefined,
+      sessionId: member.member_ref && typeof member.member_ref === 'object'
+        ? (member.member_ref as Record<string, unknown>).session_id != null
+          ? String((member.member_ref as Record<string, unknown>).session_id)
+          : undefined
+        : undefined,
     }));
   }
 
@@ -612,7 +624,16 @@ export class MeerkatClient {
     closeMethod: string,
     parse: (raw: Record<string, unknown>) => T,
   ): Promise<EventSubscription<T>> {
-    const result = await this.request(openMethod, params);
+    const result = this.process?.stdin
+      ? await (async () => {
+          this.requestId++;
+          const requestId = this.requestId;
+          const responsePromise = this.registerRequest(requestId);
+          const rpcRequest = { jsonrpc: "2.0", id: requestId, method: openMethod, params };
+          this.process!.stdin!.write(JSON.stringify(rpcRequest) + "\n");
+          return responsePromise;
+        })()
+      : await this.request(openMethod, params);
     const streamId = String(result.stream_id ?? "");
     if (!streamId) {
       throw new MeerkatError("INVALID_RESPONSE", `${openMethod} did not return stream_id`);

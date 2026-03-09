@@ -79,9 +79,9 @@ export class Session {
    * the same underlying event buffer as `pollEvents()`, so callers should use
    * either `pollEvents()` or the returned subscription, not both at once.
    */
-  subscribe(): EventSubscription {
+  subscribe(): EventSubscription<EventEnvelope> {
     if (this.destroyed) throw new Error('Session has been destroyed');
-    return new EventSubscription(() => this.pollFn(this.handle));
+    return new EventSubscription<EventEnvelope>(() => (this.destroyed ? '[]' : this.pollFn(this.handle)), (raw) => Array.isArray(raw) ? (raw as EventEnvelope[]) : []);
   }
 
   /** Stage runtime system context for application at the next LLM boundary. */

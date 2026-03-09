@@ -4,14 +4,17 @@ mod tokio {
 }
 
 use async_trait::async_trait;
+use meerkat_core::AppendSystemContextStatus;
 use meerkat_core::ScopedAgentEvent;
 use meerkat_core::agent::{AgentToolDispatcher, CommsRuntime as CoreCommsRuntime};
 use meerkat_core::comms::{CommsCommand, SendError, SendReceipt, TrustedPeerSpec};
 use meerkat_core::error::ToolError;
 use meerkat_core::interaction::InteractionId;
 use meerkat_core::service::{
-    CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService,
-    SessionServiceCommsExt, SessionSummary, SessionUsage, SessionView, StartTurnRequest,
+    AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
+    SessionControlError, SessionError, SessionInfo, SessionQuery, SessionService,
+    SessionServiceCommsExt, SessionServiceControlExt, SessionSummary, SessionUsage, SessionView,
+    StartTurnRequest,
 };
 use meerkat_core::time_compat::{Instant, SystemTime};
 use meerkat_core::types::{RunResult, SessionId, ToolCallView, ToolDef, ToolResult, Usage};
@@ -212,6 +215,31 @@ impl MobMcpState {
             .list_all_members()
             .await
             .pipe(Ok)
+    }
+
+    pub async fn mob_append_system_context(
+        &self,
+        mob_id: &MobId,
+        meerkat_id: &MeerkatId,
+        req: AppendSystemContextRequest,
+    ) -> Result<(SessionId, AppendSystemContextResult), SessionControlError> {
+        let members = self.mob_list_members(mob_id).await.map_err(|error| {
+            SessionControlError::InvalidRequest {
+                message: error.to_string(),
+            }
+        })?;
+        let session_id = members
+            .into_iter()
+            .find(|member| member.meerkat_id == *meerkat_id)
+            .and_then(|member| member.member_ref.session_id().cloned())
+            .ok_or_else(|| SessionControlError::InvalidRequest {
+                message: format!("member has no session: {meerkat_id}"),
+            })?;
+        let result = self
+            .session_service()
+            .append_system_context(&session_id, req)
+            .await?;
+        Ok((session_id, result))
     }
 
     pub async fn mob_send_message(
@@ -518,6 +546,23 @@ impl SessionServiceCommsExt for LocalSessionService {
         let sessions = self.sessions.read().await;
         let runtime = sessions.get(session_id)?;
         runtime.interaction_event_injector()
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl SessionServiceControlExt for LocalSessionService {
+    async fn append_system_context(
+        &self,
+        id: &SessionId,
+        _req: AppendSystemContextRequest,
+    ) -> Result<AppendSystemContextResult, SessionControlError> {
+        if !self.sessions.read().await.contains_key(id) {
+            return Err(SessionError::NotFound { id: id.clone() }.into());
+        }
+        Ok(AppendSystemContextResult {
+            status: AppendSystemContextStatus::Staged,
+        })
     }
 }
 
@@ -1457,6 +1502,22 @@ mod tests {
                 return None;
             }
             Some(Arc::new(MockInjector))
+        }
+    }
+
+    #[async_trait]
+    impl SessionServiceControlExt for MockSessionSvc {
+        async fn append_system_context(
+            &self,
+            id: &SessionId,
+            _req: AppendSystemContextRequest,
+        ) -> Result<AppendSystemContextResult, SessionControlError> {
+            if !self.sessions.read().await.contains_key(id) {
+                return Err(SessionError::NotFound { id: id.clone() }.into());
+            }
+            Ok(AppendSystemContextResult {
+                status: AppendSystemContextStatus::Staged,
+            })
         }
     }
 

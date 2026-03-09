@@ -127,6 +127,11 @@ export interface MobMember {
   readonly meerkatId: string;
   readonly profile: string;
   readonly memberRef?: Record<string, unknown>;
+  readonly runtimeMode?: string;
+  readonly state?: string;
+  readonly wiredTo?: readonly string[];
+  readonly labels?: Record<string, string>;
+  readonly sessionId?: string;
 }
 
 export interface MobSummary {

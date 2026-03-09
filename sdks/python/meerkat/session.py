@@ -217,6 +217,7 @@ class Session:
 
     async def send(self, **kwargs: Any) -> dict[str, Any]:
         """Send a comms command scoped to this session."""
+        kwargs.pop("session_id", None)
         return await self._client._send(self._id, **kwargs)  # noqa: SLF001
 
     async def peers(self) -> list[dict[str, Any]]:

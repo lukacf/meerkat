@@ -87,7 +87,7 @@ export interface WasmModule {
   mob_status: (mobId: string) => Promise<string>;
   mob_list: () => Promise<string>;
   mob_lifecycle: (mobId: string, action: string) => Promise<void>;
-  mob_events: (mobId: string, afterCursor: string, limit: number) => Promise<string>;
+  mob_events: (mobId: string, afterCursor: number, limit: number) => Promise<string>;
   mob_spawn: (mobId: string, specsJson: string) => Promise<string>;
   mob_retire: (mobId: string, meerkatId: string) => Promise<void>;
   mob_wire: (mobId: string, a: string, b: string) => Promise<void>;
@@ -103,8 +103,8 @@ export interface WasmModule {
   mob_run_flow: (mobId: string, flowId: string, paramsJson: string) => Promise<string>;
   mob_flow_status: (mobId: string, runId: string) => Promise<string>;
   mob_cancel_flow: (mobId: string, runId: string) => Promise<void>;
-  mob_member_subscribe: (mobId: string, meerkatId: string) => number;
-  mob_subscribe_events: (mobId: string) => number;
+  mob_member_subscribe: (mobId: string, meerkatId: string) => Promise<number>;
+  mob_subscribe_events: (mobId: string) => Promise<number>;
   poll_subscription: (handle: number) => string;
   close_subscription: (handle: number) => void;
   wire_cross_mob: (
@@ -260,8 +260,7 @@ export class MeerkatRuntime {
 
   /** Create a mob from a definition. */
   async createMob(definition: MobDefinition): Promise<Mob> {
-    const json = await this.wasm.mob_create(JSON.stringify(definition));
-    const mobId = JSON.parse(json) as string;
+    const mobId = await this.wasm.mob_create(JSON.stringify(definition));
     return new Mob(mobId, {
       mob_spawn: this.wasm.mob_spawn,
       mob_retire: this.wasm.mob_retire,

@@ -82,7 +82,6 @@ class _StdoutDispatcher:
         self._pending_stream_queue = None
         self._pending_stream_request_id = None
         self._unmatched_buffer.clear()
-        self._unmatched_stream_buffer.clear()
 
     async def _read_loop(self) -> None:
         while not self._closed:
@@ -321,10 +320,8 @@ class EventSubscription:
             return
         self._closed = True
         self._dispatcher.unsubscribe_stream(self._stream_id)
-        try:
-            await self._close_remote(self._stream_id)
-        finally:
-            self._event_queue.put_nowait(None)
+        self._event_queue.put_nowait(None)
+        await self._close_remote(self._stream_id)
 
     def __aiter__(self) -> AsyncIterator[Any]:
         return self._iter_events()

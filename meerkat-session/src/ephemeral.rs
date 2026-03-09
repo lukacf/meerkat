@@ -101,9 +101,11 @@ struct SessionHandle {
     created_at: SystemTime,
     /// Key-value labels attached at session creation.
     labels: BTreeMap<String, String>,
-    /// Subscribable event injector for pushing external events.
+    /// Public event injector for pushing external events.
     /// Extracted from the agent before it moves into its task.
-    event_injector: Option<Arc<dyn meerkat_core::SubscribableInjector>>,
+    event_injector: Option<Arc<dyn meerkat_core::EventInjector>>,
+    /// Internal runtime injector for interaction-scoped streaming.
+    interaction_event_injector: Option<Arc<dyn meerkat_core::event_injector::SubscribableInjector>>,
     /// Optional comms runtime for host-mode commands and stream attachment.
     comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
     /// Shared runtime control state for system-context appends.
@@ -196,13 +198,19 @@ pub trait SessionAgent: Send {
         &self,
     ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>;
 
-    /// Get a subscribable event injector for pushing external events.
+    /// Get an event injector for pushing external events.
     ///
     /// Called once before the agent moves into its dedicated task. The returned
     /// injector is stored in the session handle for surfaces to access.
-    /// Callers can use `inject()` for fire-and-forget or
-    /// `inject_with_subscription()` for interaction-scoped streaming.
-    fn event_injector(&self) -> Option<Arc<dyn meerkat_core::SubscribableInjector>> {
+    fn event_injector(&self) -> Option<Arc<dyn meerkat_core::EventInjector>> {
+        None
+    }
+
+    /// Internal runtime injector for interaction-scoped streaming.
+    #[doc(hidden)]
+    fn interaction_event_injector(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::event_injector::SubscribableInjector>> {
         None
     }
 
@@ -276,21 +284,29 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         })
     }
 
-    /// Get the subscribable event injector for a session, if available.
+    /// Get the event injector for a session, if available.
     ///
     /// Returns `None` if the session doesn't exist, has no comms runtime,
     /// or the comms runtime doesn't support event injection.
-    ///
-    /// Use `inject()` for fire-and-forget or `inject_with_subscription()`
-    /// for interaction-scoped streaming.
     pub async fn event_injector(
         &self,
         session_id: &SessionId,
-    ) -> Option<Arc<dyn meerkat_core::SubscribableInjector>> {
+    ) -> Option<Arc<dyn meerkat_core::EventInjector>> {
         let sessions = self.sessions.read().await;
         sessions
             .get(session_id)
             .and_then(|h| h.event_injector.clone())
+    }
+
+    #[doc(hidden)]
+    pub async fn interaction_event_injector(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<dyn meerkat_core::event_injector::SubscribableInjector>> {
+        let sessions = self.sessions.read().await;
+        sessions
+            .get(session_id)
+            .and_then(|h| h.interaction_event_injector.clone())
     }
 
     /// Get shared system-context control state for a session, if available.
@@ -428,6 +444,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
 
         // Extract the event injector before the agent moves into its task.
         let event_injector = agent.event_injector();
+        let interaction_event_injector = agent.interaction_event_injector();
         let comms_runtime = agent.comms_runtime();
         let system_context_state = agent.system_context_state();
 
@@ -472,6 +489,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             created_at,
             labels,
             event_injector,
+            interaction_event_injector,
             comms_runtime,
             system_context_state,
             interrupt_requested,
@@ -784,8 +802,15 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceCommsExt for EphemeralSessi
     async fn event_injector(
         &self,
         session_id: &SessionId,
-    ) -> Option<Arc<dyn meerkat_core::SubscribableInjector>> {
+    ) -> Option<Arc<dyn meerkat_core::EventInjector>> {
         EphemeralSessionService::<B>::event_injector(self, session_id).await
+    }
+
+    async fn interaction_event_injector(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<dyn meerkat_core::event_injector::SubscribableInjector>> {
+        EphemeralSessionService::<B>::interaction_event_injector(self, session_id).await
     }
 }
 

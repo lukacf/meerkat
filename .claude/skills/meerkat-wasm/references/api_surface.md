@@ -32,7 +32,6 @@
 | `mob_list_members` | mob_id | RosterEntry[] JSON | |
 | `mob_send_message` | mob_id, meerkat_id, msg | `()` | async |
 | `mob_respawn` | mob_id, meerkat_id, initial_message? | result JSON | async, retire + re-spawn same profile |
-| `mob_inject_and_subscribe` | mob_id, meerkat_id, message | interaction_id JSON | async, inject msg + subscribe |
 | `mob_events` | mob_id, after_cursor (u32), limit (u32) | MobEvent[] JSON | |
 | `mob_status` | mob_id | JSON | |
 | `mob_list` | | MobSummary[] JSON | |

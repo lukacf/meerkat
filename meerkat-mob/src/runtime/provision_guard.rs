@@ -148,7 +148,7 @@ mod tests {
             Ok(())
         }
 
-        async fn event_injector(
+        async fn interaction_event_injector(
             &self,
             _session_id: &SessionId,
         ) -> Option<Arc<dyn SubscribableInjector>> {

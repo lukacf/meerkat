@@ -728,10 +728,10 @@ Events are injected into the agent's context with source tagging:
 
 When injecting events from application code, you can subscribe to the streaming events produced by that specific interaction. This gives you a clean `start -> stream -> done` lifecycle scoped to exactly one injected message, without cross-talk from other concurrent interactions.
 
-The service's `event_injector()` returns an `Arc<dyn SubscribableInjector>`. Use `inject()` for fire-and-forget (existing behavior), or `inject_with_subscription()` to get a dedicated event channel:
+The service's `event_injector()` returns an `Arc<dyn EventInjector>`. Use `inject()` to push an external event into the session inbox:
 
 ```rust
-use meerkat::{SubscribableInjector, AgentEvent, PlainEventSource};
+use meerkat::{EventInjector, PlainEventSource};
 
 let injector = service.event_injector(&session_id).await
     .expect("comms must be enabled");
@@ -740,7 +740,7 @@ let injector = service.event_injector(&session_id).await
 injector.inject("hello".into(), PlainEventSource::Rpc)?;
 
 // With subscription — returns a dedicated event stream
-let sub = injector.inject_with_subscription(
+injector.inject(
     "review PR #42".into(),
     PlainEventSource::Rpc,
 )?;

@@ -336,12 +336,19 @@ pub trait CommsRuntime: Send + Sync {
     fn dismiss_received(&self) -> bool {
         false
     }
-    /// Get a subscribable event injector for this runtime's inbox.
+    /// Get an event injector for this runtime's inbox.
     ///
-    /// Surfaces use this to push external events and optionally subscribe to
-    /// interaction-scoped streaming responses. Returns `None` if the
-    /// implementation doesn't support event injection.
-    fn event_injector(&self) -> Option<Arc<dyn crate::SubscribableInjector>> {
+    /// Surfaces use this to push external events into the agent inbox.
+    /// Returns `None` if the implementation doesn't support event injection.
+    fn event_injector(&self) -> Option<Arc<dyn crate::EventInjector>> {
+        None
+    }
+
+    /// Internal runtime seam for interaction-scoped streaming.
+    #[doc(hidden)]
+    fn interaction_event_injector(
+        &self,
+    ) -> Option<Arc<dyn crate::event_injector::SubscribableInjector>> {
         None
     }
 

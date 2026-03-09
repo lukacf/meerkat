@@ -58,12 +58,12 @@ impl EventInjector for CommsEventInjector {
     }
 }
 
-impl meerkat_core::SubscribableInjector for CommsEventInjector {
+impl meerkat_core::event_injector::SubscribableInjector for CommsEventInjector {
     fn inject_with_subscription(
         &self,
         body: String,
         source: PlainEventSource,
-    ) -> Result<meerkat_core::InteractionSubscription, EventInjectorError> {
+    ) -> Result<meerkat_core::event_injector::InteractionSubscription, EventInjectorError> {
         let id = uuid::Uuid::new_v4();
         let (tx, rx) = tokio::sync::mpsc::channel(4096);
 
@@ -84,7 +84,7 @@ impl meerkat_core::SubscribableInjector for CommsEventInjector {
             });
         }
 
-        Ok(meerkat_core::InteractionSubscription {
+        Ok(meerkat_core::event_injector::InteractionSubscription {
             id: meerkat_core::InteractionId(id),
             events: rx,
         })
@@ -154,7 +154,7 @@ mod tests {
 
     #[test]
     fn test_inject_with_subscription_stores_subscriber_and_sends_item() {
-        use meerkat_core::SubscribableInjector;
+        use meerkat_core::event_injector::SubscribableInjector;
 
         let registry = new_subscriber_registry();
         let (mut inbox, sender) = Inbox::new();
@@ -185,7 +185,7 @@ mod tests {
 
     #[test]
     fn test_inject_with_subscription_cleans_up_on_full() {
-        use meerkat_core::SubscribableInjector;
+        use meerkat_core::event_injector::SubscribableInjector;
 
         let registry = new_subscriber_registry();
         let (_inbox, sender) = Inbox::new_with_capacity(1);
@@ -206,7 +206,7 @@ mod tests {
 
     #[test]
     fn test_inject_with_subscription_cleans_up_on_closed_inbox() {
-        use meerkat_core::SubscribableInjector;
+        use meerkat_core::event_injector::SubscribableInjector;
 
         let registry = new_subscriber_registry();
         let (inbox, sender) = Inbox::new();

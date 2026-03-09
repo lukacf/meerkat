@@ -156,7 +156,8 @@ impl MobActor {
                     let Some(session_id) = member_ref.session_id() else {
                         return;
                     };
-                    let Some(injector) = provisioner.event_injector(session_id).await else {
+                    let Some(injector) = provisioner.interaction_event_injector(session_id).await
+                    else {
                         return;
                     };
                     injector
@@ -432,7 +433,11 @@ impl MobActor {
                 "autonomous member '{meerkat_id}' must be session-backed for injector dispatch"
             ))
         })?;
-        if provisioner.event_injector(session_id).await.is_none() {
+        if provisioner
+            .interaction_event_injector(session_id)
+            .await
+            .is_none()
+        {
             return Err(MobError::Internal(format!(
                 "autonomous member '{meerkat_id}' is missing event injector capability"
             )));
@@ -713,18 +718,6 @@ impl MobActor {
                     let result = match self.require_state(&[MobState::Running, MobState::Creating])
                     {
                         Ok(()) => self.handle_external_turn(meerkat_id, message).await,
-                        Err(error) => Err(error),
-                    };
-                    let _ = reply_tx.send(result);
-                }
-                MobCommand::InjectAndSubscribe {
-                    meerkat_id,
-                    message,
-                    reply_tx,
-                } => {
-                    let result = match self.require_state(&[MobState::Running, MobState::Creating])
-                    {
-                        Ok(()) => self.handle_inject_and_subscribe(meerkat_id, message).await,
                         Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);
@@ -1066,7 +1059,7 @@ impl MobActor {
 
                 // Validate event injector for autonomous mode.
                 if selected_runtime_mode == crate::MobRuntimeMode::AutonomousHost
-                    && self.provisioner.event_injector(&resume_id).await.is_none()
+                    && self.provisioner.interaction_event_injector(&resume_id).await.is_none()
                 {
                     return Err(MobError::Internal(format!(
                         "resumed session '{resume_id}' has no event injector for autonomous '{meerkat_id}'"
@@ -2326,7 +2319,7 @@ impl MobActor {
                 })?;
                 let injector = self
                     .provisioner
-                    .event_injector(session_id)
+                    .interaction_event_injector(session_id)
                     .await
                     .ok_or_else(|| {
                         MobError::Internal(format!(
@@ -2356,78 +2349,6 @@ impl MobActor {
                 self.provisioner.start_turn(&entry.member_ref, req).await
             }
         }
-    }
-
-    /// Inject a message into an autonomous member and return a subscription
-    /// for streaming interaction-scoped events.
-    ///
-    /// Like `handle_external_turn`, this enforces lifecycle state and external
-    /// addressability. Unlike `handle_external_turn`, it does **not** support
-    /// spawn-policy auto-provisioning for unknown targets (the subscription
-    /// cannot be deferred through a lifecycle task). Returns
-    /// `UnsupportedForMode` for `TurnDriven` members.
-    async fn handle_inject_and_subscribe(
-        &mut self,
-        meerkat_id: MeerkatId,
-        message: String,
-    ) -> Result<meerkat_core::InteractionSubscription, MobError> {
-        // Look up the entry (mirrors handle_external_turn)
-        let entry = {
-            let roster = self.roster.read().await;
-            roster.get(&meerkat_id).cloned()
-        };
-        let entry = match entry {
-            Some(e) => e,
-            None => {
-                // Consult spawn policy — but unlike ExternalTurn we can't defer
-                // the subscription through a lifecycle task, so reject cleanly.
-                return Err(MobError::MeerkatNotFound(meerkat_id));
-            }
-        };
-
-        // Enforce external_addressable
-        let profile = self
-            .definition
-            .profiles
-            .get(&entry.profile)
-            .ok_or_else(|| MobError::ProfileNotFound(entry.profile.clone()))?;
-
-        if !profile.external_addressable {
-            return Err(MobError::NotExternallyAddressable(meerkat_id));
-        }
-
-        // Only AutonomousHost supports inject_with_subscription
-        if entry.runtime_mode != crate::MobRuntimeMode::AutonomousHost {
-            return Err(MobError::UnsupportedForMode {
-                mode: entry.runtime_mode,
-                reason: "inject_and_subscribe requires autonomous_host mode".into(),
-            });
-        }
-
-        let session_id = entry.member_ref.session_id().ok_or_else(|| {
-            MobError::Internal(format!(
-                "autonomous dispatch requires session-backed member ref for '{}'",
-                entry.meerkat_id
-            ))
-        })?;
-        let injector = self
-            .provisioner
-            .event_injector(session_id)
-            .await
-            .ok_or_else(|| {
-                MobError::Internal(format!(
-                    "missing event injector for autonomous member '{}'",
-                    entry.meerkat_id
-                ))
-            })?;
-        injector
-            .inject_with_subscription(message, meerkat_core::PlainEventSource::Rpc)
-            .map_err(|error| {
-                MobError::Internal(format!(
-                    "inject_and_subscribe failed for '{}': {}",
-                    entry.meerkat_id, error
-                ))
-            })
     }
 
     async fn handle_run_flow(

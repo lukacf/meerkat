@@ -33,7 +33,6 @@ interface MobWasmBindings {
   mob_cancel_flow: (mobId: string, runId: string) => Promise<void>;
   mob_member_subscribe: (mobId: string, meerkatId: string) => number;
   mob_subscribe_events: (mobId: string) => number;
-  mob_inject_and_subscribe: (mobId: string, meerkatId: string, message: string) => Promise<string>;
   poll_subscription: (handle: number) => string;
   close_subscription: (handle: number) => void;
 }
@@ -166,19 +165,4 @@ export class Mob {
     );
   }
 
-  /** Send a message and subscribe to the interaction. Returns the interaction ID. */
-  async injectAndSubscribe(
-    meerkatId: string,
-    message: string,
-  ): Promise<{ interactionId: string; subscription: EventSubscription }> {
-    const json = await this.bindings.mob_inject_and_subscribe(
-      this.mobId,
-      meerkatId,
-      message,
-    );
-    const interactionId = JSON.parse(json) as string;
-    // Subscribe to the member's events to follow the interaction
-    const subscription = this.subscribe(meerkatId);
-    return { interactionId, subscription };
-  }
 }

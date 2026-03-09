@@ -100,7 +100,6 @@ export interface WasmModule {
   ) => Promise<string>;
   mob_send_message: (mobId: string, meerkatId: string, message: string) => Promise<void>;
   mob_respawn: (mobId: string, meerkatId: string, initialMessage?: string) => Promise<void>;
-  mob_inject_and_subscribe: (mobId: string, meerkatId: string, message: string) => Promise<string>;
   mob_run_flow: (mobId: string, flowId: string, paramsJson: string) => Promise<string>;
   mob_flow_status: (mobId: string, runId: string) => Promise<string>;
   mob_cancel_flow: (mobId: string, runId: string) => Promise<void>;
@@ -280,7 +279,6 @@ export class MeerkatRuntime {
       mob_cancel_flow: this.wasm.mob_cancel_flow,
       mob_member_subscribe: this.wasm.mob_member_subscribe,
       mob_subscribe_events: this.wasm.mob_subscribe_events,
-      mob_inject_and_subscribe: this.wasm.mob_inject_and_subscribe,
       poll_subscription: this.wasm.poll_subscription,
       close_subscription: this.wasm.close_subscription,
     });

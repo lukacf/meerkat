@@ -97,7 +97,7 @@ Primary crates:
 - inspection: `status()`, `definition()`, `mob_id()`, `roster()`, `list_members()`, `list_all_members()`, `get_member()`, `events()`, `mcp_server_states()`
 - membership: `spawn()`, `spawn_with_backend()`, `spawn_with_options()`, `spawn_spec()`, `spawn_many()`, `retire()`, `respawn()`, `retire_all()`, `set_spawn_policy()`
 - graph: `wire()`, `unwire()`
-- turns: `send_message()`, `inject_and_subscribe()`, `internal_turn()`
+- turns: `send_message()`, `internal_turn()`
 - lifecycle: `stop()`, `resume()`, `complete()`, `reset()`, `destroy()`, `shutdown()`
 - flows: `list_flows()`, `run_flow()`, `run_flow_with_stream()`, `flow_status()`, `cancel_flow()`
 - subscriptions: `subscribe_agent_events()`, `subscribe_all_agent_events()`, `subscribe_mob_events()`, `subscribe_mob_events_with_config()`
@@ -283,7 +283,6 @@ See `SKILL.md` WASM section for the full export list. Key mob-related exports:
 mob_create(definition_json) → mob_id  [async]
 mob_spawn(mob_id, specs_json) → result JSON  [async]
 mob_wire / mob_unwire / mob_retire / mob_respawn  [async]
-mob_inject_and_subscribe(mob_id, meerkat_id, message)  [async]
 mob_list_members / mob_send_message / mob_events / mob_status / mob_list
 mob_lifecycle(mob_id, action)  [async]
 mob_run_flow / mob_flow_status / mob_cancel_flow  [async]

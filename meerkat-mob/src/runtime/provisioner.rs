@@ -25,8 +25,10 @@ pub trait MobProvisioner: Send + Sync {
         member_ref: &MemberRef,
         req: StartTurnRequest,
     ) -> Result<(), MobError>;
-    async fn event_injector(&self, session_id: &SessionId)
-    -> Option<Arc<dyn SubscribableInjector>>;
+    async fn interaction_event_injector(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<dyn SubscribableInjector>>;
     async fn is_member_active(&self, member_ref: &MemberRef) -> Result<Option<bool>, MobError>;
     async fn comms_runtime(&self, member_ref: &MemberRef) -> Option<Arc<dyn CoreCommsRuntime>>;
     async fn trusted_peer_spec(
@@ -119,11 +121,13 @@ impl MobProvisioner for SubagentBackend {
         Ok(())
     }
 
-    async fn event_injector(
+    async fn interaction_event_injector(
         &self,
         session_id: &SessionId,
     ) -> Option<Arc<dyn SubscribableInjector>> {
-        self.session_service.event_injector(session_id).await
+        self.session_service
+            .interaction_event_injector(session_id)
+            .await
     }
 
     async fn is_member_active(&self, member_ref: &MemberRef) -> Result<Option<bool>, MobError> {
@@ -312,11 +316,11 @@ impl MobProvisioner for MultiBackendProvisioner {
         self.subagent.start_turn(member_ref, req).await
     }
 
-    async fn event_injector(
+    async fn interaction_event_injector(
         &self,
         session_id: &SessionId,
     ) -> Option<Arc<dyn SubscribableInjector>> {
-        self.subagent.event_injector(session_id).await
+        self.subagent.interaction_event_injector(session_id).await
     }
 
     async fn is_member_active(&self, member_ref: &MemberRef) -> Result<Option<bool>, MobError> {

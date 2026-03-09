@@ -90,9 +90,7 @@ pub use event::{
     ToolConfigChangeOperation, ToolConfigChangedPayload, VerboseEventConfig, agent_event_type,
     compare_event_envelopes, format_verbose_event, format_verbose_event_with_config,
 };
-pub use event_injector::{
-    EventInjector, EventInjectorError, InteractionSubscription, SubscribableInjector,
-};
+pub use event_injector::{EventInjector, EventInjectorError};
 pub use event_tap::{
     EventTap, EventTapState, new_event_tap, tap_emit, tap_send_terminal, tap_try_send,
 };

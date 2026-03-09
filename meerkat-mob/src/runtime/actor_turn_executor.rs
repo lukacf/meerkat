@@ -309,7 +309,7 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                 })?;
                 let injector = self
                     .provisioner
-                    .event_injector(session_id)
+                    .interaction_event_injector(session_id)
                     .await
                     .ok_or_else(|| {
                         MobError::Internal(format!(

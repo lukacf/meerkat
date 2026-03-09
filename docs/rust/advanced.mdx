@@ -239,12 +239,12 @@ let hook_engine = create_default_hook_engine(layered_hooks);
 When injecting events into a host-mode agent from application code (HTTP handler, Slack bot, debug UI), you can subscribe to the streaming events produced by that specific interaction.
 
 ```rust
-use meerkat::{SubscribableInjector, AgentEvent, PlainEventSource};
+use meerkat::{EventInjector, PlainEventSource};
 
 let injector = service.event_injector(&session_id).await
     .expect("comms must be enabled");
 
-let sub = injector.inject_with_subscription(
+injector.inject(
     "review PR #42".into(),
     PlainEventSource::Rpc,
 )?;
@@ -274,7 +274,7 @@ while let Some(event) = sub.events.recv().await {
 
 <Accordion title="How it works">
 
-1. `inject_with_subscription()` generates a unique `InteractionId`, creates a channel (buffer: 4096), registers the sender in a subscriber registry, and injects the message into the inbox with the ID attached.
+1. `inject()` queues a plain event into the session inbox for the next host-mode drain cycle.
 2. When the host loop drains the inbox, it finds the subscriber by interaction ID (one-shot: removed on lookup).
 3. The subscriber's sender is installed into the agent's **event tap** — a shared mutex checked by both the LLM streaming adapter (for `TextDelta`) and the agent loop (for lifecycle events).
 4. All events emitted during that turn are mirrored to the subscriber channel.
@@ -298,7 +298,7 @@ while let Some(event) = sub.events.recv().await {
 ```rust
 async fn handle_chat(session_id: SessionId, user_msg: String) -> impl IntoResponse {
     let injector = service.event_injector(&session_id).await.unwrap();
-    let sub = injector.inject_with_subscription(user_msg, PlainEventSource::Rpc)?;
+    injector.inject(user_msg, PlainEventSource::Rpc)?;
 
     Sse::new(async_stream::stream! {
         while let Some(event) = sub.events.recv().await {

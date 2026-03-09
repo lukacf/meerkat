@@ -294,18 +294,6 @@ impl MobMcpState {
             .await
     }
 
-    pub async fn mob_inject_and_subscribe(
-        &self,
-        mob_id: &MobId,
-        meerkat_id: MeerkatId,
-        message: String,
-    ) -> Result<meerkat_core::InteractionSubscription, MobError> {
-        self.handle_for(mob_id)
-            .await?
-            .inject_and_subscribe(meerkat_id, message)
-            .await
-    }
-
     /// Subscribe to mob-wide events (all members, continuously updated).
     pub async fn subscribe_mob_events(
         &self,
@@ -517,10 +505,19 @@ impl SessionServiceCommsExt for LocalSessionService {
     async fn event_injector(
         &self,
         session_id: &SessionId,
-    ) -> Option<Arc<dyn meerkat_core::SubscribableInjector>> {
+    ) -> Option<Arc<dyn meerkat_core::EventInjector>> {
         let sessions = self.sessions.read().await;
         let runtime = sessions.get(session_id)?;
         runtime.event_injector()
+    }
+
+    async fn interaction_event_injector(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<dyn meerkat_core::event_injector::SubscribableInjector>> {
+        let sessions = self.sessions.read().await;
+        let runtime = sessions.get(session_id)?;
+        runtime.interaction_event_injector()
     }
 }
 
@@ -654,13 +651,6 @@ impl MobMcpDispatcher {
                      Returns once retire completes and respawn is enqueued. {COMMON}"),
                 json!({"type":"object","properties":{"mob_id":{"type":"string"},"meerkat_id":{"type":"string"},"initial_message":{"type":"string"}},"required":["mob_id","meerkat_id"]}),
             ),
-            tool(
-                "mob_inject_and_subscribe",
-                &format!("Inject a message into an autonomous meerkat and get a subscription for \
-                     interaction-scoped events (request-reply). Required: mob_id, meerkat_id, message. \
-                     Returns interaction_id. Only works for autonomous_host members. {COMMON}"),
-                json!({"type":"object","properties":{"mob_id":{"type":"string"},"meerkat_id":{"type":"string"},"message":{"type":"string"}},"required":["mob_id","meerkat_id","message"]}),
-            ),
         ]
         .into();
         Self { state, tools }
@@ -776,12 +766,6 @@ struct RespawnArgs {
     meerkat_id: String,
     #[serde(default)]
     initial_message: Option<String>,
-}
-#[derive(Deserialize)]
-struct InjectAndSubscribeArgs {
-    mob_id: String,
-    meerkat_id: String,
-    message: String,
 }
 fn default_limit() -> usize {
     100
@@ -1097,26 +1081,6 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     json!({
                         "meerkat_id": meerkat_id_str,
                         "status": "respawn_enqueued"
-                    }),
-                )
-            }
-            "mob_inject_and_subscribe" => {
-                let args: InjectAndSubscribeArgs = call
-                    .parse_args()
-                    .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
-                let subscription = self
-                    .state
-                    .mob_inject_and_subscribe(
-                        &MobId::from(args.mob_id),
-                        MeerkatId::from(args.meerkat_id),
-                        args.message,
-                    )
-                    .await
-                    .map_err(|e| map_mob_err(call, e))?;
-                encode(
-                    call,
-                    json!({
-                        "interaction_id": subscription.id.to_string()
                     }),
                 )
             }
@@ -1478,7 +1442,17 @@ mod tests {
         async fn event_injector(
             &self,
             session_id: &SessionId,
-        ) -> Option<Arc<dyn meerkat_core::SubscribableInjector>> {
+        ) -> Option<Arc<dyn meerkat_core::EventInjector>> {
+            if !self.sessions.read().await.contains_key(session_id) {
+                return None;
+            }
+            Some(Arc::new(MockInjector))
+        }
+
+        async fn interaction_event_injector(
+            &self,
+            session_id: &SessionId,
+        ) -> Option<Arc<dyn meerkat_core::event_injector::SubscribableInjector>> {
             if !self.sessions.read().await.contains_key(session_id) {
                 return None;
             }
@@ -1523,11 +1497,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dispatcher_exposes_14_tools() {
+    async fn test_dispatcher_exposes_13_tools() {
         let svc = Arc::new(MockSessionSvc::new());
         let state = Arc::new(MobMcpState::new(svc));
         let d = MobMcpDispatcher::new(state);
-        assert_eq!(d.tools().len(), 14);
+        assert_eq!(d.tools().len(), 13);
     }
 
     fn flow_enabled_definition() -> MobDefinition {

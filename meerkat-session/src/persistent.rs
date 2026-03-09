@@ -383,8 +383,15 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceCommsExt for PersistentSess
     async fn event_injector(
         &self,
         session_id: &SessionId,
-    ) -> Option<std::sync::Arc<dyn meerkat_core::SubscribableInjector>> {
+    ) -> Option<std::sync::Arc<dyn meerkat_core::EventInjector>> {
         self.inner.event_injector(session_id).await
+    }
+
+    async fn interaction_event_injector(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<std::sync::Arc<dyn meerkat_core::event_injector::SubscribableInjector>> {
+        self.inner.interaction_event_injector(session_id).await
     }
 }
 
@@ -528,12 +535,20 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
 }
 
 impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
-    /// Get the subscribable event injector for a session, if available.
+    /// Get the event injector for a session, if available.
     pub async fn event_injector(
         &self,
         session_id: &SessionId,
-    ) -> Option<std::sync::Arc<dyn meerkat_core::SubscribableInjector>> {
+    ) -> Option<std::sync::Arc<dyn meerkat_core::EventInjector>> {
         self.inner.event_injector(session_id).await
+    }
+
+    #[doc(hidden)]
+    pub async fn interaction_event_injector(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<std::sync::Arc<dyn meerkat_core::event_injector::SubscribableInjector>> {
+        self.inner.interaction_event_injector(session_id).await
     }
 
     /// Get the comms runtime for a session, if available.

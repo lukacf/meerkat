@@ -41,10 +41,11 @@ pub trait EventInjector: Send + Sync {
     fn inject(&self, body: String, source: PlainEventSource) -> Result<(), EventInjectorError>;
 }
 
-/// A subscription handle returned by `SubscribableInjector::inject_with_subscription`.
+/// Internal runtime handle for an interaction-scoped event stream.
 ///
-/// The caller reads `events` to receive streaming `AgentEvent`s scoped to this interaction.
-/// The terminal event (`InteractionComplete` or `InteractionFailed`) signals end-of-stream.
+/// This remains available only to support internal host-mode/runtime wiring.
+/// It is not part of the public interaction model.
+#[doc(hidden)]
 pub struct InteractionSubscription {
     /// Unique ID for this interaction (correlates with events).
     pub id: crate::interaction::InteractionId,
@@ -52,11 +53,12 @@ pub struct InteractionSubscription {
     pub events: tokio::sync::mpsc::Receiver<crate::event::AgentEvent>,
 }
 
-/// Extended injector that returns a subscription for streaming events.
+/// Internal runtime extension that can create an interaction-scoped stream.
 ///
-/// Implementors register a subscriber in the registry keyed by interaction ID,
-/// then inject the event into the inbox. The host loop looks up the subscriber
-/// during `drain_inbox_interactions()` and wires it to the event tap.
+/// This trait remains available only as an internal cross-crate runtime seam.
+/// Public callers should use `EventInjector` plus explicit session/agent/mob
+/// observation APIs instead.
+#[doc(hidden)]
 pub trait SubscribableInjector: EventInjector {
     /// Inject an event and return a subscription for streaming events.
     ///

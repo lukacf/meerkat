@@ -247,7 +247,7 @@ Push external events from outside systems into a running agent. Events are drain
     let injector = service.event_injector(&session_id).await
         .expect("comms must be enabled");
 
-    let sub = injector.inject_with_subscription(
+    injector.inject(
         r#"{"event": "deploy_complete"}"#.into(),
         PlainEventSource::Rpc,
     )?;

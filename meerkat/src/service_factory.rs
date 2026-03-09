@@ -149,10 +149,15 @@ impl SessionAgent for FactoryAgent {
         self.agent.system_context_state()
     }
 
-    // BRIDGE(M6→M12): Legacy injector accessor, routed through comms_runtime.
-    // Remove when event/push is eradicated in M7/M12.
-    fn event_injector(&self) -> Option<Arc<dyn meerkat_core::SubscribableInjector>> {
+    fn event_injector(&self) -> Option<Arc<dyn meerkat_core::EventInjector>> {
         self.agent.comms_arc()?.event_injector()
+    }
+
+    #[doc(hidden)]
+    fn interaction_event_injector(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::event_injector::SubscribableInjector>> {
+        self.agent.comms_arc()?.interaction_event_injector()
     }
 
     fn comms_runtime(&self) -> Option<Arc<dyn meerkat_core::agent::CommsRuntime>> {

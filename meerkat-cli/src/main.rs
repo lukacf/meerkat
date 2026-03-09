@@ -1100,11 +1100,6 @@ enum MobCommands {
         message: Option<String>,
     },
     /// Inject a message into an autonomous meerkat (request-reply).
-    InjectAndSubscribe {
-        mob_id: String,
-        meerkat_id: String,
-        message: String,
-    },
     /// Wire two peers.
     Wire {
         mob_id: String,
@@ -2603,7 +2598,7 @@ impl SessionServiceCommsExt for RunMobSessionService {
     async fn event_injector(
         &self,
         session_id: &SessionId,
-    ) -> Option<Arc<dyn meerkat_core::SubscribableInjector>> {
+    ) -> Option<Arc<dyn meerkat_core::EventInjector>> {
         self.inner.event_injector(session_id).await
     }
 }
@@ -3847,7 +3842,7 @@ impl SessionServiceCommsExt for MobCliSessionService {
     async fn event_injector(
         &self,
         session_id: &SessionId,
-    ) -> Option<Arc<dyn meerkat_core::SubscribableInjector>> {
+    ) -> Option<Arc<dyn meerkat_core::EventInjector>> {
         self.inner.event_injector(session_id).await
     }
 }
@@ -5346,24 +5341,6 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             save_mob_registry(scope, &registry).await?;
             Ok(())
         }
-        MobCommands::InjectAndSubscribe {
-            mob_id,
-            meerkat_id,
-            message,
-        } => {
-            let subscription = state
-                .mob_inject_and_subscribe(
-                    &meerkat_mob::MobId::from(mob_id.clone()),
-                    meerkat_mob::MeerkatId::from(meerkat_id),
-                    message,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            println!("{}", subscription.id);
-            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
-            save_mob_registry(scope, &registry).await?;
-            Ok(())
-        }
         MobCommands::Stop { mob_id } => {
             state
                 .mob_stop(&meerkat_mob::MobId::from(mob_id.clone()))
@@ -6796,7 +6773,7 @@ mod tests {
         async fn event_injector(
             &self,
             _session_id: &SessionId,
-        ) -> Option<Arc<dyn meerkat_core::SubscribableInjector>> {
+        ) -> Option<Arc<dyn meerkat_core::EventInjector>> {
             None
         }
     }

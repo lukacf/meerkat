@@ -237,8 +237,14 @@ impl CoreCommsRuntime for CommsRuntime {
         self.dismiss_flag.swap(false, Ordering::SeqCst)
     }
 
-    fn event_injector(&self) -> Option<Arc<dyn meerkat_core::SubscribableInjector>> {
+    fn event_injector(&self) -> Option<Arc<dyn meerkat_core::EventInjector>> {
         Some(self.event_injector())
+    }
+
+    fn interaction_event_injector(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::event_injector::SubscribableInjector>> {
+        Some(self.interaction_event_injector())
     }
 
     fn stream(&self, scope: StreamScope) -> Result<EventStream, StreamError> {
@@ -1110,11 +1116,18 @@ impl CommsRuntime {
         self.inbox_notify.clone()
     }
 
-    /// Get a subscribable event injector for this runtime's inbox.
-    ///
-    /// Surfaces use this to push external events and optionally subscribe to
-    /// interaction-scoped streaming responses.
-    pub fn event_injector(&self) -> Arc<dyn meerkat_core::SubscribableInjector> {
+    /// Get an event injector for this runtime's inbox.
+    pub fn event_injector(&self) -> Arc<dyn meerkat_core::EventInjector> {
+        Arc::new(crate::CommsEventInjector::new(
+            self.router.inbox_sender().clone(),
+            self.subscriber_registry.clone(),
+        ))
+    }
+
+    #[doc(hidden)]
+    pub fn interaction_event_injector(
+        &self,
+    ) -> Arc<dyn meerkat_core::event_injector::SubscribableInjector> {
         Arc::new(crate::CommsEventInjector::new(
             self.router.inbox_sender().clone(),
             self.subscriber_registry.clone(),
@@ -1369,7 +1382,7 @@ mod tests {
     use crate::identity::Signature;
     use crate::types::{Envelope, InboxItem, MessageKind, Status};
     use futures::StreamExt;
-    use meerkat_core::SubscribableInjector;
+    use meerkat_core::event_injector::SubscribableInjector;
     use meerkat_core::{
         SendError,
         comms::{

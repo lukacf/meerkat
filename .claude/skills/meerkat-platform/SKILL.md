@@ -73,7 +73,6 @@ rkat mob status <mob_id>
 rkat mob spawn <mob_id> <profile> <meerkat_id>
 rkat mob retire <mob_id> <meerkat_id>
 rkat mob respawn <mob_id> <meerkat_id> [--message <msg>]
-rkat mob inject-and-subscribe <mob_id> <meerkat_id> <message>
 rkat mob wire <mob_id> <a> <b>
 rkat mob unwire <mob_id> <a> <b>
 rkat mob turn <mob_id> <meerkat_id> <message>

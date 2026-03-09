@@ -60,7 +60,7 @@ rkat comms stream <SESSION-ID> [--interaction-id] # (comms feature)
 rkat realms current|list|show
 rkat skills list [--json]
 rkat skills inspect <ID> [--source <SOURCE>] [--json]
-rkat mob prefabs|create|list|status|spawn|retire|respawn|inject-and-subscribe|wire|unwire|turn|stop|resume|complete|flows|run-flow|flow-status|events|destroy|pack|inspect|validate|deploy|web
+rkat mob prefabs|create|list|status|spawn|retire|respawn|wire|unwire|turn|stop|resume|complete|flows|run-flow|flow-status|events|destroy|pack|inspect|validate|deploy|web
 rkat config get|set|patch ...
 rkat capabilities
 rkat-rpc
@@ -89,7 +89,6 @@ Mob lifecycle (non-flow) commands remain available as explicit operational/compa
 - `spawn`
 - `retire`
 - `respawn` — retire + re-spawn same profile
-- `inject-and-subscribe` — inject a message into an autonomous meerkat (request-reply)
 - `wire`
 - `unwire`
 - `turn`

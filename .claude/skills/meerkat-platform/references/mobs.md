@@ -242,7 +242,6 @@ rkat mob spawn team-mob lead lead-1
 rkat mob wire team-mob lead-1 worker-1
 rkat mob status team-mob
 rkat mob respawn team-mob worker-1 --message "restart"
-rkat mob inject-and-subscribe team-mob worker-1 "what is your status?"
 rkat mob events team-mob --member worker-1
 ```
 

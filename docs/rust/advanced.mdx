@@ -234,9 +234,9 @@ let hook_engine = create_default_hook_engine(layered_hooks);
 
 ---
 
-## Interaction-scoped event streaming
+## Comms delivery and observation
 
-When injecting events into a host-mode agent from application code (HTTP handler, Slack bot, debug UI), you can subscribe to the streaming events produced by that specific interaction.
+Public comms injection is now a pure delivery API. `event_injector()` gives you an `EventInjector`, and `inject()` queues an external event for the session's next host-mode drain cycle.
 
 ```rust
 use meerkat::{EventInjector, PlainEventSource};
@@ -248,68 +248,46 @@ injector.inject(
     "review PR #42".into(),
     PlainEventSource::Rpc,
 )?;
-
-while let Some(event) = sub.events.recv().await {
-    match event {
-        AgentEvent::TextDelta { delta } => print!("{delta}"),
-        AgentEvent::ToolCallRequested { name, .. } => {
-            println!("[calling {name}]");
-        }
-        AgentEvent::InteractionComplete { result, .. } => {
-            println!("\n---\n{result}");
-            break;
-        }
-        AgentEvent::InteractionFailed { error, .. } => {
-            eprintln!("error: {error}");
-            break;
-        }
-        AgentEvent::StreamTruncated { .. } => {
-            // Some intermediate events were dropped (backpressure).
-            // The terminal event is still guaranteed.
-        }
-        _ => {}
-    }
-}
 ```
 
 <Accordion title="How it works">
 
 1. `inject()` queues a plain event into the session inbox for the next host-mode drain cycle.
-2. When the host loop drains the inbox, it finds the subscriber by interaction ID (one-shot: removed on lookup).
-3. The subscriber's sender is installed into the agent's **event tap** — a shared mutex checked by both the LLM streaming adapter (for `TextDelta`) and the agent loop (for lifecycle events).
-4. All events emitted during that turn are mirrored to the subscriber channel.
-5. When the turn completes, `InteractionComplete` (or `InteractionFailed`) is sent and the tap is cleared.
-
-**Guarantees:**
-- No cross-talk between concurrent interactions
-- Exactly one terminal event per subscription
-- Terminal delivery uses a 5-second timeout (not best-effort `try_send`)
-- Backpressure drops intermediate events with a `StreamTruncated` marker; the terminal event is never dropped
-- The primary `event_tx` channel is unaffected
+2. The host loop drains the inbox and processes the event during the next turn boundary.
+3. Observation is selected independently:
+   - use the session's primary `event_tx` for full session activity,
+   - use mob member subscriptions for agent-scoped activity,
+   - use mob event subscriptions for attributed mob-wide activity.
+4. Public callers no longer receive an interaction-scoped stream from injection.
 
 **Requirements:**
-- Agent must be in host mode with a configured primary `event_tx`
-  (for example via `AgentBuildConfig.event_tx`, then `run_host_mode()`)
-- Comms must be enabled
+- Agent must be in host mode if you want the host loop to drain inbox events.
+- Comms must be enabled.
+- If you need streaming output, configure an observation surface separately.
 </Accordion>
 
 <Accordion title="SSE streaming example">
 
 ```rust
-async fn handle_chat(session_id: SessionId, user_msg: String) -> impl IntoResponse {
+async fn handle_chat(
+    session_id: SessionId,
+    user_msg: String,
+    session_events: tokio::sync::broadcast::Sender<SessionEvent>,
+) -> impl IntoResponse {
     let injector = service.event_injector(&session_id).await.unwrap();
+    let mut events = session_events.subscribe();
     injector.inject(user_msg, PlainEventSource::Rpc)?;
 
     Sse::new(async_stream::stream! {
-        while let Some(event) = sub.events.recv().await {
-            match event {
+        while let Ok(session_event) = events.recv().await {
+            match session_event.event.payload {
                 AgentEvent::TextDelta { delta } => yield sse_event("delta", &delta),
-                AgentEvent::InteractionComplete { result, .. } => {
-                    yield sse_event("done", &result);
+                AgentEvent::RunCompleted { ref result, .. } => {
+                    yield sse_event("done", result);
                     break;
                 }
-                AgentEvent::InteractionFailed { error, .. } => {
-                    yield sse_event("error", &error);
+                AgentEvent::RunFailed { ref error, .. } => {
+                    yield sse_event("error", error);
                     break;
                 }
                 _ => {}

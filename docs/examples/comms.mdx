@@ -252,13 +252,6 @@ Push external events from outside systems into a running agent. Events are drain
         PlainEventSource::Rpc,
     )?;
 
-    while let Some(event) = sub.events.recv().await {
-        match event {
-            AgentEvent::TextDelta { delta } => print!("{delta}"),
-            AgentEvent::InteractionComplete { .. } => break,
-            _ => {}
-        }
-    }
     ```
   </Tab>
 </Tabs>

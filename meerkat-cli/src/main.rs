@@ -300,7 +300,7 @@ async fn init_project_config() -> anyhow::Result<()> {
 }
 
 #[derive(Parser)]
-#[command(name = "meerkat")]
+#[command(name = "meerkat", version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "Meerkat - Rust Agentic Interface Kit")]
 #[command(after_help = "Shorthand: `rkat \"prompt\"` is equivalent to `rkat run \"prompt\"`")]
 struct Cli {

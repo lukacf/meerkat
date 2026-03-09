@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[derive(Parser, Debug)]
-#[command(name = "rkat-mcp")]
+#[command(name = "rkat-mcp", version = env!("CARGO_PKG_VERSION"))]
 struct Args {
     /// Explicit realm ID. Reuse to share state across processes/surfaces.
     #[arg(long)]

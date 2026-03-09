@@ -712,6 +712,14 @@ impl SessionRuntime {
         self.service.event_injector(session_id).await
     }
 
+    /// Subscribe to session-wide events regardless of triggering interaction.
+    pub async fn subscribe_session_events(
+        &self,
+        session_id: &meerkat_core::SessionId,
+    ) -> Result<meerkat_core::EventStream, meerkat_core::StreamError> {
+        self.service.subscribe_session_events(session_id).await
+    }
+
     /// Get the comms runtime for a session, if available.
     pub async fn comms_runtime(
         &self,

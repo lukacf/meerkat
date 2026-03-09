@@ -205,11 +205,11 @@ let build = SessionBuildOptions {
 | CLI `run` / `resume` | `mob_*` tools in prompt-driven runs | Primary CLI mob UX |
 | CLI `rkat mob ...` | direct command lifecycle | Secondary explicit operational surface |
 | CLI `rkat mob pack/deploy/web build` | artifact and browser distribution | Portable deploy + web target |
-| RPC | session/turn methods | `mob_*` capability via composed `meerkat-mob-mcp` dispatcher |
-| REST | session HTTP endpoints | `mob_*` capability via composed `meerkat-mob-mcp` dispatcher |
-| MCP | `meerkat_*` session tools | `mob_*` capability via composed `meerkat-mob-mcp` dispatcher |
-| Python SDK | RPC wrapper | inherits `mob_*` capability from RPC host composition |
-| TypeScript SDK | RPC wrapper | inherits `mob_*` capability from RPC host composition |
+| RPC | explicit session/mob methods | canonical typed substrate for SDKs; `mob/tools` / `mob/call` are escape hatches |
+| REST | session HTTP endpoints | compact mob lifecycle via `/mob/tools` + `/mob/call` plus SSE observe |
+| MCP | `meerkat_*` session tools | tool-oriented mob access for LLM ergonomics |
+| Python SDK | typed RPC wrapper | first-class mob handle + explicit send/session/member/mob observation |
+| TypeScript SDK | typed RPC wrapper | first-class mob handle + explicit send/session/member/mob observation |
 
 Runtime-mode behavior is shared across these surfaces because dispatch comes from the same mob runtime:
 

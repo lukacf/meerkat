@@ -33,12 +33,15 @@ from urllib.error import URLError
 import urllib.request
 
 from .errors import CapabilityUnavailableError, MeerkatError
-from .events import Usage
+from .events import Usage, parse_event
 from .generated.types import CONTRACT_VERSION
+from .mob import Mob
 from .session import Session, _normalize_skill_ref
-from .streaming import EventStream, _StdoutDispatcher
+from .streaming import EventStream, EventSubscription, _StdoutDispatcher
 from .types import (
+    AttributedEvent,
     Capability,
+    EventEnvelope,
     McpLiveOpResponse,
     RunResult,
     SchemaWarning,
@@ -483,6 +486,179 @@ class MeerkatClient:
                 "name": name,
                 "arguments": arguments or {},
             },
+        )
+
+    async def subscribe_session_events(self, session_id: str) -> EventSubscription:
+        return await self._open_event_subscription(
+            "session/stream_open",
+            {"session_id": session_id},
+            "session/stream_close",
+            self._parse_agent_event_envelope,
+        )
+
+    async def create_mob(
+        self,
+        *,
+        prefab: str | None = None,
+        definition: dict[str, Any] | None = None,
+    ) -> Mob:
+        self.require_capability("mob")
+        result = await self._request("mob/create", {"prefab": prefab, "definition": definition})
+        return Mob(self, str(result.get("mob_id", "")))
+
+    def mob(self, mob_id: str) -> Mob:
+        return Mob(self, mob_id)
+
+    async def list_mobs(self) -> list[dict[str, Any]]:
+        self.require_capability("mob")
+        result = await self._request("mob/list", {})
+        return result.get("mobs", [])
+
+    async def mob_status(self, mob_id: str) -> dict[str, Any]:
+        return await self._request("mob/status", {"mob_id": mob_id})
+
+    async def list_mob_members(self, mob_id: str) -> list[dict[str, Any]]:
+        result = await self._request("mob/members", {"mob_id": mob_id})
+        return result.get("members", [])
+
+    async def spawn_mob_member(
+        self,
+        mob_id: str,
+        *,
+        profile: str,
+        meerkat_id: str,
+        initial_message: str | None = None,
+        runtime_mode: str | None = None,
+        backend: str | None = None,
+        resume_session_id: str | None = None,
+        labels: dict[str, str] | None = None,
+        context: dict[str, Any] | None = None,
+        additional_instructions: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return await self._request("mob/spawn", {
+            "mob_id": mob_id,
+            "profile": profile,
+            "meerkat_id": meerkat_id,
+            "initial_message": initial_message,
+            "runtime_mode": runtime_mode,
+            "backend": backend,
+            "resume_session_id": resume_session_id,
+            "labels": labels,
+            "context": context,
+            "additional_instructions": additional_instructions,
+        })
+
+    async def retire_mob_member(self, mob_id: str, meerkat_id: str) -> None:
+        await self._request("mob/retire", {"mob_id": mob_id, "meerkat_id": meerkat_id})
+
+    async def respawn_mob_member(self, mob_id: str, meerkat_id: str, initial_message: str | None = None) -> None:
+        await self._request("mob/respawn", {"mob_id": mob_id, "meerkat_id": meerkat_id, "initial_message": initial_message})
+
+    async def wire_mob_members(self, mob_id: str, a: str, b: str) -> None:
+        await self._request("mob/wire", {"mob_id": mob_id, "a": a, "b": b})
+
+    async def unwire_mob_members(self, mob_id: str, a: str, b: str) -> None:
+        await self._request("mob/unwire", {"mob_id": mob_id, "a": a, "b": b})
+
+    async def mob_lifecycle(self, mob_id: str, action: str) -> None:
+        await self._request("mob/lifecycle", {"mob_id": mob_id, "action": action})
+
+    async def send_mob_message(self, mob_id: str, meerkat_id: str, message: str) -> None:
+        await self._request("mob/send", {"mob_id": mob_id, "meerkat_id": meerkat_id, "message": message})
+
+    async def append_mob_system_context(
+        self,
+        mob_id: str,
+        meerkat_id: str,
+        text: str,
+        *,
+        source: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        return await self._request("mob/append_system_context", {
+            "mob_id": mob_id,
+            "meerkat_id": meerkat_id,
+            "text": text,
+            "source": source,
+            "idempotency_key": idempotency_key,
+        })
+
+    async def list_mob_flows(self, mob_id: str) -> list[str]:
+        result = await self._request("mob/flows", {"mob_id": mob_id})
+        return result.get("flows", [])
+
+    async def run_mob_flow(self, mob_id: str, flow_id: str, params: dict[str, Any] | None = None) -> str:
+        result = await self._request("mob/flow_run", {"mob_id": mob_id, "flow_id": flow_id, "params": params or {}})
+        return str(result.get("run_id", ""))
+
+    async def get_mob_flow_status(self, mob_id: str, run_id: str) -> dict[str, Any] | None:
+        result = await self._request("mob/flow_status", {"mob_id": mob_id, "run_id": run_id})
+        return result.get("run")
+
+    async def cancel_mob_flow(self, mob_id: str, run_id: str) -> None:
+        await self._request("mob/flow_cancel", {"mob_id": mob_id, "run_id": run_id})
+
+    async def subscribe_mob_events(self, mob_id: str) -> EventSubscription:
+        return await self._open_event_subscription(
+            "mob/stream_open",
+            {"mob_id": mob_id},
+            "mob/stream_close",
+            self._parse_attributed_mob_event,
+        )
+
+    async def subscribe_mob_member_events(self, mob_id: str, meerkat_id: str) -> EventSubscription:
+        return await self._open_event_subscription(
+            "mob/stream_open",
+            {"mob_id": mob_id, "member_id": meerkat_id},
+            "mob/stream_close",
+            self._parse_agent_event_envelope,
+        )
+
+    async def _open_event_subscription(
+        self,
+        open_method: str,
+        params: dict[str, Any],
+        close_method: str,
+        parser: Any,
+    ) -> EventSubscription:
+        if not self._dispatcher:
+            raise MeerkatError("NOT_CONNECTED", "Client not connected")
+        result = await self._request(open_method, params)
+        stream_id = str(result.get("stream_id", ""))
+        if not stream_id:
+            raise MeerkatError("INVALID_RESPONSE", f"{open_method} did not return stream_id")
+        queue = self._dispatcher.subscribe_stream(stream_id)
+        async def _close_remote(active_stream_id: str) -> None:
+            self._dispatcher.unsubscribe_stream(active_stream_id)
+            await self._request(close_method, {"stream_id": active_stream_id})
+        return EventSubscription(
+            stream_id=stream_id,
+            event_queue=queue,
+            dispatcher=self._dispatcher,
+            close_remote=_close_remote,
+            parse_event_fn=parser,
+        )
+
+    @staticmethod
+    def _parse_agent_event_envelope(raw: dict[str, Any]) -> EventEnvelope:
+        payload = raw.get("payload", {})
+        return EventEnvelope(
+            event_id=str(raw.get("event_id", "")),
+            source_id=str(raw.get("source_id", "")),
+            seq=int(raw.get("seq", 0)),
+            timestamp_ms=int(raw.get("timestamp_ms", 0)),
+            payload=parse_event(payload if isinstance(payload, dict) else {}),
+        )
+
+    @staticmethod
+    def _parse_attributed_mob_event(raw: dict[str, Any]) -> AttributedEvent:
+        envelope = raw.get("envelope", {})
+        return AttributedEvent(
+            source=str(raw.get("source", "")),
+            profile=str(raw.get("profile", "")),
+            envelope=MeerkatClient._parse_agent_event_envelope(
+                envelope if isinstance(envelope, dict) else {}
+            ),
         )
 
     # -- Internal methods used by Session ----------------------------------

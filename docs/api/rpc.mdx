@@ -56,10 +56,29 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <redb|js
 | `turn/start` | Turn | Start a new turn on existing session |
 | `turn/interrupt` | Turn | Cancel in-flight turn |
 | `mob/prefabs` | Mob | List mob prefab templates (mob feature) |
-| `mob/tools` | Mob | List mob tools (mob feature) |
-| `mob/call` | Mob | Call a mob tool (mob feature) |
-| `mob/stream_open` | Mob | Open mob event stream (mob feature) |
-| `mob/stream_close` | Mob | Close mob event stream (mob feature) |
+| `session/stream_open` | Session | Open a standalone session event stream |
+| `session/stream_close` | Session | Close a standalone session event stream |
+| `mob/create` | Mob | Create a mob from a prefab or definition (mob feature) |
+| `mob/list` | Mob | List mobs (mob feature) |
+| `mob/status` | Mob | Get mob status (mob feature) |
+| `mob/members` | Mob | List mob members (mob feature) |
+| `mob/spawn` | Mob | Spawn a member into a mob (mob feature) |
+| `mob/retire` | Mob | Retire a mob member (mob feature) |
+| `mob/respawn` | Mob | Respawn a mob member (mob feature) |
+| `mob/wire` | Mob | Wire two mob members for comms (mob feature) |
+| `mob/unwire` | Mob | Remove mob comms wiring (mob feature) |
+| `mob/lifecycle` | Mob | Stop, resume, complete, destroy, or reset a mob (mob feature) |
+| `mob/send` | Mob | Send work to a mob member (mob feature) |
+| `mob/events` | Mob | Read mob events by cursor (mob feature) |
+| `mob/stream_open` | Mob | Open mob or member event stream (mob feature) |
+| `mob/stream_close` | Mob | Close mob or member event stream (mob feature) |
+| `mob/append_system_context` | Mob | Stage system context for a member session (mob feature) |
+| `mob/flows` | Mob | List mob flows (mob feature) |
+| `mob/flow_run` | Mob | Start a mob flow run (mob feature) |
+| `mob/flow_status` | Mob | Get flow run status (mob feature) |
+| `mob/flow_cancel` | Mob | Cancel a flow run (mob feature) |
+| `mob/tools` | Mob | Compatibility/escape-hatch mob tool inventory (mob feature) |
+| `mob/call` | Mob | Compatibility/escape-hatch mob tool call (mob feature) |
 | `comms/send` | Comms | Push an external event into a session |
 | `comms/peers` | Comms | List discoverable peers (comms feature) |
 | `skills/list` | Skills | List skills with provenance |
@@ -73,7 +92,7 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <redb|js
 | `config/patch` | Config | Merge-patch config (RFC 7396) |
 
 <Note>
-The `mob/*` methods (feature-gated on `mob`) provide direct protocol-level mob orchestration. Additionally, mob capability within sessions is added by composing `meerkat-mob-mcp` (`MobMcpState` + `MobMcpDispatcher`) into `SessionBuildOptions.external_tools`, which exposes `mob_*` tools to the running agent.
+RPC is the canonical typed substrate for the SDKs: use explicit `mob/*` lifecycle, send, and observation methods from apps. `mob/tools` and `mob/call` remain available only as compatibility and escape-hatch surfaces. Inside running sessions, mob capability is still exposed by composing `meerkat-mob-mcp` (`MobMcpState` + `MobMcpDispatcher`) into `SessionBuildOptions.external_tools`, which provides `mob_*` tools to the agent.
 </Note>
 
 ## Protocol
@@ -137,8 +156,13 @@ Handshake. Returns server capabilities.
       "config/get", "config/set", "config/patch",
       "capabilities/get",
       "skills/list", "skills/inspect",
-      "mob/prefabs", "mob/tools", "mob/call",
-      "mob/stream_open", "mob/stream_close",
+      "session/stream_open", "session/stream_close",
+      "mob/prefabs", "mob/create", "mob/list", "mob/status",
+      "mob/members", "mob/spawn", "mob/retire", "mob/respawn",
+      "mob/wire", "mob/unwire", "mob/lifecycle", "mob/send",
+      "mob/events", "mob/stream_open", "mob/stream_close",
+      "mob/append_system_context", "mob/flows", "mob/flow_run",
+      "mob/flow_status", "mob/flow_cancel", "mob/tools", "mob/call",
       "mcp/add", "mcp/remove", "mcp/reload",
       "comms/send", "comms/peers",
     ]
@@ -1012,6 +1036,23 @@ Event types match the `AgentEvent` enum in `meerkat-core`:
 | `interaction_complete` | Interaction-scoped stream completed |
 | `interaction_failed` | Interaction-scoped stream failed |
 | `stream_truncated` | Backpressure dropped intermediate events |
+
+### session/stream_event notifications
+
+When a session event stream is open (via `session/stream_open`), the server emits `session/stream_event` notifications. The notification payload mirrors `session/event`, but is scoped to the explicit stream handle.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "session/stream_event",
+  "params": {
+    "stream_id": "550e8400-e29b-41d4-a716-446655440000",
+    "sequence": 1,
+    "session_id": "sess_123",
+    "event": { "...": "..." }
+  }
+}
+```
 
 ### mob/stream_event notifications
 

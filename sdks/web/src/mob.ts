@@ -149,9 +149,8 @@ export class Mob {
   subscribe(meerkatId: string): EventSubscription {
     const handle = this.bindings.mob_member_subscribe(this.mobId, meerkatId);
     return new EventSubscription(
-      handle,
-      this.bindings.poll_subscription,
-      this.bindings.close_subscription,
+      () => this.bindings.poll_subscription(handle),
+      () => this.bindings.close_subscription(handle),
     );
   }
 
@@ -159,9 +158,8 @@ export class Mob {
   subscribeAll(): EventSubscription {
     const handle = this.bindings.mob_subscribe_events(this.mobId);
     return new EventSubscription(
-      handle,
-      this.bindings.poll_subscription,
-      this.bindings.close_subscription,
+      () => this.bindings.poll_subscription(handle),
+      () => this.bindings.close_subscription(handle),
     );
   }
 

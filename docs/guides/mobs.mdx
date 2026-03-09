@@ -219,25 +219,29 @@ In addition to tool-driven orchestration (where an agent calls mob tools), there
     // List prefabs
     {"jsonrpc":"2.0","id":1,"method":"mob/prefabs","params":{}}
 
-    // List available mob tools
-    {"jsonrpc":"2.0","id":2,"method":"mob/tools","params":{}}
+    // Create a mob directly
+    {"jsonrpc":"2.0","id":2,"method":"mob/create","params":{
+      "definition": {"id":"my-mob","profiles":{}}
+    }}
 
-    // Call a mob tool directly (no LLM)
-    {"jsonrpc":"2.0","id":3,"method":"mob/call","params":{
-      "name": "mob_create",
-      "arguments": {"definition": {"id":"my-mob","profiles":{}}}
+    // Spawn and send work
+    {"jsonrpc":"2.0","id":3,"method":"mob/spawn","params":{
+      "mob_id": "my-mob",
+      "profile": "lead",
+      "meerkat_id": "lead-1"
+    }}
+    {"jsonrpc":"2.0","id":4,"method":"mob/send","params":{
+      "mob_id": "my-mob",
+      "meerkat_id": "lead-1",
+      "message": "Coordinate the release triage."
     }}
     ```
   </Tab>
   <Tab title="REST">
     ```bash
-    # List prefabs
+    # REST keeps mob lifecycle compact/generic
     curl http://localhost:8080/mob/prefabs
-
-    # List mob tools
     curl http://localhost:8080/mob/tools
-
-    # Call a mob tool directly
     curl -X POST http://localhost:8080/mob/call \
       -H "Content-Type: application/json" \
       -d '{"name":"mob_create","arguments":{"definition":{"id":"my-mob","profiles":{}}}}'
@@ -245,16 +249,18 @@ In addition to tool-driven orchestration (where an agent calls mob tools), there
   </Tab>
   <Tab title="Python">
     ```python
-    prefabs = await client.list_mob_prefabs()
-    tools = await client.list_mob_tools()
-    result = await client.call_mob_tool("mob_create", {"definition": {...}})
+    mob = await client.create_mob(definition={"id": "my-mob", "profiles": {...}})
+    await mob.spawn(profile="lead", meerkat_id="lead-1")
+    await mob.send_message("lead-1", "Coordinate the release triage.")
+    events = await mob.subscribe_member("lead-1")
     ```
   </Tab>
   <Tab title="TypeScript">
     ```typescript
-    const prefabs = await client.listMobPrefabs();
-    const tools = await client.listMobTools();
-    const result = await client.callMobTool("mob_create", { definition: {...} });
+    const mob = await client.createMob({ definition: { id: "my-mob", profiles: {...} } });
+    await mob.spawn({ profile: "lead", meerkatId: "lead-1" });
+    await mob.sendMessage("lead-1", "Coordinate the release triage.");
+    const events = await mob.subscribeMemberEvents("lead-1");
     ```
   </Tab>
   <Tab title="Rust">

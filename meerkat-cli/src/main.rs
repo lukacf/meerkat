@@ -809,6 +809,12 @@ enum SessionCommands {
         idempotency_key: Option<String>,
     },
 
+    /// Stream session events to stdout as JSON lines.
+    Events {
+        /// Session ID to observe
+        session_id: String,
+    },
+
     /// Locate a session ID across realms under explicit state roots.
     Locate {
         /// Session locator (<session_id> or <realm_id>:<session_id>)
@@ -1497,6 +1503,9 @@ async fn main() -> anyhow::Result<ExitCode> {
                     &cli_scope,
                 )
                 .await
+            }
+            SessionCommands::Events { session_id } => {
+                stream_session_events(&session_id, &cli_scope).await
             }
             SessionCommands::Locate {
                 locator,
@@ -4295,6 +4304,36 @@ impl SessionLocateMatch {
 ///
 /// Default scan scope is the active runtime `state_root`. Additional roots must
 /// be passed explicitly via `--extra-state-root`.
+async fn stream_session_events(session_id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
+    use futures::StreamExt;
+
+    let (config, _) = load_config(scope).await?;
+    let service = build_cli_persistent_service(scope, config).await?;
+    let session_id = resolve_scoped_session_id(session_id, scope)?;
+    let mut stream = service
+        .subscribe_session_events(&session_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    loop {
+        tokio::select! {
+            item = stream.next() => {
+                match item {
+                    Some(envelope) => {
+                        let json = serde_json::to_string(&envelope)
+                            .map_err(|e| anyhow::anyhow!("serialize error: {e}"))?;
+                        println!("{json}");
+                    }
+                    None => break,
+                }
+            }
+            _ = tokio::signal::ctrl_c() => break,
+        }
+    }
+
+    Ok(())
+}
+
 async fn locate_sessions(
     locator_input: &str,
     extra_state_roots: Vec<PathBuf>,

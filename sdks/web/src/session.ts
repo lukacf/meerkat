@@ -1,3 +1,4 @@
+import { EventSubscription } from './events.js';
 import type {
   TurnOptions,
   TurnResult,
@@ -69,6 +70,18 @@ export class Session {
     const json = this.pollFn(this.handle);
     const parsed: unknown = JSON.parse(json);
     return Array.isArray(parsed) ? (parsed as EventEnvelope[]) : [];
+  }
+
+  /**
+   * Observe session events through the direct handle's buffered event source.
+   *
+   * This is the standalone observation API for direct WASM sessions. It uses
+   * the same underlying event buffer as `pollEvents()`, so callers should use
+   * either `pollEvents()` or the returned subscription, not both at once.
+   */
+  subscribe(): EventSubscription {
+    if (this.destroyed) throw new Error('Session has been destroyed');
+    return new EventSubscription(() => this.pollFn(this.handle));
   }
 
   /** Stage runtime system context for application at the next LLM boundary. */

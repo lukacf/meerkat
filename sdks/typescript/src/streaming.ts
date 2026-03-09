@@ -23,7 +23,7 @@ import type { Session } from "./session.js";
 import { MeerkatError } from "./generated/errors.js";
 
 /** @internal Queue with promise-based get(). */
-class AsyncQueue<T> {
+export class AsyncQueue<T> {
   private buffer: T[] = [];
   private waiters: Array<(value: T) => void> = [];
 

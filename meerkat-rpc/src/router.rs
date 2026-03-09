@@ -1,19 +1,13 @@
 //! Method router - dispatches JSON-RPC requests to the correct handler.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-#[cfg(any(feature = "comms", feature = "mob"))]
 use futures::StreamExt;
-#[cfg(any(feature = "comms", feature = "mob"))]
-use std::collections::HashMap;
-#[cfg(any(feature = "comms", feature = "mob"))]
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
-#[cfg(any(feature = "comms", feature = "mob"))]
 use tokio::sync::oneshot;
-#[cfg(any(feature = "comms", feature = "mob"))]
 use tokio::task::JoinHandle;
-#[cfg(any(feature = "comms", feature = "mob"))]
 use uuid::Uuid;
 
 use meerkat_core::ConfigStore;
@@ -23,6 +17,7 @@ use meerkat_core::types::SessionId;
 
 use crate::error;
 use crate::handlers;
+use crate::handlers::RpcResponseExt;
 use crate::protocol::{RpcNotification, RpcRequest, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 
@@ -54,6 +49,24 @@ impl NotificationSink {
         let _ = self.tx.send(notification).await;
     }
 
+    /// Emit a standalone session stream event notification.
+    pub async fn emit_session_stream_event(
+        &self,
+        stream_id: &Uuid,
+        sequence: u64,
+        session_id: &SessionId,
+        event: &EventEnvelope<AgentEvent>,
+    ) {
+        let params = serde_json::json!({
+            "stream_id": stream_id.to_string(),
+            "sequence": sequence,
+            "session_id": session_id.to_string(),
+            "event": event,
+        });
+        let notification = RpcNotification::new("session/stream_event", params);
+        let _ = self.tx.send(notification).await;
+    }
+
     #[cfg(feature = "mob")]
     /// Emit a mob stream event as a JSON-RPC notification.
     ///
@@ -75,17 +88,16 @@ impl NotificationSink {
     }
 }
 
-#[cfg(any(feature = "comms", feature = "mob"))]
 struct StreamForwarder {
     state: StreamForwarderState,
 }
 
-#[cfg(any(feature = "comms", feature = "mob"))]
 enum StreamForwarderState {
     Active {
         stop_tx: Option<oneshot::Sender<()>>,
         task: JoinHandle<()>,
     },
+    #[cfg(feature = "mob")]
     Closed,
 }
 
@@ -100,9 +112,9 @@ pub struct MethodRouter {
     config_store: Arc<dyn ConfigStore>,
     notification_sink: NotificationSink,
     skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
+    active_session_streams: Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
     #[cfg(feature = "mob")]
     mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
-    #[cfg(feature = "comms")]
     #[cfg(feature = "mob")]
     active_mob_streams: Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
 }
@@ -119,9 +131,9 @@ impl MethodRouter {
             config_store,
             notification_sink,
             skill_runtime: None,
+            active_session_streams: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(feature = "mob")]
             mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
-            #[cfg(feature = "comms")]
             #[cfg(feature = "mob")]
             active_mob_streams: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -173,6 +185,8 @@ impl MethodRouter {
             "session/inject_context" => {
                 handlers::session::handle_inject_context(id, params, &self.runtime).await
             }
+            "session/stream_open" => self.handle_session_stream_open(id, params).await,
+            "session/stream_close" => self.handle_session_stream_close(id, params).await,
             "turn/start" => {
                 handlers::turn::handle_start(id, params, &self.runtime, &self.notification_sink)
                     .await
@@ -184,6 +198,52 @@ impl MethodRouter {
             "mob/tools" => handlers::mob::handle_tools(id).await,
             #[cfg(feature = "mob")]
             "mob/call" => handlers::mob::handle_call(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/create" => handlers::mob::handle_create(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/list" => handlers::mob::handle_list(id, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/status" => handlers::mob::handle_status(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/lifecycle" => handlers::mob::handle_lifecycle(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/spawn" => handlers::mob::handle_spawn(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/members" => handlers::mob::handle_members(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/retire" => handlers::mob::handle_retire(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/respawn" => handlers::mob::handle_respawn(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/wire" => handlers::mob::handle_wire(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/unwire" => handlers::mob::handle_unwire(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/send" => handlers::mob::handle_send(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/events" => handlers::mob::handle_events(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/append_system_context" => {
+                handlers::mob::handle_append_system_context(
+                    id,
+                    params,
+                    &self.mob_state,
+                    &self.runtime,
+                )
+                .await
+            }
+            #[cfg(feature = "mob")]
+            "mob/flows" => handlers::mob::handle_flows(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/flow_run" => handlers::mob::handle_flow_run(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/flow_status" => {
+                handlers::mob::handle_flow_status(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/flow_cancel" => {
+                handlers::mob::handle_flow_cancel(id, params, &self.mob_state).await
+            }
             #[cfg(feature = "mob")]
             "mob/stream_open" => self.handle_mob_stream_open(id, params).await,
             #[cfg(feature = "mob")]
@@ -241,6 +301,159 @@ impl MethodRouter {
     /// Access the underlying session runtime.
     pub fn runtime(&self) -> &SessionRuntime {
         &self.runtime
+    }
+
+    async fn handle_session_stream_open(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        use serde::Deserialize;
+        use serde_json::json;
+
+        #[derive(Deserialize)]
+        struct SessionStreamOpenParams {
+            session_id: String,
+        }
+
+        let params = match handlers::parse_params::<SessionStreamOpenParams>(params) {
+            Ok(p) => p,
+            Err(resp) => return resp.with_id(id),
+        };
+
+        let session_id = match handlers::parse_session_id_for_runtime(
+            id.clone(),
+            &params.session_id,
+            &self.runtime,
+        ) {
+            Ok(session_id) => session_id,
+            Err(resp) => return resp,
+        };
+
+        let stream = match self.runtime.subscribe_session_events(&session_id).await {
+            Ok(stream) => stream,
+            Err(err) => {
+                return RpcResponse::error(
+                    id,
+                    error::INVALID_PARAMS,
+                    format!("Failed to subscribe to session events: {err}"),
+                );
+            }
+        };
+
+        let stream_id = Uuid::new_v4();
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        let notification_sink = self.notification_sink.clone();
+        let active_session_streams = self.active_session_streams.clone();
+        let stream_id_for_task = stream_id;
+        let session_id_for_task = session_id.clone();
+
+        let task = tokio::spawn(async move {
+            let mut stream = stream;
+            let mut stop_rx = stop_rx;
+            let mut sequence = 0u64;
+
+            loop {
+                tokio::select! {
+                    _ = &mut stop_rx => {
+                        break;
+                    }
+                    event = stream.next() => {
+                        match event {
+                            Some(envelope) => {
+                                sequence += 1;
+                                notification_sink
+                                    .emit_session_stream_event(&stream_id_for_task, sequence, &session_id_for_task, &envelope)
+                                    .await;
+                            }
+                            None => break,
+                        }
+                    }
+                }
+            }
+
+            let mut streams = active_session_streams.lock().await;
+            if streams
+                .get(&stream_id_for_task)
+                .is_some_and(|s| matches!(s.state, StreamForwarderState::Active { .. }))
+            {
+                streams.remove(&stream_id_for_task);
+            }
+        });
+
+        self.active_session_streams.lock().await.insert(
+            stream_id,
+            StreamForwarder {
+                state: StreamForwarderState::Active {
+                    stop_tx: Some(stop_tx),
+                    task,
+                },
+            },
+        );
+
+        RpcResponse::success(
+            id,
+            json!({
+                "stream_id": stream_id.to_string(),
+                "session_id": session_id.to_string(),
+                "opened": true,
+            }),
+        )
+    }
+
+    async fn handle_session_stream_close(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        use serde::Deserialize;
+        use serde_json::json;
+
+        #[derive(Deserialize)]
+        struct SessionStreamCloseParams {
+            stream_id: String,
+        }
+
+        let params = match handlers::parse_params::<SessionStreamCloseParams>(params) {
+            Ok(p) => p,
+            Err(resp) => return resp.with_id(id),
+        };
+
+        let stream_id = match Uuid::parse_str(&params.stream_id) {
+            Ok(stream_id) => stream_id,
+            Err(_) => {
+                return RpcResponse::error(
+                    id,
+                    error::INVALID_PARAMS,
+                    format!("Invalid stream_id: {}", params.stream_id),
+                );
+            }
+        };
+
+        let mut active_session_streams = self.active_session_streams.lock().await;
+        let already_closed = match active_session_streams.remove(&stream_id) {
+            Some(mut stream) => match &mut stream.state {
+                StreamForwarderState::Active { stop_tx, task } => {
+                    if let Some(stop_tx) = stop_tx.take() {
+                        let _ = stop_tx.send(());
+                    }
+                    task.abort();
+                    false
+                }
+                #[cfg(feature = "mob")]
+                StreamForwarderState::Closed => true,
+            },
+            None => false,
+        };
+
+        RpcResponse::success(
+            id,
+            json!({
+                "stream_id": stream_id.to_string(),
+                "closed": true,
+                "already_closed": already_closed,
+            }),
+        )
     }
 
     #[cfg(feature = "mob")]
@@ -783,6 +996,44 @@ mod tests {
             .unwrap();
         let created = result_value(&create_resp);
         assert!(created["mob_id"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn session_stream_close_removes_forwarder_from_active_map() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({ "prompt": "hello" }),
+            ))
+            .await
+            .unwrap();
+        let created = result_value(&create_resp);
+        let session_id = created["session_id"].as_str().unwrap().to_string();
+
+        let open_resp = router
+            .dispatch(make_request(
+                "session/stream_open",
+                serde_json::json!({ "session_id": session_id }),
+            ))
+            .await
+            .unwrap();
+        let opened = result_value(&open_resp);
+        let stream_id = opened["stream_id"].as_str().unwrap().to_string();
+        assert_eq!(router.active_session_streams.lock().await.len(), 1);
+
+        let close_resp = router
+            .dispatch(make_request(
+                "session/stream_close",
+                serde_json::json!({ "stream_id": stream_id }),
+            ))
+            .await
+            .unwrap();
+        let closed = result_value(&close_resp);
+        assert_eq!(closed["closed"], true);
+        assert_eq!(closed["already_closed"], false);
+        assert_eq!(router.active_session_streams.lock().await.len(), 0);
     }
 
     #[cfg(feature = "mob")]

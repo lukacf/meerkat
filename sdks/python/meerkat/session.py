@@ -31,7 +31,7 @@ from .types import RunResult, SkillKey, SkillRef
 
 if TYPE_CHECKING:
     from .client import MeerkatClient
-    from .streaming import EventStream
+    from .streaming import EventStream, EventSubscription
 
 
 def _normalize_skill_ref(skill_ref: SkillRef) -> SkillKey:
@@ -189,6 +189,10 @@ class Session:
     async def archive(self) -> None:
         """Archive (remove) this session from the server."""
         await self._client._archive(self._id)  # noqa: SLF001
+
+    async def subscribe_events(self) -> EventSubscription:
+        """Open a standalone session-wide event subscription."""
+        return await self._client.subscribe_session_events(self._id)  # noqa: SLF001
 
     # -- Skills convenience ------------------------------------------------
 

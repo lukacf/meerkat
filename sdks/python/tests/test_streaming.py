@@ -462,3 +462,67 @@ class TestEventStream:
         assert events == []
         assert stream.result.session_id == "s1"
         await d.stop()
+
+
+
+def stream_notification(stream_id: str, event: dict, *, method: str = "session/stream_event") -> str:
+    return jline({
+        "jsonrpc": "2.0",
+        "method": method,
+        "params": {"stream_id": stream_id, "event": event},
+    })
+
+
+class TestStandaloneSubscriptions:
+
+    @pytest.mark.asyncio
+    async def test_stream_notification_buffered_until_stream_queue_registered(self):
+        ev = {"event_id": "e1", "payload": {"type": "text_delta", "delta": "hi"}}
+        reader = asyncio.StreamReader()
+        d = _StdoutDispatcher(reader)
+        d.start()
+        reader.feed_data((stream_notification("stream-1", ev) + "\n").encode())
+        await asyncio.sleep(0)
+        queue = d.subscribe_stream("stream-1")
+        event = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert event == ev
+        reader.feed_eof()
+        await d.stop()
+
+    @pytest.mark.asyncio
+    async def test_stream_notification_dispatched_to_stream_queue(self):
+        ev = {"event_id": "e1", "payload": {"type": "text_delta", "delta": "hi"}}
+        reader = make_reader([stream_notification("stream-1", ev)])
+        d = _StdoutDispatcher(reader)
+        d.start()
+        queue = d.subscribe_stream("stream-1")
+        event = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert event == ev
+        await d.stop()
+
+    @pytest.mark.asyncio
+    async def test_event_subscription_context_manager_closes_stream(self):
+        queue: asyncio.Queue[dict | None] = asyncio.Queue()
+        queue.put_nowait({"event_id": "e1", "payload": {"type": "text_delta", "delta": "hi"}})
+        dispatcher = type("Dispatcher", (), {"unsubscribe_stream": lambda self, _sid: None})()
+        closed = []
+
+        async def close_remote(stream_id: str):
+            closed.append(stream_id)
+
+        from meerkat.streaming import EventSubscription
+
+        async with EventSubscription(
+            stream_id="stream-1",
+            event_queue=queue,
+            dispatcher=dispatcher,
+            close_remote=close_remote,
+            parse_event_fn=lambda raw: raw["payload"]["delta"],
+        ) as subscription:
+            seen = []
+            async for event in subscription:
+                seen.append(event)
+                break
+
+        assert seen == ["hi"]
+        assert closed == ["stream-1"]

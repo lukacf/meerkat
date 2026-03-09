@@ -1,40 +1,33 @@
 import type { EventEnvelope } from './types.js';
 
-// Re-exported from wasm glue — will be resolved at build time
-type PollSubscriptionFn = (handle: number) => string;
-type CloseSubscriptionFn = (handle: number) => void;
-
-/** Wraps a WASM subscription handle with typed polling. */
+/** Wraps a polling event source with typed JSON decoding. */
 export class EventSubscription {
-  private handle: number;
   private closed = false;
-  private pollFn: PollSubscriptionFn;
-  private closeFn: CloseSubscriptionFn;
+  private readonly pollSource: () => string;
+  private readonly closeSource: () => void;
 
-  /** @internal — use Mob.subscribe() or Mob.subscribeAll() instead. */
+  /** @internal — use Session.subscribe(), Mob.subscribe(), or Mob.subscribeAll(). */
   constructor(
-    handle: number,
-    pollFn: PollSubscriptionFn,
-    closeFn: CloseSubscriptionFn,
+    pollSource: () => string,
+    closeSource: () => void = () => {},
   ) {
-    this.handle = handle;
-    this.pollFn = pollFn;
-    this.closeFn = closeFn;
+    this.pollSource = pollSource;
+    this.closeSource = closeSource;
   }
 
   /** Poll for new events. Returns an empty array when no events are available. */
   poll(): EventEnvelope[] {
     if (this.closed) return [];
-    const json = this.pollFn(this.handle);
+    const json = this.pollSource();
     const parsed: unknown = JSON.parse(json);
     return Array.isArray(parsed) ? (parsed as EventEnvelope[]) : [];
   }
 
-  /** Close the subscription and release the handle. */
+  /** Close the subscription and release the underlying source if needed. */
   close(): void {
     if (this.closed) return;
     this.closed = true;
-    this.closeFn(this.handle);
+    this.closeSource();
   }
 
   /** Whether this subscription has been closed. */

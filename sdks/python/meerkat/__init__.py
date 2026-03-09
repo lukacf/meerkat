@@ -22,13 +22,16 @@ Quick start::
 
 # Core client and session
 from .client import MeerkatClient
+from .mob import Mob
 from .session import Session
-from .streaming import EventStream
+from .streaming import EventStream, EventSubscription
 
 # Domain types (clean, Wire-free public names)
 from .types import (
     CONTRACT_VERSION,
+    AttributedEvent,
     Capability,
+    EventEnvelope,
     McpAddParams,
     McpLiveOpResponse,
     McpReloadParams,
@@ -94,10 +97,14 @@ __all__ = [
     # Client & session
     "MeerkatClient",
     "Session",
+    "Mob",
     "EventStream",
+    "EventSubscription",
     # Types
     "CONTRACT_VERSION",
+    "AttributedEvent",
     "Capability",
+    "EventEnvelope",
     "McpAddParams",
     "McpRemoveParams",
     "McpReloadParams",

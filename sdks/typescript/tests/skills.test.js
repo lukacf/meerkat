@@ -223,6 +223,18 @@ describe("Skills v2.1", () => {
     assert.equal(result.sessionId, "s-early");
   });
 
+  it("createSessionStreaming does not clear buffered standalone stream events", async () => {
+    const client = new MeerkatClient();
+    client.process = { stdin: { write() {} } };
+    client.unmatchedStandaloneStreamBuffer.set("stream-1", [{ event_id: "e1" }]);
+    client.registerRequest = () => Promise.resolve({ session_id: "s-created" });
+
+    client.createSessionStreaming("hello");
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(client.unmatchedStandaloneStreamBuffer.get("stream-1"), [{ event_id: "e1" }]);
+  });
+
   it("setConfig returns the config envelope response", async () => {
     const client = new MeerkatClient();
     const calls = [];
@@ -236,6 +248,36 @@ describe("Skills v2.1", () => {
     assert.equal(calls[0].method, "config/set");
     assert.equal(calls[0].params.expected_generation, 2);
     assert.equal(response.generation, 3);
+  });
+
+
+  it("buffers standalone stream notifications until the subscription queue is registered", async () => {
+    const client = new MeerkatClient();
+    client.request = async (method, params) => {
+      if (method === "session/stream_open") {
+        client.handleLine(JSON.stringify({
+          jsonrpc: "2.0",
+          method: "session/stream_event",
+          params: {
+            stream_id: "stream-1",
+            event: { event_id: "e1", payload: { type: "text_delta", delta: "hi" } },
+          },
+        }));
+        return { stream_id: "stream-1" };
+      }
+      if (method === "session/stream_close") {
+        return { closed: true };
+      }
+      return {};
+    };
+
+    const sub = await client.subscribeSessionEvents("s1");
+    const iterator = sub[Symbol.asyncIterator]();
+    const first = await iterator.next();
+    assert.equal(first.done, false);
+    assert.equal(first.value.payload.type, "text_delta");
+    assert.equal(first.value.payload.delta, "hi");
+    await sub.close();
   });
 
   it("listMobTools/callMobTool route through mob RPC methods", async () => {

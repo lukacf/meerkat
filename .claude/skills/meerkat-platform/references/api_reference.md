@@ -195,9 +195,12 @@ Core methods:
 - `mcp/remove` — stage live MCP server remove
 - `mcp/reload` — stage live MCP server reload
 - `mob/prefabs` — list built-in mob prefab templates (feature-gated)
-- `mob/tools` — list protocol-callable mob lifecycle tools (feature-gated)
-- `mob/call` — invoke a mob lifecycle tool directly (feature-gated)
-- `mob/stream_open` / `mob/stream_close` — mob event streaming (feature-gated)
+- `session/stream_open` / `session/stream_close` — standalone session event streaming
+- `mob/create`, `mob/list`, `mob/status`, `mob/members` — explicit mob lifecycle/state methods (feature-gated)
+- `mob/spawn`, `mob/retire`, `mob/respawn`, `mob/wire`, `mob/unwire`, `mob/lifecycle`, `mob/send` — explicit mob control methods (feature-gated)
+- `mob/events`, `mob/stream_open` / `mob/stream_close` — mob/member observation (feature-gated)
+- `mob/append_system_context`, `mob/flows`, `mob/flow_run`, `mob/flow_status`, `mob/flow_cancel` — advanced mob runtime methods (feature-gated)
+- `mob/tools` / `mob/call` — compatibility and escape-hatch mob tool access (feature-gated)
 - `comms/send` (feature-gated)
 - `comms/peers` (feature-gated)
 

@@ -31,7 +31,7 @@ from .types import RunResult, SkillKey, SkillRef
 
 if TYPE_CHECKING:
     from .client import MeerkatClient
-    from .streaming import CommsEventStream, EventStream
+    from .streaming import EventStream
 
 
 def _normalize_skill_ref(skill_ref: SkillRef) -> SkillKey:
@@ -219,23 +219,6 @@ class Session:
         """List peers visible to this session's comms runtime."""
         result = await self._client._peers(self._id)  # noqa: SLF001
         return result.get("peers", [])
-
-    async def open_comms_stream(
-        self,
-        *,
-        scope: str = "session",
-        interaction_id: str | None = None,
-    ) -> "CommsEventStream":
-        """Open a comms scoped stream for this session."""
-        return await self._client.open_comms_stream(  # noqa: SLF001
-            self._id,
-            scope=scope,
-            interaction_id=interaction_id,
-        )
-
-    async def send_and_stream(self, **kwargs: Any) -> tuple[dict[str, Any], "CommsEventStream"]:
-        """Send a comms command and attach an interaction-scoped stream."""
-        return await self._client.send_and_stream(self._id, **kwargs)  # noqa: SLF001
 
     # -- Dunder ------------------------------------------------------------
 

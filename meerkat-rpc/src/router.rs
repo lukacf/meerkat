@@ -4,8 +4,6 @@ use std::sync::Arc;
 
 #[cfg(any(feature = "comms", feature = "mob"))]
 use futures::StreamExt;
-#[cfg(feature = "comms")]
-use serde::{Deserialize, Serialize};
 #[cfg(any(feature = "comms", feature = "mob"))]
 use std::collections::HashMap;
 #[cfg(any(feature = "comms", feature = "mob"))]
@@ -20,8 +18,6 @@ use uuid::Uuid;
 
 use meerkat_core::ConfigStore;
 use meerkat_core::EventEnvelope;
-#[cfg(feature = "comms")]
-use meerkat_core::comms::StreamScope;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::types::SessionId;
 
@@ -29,9 +25,6 @@ use crate::error;
 use crate::handlers;
 use crate::protocol::{RpcNotification, RpcRequest, RpcResponse};
 use crate::session_runtime::SessionRuntime;
-
-#[cfg(feature = "comms")]
-use crate::handlers::comms::COMMS_STREAM_CONTRACT_VERSION;
 
 // ---------------------------------------------------------------------------
 // NotificationSink
@@ -61,26 +54,6 @@ impl NotificationSink {
         let _ = self.tx.send(notification).await;
     }
 
-    #[cfg(feature = "comms")]
-    /// Emit a scoped comms stream event as a JSON-RPC notification.
-    async fn emit_comms_stream_event(
-        &self,
-        stream_id: &Uuid,
-        scope: &StreamScopeState,
-        sequence: u64,
-        event: &EventEnvelope<AgentEvent>,
-    ) {
-        let params = serde_json::json!({
-            "stream_id": stream_id.to_string(),
-            "scope": scope,
-            "sequence": sequence,
-            "event": event,
-            "contract_version": COMMS_STREAM_CONTRACT_VERSION,
-        });
-        let notification = RpcNotification::new("comms/stream_event", params);
-        let _ = self.tx.send(notification).await;
-    }
-
     #[cfg(feature = "mob")]
     /// Emit a mob stream event as a JSON-RPC notification.
     ///
@@ -99,29 +72,6 @@ impl NotificationSink {
         });
         let notification = RpcNotification::new("mob/stream_event", params);
         let _ = self.tx.send(notification).await;
-    }
-}
-
-#[cfg(feature = "comms")]
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-enum StreamScopeState {
-    Session { session_id: String },
-    Interaction { interaction_id: String },
-}
-
-#[cfg(feature = "comms")]
-impl StreamScopeState {
-    fn session(session_id: &SessionId) -> Self {
-        Self::Session {
-            session_id: session_id.to_string(),
-        }
-    }
-
-    fn interaction(id: &uuid::Uuid) -> Self {
-        Self::Interaction {
-            interaction_id: id.to_string(),
-        }
     }
 }
 
@@ -153,7 +103,6 @@ pub struct MethodRouter {
     #[cfg(feature = "mob")]
     mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
     #[cfg(feature = "comms")]
-    active_streams: Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
     #[cfg(feature = "mob")]
     active_mob_streams: Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
 }
@@ -173,7 +122,6 @@ impl MethodRouter {
             #[cfg(feature = "mob")]
             mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
             #[cfg(feature = "comms")]
-            active_streams: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(feature = "mob")]
             active_mob_streams: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -244,10 +192,6 @@ impl MethodRouter {
             "comms/send" => handlers::comms::handle_send(id, params, &self.runtime).await,
             #[cfg(feature = "comms")]
             "comms/peers" => handlers::comms::handle_peers(id, params, &self.runtime).await,
-            #[cfg(feature = "comms")]
-            "comms/stream_open" => self.handle_comms_stream_open(id, params).await,
-            #[cfg(feature = "comms")]
-            "comms/stream_close" => self.handle_comms_stream_close(id, params).await,
             // M12: event/push removed. Use comms/send instead.
             "skills/list" => handlers::skills::handle_list(id, &self.skill_runtime).await,
             "skills/inspect" => {
@@ -297,215 +241,6 @@ impl MethodRouter {
     /// Access the underlying session runtime.
     pub fn runtime(&self) -> &SessionRuntime {
         &self.runtime
-    }
-
-    #[cfg(feature = "comms")]
-    async fn handle_comms_stream_open(
-        &self,
-        id: Option<crate::protocol::RpcId>,
-        params: Option<&serde_json::value::RawValue>,
-    ) -> RpcResponse {
-        use crate::error;
-        use meerkat_core::InteractionId;
-        use serde_json::json;
-
-        #[derive(Deserialize)]
-        struct CommsStreamOpenParams {
-            session_id: String,
-            scope: String,
-            #[serde(default)]
-            interaction_id: Option<String>,
-        }
-
-        let params = match handlers::parse_params::<CommsStreamOpenParams>(params) {
-            Ok(p) => p,
-            Err(resp) => return resp,
-        };
-
-        let session_id = match handlers::parse_session_id_for_runtime(
-            id.clone(),
-            &params.session_id,
-            &self.runtime,
-        ) {
-            Ok(sid) => sid,
-            Err(resp) => return resp,
-        };
-
-        let comms = match self.runtime.comms_runtime(&session_id).await {
-            Some(comms) => comms,
-            None => {
-                return RpcResponse::error(
-                    id,
-                    error::INVALID_PARAMS,
-                    format!("Session not found or comms not enabled: {session_id}"),
-                );
-            }
-        };
-
-        let (stream_scope, scope_state) = match params.scope.as_str() {
-            "session" => (
-                StreamScope::Session(session_id.clone()),
-                StreamScopeState::session(&session_id),
-            ),
-            "interaction" => {
-                let interaction_id = match &params.interaction_id {
-                    Some(value) => match uuid::Uuid::parse_str(value) {
-                        Ok(interaction_id) => interaction_id,
-                        Err(_) => {
-                            return RpcResponse::error(
-                                id,
-                                error::INVALID_PARAMS,
-                                format!("Invalid interaction ID: {value}"),
-                            );
-                        }
-                    },
-                    None => {
-                        return RpcResponse::error(
-                            id,
-                            error::INVALID_PARAMS,
-                            "scope 'interaction' requires interaction_id",
-                        );
-                    }
-                };
-
-                (
-                    StreamScope::Interaction(InteractionId(interaction_id)),
-                    StreamScopeState::interaction(&interaction_id),
-                )
-            }
-            other => {
-                return RpcResponse::error(
-                    id,
-                    error::INVALID_PARAMS,
-                    format!("Unknown stream scope: {other}"),
-                );
-            }
-        };
-
-        let stream = match comms.stream(stream_scope.clone()) {
-            Ok(stream) => stream,
-            Err(err) => {
-                return RpcResponse::error(id, error::INVALID_PARAMS, err.to_string());
-            }
-        };
-
-        let stream_id = Uuid::new_v4();
-        let (stop_tx, stop_rx) = oneshot::channel::<()>();
-        let notification_sink = self.notification_sink.clone();
-        let active_streams = self.active_streams.clone();
-        let stream_id_for_task = stream_id;
-
-        let task = tokio::spawn(async move {
-            let mut stream = stream;
-            let mut stop_rx = stop_rx;
-            let mut sequence = 0u64;
-
-            loop {
-                tokio::select! {
-                    _ = &mut stop_rx => {
-                        break;
-                    }
-                    event = stream.next() => {
-                        match event {
-                            Some(event) => {
-                                sequence += 1;
-                                notification_sink
-                                    .emit_comms_stream_event(
-                                        &stream_id_for_task,
-                                        &scope_state,
-                                        sequence,
-                                        &event,
-                                    )
-                                    .await;
-                            }
-                            None => break,
-                        }
-                    }
-                }
-            }
-
-            let mut active_streams = active_streams.lock().await;
-            if active_streams
-                .get(&stream_id_for_task)
-                .is_some_and(|stream| matches!(stream.state, StreamForwarderState::Active { .. }))
-            {
-                active_streams.remove(&stream_id_for_task);
-            }
-        });
-
-        self.active_streams.lock().await.insert(
-            stream_id,
-            StreamForwarder {
-                state: StreamForwarderState::Active {
-                    stop_tx: Some(stop_tx),
-                    task,
-                },
-            },
-        );
-
-        RpcResponse::success(
-            id,
-            json!({
-                "stream_id": stream_id.to_string(),
-                "opened": true,
-            }),
-        )
-    }
-
-    #[cfg(feature = "comms")]
-    async fn handle_comms_stream_close(
-        &self,
-        id: Option<crate::protocol::RpcId>,
-        params: Option<&serde_json::value::RawValue>,
-    ) -> RpcResponse {
-        use crate::error;
-        use serde_json::json;
-
-        #[derive(Deserialize)]
-        struct CommsStreamCloseParams {
-            stream_id: String,
-        }
-
-        let params = match handlers::parse_params::<CommsStreamCloseParams>(params) {
-            Ok(p) => p,
-            Err(resp) => return resp,
-        };
-
-        let stream_id = match Uuid::parse_str(&params.stream_id) {
-            Ok(stream_id) => stream_id,
-            Err(_) => {
-                return RpcResponse::error(
-                    id,
-                    error::INVALID_PARAMS,
-                    format!("Invalid stream_id: {}", params.stream_id),
-                );
-            }
-        };
-
-        let mut active_streams = self.active_streams.lock().await;
-        let already_closed = match active_streams.get_mut(&stream_id) {
-            Some(stream) => match &mut stream.state {
-                StreamForwarderState::Active { stop_tx, task } => {
-                    if let Some(stop_tx) = stop_tx.take() {
-                        let _ = stop_tx.send(());
-                    }
-                    task.abort();
-                    stream.state = StreamForwarderState::Closed;
-                    false
-                }
-                StreamForwarderState::Closed => true,
-            },
-            None => false,
-        };
-
-        RpcResponse::success(
-            id,
-            json!({
-                "stream_id": stream_id.to_string(),
-                "closed": true,
-                "already_closed": already_closed,
-            }),
-        )
     }
 
     #[cfg(feature = "mob")]
@@ -981,11 +716,6 @@ mod tests {
             assert!(!method_names.contains(&"mob/stream_close"));
         }
         assert!(method_names.contains(&"config/get"));
-        #[cfg(feature = "comms")]
-        {
-            assert!(method_names.contains(&"comms/stream_open"));
-            assert!(method_names.contains(&"comms/stream_close"));
-        }
     }
 
     #[cfg(feature = "mob")]
@@ -1171,118 +901,6 @@ mod tests {
             turned["session_id"].as_str().expect("session id"),
             created["session_id"].as_str().expect("session id")
         );
-    }
-
-    #[cfg(feature = "comms")]
-    #[tokio::test]
-    async fn comms_stream_open_requires_reserved_interaction() {
-        use tokio::time::{Duration, timeout};
-
-        let (router, _notif_rx) = test_router().await;
-
-        // Create a session.
-        let create_req = make_request(
-            "session/create",
-            serde_json::json!({
-                "prompt":"Hello",
-                "host_mode": true,
-                "comms_name": "router-stream-test",
-            }),
-        );
-        let create_resp = timeout(Duration::from_secs(5), router.dispatch(create_req))
-            .await
-            .unwrap()
-            .unwrap();
-        let created = result_value(&create_resp);
-        let session_id = created["session_id"].as_str().unwrap().to_string();
-
-        // session scope is not supported by runtime stream implementation.
-        let open_session_scope = make_request(
-            "comms/stream_open",
-            serde_json::json!({"session_id": session_id, "scope": "session"}),
-        );
-        let session_stream_resp =
-            timeout(Duration::from_secs(5), router.dispatch(open_session_scope))
-                .await
-                .unwrap()
-                .unwrap();
-        assert_eq!(error_code(&session_stream_resp), error::INVALID_PARAMS);
-
-        // Reserve interaction stream via send.
-        let send_req = make_request(
-            "comms/send",
-            serde_json::json!({
-                "session_id": created["session_id"].as_str().unwrap(),
-                "kind": "input",
-                "body": "hello",
-                "stream": "reserve_interaction",
-                "allow_self_session": true
-            }),
-        );
-        let send_resp = timeout(Duration::from_secs(5), router.dispatch(send_req))
-            .await
-            .unwrap()
-            .unwrap();
-        let send_result = result_value(&send_resp);
-        assert_eq!(send_result["kind"], "input_accepted");
-        let interaction_id = send_result["interaction_id"].as_str().unwrap();
-
-        // Open stream and close it immediately.
-        let open_req = make_request(
-            "comms/stream_open",
-            serde_json::json!({
-                "session_id": created["session_id"].as_str().unwrap(),
-                "scope": "interaction",
-                "interaction_id": interaction_id,
-            }),
-        );
-        let open_resp = timeout(Duration::from_secs(5), router.dispatch(open_req))
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(open_resp.error.is_none());
-        let opened = result_value(&open_resp);
-        let stream_id = opened["stream_id"].as_str().unwrap();
-
-        let close_req = make_request(
-            "comms/stream_close",
-            serde_json::json!({"stream_id": stream_id}),
-        );
-        let close_resp = timeout(Duration::from_secs(5), router.dispatch(close_req))
-            .await
-            .unwrap()
-            .unwrap();
-        let closed = result_value(&close_resp);
-        assert_eq!(closed["closed"], true);
-        assert_eq!(closed["already_closed"], false);
-
-        // Idempotent: second close succeeds with already_closed=true.
-        let close_again_req = make_request(
-            "comms/stream_close",
-            serde_json::json!({"stream_id": stream_id}),
-        );
-        let close_again_resp = timeout(Duration::from_secs(5), router.dispatch(close_again_req))
-            .await
-            .unwrap()
-            .unwrap();
-        let close_again = result_value(&close_again_resp);
-        assert_eq!(close_again["closed"], true);
-        assert_eq!(close_again["already_closed"], true);
-    }
-
-    #[cfg(feature = "comms")]
-    #[tokio::test]
-    async fn comms_stream_close_unknown_returns_not_closed() {
-        let (router, _notif_rx) = test_router().await;
-
-        let close_req = make_request(
-            "comms/stream_close",
-            serde_json::json!({"stream_id": "00000000-0000-0000-0000-000000000000"}),
-        );
-        let close_resp = router.dispatch(close_req).await.unwrap();
-        let closed = result_value(&close_resp);
-        assert_eq!(closed["closed"], true);
-        assert_eq!(closed["already_closed"], false);
     }
 
     /// 2. Unknown method returns METHOD_NOT_FOUND error.

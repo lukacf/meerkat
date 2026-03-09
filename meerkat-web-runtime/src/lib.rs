@@ -33,7 +33,6 @@
 //! - `mob_append_system_context(mob_id, meerkat_id, request_json)` → JSON
 //! - `mob_send_message(mob_id, meerkat_id, message)`
 //! - `mob_respawn(mob_id, meerkat_id, initial_message?)` — retire + re-spawn same profile
-//! - `mob_inject_and_subscribe(mob_id, meerkat_id, message)` → interaction_id
 //! - `mob_run_flow(mob_id, flow_id, params_json)` → run_id
 //! - `mob_flow_status(mob_id, run_id)` → JSON
 //! - `mob_cancel_flow(mob_id, run_id)`
@@ -2063,26 +2062,6 @@ pub async fn mob_respawn(
         "meerkat_id": meerkat_id,
         "status": "respawn_enqueued",
     });
-    Ok(JsValue::from_str(&result.to_string()))
-}
-
-/// Inject a message and subscribe for interaction-scoped events.
-///
-/// Returns JSON: `{ "interaction_id": "..." }`
-#[wasm_bindgen]
-pub async fn mob_inject_and_subscribe(
-    mob_id: &str,
-    meerkat_id: &str,
-    message: &str,
-) -> Result<JsValue, JsValue> {
-    let mob_state = with_mob_state(Ok)?;
-    let id = MobId::from(mob_id);
-    let mid = MeerkatId::from(meerkat_id);
-    let subscription = mob_state
-        .mob_inject_and_subscribe(&id, mid, message.to_string())
-        .await
-        .map_err(err_mob)?;
-    let result = serde_json::json!({ "interaction_id": subscription.id.to_string() });
     Ok(JsValue::from_str(&result.to_string()))
 }
 

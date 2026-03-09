@@ -64,8 +64,6 @@ pub fn handle_initialize(id: Option<RpcId>) -> RpcResponse {
             {
                 m.push("comms/send".to_string());
                 m.push("comms/peers".to_string());
-                m.push("comms/stream_open".to_string());
-                m.push("comms/stream_close".to_string());
             }
             m
         },

@@ -161,7 +161,16 @@ impl SessionServiceCommsExt for MockSessionService {
         None
     }
 
-    async fn event_injector(
+    async fn event_injector(&self, session_id: &SessionId) -> Option<Arc<dyn EventInjector>> {
+        if !self.sessions.read().await.contains_key(session_id) {
+            return None;
+        }
+        Some(Arc::new(MockInjector {
+            inject_calls: self.inject_calls.clone(),
+        }))
+    }
+
+    async fn interaction_event_injector(
         &self,
         session_id: &SessionId,
     ) -> Option<Arc<dyn SubscribableInjector>> {

@@ -56,11 +56,10 @@ rkat sessions interrupt <ID>
 rkat sessions locate <LOCATOR> [--extra-state-root <PATH>]
 rkat comms send <SESSION-ID> --json <JSON>        # (comms feature)
 rkat comms peers <SESSION-ID>                     # (comms feature)
-rkat comms stream <SESSION-ID> [--interaction-id] # (comms feature)
 rkat realms current|list|show
 rkat skills list [--json]
 rkat skills inspect <ID> [--source <SOURCE>] [--json]
-rkat mob prefabs|create|list|status|spawn|retire|respawn|inject-and-subscribe|wire|unwire|turn|stop|resume|complete|flows|run-flow|flow-status|events|destroy|pack|inspect|validate|deploy|web
+rkat mob prefabs|create|list|status|spawn|retire|respawn|wire|unwire|turn|stop|resume|complete|flows|run-flow|flow-status|events|destroy|pack|inspect|validate|deploy|web
 rkat config get|set|patch ...
 rkat capabilities
 rkat-rpc
@@ -89,7 +88,6 @@ Mob lifecycle (non-flow) commands remain available as explicit operational/compa
 - `spawn`
 - `retire`
 - `respawn` — retire + re-spawn same profile
-- `inject-and-subscribe` — inject a message into an autonomous meerkat (request-reply)
 - `wire`
 - `unwire`
 - `turn`
@@ -137,7 +135,6 @@ Core endpoints:
 - `POST /sessions/{id}/mcp/reload` — stage live MCP server reload (feature-gated)
 - `POST /comms/send` (feature-gated)
 - `GET /comms/peers` (feature-gated)
-- `GET /comms/stream` — SSE stream for comms events (feature-gated)
 - `GET /mob/prefabs` — list mob prefab templates (feature-gated)
 - `GET /mob/tools` — list mob tools (feature-gated)
 - `POST /mob/call` — invoke a mob tool (feature-gated)
@@ -203,7 +200,6 @@ Core methods:
 - `mob/stream_open` / `mob/stream_close` — mob event streaming (feature-gated)
 - `comms/send` (feature-gated)
 - `comms/peers` (feature-gated)
-- `comms/stream_open` / `comms/stream_close` (feature-gated)
 
 `config/*` uses the same envelope + CAS semantics as REST.
 
@@ -250,7 +246,6 @@ Mob tools (feature-gated):
 Comms tools (feature-gated):
 
 - `meerkat_comms_send` / `meerkat_comms_peers`
-- `meerkat_comms_stream_open` / `meerkat_comms_stream_read` / `meerkat_comms_stream_close`
 
 `meerkat_config` input:
 
@@ -291,7 +286,6 @@ Client methods:
 - `list_skills()` / `inspect_skill(id, source?)`
 - `list_mob_prefabs()` / `list_mob_tools()` / `call_mob_tool(name, args?)`
 - `send(session_id, **kwargs)` / `peers(session_id)`
-- `open_comms_stream(session_id, ...)` / `send_and_stream(session_id, ...)`
 - `capabilities` (property, populated during `connect()`)
 
 Session methods:
@@ -302,7 +296,6 @@ Session methods:
 - `Session.interrupt()`
 - `Session.archive()`
 - `Session.send(**command)` / `Session.peers()`
-- `Session.open_comms_stream(...)` / `Session.send_and_stream(...)`
 
 `get_config()` / `patch_config()` return the config envelope.
 

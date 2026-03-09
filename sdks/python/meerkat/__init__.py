@@ -23,7 +23,7 @@ Quick start::
 # Core client and session
 from .client import MeerkatClient
 from .session import Session
-from .streaming import CommsEventStream, CommsStreamEvent, EventStream
+from .streaming import EventStream
 
 # Domain types (clean, Wire-free public names)
 from .types import (
@@ -95,8 +95,6 @@ __all__ = [
     "MeerkatClient",
     "Session",
     "EventStream",
-    "CommsEventStream",
-    "CommsStreamEvent",
     # Types
     "CONTRACT_VERSION",
     "Capability",

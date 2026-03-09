@@ -8,10 +8,7 @@ use meerkat_core::Config;
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::ConfigStore;
 use meerkat_core::Session;
-use meerkat_core::comms::{
-    CommsCommand, EventStream, PeerDirectoryEntry, SendAndStreamError, SendError, SendReceipt,
-    StreamError, StreamScope,
-};
+use meerkat_core::comms::{CommsCommand, PeerDirectoryEntry, SendError, SendReceipt};
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{CreateSessionRequest, SessionError, TurnToolOverlay};
 use meerkat_core::types::{RunResult, SessionId};
@@ -55,28 +52,6 @@ impl FactoryAgent {
             .comms()
             .ok_or_else(|| SendError::Unsupported("comms runtime is not configured".to_string()))?;
         runtime.send(cmd).await
-    }
-
-    /// Open a command/event stream for a logical session or interaction scope.
-    pub fn stream(&self, scope: StreamScope) -> Result<EventStream, StreamError> {
-        let runtime = self
-            .agent
-            .comms()
-            .ok_or_else(|| StreamError::NotFound("comms runtime is not configured".to_string()))?;
-        runtime.stream(scope)
-    }
-
-    /// Send a command and open a command stream in one call.
-    pub async fn send_and_stream(
-        &self,
-        cmd: CommsCommand,
-    ) -> Result<(SendReceipt, EventStream), SendAndStreamError> {
-        let runtime = self.agent.comms().ok_or_else(|| {
-            SendAndStreamError::Send(SendError::Unsupported(
-                "comms runtime is not configured".to_string(),
-            ))
-        })?;
-        runtime.send_and_stream(cmd).await
     }
 
     /// List peers discoverable to this agent runtime.
@@ -149,10 +124,15 @@ impl SessionAgent for FactoryAgent {
         self.agent.system_context_state()
     }
 
-    // BRIDGE(M6→M12): Legacy injector accessor, routed through comms_runtime.
-    // Remove when event/push is eradicated in M7/M12.
-    fn event_injector(&self) -> Option<Arc<dyn meerkat_core::SubscribableInjector>> {
+    fn event_injector(&self) -> Option<Arc<dyn meerkat_core::EventInjector>> {
         self.agent.comms_arc()?.event_injector()
+    }
+
+    #[doc(hidden)]
+    fn interaction_event_injector(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::event_injector::SubscribableInjector>> {
+        self.agent.comms_arc()?.interaction_event_injector()
     }
 
     fn comms_runtime(&self) -> Option<Arc<dyn meerkat_core::agent::CommsRuntime>> {
@@ -396,65 +376,6 @@ mod tests {
             .send(mock_input_cmd(&session_id, InputStreamMode::None))
             .await;
         assert!(matches!(result, Err(SendError::Unsupported(_))));
-
-        let stream = agent.stream(StreamScope::Session(session_id.clone()));
-        assert!(matches!(stream, Err(StreamError::NotFound(_))));
-
-        let stream_result = agent
-            .send_and_stream(mock_input_cmd(
-                &session_id,
-                InputStreamMode::ReserveInteraction,
-            ))
-            .await;
-        assert!(matches!(
-            stream_result,
-            Err(SendAndStreamError::Send(SendError::Unsupported(_)))
-        ));
-
-        Ok(())
-    }
-
-    #[cfg(feature = "comms")]
-    #[tokio::test]
-    async fn test_factory_agent_send_and_stream_opens_interaction_stream() -> Result<(), String> {
-        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
-        let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5");
-        build_config.host_mode = true;
-        build_config.comms_name = Some("factory-agent-comms".to_string());
-
-        let agent = build_factory_agent_with_mock(&temp, build_config).await?;
-        let session_id = agent.session().id().clone();
-        let (receipt, stream) = agent
-            .send_and_stream(mock_input_cmd(
-                &session_id,
-                InputStreamMode::ReserveInteraction,
-            ))
-            .await
-            .map_err(|err| format!("send_and_stream failed: {err}"))?;
-
-        let interaction_id = match receipt {
-            SendReceipt::InputAccepted {
-                interaction_id,
-                stream_reserved,
-            } => {
-                assert!(stream_reserved);
-                interaction_id
-            }
-            _ => unreachable!("unexpected receipt variant"),
-        };
-
-        assert!(matches!(
-            agent.stream(StreamScope::Interaction(interaction_id)),
-            Err(StreamError::AlreadyAttached(_))
-        ));
-
-        drop(stream);
-
-        let peers = agent.peers().await;
-        assert!(
-            peers.is_empty(),
-            "comms runtime should be configured but no trusted peers are registered"
-        );
 
         Ok(())
     }

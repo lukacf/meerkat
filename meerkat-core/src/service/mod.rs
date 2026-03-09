@@ -450,14 +450,25 @@ pub trait SessionServiceCommsExt: SessionService {
         None
     }
 
-    /// Get the subscribable event injector for a session, if available.
+    /// Get the event injector for a session, if available.
     async fn event_injector(
         &self,
         session_id: &SessionId,
-    ) -> Option<Arc<dyn crate::SubscribableInjector>> {
+    ) -> Option<Arc<dyn crate::EventInjector>> {
         self.comms_runtime(session_id)
             .await
             .and_then(|runtime| runtime.event_injector())
+    }
+
+    /// Internal runtime seam for interaction-scoped injection.
+    #[doc(hidden)]
+    async fn interaction_event_injector(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<dyn crate::event_injector::SubscribableInjector>> {
+        self.comms_runtime(session_id)
+            .await
+            .and_then(|runtime| runtime.interaction_event_injector())
     }
 }
 

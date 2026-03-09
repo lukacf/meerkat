@@ -293,7 +293,7 @@ pub trait CommsRuntime: Send + Sync {
         ))
     }
 
-    /// Open a stream for a session or interaction scope.
+    #[doc(hidden)]
     fn stream(&self, scope: StreamScope) -> Result<EventStream, StreamError> {
         let scope_desc = match scope {
             StreamScope::Session(session_id) => format!("session {session_id}"),
@@ -314,7 +314,7 @@ pub trait CommsRuntime: Send + Sync {
         self.peers().await.len()
     }
 
-    /// Send a command and open a scoped stream in one call.
+    #[doc(hidden)]
     async fn send_and_stream(
         &self,
         cmd: CommsCommand,
@@ -336,12 +336,19 @@ pub trait CommsRuntime: Send + Sync {
     fn dismiss_received(&self) -> bool {
         false
     }
-    /// Get a subscribable event injector for this runtime's inbox.
+    /// Get an event injector for this runtime's inbox.
     ///
-    /// Surfaces use this to push external events and optionally subscribe to
-    /// interaction-scoped streaming responses. Returns `None` if the
-    /// implementation doesn't support event injection.
-    fn event_injector(&self) -> Option<Arc<dyn crate::SubscribableInjector>> {
+    /// Surfaces use this to push external events into the agent inbox.
+    /// Returns `None` if the implementation doesn't support event injection.
+    fn event_injector(&self) -> Option<Arc<dyn crate::EventInjector>> {
+        None
+    }
+
+    /// Internal runtime seam for interaction-scoped streaming.
+    #[doc(hidden)]
+    fn interaction_event_injector(
+        &self,
+    ) -> Option<Arc<dyn crate::event_injector::SubscribableInjector>> {
         None
     }
 

@@ -835,20 +835,6 @@ enum CommsCommands {
         /// Session ID
         session_id: String,
     },
-    /// Stream comms events as newline-delimited JSON
-    Stream {
-        /// Session ID
-        session_id: String,
-        /// Optional interaction scope UUID. If omitted, session scope is used.
-        #[arg(long)]
-        interaction_id: Option<String>,
-        /// Stop after N events.
-        #[arg(long)]
-        limit: Option<usize>,
-        /// Optional timeout per event wait in milliseconds.
-        #[arg(long)]
-        timeout_ms: Option<u64>,
-    },
 }
 
 #[derive(Subcommand)]
@@ -1100,11 +1086,6 @@ enum MobCommands {
         message: Option<String>,
     },
     /// Inject a message into an autonomous meerkat (request-reply).
-    InjectAndSubscribe {
-        mob_id: String,
-        meerkat_id: String,
-        message: String,
-    },
     /// Wire two peers.
     Wire {
         mob_id: String,
@@ -1529,21 +1510,6 @@ async fn main() -> anyhow::Result<ExitCode> {
             }
             CommsCommands::Peers { session_id } => {
                 comms_peers_command(&session_id, &cli_scope).await
-            }
-            CommsCommands::Stream {
-                session_id,
-                interaction_id,
-                limit,
-                timeout_ms,
-            } => {
-                comms_stream_command(
-                    &session_id,
-                    interaction_id.as_deref(),
-                    limit,
-                    timeout_ms,
-                    &cli_scope,
-                )
-                .await
             }
         },
         Commands::Realms { command } => handle_realm_command(command, &cli_scope).await,
@@ -2603,7 +2569,7 @@ impl SessionServiceCommsExt for RunMobSessionService {
     async fn event_injector(
         &self,
         session_id: &SessionId,
-    ) -> Option<Arc<dyn meerkat_core::SubscribableInjector>> {
+    ) -> Option<Arc<dyn meerkat_core::EventInjector>> {
         self.inner.event_injector(session_id).await
     }
 }
@@ -3847,7 +3813,7 @@ impl SessionServiceCommsExt for MobCliSessionService {
     async fn event_injector(
         &self,
         session_id: &SessionId,
-    ) -> Option<Arc<dyn meerkat_core::SubscribableInjector>> {
+    ) -> Option<Arc<dyn meerkat_core::EventInjector>> {
         self.inner.event_injector(session_id).await
     }
 }
@@ -4308,63 +4274,6 @@ async fn comms_peers_command(session_id_input: &str, scope: &RuntimeScope) -> an
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({ "peers": entries }))?
     );
-    Ok(())
-}
-
-#[cfg(feature = "comms")]
-async fn comms_stream_command(
-    session_id_input: &str,
-    interaction_id: Option<&str>,
-    limit: Option<usize>,
-    timeout_ms: Option<u64>,
-    scope: &RuntimeScope,
-) -> anyhow::Result<()> {
-    use futures::StreamExt;
-    let session_id = resolve_scoped_session_id(session_id_input, scope)?;
-    let comms = resolve_live_comms_runtime(&session_id, scope).await?;
-    let scope = if let Some(interaction_id) = interaction_id {
-        let id = serde_json::from_value::<meerkat_core::InteractionId>(serde_json::Value::String(
-            interaction_id.to_string(),
-        ))
-        .map_err(|e| anyhow::anyhow!("Invalid interaction_id '{interaction_id}': {e}"))?;
-        meerkat_core::comms::StreamScope::Interaction(id)
-    } else {
-        meerkat_core::comms::StreamScope::Session(session_id.clone())
-    };
-    let mut stream = comms
-        .stream(scope)
-        .map_err(|e| anyhow::anyhow!("Failed to open comms stream: {e}"))?;
-
-    let mut seen = 0usize;
-    loop {
-        if let Some(limit) = limit
-            && seen >= limit
-        {
-            break;
-        }
-        let next = if let Some(timeout_ms) = timeout_ms {
-            match tokio::time::timeout(Duration::from_millis(timeout_ms), stream.next()).await {
-                Ok(item) => item,
-                Err(_) => {
-                    println!("{}", serde_json::json!({ "status": "timeout" }));
-                    continue;
-                }
-            }
-        } else {
-            stream.next().await
-        };
-
-        match next {
-            Some(event) => {
-                println!("{}", serde_json::to_string(&event.payload)?);
-                seen += 1;
-            }
-            None => {
-                println!("{}", serde_json::json!({ "status": "closed" }));
-                break;
-            }
-        }
-    }
     Ok(())
 }
 
@@ -5342,24 +5251,6 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             println!("respawn enqueued");
-            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
-            save_mob_registry(scope, &registry).await?;
-            Ok(())
-        }
-        MobCommands::InjectAndSubscribe {
-            mob_id,
-            meerkat_id,
-            message,
-        } => {
-            let subscription = state
-                .mob_inject_and_subscribe(
-                    &meerkat_mob::MobId::from(mob_id.clone()),
-                    meerkat_mob::MeerkatId::from(meerkat_id),
-                    message,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            println!("{}", subscription.id);
             sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
             save_mob_registry(scope, &registry).await?;
             Ok(())
@@ -6796,7 +6687,7 @@ mod tests {
         async fn event_injector(
             &self,
             _session_id: &SessionId,
-        ) -> Option<Arc<dyn meerkat_core::SubscribableInjector>> {
+        ) -> Option<Arc<dyn meerkat_core::EventInjector>> {
             None
         }
     }
@@ -7060,45 +6951,6 @@ mod tests {
                 assert_eq!(session_id, "session-1");
             }
             _ => unreachable!("expected comms peers command"),
-        }
-    }
-
-    #[cfg(feature = "comms")]
-    #[test]
-    fn test_cli_comms_stream_parses() {
-        let cli = Cli::try_parse_from([
-            "rkat",
-            "comms",
-            "stream",
-            "session-1",
-            "--interaction-id",
-            "01234567-89ab-cdef-0123-456789abcdef",
-            "--limit",
-            "5",
-            "--timeout-ms",
-            "100",
-        ])
-        .expect("comms stream should parse");
-
-        match cli.command {
-            Commands::Comms {
-                command:
-                    CommsCommands::Stream {
-                        session_id,
-                        interaction_id,
-                        limit,
-                        timeout_ms,
-                    },
-            } => {
-                assert_eq!(session_id, "session-1");
-                assert_eq!(
-                    interaction_id.as_deref(),
-                    Some("01234567-89ab-cdef-0123-456789abcdef")
-                );
-                assert_eq!(limit, Some(5));
-                assert_eq!(timeout_ms, Some(100));
-            }
-            _ => unreachable!("expected comms stream command"),
         }
     }
 

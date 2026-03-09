@@ -247,88 +247,11 @@ Push external events from outside systems into a running agent. Events are drain
     let injector = service.event_injector(&session_id).await
         .expect("comms must be enabled");
 
-    let sub = injector.inject_with_subscription(
+    injector.inject(
         r#"{"event": "deploy_complete"}"#.into(),
         PlainEventSource::Rpc,
     )?;
 
-    while let Some(event) = sub.events.recv().await {
-        match event {
-            AgentEvent::TextDelta { delta } => print!("{delta}"),
-            AgentEvent::InteractionComplete { .. } => break,
-            _ => {}
-        }
-    }
-    ```
-  </Tab>
-</Tabs>
-
-## Comms event streaming
-
-Open a scoped event stream for a session's comms activity. Events arrive in real-time as peers send messages.
-
-<Tabs>
-  <Tab title="JSON-RPC">
-    ```json
-    // Open stream
-    {"jsonrpc":"2.0","id":5,"method":"comms/stream_open","params":{"session_id":"01936f8a-..."}}
-    // → {"stream_id": "550e8400-..."}
-
-    // Events arrive as notifications:
-    {"jsonrpc":"2.0","method":"comms/stream_event","params":{
-      "session_id":"01936f8a-...",
-      "event":{"type":"comms_message","from":"agent-b","body":"task done"}
-    }}
-
-    // Close stream
-    {"jsonrpc":"2.0","id":6,"method":"comms/stream_close","params":{"stream_id":"550e8400-..."}}
-    ```
-  </Tab>
-  <Tab title="REST">
-    ```bash
-    # SSE stream of comms events for a session
-    curl -N "http://localhost:8080/comms/stream?session_id=01936f8a-..."
-    ```
-  </Tab>
-  <Tab title="MCP">
-    ```json
-    // Open
-    {"name":"meerkat_comms_stream_open","arguments":{"session_id":"01936f8a-...","scope":"session"}}
-    // → {"stream_id":"550e8400-..."}
-
-    // Poll (returns next event or null)
-    {"name":"meerkat_comms_stream_read","arguments":{"stream_id":"550e8400-..."}}
-
-    // Close
-    {"name":"meerkat_comms_stream_close","arguments":{"stream_id":"550e8400-..."}}
-    ```
-  </Tab>
-  <Tab title="Python">
-    ```python
-    stream = await client.open_comms_stream(session_id)
-    async for event in stream:
-        print(event)
-    await stream.close()
-
-    # Or send + stream the interaction in one call:
-    stream = await client.send_and_stream(session_id, kind="peer_message", to="agent-b", body="hello")
-    async for event in stream:
-        print(event)
-    ```
-  </Tab>
-  <Tab title="TypeScript">
-    ```typescript
-    const stream = await client.openCommsStream(sessionId);
-    for await (const event of stream) {
-      console.log(event);
-    }
-    await stream.close();
-
-    // Or send + stream the interaction:
-    const stream2 = await client.sendAndStream(sessionId, { kind: "peer_message", to: "agent-b", body: "hello" });
-    for await (const event of stream2) {
-      console.log(event);
-    }
     ```
   </Tab>
 </Tabs>

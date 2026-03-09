@@ -240,7 +240,7 @@ mod tests {
             MobError::SupervisorEscalation("boom".to_string()),
             MobError::UnsupportedForMode {
                 mode: crate::MobRuntimeMode::TurnDriven,
-                reason: "inject_and_subscribe requires AutonomousHost mode".to_string(),
+                reason: "autonomous host runtime required".to_string(),
             },
             MobError::ResetBarrier,
             MobError::StorageError(Box::new(std::io::Error::new(

@@ -361,7 +361,6 @@ pub struct MeerkatMcpState {
     #[cfg(feature = "mob")]
     mob_event_streams: Arc<Mutex<HashMap<String, Arc<MobEventStreamInner>>>>,
     #[cfg(feature = "comms")]
-    comms_streams: Arc<Mutex<HashMap<String, Arc<CommsStreamHandle>>>>,
     _realm_lease: Option<meerkat_store::RealmLeaseGuard>,
 }
 
@@ -375,11 +374,6 @@ enum MobEventStreamInner {
     Member(Mutex<meerkat_core::comms::EventStream>),
     /// Mob-wide attributed event stream.
     MobWide(Mutex<meerkat_mob::MobEventRouterHandle>),
-}
-
-#[cfg(feature = "comms")]
-struct CommsStreamHandle {
-    stream: Mutex<meerkat_core::comms::EventStream>,
 }
 
 impl MeerkatMcpState {
@@ -482,7 +476,6 @@ impl MeerkatMcpState {
             #[cfg(feature = "mob")]
             mob_event_streams: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(feature = "comms")]
-            comms_streams: Arc::new(Mutex::new(HashMap::new())),
             _realm_lease: Some(lease),
         })
     }
@@ -550,7 +543,6 @@ impl MeerkatMcpState {
             #[cfg(feature = "mob")]
             mob_event_streams: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(feature = "comms")]
-            comms_streams: Arc::new(Mutex::new(HashMap::new())),
             _realm_lease: None,
         }
     }
@@ -824,34 +816,6 @@ pub struct MeerkatCommsSendInput {
     pub allow_self_session: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct MeerkatCommsStreamOpenInput {
-    pub session_id: String,
-    #[serde(default = "default_comms_stream_scope")]
-    pub scope: String,
-    #[serde(default)]
-    pub interaction_id: Option<String>,
-}
-
-fn default_comms_stream_scope() -> String {
-    "session".to_string()
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct MeerkatCommsStreamReadInput {
-    pub stream_id: String,
-    #[serde(default)]
-    pub timeout_ms: Option<u64>,
-    /// Disable timeout and wait indefinitely for the next event.
-    #[serde(default)]
-    pub no_timeout: bool,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct MeerkatCommsStreamCloseInput {
-    pub stream_id: String,
-}
-
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct BudgetLimitsInput {
     #[serde(default)]
@@ -1111,21 +1075,6 @@ fn comms_tools_list() -> Vec<Value> {
             "description": "List peers visible to a session's comms runtime.",
             "inputSchema": meerkat_tools::schema_for::<MeerkatCommsPeersInput>()
         }),
-        json!({
-            "name": "meerkat_comms_stream_open",
-            "description": "Open a comms event stream for a session or interaction scope.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatCommsStreamOpenInput>()
-        }),
-        json!({
-            "name": "meerkat_comms_stream_read",
-            "description": "Read the next event from an open comms stream (optional timeout).",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatCommsStreamReadInput>()
-        }),
-        json!({
-            "name": "meerkat_comms_stream_close",
-            "description": "Close a previously opened comms stream.",
-            "inputSchema": meerkat_tools::schema_for::<MeerkatCommsStreamCloseInput>()
-        }),
     ]
 }
 
@@ -1335,30 +1284,6 @@ pub async fn handle_tools_call_with_notifier(
             let input: MeerkatCommsPeersInput = serde_json::from_value(arguments.clone())
                 .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
             handle_meerkat_comms_peers(state, input)
-                .await
-                .map_err(ToolCallError::internal)
-        }
-        #[cfg(feature = "comms")]
-        "meerkat_comms_stream_open" => {
-            let input: MeerkatCommsStreamOpenInput = serde_json::from_value(arguments.clone())
-                .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
-            handle_meerkat_comms_stream_open(state, input)
-                .await
-                .map_err(ToolCallError::internal)
-        }
-        #[cfg(feature = "comms")]
-        "meerkat_comms_stream_read" => {
-            let input: MeerkatCommsStreamReadInput = serde_json::from_value(arguments.clone())
-                .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
-            handle_meerkat_comms_stream_read(state, input)
-                .await
-                .map_err(ToolCallError::internal)
-        }
-        #[cfg(feature = "comms")]
-        "meerkat_comms_stream_close" => {
-            let input: MeerkatCommsStreamCloseInput = serde_json::from_value(arguments.clone())
-                .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
-            handle_meerkat_comms_stream_close(state, input)
                 .await
                 .map_err(ToolCallError::internal)
         }
@@ -2135,130 +2060,6 @@ async fn handle_meerkat_comms_peers(
     Ok(wrap_tool_payload(payload))
 }
 
-#[cfg(feature = "comms")]
-async fn handle_meerkat_comms_stream_open(
-    state: &MeerkatMcpState,
-    input: MeerkatCommsStreamOpenInput,
-) -> Result<Value, String> {
-    let session_id =
-        meerkat::SessionId::parse(&input.session_id).map_err(invalid_session_id_message)?;
-    let comms = state
-        .service
-        .comms_runtime(&session_id)
-        .await
-        .ok_or_else(|| format!("Session not found or comms not enabled: {session_id}"))?;
-
-    let scope_name = input.scope.clone();
-    let interaction_id_for_payload = input.interaction_id.clone();
-    let scope = match scope_name.as_str() {
-        "session" => meerkat_core::comms::StreamScope::Session(session_id.clone()),
-        "interaction" => {
-            let interaction_id = input
-                .interaction_id
-                .ok_or_else(|| "interaction_id is required when scope='interaction'".to_string())?;
-            let parsed = uuid::Uuid::parse_str(&interaction_id)
-                .map_err(|e| format!("invalid interaction_id '{interaction_id}': {e}"))?;
-            meerkat_core::comms::StreamScope::Interaction(meerkat_core::InteractionId(parsed))
-        }
-        other => {
-            return Err(format!(
-                "Invalid scope '{other}'. Use 'session' or 'interaction'."
-            ));
-        }
-    };
-
-    let stream = comms
-        .stream(scope)
-        .map_err(|e| format!("Failed to open comms stream: {e}"))?;
-    let stream_id = meerkat::SessionId::new().to_string();
-    state.comms_streams.lock().await.insert(
-        stream_id.clone(),
-        Arc::new(CommsStreamHandle {
-            stream: Mutex::new(stream),
-        }),
-    );
-
-    Ok(wrap_tool_payload(json!({
-        "stream_id": stream_id,
-        "session_id": session_id.to_string(),
-        "scope": scope_name,
-        "interaction_id": interaction_id_for_payload
-    })))
-}
-
-#[cfg(feature = "comms")]
-async fn handle_meerkat_comms_stream_read(
-    state: &MeerkatMcpState,
-    input: MeerkatCommsStreamReadInput,
-) -> Result<Value, String> {
-    let handle = state
-        .comms_streams
-        .lock()
-        .await
-        .get(&input.stream_id)
-        .cloned()
-        .ok_or_else(|| format!("Stream not found: {}", input.stream_id))?;
-
-    let timeout_ms = if input.no_timeout {
-        None
-    } else {
-        Some(input.timeout_ms.unwrap_or(DEFAULT_STREAM_READ_TIMEOUT_MS))
-    };
-    let next_event = {
-        let mut stream = handle.stream.lock().await;
-        match timeout_ms {
-            None => stream.next().await,
-            Some(timeout_ms) => {
-                match tokio::time::timeout(
-                    std::time::Duration::from_millis(timeout_ms),
-                    stream.next(),
-                )
-                .await
-                {
-                    Ok(item) => item,
-                    Err(_) => {
-                        return Ok(wrap_tool_payload(json!({
-                            "stream_id": input.stream_id,
-                            "status": "timeout"
-                        })));
-                    }
-                }
-            }
-        }
-    };
-
-    match next_event {
-        Some(envelope) => {
-            let envelope_json = serde_json::to_value(&envelope)
-                .map_err(|e| format!("Failed to serialize stream event: {e}"))?;
-            Ok(wrap_tool_payload(json!({
-                "stream_id": input.stream_id,
-                "status": "event",
-                "event": envelope_json
-            })))
-        }
-        None => {
-            state.comms_streams.lock().await.remove(&input.stream_id);
-            Ok(wrap_tool_payload(json!({
-                "stream_id": input.stream_id,
-                "status": "closed"
-            })))
-        }
-    }
-}
-
-#[cfg(feature = "comms")]
-async fn handle_meerkat_comms_stream_close(
-    state: &MeerkatMcpState,
-    input: MeerkatCommsStreamCloseInput,
-) -> Result<Value, String> {
-    let removed = state.comms_streams.lock().await.remove(&input.stream_id);
-    Ok(wrap_tool_payload(json!({
-        "stream_id": input.stream_id,
-        "closed": removed.is_some()
-    })))
-}
-
 async fn handle_meerkat_run(
     state: &MeerkatMcpState,
     input: MeerkatRunInput,
@@ -2862,11 +2663,11 @@ mod tests {
     fn test_tools_list_schema() {
         let tools = tools_list();
         #[cfg(all(feature = "comms", feature = "mob"))]
-        assert_eq!(tools.len(), 24 + meerkat_mob_mcp::tools_list().len());
+        assert_eq!(tools.len(), 21 + meerkat_mob_mcp::tools_list().len());
         #[cfg(all(not(feature = "comms"), feature = "mob"))]
         assert_eq!(tools.len(), 19 + meerkat_mob_mcp::tools_list().len());
         #[cfg(all(feature = "comms", not(feature = "mob")))]
-        assert_eq!(tools.len(), 20);
+        assert_eq!(tools.len(), 17);
         #[cfg(all(not(feature = "comms"), not(feature = "mob")))]
         assert_eq!(tools.len(), 15);
 
@@ -2960,9 +2761,6 @@ mod tests {
         {
             assert!(tool_names.contains(&"meerkat_comms_send"));
             assert!(tool_names.contains(&"meerkat_comms_peers"));
-            assert!(tool_names.contains(&"meerkat_comms_stream_open"));
-            assert!(tool_names.contains(&"meerkat_comms_stream_read"));
-            assert!(tool_names.contains(&"meerkat_comms_stream_close"));
         }
     }
 
@@ -2976,9 +2774,6 @@ mod tests {
             .collect();
         assert!(!names.contains(&"meerkat_comms_send"));
         assert!(!names.contains(&"meerkat_comms_peers"));
-        assert!(!names.contains(&"meerkat_comms_stream_open"));
-        assert!(!names.contains(&"meerkat_comms_stream_read"));
-        assert!(!names.contains(&"meerkat_comms_stream_close"));
         assert!(names.contains(&"meerkat_event_stream_open"));
         assert!(names.contains(&"meerkat_event_stream_read"));
         assert!(names.contains(&"meerkat_event_stream_close"));

@@ -2060,7 +2060,6 @@ async fn handle_meerkat_comms_peers(
     Ok(wrap_tool_payload(payload))
 }
 
-#[cfg(feature = "comms")]
 async fn handle_meerkat_run(
     state: &MeerkatMcpState,
     input: MeerkatRunInput,

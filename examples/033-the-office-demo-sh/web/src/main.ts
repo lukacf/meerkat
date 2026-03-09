@@ -459,6 +459,11 @@ async function startOffice(): Promise<void> {
       clearInterval(pollTimer);
       pollTimer = null;
     }
+    for (const sub of subs) {
+      try { runtime?.close_subscription(sub.handle); }
+      catch { /* ignore stale handles during restart */ }
+    }
+    subs = [];
     running = false;
 
     const keys = getApiKeys();

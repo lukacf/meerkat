@@ -32,6 +32,7 @@ class _StdoutDispatcher:
         self._pending_stream_request_id: int | None = None
         self._unmatched_buffer: dict[str, list[dict[str, Any]]] = {}
         self._unmatched_stream_buffer: dict[str, list[dict[str, Any]]] = {}
+        self._unmatched_stream_end: set[str] = set()
         self._task: asyncio.Task[None] | None = None
         self._closed = False
 
@@ -66,6 +67,9 @@ class _StdoutDispatcher:
         self._stream_queues[stream_id] = queue
         for event in self._unmatched_stream_buffer.pop(stream_id, []):
             queue.put_nowait(event)
+        if stream_id in self._unmatched_stream_end:
+            self._unmatched_stream_end.discard(stream_id)
+            queue.put_nowait(None)
         return queue
 
     def unsubscribe_stream(self, stream_id: str) -> None:
@@ -133,6 +137,14 @@ class _StdoutDispatcher:
                     elif stream_id:
                         self._unmatched_stream_buffer.setdefault(stream_id, []).append(event)
                     continue
+                if method in {"session/stream_end", "mob/stream_end"}:
+                    stream_id = str(params.get("stream_id", ""))
+                    queue = self._stream_queues.get(stream_id)
+                    if queue is not None:
+                        await queue.put(None)
+                    elif stream_id:
+                        self._unmatched_stream_end.add(stream_id)
+                    continue
                 session_id = params.get("session_id", "")
                 event = params.get("event")
                 queue = self._event_queues.get(session_id)
@@ -153,6 +165,7 @@ class _StdoutDispatcher:
             queue.put_nowait(None)
         self._stream_queues.clear()
         self._unmatched_stream_buffer.clear()
+        self._unmatched_stream_end.clear()
         if self._pending_stream_queue is not None:
             self._pending_stream_queue.put_nowait(None)
             self._pending_stream_queue = None

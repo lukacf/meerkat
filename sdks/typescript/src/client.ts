@@ -144,6 +144,7 @@ export class MeerkatClient {
   private pendingStreamRequestId: number | null = null;
   private unmatchedStreamBuffer = new Map<string, Record<string, unknown>[]>();
   private unmatchedStandaloneStreamBuffer = new Map<string, Record<string, unknown>[]>();
+  private unmatchedStandaloneStreamEnd = new Set<string>();
   private rl: ReadlineInterface | null = null;
 
   constructor(rkatPath = "rkat-rpc") {
@@ -645,6 +646,9 @@ export class MeerkatClient {
       queue.put(event);
     }
     this.unmatchedStandaloneStreamBuffer.delete(streamId);
+    if (this.unmatchedStandaloneStreamEnd.delete(streamId)) {
+      queue.put(null);
+    }
     return new EventSubscription<T>({
       streamId,
       queue,
@@ -830,6 +834,16 @@ export class MeerkatClient {
           const buffered = this.unmatchedStandaloneStreamBuffer.get(streamId) ?? [];
           buffered.push(event);
           this.unmatchedStandaloneStreamBuffer.set(streamId, buffered);
+        }
+        return;
+      }
+      if (method === "session/stream_end" || method === "mob/stream_end") {
+        const streamId = String(params.stream_id ?? "");
+        const queue = this.streamQueues.get(streamId);
+        if (queue) {
+          queue.put(null);
+        } else if (streamId) {
+          this.unmatchedStandaloneStreamEnd.add(streamId);
         }
         return;
       }

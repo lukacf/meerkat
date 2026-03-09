@@ -501,10 +501,24 @@ impl SessionService for LocalSessionService {
         }
         // Drain any staged system context so the append_system_context contract
         // is honored (staged context is consumed on the next turn).
-        self.pending_context
-            .write()
-            .await
-            .insert(id.clone(), Vec::new());
+        let staged_context = {
+            let mut pending = self.pending_context.write().await;
+            let entry = pending.entry(id.clone()).or_default();
+            std::mem::take(entry)
+        };
+        let effective_prompt = if staged_context.is_empty() {
+            req.prompt.clone()
+        } else {
+            let staged_sections = staged_context
+                .iter()
+                .map(|append| match append.source.as_deref() {
+                    Some(source) => format!("[SYSTEM CONTEXT:{source}] {}", append.text),
+                    None => format!("[SYSTEM CONTEXT] {}", append.text),
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("{staged_sections}\n\n{}", req.prompt)
+        };
 
         let event_tx = self.event_txs.read().await.get(id).cloned();
         let next_seq = |seq: &mut u64| {
@@ -521,7 +535,7 @@ impl SessionService for LocalSessionService {
                 None,
                 AgentEvent::RunStarted {
                     session_id: id.clone(),
-                    prompt: req.prompt.clone(),
+                    prompt: effective_prompt.clone(),
                 },
             ));
             let _ = event_tx.send(EventEnvelope::new(
@@ -1699,6 +1713,72 @@ mod tests {
         assert_eq!(result.status, AppendSystemContextStatus::Staged);
         let pending = service.pending_context.read().await;
         assert_eq!(pending.get(&session_id).map(std::vec::Vec::len), Some(1));
+    }
+
+    #[tokio::test]
+    async fn local_session_service_consumes_staged_context_on_next_turn() {
+        use futures::StreamExt;
+
+        let service = LocalSessionService::new();
+        let run = service
+            .create_session(CreateSessionRequest {
+                model: "claude-sonnet-4-5".to_string(),
+                prompt: "hello".to_string(),
+                system_prompt: None,
+                max_tokens: None,
+                event_tx: None,
+                host_mode: false,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                build: None,
+                labels: None,
+            })
+            .await
+            .expect("create session");
+        let session_id = run.session_id;
+
+        service
+            .append_system_context(
+                &session_id,
+                AppendSystemContextRequest {
+                    text: "Remember the customer preference.".to_string(),
+                    source: Some("mob".to_string()),
+                    idempotency_key: Some("ctx-1".to_string()),
+                },
+            )
+            .await
+            .expect("append context");
+
+        let mut stream =
+            meerkat_mob::MobSessionService::subscribe_session_events(&service, &session_id)
+                .await
+                .expect("subscribe events");
+        service
+            .start_turn(
+                &session_id,
+                StartTurnRequest {
+                    prompt: "hello".to_string(),
+                    event_tx: None,
+                    host_mode: false,
+                    skill_references: None,
+                    flow_tool_overlay: None,
+                    additional_instructions: None,
+                },
+            )
+            .await
+            .expect("start turn");
+
+        let first = stream.next().await.expect("first event");
+        match first.payload {
+            AgentEvent::RunStarted { prompt, .. } => {
+                assert!(prompt.contains("Remember the customer preference."));
+                assert!(prompt.contains("hello"));
+            }
+            other => panic!("expected RunStarted, got {other:?}"),
+        }
+
+        let pending = service.pending_context.read().await;
+        assert_eq!(pending.get(&session_id).map(std::vec::Vec::len), Some(0));
     }
 
     #[tokio::test]

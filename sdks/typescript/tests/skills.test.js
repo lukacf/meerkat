@@ -251,6 +251,36 @@ describe("Skills v2.1", () => {
   });
 
 
+  it("buffers standalone stream termination until the subscription queue is registered", async () => {
+    const client = new MeerkatClient();
+    client.request = async (method, params) => {
+      if (method === "session/stream_open") {
+        client.handleLine(JSON.stringify({
+          jsonrpc: "2.0",
+          method: "session/stream_end",
+          params: {
+            stream_id: "stream-end-1",
+            ended: true,
+          },
+        }));
+        return { stream_id: "stream-end-1" };
+      }
+      if (method === "session/stream_close") {
+        return { closed: true };
+      }
+      return {};
+    };
+
+    const sub = await client.subscribeSessionEvents("s1");
+    const iterator = sub[Symbol.asyncIterator]();
+    const first = await Promise.race([
+      iterator.next(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("stream did not terminate")), 200)),
+    ]);
+    assert.equal(first.done, true);
+    await sub.close();
+  });
+
   it("buffers standalone stream notifications until the subscription queue is registered", async () => {
     const client = new MeerkatClient();
     client.request = async (method, params) => {

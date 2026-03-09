@@ -68,6 +68,17 @@ impl NotificationSink {
         let _ = self.tx.send(notification).await;
     }
 
+    /// Emit an explicit terminal notification for a standalone session stream.
+    pub async fn emit_session_stream_end(&self, stream_id: &Uuid, session_id: &SessionId) {
+        let params = serde_json::json!({
+            "stream_id": stream_id.to_string(),
+            "session_id": session_id.to_string(),
+            "ended": true,
+        });
+        let notification = RpcNotification::new("session/stream_end", params);
+        let _ = self.tx.send(notification).await;
+    }
+
     #[cfg(feature = "mob")]
     /// Emit a mob stream event as a JSON-RPC notification.
     ///
@@ -85,6 +96,16 @@ impl NotificationSink {
             "event": event,
         });
         let notification = RpcNotification::new("mob/stream_event", params);
+        let _ = self.tx.send(notification).await;
+    }
+
+    #[cfg(feature = "mob")]
+    async fn emit_mob_stream_end(&self, stream_id: &Uuid) {
+        let params = serde_json::json!({
+            "stream_id": stream_id.to_string(),
+            "ended": true,
+        });
+        let notification = RpcNotification::new("mob/stream_end", params);
         let _ = self.tx.send(notification).await;
     }
 }
@@ -715,7 +736,12 @@ impl MethodRouter {
                                     .emit_session_stream_event(&stream_id_for_task, sequence, &session_id_for_task, &envelope)
                                     .await;
                             }
-                            None => break,
+                            None => {
+                                notification_sink
+                                    .emit_session_stream_end(&stream_id_for_task, &session_id_for_task)
+                                    .await;
+                                break;
+                            }
                         }
                     }
                 }
@@ -889,7 +915,12 @@ impl MethodRouter {
                                         )
                                         .await;
                                 }
-                                None => break,
+                                None => {
+                                    notification_sink
+                                        .emit_mob_stream_end(&stream_id_for_task)
+                                        .await;
+                                    break;
+                                }
                             }
                         }
                     }
@@ -942,7 +973,12 @@ impl MethodRouter {
                                         )
                                         .await;
                                 }
-                                None => break,
+                                None => {
+                                    notification_sink
+                                        .emit_mob_stream_end(&stream_id_for_task)
+                                        .await;
+                                    break;
+                                }
                             }
                         }
                     }
@@ -1646,6 +1682,86 @@ mod tests {
             response.error.as_ref().map(|e| e.code),
             Some(crate::error::SESSION_NOT_FOUND)
         );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn session_stream_open_emits_terminal_notification_when_session_ends() {
+        let (router, mut notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": "mob-session-terminal",
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-5",
+                                "tools": { "comms": true }
+                            }
+                        }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let mob_id = result_value(&create_resp)["mob_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let spawn_resp = router
+            .dispatch(make_request(
+                "mob/spawn",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "profile": "worker",
+                    "meerkat_id": "worker-1",
+                    "runtime_mode": "turn_driven"
+                }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&spawn_resp)["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let open_resp = router
+            .dispatch(make_request(
+                "session/stream_open",
+                serde_json::json!({ "session_id": session_id }),
+            ))
+            .await
+            .unwrap();
+        let stream_id = result_value(&open_resp)["stream_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let archive_resp = router
+            .dispatch(make_request(
+                "session/archive",
+                serde_json::json!({ "session_id": session_id }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result_value(&archive_resp)["archived"], true);
+
+        let notification = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let notif = notif_rx.recv().await.expect("notification");
+                if notif.method == "session/stream_end" {
+                    break notif;
+                }
+            }
+        })
+        .await
+        .expect("session stream end notification");
+        assert_eq!(notification.method, "session/stream_end");
+        assert_eq!(notification.params["stream_id"], stream_id);
+        assert_eq!(notification.params["ended"], true);
     }
 
     #[cfg(feature = "mob")]

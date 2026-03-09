@@ -310,6 +310,13 @@ export class MobOrchestrator {
       clearInterval(this.pollInterval);
       this.pollInterval = null;
     }
+    for (const panel of this.panels.values()) {
+      if (panel.subHandle != null) {
+        try { this.runtime.close_subscription(panel.subHandle); }
+        catch { /* ignore stale handles */ }
+        panel.subHandle = null;
+      }
+    }
   }
 
   /** Clear any pending tool call spinner on a panel. */

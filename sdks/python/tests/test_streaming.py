@@ -490,6 +490,23 @@ class TestStandaloneSubscriptions:
         await d.stop()
 
     @pytest.mark.asyncio
+    async def test_stream_end_buffered_until_stream_queue_registered(self):
+        reader = asyncio.StreamReader()
+        d = _StdoutDispatcher(reader)
+        d.start()
+        reader.feed_data((jline({
+            "jsonrpc": "2.0",
+            "method": "session/stream_end",
+            "params": {"stream_id": "stream-1", "ended": True},
+        }) + "\n").encode())
+        await asyncio.sleep(0)
+        queue = d.subscribe_stream("stream-1")
+        event = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert event is None
+        reader.feed_eof()
+        await d.stop()
+
+    @pytest.mark.asyncio
     async def test_stream_notification_dispatched_to_stream_queue(self):
         ev = {"event_id": "e1", "payload": {"type": "text_delta", "delta": "hi"}}
         reader = make_reader([stream_notification("stream-1", ev)])

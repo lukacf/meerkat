@@ -2681,6 +2681,7 @@ version = "0.4.5"
 dependencies = [
  "async-trait",
  "chrono",
+ "clap",
  "futures",
  "meerkat-client",
  "meerkat-core",

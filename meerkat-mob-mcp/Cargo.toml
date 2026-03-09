@@ -29,6 +29,7 @@ tracing = { workspace = true }
 futures = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+clap = { workspace = true }
 tokio = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

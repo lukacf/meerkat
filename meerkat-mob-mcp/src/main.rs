@@ -4,10 +4,16 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 mod app {
+    use clap::Parser;
     use serde_json::{Value, json};
     use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+    #[derive(Parser, Debug)]
+    #[command(name = "rkat-mob-mcp", version = env!("CARGO_PKG_VERSION"))]
+    struct Args {}
+
     pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
+        let _args = Args::parse();
         let state = meerkat_mob_mcp::MobMcpState::new_in_memory();
         eprintln!("rkat-mob-mcp starting (stdio json-rpc)");
 

@@ -13,8 +13,6 @@ use uuid::Uuid;
 use meerkat_core::ConfigStore;
 use meerkat_core::EventEnvelope;
 use meerkat_core::event::AgentEvent;
-#[cfg(feature = "mob")]
-use meerkat_core::service::SessionService;
 use meerkat_core::types::SessionId;
 use serde_json::json;
 
@@ -102,6 +100,52 @@ enum StreamForwarderState {
     },
 }
 
+/// Bounded set of recently-closed stream IDs for idempotent close detection.
+///
+/// Prevents unbounded memory growth on long-lived RPC servers: when the set
+/// exceeds `MAX_ENTRIES`, the oldest entries are evicted. This means very old
+/// stream IDs may lose `already_closed` tracking, which is acceptable — the
+/// alternative is unbounded growth.
+struct ClosedStreamSet {
+    entries: std::collections::VecDeque<Uuid>,
+    set: HashSet<Uuid>,
+}
+
+const CLOSED_STREAM_SET_MAX: usize = 1024;
+
+impl ClosedStreamSet {
+    fn new() -> Self {
+        Self {
+            entries: std::collections::VecDeque::new(),
+            set: HashSet::new(),
+        }
+    }
+
+    /// Insert a stream ID. Returns false if already present.
+    fn insert(&mut self, id: Uuid) -> bool {
+        if !self.set.insert(id) {
+            return false;
+        }
+        self.entries.push_back(id);
+        while self.entries.len() > CLOSED_STREAM_SET_MAX {
+            if let Some(evicted) = self.entries.pop_front() {
+                self.set.remove(&evicted);
+            }
+        }
+        true
+    }
+
+    /// Check and remove a stream ID. Returns true if it was present.
+    fn remove(&mut self, id: &Uuid) -> bool {
+        if self.set.remove(id) {
+            self.entries.retain(|e| e != id);
+            true
+        } else {
+            false
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // MethodRouter
 // ---------------------------------------------------------------------------
@@ -114,13 +158,15 @@ pub struct MethodRouter {
     notification_sink: NotificationSink,
     skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
     active_session_streams: Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
-    closed_session_streams: Arc<Mutex<HashSet<Uuid>>>,
+    /// Recently-closed stream IDs for idempotent close detection.
+    /// Bounded to prevent unbounded growth on long-lived servers.
+    closed_session_streams: Arc<Mutex<ClosedStreamSet>>,
     #[cfg(feature = "mob")]
     mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
     #[cfg(feature = "mob")]
     active_mob_streams: Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
     #[cfg(feature = "mob")]
-    closed_mob_streams: Arc<Mutex<HashSet<Uuid>>>,
+    closed_mob_streams: Arc<Mutex<ClosedStreamSet>>,
 }
 
 impl MethodRouter {
@@ -136,13 +182,13 @@ impl MethodRouter {
             notification_sink,
             skill_runtime: None,
             active_session_streams: Arc::new(Mutex::new(HashMap::new())),
-            closed_session_streams: Arc::new(Mutex::new(HashSet::new())),
+            closed_session_streams: Arc::new(Mutex::new(ClosedStreamSet::new())),
             #[cfg(feature = "mob")]
             mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
             #[cfg(feature = "mob")]
             active_mob_streams: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(feature = "mob")]
-            closed_mob_streams: Arc::new(Mutex::new(HashSet::new())),
+            closed_mob_streams: Arc::new(Mutex::new(ClosedStreamSet::new())),
         }
     }
 
@@ -381,7 +427,11 @@ impl MethodRouter {
             Err(rpc_err) if rpc_err.code == error::SESSION_NOT_FOUND => {
                 #[cfg(feature = "mob")]
                 {
-                    if let Ok(()) = self.mob_state.session_service().archive(&session_id).await {
+                    if let Ok(()) = self
+                        .mob_state
+                        .retire_member_by_session_id(&session_id)
+                        .await
+                    {
                         return RpcResponse::success(id, json!({"archived": true}));
                     }
                 }
@@ -609,7 +659,7 @@ impl MethodRouter {
             Err(runtime_err) => {
                 #[cfg(feature = "mob")]
                 {
-                    match SessionService::subscribe_session_events(
+                    match meerkat_mob::MobSessionService::subscribe_session_events(
                         self.mob_state.session_service(),
                         &session_id,
                     )
@@ -643,6 +693,7 @@ impl MethodRouter {
         let (stop_tx, stop_rx) = oneshot::channel::<()>();
         let notification_sink = self.notification_sink.clone();
         let active_session_streams = self.active_session_streams.clone();
+        let closed_session_streams = self.closed_session_streams.clone();
         let stream_id_for_task = stream_id;
         let session_id_for_task = session_id.clone();
 
@@ -676,6 +727,11 @@ impl MethodRouter {
                 .is_some_and(|s| matches!(s.state, StreamForwarderState::Active { .. }))
             {
                 streams.remove(&stream_id_for_task);
+                // Track natural completion so subsequent close returns already_closed=true
+                closed_session_streams
+                    .lock()
+                    .await
+                    .insert(stream_id_for_task);
             }
         });
 
@@ -791,6 +847,7 @@ impl MethodRouter {
         let (stop_tx, stop_rx) = oneshot::channel::<()>();
         let notification_sink = self.notification_sink.clone();
         let active_mob_streams = self.active_mob_streams.clone();
+        let closed_mob_streams = self.closed_mob_streams.clone();
         let stream_id_for_task = stream_id;
 
         if let Some(member_id_str) = params.member_id {
@@ -838,12 +895,14 @@ impl MethodRouter {
                     }
                 }
 
+                let closed_mob_streams = closed_mob_streams.clone();
                 let mut streams = active_mob_streams.lock().await;
                 if streams
                     .get(&stream_id_for_task)
                     .is_some_and(|s| matches!(s.state, StreamForwarderState::Active { .. }))
                 {
                     streams.remove(&stream_id_for_task);
+                    closed_mob_streams.lock().await.insert(stream_id_for_task);
                 }
             });
 
@@ -895,6 +954,7 @@ impl MethodRouter {
                     .is_some_and(|s| matches!(s.state, StreamForwarderState::Active { .. }))
                 {
                     streams.remove(&stream_id_for_task);
+                    closed_mob_streams.lock().await.insert(stream_id_for_task);
                 }
             });
 
@@ -1450,6 +1510,142 @@ mod tests {
             .unwrap();
         let peers = result_value(&peers_resp);
         assert!(peers["peers"].is_array());
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_spawned_session_id_supports_session_stream_open() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": "mob-session-stream",
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-5",
+                                "tools": { "comms": true }
+                            }
+                        }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let mob_id = result_value(&create_resp)["mob_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let spawn_resp = router
+            .dispatch(make_request(
+                "mob/spawn",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "profile": "worker",
+                    "meerkat_id": "worker-1",
+                    "runtime_mode": "turn_driven"
+                }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&spawn_resp)["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let open_resp = router
+            .dispatch(make_request(
+                "session/stream_open",
+                serde_json::json!({ "session_id": session_id }),
+            ))
+            .await
+            .unwrap();
+        let opened = result_value(&open_resp);
+        assert_eq!(opened["opened"], true);
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn session_archive_for_mob_session_retires_member() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": "mob-archive-session",
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-5",
+                                "tools": { "comms": true }
+                            }
+                        }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let mob_id = result_value(&create_resp)["mob_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let spawn_resp = router
+            .dispatch(make_request(
+                "mob/spawn",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "profile": "worker",
+                    "meerkat_id": "worker-1",
+                    "runtime_mode": "turn_driven"
+                }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&spawn_resp)["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let archive_resp = router
+            .dispatch(make_request(
+                "session/archive",
+                serde_json::json!({ "session_id": session_id }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result_value(&archive_resp)["archived"], true);
+
+        let members_resp = router
+            .dispatch(make_request(
+                "mob/members",
+                serde_json::json!({ "mob_id": mob_id }),
+            ))
+            .await
+            .unwrap();
+        let members_value = result_value(&members_resp);
+        let members = members_value["members"].as_array().unwrap();
+        assert!(members.is_empty());
+    }
+
+    #[tokio::test]
+    async fn session_archive_unknown_returns_not_found() {
+        let (router, _notif_rx) = test_router().await;
+        let response = router
+            .dispatch(make_request(
+                "session/archive",
+                serde_json::json!({ "session_id": SessionId::new() }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.error.as_ref().map(|e| e.code),
+            Some(crate::error::SESSION_NOT_FOUND)
+        );
     }
 
     #[cfg(feature = "mob")]

@@ -2584,6 +2584,20 @@ impl SessionServiceCommsExt for RunMobSessionService {
 }
 
 #[async_trait::async_trait]
+impl meerkat_core::service::SessionServiceControlExt for RunMobSessionService {
+    async fn append_system_context(
+        &self,
+        id: &SessionId,
+        req: meerkat_core::AppendSystemContextRequest,
+    ) -> Result<
+        meerkat_core::service::AppendSystemContextResult,
+        meerkat_core::service::SessionControlError,
+    > {
+        self.inner.append_system_context(id, req).await
+    }
+}
+
+#[async_trait::async_trait]
 impl meerkat_mob::MobSessionService for RunMobSessionService {
     async fn subscribe_session_events(
         &self,
@@ -3824,6 +3838,20 @@ impl SessionServiceCommsExt for MobCliSessionService {
         session_id: &SessionId,
     ) -> Option<Arc<dyn meerkat_core::EventInjector>> {
         self.inner.event_injector(session_id).await
+    }
+}
+
+#[async_trait::async_trait]
+impl meerkat_core::service::SessionServiceControlExt for MobCliSessionService {
+    async fn append_system_context(
+        &self,
+        id: &SessionId,
+        req: meerkat_core::AppendSystemContextRequest,
+    ) -> Result<
+        meerkat_core::service::AppendSystemContextResult,
+        meerkat_core::service::SessionControlError,
+    > {
+        self.inner.append_system_context(id, req).await
     }
 }
 
@@ -6728,6 +6756,25 @@ mod tests {
             _session_id: &SessionId,
         ) -> Option<Arc<dyn meerkat_core::EventInjector>> {
             None
+        }
+    }
+
+    #[async_trait]
+    impl meerkat_core::service::SessionServiceControlExt for TestMobSessionService {
+        async fn append_system_context(
+            &self,
+            id: &SessionId,
+            _req: meerkat_core::AppendSystemContextRequest,
+        ) -> Result<
+            meerkat_core::service::AppendSystemContextResult,
+            meerkat_core::service::SessionControlError,
+        > {
+            if !self.sessions.read().await.contains_key(id) {
+                return Err(meerkat_core::SessionError::NotFound { id: id.clone() }.into());
+            }
+            Ok(meerkat_core::service::AppendSystemContextResult {
+                status: meerkat_core::service::AppendSystemContextStatus::Staged,
+            })
         }
     }
 

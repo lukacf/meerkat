@@ -459,10 +459,12 @@ fn apply_hunks_to_files(
                         context: format!("Failed to write file {}", dest.display()),
                         source,
                     })?;
-                    std::fs::remove_file(&path).map_err(|source| ApplyPatchError::Io {
-                        context: format!("Failed to remove original {}", path.display()),
-                        source,
-                    })?;
+                    if dest != path {
+                        std::fs::remove_file(&path).map_err(|source| ApplyPatchError::Io {
+                            context: format!("Failed to remove original {}", path.display()),
+                            source,
+                        })?;
+                    }
                     affected.modified.push(dest);
                 } else {
                     std::fs::write(&path, new_contents).map_err(|source| ApplyPatchError::Io {
@@ -752,5 +754,19 @@ mod tests {
         let patch = wrap_patch("*** Add File: ../escape.txt\n+bad");
         let err = apply_patch(dir.path(), &patch).expect_err("escape should fail");
         assert!(err.to_string().contains("escapes the project root"));
+    }
+
+    #[test]
+    fn move_to_same_normalized_path_updates_in_place() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let path = root.join("same.txt");
+        std::fs::write(&path, "before\n").unwrap();
+
+        let patch =
+            wrap_patch("*** Update File: same.txt\n*** Move to: ./same.txt\n@@\n-before\n+after");
+        apply_patch(root, &patch).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "after\n");
     }
 }

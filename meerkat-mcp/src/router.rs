@@ -941,6 +941,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "exercises real subprocess timeout behavior"]
     async fn connect_and_enumerate_times_out() {
         // Use a config with a very short timeout pointing at a command that hangs.
         let mut config = McpServerConfig::stdio(

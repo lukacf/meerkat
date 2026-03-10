@@ -5,9 +5,36 @@ use crate::ids::{RunId, StepId};
 use crate::run::FlowRunConfig;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 const ESCALATION_TURN_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[cfg(test)]
+static TEST_ESCALATION_TURN_TIMEOUT_MS: AtomicU64 = AtomicU64::new(0);
+
+fn escalation_turn_timeout() -> Duration {
+    #[cfg(test)]
+    {
+        let override_ms = TEST_ESCALATION_TURN_TIMEOUT_MS.load(Ordering::Relaxed);
+        if override_ms > 0 {
+            return Duration::from_millis(override_ms);
+        }
+    }
+
+    ESCALATION_TURN_TIMEOUT
+}
+
+#[cfg(test)]
+pub(crate) fn set_escalation_turn_timeout_for_tests(timeout: Duration) {
+    TEST_ESCALATION_TURN_TIMEOUT_MS.store(timeout.as_millis() as u64, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn reset_escalation_turn_timeout_for_tests() {
+    TEST_ESCALATION_TURN_TIMEOUT_MS.store(0, Ordering::Relaxed);
+}
 
 pub struct Supervisor {
     handle: MobHandle,
@@ -45,8 +72,10 @@ impl Supervisor {
                 ))
             })?;
 
+        let escalation_turn_timeout = escalation_turn_timeout();
+
         tokio::time::timeout(
-            ESCALATION_TURN_TIMEOUT,
+            escalation_turn_timeout,
             self.handle.internal_turn(
                 escalation_target.meerkat_id.clone(),
                 format!("Supervisor escalation for run '{run_id}', step '{step_id}': {reason}"),
@@ -56,7 +85,7 @@ impl Supervisor {
         .map_err(|_| {
             MobError::SupervisorEscalation(format!(
                 "supervisor escalation timed out after {}ms",
-                ESCALATION_TURN_TIMEOUT.as_millis()
+                escalation_turn_timeout.as_millis()
             ))
         })??;
 

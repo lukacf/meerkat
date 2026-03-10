@@ -2,14 +2,14 @@
 
 [alias]
 # Fast test suite (unit + integration-fast, skips doctests)
-fast = "nextest run --workspace"
-rct = "nextest run --workspace"
+fast = "nextest run --workspace --show-progress none --status-level none --final-status-level fail"
+rct = "nextest run --workspace --show-progress none --status-level none --final-status-level fail"
 
 # Unit tests only (no integration tests, skips doctests)
-unit = "nextest run --workspace --lib"
+unit = "nextest run --workspace --lib --show-progress none --status-level none --final-status-level fail"
 
 # Integration-fast tests only (ignored tests are not run)
-int = "nextest run --workspace --tests"
+int = "nextest run --workspace --tests --show-progress none --status-level none --final-status-level fail"
 
 # Integration tests that spawn real processes / need binaries (ignored by default)
 int-real = "nextest run --workspace --run-ignored ignored-only -E 'test(integration_real)' --test-threads=1"

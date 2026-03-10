@@ -1494,6 +1494,20 @@ fn sample_definition_with_single_step_flow(
     def
 }
 
+fn with_cancel_grace_timeout(
+    mut def: MobDefinition,
+    cancel_grace_timeout_ms: u64,
+) -> MobDefinition {
+    let limits = def.limits.get_or_insert(LimitsSpec {
+        max_flow_duration_ms: None,
+        max_step_retries: None,
+        max_orphaned_turns: None,
+        cancel_grace_timeout_ms: None,
+    });
+    limits.cancel_grace_timeout_ms = Some(cancel_grace_timeout_ms);
+    def
+}
+
 fn sample_definition_with_branch_flow() -> MobDefinition {
     let mut def = sample_definition();
     let mut steps = IndexMap::new();
@@ -2885,7 +2899,8 @@ async fn test_mob_management_tools_dispatch_to_handle() {
 
 #[tokio::test]
 async fn test_mob_flow_tools_dispatch_mutate_and_query_real_run_state() {
-    let mut definition = sample_definition_with_single_step_flow(60_000, 8);
+    let mut definition =
+        with_cancel_grace_timeout(sample_definition_with_single_step_flow(60_000, 8), 25);
     let worker = definition
         .profiles
         .get_mut(&ProfileName::from("worker"))
@@ -7494,8 +7509,11 @@ async fn test_cancel_flow_cooperative_path_finishes_before_fallback_window() {
 
 #[tokio::test]
 async fn test_cancel_flow_fallback_marks_run_canceled_when_turn_stalls() {
-    let (handle, service) =
-        create_test_mob(sample_definition_with_single_step_flow(60_000, 8)).await;
+    let (handle, service) = create_test_mob(with_cancel_grace_timeout(
+        sample_definition_with_single_step_flow(60_000, 8),
+        25,
+    ))
+    .await;
     handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
@@ -7564,7 +7582,7 @@ async fn test_cancel_flow_fallback_uses_configured_grace_timeout() {
 async fn test_cancel_fallback_uses_direct_pending_to_terminal_cas_attempts() {
     let run_store = Arc::new(RecordingRunStore::new());
     let (handle, service) = create_test_mob_with_run_store(
-        sample_definition_with_single_step_flow(60_000, 8),
+        with_cancel_grace_timeout(sample_definition_with_single_step_flow(60_000, 8), 25),
         run_store.clone(),
     )
     .await;
@@ -7918,9 +7936,11 @@ async fn test_flow_completed_append_failure_records_coherence_failure_ledger_ent
 async fn test_flow_canceled_append_failure_records_coherence_failure_ledger_entry() {
     let events = Arc::new(FaultInjectedMobEventStore::new());
     events.fail_appends_for("FlowCanceled").await;
-    let (handle, service) =
-        create_test_mob_with_events(sample_definition_with_single_step_flow(60_000, 8), events)
-            .await;
+    let (handle, service) = create_test_mob_with_events(
+        with_cancel_grace_timeout(sample_definition_with_single_step_flow(60_000, 8), 25),
+        events,
+    )
+    .await;
     handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
@@ -8295,6 +8315,7 @@ async fn test_supervisor_escalation_forces_reset_via_retire_path() {
 
 #[tokio::test]
 async fn test_supervisor_escalation_times_out_when_turn_hangs() {
+    crate::runtime::supervisor::set_escalation_turn_timeout_for_tests(Duration::from_millis(25));
     let mut definition = sample_definition_with_supervisor_threshold(1);
     let lead = definition
         .profiles
@@ -8311,13 +8332,14 @@ async fn test_supervisor_escalation_times_out_when_turn_hangs() {
         .await
         .expect("spawn worker");
     service.set_flow_turn_fail(true);
-    service.set_start_turn_delay_ms(3_000);
+    service.set_start_turn_delay_ms(250);
 
     let run_id = handle
         .run_flow(FlowId::from("demo"), serde_json::json!({}))
         .await
         .expect("run flow");
     let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(8)).await;
+    crate::runtime::supervisor::reset_escalation_turn_timeout_for_tests();
     assert_eq!(terminal.status, MobRunStatus::Failed);
     let events = handle.events().replay_all().await.expect("replay");
     assert!(

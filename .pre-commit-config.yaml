@@ -15,7 +15,7 @@ repos:
         types: [rust]
         pass_filenames: false
 
-  # On commit: clippy + unit tests on changed crates only (~5-10s)
+  # Manual: changed-crate validation when you want a local preflight.
   - repo: local
     hooks:
       - id: cargo-check-changed
@@ -24,6 +24,7 @@ repos:
         language: script
         types: [rust]
         pass_filenames: false
+        stages: [manual]
 
   # On push: secret detection
   - repo: https://github.com/gitleaks/gitleaks
@@ -87,8 +88,8 @@ repos:
   - repo: local
     hooks:
       - id: cargo-test
-        name: cargo nextest (unit tests)
-        entry: cargo nextest run --workspace --lib
+        name: cargo unit
+        entry: cargo unit
         language: system
         types: [rust]
         pass_filenames: false

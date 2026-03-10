@@ -11,7 +11,10 @@ use meerkat_core::skills::{
 use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+#[cfg(not(test))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Skill source that reads from a filesystem directory tree.
@@ -84,7 +87,16 @@ impl FilesystemSourceState {
     }
 }
 
+#[cfg(test)]
+static TEST_NOW_UNIX_SECS: AtomicU64 = AtomicU64::new(1_700_000_000);
+
 fn now_unix_secs() -> u64 {
+    #[cfg(test)]
+    {
+        return TEST_NOW_UNIX_SECS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(not(test))]
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -615,7 +627,6 @@ mod tests {
         assert_eq!(first_diag.error_class, "parse");
         assert!(first_diag.location.ends_with("broken/skill/SKILL.md"));
 
-        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
         let _ = source.list(&SkillFilter::default()).await.unwrap();
         let second = source.quarantined_diagnostics().await.unwrap();
         assert_eq!(second.len(), 1);

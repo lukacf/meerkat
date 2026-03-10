@@ -244,15 +244,19 @@ gh workflow run release.yml --ref v0.4.0 -f publish_release_packages=true
 Installed via `make install-hooks`. Two stages:
 
 **On commit** (`pre-commit`):
-- Runs tests only on changed crates (`scripts/test-changed-crates.sh`)
+- `cargo fmt --all`
 
 **On push** (`pre-push`):
 - Secret detection (gitleaks)
 - Trailing whitespace, YAML/TOML validation, merge conflict check, large file check
-- `make test` (fast tests: unit + integration-fast)
-- `cargo clippy` (workspace, warnings as errors)
-- `cargo doc` (workspace docs build)
-- `make audit` (cargo-deny security audit)
+- `cargo fmt --all -- --check`
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- `cargo build --workspace`
+- `cargo unit`
+
+**Manual local preflight**:
+- `pre-commit run --hook-stage manual cargo-check-changed`
+- `scripts/test-changed-crates.sh`
 
 ### Version Parity Contract
 

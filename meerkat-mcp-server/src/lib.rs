@@ -946,6 +946,9 @@ fn format_agent_result(
     }
 }
 
+#[cfg(test)]
+const DEFAULT_STREAM_READ_TIMEOUT_MS: u64 = 5;
+#[cfg(not(test))]
 const DEFAULT_STREAM_READ_TIMEOUT_MS: u64 = 5_000;
 
 fn base_tools_list() -> Vec<Value> {

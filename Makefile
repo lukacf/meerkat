@@ -27,17 +27,17 @@ release:
 # Fast test suite (unit + integration-fast, skips doctests and ignored)
 test:
 	@echo "$(GREEN)Running fast tests (unit + integration-fast)...$(NC)"
-	cargo nextest run --workspace
+	cargo nextest run --workspace --show-progress none --status-level none --final-status-level fail
 
 # Unit tests only
 test-unit:
 	@echo "$(GREEN)Running unit tests...$(NC)"
-	cargo nextest run --workspace --lib
+	cargo nextest run --workspace --lib --show-progress none --status-level none --final-status-level fail
 
 # Integration-fast tests only (no unit tests)
 test-int:
 	@echo "$(GREEN)Running integration-fast tests...$(NC)"
-	cargo nextest run --workspace --tests
+	cargo nextest run --workspace --tests --show-progress none --status-level none --final-status-level fail
 
 # Integration-real tests (ignored by default)
 test-int-real:

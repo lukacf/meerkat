@@ -252,7 +252,7 @@ Installed via `make install-hooks`. Two stages:
 - `cargo fmt --all -- --check`
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - `cargo build --workspace`
-- `cargo unit`
+- `scripts/pre-push-unit.sh` (`cargo unit` with per-tree cache, serialized runs, and one retry if `nextest` discovery hangs)
 
 **Manual local preflight**:
 - `pre-commit run --hook-stage manual cargo-check-changed`

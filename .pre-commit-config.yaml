@@ -88,8 +88,8 @@ repos:
   - repo: local
     hooks:
       - id: cargo-test
-        name: cargo unit
-        entry: cargo unit
+        name: workspace unit gate
+        entry: scripts/pre-push-unit.sh
         language: system
         types: [rust]
         pass_filenames: false

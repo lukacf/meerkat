@@ -112,6 +112,16 @@
           }
         ]
       },
+      "shell_env": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "description": "Per-agent environment variables injected into shell tool subprocesses.",
+        "type": [
+          "object",
+          "null"
+        ]
+      },
       "system_prompt": {
         "type": [
           "string",

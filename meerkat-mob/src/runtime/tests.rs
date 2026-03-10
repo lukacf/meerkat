@@ -301,6 +301,7 @@ struct MockSessionService {
     create_session_delay_ms: AtomicU64,
     create_session_in_flight: AtomicU64,
     create_session_max_in_flight: AtomicU64,
+    archive_delay_ms: AtomicU64,
     start_turn_delay_ms: AtomicU64,
     flow_turn_delay_ms: AtomicU64,
     flow_turn_never_terminal: std::sync::atomic::AtomicBool,
@@ -335,6 +336,7 @@ impl MockSessionService {
             create_session_delay_ms: AtomicU64::new(0),
             create_session_in_flight: AtomicU64::new(0),
             create_session_max_in_flight: AtomicU64::new(0),
+            archive_delay_ms: AtomicU64::new(0),
             start_turn_delay_ms: AtomicU64::new(0),
             flow_turn_delay_ms: AtomicU64::new(0),
             flow_turn_never_terminal: std::sync::atomic::AtomicBool::new(false),
@@ -468,6 +470,10 @@ impl MockSessionService {
 
     fn max_concurrent_create_session_calls(&self) -> u64 {
         self.create_session_max_in_flight.load(Ordering::Relaxed)
+    }
+
+    fn set_archive_delay_ms(&self, delay_ms: u64) {
+        self.archive_delay_ms.store(delay_ms, Ordering::Relaxed);
     }
 
     fn set_start_turn_delay_ms(&self, delay_ms: u64) {
@@ -841,6 +847,10 @@ impl SessionService for MockSessionService {
             return Err(SessionError::Store(Box::new(std::io::Error::other(
                 "mock archive failure",
             ))));
+        }
+        let archive_delay_ms = self.archive_delay_ms.load(Ordering::Relaxed);
+        if archive_delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(archive_delay_ms)).await;
         }
         let mut sessions = self.sessions.write().await;
         if let Some(runtime) = sessions.remove(id) {
@@ -6691,6 +6701,79 @@ async fn test_concurrent_spawn_and_retire_same_meerkat_is_serialized() {
     assert!(
         roster.is_empty() || (roster.len() == 1 && roster[0].meerkat_id.as_str() == "w-1"),
         "serialized spawn/retire should never corrupt roster"
+    );
+}
+
+#[tokio::test]
+async fn test_retiring_member_is_not_routable_before_disposal_completes() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_archive_delay_ms(250);
+
+    let session_id = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1")
+        .session_id()
+        .expect("session-backed")
+        .clone();
+
+    let retire_handle = {
+        let handle = handle.clone();
+        tokio::spawn(async move { handle.retire(MeerkatId::from("w-1")).await })
+    };
+
+    tokio::time::sleep(Duration::from_millis(25)).await;
+
+    let active_members = handle.list_members().await;
+    assert!(
+        active_members.is_empty(),
+        "retiring member must leave the active roster before disposal completes"
+    );
+
+    let all_members = handle.list_all_members().await;
+    assert_eq!(
+        all_members.len(),
+        1,
+        "retiring member should remain observable"
+    );
+    assert_eq!(all_members[0].meerkat_id.as_str(), "w-1");
+    assert_eq!(all_members[0].state, crate::roster::MemberState::Retiring);
+
+    let start_turn_calls_before = service.start_turn_call_count();
+    let external_turn = handle
+        .send_message(MeerkatId::from("w-1"), "still there?".to_string())
+        .await
+        .expect_err("retiring member must reject new external work");
+    assert!(matches!(external_turn, MobError::MeerkatNotFound(id) if id.as_str() == "w-1"));
+
+    let internal_turn = handle
+        .internal_turn(MeerkatId::from("w-1"), "still there?".to_string())
+        .await
+        .expect_err("retiring member must reject new internal work");
+    assert!(matches!(internal_turn, MobError::MeerkatNotFound(id) if id.as_str() == "w-1"));
+
+    assert_eq!(
+        service.start_turn_call_count(),
+        start_turn_calls_before,
+        "blocked turns must not reach the backing session"
+    );
+
+    retire_handle
+        .await
+        .expect("retire join")
+        .expect("retire completes");
+    assert!(
+        handle.get_member(&MeerkatId::from("w-1")).await.is_none(),
+        "member should be removed once retirement completes"
+    );
+    assert_eq!(
+        service.active_session_count().await,
+        0,
+        "completed retirement must archive the backing session"
+    );
+    assert!(
+        service.read(&session_id).await.is_err(),
+        "retired backing session should no longer resolve as active in the owner test harness"
     );
 }
 

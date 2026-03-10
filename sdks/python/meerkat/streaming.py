@@ -32,6 +32,7 @@ class _StdoutDispatcher:
         self._pending_stream_request_id: int | None = None
         self._unmatched_buffer: dict[str, list[dict[str, Any]]] = {}
         self._unmatched_stream_buffer: dict[str, list[dict[str, Any]]] = {}
+        self._stream_terminal: dict[str, dict[str, Any]] = {}
         self._unmatched_stream_end: set[str] = set()
         self._task: asyncio.Task[None] | None = None
         self._closed = False
@@ -74,6 +75,9 @@ class _StdoutDispatcher:
 
     def unsubscribe_stream(self, stream_id: str) -> None:
         self._stream_queues.pop(stream_id, None)
+
+    def stream_terminal(self, stream_id: str) -> dict[str, Any] | None:
+        return self._stream_terminal.get(stream_id)
 
     def subscribe_pending_stream(self, request_id: int) -> asyncio.Queue[dict[str, Any] | None]:
         if self._pending_stream_queue is not None:
@@ -139,6 +143,8 @@ class _StdoutDispatcher:
                     continue
                 if method in {"session/stream_end", "mob/stream_end"}:
                     stream_id = str(params.get("stream_id", ""))
+                    if stream_id:
+                        self._stream_terminal[stream_id] = dict(params)
                     queue = self._stream_queues.get(stream_id)
                     if queue is not None:
                         await queue.put(None)
@@ -166,6 +172,7 @@ class _StdoutDispatcher:
         self._stream_queues.clear()
         self._unmatched_stream_buffer.clear()
         self._unmatched_stream_end.clear()
+        self._stream_terminal.clear()
         if self._pending_stream_queue is not None:
             self._pending_stream_queue.put_nowait(None)
             self._pending_stream_queue = None
@@ -321,6 +328,10 @@ class EventSubscription:
     @property
     def stream_id(self) -> str:
         return self._stream_id
+
+    @property
+    def terminal_outcome(self) -> dict[str, Any] | None:
+        return self._dispatcher.stream_terminal(self._stream_id)
 
     async def __aenter__(self) -> EventSubscription:
         return self

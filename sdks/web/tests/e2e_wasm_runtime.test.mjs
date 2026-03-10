@@ -1,0 +1,161 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import http from "node:http";
+import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
+
+import { MeerkatRuntime } from "@rkat/web";
+import * as rawWasm from "@rkat/web/wasm/meerkat_web_runtime.js";
+
+async function makeNodeCompatibleWasmModule() {
+  const wasmUrl = import.meta.resolve("@rkat/web/wasm/meerkat_web_runtime_bg.wasm");
+  const wasmBytes = await readFile(fileURLToPath(wasmUrl));
+  return {
+    ...rawWasm,
+    default: async () => rawWasm.default({ module_or_path: wasmBytes }),
+  };
+}
+
+async function withAnthropicStreamServer(chunkCount, fn) {
+  const sseBody = Array.from(
+    { length: chunkCount },
+    (_, index) =>
+      `data: ${JSON.stringify({ type: "content_block_delta", delta: { type: "text_delta", text: String(index % 10) } })}\n\n`,
+  ).join("") + `data: ${JSON.stringify({ type: "message_stop" })}\n\n`;
+
+  const server = http.createServer((req, res) => {
+    if (req.method === "POST" && req.url === "/v1/messages") {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(sseBody);
+      return;
+    }
+    res.writeHead(404);
+    res.end("not found");
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+  try {
+    return await fn(`http://127.0.0.1:${port}`);
+  } finally {
+    await new Promise((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+}
+
+test("MeerkatRuntime drives direct-session lifecycle through shipped wasm exports", async () => {
+  const wasm = await makeNodeCompatibleWasmModule();
+  const runtime = await MeerkatRuntime.init(wasm, {
+    anthropicApiKey: "sk-test",
+    model: "claude-sonnet-4-5",
+  });
+
+  const session = runtime.createSession({
+    model: "claude-sonnet-4-5",
+    apiKey: "sk-test",
+  });
+  const staged = session.appendSystemContext({
+    text: "Remember the browser-side coordinator.",
+    source: "web",
+    idempotencyKey: "ctx-web-1",
+  });
+
+  assert.equal(staged.status, "staged");
+  assert.equal(staged.handle, session.handle);
+
+  const state = session.getState();
+  assert.equal(state.session_id, session.handle);
+  assert.equal(state.model, "claude-sonnet-4-5");
+
+  session.destroy();
+  assert.equal(session.isDestroyed, true);
+  assert.throws(() => session.getState(), /destroyed/i);
+});
+
+test("MeerkatRuntime opens and closes a public mob subscription through the shipped package surface", async () => {
+  let subscribedHandle;
+  const wasm = {
+    ...(await makeNodeCompatibleWasmModule()),
+    async mob_subscribe_events(mobId) {
+      const handle = await rawWasm.mob_subscribe_events(mobId);
+      subscribedHandle = handle;
+      return handle;
+    },
+  };
+  const runtime = await MeerkatRuntime.init(wasm, {
+    anthropicApiKey: "sk-test",
+    model: "claude-sonnet-4-5",
+  });
+
+  const mob = await runtime.createMob({
+    id: "mob-web-phase-0",
+    profiles: {
+      worker: {
+        model: "claude-sonnet-4-5",
+        tools: { comms: true },
+      },
+    },
+  });
+
+  const subscription = await mob.subscribeAll();
+  assert.deepEqual(subscription.poll(), []);
+  subscription.close();
+  assert.equal(subscription.isClosed, true);
+  assert.notEqual(subscribedHandle, undefined);
+  assert.throws(
+    () => rawWasm.poll_subscription(subscribedHandle),
+    /unknown subscription handle/i,
+  );
+});
+
+test("MeerkatRuntime surfaces lagged subscription signals through the shipped package surface", async () => {
+  await withAnthropicStreamServer(305, async (anthropicBaseUrl) => {
+    const wasm = await makeNodeCompatibleWasmModule();
+    const runtime = await MeerkatRuntime.init(wasm, {
+      anthropicApiKey: "sk-test",
+      anthropicBaseUrl,
+      model: "claude-sonnet-4-5",
+    });
+
+    const mob = await runtime.createMob({
+      id: "mob-web-phase-4",
+      profiles: {
+        worker: {
+          model: "claude-sonnet-4-5",
+          external_addressable: true,
+          tools: { comms: true },
+        },
+      },
+    });
+
+    const spawned = await mob.spawn([
+      {
+        profile: "worker",
+        meerkat_id: "worker-1",
+        runtime_mode: "turn_driven",
+      },
+    ]);
+    assert.equal(spawned[0].status, "ok");
+
+    const subscription = await mob.subscribe("worker-1");
+    await mob.sendMessage("worker-1", "Trigger a long streamed response.");
+
+    let items = [];
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await delay(25);
+      items = subscription.poll();
+      if (items.some((item) => item.type === "lagged")) {
+        break;
+      }
+    }
+
+    const lagged = items.find((item) => item.type === "lagged");
+    assert.ok(lagged, "expected a lagged signal from the shipped subscription path");
+    assert.ok(lagged.skipped >= 1);
+    const survivingEvent = items.find((item) => item.payload?.type === "text_delta");
+    assert.ok(survivingEvent, "expected a surviving text_delta event after lag");
+    subscription.close();
+  });
+});

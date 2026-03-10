@@ -6,6 +6,7 @@ use std::sync::Arc;
 use futures::StreamExt;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
@@ -22,6 +23,13 @@ use crate::handlers::RpcResponseExt;
 use crate::protocol::{RpcNotification, RpcRequest, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionOwner {
+    Runtime,
+    #[cfg(feature = "mob")]
+    Mob,
+}
+
 // ---------------------------------------------------------------------------
 // NotificationSink
 // ---------------------------------------------------------------------------
@@ -31,6 +39,13 @@ use crate::session_runtime::SessionRuntime;
 #[derive(Clone)]
 pub struct NotificationSink {
     tx: mpsc::Sender<RpcNotification>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StreamEmitStatus {
+    Delivered,
+    Overflow,
+    ReceiverGone,
 }
 
 impl NotificationSink {
@@ -51,13 +66,13 @@ impl NotificationSink {
     }
 
     /// Emit a standalone session stream event notification.
-    pub async fn emit_session_stream_event(
+    async fn emit_session_stream_event(
         &self,
         stream_id: &Uuid,
         sequence: u64,
         session_id: &SessionId,
         event: &EventEnvelope<AgentEvent>,
-    ) {
+    ) -> StreamEmitStatus {
         let params = serde_json::json!({
             "stream_id": stream_id.to_string(),
             "sequence": sequence,
@@ -65,16 +80,33 @@ impl NotificationSink {
             "event": event,
         });
         let notification = RpcNotification::new("session/stream_event", params);
-        let _ = self.tx.send(notification).await;
+        match self.tx.try_send(notification) {
+            Ok(()) => StreamEmitStatus::Delivered,
+            Err(TrySendError::Full(_)) => StreamEmitStatus::Overflow,
+            Err(TrySendError::Closed(_)) => StreamEmitStatus::ReceiverGone,
+        }
     }
 
     /// Emit an explicit terminal notification for a standalone session stream.
-    pub async fn emit_session_stream_end(&self, stream_id: &Uuid, session_id: &SessionId) {
-        let params = serde_json::json!({
+    pub async fn emit_session_stream_end(
+        &self,
+        stream_id: &Uuid,
+        session_id: &SessionId,
+        outcome: &str,
+        detail: Option<&str>,
+    ) {
+        let mut params = serde_json::json!({
             "stream_id": stream_id.to_string(),
             "session_id": session_id.to_string(),
             "ended": true,
+            "outcome": outcome,
         });
+        if let Some(detail) = detail {
+            params["error"] = serde_json::json!({
+                "code": "stream_queue_overflow",
+                "message": detail,
+            });
+        }
         let notification = RpcNotification::new("session/stream_end", params);
         let _ = self.tx.send(notification).await;
     }
@@ -89,29 +121,48 @@ impl NotificationSink {
         stream_id: &Uuid,
         sequence: u64,
         event: &serde_json::Value,
-    ) {
+    ) -> StreamEmitStatus {
         let params = serde_json::json!({
             "stream_id": stream_id.to_string(),
             "sequence": sequence,
             "event": event,
         });
         let notification = RpcNotification::new("mob/stream_event", params);
-        let _ = self.tx.send(notification).await;
+        match self.tx.try_send(notification) {
+            Ok(()) => StreamEmitStatus::Delivered,
+            Err(TrySendError::Full(_)) => StreamEmitStatus::Overflow,
+            Err(TrySendError::Closed(_)) => StreamEmitStatus::ReceiverGone,
+        }
     }
 
     #[cfg(feature = "mob")]
-    async fn emit_mob_stream_end(&self, stream_id: &Uuid) {
-        let params = serde_json::json!({
+    async fn emit_mob_stream_end(&self, stream_id: &Uuid, outcome: &str, detail: Option<&str>) {
+        let mut params = serde_json::json!({
             "stream_id": stream_id.to_string(),
             "ended": true,
+            "outcome": outcome,
         });
+        if let Some(detail) = detail {
+            params["error"] = serde_json::json!({
+                "code": "stream_queue_overflow",
+                "message": detail,
+            });
+        }
         let notification = RpcNotification::new("mob/stream_end", params);
         let _ = self.tx.send(notification).await;
     }
 }
 
 struct StreamForwarder {
+    terminal: StreamTerminal,
     state: StreamForwarderState,
+}
+
+#[derive(Clone)]
+enum StreamTerminal {
+    Session(SessionId),
+    #[cfg(feature = "mob")]
+    Mob,
 }
 
 enum StreamForwarderState {
@@ -213,6 +264,29 @@ impl MethodRouter {
         }
     }
 
+    #[cfg(all(test, feature = "mob"))]
+    fn new_with_mob_state(
+        runtime: Arc<SessionRuntime>,
+        config_store: Arc<dyn ConfigStore>,
+        notification_sink: NotificationSink,
+        mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
+    ) -> Self {
+        Self {
+            runtime,
+            config_store,
+            notification_sink,
+            skill_runtime: None,
+            active_session_streams: Arc::new(Mutex::new(HashMap::new())),
+            closed_session_streams: Arc::new(Mutex::new(ClosedStreamSet::new())),
+            #[cfg(feature = "mob")]
+            mob_state,
+            #[cfg(feature = "mob")]
+            active_mob_streams: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(feature = "mob")]
+            closed_mob_streams: Arc::new(Mutex::new(ClosedStreamSet::new())),
+        }
+    }
+
     /// Set the skill runtime for introspection methods.
     pub fn with_skill_runtime(
         mut self,
@@ -220,6 +294,30 @@ impl MethodRouter {
     ) -> Self {
         self.skill_runtime = runtime;
         self
+    }
+
+    // This intentionally does only the minimum owner probe. Handlers perform
+    // the authoritative operation-specific read again so they observe the
+    // freshest lifecycle state instead of routing off a cached snapshot.
+    async fn resolve_session_owner(&self, session_id: &SessionId) -> Option<SessionOwner> {
+        if self.runtime.session_state(session_id).await.is_some()
+            || self.runtime.read_session(session_id).await.is_ok()
+        {
+            return Some(SessionOwner::Runtime);
+        }
+
+        #[cfg(feature = "mob")]
+        if self
+            .mob_state
+            .session_service()
+            .read(session_id)
+            .await
+            .is_ok()
+        {
+            return Some(SessionOwner::Mob);
+        }
+
+        None
     }
 
     /// Dispatch a request to the appropriate handler.
@@ -263,7 +361,17 @@ impl MethodRouter {
                 handlers::turn::handle_start(id, params, &self.runtime, &self.notification_sink)
                     .await
             }
-            "turn/interrupt" => handlers::turn::handle_interrupt(id, params, &self.runtime).await,
+            "turn/interrupt" => {
+                #[cfg(feature = "mob")]
+                {
+                    handlers::turn::handle_interrupt(id, params, &self.runtime, &self.mob_state)
+                        .await
+                }
+                #[cfg(not(feature = "mob"))]
+                {
+                    handlers::turn::handle_interrupt(id, params, &self.runtime).await
+                }
+            }
             #[cfg(feature = "mob")]
             "mob/prefabs" => handlers::mob::handle_prefabs(id).await,
             #[cfg(feature = "mob")]
@@ -394,36 +502,53 @@ impl MethodRouter {
             Err(resp) => return resp,
         };
 
-        if let Some(info) = self.runtime.session_state(&session_id).await {
-            return RpcResponse::success(
+        match self.resolve_session_owner(&session_id).await {
+            Some(SessionOwner::Runtime) => {
+                if let Some(info) = self.runtime.session_state(&session_id).await {
+                    return RpcResponse::success(
+                        id,
+                        json!({
+                            "session_id": session_id.to_string(),
+                            "session_ref": self.runtime.realm_id().map(|realm| meerkat_contracts::format_session_ref(realm, &session_id)),
+                            "state": info.state.as_str(),
+                            "labels": info.labels,
+                        }),
+                    );
+                }
+                match self.runtime.read_session(&session_id).await {
+                    Ok(view) => RpcResponse::success(
+                        id,
+                        json!({
+                            "session_id": session_id.to_string(),
+                            "session_ref": self.runtime.realm_id().map(|realm| meerkat_contracts::format_session_ref(realm, &session_id)),
+                            "state": if view.state.is_active { "running" } else { "idle" },
+                            "labels": view.state.labels,
+                        }),
+                    ),
+                    Err(rpc_err) => RpcResponse::error(id, rpc_err.code, rpc_err.message),
+                }
+            }
+            #[cfg(feature = "mob")]
+            Some(SessionOwner::Mob) => {
+                match self.mob_state.session_service().read(&session_id).await {
+                    Ok(view) => RpcResponse::success(
+                        id,
+                        json!({
+                            "session_id": session_id.to_string(),
+                            "session_ref": self.runtime.realm_id().map(|realm| meerkat_contracts::format_session_ref(realm, &session_id)),
+                            "state": if view.state.is_active { "running" } else { "idle" },
+                            "labels": view.state.labels,
+                        }),
+                    ),
+                    Err(err) => RpcResponse::error(id, error::SESSION_NOT_FOUND, err.to_string()),
+                }
+            }
+            None => RpcResponse::error(
                 id,
-                json!({
-                    "session_id": session_id.to_string(),
-                    "session_ref": self.runtime.realm_id().map(|realm| meerkat_contracts::format_session_ref(realm, &session_id)),
-                    "state": info.state.as_str(),
-                    "labels": info.labels,
-                }),
-            );
+                error::SESSION_NOT_FOUND,
+                format!("Session not found: {session_id}"),
+            ),
         }
-
-        #[cfg(feature = "mob")]
-        if let Ok(view) = self.mob_state.session_service().read(&session_id).await {
-            return RpcResponse::success(
-                id,
-                json!({
-                    "session_id": session_id.to_string(),
-                    "session_ref": self.runtime.realm_id().map(|realm| meerkat_contracts::format_session_ref(realm, &session_id)),
-                    "state": if view.state.is_active { "running" } else { "idle" },
-                    "labels": view.state.labels,
-                }),
-            );
-        }
-
-        RpcResponse::error(
-            id,
-            error::SESSION_NOT_FOUND,
-            format!("Session not found: {session_id}"),
-        )
     }
 
     async fn handle_session_archive(
@@ -443,22 +568,25 @@ impl MethodRouter {
             Ok(sid) => sid,
             Err(resp) => return resp,
         };
-        match self.runtime.archive_session(&session_id).await {
-            Ok(()) => RpcResponse::success(id, json!({"archived": true})),
-            Err(rpc_err) if rpc_err.code == error::SESSION_NOT_FOUND => {
-                #[cfg(feature = "mob")]
-                {
-                    if let Ok(()) = self
-                        .mob_state
-                        .retire_member_by_session_id(&session_id)
-                        .await
-                    {
-                        return RpcResponse::success(id, json!({"archived": true}));
-                    }
-                }
-                RpcResponse::error(id, rpc_err.code, rpc_err.message)
-            }
-            Err(rpc_err) => RpcResponse::error(id, rpc_err.code, rpc_err.message),
+        match self.resolve_session_owner(&session_id).await {
+            Some(SessionOwner::Runtime) => match self.runtime.archive_session(&session_id).await {
+                Ok(()) => RpcResponse::success(id, json!({"archived": true})),
+                Err(rpc_err) => RpcResponse::error(id, rpc_err.code, rpc_err.message),
+            },
+            #[cfg(feature = "mob")]
+            Some(SessionOwner::Mob) => match self
+                .mob_state
+                .retire_member_by_session_id(&session_id)
+                .await
+            {
+                Ok(()) => RpcResponse::success(id, json!({"archived": true})),
+                Err(err) => RpcResponse::error(id, error::SESSION_NOT_FOUND, err.to_string()),
+            },
+            None => RpcResponse::error(
+                id,
+                error::SESSION_NOT_FOUND,
+                format!("Session not found: {session_id}"),
+            ),
         }
     }
 
@@ -485,27 +613,28 @@ impl MethodRouter {
             source: params.source,
             idempotency_key: params.idempotency_key,
         };
-        match self
-            .runtime
-            .append_system_context(&session_id, req.clone())
-            .await
-        {
-            Ok(result) => RpcResponse::success(id, json!({"status": result.status})),
-            Err(rpc_err) if rpc_err.code == error::SESSION_NOT_FOUND => {
-                #[cfg(feature = "mob")]
-                {
-                    if let Ok(result) = self
-                        .mob_state
-                        .session_service()
-                        .append_system_context(&session_id, req)
-                        .await
-                    {
-                        return RpcResponse::success(id, json!({"status": result.status}));
-                    }
+        match self.resolve_session_owner(&session_id).await {
+            Some(SessionOwner::Runtime) => {
+                match self.runtime.append_system_context(&session_id, req).await {
+                    Ok(result) => RpcResponse::success(id, json!({"status": result.status})),
+                    Err(rpc_err) => RpcResponse::error(id, rpc_err.code, rpc_err.message),
                 }
-                RpcResponse::error(id, rpc_err.code, rpc_err.message)
             }
-            Err(rpc_err) => RpcResponse::error(id, rpc_err.code, rpc_err.message),
+            #[cfg(feature = "mob")]
+            Some(SessionOwner::Mob) => match self
+                .mob_state
+                .session_service()
+                .append_system_context(&session_id, req)
+                .await
+            {
+                Ok(result) => RpcResponse::success(id, json!({"status": result.status})),
+                Err(err) => RpcResponse::error(id, error::SESSION_NOT_FOUND, err.to_string()),
+            },
+            None => RpcResponse::error(
+                id,
+                error::SESSION_NOT_FOUND,
+                format!("Session not found: {session_id}"),
+            ),
         }
     }
 
@@ -527,20 +656,25 @@ impl MethodRouter {
             Ok(sid) => sid,
             Err(resp) => return resp,
         };
-        let comms = if let Some(c) = self.runtime.comms_runtime(&session_id).await {
-            Some(c)
-        } else {
+        let comms = match self.resolve_session_owner(&session_id).await {
+            Some(SessionOwner::Runtime) => {
+                if self.runtime.session_state(&session_id).await.is_none() {
+                    return RpcResponse::error(
+                        id,
+                        error::INVALID_PARAMS,
+                        format!("Session is archived: {session_id}"),
+                    );
+                }
+                self.runtime.comms_runtime(&session_id).await
+            }
             #[cfg(feature = "mob")]
-            {
+            Some(SessionOwner::Mob) => {
                 self.mob_state
                     .session_service()
                     .comms_runtime(&session_id)
                     .await
             }
-            #[cfg(not(feature = "mob"))]
-            {
-                None
-            }
+            None => None,
         };
         let Some(comms) = comms else {
             return RpcResponse::error(
@@ -609,20 +743,25 @@ impl MethodRouter {
             Ok(sid) => sid,
             Err(resp) => return resp,
         };
-        let comms = if let Some(c) = self.runtime.comms_runtime(&session_id).await {
-            Some(c)
-        } else {
+        let comms = match self.resolve_session_owner(&session_id).await {
+            Some(SessionOwner::Runtime) => {
+                if self.runtime.session_state(&session_id).await.is_none() {
+                    return RpcResponse::error(
+                        id,
+                        error::INVALID_PARAMS,
+                        format!("Session is archived: {session_id}"),
+                    );
+                }
+                self.runtime.comms_runtime(&session_id).await
+            }
             #[cfg(feature = "mob")]
-            {
+            Some(SessionOwner::Mob) => {
                 self.mob_state
                     .session_service()
                     .comms_runtime(&session_id)
                     .await
             }
-            #[cfg(not(feature = "mob"))]
-            {
-                None
-            }
+            None => None,
         };
         let Some(comms) = comms else {
             return RpcResponse::error(
@@ -675,37 +814,43 @@ impl MethodRouter {
             Err(resp) => return resp,
         };
 
-        let stream = match self.runtime.subscribe_session_events(&session_id).await {
-            Ok(stream) => stream,
-            Err(runtime_err) => {
-                #[cfg(feature = "mob")]
-                {
-                    match meerkat_mob::MobSessionService::subscribe_session_events(
-                        self.mob_state.session_service(),
-                        &session_id,
-                    )
-                    .await
-                    {
-                        Ok(stream) => stream,
-                        Err(err) => {
-                            return RpcResponse::error(
-                                id,
-                                error::INVALID_PARAMS,
-                                format!(
-                                    "Failed to subscribe to session events: {runtime_err}; fallback: {err}"
-                                ),
-                            );
-                        }
+        let stream = match self.resolve_session_owner(&session_id).await {
+            Some(SessionOwner::Runtime) => {
+                match self.runtime.subscribe_session_events(&session_id).await {
+                    Ok(stream) => stream,
+                    Err(err) => {
+                        return RpcResponse::error(
+                            id,
+                            error::INVALID_PARAMS,
+                            format!("Failed to subscribe to session events: {err}"),
+                        );
                     }
                 }
-                #[cfg(not(feature = "mob"))]
+            }
+            #[cfg(feature = "mob")]
+            Some(SessionOwner::Mob) => {
+                match meerkat_mob::MobSessionService::subscribe_session_events(
+                    self.mob_state.session_service(),
+                    &session_id,
+                )
+                .await
                 {
-                    return RpcResponse::error(
-                        id,
-                        error::INVALID_PARAMS,
-                        format!("Failed to subscribe to session events: {runtime_err}"),
-                    );
+                    Ok(stream) => stream,
+                    Err(err) => {
+                        return RpcResponse::error(
+                            id,
+                            error::INVALID_PARAMS,
+                            format!("Failed to subscribe to session events: {err}"),
+                        );
+                    }
                 }
+            }
+            None => {
+                return RpcResponse::error(
+                    id,
+                    error::SESSION_NOT_FOUND,
+                    format!("Session not found: {session_id}"),
+                );
             }
         };
 
@@ -732,38 +877,78 @@ impl MethodRouter {
                         match event {
                             Some(envelope) => {
                                 sequence += 1;
-                                notification_sink
+                                let emit_status = notification_sink
                                     .emit_session_stream_event(&stream_id_for_task, sequence, &session_id_for_task, &envelope)
                                     .await;
+                                if emit_status == StreamEmitStatus::Overflow {
+                                    let should_emit = {
+                                        let mut streams = active_session_streams.lock().await;
+                                        if streams
+                                            .get(&stream_id_for_task)
+                                            .is_some_and(|s| matches!(s.state, StreamForwarderState::Active { .. }))
+                                        {
+                                            streams.remove(&stream_id_for_task);
+                                            closed_session_streams
+                                                .lock()
+                                                .await
+                                                .insert(stream_id_for_task);
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    };
+                                    if should_emit {
+                                        notification_sink
+                                            .emit_session_stream_end(
+                                                &stream_id_for_task,
+                                                &session_id_for_task,
+                                                "terminal_error",
+                                                Some("transport stream notification queue overflow"),
+                                            )
+                                            .await;
+                                    }
+                                    break;
+                                }
                             }
                             None => {
-                                notification_sink
-                                    .emit_session_stream_end(&stream_id_for_task, &session_id_for_task)
-                                    .await;
+                                let should_emit = {
+                                    let mut streams = active_session_streams.lock().await;
+                                    if streams
+                                        .get(&stream_id_for_task)
+                                        .is_some_and(|s| matches!(s.state, StreamForwarderState::Active { .. }))
+                                    {
+                                        streams.remove(&stream_id_for_task);
+                                        closed_session_streams
+                                            .lock()
+                                            .await
+                                            .insert(stream_id_for_task);
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                };
+                                if should_emit {
+                                    notification_sink
+                                        .emit_session_stream_end(
+                                            &stream_id_for_task,
+                                            &session_id_for_task,
+                                            "remote_end",
+                                            None,
+                                        )
+                                        .await;
+                                }
                                 break;
                             }
                         }
                     }
                 }
             }
-
-            let mut streams = active_session_streams.lock().await;
-            if streams
-                .get(&stream_id_for_task)
-                .is_some_and(|s| matches!(s.state, StreamForwarderState::Active { .. }))
-            {
-                streams.remove(&stream_id_for_task);
-                // Track natural completion so subsequent close returns already_closed=true
-                closed_session_streams
-                    .lock()
-                    .await
-                    .insert(stream_id_for_task);
-            }
         });
 
         self.active_session_streams.lock().await.insert(
             stream_id,
             StreamForwarder {
+                terminal: StreamTerminal::Session(session_id.clone()),
                 state: StreamForwarderState::Active {
                     stop_tx: Some(stop_tx),
                     task,
@@ -810,18 +995,33 @@ impl MethodRouter {
             }
         };
 
-        let mut active_session_streams = self.active_session_streams.lock().await;
-        let already_closed = match active_session_streams.remove(&stream_id) {
-            Some(mut stream) => match &mut stream.state {
-                StreamForwarderState::Active { stop_tx, task } => {
-                    if let Some(stop_tx) = stop_tx.take() {
-                        let _ = stop_tx.send(());
+        let closed_terminal = {
+            let mut active_session_streams = self.active_session_streams.lock().await;
+            match active_session_streams.remove(&stream_id) {
+                Some(mut stream) => match &mut stream.state {
+                    StreamForwarderState::Active { stop_tx, task } => {
+                        if let Some(stop_tx) = stop_tx.take() {
+                            let _ = stop_tx.send(());
+                        }
+                        task.abort();
+                        self.closed_session_streams.lock().await.insert(stream_id);
+                        Some(stream.terminal)
                     }
-                    task.abort();
-                    self.closed_session_streams.lock().await.insert(stream_id);
-                    false
-                }
-            },
+                },
+                None => None,
+            }
+        };
+        let already_closed = match closed_terminal {
+            Some(StreamTerminal::Session(session_id)) => {
+                self.notification_sink
+                    .emit_session_stream_end(&stream_id, &session_id, "explicit_close", None)
+                    .await;
+                false
+            }
+            #[cfg(feature = "mob")]
+            Some(StreamTerminal::Mob) => {
+                unreachable!("session stream stored mob terminal metadata")
+            }
             None => self.closed_session_streams.lock().await.remove(&stream_id),
         };
 
@@ -907,39 +1107,70 @@ impl MethodRouter {
                                     sequence += 1;
                                     let event_json = serde_json::to_value(&envelope)
                                         .unwrap_or(serde_json::Value::Null);
-                                    notification_sink
+                                    let emit_status = notification_sink
                                         .emit_mob_stream_event(
                                             &stream_id_for_task,
                                             sequence,
                                             &event_json,
                                         )
                                         .await;
+                                    if emit_status == StreamEmitStatus::Overflow {
+                                        let should_emit = {
+                                            let mut streams = active_mob_streams.lock().await;
+                                            if streams
+                                                .get(&stream_id_for_task)
+                                                .is_some_and(|s| matches!(s.state, StreamForwarderState::Active { .. }))
+                                            {
+                                                streams.remove(&stream_id_for_task);
+                                                closed_mob_streams.lock().await.insert(stream_id_for_task);
+                                                true
+                                            } else {
+                                                false
+                                            }
+                                        };
+                                        if should_emit {
+                                            notification_sink
+                                                .emit_mob_stream_end(
+                                                    &stream_id_for_task,
+                                                    "terminal_error",
+                                                    Some("transport stream notification queue overflow"),
+                                                )
+                                                .await;
+                                        }
+                                        break;
+                                    }
                                 }
                                 None => {
-                                    notification_sink
-                                        .emit_mob_stream_end(&stream_id_for_task)
-                                        .await;
+                                    let should_emit = {
+                                        let mut streams = active_mob_streams.lock().await;
+                                        if streams
+                                            .get(&stream_id_for_task)
+                                            .is_some_and(|s| matches!(s.state, StreamForwarderState::Active { .. }))
+                                        {
+                                            streams.remove(&stream_id_for_task);
+                                            closed_mob_streams.lock().await.insert(stream_id_for_task);
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    };
+                                    if should_emit {
+                                        notification_sink
+                                            .emit_mob_stream_end(&stream_id_for_task, "remote_end", None)
+                                            .await;
+                                    }
                                     break;
                                 }
                             }
                         }
                     }
                 }
-
-                let closed_mob_streams = closed_mob_streams.clone();
-                let mut streams = active_mob_streams.lock().await;
-                if streams
-                    .get(&stream_id_for_task)
-                    .is_some_and(|s| matches!(s.state, StreamForwarderState::Active { .. }))
-                {
-                    streams.remove(&stream_id_for_task);
-                    closed_mob_streams.lock().await.insert(stream_id_for_task);
-                }
             });
 
             self.active_mob_streams.lock().await.insert(
                 stream_id,
                 StreamForwarder {
+                    terminal: StreamTerminal::Mob,
                     state: StreamForwarderState::Active {
                         stop_tx: Some(stop_tx),
                         task,
@@ -965,38 +1196,70 @@ impl MethodRouter {
                                     sequence += 1;
                                     let event_json = serde_json::to_value(&attributed)
                                         .unwrap_or(serde_json::Value::Null);
-                                    notification_sink
+                                    let emit_status = notification_sink
                                         .emit_mob_stream_event(
                                             &stream_id_for_task,
                                             sequence,
                                             &event_json,
                                         )
                                         .await;
+                                    if emit_status == StreamEmitStatus::Overflow {
+                                        let should_emit = {
+                                            let mut streams = active_mob_streams.lock().await;
+                                            if streams
+                                                .get(&stream_id_for_task)
+                                                .is_some_and(|s| matches!(s.state, StreamForwarderState::Active { .. }))
+                                            {
+                                                streams.remove(&stream_id_for_task);
+                                                closed_mob_streams.lock().await.insert(stream_id_for_task);
+                                                true
+                                            } else {
+                                                false
+                                            }
+                                        };
+                                        if should_emit {
+                                            notification_sink
+                                                .emit_mob_stream_end(
+                                                    &stream_id_for_task,
+                                                    "terminal_error",
+                                                    Some("transport stream notification queue overflow"),
+                                                )
+                                                .await;
+                                        }
+                                        break;
+                                    }
                                 }
                                 None => {
-                                    notification_sink
-                                        .emit_mob_stream_end(&stream_id_for_task)
-                                        .await;
+                                    let should_emit = {
+                                        let mut streams = active_mob_streams.lock().await;
+                                        if streams
+                                            .get(&stream_id_for_task)
+                                            .is_some_and(|s| matches!(s.state, StreamForwarderState::Active { .. }))
+                                        {
+                                            streams.remove(&stream_id_for_task);
+                                            closed_mob_streams.lock().await.insert(stream_id_for_task);
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    };
+                                    if should_emit {
+                                        notification_sink
+                                            .emit_mob_stream_end(&stream_id_for_task, "remote_end", None)
+                                            .await;
+                                    }
                                     break;
                                 }
                             }
                         }
                     }
                 }
-
-                let mut streams = active_mob_streams.lock().await;
-                if streams
-                    .get(&stream_id_for_task)
-                    .is_some_and(|s| matches!(s.state, StreamForwarderState::Active { .. }))
-                {
-                    streams.remove(&stream_id_for_task);
-                    closed_mob_streams.lock().await.insert(stream_id_for_task);
-                }
             });
 
             self.active_mob_streams.lock().await.insert(
                 stream_id,
                 StreamForwarder {
+                    terminal: StreamTerminal::Mob,
                     state: StreamForwarderState::Active {
                         stop_tx: Some(stop_tx),
                         task,
@@ -1044,18 +1307,32 @@ impl MethodRouter {
             }
         };
 
-        let mut active_mob_streams = self.active_mob_streams.lock().await;
-        let already_closed = match active_mob_streams.remove(&stream_id) {
-            Some(mut stream) => match &mut stream.state {
-                StreamForwarderState::Active { stop_tx, task } => {
-                    if let Some(stop_tx) = stop_tx.take() {
-                        let _ = stop_tx.send(());
+        let closed_terminal = {
+            let mut active_mob_streams = self.active_mob_streams.lock().await;
+            match active_mob_streams.remove(&stream_id) {
+                Some(mut stream) => match &mut stream.state {
+                    StreamForwarderState::Active { stop_tx, task } => {
+                        if let Some(stop_tx) = stop_tx.take() {
+                            let _ = stop_tx.send(());
+                        }
+                        task.abort();
+                        self.closed_mob_streams.lock().await.insert(stream_id);
+                        Some(stream.terminal)
                     }
-                    task.abort();
-                    self.closed_mob_streams.lock().await.insert(stream_id);
-                    false
-                }
-            },
+                },
+                None => None,
+            }
+        };
+        let already_closed = match closed_terminal {
+            Some(StreamTerminal::Mob) => {
+                self.notification_sink
+                    .emit_mob_stream_end(&stream_id, "explicit_close", None)
+                    .await;
+                false
+            }
+            Some(StreamTerminal::Session(_)) => {
+                unreachable!("mob stream stored session terminal metadata")
+            }
             None => self.closed_mob_streams.lock().await.remove(&stream_id),
         };
 
@@ -1091,7 +1368,7 @@ mod tests {
         SourceIdentityRecord, SourceIdentityRegistry, SourceIdentityStatus, SourceTransportKind,
         SourceUuid,
     };
-    use meerkat_core::{Config, ConfigRuntime, MemoryConfigStore, StopReason};
+    use meerkat_core::{Config, ConfigRuntime, MemoryConfigStore, Message, StopReason};
     use serde::Serialize;
 
     use crate::protocol::RpcId;
@@ -1132,6 +1409,76 @@ mod tests {
         }
     }
 
+    struct RecordingMockLlmClient {
+        requests: Arc<std::sync::Mutex<Vec<Vec<Message>>>>,
+        delay_ms: Option<u64>,
+    }
+
+    impl RecordingMockLlmClient {
+        fn new(requests: Arc<std::sync::Mutex<Vec<Vec<Message>>>>) -> Self {
+            Self {
+                requests,
+                delay_ms: None,
+            }
+        }
+
+        fn with_delay(requests: Arc<std::sync::Mutex<Vec<Vec<Message>>>>, delay_ms: u64) -> Self {
+            Self {
+                requests,
+                delay_ms: Some(delay_ms),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmClient for RecordingMockLlmClient {
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_client::LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
+        > {
+            self.requests
+                .lock()
+                .expect("recorded requests lock poisoned")
+                .push(request.messages.clone());
+            let delay = self.delay_ms;
+            Box::pin(stream::unfold(0u8, move |state| async move {
+                match state {
+                    0 => {
+                        if let Some(delay_ms) = delay {
+                            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                        }
+                        Some((
+                            Ok(meerkat_client::LlmEvent::TextDelta {
+                                delta: "Hello from mock".to_string(),
+                                meta: None,
+                            }),
+                            1,
+                        ))
+                    }
+                    1 => Some((
+                        Ok(meerkat_client::LlmEvent::Done {
+                            outcome: meerkat_client::LlmDoneOutcome::Success {
+                                stop_reason: StopReason::EndTurn,
+                            },
+                        }),
+                        2,
+                    )),
+                    _ => None,
+                }
+            }))
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Test helpers
     // -----------------------------------------------------------------------
@@ -1153,6 +1500,74 @@ mod tests {
         let (notif_tx, notif_rx) = mpsc::channel(100);
         let sink = NotificationSink::new(notif_tx);
         let router = MethodRouter::new(runtime, config_store, sink);
+        (router, notif_rx)
+    }
+
+    async fn test_router_with_llm(
+        llm_client: Arc<dyn LlmClient>,
+    ) -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let config = Config::default();
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let mut runtime = SessionRuntime::new(factory, config, 10, store);
+        let config_store: Arc<dyn ConfigStore> =
+            Arc::new(MemoryConfigStore::new(Config::default()));
+        runtime.default_llm_client = Some(llm_client);
+        runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+            Arc::clone(&config_store),
+            temp.path().join("config_state.json"),
+        )));
+        let runtime = Arc::new(runtime);
+        let (notif_tx, notif_rx) = mpsc::channel(100);
+        let sink = NotificationSink::new(notif_tx);
+        let router = MethodRouter::new(runtime, config_store, sink);
+        (router, notif_rx)
+    }
+
+    async fn test_router_with_llm_and_notification_capacity(
+        llm_client: Arc<dyn LlmClient>,
+        notification_capacity: usize,
+    ) -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let config = Config::default();
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let mut runtime = SessionRuntime::new(factory, config, 10, store);
+        let config_store: Arc<dyn ConfigStore> =
+            Arc::new(MemoryConfigStore::new(Config::default()));
+        runtime.default_llm_client = Some(llm_client);
+        runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+            Arc::clone(&config_store),
+            temp.path().join("config_state.json"),
+        )));
+        let runtime = Arc::new(runtime);
+        let (notif_tx, notif_rx) = mpsc::channel(notification_capacity);
+        let sink = NotificationSink::new(notif_tx);
+        let router = MethodRouter::new(runtime, config_store, sink);
+        (router, notif_rx)
+    }
+
+    #[cfg(feature = "mob")]
+    async fn test_router_with_mob_state(
+        mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
+    ) -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let config = Config::default();
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let mut runtime = SessionRuntime::new(factory, config, 10, store);
+        let config_store: Arc<dyn ConfigStore> =
+            Arc::new(MemoryConfigStore::new(Config::default()));
+        runtime.default_llm_client = Some(Arc::new(MockLlmClient));
+        runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+            Arc::clone(&config_store),
+            temp.path().join("config_state.json"),
+        )));
+        let runtime = Arc::new(runtime);
+        let (notif_tx, notif_rx) = mpsc::channel(100);
+        let sink = NotificationSink::new(notif_tx);
+        let router = MethodRouter::new_with_mob_state(runtime, config_store, sink, mob_state);
         (router, notif_rx)
     }
 
@@ -1281,6 +1696,38 @@ mod tests {
         resp.error.as_ref().expect("Expected error response").code
     }
 
+    async fn drain_notifications(notif_rx: &mut mpsc::Receiver<RpcNotification>) {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        while notif_rx.try_recv().is_ok() {}
+    }
+
+    async fn next_run_started_prompt(notif_rx: &mut mpsc::Receiver<RpcNotification>) -> String {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let notif = notif_rx.recv().await.expect("notification");
+                if notif.method != "session/event" {
+                    continue;
+                }
+                if notif.params["event"]["payload"]["type"] != "run_started" {
+                    continue;
+                }
+                break notif.params["event"]["payload"]["prompt"]
+                    .as_str()
+                    .expect("run_started prompt")
+                    .to_string();
+            }
+        })
+        .await
+        .expect("run_started notification")
+    }
+
+    fn system_prompt_from_request(messages: &[Message]) -> Option<&str> {
+        messages.iter().find_map(|message| match message {
+            Message::System(system) => Some(system.content.as_str()),
+            _ => None,
+        })
+    }
+
     // -----------------------------------------------------------------------
     // Tests
     // -----------------------------------------------------------------------
@@ -1305,6 +1752,10 @@ mod tests {
         assert!(method_names.contains(&"session/create"));
         assert!(method_names.contains(&"session/inject_context"));
         assert!(method_names.contains(&"turn/start"));
+        assert!(
+            !method_names.contains(&"session/destroy"),
+            "generic session/destroy must not appear until it has member-aware mob semantics"
+        );
         #[cfg(feature = "mob")]
         {
             assert!(method_names.contains(&"mob/prefabs"));
@@ -1393,7 +1844,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_stream_close_removes_forwarder_from_active_map() {
-        let (router, _notif_rx) = test_router().await;
+        let (router, mut notif_rx) = test_router().await;
 
         let create_resp = router
             .dispatch(make_request(
@@ -1427,6 +1878,86 @@ mod tests {
         assert_eq!(closed["closed"], true);
         assert_eq!(closed["already_closed"], false);
         assert_eq!(router.active_session_streams.lock().await.len(), 0);
+
+        let notification = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let notif = notif_rx.recv().await.expect("notification");
+                if notif.method == "session/stream_end" {
+                    break notif;
+                }
+            }
+        })
+        .await
+        .expect("session explicit-close notification");
+        assert_eq!(notification.params["stream_id"], stream_id);
+        assert_eq!(notification.params["session_id"], session_id);
+        assert_eq!(notification.params["outcome"], "explicit_close");
+    }
+
+    #[tokio::test]
+    async fn session_stream_close_is_idempotent_after_explicit_close() {
+        let (router, mut notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({ "prompt": "hello" }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&create_resp)["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let open_resp = router
+            .dispatch(make_request(
+                "session/stream_open",
+                serde_json::json!({ "session_id": session_id }),
+            ))
+            .await
+            .unwrap();
+        let stream_id = result_value(&open_resp)["stream_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let close_resp = router
+            .dispatch(make_request(
+                "session/stream_close",
+                serde_json::json!({ "stream_id": stream_id }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result_value(&close_resp)["already_closed"], false);
+
+        let notification = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let notif = notif_rx.recv().await.expect("notification");
+                if notif.method == "session/stream_end" {
+                    break notif;
+                }
+            }
+        })
+        .await
+        .expect("explicit-close notification");
+        assert_eq!(notification.params["outcome"], "explicit_close");
+
+        let close_again_resp = router
+            .dispatch(make_request(
+                "session/stream_close",
+                serde_json::json!({ "stream_id": stream_id }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result_value(&close_again_resp)["already_closed"], true);
+
+        let extra_notification =
+            tokio::time::timeout(std::time::Duration::from_millis(200), notif_rx.recv()).await;
+        assert!(
+            extra_notification.is_err(),
+            "idempotent close must not emit a second terminal notification"
+        );
     }
 
     #[cfg(feature = "mob")]
@@ -1605,6 +2136,64 @@ mod tests {
 
     #[cfg(feature = "mob")]
     #[tokio::test]
+    async fn mob_spawned_session_id_supports_turn_interrupt() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": "mob-session-interrupt",
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-5",
+                                "tools": { "comms": true }
+                            }
+                        }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let mob_id = result_value(&create_resp)["mob_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let spawn_resp = router
+            .dispatch(make_request(
+                "mob/spawn",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "profile": "worker",
+                    "meerkat_id": "worker-1",
+                    "runtime_mode": "turn_driven"
+                }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&spawn_resp)["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let interrupt_resp = router
+            .dispatch(make_request(
+                "turn/interrupt",
+                serde_json::json!({ "session_id": session_id }),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            interrupt_resp.error.is_none(),
+            "mob-backed interrupt should route through the authoritative owner: {interrupt_resp:?}"
+        );
+        assert_eq!(result_value(&interrupt_resp)["interrupted"], true);
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
     async fn session_archive_for_mob_session_retires_member() {
         let (router, _notif_rx) = test_router().await;
 
@@ -1666,6 +2255,136 @@ mod tests {
         let members_value = result_value(&members_resp);
         let members = members_value["members"].as_array().unwrap();
         assert!(members.is_empty());
+
+        let interrupt_resp = router
+            .dispatch(make_request(
+                "turn/interrupt",
+                serde_json::json!({ "session_id": session_id }),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            interrupt_resp.error.is_some(),
+            "retired mob-backed session must reject generic turn/interrupt"
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_spawned_session_id_supports_session_read() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": "mob-session-read",
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-5",
+                                "tools": { "comms": true }
+                            }
+                        }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let mob_id = result_value(&create_resp)["mob_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let spawn_resp = router
+            .dispatch(make_request(
+                "mob/spawn",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "profile": "worker",
+                    "meerkat_id": "worker-1",
+                    "runtime_mode": "turn_driven"
+                }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&spawn_resp)["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let read_resp = router
+            .dispatch(make_request(
+                "session/read",
+                serde_json::json!({ "session_id": session_id }),
+            ))
+            .await
+            .unwrap();
+        let read_value = result_value(&read_resp);
+
+        assert_eq!(read_value["session_id"].as_str().unwrap(), session_id);
+        assert!(read_value["state"].is_string());
+        assert!(read_value["labels"].is_object());
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn session_inject_context_for_mob_session_targets_backing_service() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": "mob-session-inject-context",
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-5",
+                                "tools": { "comms": true }
+                            }
+                        }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let mob_id = result_value(&create_resp)["mob_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let spawn_resp = router
+            .dispatch(make_request(
+                "mob/spawn",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "profile": "worker",
+                    "meerkat_id": "worker-1",
+                    "runtime_mode": "turn_driven"
+                }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&spawn_resp)["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let inject_resp = router
+            .dispatch(make_request(
+                "session/inject_context",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "text": "Coordinate with the lead before acting.",
+                    "source": "mob",
+                    "idempotency_key": "ctx-worker-1"
+                }),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(result_value(&inject_resp)["status"], "staged");
     }
 
     #[tokio::test]
@@ -1682,6 +2401,486 @@ mod tests {
             response.error.as_ref().map(|e| e.code),
             Some(crate::error::SESSION_NOT_FOUND)
         );
+    }
+
+    #[tokio::test]
+    async fn notification_sink_reports_overflow_for_stream_events() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let sink = NotificationSink::new(tx);
+        let session_id = SessionId::new();
+        let envelope = EventEnvelope::new(
+            session_id.to_string(),
+            1,
+            None,
+            AgentEvent::TextDelta {
+                delta: "hello".to_string(),
+            },
+        );
+
+        assert!(
+            sink.emit_session_stream_event(&Uuid::new_v4(), 1, &session_id, &envelope)
+                .await
+                == StreamEmitStatus::Delivered
+        );
+        assert!(
+            sink.emit_session_stream_event(&Uuid::new_v4(), 2, &session_id, &envelope)
+                .await
+                == StreamEmitStatus::Overflow,
+            "second send should surface overflow to the caller"
+        );
+
+        let first = rx.recv().await.expect("first notification");
+        assert_eq!(first.method, "session/stream_event");
+    }
+
+    #[tokio::test]
+    async fn session_stream_overflow_emits_terminal_error_outcome() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let sink = NotificationSink::new(tx);
+        let session_id = SessionId::new();
+        let stream_id = Uuid::new_v4();
+        let envelope = EventEnvelope::new(
+            session_id.to_string(),
+            1,
+            None,
+            AgentEvent::TextDelta {
+                delta: "hello".to_string(),
+            },
+        );
+
+        assert_eq!(
+            sink.emit_session_stream_event(&stream_id, 1, &session_id, &envelope)
+                .await,
+            StreamEmitStatus::Delivered
+        );
+        assert_eq!(
+            sink.emit_session_stream_event(&stream_id, 2, &session_id, &envelope)
+                .await,
+            StreamEmitStatus::Overflow
+        );
+
+        let terminal = tokio::spawn({
+            let sink = sink.clone();
+            let session_id = session_id.clone();
+            async move {
+                sink.emit_session_stream_end(
+                    &stream_id,
+                    &session_id,
+                    "terminal_error",
+                    Some("transport stream notification queue overflow"),
+                )
+                .await;
+            }
+        });
+
+        let first = rx.recv().await.expect("first notification");
+        assert_eq!(first.method, "session/stream_event");
+
+        let terminal_notification =
+            tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+                .await
+                .expect("terminal notification should arrive after queue drains")
+                .expect("terminal notification");
+        terminal.await.expect("terminal send join");
+        assert_eq!(terminal_notification.method, "session/stream_end");
+        assert_eq!(terminal_notification.params["outcome"], "terminal_error");
+        assert_eq!(
+            terminal_notification.params["error"]["code"],
+            "stream_queue_overflow"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_stream_router_overflow_emits_terminal_error_outcome() {
+        let requests = Arc::new(std::sync::Mutex::new(Vec::<Vec<Message>>::new()));
+        let llm_client = Arc::new(RecordingMockLlmClient::new(requests));
+        let (router, mut notif_rx) =
+            test_router_with_llm_and_notification_capacity(llm_client, 1).await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({ "prompt": "create overflow session" }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&create_resp)["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        drain_notifications(&mut notif_rx).await;
+
+        let open_resp = router
+            .dispatch(make_request(
+                "session/stream_open",
+                serde_json::json!({ "session_id": session_id }),
+            ))
+            .await
+            .unwrap();
+        let stream_id = result_value(&open_resp)["stream_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let turn_resp = router
+            .dispatch(make_request(
+                "turn/start",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "prompt": "overflow please"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert!(turn_resp.error.is_none(), "turn should succeed");
+
+        let notification = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let notif = notif_rx.recv().await.expect("notification");
+                if notif.method == "session/stream_end" {
+                    break notif;
+                }
+            }
+        })
+        .await
+        .expect("session stream end notification");
+        assert_eq!(notification.params["stream_id"], stream_id);
+        assert_eq!(notification.params["outcome"], "terminal_error");
+        assert_eq!(
+            notification.params["error"]["code"],
+            "stream_queue_overflow"
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_stream_overflow_emits_terminal_error_outcome() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let sink = NotificationSink::new(tx);
+        let stream_id = Uuid::new_v4();
+        let event = serde_json::json!({
+            "event_id": "e1",
+            "payload": {
+                "type": "text_delta",
+                "delta": "hello",
+            }
+        });
+
+        assert_eq!(
+            sink.emit_mob_stream_event(&stream_id, 1, &event).await,
+            StreamEmitStatus::Delivered
+        );
+        assert_eq!(
+            sink.emit_mob_stream_event(&stream_id, 2, &event).await,
+            StreamEmitStatus::Overflow
+        );
+
+        let terminal = tokio::spawn({
+            let sink = sink.clone();
+            async move {
+                sink.emit_mob_stream_end(
+                    &stream_id,
+                    "terminal_error",
+                    Some("transport stream notification queue overflow"),
+                )
+                .await;
+            }
+        });
+
+        let first = rx.recv().await.expect("first notification");
+        assert_eq!(first.method, "mob/stream_event");
+
+        let terminal_notification =
+            tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+                .await
+                .expect("terminal notification should arrive after queue drains")
+                .expect("terminal notification");
+        terminal.await.expect("terminal send join");
+        assert_eq!(terminal_notification.method, "mob/stream_end");
+        assert_eq!(terminal_notification.params["outcome"], "terminal_error");
+        assert_eq!(
+            terminal_notification.params["error"]["code"],
+            "stream_queue_overflow"
+        );
+    }
+
+    #[tokio::test]
+    async fn archived_session_read_remains_available_and_mutations_reject() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "Create a session that will be archived"
+                }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&create_resp)["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let archive_resp = router
+            .dispatch(make_request(
+                "session/archive",
+                serde_json::json!({ "session_id": session_id }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result_value(&archive_resp)["archived"], true);
+
+        let read_resp = router
+            .dispatch(make_request(
+                "session/read",
+                serde_json::json!({ "session_id": session_id }),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            read_resp.error.is_none(),
+            "archived session should remain readable: {read_resp:?}"
+        );
+        let read = result_value(&read_resp);
+        assert_eq!(read["session_id"], session_id);
+
+        let stream_resp = router
+            .dispatch(make_request(
+                "session/stream_open",
+                serde_json::json!({ "session_id": session_id }),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            stream_resp.error.is_some(),
+            "archived session must reject stream_open"
+        );
+
+        let inject_resp = router
+            .dispatch(make_request(
+                "session/inject_context",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "text": "should be rejected"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            inject_resp.error.is_some(),
+            "archived session must reject staged context append"
+        );
+
+        let peers_resp = router
+            .dispatch(make_request(
+                "comms/peers",
+                serde_json::json!({ "session_id": session_id }),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            peers_resp.error.is_some(),
+            "archived session must reject comms/peers"
+        );
+
+        let send_resp = router
+            .dispatch(make_request(
+                "comms/send",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "kind": "peer_message",
+                    "target": "nobody",
+                    "content": "hello after archive"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            send_resp.error.is_some(),
+            "archived session must reject comms/send"
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn archived_mob_backed_session_rejects_comms_after_retirement() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": "mob-archive-comms-session",
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-5",
+                                "tools": { "comms": true }
+                            }
+                        }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let mob_id = result_value(&create_resp)["mob_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let spawn_resp = router
+            .dispatch(make_request(
+                "mob/spawn",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "profile": "worker",
+                    "meerkat_id": "worker-1",
+                    "runtime_mode": "turn_driven"
+                }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&spawn_resp)["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let archive_resp = router
+            .dispatch(make_request(
+                "session/archive",
+                serde_json::json!({ "session_id": session_id }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result_value(&archive_resp)["archived"], true);
+
+        let peers_resp = router
+            .dispatch(make_request(
+                "comms/peers",
+                serde_json::json!({ "session_id": session_id }),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            peers_resp.error.is_some(),
+            "retired mob member must reject comms/peers"
+        );
+
+        let send_resp = router
+            .dispatch(make_request(
+                "comms/send",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "kind": "peer_message",
+                    "target": "worker-2",
+                    "content": "hello after archive"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            send_resp.error.is_some(),
+            "retired mob member must reject comms/send"
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_send_rejects_while_archive_retirement_is_in_flight() {
+        let (router, _notif_rx) = test_router_with_mob_state(
+            meerkat_mob_mcp::MobMcpState::new_in_memory_with_archive_delay(250),
+        )
+        .await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": "mob-retiring-send",
+                        "profiles": {
+                            "lead": {
+                                "model": "claude-sonnet-4-5",
+                                "external_addressable": true,
+                                "tools": { "comms": true }
+                            }
+                        }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let mob_id = result_value(&create_resp)["mob_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let spawn_resp = router
+            .dispatch(make_request(
+                "mob/spawn",
+                serde_json::json!({
+                    "mob_id": &mob_id,
+                    "profile": "lead",
+                    "meerkat_id": "lead-1",
+                    "runtime_mode": "turn_driven"
+                }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&spawn_resp)["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let archive = {
+            let router = router.clone();
+            tokio::spawn(async move {
+                router
+                    .dispatch(make_request(
+                        "session/archive",
+                        serde_json::json!({ "session_id": &session_id }),
+                    ))
+                    .await
+                    .expect("archive response")
+            })
+        };
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let members_resp = router
+            .dispatch(make_request(
+                "mob/members",
+                serde_json::json!({ "mob_id": &mob_id }),
+            ))
+            .await
+            .unwrap();
+        let members_value = result_value(&members_resp);
+        let members = members_value["members"].as_array().expect("members array");
+        assert_eq!(members.len(), 1, "retiring member should remain observable");
+        assert_eq!(members[0]["meerkat_id"], "lead-1");
+        assert_eq!(members[0]["state"], "Retiring");
+
+        let send_resp = router
+            .dispatch(make_request(
+                "mob/send",
+                serde_json::json!({
+                    "mob_id": &mob_id,
+                    "meerkat_id": "lead-1",
+                    "message": "do work while retiring"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            send_resp.error.is_some(),
+            "retiring member must reject new mob/send work before archive completes"
+        );
+
+        let archive_resp = archive.await.expect("archive join");
+        assert_eq!(result_value(&archive_resp)["archived"], true);
     }
 
     #[cfg(feature = "mob")]
@@ -1762,12 +2961,13 @@ mod tests {
         assert_eq!(notification.method, "session/stream_end");
         assert_eq!(notification.params["stream_id"], stream_id);
         assert_eq!(notification.params["ended"], true);
+        assert_eq!(notification.params["outcome"], "remote_end");
     }
 
     #[cfg(feature = "mob")]
     #[tokio::test]
     async fn mob_stream_close_removes_forwarder_from_active_map() {
-        let (router, _notif_rx) = test_router().await;
+        let (router, mut notif_rx) = test_router().await;
 
         let create_resp = router
             .dispatch(make_request(
@@ -1804,6 +3004,19 @@ mod tests {
         assert_eq!(closed["closed"], true);
         assert_eq!(closed["already_closed"], false);
         assert_eq!(router.active_mob_streams.lock().await.len(), 0);
+
+        let notification = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let notif = notif_rx.recv().await.expect("notification");
+                if notif.method == "mob/stream_end" {
+                    break notif;
+                }
+            }
+        })
+        .await
+        .expect("mob explicit-close notification");
+        assert_eq!(notification.params["stream_id"], stream_id);
+        assert_eq!(notification.params["outcome"], "explicit_close");
     }
 
     #[cfg(feature = "mob")]
@@ -2033,6 +3246,308 @@ mod tests {
         assert_eq!(injected["status"], "staged");
     }
 
+    #[tokio::test]
+    async fn session_inject_context_is_consumed_by_next_turn_exactly_once() {
+        let recorded_requests = Arc::new(std::sync::Mutex::new(Vec::<Vec<Message>>::new()));
+        let (router, mut notif_rx) = test_router_with_llm(Arc::new(RecordingMockLlmClient::new(
+            Arc::clone(&recorded_requests),
+        )))
+        .await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({ "prompt": "Hello" }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&create_resp)["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        drain_notifications(&mut notif_rx).await;
+        recorded_requests
+            .lock()
+            .expect("recorded requests lock poisoned")
+            .clear();
+
+        let injected_text = "Coordinate with the orchestrator exactly once.";
+        let inject_resp = router
+            .dispatch(make_request(
+                "session/inject_context",
+                serde_json::json!({
+                    "session_id": &session_id,
+                    "text": injected_text,
+                    "source": "mob",
+                    "idempotency_key": "ctx-next-turn-once"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result_value(&inject_resp)["status"], "staged");
+
+        let first_turn_resp = router
+            .dispatch(make_request(
+                "turn/start",
+                serde_json::json!({
+                    "session_id": &session_id,
+                    "prompt": "first follow up"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert!(first_turn_resp.error.is_none(), "first turn should succeed");
+        let first_prompt = next_run_started_prompt(&mut notif_rx).await;
+        assert!(
+            first_prompt.contains("first follow up"),
+            "turn notification must still reflect the user prompt: {first_prompt}"
+        );
+        let first_request = recorded_requests
+            .lock()
+            .expect("recorded requests lock poisoned")
+            .last()
+            .cloned()
+            .expect("first follow-up request");
+        let first_system_prompt =
+            system_prompt_from_request(&first_request).expect("system prompt on first turn");
+        assert!(
+            first_system_prompt.contains(injected_text),
+            "next eligible turn must include staged context in the LLM system prompt: {first_system_prompt}"
+        );
+        assert_eq!(first_system_prompt.matches(injected_text).count(), 1);
+        recorded_requests
+            .lock()
+            .expect("recorded requests lock poisoned")
+            .clear();
+
+        let second_turn_resp = router
+            .dispatch(make_request(
+                "turn/start",
+                serde_json::json!({
+                    "session_id": &session_id,
+                    "prompt": "second follow up"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            second_turn_resp.error.is_none(),
+            "second turn should succeed"
+        );
+        let second_prompt = next_run_started_prompt(&mut notif_rx).await;
+        assert!(
+            second_prompt.contains("second follow up"),
+            "turn notification must still reflect the user prompt: {second_prompt}"
+        );
+        let second_request = recorded_requests
+            .lock()
+            .expect("recorded requests lock poisoned")
+            .last()
+            .cloned()
+            .expect("second follow-up request");
+        let second_system_prompt =
+            system_prompt_from_request(&second_request).expect("system prompt on second turn");
+        assert!(
+            !second_system_prompt.contains(injected_text),
+            "staged context must be consumed exactly once, not replayed on later turns: {second_system_prompt}"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_inject_context_during_active_turn_waits_for_next_rpc_turn() {
+        let recorded_requests = Arc::new(std::sync::Mutex::new(Vec::<Vec<Message>>::new()));
+        let (router, _notif_rx) = test_router_with_llm(Arc::new(
+            RecordingMockLlmClient::with_delay(Arc::clone(&recorded_requests), 200),
+        ))
+        .await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({ "prompt": "Hello" }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&create_resp)["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let first_turn = {
+            let router = router.clone();
+            let session_id = session_id.clone();
+            tokio::spawn(async move {
+                router
+                    .dispatch(make_request(
+                        "turn/start",
+                        serde_json::json!({
+                            "session_id": &session_id,
+                            "prompt": "first turn"
+                        }),
+                    ))
+                    .await
+                    .expect("first turn response")
+            })
+        };
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if !recorded_requests
+                    .lock()
+                    .expect("recorded requests lock poisoned")
+                    .is_empty()
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("first request should reach the LLM");
+
+        let injected_text = "Late staged context";
+        let inject_resp = router
+            .dispatch(make_request(
+                "session/inject_context",
+                serde_json::json!({
+                    "session_id": &session_id,
+                    "text": injected_text,
+                    "source": "mob",
+                    "idempotency_key": "ctx-rpc-during-active-turn"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result_value(&inject_resp)["status"], "staged");
+
+        let first_turn_resp = first_turn.await.expect("first turn join");
+        assert!(
+            first_turn_resp.error.is_none(),
+            "first turn should still complete"
+        );
+        let first_request = recorded_requests
+            .lock()
+            .expect("recorded requests lock poisoned")
+            .first()
+            .cloned()
+            .expect("first request");
+        let first_system_prompt =
+            system_prompt_from_request(&first_request).expect("system prompt on first turn");
+        assert!(
+            !first_system_prompt.contains(injected_text),
+            "context appended during an active RPC turn must not affect the in-flight request"
+        );
+
+        let second_turn_resp = router
+            .dispatch(make_request(
+                "turn/start",
+                serde_json::json!({
+                    "session_id": &session_id,
+                    "prompt": "second turn"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            second_turn_resp.error.is_none(),
+            "second turn should succeed"
+        );
+        let second_request = recorded_requests
+            .lock()
+            .expect("recorded requests lock poisoned")
+            .last()
+            .cloned()
+            .expect("second request");
+        let second_system_prompt =
+            system_prompt_from_request(&second_request).expect("system prompt on second turn");
+        assert!(
+            second_system_prompt.contains(injected_text),
+            "context appended during an active RPC turn must apply on the next eligible turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_inject_context_duplicate_idempotency_key_does_not_double_stage() {
+        let recorded_requests = Arc::new(std::sync::Mutex::new(Vec::<Vec<Message>>::new()));
+        let (router, mut notif_rx) = test_router_with_llm(Arc::new(RecordingMockLlmClient::new(
+            Arc::clone(&recorded_requests),
+        )))
+        .await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({ "prompt": "Hello" }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&create_resp)["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        drain_notifications(&mut notif_rx).await;
+        recorded_requests
+            .lock()
+            .expect("recorded requests lock poisoned")
+            .clear();
+
+        let injected_text = "Only stage this once.";
+        let first_inject = router
+            .dispatch(make_request(
+                "session/inject_context",
+                serde_json::json!({
+                    "session_id": &session_id,
+                    "text": injected_text,
+                    "source": "mob",
+                    "idempotency_key": "ctx-dedup"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result_value(&first_inject)["status"], "staged");
+
+        let second_inject = router
+            .dispatch(make_request(
+                "session/inject_context",
+                serde_json::json!({
+                    "session_id": &session_id,
+                    "text": injected_text,
+                    "source": "mob",
+                    "idempotency_key": "ctx-dedup"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result_value(&second_inject)["status"], "duplicate");
+
+        let turn_resp = router
+            .dispatch(make_request(
+                "turn/start",
+                serde_json::json!({
+                    "session_id": &session_id,
+                    "prompt": "follow up"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert!(turn_resp.error.is_none(), "turn should succeed");
+        let _prompt = next_run_started_prompt(&mut notif_rx).await;
+
+        let request = recorded_requests
+            .lock()
+            .expect("recorded requests lock poisoned")
+            .last()
+            .cloned()
+            .expect("follow-up request");
+        let system_prompt =
+            system_prompt_from_request(&request).expect("system prompt on follow-up turn");
+        assert_eq!(
+            system_prompt.matches(injected_text).count(),
+            1,
+            "duplicate idempotency keys must not enqueue multiple staged copies: {system_prompt}"
+        );
+    }
+
     /// 6. `session/archive` removes a session.
     #[tokio::test]
     async fn session_archive_removes_session() {
@@ -2062,6 +3577,99 @@ mod tests {
             .iter()
             .any(|s| s["session_id"].as_str() == Some(&session_id));
         assert!(!found, "Archived session should not appear in list");
+    }
+
+    #[tokio::test]
+    async fn archived_session_drops_unapplied_staged_context_before_any_later_turn() {
+        let recorded_requests = Arc::new(std::sync::Mutex::new(Vec::<Vec<Message>>::new()));
+        let (router, mut notif_rx) = test_router_with_llm(Arc::new(RecordingMockLlmClient::new(
+            Arc::clone(&recorded_requests),
+        )))
+        .await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({ "prompt": "Hello" }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&create_resp)["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        drain_notifications(&mut notif_rx).await;
+        recorded_requests
+            .lock()
+            .expect("recorded requests lock poisoned")
+            .clear();
+
+        let injected_text = "This context must be dropped on archive.";
+        let inject_resp = router
+            .dispatch(make_request(
+                "session/inject_context",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "text": injected_text,
+                    "source": "mob",
+                    "idempotency_key": "ctx-archive-drop"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result_value(&inject_resp)["status"], "staged");
+
+        let archive_resp = router
+            .dispatch(make_request(
+                "session/archive",
+                serde_json::json!({ "session_id": session_id }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result_value(&archive_resp)["archived"], true);
+
+        let rejected_turn = router
+            .dispatch(make_request(
+                "turn/start",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "prompt": "should never run"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            rejected_turn.error.is_some(),
+            "archived session must reject later turns after staged context was accepted"
+        );
+        assert!(
+            recorded_requests
+                .lock()
+                .expect("recorded requests lock poisoned")
+                .is_empty(),
+            "archived session must not reach the LLM again after staged context is dropped"
+        );
+
+        let notification = tokio::time::timeout(std::time::Duration::from_millis(200), async {
+            notif_rx.recv().await
+        })
+        .await;
+        match notification {
+            Err(_) => {}
+            Ok(None) => {}
+            Ok(Some(notif)) => {
+                let event_type = notif.params["event"]["payload"]["type"].as_str();
+                assert!(
+                    !(notif.method == "session/event"
+                        && event_type == Some("run_started")
+                        && notif.params["session_id"].as_str() == Some(session_id.as_str())
+                        && notif.params["event"]["payload"]["prompt"]
+                            .as_str()
+                            .is_some_and(|prompt| prompt.contains(injected_text))),
+                    "archived session must not emit a later run_started that replays dropped staged context: {notif:?}"
+                );
+            }
+        }
     }
 
     /// 7. `turn/start` returns a result for an existing session.

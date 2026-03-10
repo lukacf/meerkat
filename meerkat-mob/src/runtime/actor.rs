@@ -2201,7 +2201,12 @@ impl MobActor {
             roster.get(&meerkat_id).cloned()
         };
         let entry = match entry {
-            Some(e) => e,
+            Some(e) => {
+                if e.state != crate::roster::MemberState::Active {
+                    return Err(MobError::MeerkatNotFound(meerkat_id));
+                }
+                e
+            }
             None => {
                 // Consult spawn policy for auto-provisioning
                 if let Some(ref policy) = self.spawn_policy
@@ -2290,6 +2295,9 @@ impl MobActor {
                 .cloned()
                 .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?
         };
+        if entry.state != crate::roster::MemberState::Active {
+            return Err(MobError::MeerkatNotFound(meerkat_id));
+        }
 
         self.dispatch_member_turn(&entry, message).await.map(|_| ())
     }

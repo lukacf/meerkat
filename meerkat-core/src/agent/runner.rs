@@ -9,7 +9,7 @@ use crate::ops::{
 };
 use crate::retry::RetryPolicy;
 use crate::service::TurnToolOverlay;
-use crate::session::Session;
+use crate::session::{PendingSystemContextAppend, Session};
 use crate::state::LoopState;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -201,8 +201,13 @@ where
         }
     }
 
-    /// Apply all pending system-context appends at the current LLM boundary.
-    pub(crate) fn apply_pending_system_context_boundary(&mut self) -> usize {
+    /// Consume all pending system-context appends for the next LLM boundary.
+    ///
+    /// The returned appends are intended for transient request composition only;
+    /// they must not be written back into the canonical session prompt.
+    pub(crate) fn take_pending_system_context_boundary(
+        &mut self,
+    ) -> Vec<PendingSystemContextAppend> {
         let pending = {
             let mut state = match self.system_context_state.lock() {
                 Ok(guard) => guard,
@@ -212,16 +217,28 @@ where
                 }
             };
             if state.pending.is_empty() {
-                return 0;
+                return Vec::new();
             }
             let pending = state.pending.clone();
             state.mark_pending_applied();
             pending
         };
 
-        self.session.append_system_context_blocks(&pending);
         self.sync_system_context_state_to_session();
-        pending.len()
+        pending
+    }
+
+    pub(crate) fn llm_messages_with_runtime_system_context(
+        &self,
+        appends: &[PendingSystemContextAppend],
+    ) -> Vec<Message> {
+        if appends.is_empty() {
+            return self.session.messages().to_vec();
+        }
+
+        let mut session = self.session.clone();
+        session.append_system_context_blocks(appends);
+        session.messages().to_vec()
     }
 
     /// Persist the current session through the configured checkpointer after syncing control state.

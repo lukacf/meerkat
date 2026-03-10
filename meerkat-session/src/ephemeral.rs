@@ -233,6 +233,7 @@ pub trait SessionAgent: Send {
 /// Sessions are kept alive as tokio tasks. All state is lost on process exit.
 pub struct EphemeralSessionService<B: SessionAgentBuilder> {
     sessions: RwLock<IndexMap<SessionId, SessionHandle>>,
+    archived_views: RwLock<IndexMap<SessionId, SessionView>>,
     builder: B,
     max_sessions: usize,
     session_capacity: Arc<Semaphore>,
@@ -246,10 +247,30 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     pub fn new(builder: B, max_sessions: usize) -> Self {
         Self {
             sessions: RwLock::new(IndexMap::new()),
+            archived_views: RwLock::new(IndexMap::new()),
             builder,
             max_sessions,
             session_capacity: Arc::new(Semaphore::new(max_sessions)),
             session_registered: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn archived_view_from_handle(id: &SessionId, handle: &SessionHandle) -> SessionView {
+        let cache = handle.summary_rx.borrow();
+        SessionView {
+            state: SessionInfo {
+                session_id: id.clone(),
+                created_at: handle.created_at,
+                updated_at: cache.updated_at,
+                message_count: cache.message_count,
+                is_active: false,
+                last_assistant_text: None,
+                labels: handle.labels.clone(),
+            },
+            billing: SessionUsage {
+                total_tokens: cache.total_tokens,
+                usage: Usage::default(),
+            },
         }
     }
 
@@ -657,9 +678,19 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
 
     async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
         let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let handle = match sessions.get(id) {
+            Some(handle) => handle,
+            None => {
+                drop(sessions);
+                return self
+                    .archived_views
+                    .read()
+                    .await
+                    .get(id)
+                    .cloned()
+                    .ok_or_else(|| SessionError::NotFound { id: id.clone() });
+            }
+        };
 
         let (reply_tx, reply_rx) = oneshot::channel();
         handle
@@ -743,6 +774,12 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         let handle = sessions
             .swap_remove(id)
             .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let archived_view = Self::archived_view_from_handle(id, &handle);
+        drop(sessions);
+        self.archived_views
+            .write()
+            .await
+            .insert(id.clone(), archived_view);
 
         let _ = handle.command_tx.send(SessionCommand::Shutdown).await;
         Ok(())

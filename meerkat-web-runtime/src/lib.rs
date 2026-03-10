@@ -2277,6 +2277,10 @@ pub fn poll_subscription(handle: u32) -> Result<String, JsValue> {
                         },
                         Err(TryRecvError::Lagged(n)) => {
                             tracing::warn!(skipped = n, "subscription lagged");
+                            events.push(serde_json::json!({
+                                "type": "lagged",
+                                "skipped": n,
+                            }));
                             continue;
                         }
                         Err(TryRecvError::Empty | TryRecvError::Closed) => break,
@@ -2316,7 +2320,12 @@ pub fn close_subscription(handle: u32) -> Result<(), JsValue> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_service_infrastructure, merge_runtime_system_context_state};
+    use super::{
+        EventSubscription, SUBSCRIPTIONS, SubscriptionInner, build_service_infrastructure,
+        close_subscription, merge_runtime_system_context_state, poll_subscription,
+    };
+    #[cfg(target_arch = "wasm32")]
+    use super::{append_system_context, create_session_simple, destroy_session, get_session_state};
     use meerkat::SessionServiceControlExt;
     use meerkat_core::Config;
     use meerkat_core::{
@@ -2485,5 +2494,118 @@ mod tests {
             system_context_state.pending[0].text,
             "Prioritize coordinating with the lead."
         );
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[test]
+    fn append_system_context_export_stages_context_for_direct_session_handle() {
+        let handle = create_session_simple(
+            &json!({
+                "model": "claude-sonnet-4-5",
+                "api_key": "sk-test"
+            })
+            .to_string(),
+        )
+        .expect("create session");
+
+        let result = append_system_context(
+            handle,
+            &json!({
+                "text": "Remember the browser-side coordinator.",
+                "source": "web",
+                "idempotency_key": "ctx-web-1"
+            })
+            .to_string(),
+        )
+        .expect("append system context");
+        let result_json = result.as_string().expect("append result string");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result_json).expect("append result json");
+
+        assert_eq!(parsed["handle"], handle);
+        assert_eq!(parsed["status"], "staged");
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[test]
+    fn destroy_session_export_removes_local_handle() {
+        let handle = create_session_simple(
+            &json!({
+                "model": "claude-sonnet-4-5",
+                "api_key": "sk-test"
+            })
+            .to_string(),
+        )
+        .expect("create session");
+
+        let before = get_session_state(handle).expect("session state before destroy");
+        let before: serde_json::Value = serde_json::from_str(&before).expect("state json");
+        assert_eq!(before["session_id"], handle);
+
+        destroy_session(handle).expect("destroy session");
+        assert!(get_session_state(handle).is_err());
+    }
+
+    #[test]
+    fn poll_subscription_surfaces_lagged_signal() {
+        let (tx, rx) = crate::tokio::sync::broadcast::channel(1);
+        let session_id = meerkat_core::SessionId::new();
+        tx.send(meerkat_core::EventEnvelope::new(
+            session_id.to_string(),
+            1,
+            None,
+            meerkat_core::AgentEvent::TextDelta {
+                delta: "first".to_string(),
+            },
+        ))
+        .unwrap_or(0);
+        tx.send(meerkat_core::EventEnvelope::new(
+            session_id.to_string(),
+            2,
+            None,
+            meerkat_core::AgentEvent::TextDelta {
+                delta: "second".to_string(),
+            },
+        ))
+        .unwrap_or(0);
+
+        let handle = SUBSCRIPTIONS.with(|cell| {
+            let mut registry = cell.borrow_mut();
+            let handle = registry.next_handle;
+            registry.next_handle = registry.next_handle.wrapping_add(1);
+            registry.subscriptions.insert(
+                handle,
+                EventSubscription {
+                    inner: SubscriptionInner::Member(std::cell::RefCell::new(rx)),
+                },
+            );
+            handle
+        });
+
+        let payload_result = poll_subscription(handle);
+        assert!(payload_result.is_ok());
+        let payload = match payload_result {
+            Ok(payload) => payload,
+            Err(_) => unreachable!(),
+        };
+        let parsed_result: Result<serde_json::Value, _> = serde_json::from_str(&payload);
+        assert!(parsed_result.is_ok());
+        let parsed = match parsed_result {
+            Ok(parsed) => parsed,
+            Err(_) => unreachable!(),
+        };
+        let items_opt = parsed.as_array();
+        assert!(items_opt.is_some());
+        let items = match items_opt {
+            Some(items) => items,
+            None => unreachable!(),
+        };
+        assert_eq!(items[0]["type"], "lagged");
+        assert_eq!(items[0]["skipped"], 1);
+        assert_eq!(items[1]["payload"]["type"], "text_delta");
+        assert_eq!(items[1]["payload"]["delta"], "second");
+
+        let close_result = close_subscription(handle);
+        assert!(close_result.is_ok());
     }
 }

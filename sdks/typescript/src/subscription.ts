@@ -5,6 +5,7 @@ export class EventSubscription<T> implements AsyncIterable<T> {
   private readonly queue: AsyncQueue<Record<string, unknown> | null>;
   private readonly closeRemote: (streamId: string) => Promise<void>;
   private readonly parseEvent: (raw: Record<string, unknown>) => T;
+  private readonly getTerminalOutcome: () => Record<string, unknown> | undefined;
   private closed = false;
 
   /** @internal */
@@ -13,11 +14,13 @@ export class EventSubscription<T> implements AsyncIterable<T> {
     queue: AsyncQueue<Record<string, unknown> | null>;
     closeRemote: (streamId: string) => Promise<void>;
     parseEvent: (raw: Record<string, unknown>) => T;
+    getTerminalOutcome: () => Record<string, unknown> | undefined;
   }) {
     this.streamId = opts.streamId;
     this.queue = opts.queue;
     this.closeRemote = opts.closeRemote;
     this.parseEvent = opts.parseEvent;
+    this.getTerminalOutcome = opts.getTerminalOutcome;
   }
 
   get id(): string {
@@ -26,6 +29,10 @@ export class EventSubscription<T> implements AsyncIterable<T> {
 
   get isClosed(): boolean {
     return this.closed;
+  }
+
+  get terminalOutcome(): Record<string, unknown> | undefined {
+    return this.getTerminalOutcome();
   }
 
   async close(): Promise<void> {

@@ -12,13 +12,12 @@ use meerkat_core::AgentToolDispatcher;
 use meerkat_core::CommsRuntimeMode;
 use meerkat_core::config::CliOverrides;
 use meerkat_core::service::{
-    AppendSystemContextRequest, AppendSystemContextStatus, CreateSessionRequest,
-    SessionBuildOptions, SessionControlError, SessionError, SessionQuery, SessionService,
-    SessionServiceCommsExt, SessionServiceControlExt, StartTurnRequest, TurnToolOverlay,
+    CreateSessionRequest, SessionBuildOptions, SessionError, SessionQuery, SessionService,
+    SessionServiceCommsExt, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::{
-    AgentEvent, EventEnvelope, RealmConfig, RealmLocator, RealmSelection, SchemaCompat,
-    ScopedAgentEvent, StreamScopeFrame, format_verbose_event,
+    AgentEvent, EventEnvelope, RealmConfig, RealmLocator, RealmSelection, ScopedAgentEvent,
+    StreamScopeFrame, format_verbose_event,
 };
 use meerkat_core::{
     Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore, FileConfigStore,
@@ -26,7 +25,7 @@ use meerkat_core::{
 };
 #[cfg(feature = "mcp")]
 use meerkat_mcp::McpRouterAdapter;
-use meerkat_mob::{FlowId, MobDefinition, Prefab, ProfileName, RunId};
+use meerkat_mob::{FlowId, MobDefinition, RunId};
 use meerkat_mob_pack::archive::MobpackArchive;
 use meerkat_mob_pack::pack::{
     compute_archive_digest, inspect_archive_bytes, pack_directory_with_excludes,
@@ -47,7 +46,7 @@ use meerkat_core::error::AgentError;
 use meerkat_core::mcp_config::{McpScope, McpTransportKind};
 use meerkat_core::skills::{SkillKey, SkillRef};
 use meerkat_core::types::OutputSchema;
-use meerkat_store::{RealmBackend, RealmOrigin, SessionFilter};
+use meerkat_store::{RealmBackend, RealmOrigin};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -125,56 +124,76 @@ fn spawn_scoped_event_handler(
     })
 }
 
-fn resolve_stream_policy(
-    stream: bool,
-    stream_view: StreamView,
-    stream_focus: Option<String>,
-) -> anyhow::Result<Option<stream_renderer::StreamRenderPolicy>> {
-    if !stream {
-        if stream_focus.is_some() {
-            return Err(anyhow::anyhow!(
-                "--stream-focus requires --stream and --stream-view focus"
-            ));
-        }
-        if stream_view != StreamView::Primary {
-            return Err(anyhow::anyhow!("--stream-view requires --stream"));
-        }
-        return Ok(None);
-    }
+#[derive(Clone, Copy, Debug)]
+struct ToolPresetResolution {
+    builtins: bool,
+    shell: bool,
+    subagents: bool,
+    memory: bool,
+    mob: bool,
+}
 
-    match stream_view {
-        StreamView::Primary => {
-            if stream_focus.is_some() {
-                return Err(anyhow::anyhow!(
-                    "--stream-focus is only valid with --stream-view focus"
-                ));
-            }
-            Ok(Some(stream_renderer::StreamRenderPolicy::PrimaryOnly))
-        }
-        StreamView::Mux => {
-            if stream_focus.is_some() {
-                return Err(anyhow::anyhow!(
-                    "--stream-focus is only valid with --stream-view focus"
-                ));
-            }
-            Ok(Some(stream_renderer::StreamRenderPolicy::MuxAll))
-        }
-        StreamView::Focus => {
-            let focus = stream_focus.ok_or_else(|| {
-                anyhow::anyhow!("--stream-focus is required when --stream-view focus is used")
-            })?;
-            if !stream_renderer::is_valid_scope_id(&focus) {
-                return Err(anyhow::anyhow!(
-                    "invalid --stream-focus scope '{focus}': expected primary, mob:<member>, primary/sub:<agent>, or mob:<member>/sub:<agent>"
-                ));
-            }
-            Ok(Some(stream_renderer::StreamRenderPolicy::Focus(focus)))
-        }
+fn resolve_tool_preset(preset: ToolPreset, yolo: bool) -> ToolPresetResolution {
+    let preset = if yolo { ToolPreset::Full } else { preset };
+    match preset {
+        ToolPreset::Safe => ToolPresetResolution {
+            builtins: true,
+            shell: false,
+            subagents: true,
+            memory: false,
+            mob: false,
+        },
+        ToolPreset::Workspace => ToolPresetResolution {
+            builtins: true,
+            shell: true,
+            subagents: true,
+            memory: false,
+            mob: false,
+        },
+        ToolPreset::Full => ToolPresetResolution {
+            builtins: true,
+            shell: true,
+            subagents: true,
+            memory: true,
+            mob: true,
+        },
+        ToolPreset::None => ToolPresetResolution {
+            builtins: false,
+            shell: false,
+            subagents: false,
+            memory: false,
+            mob: false,
+        },
     }
 }
 
-fn resolve_tooling_flags(enable_builtins: bool, enable_shell: bool) -> (bool, bool) {
-    (enable_builtins || enable_shell, enable_shell)
+fn resolve_stream_enabled(
+    stream: bool,
+    no_stream: bool,
+    stream_by_default: bool,
+) -> anyhow::Result<bool> {
+    use std::io::IsTerminal;
+    if stream && no_stream {
+        return Err(anyhow::anyhow!(
+            "cannot use --stream and --no-stream together"
+        ));
+    }
+    if stream {
+        Ok(true)
+    } else if no_stream {
+        Ok(false)
+    } else {
+        Ok(stream_by_default && std::io::stdout().is_terminal())
+    }
+}
+
+fn resolve_stdin_mode(mode: StdinMode) -> StdinMode {
+    use std::io::IsTerminal;
+    if std::io::stdin().is_terminal() {
+        StdinMode::Off
+    } else {
+        mode
+    }
 }
 
 /// Inject `run` as the default subcommand when the first positional argument
@@ -190,13 +209,13 @@ fn inject_default_run_subcommand(
         "continue",
         "c",
         "sessions",
-        "comms",
         "realms",
         "mcp",
         "skills",
         "mob",
         "config",
         "capabilities",
+        "doctor",
         "help",
     ];
     // Global flags that consume the next argument as a value.
@@ -235,11 +254,7 @@ fn inject_default_run_subcommand(
 }
 
 /// Read piped stdin content and prepend it to the prompt as context.
-///
-/// When stdin is a terminal (interactive), returns the prompt unchanged.
-/// When stdin is piped (e.g. `cat file.txt | rkat run "summarize"`),
-/// reads all of stdin and prepends it as a fenced context block.
-fn maybe_prepend_stdin_context(prompt: String) -> String {
+fn prepend_stdin_blob_context(prompt: String) -> String {
     use std::io::IsTerminal;
     if std::io::stdin().is_terminal() {
         return prompt;
@@ -300,9 +315,12 @@ async fn init_project_config() -> anyhow::Result<()> {
 }
 
 #[derive(Parser)]
-#[command(name = "meerkat")]
-#[command(about = "Meerkat - Rust Agentic Interface Kit")]
-#[command(after_help = "Shorthand: `rkat \"prompt\"` is equivalent to `rkat run \"prompt\"`")]
+#[command(name = "rkat")]
+#[command(about = "Run agent tasks, manage local config, and build mob artifacts")]
+#[command(override_usage = "rkat [OPTIONS] <PROMPT>\n       rkat [OPTIONS] <COMMAND>")]
+#[command(
+    after_help = "Examples:\n  rkat \"summarize this repository\"\n  cat story.txt | rkat \"summarize the story\"\n  git diff | rkat \"review these changes\"\n  tail -f app.log | rkat --stdin lines \"watch for incidents\"\n  rkat -t workspace \"fix the failing test\"\n  rkat mob pack ./mobs/release-triage -o dist/release-triage.mobpack\n\nUse `rkat <command> --help` for more details."
+)]
 struct Cli {
     /// Explicit realm ID (opaque). Reuse to share state across surfaces.
     #[arg(long, short = 'r', global = true)]
@@ -352,13 +370,16 @@ impl From<RealmBackendArg> for RealmBackend {
 enum Commands {
     /// Initialize local project config from the global template
     Init,
+    #[command(
+        after_help = "Examples:\n  rkat \"summarize this repository\"\n  cat story.txt | rkat \"summarize the story\"\n  git diff | rkat --json \"review these changes\"\n  tail -f app.log | rkat --stdin lines \"watch for incidents\"\n  rkat -t workspace \"fix the failing test\"\n  rkat --yolo --param temperature=0.2 \"take the gloves off\"\n\nDefaults:\n  - `--tools safe`\n  - stream on in a TTY, off in pipes/scripts\n  - piped stdin is read as blob context unless `--stdin lines` is set"
+    )]
     /// Run an agent with a prompt
     Run {
         /// The prompt to execute
         prompt: String,
 
         /// Optional per-request system prompt override.
-        #[arg(long)]
+        #[arg(long = "system")]
         system_prompt: Option<String>,
 
         /// Model to use (defaults to config when omitted)
@@ -373,10 +394,6 @@ enum Commands {
         #[arg(long)]
         max_tokens: Option<u32>,
 
-        /// Maximum total tokens for the run
-        #[arg(long)]
-        max_total_tokens: Option<u64>,
-
         /// Maximum duration for the run (e.g., "5m", "1h30m")
         #[arg(long, short = 'd')]
         max_duration: Option<String>,
@@ -386,48 +403,32 @@ enum Commands {
         max_tool_calls: Option<usize>,
 
         /// Output format (text, json)
-        #[arg(long, default_value = "text")]
+        #[arg(long, short = 'o', default_value = "text")]
         output: String,
+
+        /// Convenience alias for --output json
+        #[arg(long)]
+        json: bool,
 
         /// Stream LLM response tokens to stdout as they arrive
         #[arg(long, short = 's')]
         stream: bool,
 
-        /// Streaming view policy (primary, mux, focus)
-        #[arg(long, short = 'w', value_enum, default_value = "primary")]
-        stream_view: StreamView,
-
-        /// Scope selector for `--stream-view focus`
-        #[arg(long, short = 'f')]
-        stream_focus: Option<String>,
+        /// Disable streaming output
+        #[arg(long)]
+        no_stream: bool,
 
         /// Provider-specific parameter (KEY=VALUE). Can be repeated.
         #[arg(long = "param", value_name = "KEY=VALUE")]
         params: Vec<String>,
 
         /// Provider-specific params as a JSON object.
-        #[arg(long = "provider-params-json", value_name = "JSON")]
+        #[arg(long = "params-json", value_name = "JSON")]
         provider_params_json: Option<String>,
 
         /// Structured output schema (wrapper or raw JSON schema; file path OR inline JSON)
-        #[arg(long, value_name = "SCHEMA")]
+        #[arg(long = "schema", value_name = "SCHEMA")]
         output_schema: Option<String>,
-
-        /// Compatibility mode for schema lowering (lossy, strict)
-        #[arg(long, value_enum)]
-        output_schema_compat: Option<SchemaCompatArg>,
-
-        /// Max retries for structured output validation (default: 2)
-        #[arg(long, default_value = "2")]
-        structured_output_retries: u32,
-
-        /// Run-scoped hook overrides as inline JSON.
-        #[arg(long = "hooks-override-json", value_name = "JSON")]
-        hooks_override_json: Option<String>,
-
-        /// Run-scoped hook overrides from a JSON file.
-        #[arg(long = "hooks-override-file", value_name = "FILE")]
-        hooks_override_file: Option<PathBuf>,
 
         /// Skills to preload into the system prompt at session creation.
         #[arg(long = "preload-skill", value_name = "SKILL_ID")]
@@ -462,52 +463,13 @@ enum Commands {
         #[arg(long = "app-context", value_name = "JSON")]
         app_context: Option<String>,
 
-        // === Comms flags ===
-        /// Agent name for inter-agent communication. Enables comms if set.
-        #[cfg(feature = "comms")]
-        #[arg(long = "comms-name")]
-        comms_name: Option<String>,
+        /// Tool preset
+        #[arg(long, short = 't', value_enum, default_value = "safe")]
+        tools: ToolPreset,
 
-        /// TCP address to listen on for inter-agent communication (e.g., "0.0.0.0:4200")
-        #[cfg(feature = "comms")]
-        #[arg(long = "comms-listen-tcp")]
-        comms_listen_tcp: Option<String>,
-
-        /// Disable inter-agent communication entirely
-        #[cfg(feature = "comms")]
-        #[arg(long = "no-comms")]
-        no_comms: bool,
-
-        /// Human-readable description of this agent (shown to peers via `peers()`)
-        #[cfg(feature = "comms")]
-        #[arg(long = "agent-description")]
-        agent_description: Option<String>,
-
-        /// Metadata label for this agent (key=value, repeatable)
-        #[cfg(feature = "comms")]
-        #[arg(long = "agent-label", value_parser = parse_label)]
-        agent_label: Vec<(String, String)>,
-
-        // === Built-in tools flags ===
-        /// Enable built-in tools (tasks, shell). Adds task management tools.
-        #[arg(long, short = 'b')]
-        enable_builtins: bool,
-
-        /// Enable shell tool. Implies --enable-builtins.
-        #[arg(long, short = 'x')]
-        enable_shell: bool,
-
-        /// Disable sub-agent tools (agent_spawn, agent_fork, etc.). They are enabled by default.
-        #[arg(long, short = 'N')]
-        no_subagents: bool,
-
-        /// Enable semantic memory tools for this run.
+        /// Alias for --tools full
         #[arg(long)]
-        enable_memory: bool,
-
-        /// Enable mob (multi-agent orchestration) tools.
-        #[arg(long, short = 'M')]
-        enable_mob: bool,
+        yolo: bool,
 
         /// Wait for all MCP servers to connect before running the first prompt.
         /// By default MCP servers connect in the background and their tools
@@ -521,20 +483,18 @@ enum Commands {
         #[arg(long, short = 'v')]
         verbose: bool,
 
-        // === Host mode ===
-        /// Run as a host: process initial prompt, then stay alive listening for comms messages.
-        /// Requires comms to be enabled (--comms-name or auto-enabled). Exit with DISMISS message.
-        #[cfg(feature = "comms")]
-        #[arg(long)]
-        host: bool,
+        /// How stdin should be handled
+        #[arg(long, value_enum, default_value = "auto")]
+        stdin: StdinMode,
 
-        /// Also read events from stdin (one per line, JSON or plain text).
-        /// Only meaningful with --host. Lines are injected as external events.
-        #[cfg(feature = "comms")]
-        #[arg(long)]
-        stdin: bool,
+        /// How each stdin line is interpreted in line mode
+        #[arg(long, value_enum, default_value = "text")]
+        line_format: LineFormat,
     },
 
+    #[command(
+        after_help = "Examples:\n  rkat resume last \"keep going\"\n  rkat resume ~2 \"pick this thread back up\"\n  cat notes.txt | rkat resume last \"merge these notes into the plan\"\n  tail -f app.log | rkat resume last --stdin lines \"watch for new incidents\""
+    )]
     /// Resume a previous session (supports full UUID, short prefix, `last`, `~N`)
     Resume {
         /// Session ID, short prefix, or alias (last, ~1, ~2, ...)
@@ -546,14 +506,6 @@ enum Commands {
         /// Optional per-request system prompt override.
         #[arg(long)]
         system_prompt: Option<String>,
-
-        /// Run-scoped hook overrides as inline JSON.
-        #[arg(long = "hooks-override-json", value_name = "JSON")]
-        hooks_override_json: Option<String>,
-
-        /// Run-scoped hook overrides from a JSON file.
-        #[arg(long = "hooks-override-file", value_name = "FILE")]
-        hooks_override_file: Option<PathBuf>,
 
         /// Structured skill refs for this resumed turn.
         /// Accepts JSON objects or legacy source_uuid/skill_name strings.
@@ -576,10 +528,6 @@ enum Commands {
         #[arg(long = "instructions", value_name = "TEXT")]
         instructions: Vec<String>,
 
-        /// Maximum total tokens for this resumed run.
-        #[arg(long)]
-        max_total_tokens: Option<u64>,
-
         /// Maximum duration for this resumed run (e.g., "5m", "1h30m").
         #[arg(long, short = 'd')]
         max_duration: Option<String>,
@@ -593,18 +541,37 @@ enum Commands {
         params: Vec<String>,
 
         /// Provider-specific params as a JSON object.
-        #[arg(long = "provider-params-json", value_name = "JSON")]
+        #[arg(long = "params-json", value_name = "JSON")]
         provider_params_json: Option<String>,
 
         /// Verbose output: show each turn, tool calls, and results as they happen
         #[arg(long, short = 'v')]
         verbose: bool,
 
+        /// Stream output
+        #[arg(long, short = 's')]
+        stream: bool,
+
+        /// Disable streaming output
+        #[arg(long)]
+        no_stream: bool,
+
         /// Wait for all MCP servers to connect before running the resumed turn.
         #[arg(long)]
         wait_for_mcp: bool,
+
+        /// How stdin should be handled
+        #[arg(long, value_enum, default_value = "auto")]
+        stdin: StdinMode,
+
+        /// How each stdin line is interpreted in line mode
+        #[arg(long, value_enum, default_value = "text")]
+        line_format: LineFormat,
     },
 
+    #[command(
+        after_help = "Examples:\n  rkat continue \"keep going\"\n  git diff | rkat continue \"review this patch\"\n  rkat c --stdin off \"ignore the current pipe and continue\""
+    )]
     /// Continue the most recent session (shortcut for `resume last`)
     #[command(name = "continue", alias = "c")]
     Continue {
@@ -614,14 +581,6 @@ enum Commands {
         /// Optional per-request system prompt override.
         #[arg(long)]
         system_prompt: Option<String>,
-
-        /// Run-scoped hook overrides as inline JSON.
-        #[arg(long = "hooks-override-json", value_name = "JSON")]
-        hooks_override_json: Option<String>,
-
-        /// Run-scoped hook overrides from a JSON file.
-        #[arg(long = "hooks-override-file", value_name = "FILE")]
-        hooks_override_file: Option<PathBuf>,
 
         /// Structured skill refs for this continued turn.
         /// Accepts JSON objects or legacy source_uuid/skill_name strings.
@@ -647,6 +606,22 @@ enum Commands {
         /// Verbose output
         #[arg(long, short = 'v')]
         verbose: bool,
+
+        /// Stream output
+        #[arg(long, short = 's')]
+        stream: bool,
+
+        /// Disable streaming output
+        #[arg(long)]
+        no_stream: bool,
+
+        /// How stdin should be handled
+        #[arg(long, value_enum, default_value = "auto")]
+        stdin: StdinMode,
+
+        /// How each stdin line is interpreted in line mode
+        #[arg(long, value_enum, default_value = "text")]
+        line_format: LineFormat,
     },
 
     /// Session management
@@ -655,25 +630,24 @@ enum Commands {
         command: SessionCommands,
     },
 
-    /// Direct comms operations for a live session
-    #[cfg(feature = "comms")]
-    Comms {
-        #[command(subcommand)]
-        command: CommsCommands,
-    },
-
     /// Realm lifecycle management
     Realms {
         #[command(subcommand)]
         command: RealmCommands,
     },
 
+    #[command(
+        after_help = "Examples:\n  rkat mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem .\n  rkat mcp add linear --transport http --url https://mcp.example.com\n  rkat mcp list --scope all\n  rkat mcp get filesystem --scope project"
+    )]
     /// MCP server management
     Mcp {
         #[command(subcommand)]
         command: McpCommands,
     },
 
+    #[command(
+        after_help = "Examples:\n  rkat mob pack ./mobs/release-triage -o dist/release-triage.mobpack\n  rkat mob inspect dist/release-triage.mobpack\n  rkat mob validate dist/release-triage.mobpack\n  rkat mob deploy dist/release-triage.mobpack \"triage the latest release regressions\"\n  rkat mob web build dist/release-triage.mobpack -o dist/release-triage-web"
+    )]
     /// Mob orchestration commands
     Mob {
         #[command(subcommand)]
@@ -686,6 +660,9 @@ enum Commands {
         command: SkillsCommands,
     },
 
+    #[command(
+        after_help = "Examples:\n  rkat config get --format toml\n  rkat config set ./.rkat/config.toml\n  rkat config patch '{\"agent\":{\"model\":\"gpt-5.2\"}}'"
+    )]
     /// Config management
     Config {
         #[command(subcommand)]
@@ -694,6 +671,9 @@ enum Commands {
 
     /// Show runtime capabilities
     Capabilities,
+
+    /// Check local setup and common prerequisites
+    Doctor,
 }
 
 #[derive(Subcommand)]
@@ -702,36 +682,16 @@ enum ConfigCommands {
     Get {
         #[arg(long, default_value = "toml")]
         format: ConfigFormat,
-        /// Include generation + realm metadata in output.
-        #[arg(long)]
-        with_generation: bool,
     },
     /// Replace the config with the provided content
     Set {
         /// Path to a TOML or JSON config file
-        #[arg(long)]
-        file: Option<PathBuf>,
-        /// Raw JSON config payload
-        #[arg(long)]
-        json: Option<String>,
-        /// Raw TOML config payload
-        #[arg(long)]
-        toml: Option<String>,
-        /// Expected config generation for optimistic concurrency.
-        #[arg(long)]
-        expected_generation: Option<u64>,
+        file: PathBuf,
     },
     /// Apply a JSON merge patch to the config
     Patch {
-        /// Path to a JSON patch file
-        #[arg(long)]
-        file: Option<PathBuf>,
-        /// Raw JSON patch payload
-        #[arg(long)]
-        json: Option<String>,
-        /// Expected config generation for optimistic concurrency.
-        #[arg(long)]
-        expected_generation: Option<u64>,
+        /// Raw JSON patch payload or path to a JSON file
+        value: String,
     },
 }
 
@@ -742,26 +702,32 @@ enum ConfigFormat {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum ToolPreset {
+    Safe,
+    Workspace,
+    Full,
+    None,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum StdinMode {
+    Auto,
+    Blob,
+    Lines,
+    Off,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum LineFormat {
+    Text,
+    Json,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum StreamView {
     Primary,
     Mux,
     Focus,
-}
-
-/// Schema compatibility mode for provider lowering.
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum SchemaCompatArg {
-    Lossy,
-    Strict,
-}
-
-impl From<SchemaCompatArg> for SchemaCompat {
-    fn from(value: SchemaCompatArg) -> Self {
-        match value {
-            SchemaCompatArg::Lossy => SchemaCompat::Lossy,
-            SchemaCompatArg::Strict => SchemaCompat::Strict,
-        }
-    }
 }
 
 #[derive(Subcommand)]
@@ -792,53 +758,6 @@ enum SessionCommands {
     /// Interrupt an in-flight turn for a session
     Interrupt {
         /// Session ID to interrupt
-        session_id: String,
-    },
-
-    /// Append runtime system context to a session
-    InjectContext {
-        /// Session ID to update
-        session_id: String,
-        /// Context text to append
-        text: String,
-        /// Optional source label for provenance
-        #[arg(long)]
-        source: Option<String>,
-        /// Optional idempotency key (scoped per session)
-        #[arg(long)]
-        idempotency_key: Option<String>,
-    },
-
-    /// Stream session events to stdout as JSON lines.
-    Events {
-        /// Session ID to observe
-        session_id: String,
-    },
-
-    /// Locate a session ID across realms under explicit state roots.
-    Locate {
-        /// Session locator (<session_id> or <realm_id>:<session_id>)
-        locator: String,
-        /// Additional state roots to scan (active --state-root is always scanned).
-        #[arg(long = "extra-state-root")]
-        extra_state_roots: Vec<PathBuf>,
-    },
-}
-
-#[cfg(feature = "comms")]
-#[derive(Subcommand)]
-enum CommsCommands {
-    /// Send a canonical comms command
-    Send {
-        /// Session ID
-        session_id: String,
-        /// JSON command object
-        #[arg(long, value_name = "JSON")]
-        json: String,
-    },
-    /// List visible peers
-    Peers {
-        /// Session ID
         session_id: String,
     },
 }
@@ -928,9 +847,9 @@ enum McpCommands {
         #[arg(long, short = 't', value_enum)]
         transport: Option<CliTransport>,
 
-        /// Add to user scope instead of project (default: project/local-first)
-        #[arg(long)]
-        user: bool,
+        /// Config scope
+        #[arg(long, value_enum, default_value = "project")]
+        scope: CliMcpScope,
 
         /// Server URL (for http/sse transports)
         #[arg(long, short = 'u')]
@@ -947,18 +866,6 @@ enum McpCommands {
         /// Command and arguments after -- (for stdio transport)
         #[arg(last = true, num_args = 0..)]
         command: Vec<String>,
-
-        /// Live session target for runtime staging (without persistence by default)
-        #[arg(long)]
-        session: Option<String>,
-
-        /// Base URL of active REST server for live MCP ops (for example: http://127.0.0.1:8080)
-        #[arg(long)]
-        live_server_url: Option<String>,
-
-        /// Persist live change to config for future sessions (default: runtime-only)
-        #[arg(long, requires = "session")]
-        persist: bool,
     },
 
     /// Remove an MCP server
@@ -969,36 +876,6 @@ enum McpCommands {
         /// Scope to remove from
         #[arg(long, value_enum)]
         scope: Option<CliMcpScope>,
-
-        /// Live session target for runtime staging (without persistence by default)
-        #[arg(long)]
-        session: Option<String>,
-
-        /// Base URL of active REST server for live MCP ops (for example: http://127.0.0.1:8080)
-        #[arg(long)]
-        live_server_url: Option<String>,
-
-        /// Persist live change to config for future sessions (default: runtime-only)
-        #[arg(long, requires = "session")]
-        persist: bool,
-    },
-
-    /// Reload MCP servers on a live session
-    Reload {
-        /// Optional server name. Omit to reload all active servers.
-        name: Option<String>,
-
-        /// Live session target for runtime staging.
-        #[arg(long)]
-        session: String,
-
-        /// Base URL of active REST server for live MCP ops (for example: http://127.0.0.1:8080)
-        #[arg(long)]
-        live_server_url: String,
-
-        /// Persist live change to config for future sessions (default: runtime-only)
-        #[arg(long)]
-        persist: bool,
     },
 
     /// List configured MCP servers
@@ -1062,62 +939,6 @@ enum MobCommands {
         #[arg(long, value_enum, default_value = "cli")]
         surface: DeploySurfaceArg,
     },
-    /// List available prefab templates.
-    Prefabs,
-    /// Create a mob from --prefab or --definition.
-    Create {
-        #[arg(long)]
-        prefab: Option<String>,
-        #[arg(long)]
-        definition: Option<PathBuf>,
-    },
-    /// List mobs in local mob registry.
-    List,
-    /// Show status for a mob.
-    Status { mob_id: String },
-    /// Spawn a meerkat.
-    Spawn {
-        mob_id: String,
-        profile: String,
-        meerkat_id: String,
-    },
-    /// Retire a meerkat.
-    Retire { mob_id: String, meerkat_id: String },
-    /// Retire and re-spawn a meerkat with the same profile.
-    Respawn {
-        mob_id: String,
-        meerkat_id: String,
-        /// Optional initial message for the respawned meerkat.
-        #[arg(long)]
-        message: Option<String>,
-    },
-    /// Inject a message into an autonomous meerkat (request-reply).
-    /// Wire two peers.
-    Wire {
-        mob_id: String,
-        a: String,
-        b: String,
-    },
-    /// Unwire two peers.
-    Unwire {
-        mob_id: String,
-        a: String,
-        b: String,
-    },
-    /// Send external turn to a meerkat.
-    Turn {
-        mob_id: String,
-        meerkat_id: String,
-        message: String,
-    },
-    /// Stop a mob.
-    Stop { mob_id: String },
-    /// Resume a mob.
-    Resume { mob_id: String },
-    /// Complete a mob.
-    Complete { mob_id: String },
-    /// List configured flow IDs for a mob.
-    Flows { mob_id: String },
     /// Start a flow run and print the run_id.
     RunFlow {
         mob_id: String,
@@ -1128,24 +949,12 @@ enum MobCommands {
         /// Stream flow member outputs while the run is executing
         #[arg(long, short = 's')]
         stream: bool,
-        /// Streaming view policy (primary, mux, focus)
-        #[arg(long, short = 'w', value_enum, default_value = "primary")]
-        stream_view: StreamView,
-        /// Scope selector for `--stream-view focus`
-        #[arg(long, short = 'f')]
-        stream_focus: Option<String>,
+        /// Disable streaming output
+        #[arg(long)]
+        no_stream: bool,
     },
     /// Show JSON status for a flow run.
     FlowStatus { mob_id: String, run_id: String },
-    /// Stream mob events to stdout as JSON lines.
-    Events {
-        mob_id: String,
-        /// Stream events for a specific member only.
-        #[arg(long)]
-        member: Option<String>,
-    },
-    /// Destroy a mob.
-    Destroy { mob_id: String },
     /// Web deployment commands.
     Web {
         #[command(subcommand)]
@@ -1215,27 +1024,21 @@ async fn main() -> anyhow::Result<ExitCode> {
 
     let result = match cli.command {
         Commands::Init => init_project_config().await,
-        #[cfg(feature = "comms")]
         Commands::Run {
             prompt,
             system_prompt,
             model,
             provider,
             max_tokens,
-            max_total_tokens,
             max_duration,
             max_tool_calls,
             output,
+            json,
             stream,
-            stream_view,
-            stream_focus,
+            no_stream,
             params,
             provider_params_json,
             output_schema,
-            output_schema_compat,
-            structured_output_retries,
-            hooks_override_json,
-            hooks_override_file,
             preload_skills,
             skill_refs,
             skill_references,
@@ -1244,63 +1047,28 @@ async fn main() -> anyhow::Result<ExitCode> {
             labels,
             instructions,
             app_context,
-            comms_name,
-            comms_listen_tcp,
-            no_comms,
-            agent_description,
-            agent_label,
-            enable_builtins,
-            enable_shell,
-            no_subagents,
-            enable_memory,
-            enable_mob,
+            tools,
+            yolo,
             wait_for_mcp,
             verbose,
-            host,
             stdin,
+            line_format,
         } => {
-            let peer_meta = if agent_description.is_some() || !agent_label.is_empty() {
-                Some(meerkat_core::PeerMeta {
-                    description: agent_description,
-                    labels: agent_label.into_iter().collect(),
-                })
-            } else {
-                None
-            };
-            let comms_overrides = CommsOverrides {
-                name: comms_name,
-                listen_tcp: comms_listen_tcp,
-                disabled: no_comms,
-                peer_meta,
-            };
-
-            // Skip stdin context injection when --stdin is set (host-mode event
-            // streaming reads stdin later via spawn_stdin_reader).
-            let prompt = if stdin {
-                prompt
-            } else {
-                maybe_prepend_stdin_context(prompt)
-            };
             handle_run_command(
                 prompt,
                 system_prompt,
                 model,
                 provider,
                 max_tokens,
-                max_total_tokens,
                 max_duration,
                 max_tool_calls,
                 output,
+                json,
                 stream,
-                stream_view,
-                stream_focus,
+                no_stream,
                 params,
                 provider_params_json,
                 output_schema,
-                output_schema_compat,
-                structured_output_retries,
-                hooks_override_json,
-                hooks_override_file,
                 preload_skills,
                 skill_refs,
                 skill_references,
@@ -1309,96 +1077,12 @@ async fn main() -> anyhow::Result<ExitCode> {
                 labels,
                 instructions,
                 app_context,
-                comms_overrides,
-                enable_builtins,
-                enable_shell,
-                no_subagents,
-                enable_memory,
-                enable_mob,
+                tools,
+                yolo,
                 wait_for_mcp,
                 verbose,
-                host,
                 stdin,
-                &cli_scope,
-            )
-            .await
-        }
-        #[cfg(not(feature = "comms"))]
-        Commands::Run {
-            prompt,
-            system_prompt,
-            model,
-            provider,
-            max_tokens,
-            max_total_tokens,
-            max_duration,
-            max_tool_calls,
-            output,
-            stream,
-            stream_view,
-            stream_focus,
-            params,
-            provider_params_json,
-            output_schema,
-            output_schema_compat,
-            structured_output_retries,
-            hooks_override_json,
-            hooks_override_file,
-            preload_skills,
-            skill_refs,
-            skill_references,
-            allow_tools,
-            block_tools,
-            labels,
-            instructions,
-            app_context,
-            enable_builtins,
-            enable_shell,
-            no_subagents,
-            enable_memory,
-            enable_mob,
-            wait_for_mcp,
-            verbose,
-        } => {
-            let prompt = maybe_prepend_stdin_context(prompt);
-            handle_run_command(
-                prompt,
-                system_prompt,
-                model,
-                provider,
-                max_tokens,
-                max_total_tokens,
-                max_duration,
-                max_tool_calls,
-                output,
-                stream,
-                stream_view,
-                stream_focus,
-                params,
-                provider_params_json,
-                output_schema,
-                output_schema_compat,
-                structured_output_retries,
-                hooks_override_json,
-                hooks_override_file,
-                preload_skills,
-                skill_refs,
-                skill_references,
-                allow_tools,
-                block_tools,
-                labels,
-                instructions,
-                app_context,
-                CommsOverrides::default(),
-                enable_builtins,
-                enable_shell,
-                no_subagents,
-                enable_memory,
-                enable_mob,
-                wait_for_mcp,
-                verbose,
-                false, // host_mode
-                false, // stdin_events
+                line_format,
                 &cli_scope,
             )
             .await
@@ -1407,37 +1091,39 @@ async fn main() -> anyhow::Result<ExitCode> {
             session_id,
             prompt,
             system_prompt,
-            hooks_override_json,
-            hooks_override_file,
             skill_refs,
             skill_references,
             allow_tools,
             block_tools,
             instructions,
-            max_total_tokens,
             max_duration,
             max_tool_calls,
             params,
             provider_params_json,
             verbose,
+            stream,
+            no_stream,
             wait_for_mcp,
+            stdin,
+            line_format,
         } => {
-            let overrides = parse_hook_run_overrides(hooks_override_file, hooks_override_json)?;
             resume_session(
                 &session_id,
-                &prompt,
+                prompt,
                 system_prompt,
-                overrides,
                 skill_refs,
                 skill_references,
                 allow_tools,
                 block_tools,
                 instructions,
-                max_total_tokens,
                 max_duration,
                 max_tool_calls,
                 params,
                 provider_params_json,
+                stream,
+                no_stream,
+                stdin,
+                line_format,
                 &cli_scope,
                 verbose,
                 wait_for_mcp,
@@ -1447,21 +1133,21 @@ async fn main() -> anyhow::Result<ExitCode> {
         Commands::Continue {
             prompt,
             system_prompt,
-            hooks_override_json,
-            hooks_override_file,
             skill_refs,
             skill_references,
             allow_tools,
             block_tools,
             instructions,
             verbose,
+            stream,
+            no_stream,
+            stdin,
+            line_format,
         } => {
-            let overrides = parse_hook_run_overrides(hooks_override_file, hooks_override_json)?;
             resume_session(
                 "last",
-                &prompt,
+                prompt,
                 system_prompt,
-                overrides,
                 skill_refs,
                 skill_references,
                 allow_tools,
@@ -1469,9 +1155,12 @@ async fn main() -> anyhow::Result<ExitCode> {
                 instructions,
                 None,
                 None,
-                None,
                 Vec::new(),
                 None,
+                stream,
+                no_stream,
+                stdin,
+                line_format,
                 &cli_scope,
                 verbose,
                 false, // wait_for_mcp
@@ -1489,60 +1178,20 @@ async fn main() -> anyhow::Result<ExitCode> {
             SessionCommands::Interrupt { session_id } => {
                 interrupt_session(&session_id, &cli_scope).await
             }
-            SessionCommands::InjectContext {
-                session_id,
-                text,
-                source,
-                idempotency_key,
-            } => {
-                inject_session_context(
-                    &session_id,
-                    &text,
-                    source.as_deref(),
-                    idempotency_key.as_deref(),
-                    &cli_scope,
-                )
-                .await
-            }
-            SessionCommands::Events { session_id } => {
-                stream_session_events(&session_id, &cli_scope).await
-            }
-            SessionCommands::Locate {
-                locator,
-                extra_state_roots,
-            } => locate_sessions(&locator, extra_state_roots, &cli_scope).await,
-        },
-        #[cfg(feature = "comms")]
-        Commands::Comms { command } => match command {
-            CommsCommands::Send { session_id, json } => {
-                comms_send_command(&session_id, &json, &cli_scope).await
-            }
-            CommsCommands::Peers { session_id } => {
-                comms_peers_command(&session_id, &cli_scope).await
-            }
         },
         Commands::Realms { command } => handle_realm_command(command, &cli_scope).await,
         Commands::Mcp { command } => handle_mcp_command(command).await,
         Commands::Skills { command } => handle_skills_command(command, &cli_scope).await,
         Commands::Mob { command } => handle_mob_command(command, &cli_scope).await,
         Commands::Config { command } => match command {
-            ConfigCommands::Get {
-                format,
-                with_generation,
-            } => handle_config_get(format, with_generation, &cli_scope).await,
-            ConfigCommands::Set {
-                file,
-                json,
-                toml,
-                expected_generation,
-            } => handle_config_set(file, json, toml, expected_generation, &cli_scope).await,
-            ConfigCommands::Patch {
-                file,
-                json,
-                expected_generation,
-            } => handle_config_patch(file, json, expected_generation, &cli_scope).await,
+            ConfigCommands::Get { format } => handle_config_get(format, false, &cli_scope).await,
+            ConfigCommands::Set { file } => {
+                handle_config_set(Some(file), None, None, None, &cli_scope).await
+            }
+            ConfigCommands::Patch { value } => handle_config_patch_value(&value, &cli_scope).await,
         },
         Commands::Capabilities => handle_capabilities(&cli_scope).await,
+        Commands::Doctor => handle_doctor(&cli_scope).await,
     };
 
     // Map result to exit code
@@ -1565,25 +1214,20 @@ async fn main() -> anyhow::Result<ExitCode> {
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_run_command(
-    prompt: String,
+    mut prompt: String,
     system_prompt: Option<String>,
     model: Option<String>,
     provider: Option<Provider>,
     max_tokens: Option<u32>,
-    max_total_tokens: Option<u64>,
     max_duration: Option<String>,
     max_tool_calls: Option<usize>,
     output: String,
+    json: bool,
     stream: bool,
-    stream_view: StreamView,
-    stream_focus: Option<String>,
+    no_stream: bool,
     params: Vec<String>,
     provider_params_json: Option<String>,
     output_schema: Option<String>,
-    output_schema_compat: Option<SchemaCompatArg>,
-    structured_output_retries: u32,
-    hooks_override_json: Option<String>,
-    hooks_override_file: Option<PathBuf>,
     preload_skills: Vec<String>,
     skill_refs: Vec<SkillRef>,
     skill_references: Vec<String>,
@@ -1592,16 +1236,12 @@ async fn handle_run_command(
     labels: Vec<(String, String)>,
     instructions: Vec<String>,
     app_context: Option<String>,
-    comms_overrides: CommsOverrides,
-    enable_builtins: bool,
-    enable_shell: bool,
-    no_subagents: bool,
-    enable_memory: bool,
-    enable_mob: bool,
+    tools: ToolPreset,
+    yolo: bool,
     wait_for_mcp: bool,
     verbose: bool,
-    host: bool,
-    stdin: bool,
+    stdin: StdinMode,
+    line_format: LineFormat,
     scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
     let (config, config_base_dir) = load_config(scope).await?;
@@ -1615,38 +1255,29 @@ async fn handle_run_command(
     let duration = max_duration.map(|s| parse_duration(&s)).transpose();
     let provider_params = parse_provider_params(&params);
     let provider_params_json = parse_provider_params_json(provider_params_json);
-    let hook_run_overrides = parse_hook_run_overrides(hooks_override_file, hooks_override_json);
-    let stream_policy = resolve_stream_policy(stream, stream_view, stream_focus.clone())?;
-
+    let hooks_override = HookRunOverrides::default();
+    let json_output = json || output.eq_ignore_ascii_case("json");
+    let stream = resolve_stream_enabled(stream, no_stream, !json_output)?;
+    let stream_policy = if stream {
+        Some(stream_renderer::StreamRenderPolicy::PrimaryOnly)
+    } else {
+        None
+    };
+    let stdin = resolve_stdin_mode(stdin);
     let parsed_output_schema = output_schema
         .as_ref()
         .map(|s| parse_output_schema(s))
-        .transpose()?
-        .map(|schema| {
-            if let Some(compat) = output_schema_compat {
-                schema.with_compat(compat.into())
-            } else {
-                schema
-            }
-        });
-    let user_requested_builtins = enable_builtins;
-    let (enable_builtins, enable_shell) = resolve_tooling_flags(enable_builtins, enable_shell);
-    if enable_shell && !user_requested_builtins {
-        eprintln!("Info: enabling built-in tools because --enable-shell was requested");
+        .transpose()?;
+    let tooling = resolve_tool_preset(tools, yolo);
+    let output = if json { "json".to_string() } else { output };
+    if matches!(stdin, StdinMode::Blob | StdinMode::Auto) {
+        prompt = prepend_stdin_blob_context(prompt);
     }
 
-    match (
-        duration,
-        provider_params,
-        provider_params_json,
-        hook_run_overrides,
-    ) {
-        (Ok(dur), Ok(parsed_params), Ok(parsed_params_json), Ok(hooks_override)) => {
+    match (duration, provider_params, provider_params_json) {
+        (Ok(dur), Ok(parsed_params), Ok(parsed_params_json)) => {
             let merged_provider_params = merge_provider_params(parsed_params, parsed_params_json)?;
             let mut limits = config.budget_limits();
-            if let Some(max_tokens) = max_total_tokens {
-                limits.max_tokens = Some(max_tokens);
-            }
             if let Some(max_duration) = dur {
                 limits.max_duration = Some(max_duration);
             }
@@ -1665,17 +1296,18 @@ async fn handle_run_command(
                 stream_policy.clone(),
                 merged_provider_params,
                 parsed_output_schema,
-                structured_output_retries,
-                comms_overrides,
-                enable_builtins,
-                enable_shell,
-                !no_subagents,
-                enable_memory,
-                enable_mob,
+                2,
+                CommsOverrides::default(),
+                tooling.builtins,
+                tooling.shell,
+                tooling.subagents,
+                tooling.memory,
+                tooling.mob,
                 wait_for_mcp,
                 verbose,
-                host,
-                stdin,
+                matches!(stdin, StdinMode::Lines),
+                matches!(stdin, StdinMode::Lines),
+                line_format,
                 &config,
                 preload_skills,
                 skill_refs,
@@ -1691,10 +1323,9 @@ async fn handle_run_command(
             )
             .await
         }
-        (Err(e), _, _, _) => Err(e),
-        (_, Err(e), _, _) => Err(e),
-        (_, _, Err(e), _) => Err(e),
-        (_, _, _, Err(e)) => Err(e),
+        (Err(e), _, _) => Err(e),
+        (_, Err(e), _) => Err(e),
+        (_, _, Err(e)) => Err(e),
     }
 }
 
@@ -1726,18 +1357,16 @@ fn parse_provider_params(params: &[String]) -> anyhow::Result<Option<serde_json:
     Ok(Some(serde_json::Value::Object(map)))
 }
 
-/// Parse --provider-params-json into a JSON object.
+/// Parse --params-json into a JSON object.
 fn parse_provider_params_json(raw: Option<String>) -> anyhow::Result<Option<serde_json::Value>> {
     let Some(raw) = raw else {
         return Ok(None);
     };
 
-    let value: serde_json::Value = serde_json::from_str(&raw)
-        .map_err(|e| anyhow::anyhow!("Invalid --provider-params-json: {e}"))?;
+    let value: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| anyhow::anyhow!("Invalid --params-json: {e}"))?;
     if !value.is_object() {
-        return Err(anyhow::anyhow!(
-            "--provider-params-json must be a JSON object"
-        ));
+        return Err(anyhow::anyhow!("--params-json must be a JSON object"));
     }
     Ok(Some(value))
 }
@@ -1778,6 +1407,7 @@ fn parse_output_schema(schema_arg: &str) -> anyhow::Result<OutputSchema> {
         .map_err(|e| anyhow::anyhow!("Invalid output schema: {e}"))
 }
 
+#[cfg(test)]
 /// Parse run-scoped hook overrides from either --hooks-override-json or --hooks-override-file.
 fn parse_hook_run_overrides(
     hooks_override_file: Option<PathBuf>,
@@ -2011,6 +1641,15 @@ async fn handle_config_patch(
     Ok(())
 }
 
+async fn handle_config_patch_value(value: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
+    let path = PathBuf::from(value);
+    if path.exists() {
+        handle_config_patch(Some(path), None, None, scope).await
+    } else {
+        handle_config_patch(None, Some(value.to_string()), None, scope).await
+    }
+}
+
 async fn handle_capabilities(scope: &RuntimeScope) -> anyhow::Result<()> {
     let (config, _) = load_config(scope).await?;
     let response = meerkat::surface::build_capabilities_response(&config);
@@ -2019,6 +1658,69 @@ async fn handle_capabilities(scope: &RuntimeScope) -> anyhow::Result<()> {
         serde_json::to_string_pretty(&response).unwrap_or_else(|_| "{}".to_string())
     );
     Ok(())
+}
+
+async fn handle_doctor(scope: &RuntimeScope) -> anyhow::Result<()> {
+    let mut ok = true;
+    let config_path =
+        meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id)
+            .config_path;
+    if config_path.exists() {
+        println!("ok\tconfig\t{}", config_path.display());
+    } else {
+        ok = false;
+        println!("warn\tconfig\tmissing config at {}", config_path.display());
+    }
+
+    let provider_keys = [
+        ("anthropic", "ANTHROPIC_API_KEY"),
+        ("openai", "OPENAI_API_KEY"),
+        ("gemini", "GEMINI_API_KEY"),
+    ];
+    for (provider, env_key) in provider_keys {
+        if std::env::var(env_key)
+            .ok()
+            .filter(|v| !v.is_empty())
+            .is_some()
+        {
+            println!("ok\tprovider\t{provider} via {env_key}");
+        } else {
+            println!("warn\tprovider\t{provider} missing {env_key}");
+        }
+    }
+
+    match meerkat_core::mcp_config::McpConfig::load_from_roots(
+        scope.context_root.as_deref(),
+        scope.user_config_root.as_deref(),
+    )
+    .await
+    {
+        Ok(config) => println!("ok\tmcp\t{} configured server(s)", config.servers.len()),
+        Err(err) => {
+            ok = false;
+            println!("warn\tmcp\t{err}");
+        }
+    }
+
+    let wasm_pack = TokioCommand::new("wasm-pack")
+        .arg("--version")
+        .output()
+        .await;
+    match wasm_pack {
+        Ok(output) if output.status.success() => {
+            println!("ok\twasm-pack\tavailable");
+        }
+        _ => println!("warn\twasm-pack\tnot found (needed for `rkat mob web build`)"),
+    }
+
+    if ok {
+        println!("ok\tdoctor\tsetup looks good");
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "doctor found issues; review the warnings above"
+        ))
+    }
 }
 
 async fn handle_realm_command(command: RealmCommands, scope: &RuntimeScope) -> anyhow::Result<()> {
@@ -2947,6 +2649,7 @@ async fn run_agent(
     verbose: bool,
     host_mode: bool,
     stdin_events: bool,
+    line_format: LineFormat,
     config: &Config,
     preload_skills: Vec<String>,
     skill_refs: Vec<SkillRef>,
@@ -3191,7 +2894,15 @@ async fn run_agent(
             service
                 .event_injector(&info.session_id)
                 .await
-                .map(stdin_events::spawn_stdin_reader)
+                .map(|injector| {
+                    stdin_events::spawn_stdin_reader(
+                        injector,
+                        match line_format {
+                            LineFormat::Text => stdin_events::StdinLineFormat::Text,
+                            LineFormat::Json => stdin_events::StdinLineFormat::Json,
+                        },
+                    )
+                })
         } else {
             tracing::warn!("--stdin: session registered but not found in list");
             None
@@ -3207,10 +2918,19 @@ async fn run_agent(
             .await
             .map_err(session_err_to_anyhow)?;
         if stdin_events && host_mode && !run_initial_turn_during_create {
-            stdin_reader_handle = service
-                .event_injector(&created.session_id)
-                .await
-                .map(stdin_events::spawn_stdin_reader);
+            stdin_reader_handle =
+                service
+                    .event_injector(&created.session_id)
+                    .await
+                    .map(|injector| {
+                        stdin_events::spawn_stdin_reader(
+                            injector,
+                            match line_format {
+                                LineFormat::Text => stdin_events::StdinLineFormat::Text,
+                                LineFormat::Json => stdin_events::StdinLineFormat::Json,
+                            },
+                        )
+                    });
         }
         created
     };
@@ -3352,38 +3072,44 @@ async fn run_agent(
 #[allow(clippy::too_many_arguments)]
 async fn resume_session(
     session_id: &str,
-    prompt: &str,
+    mut prompt: String,
     system_prompt: Option<String>,
-    hooks_override: HookRunOverrides,
     skill_refs: Vec<SkillRef>,
     skill_references: Vec<String>,
     allow_tools: Vec<String>,
     block_tools: Vec<String>,
     instructions: Vec<String>,
-    max_total_tokens: Option<u64>,
     max_duration: Option<String>,
     max_tool_calls: Option<usize>,
     params: Vec<String>,
     provider_params_json: Option<String>,
+    stream: bool,
+    no_stream: bool,
+    stdin: StdinMode,
+    _line_format: LineFormat,
     scope: &RuntimeScope,
     verbose: bool,
     wait_for_mcp: bool,
 ) -> anyhow::Result<()> {
+    if matches!(resolve_stdin_mode(stdin), StdinMode::Blob | StdinMode::Auto) {
+        prompt = prepend_stdin_blob_context(prompt);
+    }
     resume_session_with_llm_override(
         session_id,
-        prompt,
+        &prompt,
         system_prompt,
-        hooks_override,
+        HookRunOverrides::default(),
         skill_refs,
         skill_references,
         allow_tools,
         block_tools,
         instructions,
-        max_total_tokens,
         max_duration,
         max_tool_calls,
         params,
         provider_params_json,
+        stream,
+        no_stream,
         scope,
         None,
         verbose,
@@ -3403,11 +3129,12 @@ async fn resume_session_with_llm_override(
     allow_tools: Vec<String>,
     block_tools: Vec<String>,
     instructions: Vec<String>,
-    max_total_tokens: Option<u64>,
     max_duration: Option<String>,
     max_tool_calls: Option<usize>,
     params: Vec<String>,
     provider_params_json: Option<String>,
+    stream: bool,
+    no_stream: bool,
     scope: &RuntimeScope,
     llm_override: Option<Arc<dyn meerkat_client::LlmClient>>,
     verbose: bool,
@@ -3426,24 +3153,21 @@ async fn resume_session_with_llm_override(
 
     log_stage("load_config");
     let (config, _config_base_dir) = load_config(scope).await?;
-    let has_max_total_tokens = max_total_tokens.is_some();
     let has_max_duration = max_duration.is_some();
     let has_max_tool_calls = max_tool_calls.is_some();
     let duration = max_duration.map(|s| parse_duration(&s)).transpose()?;
+    let stream = resolve_stream_enabled(stream, no_stream, true)?;
     let parsed_params = parse_provider_params(&params)?;
     let parsed_params_json = parse_provider_params_json(provider_params_json)?;
     let merged_provider_params = merge_provider_params(parsed_params, parsed_params_json)?;
     let mut limits = config.budget_limits();
-    if let Some(limit) = max_total_tokens {
-        limits.max_tokens = Some(limit);
-    }
     if let Some(dur) = duration {
         limits.max_duration = Some(dur);
     }
     if let Some(calls) = max_tool_calls {
         limits.max_tool_calls = Some(calls);
     }
-    let budget_override = if has_max_total_tokens || has_max_duration || has_max_tool_calls {
+    let budget_override = if has_max_duration || has_max_tool_calls {
         Some(limits)
     } else {
         None
@@ -3554,12 +3278,39 @@ async fn resume_session_with_llm_override(
     let mob_external_tools = run_mob_tools.as_ref().map(RunMobToolsContext::dispatcher);
     let external_tools = compose_external_tool_dispatchers(mob_external_tools, mcp_external_tools)?;
 
-    let (event_tx, event_task) = if verbose {
+    let mut event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>> = None;
+    let mut scoped_event_tx: Option<mpsc::Sender<ScopedAgentEvent>> = None;
+    let mut verbose_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut stream_task: Option<tokio::task::JoinHandle<stream_renderer::StreamRenderSummary>> =
+        None;
+    let mut primary_to_scoped_bridge_task: Option<tokio::task::JoinHandle<()>> = None;
+
+    if stream {
+        let (primary_tx, mut primary_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
+        let (scoped_tx, scoped_rx) = mpsc::channel::<ScopedAgentEvent>(200);
+        let scope_path_for_bridge = vec![StreamScopeFrame::Primary {
+            session_id: session_id.to_string(),
+        }];
+        let bridge_scoped_tx = scoped_tx.clone();
+        primary_to_scoped_bridge_task = Some(tokio::spawn(async move {
+            while let Some(event) = primary_rx.recv().await {
+                let scoped = ScopedAgentEvent::new(scope_path_for_bridge.clone(), event.payload);
+                if bridge_scoped_tx.send(scoped).await.is_err() {
+                    break;
+                }
+            }
+        }));
+        event_tx = Some(primary_tx);
+        stream_task = Some(spawn_scoped_event_handler(
+            scoped_rx,
+            stream_renderer::StreamRenderPolicy::PrimaryOnly,
+        ));
+        scoped_event_tx = Some(scoped_tx);
+    } else if verbose {
         let (tx, rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
-        (Some(tx), Some(spawn_verbose_event_handler(rx, true)))
-    } else {
-        (None, None)
-    };
+        event_tx = Some(tx);
+        verbose_task = Some(spawn_verbose_event_handler(rx, true));
+    }
 
     let build = SessionBuildOptions {
         provider: Some(provider_core),
@@ -3572,8 +3323,12 @@ async fn resume_session_with_llm_override(
         provider_params: merged_provider_params,
         external_tools,
         llm_client_override: llm_override.map(meerkat::encode_llm_client_override_for_service),
-        scoped_event_tx: None,
-        scoped_event_path: None,
+        scoped_event_tx: scoped_event_tx.clone(),
+        scoped_event_path: scoped_event_tx.as_ref().map(|_| {
+            vec![StreamScopeFrame::Primary {
+                session_id: session_id.to_string(),
+            }]
+        }),
         override_builtins: None,
         override_shell: None,
         override_subagents: None,
@@ -3663,13 +3418,22 @@ async fn resume_session_with_llm_override(
     if let Some(ref mut mob_ctx) = run_mob_tools {
         mob_ctx.persist(scope).await?;
     }
-    if let Some(task) = event_task {
+    drop(scoped_event_tx);
+    if let Some(task) = primary_to_scoped_bridge_task {
+        let _ = task.await;
+    }
+    if let Some(task) = verbose_task {
+        let _ = task.await;
+    }
+    if let Some(task) = stream_task {
         let _ = task.await;
     }
 
     // Output the result
     log_stage("print_result");
-    println!("{}", result.text);
+    if !stream {
+        println!("{}", result.text);
+    }
     eprintln!(
         "\n[Session: {} | Ref: {} | Turns: {} | Tokens: {} in / {} out]",
         result.session_id,
@@ -4114,57 +3878,7 @@ async fn interrupt_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()>
     }
 }
 
-fn system_context_error_to_anyhow(err: SessionControlError) -> anyhow::Error {
-    match err {
-        SessionControlError::Session(inner) => anyhow::anyhow!(inner),
-        SessionControlError::InvalidRequest { message } => anyhow::anyhow!(message),
-        SessionControlError::Conflict { key, .. } => {
-            anyhow::anyhow!("system-context idempotency conflict for key '{key}'")
-        }
-    }
-}
-
-/// Append runtime system context to a session.
-async fn inject_session_context(
-    id: &str,
-    text: &str,
-    source: Option<&str>,
-    idempotency_key: Option<&str>,
-    scope: &RuntimeScope,
-) -> anyhow::Result<()> {
-    let session_id = resolve_scoped_session_id(id, scope)?;
-
-    let (config, _) = load_config(scope).await?;
-    let service = build_cli_persistent_service(scope, config).await?;
-    let result = service
-        .append_system_context(
-            &session_id,
-            AppendSystemContextRequest {
-                text: text.to_string(),
-                source: source.map(ToOwned::to_owned),
-                idempotency_key: idempotency_key.map(ToOwned::to_owned),
-            },
-        )
-        .await
-        .map_err(system_context_error_to_anyhow)?;
-
-    println!("Updated session: {session_id}");
-    println!(
-        "Session Ref: {}",
-        format_session_ref(&scope.locator.realm_id, &session_id)
-    );
-    println!(
-        "Status: {}",
-        match result.status {
-            AppendSystemContextStatus::Applied => "applied",
-            AppendSystemContextStatus::Staged => "staged",
-            AppendSystemContextStatus::Duplicate => "duplicate",
-        }
-    );
-    Ok(())
-}
-
-#[cfg(feature = "comms")]
+#[cfg(all(feature = "comms", test))]
 #[derive(Debug, serde::Deserialize)]
 struct CliCommsSendRequest {
     kind: String,
@@ -4190,22 +3904,7 @@ struct CliCommsSendRequest {
     allow_self_session: Option<bool>,
 }
 
-#[cfg(feature = "comms")]
-async fn resolve_live_comms_runtime(
-    session_id: &SessionId,
-    scope: &RuntimeScope,
-) -> anyhow::Result<Arc<dyn meerkat_core::agent::CommsRuntime>> {
-    let (config, _) = load_config(scope).await?;
-    let service = build_cli_persistent_service(scope, config).await?;
-    service.comms_runtime(session_id).await.ok_or_else(|| {
-        anyhow::anyhow!(
-            "Session not found or comms runtime unavailable: {session_id}. \
-             Comms runtime is only available for live sessions in this process."
-        )
-    })
-}
-
-#[cfg(feature = "comms")]
+#[cfg(all(feature = "comms", test))]
 fn parse_comms_send_payload(
     payload_json: &str,
     session_id: &SessionId,
@@ -4236,170 +3935,15 @@ fn parse_comms_send_payload(
     })
 }
 
-#[cfg(feature = "comms")]
-async fn comms_send_command(
-    session_id_input: &str,
-    payload_json: &str,
-    scope: &RuntimeScope,
-) -> anyhow::Result<()> {
-    let session_id = resolve_scoped_session_id(session_id_input, scope)?;
-    let comms = resolve_live_comms_runtime(&session_id, scope).await?;
-    let cmd = parse_comms_send_payload(payload_json, &session_id)?;
-    use meerkat_core::comms::SendReceipt;
-    let receipt = comms
-        .send(cmd)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to send comms command: {e}"))?;
-    let json = match receipt {
-        SendReceipt::InputAccepted {
-            interaction_id,
-            stream_reserved,
-        } => serde_json::json!({
-            "kind": "input_accepted",
-            "interaction_id": interaction_id.0.to_string(),
-            "stream_reserved": stream_reserved,
-        }),
-        SendReceipt::PeerMessageSent { envelope_id, acked } => serde_json::json!({
-            "kind": "peer_message_sent",
-            "envelope_id": envelope_id.to_string(),
-            "acked": acked,
-        }),
-        SendReceipt::PeerRequestSent {
-            envelope_id,
-            interaction_id,
-            stream_reserved,
-        } => serde_json::json!({
-            "kind": "peer_request_sent",
-            "envelope_id": envelope_id.to_string(),
-            "interaction_id": interaction_id.0.to_string(),
-            "stream_reserved": stream_reserved,
-        }),
-        SendReceipt::PeerResponseSent {
-            envelope_id,
-            in_reply_to,
-        } => serde_json::json!({
-            "kind": "peer_response_sent",
-            "envelope_id": envelope_id.to_string(),
-            "in_reply_to": in_reply_to.0.to_string(),
-        }),
-    };
-    println!("{}", serde_json::to_string_pretty(&json)?);
-    Ok(())
-}
-
-#[cfg(feature = "comms")]
-async fn comms_peers_command(session_id_input: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
-    let session_id = resolve_scoped_session_id(session_id_input, scope)?;
-    let comms = resolve_live_comms_runtime(&session_id, scope).await?;
-    let peers = comms.peers().await;
-    let entries: Vec<serde_json::Value> = peers
-        .iter()
-        .map(|peer| {
-            serde_json::json!({
-                "name": peer.name.to_string(),
-                "peer_id": peer.peer_id.clone(),
-                "address": peer.address.clone(),
-                "source": format!("{:?}", peer.source),
-                "sendable_kinds": peer.sendable_kinds.clone(),
-                "capabilities": peer.capabilities.clone(),
-                "meta": {
-                    "description": peer.meta.description.clone(),
-                    "labels": peer.meta.labels.clone(),
-                }
-            })
-        })
-        .collect();
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({ "peers": entries }))?
-    );
-    Ok(())
-}
-
+#[cfg(test)]
 #[derive(Debug, Clone)]
 struct SessionLocateMatch {
     state_root: PathBuf,
     realm_id: String,
-    backend: RealmBackend,
     session_id: SessionId,
 }
 
-impl SessionLocateMatch {
-    fn session_ref(&self) -> String {
-        format_session_ref(&self.realm_id, &self.session_id)
-    }
-}
-
-/// Locate a session across realms in explicit scan roots.
-///
-/// Default scan scope is the active runtime `state_root`. Additional roots must
-/// be passed explicitly via `--extra-state-root`.
-async fn stream_session_events(session_id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
-    use futures::StreamExt;
-
-    let (config, _) = load_config(scope).await?;
-    let service = build_cli_persistent_service(scope, config).await?;
-    let session_id = resolve_scoped_session_id(session_id, scope)?;
-    let mut stream = service
-        .subscribe_session_events(&session_id)
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-    loop {
-        tokio::select! {
-            item = stream.next() => {
-                match item {
-                    Some(envelope) => {
-                        let json = serde_json::to_string(&envelope)
-                            .map_err(|e| anyhow::anyhow!("serialize error: {e}"))?;
-                        println!("{json}");
-                    }
-                    None => break,
-                }
-            }
-            _ = tokio::signal::ctrl_c() => break,
-        }
-    }
-
-    Ok(())
-}
-
-async fn locate_sessions(
-    locator_input: &str,
-    extra_state_roots: Vec<PathBuf>,
-    scope: &RuntimeScope,
-) -> anyhow::Result<()> {
-    let mut matches = find_session_matches(locator_input, &extra_state_roots, scope).await?;
-
-    if matches.is_empty() {
-        return Err(anyhow::anyhow!(
-            "Session '{locator_input}' was not found in the scanned state roots."
-        ));
-    }
-
-    matches.sort_by(|a, b| {
-        a.state_root
-            .cmp(&b.state_root)
-            .then_with(|| a.realm_id.cmp(&b.realm_id))
-    });
-
-    println!(
-        "{:<72} {:<40} {:<8} STATE_ROOT",
-        "SESSION_REF", "SESSION_ID", "BACKEND"
-    );
-    println!("{}", "-".repeat(160));
-    for hit in matches {
-        println!(
-            "{:<72} {:<40} {:<8} {}",
-            hit.session_ref(),
-            hit.session_id,
-            hit.backend.as_str(),
-            hit.state_root.display()
-        );
-    }
-    Ok(())
-}
-
+#[cfg(test)]
 async fn find_session_matches(
     locator_input: &str,
     extra_state_roots: &[PathBuf],
@@ -4444,7 +3988,7 @@ async fn find_session_matches(
             .1;
 
             let found = store
-                .list(SessionFilter::default())
+                .list(meerkat_store::SessionFilter::default())
                 .await
                 .map_err(|e| {
                     anyhow::anyhow!(
@@ -4459,7 +4003,6 @@ async fn find_session_matches(
                 matches.push(SessionLocateMatch {
                     state_root: root.clone(),
                     realm_id: entry.manifest.realm_id,
-                    backend: entry.manifest.backend,
                     session_id: locator.session_id.clone(),
                 });
             }
@@ -4588,89 +4131,34 @@ async fn handle_mcp_command(command: McpCommands) -> anyhow::Result<()> {
         McpCommands::Add {
             name,
             transport,
-            user,
+            scope,
             url,
             headers,
             env,
             command,
-            session,
-            live_server_url,
-            persist,
         } => {
             let transport = transport.map(|t| match t {
                 CliTransport::Stdio => McpTransportKind::Stdio,
                 CliTransport::Http => McpTransportKind::StreamableHttp,
                 CliTransport::Sse => McpTransportKind::Sse,
             });
-            if let Some(session_id) = session {
-                if persist {
-                    anyhow::bail!(
-                        "--persist is not yet supported for live MCP operations; \
-                         changes are runtime-only until the session ends"
-                    );
-                }
-                let base_url = live_server_url
-                    .ok_or_else(|| anyhow::anyhow!("--session requires --live-server-url"))?;
-                mcp::live_add_server(
-                    &base_url,
-                    &session_id,
-                    name,
-                    transport,
-                    url,
-                    headers,
-                    command,
-                    env,
-                )
-                .await
-            } else {
-                if live_server_url.is_some() {
-                    anyhow::bail!("--live-server-url requires --session");
-                }
-                // user flag means user scope, otherwise default to project
-                mcp::add_server(name, transport, url, headers, command, env, !user).await
-            }
+            mcp::add_server(
+                name,
+                transport,
+                url,
+                headers,
+                command,
+                env,
+                matches!(scope, CliMcpScope::Project | CliMcpScope::Local),
+            )
+            .await
         }
-        McpCommands::Remove {
-            name,
-            scope,
-            session,
-            live_server_url,
-            persist,
-        } => {
+        McpCommands::Remove { name, scope } => {
             let scope = scope.map(|s| match s {
                 CliMcpScope::User => McpScope::User,
                 CliMcpScope::Project | CliMcpScope::Local => McpScope::Project,
             });
-            if let Some(session_id) = session {
-                if persist {
-                    anyhow::bail!(
-                        "--persist is not yet supported for live MCP operations; \
-                         changes are runtime-only until the session ends"
-                    );
-                }
-                let base_url = live_server_url
-                    .ok_or_else(|| anyhow::anyhow!("--session requires --live-server-url"))?;
-                mcp::live_remove_server(&base_url, &session_id, name).await
-            } else {
-                if live_server_url.is_some() {
-                    anyhow::bail!("--live-server-url requires --session");
-                }
-                mcp::remove_server(name, scope).await
-            }
-        }
-        McpCommands::Reload {
-            name,
-            session,
-            live_server_url,
-            persist,
-        } => {
-            if persist {
-                anyhow::bail!(
-                    "--persist is not yet supported for live MCP operations; \
-                     changes are runtime-only until the session ends"
-                );
-            }
-            mcp::live_reload_server(&live_server_url, &session, name).await
+            mcp::remove_server(name, scope).await
         }
         McpCommands::List { scope, json } => {
             let scope = scope.map(|s| match s {
@@ -5166,210 +4654,19 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
         Arc::new(MobCliSessionService::new(persistent.clone()));
     let (state, mut registry) = hydrate_mob_state(scope, session_service).await?;
     let result = match command {
-        MobCommands::Prefabs => {
-            for prefab in Prefab::all() {
-                println!("{}", prefab.key());
-            }
-            Ok(())
-        }
-        MobCommands::Create { prefab, definition } => {
-            if prefab.is_some() && definition.is_some() {
-                return Err(anyhow::anyhow!(
-                    "provide exactly one of --prefab <name> or --definition <file>, not both"
-                ));
-            }
-            let mob_id = if let Some(prefab_key) = prefab {
-                let prefab = Prefab::from_key(&prefab_key)
-                    .ok_or_else(|| anyhow::anyhow!("unknown prefab '{prefab_key}'"))?;
-                let definition = prefab.definition();
-                state
-                    .mob_create_definition(definition.clone())
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?
-                    .to_string()
-            } else if let Some(path) = definition {
-                let content = tokio::fs::read_to_string(&path).await.map_err(|e| {
-                    anyhow::anyhow!("failed reading definition '{}': {e}", path.display())
-                })?;
-                let definition = MobDefinition::from_toml(&content).map_err(|e| {
-                    anyhow::anyhow!("failed parsing TOML definition '{}': {e}", path.display())
-                })?;
-                state
-                    .mob_create_definition(definition.clone())
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?
-                    .to_string()
-            } else {
-                return Err(anyhow::anyhow!(
-                    "provide one of --prefab <name> or --definition <file>"
-                ));
-            };
-            registry.mobs.insert(
-                mob_id.clone(),
-                PersistedMob {
-                    definition: None,
-                    status: Some(meerkat_mob::MobState::Running.as_str().to_string()),
-                    events: Vec::new(),
-                    runs: std::collections::BTreeMap::new(),
-                },
-            );
-            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
-            save_mob_registry(scope, &registry).await?;
-            println!("{mob_id}");
-            Ok(())
-        }
-        MobCommands::List => {
-            for (id, status) in state.mob_list().await {
-                println!("{id}\t{}", status.as_str());
-            }
-            Ok(())
-        }
-        MobCommands::Status { mob_id } => {
-            let status = state
-                .mob_status(&meerkat_mob::MobId::from(mob_id))
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            println!("{}", status.as_str());
-            Ok(())
-        }
-        MobCommands::Spawn {
-            mob_id,
-            profile,
-            meerkat_id,
-        } => {
-            state
-                .mob_spawn(
-                    &meerkat_mob::MobId::from(mob_id.clone()),
-                    ProfileName::from(profile.clone()),
-                    meerkat_mob::MeerkatId::from(meerkat_id.clone()),
-                    None,
-                    None,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
-            save_mob_registry(scope, &registry).await?;
-            Ok(())
-        }
-        MobCommands::Retire { mob_id, meerkat_id } => {
-            state
-                .mob_retire(
-                    &meerkat_mob::MobId::from(mob_id.clone()),
-                    meerkat_mob::MeerkatId::from(meerkat_id.clone()),
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
-            save_mob_registry(scope, &registry).await?;
-            Ok(())
-        }
-        MobCommands::Wire { mob_id, a, b } => {
-            state
-                .mob_wire(
-                    &meerkat_mob::MobId::from(mob_id.clone()),
-                    meerkat_mob::MeerkatId::from(a.clone()),
-                    meerkat_mob::MeerkatId::from(b.clone()),
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
-            save_mob_registry(scope, &registry).await?;
-            Ok(())
-        }
-        MobCommands::Unwire { mob_id, a, b } => {
-            state
-                .mob_unwire(
-                    &meerkat_mob::MobId::from(mob_id.clone()),
-                    meerkat_mob::MeerkatId::from(a.clone()),
-                    meerkat_mob::MeerkatId::from(b.clone()),
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
-            save_mob_registry(scope, &registry).await?;
-            Ok(())
-        }
-        MobCommands::Turn {
-            mob_id,
-            meerkat_id,
-            message,
-        } => {
-            state
-                .mob_send_message(
-                    &meerkat_mob::MobId::from(mob_id.clone()),
-                    meerkat_mob::MeerkatId::from(meerkat_id),
-                    message,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
-            save_mob_registry(scope, &registry).await?;
-            Ok(())
-        }
-        MobCommands::Respawn {
-            mob_id,
-            meerkat_id,
-            message,
-        } => {
-            state
-                .mob_respawn(
-                    &meerkat_mob::MobId::from(mob_id.clone()),
-                    meerkat_mob::MeerkatId::from(meerkat_id),
-                    message,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            println!("respawn enqueued");
-            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
-            save_mob_registry(scope, &registry).await?;
-            Ok(())
-        }
-        MobCommands::Stop { mob_id } => {
-            state
-                .mob_stop(&meerkat_mob::MobId::from(mob_id.clone()))
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
-            save_mob_registry(scope, &registry).await?;
-            Ok(())
-        }
-        MobCommands::Resume { mob_id } => {
-            state
-                .mob_resume(&meerkat_mob::MobId::from(mob_id.clone()))
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
-            save_mob_registry(scope, &registry).await?;
-            Ok(())
-        }
-        MobCommands::Complete { mob_id } => {
-            state
-                .mob_complete(&meerkat_mob::MobId::from(mob_id.clone()))
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
-            save_mob_registry(scope, &registry).await?;
-            Ok(())
-        }
-        MobCommands::Flows { mob_id } => {
-            let flows = state
-                .mob_list_flows(&meerkat_mob::MobId::from(mob_id))
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            for flow_id in flows {
-                println!("{flow_id}");
-            }
-            Ok(())
-        }
         MobCommands::RunFlow {
             mob_id,
             flow,
             params,
             stream,
-            stream_view,
-            stream_focus,
+            no_stream,
         } => {
-            let stream_policy = resolve_stream_policy(stream, stream_view, stream_focus)?;
+            let stream = resolve_stream_enabled(stream, no_stream, true)?;
+            let stream_policy = if stream {
+                Some(stream_renderer::StreamRenderPolicy::PrimaryOnly)
+            } else {
+                None
+            };
             let activation_params = parse_run_flow_params(params)?;
             let (scoped_event_tx, stream_task) = if let Some(policy) = stream_policy {
                 let (tx, rx) = mpsc::channel::<ScopedAgentEvent>(200);
@@ -5431,62 +4728,6 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
             save_mob_registry(scope, &registry).await?;
             println!("{}", render_flow_status_json(resolved)?);
-            Ok(())
-        }
-        MobCommands::Events { mob_id, member } => {
-            use futures::StreamExt;
-            let mob_id_typed = meerkat_mob::MobId::from(mob_id.as_str());
-            if let Some(member_id) = member {
-                let meerkat_id = meerkat_mob::MeerkatId::from(member_id.as_str());
-                let mut stream = state
-                    .subscribe_agent_events(&mob_id_typed, &meerkat_id)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-                loop {
-                    tokio::select! {
-                        item = stream.next() => {
-                            match item {
-                                Some(envelope) => {
-                                    let json = serde_json::to_string(&envelope)
-                                        .map_err(|e| anyhow::anyhow!("serialize error: {e}"))?;
-                                    println!("{json}");
-                                }
-                                None => break,
-                            }
-                        }
-                        _ = tokio::signal::ctrl_c() => break,
-                    }
-                }
-            } else {
-                let mut router_handle = state
-                    .subscribe_mob_events(&mob_id_typed)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-                loop {
-                    tokio::select! {
-                        item = router_handle.event_rx.recv() => {
-                            match item {
-                                Some(attributed) => {
-                                    let json = serde_json::to_string(&attributed)
-                                        .map_err(|e| anyhow::anyhow!("serialize error: {e}"))?;
-                                    println!("{json}");
-                                }
-                                None => break,
-                            }
-                        }
-                        _ = tokio::signal::ctrl_c() => break,
-                    }
-                }
-            }
-            Ok(())
-        }
-        MobCommands::Destroy { mob_id } => {
-            state
-                .mob_destroy(&meerkat_mob::MobId::from(mob_id.clone()))
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            registry.mobs.remove(&mob_id);
-            save_mob_registry(scope, &registry).await?;
             Ok(())
         }
         MobCommands::Pack { .. }
@@ -6802,66 +6043,82 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_tooling_flags_shell_implies_builtins() {
-        let (builtins, shell) = resolve_tooling_flags(false, true);
-        assert!(builtins, "shell should imply builtins");
-        assert!(shell, "shell should stay enabled");
+    fn test_resolve_tool_preset_full_and_yolo_enable_mob_tools() {
+        let full = resolve_tool_preset(ToolPreset::Full, false);
+        assert!(full.builtins);
+        assert!(full.shell);
+        assert!(full.subagents);
+        assert!(full.memory);
+        assert!(full.mob);
 
-        let (builtins, shell) = resolve_tooling_flags(false, false);
-        assert!(!builtins);
-        assert!(!shell);
+        let yolo = resolve_tool_preset(ToolPreset::Safe, true);
+        assert!(yolo.shell);
+        assert!(yolo.memory);
+        assert!(yolo.mob);
     }
 
     #[test]
-    fn test_run_short_flags_parse() {
-        let cli = Cli::try_parse_from([
-            "rkat", "run", "hello", "-s", "-w", "focus", "-f", "primary", "-x", "-d", "5m", "-M",
-        ])
-        .expect("short flags should parse");
-
-        match cli.command {
-            Commands::Run {
-                stream,
-                stream_view,
-                stream_focus,
-                enable_shell,
-                max_duration,
-                enable_mob,
-                ..
-            } => {
-                assert!(stream);
-                assert!(matches!(stream_view, StreamView::Focus));
-                assert_eq!(stream_focus.as_deref(), Some("primary"));
-                assert!(enable_shell);
-                assert_eq!(max_duration.as_deref(), Some("5m"));
-                assert!(enable_mob);
-            }
-            _ => unreachable!("expected run command"),
-        }
+    fn test_resolve_stream_enabled_defaults_are_explicit() {
+        assert!(!resolve_stream_enabled(false, false, false).expect("json default"));
+        assert!(resolve_stream_enabled(true, false, false).expect("explicit stream"));
+        assert!(!resolve_stream_enabled(false, true, true).expect("explicit no-stream"));
     }
 
     #[test]
-    fn test_run_tool_overlay_flags_parse() {
+    fn test_run_cli_surface_parses_current_flags() {
         let cli = Cli::try_parse_from([
             "rkat",
             "run",
             "hello",
-            "--allow-tool",
-            "read_file",
+            "-t",
+            "workspace",
+            "--yolo",
+            "--param",
+            "temperature=0.2",
+            "--params-json",
+            r#"{"reasoning":{"effort":"high"}}"#,
+            "--schema",
+            "./schema.json",
+            "--json",
+            "--stdin",
+            "lines",
+            "--line-format",
+            "json",
             "--allow-tool",
             "search",
             "--block-tool",
             "shell",
         ])
-        .expect("run tool overlay flags should parse");
+        .expect("run should parse");
 
         match cli.command {
             Commands::Run {
+                prompt,
+                tools,
+                yolo,
+                params,
+                provider_params_json,
+                output_schema,
+                json,
+                stdin,
+                line_format,
                 allow_tools,
                 block_tools,
                 ..
             } => {
-                assert_eq!(allow_tools, vec!["read_file", "search"]);
+                assert_eq!(prompt, "hello");
+                assert!(matches!(tools, ToolPreset::Workspace));
+                assert!(yolo);
+                assert_eq!(params, vec!["temperature=0.2"]);
+                assert_eq!(
+                    provider_params_json.as_deref(),
+                    Some(r#"{"reasoning":{"effort":"high"}}"#)
+                );
+                assert_eq!(output_schema.as_deref(), Some("./schema.json"));
+                assert!(json);
+                assert!(matches!(stdin, StdinMode::Lines));
+                assert!(matches!(line_format, LineFormat::Json));
+                assert_eq!(allow_tools, vec!["search"]);
                 assert_eq!(block_tools, vec!["shell"]);
             }
             _ => unreachable!("expected run command"),
@@ -6869,67 +6126,68 @@ mod tests {
     }
 
     #[test]
-    fn test_resume_tool_overlay_flags_parse() {
-        let cli = Cli::try_parse_from([
+    fn test_resume_and_continue_parse_current_flags() {
+        let resume = Cli::try_parse_from([
             "rkat",
             "resume",
             "last",
-            "continue",
+            "keep going",
+            "--stdin",
+            "blob",
+            "--line-format",
+            "text",
+            "--stream",
             "--allow-tool",
             "search",
-            "--block-tool",
-            "shell",
-            "--block-tool",
-            "delete_file",
         ])
-        .expect("resume tool overlay flags should parse");
-
-        match cli.command {
+        .expect("resume should parse");
+        match resume.command {
             Commands::Resume {
+                session_id,
+                prompt,
+                stdin,
+                line_format,
+                stream,
                 allow_tools,
-                block_tools,
                 ..
             } => {
+                assert_eq!(session_id, "last");
+                assert_eq!(prompt, "keep going");
+                assert!(matches!(stdin, StdinMode::Blob));
+                assert!(matches!(line_format, LineFormat::Text));
+                assert!(stream);
                 assert_eq!(allow_tools, vec!["search"]);
-                assert_eq!(block_tools, vec!["shell", "delete_file"]);
             }
-            _ => unreachable!("expected resume command"),
+            _ => unreachable!("expected resume"),
         }
-    }
 
-    #[test]
-    fn test_continue_resume_parity_flags_parse() {
-        let cli = Cli::try_parse_from([
+        let cont = Cli::try_parse_from([
             "rkat",
             "continue",
             "next step",
-            "--allow-tool",
-            "search",
             "--block-tool",
             "shell",
             "--skill-reference",
             "legacy/skill",
         ])
-        .expect("continue parity flags should parse");
-
-        match cli.command {
+        .expect("continue should parse");
+        match cont.command {
             Commands::Continue {
-                allow_tools,
+                prompt,
                 block_tools,
                 skill_references,
                 ..
             } => {
-                assert_eq!(allow_tools, vec!["search"]);
+                assert_eq!(prompt, "next step");
                 assert_eq!(block_tools, vec!["shell"]);
                 assert_eq!(skill_references, vec!["legacy/skill"]);
             }
-            _ => unreachable!("expected continue command"),
+            _ => unreachable!("expected continue"),
         }
     }
 
     #[test]
     fn test_inject_default_run_subcommand() {
-        // Bare prompt → inject "run"
         let args = inject_default_run_subcommand(["rkat", "hello world"].map(Into::into));
         assert_eq!(
             args,
@@ -6939,31 +6197,11 @@ mod tests {
                 .collect::<Vec<_>>()
         );
 
-        // Global flags before prompt → inject "run" before prompt
         let args =
             inject_default_run_subcommand(["rkat", "--realm", "test", "hello"].map(Into::into));
-        assert_eq!(
-            args[3],
-            std::ffi::OsString::from("run"),
-            "should inject run before first positional"
-        );
-        assert_eq!(
-            args[4],
-            std::ffi::OsString::from("hello"),
-            "prompt follows run"
-        );
+        assert_eq!(args[3], std::ffi::OsString::from("run"));
+        assert_eq!(args[4], std::ffi::OsString::from("hello"));
 
-        // Explicit subcommand → no injection
-        let args = inject_default_run_subcommand(["rkat", "run", "hello"].map(Into::into));
-        assert_eq!(
-            args,
-            vec!["rkat", "run", "hello"]
-                .into_iter()
-                .map(std::ffi::OsString::from)
-                .collect::<Vec<_>>()
-        );
-
-        // Other subcommand → no injection
         let args = inject_default_run_subcommand(["rkat", "init"].map(Into::into));
         assert_eq!(
             args,
@@ -6975,70 +6213,19 @@ mod tests {
     }
 
     #[test]
-    fn test_inject_default_run_subcommand_respects_comms_subcommand() {
-        let args = inject_default_run_subcommand(["rkat", "comms", "peers", "sid"].map(Into::into));
-        assert_eq!(
-            args,
-            vec!["rkat", "comms", "peers", "sid"]
-                .into_iter()
-                .map(std::ffi::OsString::from)
-                .collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn test_sessions_list_offset_flag_parses() {
-        let cli =
-            Cli::try_parse_from(["rkat", "sessions", "list", "--limit", "10", "--offset", "3"])
-                .expect("sessions list offset should parse");
+    fn test_sessions_list_parses_current_flags() {
+        let cli = Cli::try_parse_from([
+            "rkat", "sessions", "list", "--limit", "10", "--label", "env=dev",
+        ])
+        .expect("sessions list should parse");
         match cli.command {
             Commands::Sessions {
-                command: SessionCommands::List { limit, offset, .. },
+                command: SessionCommands::List { limit, labels, .. },
             } => {
                 assert_eq!(limit, 10);
-                assert_eq!(offset, Some(3));
+                assert_eq!(labels, vec![("env".to_string(), "dev".to_string())]);
             }
             _ => unreachable!("expected sessions list command"),
-        }
-    }
-
-    #[cfg(feature = "comms")]
-    #[test]
-    fn test_cli_comms_send_parses() {
-        let cli = Cli::try_parse_from([
-            "rkat",
-            "comms",
-            "send",
-            "01234567-89ab-cdef-0123-456789abcdef",
-            "--json",
-            r#"{"kind":"peer_message","to":"agent-b","body":"hi"}"#,
-        ])
-        .expect("comms send should parse");
-
-        match cli.command {
-            Commands::Comms {
-                command: CommsCommands::Send { session_id, json },
-            } => {
-                assert_eq!(session_id, "01234567-89ab-cdef-0123-456789abcdef");
-                assert!(json.contains("\"kind\":\"peer_message\""));
-            }
-            _ => unreachable!("expected comms send command"),
-        }
-    }
-
-    #[cfg(feature = "comms")]
-    #[test]
-    fn test_cli_comms_peers_parses() {
-        let cli = Cli::try_parse_from(["rkat", "comms", "peers", "session-1"])
-            .expect("comms peers should parse");
-
-        match cli.command {
-            Commands::Comms {
-                command: CommsCommands::Peers { session_id },
-            } => {
-                assert_eq!(session_id, "session-1");
-            }
-            _ => unreachable!("expected comms peers command"),
         }
     }
 
@@ -7136,22 +6323,22 @@ mod tests {
 
     #[test]
     fn test_mob_run_flow_short_flags_parse() {
-        let cli = Cli::try_parse_from([
-            "rkat", "mob", "run-flow", "mob-1", "--flow", "f1", "-s", "-w", "mux",
-        ])
-        .expect("mob run-flow short flags should parse");
+        let cli = Cli::try_parse_from(["rkat", "mob", "run-flow", "mob-1", "--flow", "f1", "-s"])
+            .expect("mob run-flow should parse");
 
         match cli.command {
             Commands::Mob {
                 command:
                     MobCommands::RunFlow {
+                        mob_id,
+                        flow,
                         stream,
-                        stream_view,
                         ..
                     },
             } => {
+                assert_eq!(mob_id, "mob-1");
+                assert_eq!(flow, "f1");
                 assert!(stream);
-                assert!(matches!(stream_view, StreamView::Mux));
             }
             _ => unreachable!("expected mob run-flow command"),
         }
@@ -7247,157 +6434,90 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_mcp_add_live_flags_parse() {
-        let cli = Cli::try_parse_from([
+    fn test_cli_mcp_add_and_remove_parse_local_config_surface() {
+        let add = Cli::try_parse_from([
             "rkat",
             "mcp",
             "add",
-            "live-server",
-            "--session",
-            "session-123",
-            "--live-server-url",
-            "http://127.0.0.1:8080",
-            "--url",
-            "https://example.com/mcp",
+            "filesystem",
+            "--scope",
+            "project",
+            "--transport",
+            "stdio",
+            "--",
+            "npx",
+            "-y",
+            "@modelcontextprotocol/server-filesystem",
+            ".",
         ])
-        .expect("mcp add live flags should parse");
-
-        match cli.command {
+        .expect("mcp add should parse");
+        match add.command {
             Commands::Mcp {
                 command:
                     McpCommands::Add {
                         name,
-                        session,
-                        live_server_url,
-                        persist,
+                        scope,
+                        transport,
+                        command,
                         ..
                     },
             } => {
-                assert_eq!(name, "live-server");
-                assert_eq!(session.as_deref(), Some("session-123"));
-                assert_eq!(live_server_url.as_deref(), Some("http://127.0.0.1:8080"));
-                assert!(!persist);
+                assert_eq!(name, "filesystem");
+                assert!(matches!(scope, CliMcpScope::Project));
+                assert!(matches!(transport, Some(CliTransport::Stdio)));
+                assert_eq!(
+                    command,
+                    vec!["npx", "-y", "@modelcontextprotocol/server-filesystem", "."]
+                );
             }
-            _ => unreachable!("expected mcp add command"),
+            _ => unreachable!("expected mcp add"),
         }
-    }
 
-    #[test]
-    fn test_cli_mcp_remove_live_persist_flags_parse() {
-        let cli = Cli::try_parse_from([
-            "rkat",
-            "mcp",
-            "remove",
-            "live-server",
-            "--session",
-            "session-123",
-            "--live-server-url",
-            "http://127.0.0.1:8080",
-            "--persist",
-        ])
-        .expect("mcp remove live flags should parse");
-
-        match cli.command {
+        let remove =
+            Cli::try_parse_from(["rkat", "mcp", "remove", "filesystem", "--scope", "project"])
+                .expect("mcp remove should parse");
+        match remove.command {
             Commands::Mcp {
-                command:
-                    McpCommands::Remove {
-                        name,
-                        session,
-                        live_server_url,
-                        persist,
-                        ..
-                    },
+                command: McpCommands::Remove { name, scope },
             } => {
-                assert_eq!(name, "live-server");
-                assert_eq!(session.as_deref(), Some("session-123"));
-                assert_eq!(live_server_url.as_deref(), Some("http://127.0.0.1:8080"));
-                assert!(persist);
+                assert_eq!(name, "filesystem");
+                assert!(matches!(scope, Some(CliMcpScope::Project)));
             }
-            _ => unreachable!("expected mcp remove command"),
+            _ => unreachable!("expected mcp remove"),
         }
     }
 
     #[test]
-    fn test_cli_mcp_reload_live_flags_parse() {
-        let cli = Cli::try_parse_from([
-            "rkat",
-            "mcp",
-            "reload",
-            "live-server",
-            "--session",
-            "session-123",
-            "--live-server-url",
-            "http://127.0.0.1:8080",
-        ])
-        .expect("mcp reload live flags should parse");
+    fn test_help_snapshots_cover_current_public_surface() {
+        use clap::CommandFactory;
 
-        match cli.command {
-            Commands::Mcp {
-                command:
-                    McpCommands::Reload {
-                        name,
-                        session,
-                        live_server_url,
-                        persist,
-                    },
-            } => {
-                assert_eq!(name.as_deref(), Some("live-server"));
-                assert_eq!(session, "session-123");
-                assert_eq!(live_server_url, "http://127.0.0.1:8080");
-                assert!(!persist);
-            }
-            _ => unreachable!("expected mcp reload command"),
+        fn render_help(mut command: clap::Command) -> String {
+            let mut out = Vec::new();
+            command
+                .write_long_help(&mut out)
+                .expect("help should render");
+            String::from_utf8(out).expect("utf-8 help")
         }
-    }
 
-    #[test]
-    fn test_cli_mcp_add_persist_requires_session() {
-        let err = Cli::try_parse_from(["rkat", "mcp", "add", "srv", "--persist"])
-            .err()
-            .expect("persist without session should fail");
-        let message = err.to_string();
-        assert!(message.contains("--persist"));
-    }
+        let top = render_help(Cli::command());
+        assert!(top.contains("Usage: rkat [OPTIONS] <PROMPT>"));
+        assert!(top.contains("cat story.txt | rkat \"summarize the story\""));
+        assert!(top.contains("tail -f app.log | rkat --stdin lines"));
 
-    #[tokio::test]
-    async fn test_handle_mcp_add_live_session_requires_server_url() {
-        let err = handle_mcp_command(McpCommands::Add {
-            name: "srv".to_string(),
-            transport: None,
-            user: false,
-            url: Some("https://example.com/mcp".to_string()),
-            headers: Vec::new(),
-            env: Vec::new(),
-            command: Vec::new(),
-            session: Some("session-1".to_string()),
-            live_server_url: None,
-            persist: false,
-        })
-        .await
-        .expect_err("session without server url should be rejected");
+        let run = render_help(Cli::command().find_subcommand("run").unwrap().clone());
+        assert!(run.contains("--tools <TOOLS>"));
+        assert!(run.contains("--yolo"));
+        assert!(run.contains("--stdin <STDIN>"));
+        assert!(run.contains("piped stdin is read as blob context"));
 
-        assert!(
-            err.to_string()
-                .contains("--session requires --live-server-url")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_handle_mcp_remove_live_session_requires_server_url() {
-        let err = handle_mcp_command(McpCommands::Remove {
-            name: "srv".to_string(),
-            scope: None,
-            session: Some("session-1".to_string()),
-            live_server_url: None,
-            persist: false,
-        })
-        .await
-        .expect_err("session without server url should be rejected");
-
-        assert!(
-            err.to_string()
-                .contains("--session requires --live-server-url")
-        );
+        let mob = render_help(Cli::command().find_subcommand("mob").unwrap().clone());
+        assert!(mob.contains("pack"));
+        assert!(mob.contains("deploy"));
+        assert!(mob.contains("run-flow"));
+        assert!(mob.contains("flow-status"));
+        assert!(!mob.contains("prefabs"));
+        assert!(!mob.contains("create"));
+        assert!(!mob.contains("spawn"));
     }
 
     #[test]
@@ -8983,94 +8103,6 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
     }
 
     #[cfg(feature = "jsonl-store")]
-    #[tokio::test]
-    async fn test_resume_session_wires_mob_tools_into_llm_request() {
-        let temp = tempfile::tempdir().expect("tempdir must be created");
-        let mut scope = test_scope_with_context(temp.path().to_path_buf());
-        scope.backend_hint = Some(RealmBackend::Jsonl);
-        let (manifest, store) = create_session_store(&scope)
-            .await
-            .expect("session store should initialize");
-
-        let mut session = Session::new();
-        let session_id = session.id().to_string();
-        session
-            .set_session_metadata(meerkat_core::SessionMetadata {
-                model: "claude-sonnet-4-5".to_string(),
-                max_tokens: 64,
-                provider: meerkat_core::Provider::Anthropic,
-                tooling: SessionTooling {
-                    builtins: true,
-                    shell: false,
-                    comms: false,
-                    subagents: true,
-                    mob: true,
-                    active_skills: None,
-                },
-                host_mode: false,
-                comms_name: None,
-                peer_meta: None,
-                realm_id: Some(scope.locator.realm_id.clone()),
-                instance_id: None,
-                backend: None,
-                config_generation: None,
-            })
-            .expect("session metadata should be set");
-        store
-            .save(&session)
-            .await
-            .expect("seed session should save");
-        drop(store);
-        drop(manifest);
-
-        let captured_tool_names = Arc::new(Mutex::new(Vec::<String>::new()));
-        let captured_system_prompt = Arc::new(Mutex::new(None::<String>));
-        let llm_override: Arc<dyn LlmClient> = Arc::new(CapturingLlmClient::new(
-            captured_tool_names.clone(),
-            captured_system_prompt.clone(),
-        ));
-
-        resume_session_with_llm_override(
-            &session_id,
-            "resume and list tools",
-            None,
-            HookRunOverrides::default(),
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            None,
-            None,
-            None,
-            vec![],
-            None,
-            &scope,
-            Some(llm_override),
-            false,
-            false, // wait_for_mcp
-        )
-        .await
-        .expect("resume should succeed with llm override");
-
-        let names: std::collections::BTreeSet<String> = captured_tool_names
-            .lock()
-            .expect("captured tool mutex should not be poisoned")
-            .iter()
-            .cloned()
-            .collect();
-        assert!(names.contains("mob_list"));
-        assert!(names.contains("mob_create"));
-
-        let system_prompt = captured_system_prompt
-            .lock()
-            .expect("captured prompt mutex should not be poisoned")
-            .clone()
-            .expect("system prompt must be captured");
-        assert!(system_prompt.contains("mob_list"));
-        assert!(system_prompt.contains("mob_create"));
-    }
-
     #[test]
     fn test_parse_provider_params_multiple() -> Result<(), Box<dyn std::error::Error>> {
         let params = vec![
@@ -9695,100 +8727,6 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
         }
     }
 
-    fn flow_definition_toml(mob_id: &str) -> String {
-        format!(
-            r#"
-[mob]
-id = "{mob_id}"
-orchestrator = "lead"
-
-[profiles.lead]
-model = "claude-opus-4-6"
-external_addressable = true
-peer_description = "Lead"
-
-[profiles.lead.tools]
-comms = true
-mob = true
-
-[profiles.worker]
-model = "claude-sonnet-4-5"
-external_addressable = false
-peer_description = "Worker"
-runtime_mode = "turn_driven"
-
-[profiles.worker.tools]
-comms = true
-
-[wiring]
-auto_wire_orchestrator = false
-role_wiring = []
-
-[backend]
-default = "subagent"
-
-[flows.demo]
-description = "demo flow"
-
-[flows.demo.steps.start]
-role = "worker"
-message = "Execute flow"
-timeout_ms = 1000
-"#
-        )
-    }
-
-    #[tokio::test]
-    async fn test_mob_create_prefab_and_list_registry() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let scope = test_scope_with_context(temp.path().to_path_buf());
-
-        handle_mob_command(
-            MobCommands::Create {
-                prefab: Some("coding_swarm".to_string()),
-                definition: None,
-            },
-            &scope,
-        )
-        .await
-        .expect("mob create should succeed");
-
-        let registry = load_mob_registry(&scope)
-            .await
-            .expect("registry should load");
-        assert!(registry.mobs.contains_key("coding_swarm"));
-
-        handle_mob_command(MobCommands::List, &scope)
-            .await
-            .expect("mob list should succeed");
-    }
-
-    #[tokio::test]
-    async fn test_mob_create_rejects_prefab_and_definition_together() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let scope = test_scope_with_context(temp.path().to_path_buf());
-        let definition_path = temp.path().join("mob.toml");
-        tokio::fs::write(&definition_path, "id = \"x\"")
-            .await
-            .expect("write definition");
-
-        let result = handle_mob_command(
-            MobCommands::Create {
-                prefab: Some("pipeline".to_string()),
-                definition: Some(definition_path),
-            },
-            &scope,
-        )
-        .await;
-
-        assert!(result.is_err(), "conflicting create inputs must fail");
-        let err = result.expect_err("expected conflict error").to_string();
-        assert!(
-            err.contains("exactly one"),
-            "error should explain mutually exclusive flags: {err}"
-        );
-    }
-
     #[tokio::test]
     async fn test_prepare_run_mob_tools_does_not_hold_registry_lock_for_context_lifetime() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -9809,72 +8747,6 @@ timeout_ms = 1000
         .await
         .expect("second context should not block on long-held registry lock")
         .expect("second context should initialize");
-    }
-
-    #[tokio::test]
-    async fn test_mob_prefabs_and_lifecycle_commands_parse_and_dispatch() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let scope = test_scope_with_context(temp.path().to_path_buf());
-        let scope_2 = test_scope_with_context(temp.path().to_path_buf());
-
-        handle_mob_command(MobCommands::Prefabs, &scope)
-            .await
-            .expect("prefabs should succeed");
-        handle_mob_command(
-            MobCommands::Create {
-                prefab: Some("pipeline".to_string()),
-                definition: None,
-            },
-            &scope,
-        )
-        .await
-        .expect("create should succeed");
-
-        // New invocation context should rehydrate created mobs from persisted registry.
-        handle_mob_command(MobCommands::List, &scope_2)
-            .await
-            .expect("list should succeed across invocations");
-
-        handle_mob_command(
-            MobCommands::Status {
-                mob_id: "pipeline".to_string(),
-            },
-            &scope_2,
-        )
-        .await
-        .expect("status should succeed");
-        handle_mob_command(
-            MobCommands::Stop {
-                mob_id: "pipeline".to_string(),
-            },
-            &scope,
-        )
-        .await
-        .expect("stop should succeed");
-        handle_mob_command(
-            MobCommands::Resume {
-                mob_id: "pipeline".to_string(),
-            },
-            &scope,
-        )
-        .await
-        .expect("resume should succeed");
-        handle_mob_command(
-            MobCommands::Complete {
-                mob_id: "pipeline".to_string(),
-            },
-            &scope,
-        )
-        .await
-        .expect("complete should succeed");
-        handle_mob_command(
-            MobCommands::Destroy {
-                mob_id: "pipeline".to_string(),
-            },
-            &scope,
-        )
-        .await
-        .expect("destroy should succeed");
     }
 
     #[test]
@@ -9970,348 +8842,6 @@ timeout_ms = 1000
             running.is_none(),
             "non-terminal cached run must never be treated as authoritative"
         );
-    }
-
-    #[tokio::test]
-    async fn test_flow_status_discards_non_terminal_cached_snapshot_when_run_missing() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let scope = test_scope_with_context(temp.path().to_path_buf());
-        let definition_path = temp.path().join("flow-mob.toml");
-        tokio::fs::write(&definition_path, flow_definition_toml("flow-mob"))
-            .await
-            .expect("write flow mob definition");
-
-        handle_mob_command(
-            MobCommands::Create {
-                prefab: None,
-                definition: Some(definition_path),
-            },
-            &scope,
-        )
-        .await
-        .expect("create flow mob");
-
-        let run_id = RunId::new();
-        let now = chrono::Utc::now();
-        let mut registry = load_mob_registry(&scope)
-            .await
-            .expect("registry should load");
-        let mob = registry
-            .mobs
-            .get_mut("flow-mob")
-            .expect("flow-mob should exist");
-        mob.runs.insert(
-            run_id.to_string(),
-            meerkat_mob::MobRun {
-                run_id: run_id.clone(),
-                mob_id: meerkat_mob::MobId::from("flow-mob"),
-                flow_id: FlowId::from("demo"),
-                status: meerkat_mob::MobRunStatus::Running,
-                activation_params: serde_json::json!({}),
-                created_at: now,
-                completed_at: None,
-                step_ledger: Vec::new(),
-                failure_ledger: Vec::new(),
-            },
-        );
-        save_mob_registry(&scope, &registry)
-            .await
-            .expect("save injected running snapshot");
-
-        handle_mob_command(
-            MobCommands::FlowStatus {
-                mob_id: "flow-mob".to_string(),
-                run_id: run_id.to_string(),
-            },
-            &scope,
-        )
-        .await
-        .expect("flow status should not trust non-terminal cache");
-
-        let refreshed = load_mob_registry(&scope)
-            .await
-            .expect("registry should reload");
-        let refreshed_mob = refreshed
-            .mobs
-            .get("flow-mob")
-            .expect("flow-mob should remain persisted");
-        assert!(
-            !refreshed_mob.runs.contains_key(&run_id.to_string()),
-            "flow-status should drop non-terminal cached snapshots when no live run exists"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_mob_flow_commands_parse_and_dispatch() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let scope = test_scope_with_context(temp.path().to_path_buf());
-        let scope_2 = test_scope_with_context(temp.path().to_path_buf());
-        let definition_path = temp.path().join("flow-mob.toml");
-        tokio::fs::write(&definition_path, flow_definition_toml("flow-mob"))
-            .await
-            .expect("write flow mob definition");
-
-        handle_mob_command(
-            MobCommands::Create {
-                prefab: None,
-                definition: Some(definition_path),
-            },
-            &scope,
-        )
-        .await
-        .expect("create flow mob");
-        handle_mob_command(
-            MobCommands::Flows {
-                mob_id: "flow-mob".to_string(),
-            },
-            &scope,
-        )
-        .await
-        .expect("list flows");
-        handle_mob_command(
-            MobCommands::RunFlow {
-                mob_id: "flow-mob".to_string(),
-                flow: "demo".to_string(),
-                params: Some(r#"{"ticket":"REQ-019"}"#.to_string()),
-                stream: false,
-                stream_view: StreamView::Primary,
-                stream_focus: None,
-            },
-            &scope,
-        )
-        .await
-        .expect("run flow");
-
-        let registry = load_mob_registry(&scope)
-            .await
-            .expect("registry should load");
-        let persisted = registry
-            .mobs
-            .get("flow-mob")
-            .expect("flow-mob should be persisted");
-        assert_eq!(
-            persisted.runs.len(),
-            1,
-            "run-flow must persist exactly one run snapshot"
-        );
-        let (run_id, persisted_run) = persisted.runs.iter().next().expect("persisted run");
-        assert_eq!(
-            persisted_run.flow_id,
-            FlowId::from("demo"),
-            "persisted run snapshot should keep flow identity"
-        );
-        assert!(
-            persisted_run.status.is_terminal(),
-            "run-flow command should persist terminal run status before returning"
-        );
-        assert_eq!(
-            persisted_run.activation_params,
-            serde_json::json!({"ticket":"REQ-019"}),
-            "persisted run snapshot should keep activation params"
-        );
-
-        handle_mob_command(
-            MobCommands::FlowStatus {
-                mob_id: "flow-mob".to_string(),
-                run_id: run_id.clone(),
-            },
-            &scope,
-        )
-        .await
-        .expect("flow status should resolve persisted run");
-
-        let session_service: Arc<dyn meerkat_mob::MobSessionService> =
-            Arc::new(TestMobSessionService::new());
-        let (rehydrated_state, _registry) = hydrate_mob_state(&scope_2, session_service)
-            .await
-            .expect("rehydration should succeed");
-        let roundtrip = rehydrated_state
-            .mob_flow_status(
-                &meerkat_mob::MobId::from("flow-mob"),
-                run_id.parse::<RunId>().expect("run id"),
-            )
-            .await
-            .expect("flow status in rehydrated state should succeed");
-        let roundtrip = roundtrip.expect("terminal run should resolve after rehydration");
-        assert_eq!(roundtrip.flow_id, FlowId::from("demo"));
-    }
-
-    #[tokio::test]
-    async fn test_mob_run_flow_failure_persists_terminal_snapshot_and_rehydrates() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let scope = test_scope_with_context(temp.path().to_path_buf());
-        let scope_2 = test_scope_with_context(temp.path().to_path_buf());
-        let definition_path = temp.path().join("flow-mob.toml");
-        tokio::fs::write(&definition_path, flow_definition_toml("flow-mob"))
-            .await
-            .expect("write flow mob definition");
-
-        handle_mob_command(
-            MobCommands::Create {
-                prefab: None,
-                definition: Some(definition_path),
-            },
-            &scope,
-        )
-        .await
-        .expect("create flow mob");
-
-        // Do not spawn any worker so the flow fails with no targets and still reaches terminal state.
-        handle_mob_command(
-            MobCommands::RunFlow {
-                mob_id: "flow-mob".to_string(),
-                flow: "demo".to_string(),
-                params: Some(r#"{"ticket":"REQ-020"}"#.to_string()),
-                stream: false,
-                stream_view: StreamView::Primary,
-                stream_focus: None,
-            },
-            &scope,
-        )
-        .await
-        .expect("run flow should return after terminal failure");
-
-        let registry = load_mob_registry(&scope)
-            .await
-            .expect("registry should load");
-        let persisted = registry
-            .mobs
-            .get("flow-mob")
-            .expect("flow-mob should be persisted");
-        let (_run_id, persisted_run) = persisted.runs.iter().next().expect("persisted run");
-        assert_eq!(
-            persisted_run.status,
-            meerkat_mob::MobRunStatus::Failed,
-            "failed run should be cached as terminal failure"
-        );
-        assert!(
-            persisted_run.status.is_terminal(),
-            "cached run snapshot must always be terminal"
-        );
-
-        let session_service: Arc<dyn meerkat_mob::MobSessionService> =
-            Arc::new(TestMobSessionService::new());
-        let (rehydrated_state, _registry) = hydrate_mob_state(&scope_2, session_service)
-            .await
-            .expect("rehydration should succeed");
-        let rehydrated = rehydrated_state
-            .mob_flow_status(
-                &meerkat_mob::MobId::from("flow-mob"),
-                persisted_run.run_id.clone(),
-            )
-            .await
-            .expect("flow status in rehydrated state should succeed")
-            .expect("terminal run should resolve after rehydration");
-        assert_eq!(
-            rehydrated.status,
-            meerkat_mob::MobRunStatus::Failed,
-            "rehydrated run should preserve failure terminal status"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_mob_flow_status_rejects_invalid_run_id() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let scope = test_scope_with_context(temp.path().to_path_buf());
-        let definition_path = temp.path().join("flow-mob.toml");
-        tokio::fs::write(&definition_path, flow_definition_toml("flow-mob"))
-            .await
-            .expect("write flow mob definition");
-        handle_mob_command(
-            MobCommands::Create {
-                prefab: None,
-                definition: Some(definition_path),
-            },
-            &scope,
-        )
-        .await
-        .expect("create flow mob");
-
-        let err = handle_mob_command(
-            MobCommands::FlowStatus {
-                mob_id: "flow-mob".to_string(),
-                run_id: "not-a-uuid".to_string(),
-            },
-            &scope,
-        )
-        .await
-        .expect_err("invalid run_id should fail");
-        assert!(
-            err.to_string().contains("invalid run_id"),
-            "error should follow invalid-argument style: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_mob_run_flow_rejects_unknown_flow_id() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let scope = test_scope_with_context(temp.path().to_path_buf());
-        let definition_path = temp.path().join("flow-mob.toml");
-        tokio::fs::write(&definition_path, flow_definition_toml("flow-mob"))
-            .await
-            .expect("write flow mob definition");
-        handle_mob_command(
-            MobCommands::Create {
-                prefab: None,
-                definition: Some(definition_path),
-            },
-            &scope,
-        )
-        .await
-        .expect("create flow mob");
-        let err = handle_mob_command(
-            MobCommands::RunFlow {
-                mob_id: "flow-mob".to_string(),
-                flow: "missing".to_string(),
-                params: Some(r#"{"ticket":"REQ-019"}"#.to_string()),
-                stream: false,
-                stream_view: StreamView::Primary,
-                stream_focus: None,
-            },
-            &scope,
-        )
-        .await
-        .expect_err("unknown flow_id should fail");
-        assert!(
-            err.to_string().contains("flow not found"),
-            "error should explain missing flow: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_mob_registry_serializes_concurrent_writers() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let scope_a = test_scope_with_context(temp.path().to_path_buf());
-        let scope_b = test_scope_with_context(temp.path().to_path_buf());
-
-        let a = tokio::spawn(async move {
-            handle_mob_command(
-                MobCommands::Create {
-                    prefab: Some("pipeline".to_string()),
-                    definition: None,
-                },
-                &scope_a,
-            )
-            .await
-        });
-        let b = tokio::spawn(async move {
-            handle_mob_command(
-                MobCommands::Create {
-                    prefab: Some("code_review".to_string()),
-                    definition: None,
-                },
-                &scope_b,
-            )
-            .await
-        });
-
-        a.await.expect("join A").expect("create A");
-        b.await.expect("join B").expect("create B");
-
-        let scope_read = test_scope_with_context(temp.path().to_path_buf());
-        let registry = load_mob_registry(&scope_read).await.expect("registry");
-        assert!(registry.mobs.contains_key("pipeline"));
-        assert!(registry.mobs.contains_key("code_review"));
     }
 
     #[test]

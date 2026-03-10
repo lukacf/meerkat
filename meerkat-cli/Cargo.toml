@@ -17,11 +17,6 @@ name = "rkat"
 path = "src/main.rs"
 
 [[test]]
-name = "e2e_rkat_comms"
-path = "tests/e2e_rkat_comms.rs"
-required-features = ["integration-real-tests"]
-
-[[test]]
 name = "e2e_rkat_init"
 path = "tests/e2e_rkat_init.rs"
 required-features = ["integration-real-tests"]
@@ -34,11 +29,6 @@ required-features = ["integration-real-tests"]
 [[test]]
 name = "e2e_smoke"
 path = "tests/e2e_smoke.rs"
-required-features = ["integration-real-tests"]
-
-[[test]]
-name = "e2e_mob_smoke_matrix"
-path = "tests/e2e_mob_smoke_matrix.rs"
 required-features = ["integration-real-tests"]
 
 [[test]]
@@ -75,7 +65,6 @@ chrono = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
 nix = { workspace = true }
-reqwest = { workspace = true }
 
 [features]
 default = ["anthropic", "openai", "gemini", "jsonl-store", "session-store", "sub-agents", "skills", "comms", "mcp"]

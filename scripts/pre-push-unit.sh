@@ -8,8 +8,10 @@ set -euo pipefail
 CACHE_VERSION="v2"
 NEXTEST_TIMEOUT_SECS="${MEERKAT_PRE_PUSH_NEXTEST_TIMEOUT_SECS:-120}"
 LOCK_WAIT_SECS="${MEERKAT_PRE_PUSH_UNIT_LOCK_WAIT_SECS:-180}"
-HOOK_CACHE_DIR=".git/meerkat-hook-cache/unit"
-LOCK_DIR=".git/meerkat-hook-cache/unit.lock"
+GIT_DIR_PATH="$(git rev-parse --git-dir)"
+HOOK_CACHE_ROOT="${GIT_DIR_PATH}/meerkat-hook-cache"
+HOOK_CACHE_DIR="${HOOK_CACHE_ROOT}/unit"
+LOCK_DIR="${HOOK_CACHE_ROOT}/unit.lock"
 PID_FILE="${LOCK_DIR}/pid"
 
 mkdir -p "$HOOK_CACHE_DIR"

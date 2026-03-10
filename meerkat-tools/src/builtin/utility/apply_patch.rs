@@ -53,14 +53,14 @@ enum ParseError {
 
 #[derive(Debug, PartialEq, Clone)]
 enum Hunk {
-    AddFile {
+    Add {
         path: PathBuf,
         contents: String,
     },
-    DeleteFile {
+    Delete {
         path: PathBuf,
     },
-    UpdateFile {
+    Update {
         path: PathBuf,
         move_path: Option<PathBuf>,
         chunks: Vec<UpdateFileChunk>,
@@ -207,7 +207,7 @@ fn parse_one_hunk(lines: &[&str], line_number: usize) -> Result<(Hunk, usize), P
             }
         }
         return Ok((
-            Hunk::AddFile {
+            Hunk::Add {
                 path: PathBuf::from(path),
                 contents,
             },
@@ -217,7 +217,7 @@ fn parse_one_hunk(lines: &[&str], line_number: usize) -> Result<(Hunk, usize), P
 
     if let Some(path) = first_line.strip_prefix(DELETE_FILE_MARKER) {
         return Ok((
-            Hunk::DeleteFile {
+            Hunk::Delete {
                 path: PathBuf::from(path),
             },
             1,
@@ -265,7 +265,7 @@ fn parse_one_hunk(lines: &[&str], line_number: usize) -> Result<(Hunk, usize), P
         }
 
         return Ok((
-            Hunk::UpdateFile {
+            Hunk::Update {
                 path: PathBuf::from(path),
                 move_path,
                 chunks,
@@ -386,7 +386,7 @@ fn apply_hunks_to_files(
     let mut affected = AffectedPaths::default();
     for hunk in hunks {
         match hunk {
-            Hunk::AddFile { path, contents } => {
+            Hunk::Add { path, contents } => {
                 let path = resolve_patch_path(project_root, path)?;
                 if path.exists() {
                     return Err(ApplyPatchError::ComputeReplacements(format!(
@@ -409,7 +409,7 @@ fn apply_hunks_to_files(
                 })?;
                 affected.added.push(path);
             }
-            Hunk::DeleteFile { path } => {
+            Hunk::Delete { path } => {
                 let path = resolve_patch_path(project_root, path)?;
                 let metadata = std::fs::metadata(&path).map_err(|source| ApplyPatchError::Io {
                     context: format!("Failed to delete file {}", path.display()),
@@ -427,7 +427,7 @@ fn apply_hunks_to_files(
                 })?;
                 affected.deleted.push(path);
             }
-            Hunk::UpdateFile {
+            Hunk::Update {
                 path,
                 move_path,
                 chunks,
@@ -612,16 +612,12 @@ fn seek_sequence(lines: &[String], pattern: &[String], start: usize, eof: bool) 
             return Some(i);
         }
     }
-    for i in search_start..=lines.len().saturating_sub(pattern.len()) {
-        if pattern
+    (search_start..=lines.len().saturating_sub(pattern.len())).find(|&i| {
+        pattern
             .iter()
             .enumerate()
             .all(|(p_idx, pat)| normalize_line(&lines[i + p_idx]) == normalize_line(pat))
-        {
-            return Some(i);
-        }
-    }
-    None
+    })
 }
 
 fn normalize_line(s: &str) -> String {

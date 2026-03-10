@@ -1,297 +1,281 @@
 ---
 title: "CLI commands"
-description: "Command reference for rkat with realm-first runtime scoping."
+description: "Command reference for the task-first, Unix-native rkat CLI."
 icon: "terminal"
 ---
 
-`rkat` is realm-first. All commands accept global scope flags:
+`rkat` is designed for three main workflows:
+
+- interactive terminal use
+- scripts and CI
+- Unix pipes and chained command composition
+
+The default path is prompt-first:
 
 ```bash
-rkat [--realm <id>] [--instance <id>] [--realm-backend <redb|jsonl>] <command> ...
+rkat "summarize this repository"
+```
+
+You can also use subcommands explicitly:
+
+```bash
+rkat run "summarize this repository"
+rkat resume last "keep going"
+rkat mob pack ./mobs/release-triage -o dist/release-triage.mobpack
+```
+
+## Global flags
+
+All commands accept the same realm and convention-root flags:
+
+```bash
+rkat [--realm <id>] [--isolated] [--instance <id>] \
+  [--realm-backend <redb|jsonl>] \
+  [--state-root <path>] \
+  [--context-root <path>] \
+  [--user-config-root <path>] \
+  <command>
 ```
 
 ## Common commands
 
 | Command | Purpose |
 |---------|---------|
-| `init` | Initialize local project compatibility config (`.rkat/config.toml`) |
-| `run` | Create and run a session |
-| `resume` | Continue an existing session |
-| `sessions list/show/delete` | Inspect or remove sessions in active realm |
-| `config get/set/patch` | Read or mutate realm config |
-| `mcp ...` | Manage MCP server config |
-| `skills ...` | Inspect available skills |
-| `mob ...` | Manage mob lifecycle directly from CLI |
-| `capabilities` | Show resolved runtime capabilities |
+| `rkat <PROMPT>` | Run a task directly from the terminal |
+| `rkat run <PROMPT>` | Explicit form of the default prompt command |
+| `rkat resume <SESSION_ID> <PROMPT>` | Continue a saved session |
+| `rkat continue <PROMPT>` | Shortcut for `resume last` |
+| `rkat sessions ...` | Inspect, delete, or interrupt sessions |
+| `rkat config ...` | Read or update CLI/runtime config |
+| `rkat mcp ...` | Manage local/project MCP server config |
+| `rkat mob ...` | Pack, inspect, validate, deploy, and build mob artifacts |
+| `rkat skills ...` | Inspect available skills |
+| `rkat capabilities` | Show runtime capabilities |
+| `rkat doctor` | Check local setup and common prerequisites |
+| `rkat init` | Create project config from the global template |
 
-## Realm behavior by command
-
-| Command surface | Default without `--realm` |
-|----------------|----------------------------|
-| `run`, `resume`, `sessions ...` | Workspace-derived stable realm (`ws-...`) |
-| `rkat-rpc` | New opaque realm (`realm-...`) |
-
-To share state between CLI and RPC, use the same explicit realm:
+## Prompt-first usage
 
 ```bash
-rkat --realm team-alpha run "Plan release"
-rkat --realm team-alpha sessions list
-rkat-rpc --realm team-alpha
-```
-
-## run
-
-```bash
+rkat [OPTIONS] <PROMPT>
 rkat run [OPTIONS] <PROMPT>
-rkat <PROMPT>                    # shorthand — "run" is the default subcommand
 ```
 
-When the first positional argument is not a known subcommand, `run` is implied. `rkat "hello"` is equivalent to `rkat run "hello"`.
+Examples:
 
-Frequently used options:
+```bash
+rkat "summarize this repository"
+cat story.txt | rkat "summarize the story"
+git diff | rkat --json "review these changes"
+tail -f app.log | rkat --stdin lines "watch for incidents"
+rkat -t workspace "fix the failing test"
+rkat --yolo --param temperature=0.2 "take the gloves off"
+```
 
-- `--model <MODEL>`
-- `--provider <anthropic|openai|gemini>`
-- `--stream`
-- `-s` (short for `--stream`)
-- `--stream-view <primary|mux|focus>` (default: `primary`)
-- `-w <primary|mux|focus>` (short for `--stream-view`)
-- `--stream-focus <scope_id>` (required when `--stream-view focus`)
-- `-f <scope_id>` (short for `--stream-focus`)
-- `--output <text|json>`
-- `--max-tokens <N>`
-- `--max-total-tokens <N>`
-- `--max-duration <DURATION>`
-- `-d <DURATION>` (short for `--max-duration`)
+### Common run flags
+
+- `-m, --model <MODEL>`
+- `-p, --provider <anthropic|openai|gemini>`
+- `-o, --output <text|json>`
+- `--json`
+- `-s, --stream`
+- `--no-stream`
+- `-d, --max-duration <DURATION>`
 - `--max-tool-calls <N>`
-- `--enable-builtins`
-- `-b` (short for `--enable-builtins`)
-- `--enable-shell` (implies `--enable-builtins`)
-- `-x` (short for `--enable-shell`)
-- `--enable-mob`
-- `-M` (short for `--enable-mob`; opt-in mob tools, default: disabled)
-- `--wait-for-mcp` (block until all MCP servers finish connecting before the first turn)
-- `--no-subagents`
-- `-N` (short for `--no-subagents`)
-- `--output-schema <SCHEMA>` (file path or inline JSON for structured output)
-- `--output-schema-compat <lossy|strict>` (schema lowering mode)
-- `--structured-output-retries <N>` (validation retry count, default: 2)
-- `--hooks-override-json <JSON>`
-- `--hooks-override-file <FILE>`
+- `-t, --tools <safe|workspace|full|none>`
+- `--yolo`
+- `--param <KEY=VALUE>` repeatable
+- `--params-json <JSON>`
+- `--schema <FILE_OR_JSON>`
+- `--allow-tool <TOOL>` repeatable
+- `--block-tool <TOOL>` repeatable
+- `--stdin <auto|blob|lines|off>`
+- `--line-format <text|json>`
+- `--wait-for-mcp`
 
-Scoped stream selectors:
+### Tool presets
 
-- `primary`
-- `mob:<member_ref>`
-- `primary/sub:<agent_id>`
-- `mob:<member_ref>/sub:<agent_id>`
+`rkat` uses presets instead of many enable/disable booleans.
 
-Stream view behavior:
+| Preset | Meaning |
+|--------|---------|
+| `safe` | Builtins, skills, configured MCP, subagents; no shell |
+| `workspace` | `safe` plus shell access |
+| `full` | All CLI-side capabilities, including memory and mob tools |
+| `none` | No tools |
 
-- `primary`: renders only the run primary scope.
-- `mux`: renders all scopes with a `[<scope_id>]` prefix.
-- `focus`: renders only the matching `--stream-focus` scope.
+`--yolo` is an alias for `--tools full`.
 
-Tooling convenience:
+### Provider and structured output controls
 
-- `--enable-shell` now implies `--enable-builtins`; you can use `-x` alone for common shell-enabled runs.
-
-Stdin has two modes depending on whether you want batch context or live streaming:
-
-**Batch context** — when stdin is not a terminal (and `--stdin` is not set), `rkat run` reads all of stdin and prepends it to the prompt as context wrapped in `<stdin>` tags. The pipe must be finite (EOF-terminated):
+Use `--param` for common tuning and `--params-json` as the escape hatch:
 
 ```bash
-cat document.txt | rkat run "Summarize this"
-git diff | rkat run "Review these changes"
-curl -s https://example.com/api | rkat run "Parse the response"
+rkat -m claude-sonnet-4-5 \
+  --param temperature=0.2 \
+  --param max_output_tokens=4000 \
+  "triage this incident"
 ```
 
-Batch pipes can be chained — each `rkat run` reads stdin context and writes its response to stdout:
+Structured output is file-friendly:
 
 ```bash
-cat data.csv | rkat run "Extract all entities" | rkat run "Write a short story involving these entities"
+rkat --schema ./triage.schema.json "extract issues from this diff"
 ```
 
-**Live event streaming** — `--host --stdin` keeps the agent alive and reads stdin line-by-line as external events (newline-delimited JSON or plain text). The pipe can be infinite:
+`--json` is a convenience alias for `--output json`.
+
+### Streaming defaults
+
+- In a TTY, text output streams by default.
+- In pipes and scripts, streaming is off by default.
+- JSON output stays non-streaming by default so stdout remains valid JSON unless `--stream` is explicitly requested.
+
+### Stdin modes and Unix pipes
+
+`rkat` treats piped stdin as a first-class interface:
+
+- `auto` default: if stdin is piped, read it as one blob of context
+- `blob`: always read full stdin to EOF before running
+- `lines`: keep stdin open and process one line at a time
+- `off`: ignore stdin even if something is piped in
+
+Batch blob mode:
 
 ```bash
-tail -f app.log | rkat run --host --stdin "Monitor incidents and alert on anomalies"
+cat story.txt | rkat "summarize the story"
+git diff | rkat "review these changes"
+cat notes.txt | rkat "extract action items" | rkat "group these by owner"
 ```
 
-When `--stdin` is set, batch context injection is skipped so stdin remains available for the event reader.
-
-When `--enable-mob` (`-M`) is passed, `run` composes the consolidated mob tool surface (backed by `meerkat-mob-mcp`) into the agent tool list (`mob_create`, `mob_list`, `mob_lifecycle`, `mob_events`, `mob_run_flow`, `mob_flow_status`, `mob_cancel_flow`, `meerkat_spawn`, `meerkat_retire`, `meerkat_list`, `meerkat_wire`, `meerkat_message`, `mob_respawn`).
-Mob tools are opt-in and disabled by default. When enabled, they are available even when built-ins are disabled.
-
-For mob workflows, this tool path is the primary CLI UX:
+Live line mode:
 
 ```bash
-rkat run "create a mob for release triage with 1 lead and 3 workers"
+tail -f app.log | rkat --stdin lines "watch for incidents and call them out"
 ```
 
-If external MCP servers define a tool with the same name, the mob tool dispatcher wins.
-
-MCP server loading:
-
-MCP servers connect in parallel in the background. Their tools become available as each server completes its handshake. The agent sees a `[MCP_PENDING]` system notice while servers are still connecting.
-
-Use `--wait-for-mcp` when the first prompt requires MCP tools to be available immediately:
-
-```bash
-rkat run --wait-for-mcp -x "use the filesystem tool to list /tmp"
-```
-
-The wait timeout is derived from the configured servers: `max(connect_timeout_secs) + 5s`, capped at 60 seconds.
-
-Comms options:
-
-- `--comms-name <NAME>`
-- `--comms-listen-tcp <ADDR>`
-- `--no-comms`
-- `--host`
-- `--stdin`
+`--line-format json` treats each incoming line as JSON instead of plain text.
 
 ## resume
 
 ```bash
-rkat resume <SESSION_ID> <PROMPT>
-rkat resume last "continue where we left off"   # most recent session
-rkat resume ~2 "go back to this one"             # 2nd most recent
-rkat resume 019c8b99 "keep going"                # short prefix match
+rkat resume [OPTIONS] <SESSION_ID> <PROMPT>
 ```
 
-Session identifiers accept full UUIDs, short prefixes (git-style, fails on ambiguity), or relative aliases (`last`/`~`/`~N`). All scoped to the active realm.
+Examples:
 
-Mob tools are inherited from the original session configuration; `resume` does not accept `--enable-mob`.
+```bash
+rkat resume last "keep going"
+rkat resume ~2 "pick this thread back up"
+cat notes.txt | rkat resume last "merge these notes into the plan"
+tail -f app.log | rkat resume last --stdin lines "watch for new incidents"
+```
+
+`SESSION_ID` accepts:
+
+- a full UUID
+- a short prefix
+- `last`
+- `~N`
+
+Resume supports the same stdin model as `run`, plus per-turn tool overlays and provider params.
 
 ## continue
 
 ```bash
-rkat continue <PROMPT>
-rkat c "keep going"                              # alias
+rkat continue [OPTIONS] <PROMPT>
+rkat c [OPTIONS] <PROMPT>
 ```
 
-Shortcut for `rkat resume last <PROMPT>`. Resumes the most recent session in the active realm.
+Shortcut for `rkat resume last <PROMPT>`.
+
+## sessions
+
+```bash
+rkat sessions list [--limit <N>] [--label <KEY=VALUE>]
+rkat sessions show <SESSION_ID>
+rkat sessions delete <SESSION_ID>
+rkat sessions interrupt <SESSION_ID>
+```
+
+This is the human/operator session surface. CLI-internal control-plane session APIs are not exposed here.
+
+## config
+
+```bash
+rkat config get [--format toml|json]
+rkat config set <FILE>
+rkat config patch <JSON_OR_FILE>
+```
+
+Examples:
+
+```bash
+rkat config get --format toml
+rkat config set ./.rkat/config.toml
+rkat config patch '{"agent":{"model":"gpt-5.2"}}'
+```
+
+## mcp
+
+`rkat mcp` is for local and project configuration only.
+
+```bash
+rkat mcp add <NAME> [--transport stdio|http|sse] [--scope project|user] (--url <URL> | -- <CMD...>)
+rkat mcp remove <NAME> [--scope project|user]
+rkat mcp list [--scope project|user|all] [--json]
+rkat mcp get <NAME> [--scope project|user|all] [--json]
+```
+
+Examples:
+
+```bash
+rkat mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem .
+rkat mcp add linear --transport http --url https://mcp.example.com
+rkat mcp list --scope all
+rkat mcp get filesystem --scope project
+```
 
 ## mob
 
+`rkat mob` is the artifact and deployment surface, not a manual runtime-control console.
+
 ```bash
-rkat mob prefabs
-rkat mob create --prefab <NAME>
-rkat mob create --definition <FILE.toml>
 rkat mob pack <DIR> -o <OUT.mobpack> [--sign <KEY_FILE>]
 rkat mob inspect <PACK.mobpack>
 rkat mob validate <PACK.mobpack>
 rkat mob deploy <PACK.mobpack> <PROMPT> [--trust-policy <permissive|strict>] [--surface <cli|rpc>]
-rkat mob web build <PACK.mobpack> -o <WEB_DIR>
-rkat mob list
-rkat mob status <MOB_ID>
-rkat mob spawn <MOB_ID> <PROFILE> <MEERKAT_ID>
-rkat mob retire <MOB_ID> <MEERKAT_ID>
-rkat mob wire <MOB_ID> <A> <B>
-rkat mob unwire <MOB_ID> <A> <B>
-rkat mob turn <MOB_ID> <MEERKAT_ID> <MESSAGE>
-rkat mob stop <MOB_ID>
-rkat mob resume <MOB_ID>
-rkat mob complete <MOB_ID>
-rkat mob flows <MOB_ID>
-rkat mob run-flow <MOB_ID> --flow <FLOW_ID> [--params <JSON_OBJECT>] [--stream|-s] [--stream-view|-w <primary|mux|focus>] [--stream-focus|-f <scope_id>]
+rkat mob web build <PACK.mobpack> -o <OUT_DIR>
+rkat mob run-flow <MOB_ID> --flow <FLOW_ID> [--params <JSON>] [--stream]
 rkat mob flow-status <MOB_ID> <RUN_ID>
-rkat mob destroy <MOB_ID>
 ```
 
-CLI `mob` commands are the explicit compatibility/operational surface for persisted mob state in the local registry.
-Primary day-to-day mob usage on CLI is tool-driven through `run`/`resume`; this command group is for direct/manual control.
+Examples:
 
-Mobpack commands are the portable deployment layer:
+```bash
+rkat mob pack ./mobs/release-triage -o dist/release-triage.mobpack
+rkat mob inspect dist/release-triage.mobpack
+rkat mob validate dist/release-triage.mobpack
+rkat mob deploy dist/release-triage.mobpack "triage the latest release regressions"
+rkat mob web build dist/release-triage.mobpack -o dist/release-triage-web
+```
 
-- `mob pack`: archive a mob definition directory into a `.mobpack` artifact.
-- `mob inspect`: print manifest metadata, file listing, and digest.
-- `mob validate`: structural/manifest/definition validation.
-- `mob deploy`: one-shot or RPC deployment from a pack.
-- `mob web build`: compile a browser bundle from a pack.
+### Trust policy
 
-Trust controls for deploy:
+- `--trust-policy strict` rejects unsigned packs and unknown signers
+- `--trust-policy permissive` allows unsigned packs with warnings but still rejects invalid signatures
 
-- `--trust-policy strict` rejects unsigned packs and unknown signers.
-- `--trust-policy permissive` allows unsigned packs with warnings (but still rejects invalid signatures).
-- Resolution order is CLI flag > `RKAT_TRUST_POLICY` > config > default (`permissive`).
-
-Web build prerequisites:
+### Web build prerequisites
 
 ```bash
 cargo install wasm-pack
-export PATH="$HOME/.cargo/bin:$PATH"
 wasm-pack --version
 ```
 
 Optional overrides:
 
-- `RKAT_WASM_PACK_BIN`: explicit `wasm-pack` binary path.
-- `RKAT_WEB_RUNTIME_CRATE_DIR`: explicit web runtime crate directory used by `mob web build`.
-
-Flow commands:
-
-- `mob flows`: list configured flow IDs in a mob definition.
-- `mob run-flow`: starts a run and waits for terminal state before returning `run_id`.
-- `mob flow-status`: returns JSON `MobRun` (or `null`) for the run.
-- `mob run-flow --stream`: live flow events with scoped stream controls (`primary`, `mux`, `focus`).
-
-`mob run-flow` persists terminal status snapshots, and `mob flow-status` prefers live runtime status when available, then terminal snapshots as fallback.
-
-Streaming examples:
-
-```bash
-rkat run --stream --stream-view mux "Plan and execute release checklist"
-rkat run --stream --stream-view focus --stream-focus primary/sub:agent-42 "Draft and verify migration steps"
-rkat mob run-flow demo-mob --flow incident_response --stream --stream-view mux
-rkat mob pack ./mobs/release-triage -o ./dist/release-triage.mobpack
-rkat mob deploy ./dist/release-triage.mobpack "triage latest release regressions" --trust-policy strict
-rkat mob web build ./dist/release-triage.mobpack -o ./dist/release-triage-web
-```
-
-Troubleshooting:
-
-- Focus scope not found: `focus` exits non-zero and prints discovered scope IDs.
-- Noisy mux output: switch to `--stream-view primary` or `--stream-view focus`.
-
-## sessions
-
-```bash
-rkat sessions list [--limit N]
-rkat sessions show <ID>
-rkat sessions delete <ID>
-```
-
-These commands read/write through the same session service path used by `run` and `resume`.
-
-## config
-
-```bash
-rkat config get [--format toml|json] [--with-generation]
-rkat config set --file config.toml [--expected-generation N]
-rkat config set --json '{"agent":{"model":"gpt-5.2"}}'
-rkat config patch --json '{"budget":{"max_tokens":50000}}' [--expected-generation N]
-```
-
-Config operations are realm-scoped.
-
-- `config get --with-generation` returns envelope-style metadata (JSON) or prepends generation info (TOML).
-- `config set/patch --expected-generation N` enforces optimistic concurrency (CAS) for safe concurrent edits.
-
-## rkat-rpc
-
-```bash
-rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <redb|jsonl>] [--state-root <path>] [--context-root <path>] [--user-config-root <path>]
-```
-
-Starts JSON-RPC 2.0 over stdio.
-
-Pass `--realm` when you want deterministic shared state with other surfaces or processes:
-
-```bash
-rkat-rpc --realm team-alpha
-```
+- `RKAT_WASM_PACK_BIN`
+- `RKAT_WEB_RUNTIME_CRATE_DIR`
 
 ## skills
 
@@ -300,50 +284,31 @@ rkat skills list [--json]
 rkat skills inspect <ID> [--source <SOURCE>] [--json]
 ```
 
-List available skills with provenance (source, scope, shadow status) or inspect a skill's full content.
-
-```bash
-# List all skills in table format
-rkat skills list
-
-# List as JSON
-rkat skills list --json
-
-# Inspect a specific skill
-rkat skills inspect task-workflow
-
-# Inspect a shadowed skill from a specific source
-rkat skills inspect task-workflow --source company
-
-# Inspect as JSON
-rkat skills inspect extraction/email --json
-```
-
-The `list` output shows a fixed-width table with ID, SOURCE, SCOPE, and STATUS columns. Shadowed skills show which source has precedence.
-
-## mcp
-
-```bash
-rkat mcp add <NAME> -- <COMMAND> [ARGS...]
-rkat mcp add <NAME> --url <URL>
-rkat mcp list [--scope user|project] [--json]
-rkat mcp get <NAME> [--scope user|project] [--json]
-rkat mcp remove <NAME> [--scope user|project]
-```
-
-MCP config is stored in `.rkat/mcp.toml` (project) and `~/.rkat/mcp.toml` (user).
-
 ## capabilities
 
 ```bash
 rkat capabilities
 ```
 
-Shows status per capability (`Available`, `DisabledByPolicy`, `NotCompiled`, `NotSupportedByProtocol`).
+Shows status for compiled/runtime capabilities.
 
-## See also
+## doctor
 
-- [Realms](/concepts/realms)
-- [CLI configuration](/cli/configuration)
-- [JSON-RPC](/api/rpc)
-- [Tools](/concepts/tools)
+```bash
+rkat doctor
+```
+
+Checks:
+
+- config readability
+- common provider API keys
+- MCP config loading
+- `wasm-pack` availability for `mob web build`
+
+## init
+
+```bash
+rkat init
+```
+
+Creates `.rkat/config.toml` from the global template.

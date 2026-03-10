@@ -12,13 +12,12 @@ use meerkat_core::AgentToolDispatcher;
 use meerkat_core::CommsRuntimeMode;
 use meerkat_core::config::CliOverrides;
 use meerkat_core::service::{
-    AppendSystemContextRequest, AppendSystemContextStatus, CreateSessionRequest,
-    SessionBuildOptions, SessionControlError, SessionError, SessionQuery, SessionService,
-    SessionServiceCommsExt, SessionServiceControlExt, StartTurnRequest, TurnToolOverlay,
+    CreateSessionRequest, SessionBuildOptions, SessionError, SessionQuery, SessionService,
+    SessionServiceCommsExt, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::{
-    AgentEvent, EventEnvelope, RealmConfig, RealmLocator, RealmSelection, SchemaCompat,
-    ScopedAgentEvent, StreamScopeFrame, format_verbose_event,
+    AgentEvent, EventEnvelope, RealmConfig, RealmLocator, RealmSelection, ScopedAgentEvent,
+    StreamScopeFrame, format_verbose_event,
 };
 use meerkat_core::{
     Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore, FileConfigStore,
@@ -26,7 +25,7 @@ use meerkat_core::{
 };
 #[cfg(feature = "mcp")]
 use meerkat_mcp::McpRouterAdapter;
-use meerkat_mob::{FlowId, MobDefinition, Prefab, ProfileName, RunId};
+use meerkat_mob::{FlowId, MobDefinition, RunId};
 use meerkat_mob_pack::archive::MobpackArchive;
 use meerkat_mob_pack::pack::{
     compute_archive_digest, inspect_archive_bytes, pack_directory_with_excludes,
@@ -47,7 +46,7 @@ use meerkat_core::error::AgentError;
 use meerkat_core::mcp_config::{McpScope, McpTransportKind};
 use meerkat_core::skills::{SkillKey, SkillRef};
 use meerkat_core::types::OutputSchema;
-use meerkat_store::{RealmBackend, RealmOrigin, SessionFilter};
+use meerkat_store::{RealmBackend, RealmOrigin};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -125,58 +124,6 @@ fn spawn_scoped_event_handler(
     })
 }
 
-fn resolve_stream_policy(
-    stream: bool,
-    stream_view: StreamView,
-    stream_focus: Option<String>,
-) -> anyhow::Result<Option<stream_renderer::StreamRenderPolicy>> {
-    if !stream {
-        if stream_focus.is_some() {
-            return Err(anyhow::anyhow!(
-                "--stream-focus requires --stream and --stream-view focus"
-            ));
-        }
-        if stream_view != StreamView::Primary {
-            return Err(anyhow::anyhow!("--stream-view requires --stream"));
-        }
-        return Ok(None);
-    }
-
-    match stream_view {
-        StreamView::Primary => {
-            if stream_focus.is_some() {
-                return Err(anyhow::anyhow!(
-                    "--stream-focus is only valid with --stream-view focus"
-                ));
-            }
-            Ok(Some(stream_renderer::StreamRenderPolicy::PrimaryOnly))
-        }
-        StreamView::Mux => {
-            if stream_focus.is_some() {
-                return Err(anyhow::anyhow!(
-                    "--stream-focus is only valid with --stream-view focus"
-                ));
-            }
-            Ok(Some(stream_renderer::StreamRenderPolicy::MuxAll))
-        }
-        StreamView::Focus => {
-            let focus = stream_focus.ok_or_else(|| {
-                anyhow::anyhow!("--stream-focus is required when --stream-view focus is used")
-            })?;
-            if !stream_renderer::is_valid_scope_id(&focus) {
-                return Err(anyhow::anyhow!(
-                    "invalid --stream-focus scope '{focus}': expected primary, mob:<member>, primary/sub:<agent>, or mob:<member>/sub:<agent>"
-                ));
-            }
-            Ok(Some(stream_renderer::StreamRenderPolicy::Focus(focus)))
-        }
-    }
-}
-
-fn resolve_tooling_flags(enable_builtins: bool, enable_shell: bool) -> (bool, bool) {
-    (enable_builtins || enable_shell, enable_shell)
-}
-
 #[derive(Clone, Copy, Debug)]
 struct ToolPresetResolution {
     builtins: bool,
@@ -208,7 +155,7 @@ fn resolve_tool_preset(preset: ToolPreset, yolo: bool) -> ToolPresetResolution {
             shell: true,
             subagents: true,
             memory: true,
-            mob: false,
+            mob: true,
         },
         ToolPreset::None => ToolPresetResolution {
             builtins: false,
@@ -220,7 +167,11 @@ fn resolve_tool_preset(preset: ToolPreset, yolo: bool) -> ToolPresetResolution {
     }
 }
 
-fn resolve_stream_enabled(stream: bool, no_stream: bool) -> anyhow::Result<bool> {
+fn resolve_stream_enabled(
+    stream: bool,
+    no_stream: bool,
+    stream_by_default: bool,
+) -> anyhow::Result<bool> {
     use std::io::IsTerminal;
     if stream && no_stream {
         return Err(anyhow::anyhow!(
@@ -232,7 +183,7 @@ fn resolve_stream_enabled(stream: bool, no_stream: bool) -> anyhow::Result<bool>
     } else if no_stream {
         Ok(false)
     } else {
-        Ok(std::io::stdout().is_terminal())
+        Ok(stream_by_default && std::io::stdout().is_terminal())
     }
 }
 
@@ -364,9 +315,12 @@ async fn init_project_config() -> anyhow::Result<()> {
 }
 
 #[derive(Parser)]
-#[command(name = "meerkat")]
-#[command(about = "Meerkat - Rust Agentic Interface Kit")]
-#[command(after_help = "Shorthand: `rkat \"prompt\"` is equivalent to `rkat run \"prompt\"`")]
+#[command(name = "rkat")]
+#[command(about = "Run agent tasks, manage local config, and build mob artifacts")]
+#[command(override_usage = "rkat [OPTIONS] <PROMPT>\n       rkat [OPTIONS] <COMMAND>")]
+#[command(
+    after_help = "Examples:\n  rkat \"summarize this repository\"\n  cat story.txt | rkat \"summarize the story\"\n  git diff | rkat \"review these changes\"\n  tail -f app.log | rkat --stdin lines \"watch for incidents\"\n  rkat -t workspace \"fix the failing test\"\n  rkat mob pack ./mobs/release-triage -o dist/release-triage.mobpack\n\nUse `rkat <command> --help` for more details."
+)]
 struct Cli {
     /// Explicit realm ID (opaque). Reuse to share state across surfaces.
     #[arg(long, short = 'r', global = true)]
@@ -416,6 +370,9 @@ impl From<RealmBackendArg> for RealmBackend {
 enum Commands {
     /// Initialize local project config from the global template
     Init,
+    #[command(
+        after_help = "Examples:\n  rkat \"summarize this repository\"\n  cat story.txt | rkat \"summarize the story\"\n  git diff | rkat --json \"review these changes\"\n  tail -f app.log | rkat --stdin lines \"watch for incidents\"\n  rkat -t workspace \"fix the failing test\"\n  rkat --yolo --param temperature=0.2 \"take the gloves off\"\n\nDefaults:\n  - `--tools safe`\n  - stream on in a TTY, off in pipes/scripts\n  - piped stdin is read as blob context unless `--stdin lines` is set"
+    )]
     /// Run an agent with a prompt
     Run {
         /// The prompt to execute
@@ -535,6 +492,9 @@ enum Commands {
         line_format: LineFormat,
     },
 
+    #[command(
+        after_help = "Examples:\n  rkat resume last \"keep going\"\n  rkat resume ~2 \"pick this thread back up\"\n  cat notes.txt | rkat resume last \"merge these notes into the plan\"\n  tail -f app.log | rkat resume last --stdin lines \"watch for new incidents\""
+    )]
     /// Resume a previous session (supports full UUID, short prefix, `last`, `~N`)
     Resume {
         /// Session ID, short prefix, or alias (last, ~1, ~2, ...)
@@ -609,6 +569,9 @@ enum Commands {
         line_format: LineFormat,
     },
 
+    #[command(
+        after_help = "Examples:\n  rkat continue \"keep going\"\n  git diff | rkat continue \"review this patch\"\n  rkat c --stdin off \"ignore the current pipe and continue\""
+    )]
     /// Continue the most recent session (shortcut for `resume last`)
     #[command(name = "continue", alias = "c")]
     Continue {
@@ -673,12 +636,18 @@ enum Commands {
         command: RealmCommands,
     },
 
+    #[command(
+        after_help = "Examples:\n  rkat mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem .\n  rkat mcp add linear --transport http --url https://mcp.example.com\n  rkat mcp list --scope all\n  rkat mcp get filesystem --scope project"
+    )]
     /// MCP server management
     Mcp {
         #[command(subcommand)]
         command: McpCommands,
     },
 
+    #[command(
+        after_help = "Examples:\n  rkat mob pack ./mobs/release-triage -o dist/release-triage.mobpack\n  rkat mob inspect dist/release-triage.mobpack\n  rkat mob validate dist/release-triage.mobpack\n  rkat mob deploy dist/release-triage.mobpack \"triage the latest release regressions\"\n  rkat mob web build dist/release-triage.mobpack -o dist/release-triage-web"
+    )]
     /// Mob orchestration commands
     Mob {
         #[command(subcommand)]
@@ -691,6 +660,9 @@ enum Commands {
         command: SkillsCommands,
     },
 
+    #[command(
+        after_help = "Examples:\n  rkat config get --format toml\n  rkat config set ./.rkat/config.toml\n  rkat config patch '{\"agent\":{\"model\":\"gpt-5.2\"}}'"
+    )]
     /// Config management
     Config {
         #[command(subcommand)]
@@ -1284,7 +1256,8 @@ async fn handle_run_command(
     let provider_params = parse_provider_params(&params);
     let provider_params_json = parse_provider_params_json(provider_params_json);
     let hooks_override = HookRunOverrides::default();
-    let stream = resolve_stream_enabled(stream, no_stream)?;
+    let json_output = json || output.eq_ignore_ascii_case("json");
+    let stream = resolve_stream_enabled(stream, no_stream, !json_output)?;
     let stream_policy = if stream {
         Some(stream_renderer::StreamRenderPolicy::PrimaryOnly)
     } else {
@@ -1434,6 +1407,7 @@ fn parse_output_schema(schema_arg: &str) -> anyhow::Result<OutputSchema> {
         .map_err(|e| anyhow::anyhow!("Invalid output schema: {e}"))
 }
 
+#[cfg(test)]
 /// Parse run-scoped hook overrides from either --hooks-override-json or --hooks-override-file.
 fn parse_hook_run_overrides(
     hooks_override_file: Option<PathBuf>,
@@ -1721,7 +1695,7 @@ async fn handle_doctor(scope: &RuntimeScope) -> anyhow::Result<()> {
     )
     .await
     {
-        Ok(servers) => println!("ok\tmcp\t{} configured server(s)", servers.len()),
+        Ok(config) => println!("ok\tmcp\t{} configured server(s)", config.servers.len()),
         Err(err) => {
             ok = false;
             println!("warn\tmcp\t{err}");
@@ -3181,7 +3155,7 @@ async fn resume_session_with_llm_override(
     let has_max_duration = max_duration.is_some();
     let has_max_tool_calls = max_tool_calls.is_some();
     let duration = max_duration.map(|s| parse_duration(&s)).transpose()?;
-    let stream = resolve_stream_enabled(stream, no_stream)?;
+    let stream = resolve_stream_enabled(stream, no_stream, true)?;
     let parsed_params = parse_provider_params(&params)?;
     let parsed_params_json = parse_provider_params_json(provider_params_json)?;
     let merged_provider_params = merge_provider_params(parsed_params, parsed_params_json)?;
@@ -3303,35 +3277,39 @@ async fn resume_session_with_llm_override(
     let mob_external_tools = run_mob_tools.as_ref().map(RunMobToolsContext::dispatcher);
     let external_tools = compose_external_tool_dispatchers(mob_external_tools, mcp_external_tools)?;
 
-    let (event_tx, event_task, scoped_event_tx, primary_to_scoped_bridge_task) = if stream {
+    let mut event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>> = None;
+    let mut scoped_event_tx: Option<mpsc::Sender<ScopedAgentEvent>> = None;
+    let mut verbose_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut stream_task: Option<tokio::task::JoinHandle<stream_renderer::StreamRenderSummary>> =
+        None;
+    let mut primary_to_scoped_bridge_task: Option<tokio::task::JoinHandle<()>> = None;
+
+    if stream {
         let (primary_tx, mut primary_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
         let (scoped_tx, scoped_rx) = mpsc::channel::<ScopedAgentEvent>(200);
         let scope_path_for_bridge = vec![StreamScopeFrame::Primary {
             session_id: session_id.to_string(),
         }];
         let bridge_scoped_tx = scoped_tx.clone();
-        let bridge = tokio::spawn(async move {
+        primary_to_scoped_bridge_task = Some(tokio::spawn(async move {
             while let Some(event) = primary_rx.recv().await {
                 let scoped = ScopedAgentEvent::new(scope_path_for_bridge.clone(), event.payload);
                 if bridge_scoped_tx.send(scoped).await.is_err() {
                     break;
                 }
             }
-        });
-        let task =
-            spawn_scoped_event_handler(scoped_rx, stream_renderer::StreamRenderPolicy::PrimaryOnly);
-        (Some(primary_tx), Some(task), Some(scoped_tx), Some(bridge))
+        }));
+        event_tx = Some(primary_tx);
+        stream_task = Some(spawn_scoped_event_handler(
+            scoped_rx,
+            stream_renderer::StreamRenderPolicy::PrimaryOnly,
+        ));
+        scoped_event_tx = Some(scoped_tx);
     } else if verbose {
         let (tx, rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
-        (
-            Some(tx),
-            Some(spawn_verbose_event_handler(rx, true)),
-            None,
-            None,
-        )
-    } else {
-        (None, None, None, None)
-    };
+        event_tx = Some(tx);
+        verbose_task = Some(spawn_verbose_event_handler(rx, true));
+    }
 
     let build = SessionBuildOptions {
         provider: Some(provider_core),
@@ -3442,13 +3420,18 @@ async fn resume_session_with_llm_override(
     if let Some(task) = primary_to_scoped_bridge_task {
         let _ = task.await;
     }
-    if let Some(task) = event_task {
+    if let Some(task) = verbose_task {
+        let _ = task.await;
+    }
+    if let Some(task) = stream_task {
         let _ = task.await;
     }
 
     // Output the result
     log_stage("print_result");
-    println!("{}", result.text);
+    if !stream {
+        println!("{}", result.text);
+    }
     eprintln!(
         "\n[Session: {} | Ref: {} | Turns: {} | Tokens: {} in / {} out]",
         result.session_id,
@@ -3893,57 +3876,7 @@ async fn interrupt_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()>
     }
 }
 
-fn system_context_error_to_anyhow(err: SessionControlError) -> anyhow::Error {
-    match err {
-        SessionControlError::Session(inner) => anyhow::anyhow!(inner),
-        SessionControlError::InvalidRequest { message } => anyhow::anyhow!(message),
-        SessionControlError::Conflict { key, .. } => {
-            anyhow::anyhow!("system-context idempotency conflict for key '{key}'")
-        }
-    }
-}
-
-/// Append runtime system context to a session.
-async fn inject_session_context(
-    id: &str,
-    text: &str,
-    source: Option<&str>,
-    idempotency_key: Option<&str>,
-    scope: &RuntimeScope,
-) -> anyhow::Result<()> {
-    let session_id = resolve_scoped_session_id(id, scope)?;
-
-    let (config, _) = load_config(scope).await?;
-    let service = build_cli_persistent_service(scope, config).await?;
-    let result = service
-        .append_system_context(
-            &session_id,
-            AppendSystemContextRequest {
-                text: text.to_string(),
-                source: source.map(ToOwned::to_owned),
-                idempotency_key: idempotency_key.map(ToOwned::to_owned),
-            },
-        )
-        .await
-        .map_err(system_context_error_to_anyhow)?;
-
-    println!("Updated session: {session_id}");
-    println!(
-        "Session Ref: {}",
-        format_session_ref(&scope.locator.realm_id, &session_id)
-    );
-    println!(
-        "Status: {}",
-        match result.status {
-            AppendSystemContextStatus::Applied => "applied",
-            AppendSystemContextStatus::Staged => "staged",
-            AppendSystemContextStatus::Duplicate => "duplicate",
-        }
-    );
-    Ok(())
-}
-
-#[cfg(feature = "comms")]
+#[cfg(all(feature = "comms", test))]
 #[derive(Debug, serde::Deserialize)]
 struct CliCommsSendRequest {
     kind: String,
@@ -3969,22 +3902,7 @@ struct CliCommsSendRequest {
     allow_self_session: Option<bool>,
 }
 
-#[cfg(feature = "comms")]
-async fn resolve_live_comms_runtime(
-    session_id: &SessionId,
-    scope: &RuntimeScope,
-) -> anyhow::Result<Arc<dyn meerkat_core::agent::CommsRuntime>> {
-    let (config, _) = load_config(scope).await?;
-    let service = build_cli_persistent_service(scope, config).await?;
-    service.comms_runtime(session_id).await.ok_or_else(|| {
-        anyhow::anyhow!(
-            "Session not found or comms runtime unavailable: {session_id}. \
-             Comms runtime is only available for live sessions in this process."
-        )
-    })
-}
-
-#[cfg(feature = "comms")]
+#[cfg(all(feature = "comms", test))]
 fn parse_comms_send_payload(
     payload_json: &str,
     session_id: &SessionId,
@@ -4015,170 +3933,15 @@ fn parse_comms_send_payload(
     })
 }
 
-#[cfg(feature = "comms")]
-async fn comms_send_command(
-    session_id_input: &str,
-    payload_json: &str,
-    scope: &RuntimeScope,
-) -> anyhow::Result<()> {
-    let session_id = resolve_scoped_session_id(session_id_input, scope)?;
-    let comms = resolve_live_comms_runtime(&session_id, scope).await?;
-    let cmd = parse_comms_send_payload(payload_json, &session_id)?;
-    use meerkat_core::comms::SendReceipt;
-    let receipt = comms
-        .send(cmd)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to send comms command: {e}"))?;
-    let json = match receipt {
-        SendReceipt::InputAccepted {
-            interaction_id,
-            stream_reserved,
-        } => serde_json::json!({
-            "kind": "input_accepted",
-            "interaction_id": interaction_id.0.to_string(),
-            "stream_reserved": stream_reserved,
-        }),
-        SendReceipt::PeerMessageSent { envelope_id, acked } => serde_json::json!({
-            "kind": "peer_message_sent",
-            "envelope_id": envelope_id.to_string(),
-            "acked": acked,
-        }),
-        SendReceipt::PeerRequestSent {
-            envelope_id,
-            interaction_id,
-            stream_reserved,
-        } => serde_json::json!({
-            "kind": "peer_request_sent",
-            "envelope_id": envelope_id.to_string(),
-            "interaction_id": interaction_id.0.to_string(),
-            "stream_reserved": stream_reserved,
-        }),
-        SendReceipt::PeerResponseSent {
-            envelope_id,
-            in_reply_to,
-        } => serde_json::json!({
-            "kind": "peer_response_sent",
-            "envelope_id": envelope_id.to_string(),
-            "in_reply_to": in_reply_to.0.to_string(),
-        }),
-    };
-    println!("{}", serde_json::to_string_pretty(&json)?);
-    Ok(())
-}
-
-#[cfg(feature = "comms")]
-async fn comms_peers_command(session_id_input: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
-    let session_id = resolve_scoped_session_id(session_id_input, scope)?;
-    let comms = resolve_live_comms_runtime(&session_id, scope).await?;
-    let peers = comms.peers().await;
-    let entries: Vec<serde_json::Value> = peers
-        .iter()
-        .map(|peer| {
-            serde_json::json!({
-                "name": peer.name.to_string(),
-                "peer_id": peer.peer_id.clone(),
-                "address": peer.address.clone(),
-                "source": format!("{:?}", peer.source),
-                "sendable_kinds": peer.sendable_kinds.clone(),
-                "capabilities": peer.capabilities.clone(),
-                "meta": {
-                    "description": peer.meta.description.clone(),
-                    "labels": peer.meta.labels.clone(),
-                }
-            })
-        })
-        .collect();
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({ "peers": entries }))?
-    );
-    Ok(())
-}
-
+#[cfg(test)]
 #[derive(Debug, Clone)]
 struct SessionLocateMatch {
     state_root: PathBuf,
     realm_id: String,
-    backend: RealmBackend,
     session_id: SessionId,
 }
 
-impl SessionLocateMatch {
-    fn session_ref(&self) -> String {
-        format_session_ref(&self.realm_id, &self.session_id)
-    }
-}
-
-/// Locate a session across realms in explicit scan roots.
-///
-/// Default scan scope is the active runtime `state_root`. Additional roots must
-/// be passed explicitly via `--extra-state-root`.
-async fn stream_session_events(session_id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
-    use futures::StreamExt;
-
-    let (config, _) = load_config(scope).await?;
-    let service = build_cli_persistent_service(scope, config).await?;
-    let session_id = resolve_scoped_session_id(session_id, scope)?;
-    let mut stream = service
-        .subscribe_session_events(&session_id)
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-    loop {
-        tokio::select! {
-            item = stream.next() => {
-                match item {
-                    Some(envelope) => {
-                        let json = serde_json::to_string(&envelope)
-                            .map_err(|e| anyhow::anyhow!("serialize error: {e}"))?;
-                        println!("{json}");
-                    }
-                    None => break,
-                }
-            }
-            _ = tokio::signal::ctrl_c() => break,
-        }
-    }
-
-    Ok(())
-}
-
-async fn locate_sessions(
-    locator_input: &str,
-    extra_state_roots: Vec<PathBuf>,
-    scope: &RuntimeScope,
-) -> anyhow::Result<()> {
-    let mut matches = find_session_matches(locator_input, &extra_state_roots, scope).await?;
-
-    if matches.is_empty() {
-        return Err(anyhow::anyhow!(
-            "Session '{locator_input}' was not found in the scanned state roots."
-        ));
-    }
-
-    matches.sort_by(|a, b| {
-        a.state_root
-            .cmp(&b.state_root)
-            .then_with(|| a.realm_id.cmp(&b.realm_id))
-    });
-
-    println!(
-        "{:<72} {:<40} {:<8} STATE_ROOT",
-        "SESSION_REF", "SESSION_ID", "BACKEND"
-    );
-    println!("{}", "-".repeat(160));
-    for hit in matches {
-        println!(
-            "{:<72} {:<40} {:<8} {}",
-            hit.session_ref(),
-            hit.session_id,
-            hit.backend.as_str(),
-            hit.state_root.display()
-        );
-    }
-    Ok(())
-}
-
+#[cfg(test)]
 async fn find_session_matches(
     locator_input: &str,
     extra_state_roots: &[PathBuf],
@@ -4223,7 +3986,7 @@ async fn find_session_matches(
             .1;
 
             let found = store
-                .list(SessionFilter::default())
+                .list(meerkat_store::SessionFilter::default())
                 .await
                 .map_err(|e| {
                     anyhow::anyhow!(
@@ -4238,7 +4001,6 @@ async fn find_session_matches(
                 matches.push(SessionLocateMatch {
                     state_root: root.clone(),
                     realm_id: entry.manifest.realm_id,
-                    backend: entry.manifest.backend,
                     session_id: locator.session_id.clone(),
                 });
             }
@@ -4897,7 +4659,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             stream,
             no_stream,
         } => {
-            let stream = resolve_stream_enabled(stream, no_stream)?;
+            let stream = resolve_stream_enabled(stream, no_stream, true)?;
             let stream_policy = if stream {
                 Some(stream_renderer::StreamRenderPolicy::PrimaryOnly)
             } else {
@@ -6279,66 +6041,82 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_tooling_flags_shell_implies_builtins() {
-        let (builtins, shell) = resolve_tooling_flags(false, true);
-        assert!(builtins, "shell should imply builtins");
-        assert!(shell, "shell should stay enabled");
+    fn test_resolve_tool_preset_full_and_yolo_enable_mob_tools() {
+        let full = resolve_tool_preset(ToolPreset::Full, false);
+        assert!(full.builtins);
+        assert!(full.shell);
+        assert!(full.subagents);
+        assert!(full.memory);
+        assert!(full.mob);
 
-        let (builtins, shell) = resolve_tooling_flags(false, false);
-        assert!(!builtins);
-        assert!(!shell);
+        let yolo = resolve_tool_preset(ToolPreset::Safe, true);
+        assert!(yolo.shell);
+        assert!(yolo.memory);
+        assert!(yolo.mob);
     }
 
     #[test]
-    fn test_run_short_flags_parse() {
-        let cli = Cli::try_parse_from([
-            "rkat", "run", "hello", "-s", "-w", "focus", "-f", "primary", "-x", "-d", "5m", "-M",
-        ])
-        .expect("short flags should parse");
-
-        match cli.command {
-            Commands::Run {
-                stream,
-                stream_view,
-                stream_focus,
-                enable_shell,
-                max_duration,
-                enable_mob,
-                ..
-            } => {
-                assert!(stream);
-                assert!(matches!(stream_view, StreamView::Focus));
-                assert_eq!(stream_focus.as_deref(), Some("primary"));
-                assert!(enable_shell);
-                assert_eq!(max_duration.as_deref(), Some("5m"));
-                assert!(enable_mob);
-            }
-            _ => unreachable!("expected run command"),
-        }
+    fn test_resolve_stream_enabled_defaults_are_explicit() {
+        assert!(!resolve_stream_enabled(false, false, false).expect("json default"));
+        assert!(resolve_stream_enabled(true, false, false).expect("explicit stream"));
+        assert!(!resolve_stream_enabled(false, true, true).expect("explicit no-stream"));
     }
 
     #[test]
-    fn test_run_tool_overlay_flags_parse() {
+    fn test_run_cli_surface_parses_current_flags() {
         let cli = Cli::try_parse_from([
             "rkat",
             "run",
             "hello",
-            "--allow-tool",
-            "read_file",
+            "-t",
+            "workspace",
+            "--yolo",
+            "--param",
+            "temperature=0.2",
+            "--params-json",
+            r#"{"reasoning":{"effort":"high"}}"#,
+            "--schema",
+            "./schema.json",
+            "--json",
+            "--stdin",
+            "lines",
+            "--line-format",
+            "json",
             "--allow-tool",
             "search",
             "--block-tool",
             "shell",
         ])
-        .expect("run tool overlay flags should parse");
+        .expect("run should parse");
 
         match cli.command {
             Commands::Run {
+                prompt,
+                tools,
+                yolo,
+                params,
+                provider_params_json,
+                output_schema,
+                json,
+                stdin,
+                line_format,
                 allow_tools,
                 block_tools,
                 ..
             } => {
-                assert_eq!(allow_tools, vec!["read_file", "search"]);
+                assert_eq!(prompt, "hello");
+                assert!(matches!(tools, ToolPreset::Workspace));
+                assert!(yolo);
+                assert_eq!(params, vec!["temperature=0.2"]);
+                assert_eq!(
+                    provider_params_json.as_deref(),
+                    Some(r#"{"reasoning":{"effort":"high"}}"#)
+                );
+                assert_eq!(output_schema.as_deref(), Some("./schema.json"));
+                assert!(json);
+                assert!(matches!(stdin, StdinMode::Lines));
+                assert!(matches!(line_format, LineFormat::Json));
+                assert_eq!(allow_tools, vec!["search"]);
                 assert_eq!(block_tools, vec!["shell"]);
             }
             _ => unreachable!("expected run command"),
@@ -6346,67 +6124,68 @@ mod tests {
     }
 
     #[test]
-    fn test_resume_tool_overlay_flags_parse() {
-        let cli = Cli::try_parse_from([
+    fn test_resume_and_continue_parse_current_flags() {
+        let resume = Cli::try_parse_from([
             "rkat",
             "resume",
             "last",
-            "continue",
+            "keep going",
+            "--stdin",
+            "blob",
+            "--line-format",
+            "text",
+            "--stream",
             "--allow-tool",
             "search",
-            "--block-tool",
-            "shell",
-            "--block-tool",
-            "delete_file",
         ])
-        .expect("resume tool overlay flags should parse");
-
-        match cli.command {
+        .expect("resume should parse");
+        match resume.command {
             Commands::Resume {
+                session_id,
+                prompt,
+                stdin,
+                line_format,
+                stream,
                 allow_tools,
-                block_tools,
                 ..
             } => {
+                assert_eq!(session_id, "last");
+                assert_eq!(prompt, "keep going");
+                assert!(matches!(stdin, StdinMode::Blob));
+                assert!(matches!(line_format, LineFormat::Text));
+                assert!(stream);
                 assert_eq!(allow_tools, vec!["search"]);
-                assert_eq!(block_tools, vec!["shell", "delete_file"]);
             }
-            _ => unreachable!("expected resume command"),
+            _ => unreachable!("expected resume"),
         }
-    }
 
-    #[test]
-    fn test_continue_resume_parity_flags_parse() {
-        let cli = Cli::try_parse_from([
+        let cont = Cli::try_parse_from([
             "rkat",
             "continue",
             "next step",
-            "--allow-tool",
-            "search",
             "--block-tool",
             "shell",
             "--skill-reference",
             "legacy/skill",
         ])
-        .expect("continue parity flags should parse");
-
-        match cli.command {
+        .expect("continue should parse");
+        match cont.command {
             Commands::Continue {
-                allow_tools,
+                prompt,
                 block_tools,
                 skill_references,
                 ..
             } => {
-                assert_eq!(allow_tools, vec!["search"]);
+                assert_eq!(prompt, "next step");
                 assert_eq!(block_tools, vec!["shell"]);
                 assert_eq!(skill_references, vec!["legacy/skill"]);
             }
-            _ => unreachable!("expected continue command"),
+            _ => unreachable!("expected continue"),
         }
     }
 
     #[test]
     fn test_inject_default_run_subcommand() {
-        // Bare prompt → inject "run"
         let args = inject_default_run_subcommand(["rkat", "hello world"].map(Into::into));
         assert_eq!(
             args,
@@ -6416,31 +6195,11 @@ mod tests {
                 .collect::<Vec<_>>()
         );
 
-        // Global flags before prompt → inject "run" before prompt
         let args =
             inject_default_run_subcommand(["rkat", "--realm", "test", "hello"].map(Into::into));
-        assert_eq!(
-            args[3],
-            std::ffi::OsString::from("run"),
-            "should inject run before first positional"
-        );
-        assert_eq!(
-            args[4],
-            std::ffi::OsString::from("hello"),
-            "prompt follows run"
-        );
+        assert_eq!(args[3], std::ffi::OsString::from("run"));
+        assert_eq!(args[4], std::ffi::OsString::from("hello"));
 
-        // Explicit subcommand → no injection
-        let args = inject_default_run_subcommand(["rkat", "run", "hello"].map(Into::into));
-        assert_eq!(
-            args,
-            vec!["rkat", "run", "hello"]
-                .into_iter()
-                .map(std::ffi::OsString::from)
-                .collect::<Vec<_>>()
-        );
-
-        // Other subcommand → no injection
         let args = inject_default_run_subcommand(["rkat", "init"].map(Into::into));
         assert_eq!(
             args,
@@ -6452,70 +6211,19 @@ mod tests {
     }
 
     #[test]
-    fn test_inject_default_run_subcommand_respects_comms_subcommand() {
-        let args = inject_default_run_subcommand(["rkat", "comms", "peers", "sid"].map(Into::into));
-        assert_eq!(
-            args,
-            vec!["rkat", "comms", "peers", "sid"]
-                .into_iter()
-                .map(std::ffi::OsString::from)
-                .collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn test_sessions_list_offset_flag_parses() {
-        let cli =
-            Cli::try_parse_from(["rkat", "sessions", "list", "--limit", "10", "--offset", "3"])
-                .expect("sessions list offset should parse");
+    fn test_sessions_list_parses_current_flags() {
+        let cli = Cli::try_parse_from([
+            "rkat", "sessions", "list", "--limit", "10", "--label", "env=dev",
+        ])
+        .expect("sessions list should parse");
         match cli.command {
             Commands::Sessions {
-                command: SessionCommands::List { limit, offset, .. },
+                command: SessionCommands::List { limit, labels, .. },
             } => {
                 assert_eq!(limit, 10);
-                assert_eq!(offset, Some(3));
+                assert_eq!(labels, vec![("env".to_string(), "dev".to_string())]);
             }
             _ => unreachable!("expected sessions list command"),
-        }
-    }
-
-    #[cfg(feature = "comms")]
-    #[test]
-    fn test_cli_comms_send_parses() {
-        let cli = Cli::try_parse_from([
-            "rkat",
-            "comms",
-            "send",
-            "01234567-89ab-cdef-0123-456789abcdef",
-            "--json",
-            r#"{"kind":"peer_message","to":"agent-b","body":"hi"}"#,
-        ])
-        .expect("comms send should parse");
-
-        match cli.command {
-            Commands::Comms {
-                command: CommsCommands::Send { session_id, json },
-            } => {
-                assert_eq!(session_id, "01234567-89ab-cdef-0123-456789abcdef");
-                assert!(json.contains("\"kind\":\"peer_message\""));
-            }
-            _ => unreachable!("expected comms send command"),
-        }
-    }
-
-    #[cfg(feature = "comms")]
-    #[test]
-    fn test_cli_comms_peers_parses() {
-        let cli = Cli::try_parse_from(["rkat", "comms", "peers", "session-1"])
-            .expect("comms peers should parse");
-
-        match cli.command {
-            Commands::Comms {
-                command: CommsCommands::Peers { session_id },
-            } => {
-                assert_eq!(session_id, "session-1");
-            }
-            _ => unreachable!("expected comms peers command"),
         }
     }
 
@@ -6613,22 +6321,22 @@ mod tests {
 
     #[test]
     fn test_mob_run_flow_short_flags_parse() {
-        let cli = Cli::try_parse_from([
-            "rkat", "mob", "run-flow", "mob-1", "--flow", "f1", "-s", "-w", "mux",
-        ])
-        .expect("mob run-flow short flags should parse");
+        let cli = Cli::try_parse_from(["rkat", "mob", "run-flow", "mob-1", "--flow", "f1", "-s"])
+            .expect("mob run-flow should parse");
 
         match cli.command {
             Commands::Mob {
                 command:
                     MobCommands::RunFlow {
+                        mob_id,
+                        flow,
                         stream,
-                        stream_view,
                         ..
                     },
             } => {
+                assert_eq!(mob_id, "mob-1");
+                assert_eq!(flow, "f1");
                 assert!(stream);
-                assert!(matches!(stream_view, StreamView::Mux));
             }
             _ => unreachable!("expected mob run-flow command"),
         }
@@ -6724,157 +6432,90 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_mcp_add_live_flags_parse() {
-        let cli = Cli::try_parse_from([
+    fn test_cli_mcp_add_and_remove_parse_local_config_surface() {
+        let add = Cli::try_parse_from([
             "rkat",
             "mcp",
             "add",
-            "live-server",
-            "--session",
-            "session-123",
-            "--live-server-url",
-            "http://127.0.0.1:8080",
-            "--url",
-            "https://example.com/mcp",
+            "filesystem",
+            "--scope",
+            "project",
+            "--transport",
+            "stdio",
+            "--",
+            "npx",
+            "-y",
+            "@modelcontextprotocol/server-filesystem",
+            ".",
         ])
-        .expect("mcp add live flags should parse");
-
-        match cli.command {
+        .expect("mcp add should parse");
+        match add.command {
             Commands::Mcp {
                 command:
                     McpCommands::Add {
                         name,
-                        session,
-                        live_server_url,
-                        persist,
+                        scope,
+                        transport,
+                        command,
                         ..
                     },
             } => {
-                assert_eq!(name, "live-server");
-                assert_eq!(session.as_deref(), Some("session-123"));
-                assert_eq!(live_server_url.as_deref(), Some("http://127.0.0.1:8080"));
-                assert!(!persist);
+                assert_eq!(name, "filesystem");
+                assert!(matches!(scope, CliMcpScope::Project));
+                assert!(matches!(transport, Some(CliTransport::Stdio)));
+                assert_eq!(
+                    command,
+                    vec!["npx", "-y", "@modelcontextprotocol/server-filesystem", "."]
+                );
             }
-            _ => unreachable!("expected mcp add command"),
+            _ => unreachable!("expected mcp add"),
         }
-    }
 
-    #[test]
-    fn test_cli_mcp_remove_live_persist_flags_parse() {
-        let cli = Cli::try_parse_from([
-            "rkat",
-            "mcp",
-            "remove",
-            "live-server",
-            "--session",
-            "session-123",
-            "--live-server-url",
-            "http://127.0.0.1:8080",
-            "--persist",
-        ])
-        .expect("mcp remove live flags should parse");
-
-        match cli.command {
+        let remove =
+            Cli::try_parse_from(["rkat", "mcp", "remove", "filesystem", "--scope", "project"])
+                .expect("mcp remove should parse");
+        match remove.command {
             Commands::Mcp {
-                command:
-                    McpCommands::Remove {
-                        name,
-                        session,
-                        live_server_url,
-                        persist,
-                        ..
-                    },
+                command: McpCommands::Remove { name, scope },
             } => {
-                assert_eq!(name, "live-server");
-                assert_eq!(session.as_deref(), Some("session-123"));
-                assert_eq!(live_server_url.as_deref(), Some("http://127.0.0.1:8080"));
-                assert!(persist);
+                assert_eq!(name, "filesystem");
+                assert!(matches!(scope, Some(CliMcpScope::Project)));
             }
-            _ => unreachable!("expected mcp remove command"),
+            _ => unreachable!("expected mcp remove"),
         }
     }
 
     #[test]
-    fn test_cli_mcp_reload_live_flags_parse() {
-        let cli = Cli::try_parse_from([
-            "rkat",
-            "mcp",
-            "reload",
-            "live-server",
-            "--session",
-            "session-123",
-            "--live-server-url",
-            "http://127.0.0.1:8080",
-        ])
-        .expect("mcp reload live flags should parse");
+    fn test_help_snapshots_cover_current_public_surface() {
+        use clap::CommandFactory;
 
-        match cli.command {
-            Commands::Mcp {
-                command:
-                    McpCommands::Reload {
-                        name,
-                        session,
-                        live_server_url,
-                        persist,
-                    },
-            } => {
-                assert_eq!(name.as_deref(), Some("live-server"));
-                assert_eq!(session, "session-123");
-                assert_eq!(live_server_url, "http://127.0.0.1:8080");
-                assert!(!persist);
-            }
-            _ => unreachable!("expected mcp reload command"),
+        fn render_help(mut command: clap::Command) -> String {
+            let mut out = Vec::new();
+            command
+                .write_long_help(&mut out)
+                .expect("help should render");
+            String::from_utf8(out).expect("utf-8 help")
         }
-    }
 
-    #[test]
-    fn test_cli_mcp_add_persist_requires_session() {
-        let err = Cli::try_parse_from(["rkat", "mcp", "add", "srv", "--persist"])
-            .err()
-            .expect("persist without session should fail");
-        let message = err.to_string();
-        assert!(message.contains("--persist"));
-    }
+        let top = render_help(Cli::command());
+        assert!(top.contains("Usage: rkat [OPTIONS] <PROMPT>"));
+        assert!(top.contains("cat story.txt | rkat \"summarize the story\""));
+        assert!(top.contains("tail -f app.log | rkat --stdin lines"));
 
-    #[tokio::test]
-    async fn test_handle_mcp_add_live_session_requires_server_url() {
-        let err = handle_mcp_command(McpCommands::Add {
-            name: "srv".to_string(),
-            transport: None,
-            user: false,
-            url: Some("https://example.com/mcp".to_string()),
-            headers: Vec::new(),
-            env: Vec::new(),
-            command: Vec::new(),
-            session: Some("session-1".to_string()),
-            live_server_url: None,
-            persist: false,
-        })
-        .await
-        .expect_err("session without server url should be rejected");
+        let run = render_help(Cli::command().find_subcommand("run").unwrap().clone());
+        assert!(run.contains("--tools <TOOLS>"));
+        assert!(run.contains("--yolo"));
+        assert!(run.contains("--stdin <STDIN>"));
+        assert!(run.contains("piped stdin is read as blob context"));
 
-        assert!(
-            err.to_string()
-                .contains("--session requires --live-server-url")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_handle_mcp_remove_live_session_requires_server_url() {
-        let err = handle_mcp_command(McpCommands::Remove {
-            name: "srv".to_string(),
-            scope: None,
-            session: Some("session-1".to_string()),
-            live_server_url: None,
-            persist: false,
-        })
-        .await
-        .expect_err("session without server url should be rejected");
-
-        assert!(
-            err.to_string()
-                .contains("--session requires --live-server-url")
-        );
+        let mob = render_help(Cli::command().find_subcommand("mob").unwrap().clone());
+        assert!(mob.contains("pack"));
+        assert!(mob.contains("deploy"));
+        assert!(mob.contains("run-flow"));
+        assert!(mob.contains("flow-status"));
+        assert!(!mob.contains("prefabs"));
+        assert!(!mob.contains("create"));
+        assert!(!mob.contains("spawn"));
     }
 
     #[test]
@@ -8460,94 +8101,6 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
     }
 
     #[cfg(feature = "jsonl-store")]
-    #[tokio::test]
-    async fn test_resume_session_wires_mob_tools_into_llm_request() {
-        let temp = tempfile::tempdir().expect("tempdir must be created");
-        let mut scope = test_scope_with_context(temp.path().to_path_buf());
-        scope.backend_hint = Some(RealmBackend::Jsonl);
-        let (manifest, store) = create_session_store(&scope)
-            .await
-            .expect("session store should initialize");
-
-        let mut session = Session::new();
-        let session_id = session.id().to_string();
-        session
-            .set_session_metadata(meerkat_core::SessionMetadata {
-                model: "claude-sonnet-4-5".to_string(),
-                max_tokens: 64,
-                provider: meerkat_core::Provider::Anthropic,
-                tooling: SessionTooling {
-                    builtins: true,
-                    shell: false,
-                    comms: false,
-                    subagents: true,
-                    mob: true,
-                    active_skills: None,
-                },
-                host_mode: false,
-                comms_name: None,
-                peer_meta: None,
-                realm_id: Some(scope.locator.realm_id.clone()),
-                instance_id: None,
-                backend: None,
-                config_generation: None,
-            })
-            .expect("session metadata should be set");
-        store
-            .save(&session)
-            .await
-            .expect("seed session should save");
-        drop(store);
-        drop(manifest);
-
-        let captured_tool_names = Arc::new(Mutex::new(Vec::<String>::new()));
-        let captured_system_prompt = Arc::new(Mutex::new(None::<String>));
-        let llm_override: Arc<dyn LlmClient> = Arc::new(CapturingLlmClient::new(
-            captured_tool_names.clone(),
-            captured_system_prompt.clone(),
-        ));
-
-        resume_session_with_llm_override(
-            &session_id,
-            "resume and list tools",
-            None,
-            HookRunOverrides::default(),
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            None,
-            None,
-            None,
-            vec![],
-            None,
-            &scope,
-            Some(llm_override),
-            false,
-            false, // wait_for_mcp
-        )
-        .await
-        .expect("resume should succeed with llm override");
-
-        let names: std::collections::BTreeSet<String> = captured_tool_names
-            .lock()
-            .expect("captured tool mutex should not be poisoned")
-            .iter()
-            .cloned()
-            .collect();
-        assert!(names.contains("mob_list"));
-        assert!(names.contains("mob_create"));
-
-        let system_prompt = captured_system_prompt
-            .lock()
-            .expect("captured prompt mutex should not be poisoned")
-            .clone()
-            .expect("system prompt must be captured");
-        assert!(system_prompt.contains("mob_list"));
-        assert!(system_prompt.contains("mob_create"));
-    }
-
     #[test]
     fn test_parse_provider_params_multiple() -> Result<(), Box<dyn std::error::Error>> {
         let params = vec![
@@ -9172,100 +8725,6 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
         }
     }
 
-    fn flow_definition_toml(mob_id: &str) -> String {
-        format!(
-            r#"
-[mob]
-id = "{mob_id}"
-orchestrator = "lead"
-
-[profiles.lead]
-model = "claude-opus-4-6"
-external_addressable = true
-peer_description = "Lead"
-
-[profiles.lead.tools]
-comms = true
-mob = true
-
-[profiles.worker]
-model = "claude-sonnet-4-5"
-external_addressable = false
-peer_description = "Worker"
-runtime_mode = "turn_driven"
-
-[profiles.worker.tools]
-comms = true
-
-[wiring]
-auto_wire_orchestrator = false
-role_wiring = []
-
-[backend]
-default = "subagent"
-
-[flows.demo]
-description = "demo flow"
-
-[flows.demo.steps.start]
-role = "worker"
-message = "Execute flow"
-timeout_ms = 1000
-"#
-        )
-    }
-
-    #[tokio::test]
-    async fn test_mob_create_prefab_and_list_registry() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let scope = test_scope_with_context(temp.path().to_path_buf());
-
-        handle_mob_command(
-            MobCommands::Create {
-                prefab: Some("coding_swarm".to_string()),
-                definition: None,
-            },
-            &scope,
-        )
-        .await
-        .expect("mob create should succeed");
-
-        let registry = load_mob_registry(&scope)
-            .await
-            .expect("registry should load");
-        assert!(registry.mobs.contains_key("coding_swarm"));
-
-        handle_mob_command(MobCommands::List, &scope)
-            .await
-            .expect("mob list should succeed");
-    }
-
-    #[tokio::test]
-    async fn test_mob_create_rejects_prefab_and_definition_together() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let scope = test_scope_with_context(temp.path().to_path_buf());
-        let definition_path = temp.path().join("mob.toml");
-        tokio::fs::write(&definition_path, "id = \"x\"")
-            .await
-            .expect("write definition");
-
-        let result = handle_mob_command(
-            MobCommands::Create {
-                prefab: Some("pipeline".to_string()),
-                definition: Some(definition_path),
-            },
-            &scope,
-        )
-        .await;
-
-        assert!(result.is_err(), "conflicting create inputs must fail");
-        let err = result.expect_err("expected conflict error").to_string();
-        assert!(
-            err.contains("exactly one"),
-            "error should explain mutually exclusive flags: {err}"
-        );
-    }
-
     #[tokio::test]
     async fn test_prepare_run_mob_tools_does_not_hold_registry_lock_for_context_lifetime() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -9286,72 +8745,6 @@ timeout_ms = 1000
         .await
         .expect("second context should not block on long-held registry lock")
         .expect("second context should initialize");
-    }
-
-    #[tokio::test]
-    async fn test_mob_prefabs_and_lifecycle_commands_parse_and_dispatch() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let scope = test_scope_with_context(temp.path().to_path_buf());
-        let scope_2 = test_scope_with_context(temp.path().to_path_buf());
-
-        handle_mob_command(MobCommands::Prefabs, &scope)
-            .await
-            .expect("prefabs should succeed");
-        handle_mob_command(
-            MobCommands::Create {
-                prefab: Some("pipeline".to_string()),
-                definition: None,
-            },
-            &scope,
-        )
-        .await
-        .expect("create should succeed");
-
-        // New invocation context should rehydrate created mobs from persisted registry.
-        handle_mob_command(MobCommands::List, &scope_2)
-            .await
-            .expect("list should succeed across invocations");
-
-        handle_mob_command(
-            MobCommands::Status {
-                mob_id: "pipeline".to_string(),
-            },
-            &scope_2,
-        )
-        .await
-        .expect("status should succeed");
-        handle_mob_command(
-            MobCommands::Stop {
-                mob_id: "pipeline".to_string(),
-            },
-            &scope,
-        )
-        .await
-        .expect("stop should succeed");
-        handle_mob_command(
-            MobCommands::Resume {
-                mob_id: "pipeline".to_string(),
-            },
-            &scope,
-        )
-        .await
-        .expect("resume should succeed");
-        handle_mob_command(
-            MobCommands::Complete {
-                mob_id: "pipeline".to_string(),
-            },
-            &scope,
-        )
-        .await
-        .expect("complete should succeed");
-        handle_mob_command(
-            MobCommands::Destroy {
-                mob_id: "pipeline".to_string(),
-            },
-            &scope,
-        )
-        .await
-        .expect("destroy should succeed");
     }
 
     #[test]
@@ -9447,348 +8840,6 @@ timeout_ms = 1000
             running.is_none(),
             "non-terminal cached run must never be treated as authoritative"
         );
-    }
-
-    #[tokio::test]
-    async fn test_flow_status_discards_non_terminal_cached_snapshot_when_run_missing() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let scope = test_scope_with_context(temp.path().to_path_buf());
-        let definition_path = temp.path().join("flow-mob.toml");
-        tokio::fs::write(&definition_path, flow_definition_toml("flow-mob"))
-            .await
-            .expect("write flow mob definition");
-
-        handle_mob_command(
-            MobCommands::Create {
-                prefab: None,
-                definition: Some(definition_path),
-            },
-            &scope,
-        )
-        .await
-        .expect("create flow mob");
-
-        let run_id = RunId::new();
-        let now = chrono::Utc::now();
-        let mut registry = load_mob_registry(&scope)
-            .await
-            .expect("registry should load");
-        let mob = registry
-            .mobs
-            .get_mut("flow-mob")
-            .expect("flow-mob should exist");
-        mob.runs.insert(
-            run_id.to_string(),
-            meerkat_mob::MobRun {
-                run_id: run_id.clone(),
-                mob_id: meerkat_mob::MobId::from("flow-mob"),
-                flow_id: FlowId::from("demo"),
-                status: meerkat_mob::MobRunStatus::Running,
-                activation_params: serde_json::json!({}),
-                created_at: now,
-                completed_at: None,
-                step_ledger: Vec::new(),
-                failure_ledger: Vec::new(),
-            },
-        );
-        save_mob_registry(&scope, &registry)
-            .await
-            .expect("save injected running snapshot");
-
-        handle_mob_command(
-            MobCommands::FlowStatus {
-                mob_id: "flow-mob".to_string(),
-                run_id: run_id.to_string(),
-            },
-            &scope,
-        )
-        .await
-        .expect("flow status should not trust non-terminal cache");
-
-        let refreshed = load_mob_registry(&scope)
-            .await
-            .expect("registry should reload");
-        let refreshed_mob = refreshed
-            .mobs
-            .get("flow-mob")
-            .expect("flow-mob should remain persisted");
-        assert!(
-            !refreshed_mob.runs.contains_key(&run_id.to_string()),
-            "flow-status should drop non-terminal cached snapshots when no live run exists"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_mob_flow_commands_parse_and_dispatch() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let scope = test_scope_with_context(temp.path().to_path_buf());
-        let scope_2 = test_scope_with_context(temp.path().to_path_buf());
-        let definition_path = temp.path().join("flow-mob.toml");
-        tokio::fs::write(&definition_path, flow_definition_toml("flow-mob"))
-            .await
-            .expect("write flow mob definition");
-
-        handle_mob_command(
-            MobCommands::Create {
-                prefab: None,
-                definition: Some(definition_path),
-            },
-            &scope,
-        )
-        .await
-        .expect("create flow mob");
-        handle_mob_command(
-            MobCommands::Flows {
-                mob_id: "flow-mob".to_string(),
-            },
-            &scope,
-        )
-        .await
-        .expect("list flows");
-        handle_mob_command(
-            MobCommands::RunFlow {
-                mob_id: "flow-mob".to_string(),
-                flow: "demo".to_string(),
-                params: Some(r#"{"ticket":"REQ-019"}"#.to_string()),
-                stream: false,
-                stream_view: StreamView::Primary,
-                stream_focus: None,
-            },
-            &scope,
-        )
-        .await
-        .expect("run flow");
-
-        let registry = load_mob_registry(&scope)
-            .await
-            .expect("registry should load");
-        let persisted = registry
-            .mobs
-            .get("flow-mob")
-            .expect("flow-mob should be persisted");
-        assert_eq!(
-            persisted.runs.len(),
-            1,
-            "run-flow must persist exactly one run snapshot"
-        );
-        let (run_id, persisted_run) = persisted.runs.iter().next().expect("persisted run");
-        assert_eq!(
-            persisted_run.flow_id,
-            FlowId::from("demo"),
-            "persisted run snapshot should keep flow identity"
-        );
-        assert!(
-            persisted_run.status.is_terminal(),
-            "run-flow command should persist terminal run status before returning"
-        );
-        assert_eq!(
-            persisted_run.activation_params,
-            serde_json::json!({"ticket":"REQ-019"}),
-            "persisted run snapshot should keep activation params"
-        );
-
-        handle_mob_command(
-            MobCommands::FlowStatus {
-                mob_id: "flow-mob".to_string(),
-                run_id: run_id.clone(),
-            },
-            &scope,
-        )
-        .await
-        .expect("flow status should resolve persisted run");
-
-        let session_service: Arc<dyn meerkat_mob::MobSessionService> =
-            Arc::new(TestMobSessionService::new());
-        let (rehydrated_state, _registry) = hydrate_mob_state(&scope_2, session_service)
-            .await
-            .expect("rehydration should succeed");
-        let roundtrip = rehydrated_state
-            .mob_flow_status(
-                &meerkat_mob::MobId::from("flow-mob"),
-                run_id.parse::<RunId>().expect("run id"),
-            )
-            .await
-            .expect("flow status in rehydrated state should succeed");
-        let roundtrip = roundtrip.expect("terminal run should resolve after rehydration");
-        assert_eq!(roundtrip.flow_id, FlowId::from("demo"));
-    }
-
-    #[tokio::test]
-    async fn test_mob_run_flow_failure_persists_terminal_snapshot_and_rehydrates() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let scope = test_scope_with_context(temp.path().to_path_buf());
-        let scope_2 = test_scope_with_context(temp.path().to_path_buf());
-        let definition_path = temp.path().join("flow-mob.toml");
-        tokio::fs::write(&definition_path, flow_definition_toml("flow-mob"))
-            .await
-            .expect("write flow mob definition");
-
-        handle_mob_command(
-            MobCommands::Create {
-                prefab: None,
-                definition: Some(definition_path),
-            },
-            &scope,
-        )
-        .await
-        .expect("create flow mob");
-
-        // Do not spawn any worker so the flow fails with no targets and still reaches terminal state.
-        handle_mob_command(
-            MobCommands::RunFlow {
-                mob_id: "flow-mob".to_string(),
-                flow: "demo".to_string(),
-                params: Some(r#"{"ticket":"REQ-020"}"#.to_string()),
-                stream: false,
-                stream_view: StreamView::Primary,
-                stream_focus: None,
-            },
-            &scope,
-        )
-        .await
-        .expect("run flow should return after terminal failure");
-
-        let registry = load_mob_registry(&scope)
-            .await
-            .expect("registry should load");
-        let persisted = registry
-            .mobs
-            .get("flow-mob")
-            .expect("flow-mob should be persisted");
-        let (_run_id, persisted_run) = persisted.runs.iter().next().expect("persisted run");
-        assert_eq!(
-            persisted_run.status,
-            meerkat_mob::MobRunStatus::Failed,
-            "failed run should be cached as terminal failure"
-        );
-        assert!(
-            persisted_run.status.is_terminal(),
-            "cached run snapshot must always be terminal"
-        );
-
-        let session_service: Arc<dyn meerkat_mob::MobSessionService> =
-            Arc::new(TestMobSessionService::new());
-        let (rehydrated_state, _registry) = hydrate_mob_state(&scope_2, session_service)
-            .await
-            .expect("rehydration should succeed");
-        let rehydrated = rehydrated_state
-            .mob_flow_status(
-                &meerkat_mob::MobId::from("flow-mob"),
-                persisted_run.run_id.clone(),
-            )
-            .await
-            .expect("flow status in rehydrated state should succeed")
-            .expect("terminal run should resolve after rehydration");
-        assert_eq!(
-            rehydrated.status,
-            meerkat_mob::MobRunStatus::Failed,
-            "rehydrated run should preserve failure terminal status"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_mob_flow_status_rejects_invalid_run_id() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let scope = test_scope_with_context(temp.path().to_path_buf());
-        let definition_path = temp.path().join("flow-mob.toml");
-        tokio::fs::write(&definition_path, flow_definition_toml("flow-mob"))
-            .await
-            .expect("write flow mob definition");
-        handle_mob_command(
-            MobCommands::Create {
-                prefab: None,
-                definition: Some(definition_path),
-            },
-            &scope,
-        )
-        .await
-        .expect("create flow mob");
-
-        let err = handle_mob_command(
-            MobCommands::FlowStatus {
-                mob_id: "flow-mob".to_string(),
-                run_id: "not-a-uuid".to_string(),
-            },
-            &scope,
-        )
-        .await
-        .expect_err("invalid run_id should fail");
-        assert!(
-            err.to_string().contains("invalid run_id"),
-            "error should follow invalid-argument style: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_mob_run_flow_rejects_unknown_flow_id() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let scope = test_scope_with_context(temp.path().to_path_buf());
-        let definition_path = temp.path().join("flow-mob.toml");
-        tokio::fs::write(&definition_path, flow_definition_toml("flow-mob"))
-            .await
-            .expect("write flow mob definition");
-        handle_mob_command(
-            MobCommands::Create {
-                prefab: None,
-                definition: Some(definition_path),
-            },
-            &scope,
-        )
-        .await
-        .expect("create flow mob");
-        let err = handle_mob_command(
-            MobCommands::RunFlow {
-                mob_id: "flow-mob".to_string(),
-                flow: "missing".to_string(),
-                params: Some(r#"{"ticket":"REQ-019"}"#.to_string()),
-                stream: false,
-                stream_view: StreamView::Primary,
-                stream_focus: None,
-            },
-            &scope,
-        )
-        .await
-        .expect_err("unknown flow_id should fail");
-        assert!(
-            err.to_string().contains("flow not found"),
-            "error should explain missing flow: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_mob_registry_serializes_concurrent_writers() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let scope_a = test_scope_with_context(temp.path().to_path_buf());
-        let scope_b = test_scope_with_context(temp.path().to_path_buf());
-
-        let a = tokio::spawn(async move {
-            handle_mob_command(
-                MobCommands::Create {
-                    prefab: Some("pipeline".to_string()),
-                    definition: None,
-                },
-                &scope_a,
-            )
-            .await
-        });
-        let b = tokio::spawn(async move {
-            handle_mob_command(
-                MobCommands::Create {
-                    prefab: Some("code_review".to_string()),
-                    definition: None,
-                },
-                &scope_b,
-            )
-            .await
-        });
-
-        a.await.expect("join A").expect("create A");
-        b.await.expect("join B").expect("create B");
-
-        let scope_read = test_scope_with_context(temp.path().to_path_buf());
-        let registry = load_mob_registry(&scope_read).await.expect("registry");
-        assert!(registry.mobs.contains_key("pipeline"));
-        assert!(registry.mobs.contains_key("code_review"));
     }
 
     #[test]

@@ -24,6 +24,7 @@ const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
 const MAGENTA: &str = "\x1b[35m";
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamRenderPolicy {
     PrimaryOnly,
@@ -640,6 +641,7 @@ pub fn stderr_is_tty() -> bool {
 }
 
 /// Validate canonical scope selector format used by `--stream-focus`.
+#[cfg(test)]
 pub fn is_valid_scope_id(input: &str) -> bool {
     if input == "primary" {
         return true;
@@ -656,6 +658,7 @@ pub fn is_valid_scope_id(input: &str) -> bool {
     false
 }
 
+#[cfg(test)]
 fn is_scope_atom(input: &str) -> bool {
     !input.is_empty() && !input.contains('/') && !input.chars().any(char::is_whitespace)
 }

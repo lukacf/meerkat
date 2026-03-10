@@ -5,7 +5,7 @@
 # WebCM (https://github.com/edubart/webcm) by @edubart — Cartesi Machine
 # RISC-V emulator compiled to WebAssembly.
 #
-# Prerequisites: node, npm, curl, wasm-pack
+# Prerequisites: node, npm, curl (wasm-pack needed if sdks/web not pre-built)
 # Usage: ./examples.sh [--clean]
 
 set -euo pipefail
@@ -44,11 +44,26 @@ fi
 if [[ ! -f "${MEERKAT_PKG}/meerkat_web_runtime_bg.wasm" ]]; then
   echo "Building meerkat-web-runtime for wasm32..."
   REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-  RUSTFLAGS='--cfg getrandom_backend="wasm_js"' \
-    wasm-pack build "${REPO_ROOT}/meerkat-web-runtime" \
-      --target web \
-      --out-dir "${PWD}/${MEERKAT_PKG}" \
-      --dev
+  SDK_WASM_DIR="${REPO_ROOT}/sdks/web/wasm"
+
+  # Build via sdks/web's build:wasm script (handles --out-dir and .gitignore cleanup)
+  if [[ -f "${REPO_ROOT}/sdks/web/package.json" ]]; then
+    (cd "${REPO_ROOT}/sdks/web" && npm run build:wasm)
+  else
+    RUSTFLAGS='--cfg getrandom_backend="wasm_js"' \
+      wasm-pack build "${REPO_ROOT}/meerkat-web-runtime" \
+        --target web \
+        --out-dir "${PWD}/${MEERKAT_PKG}" \
+        --dev
+  fi
+
+  # Copy from sdks/web/wasm if built there
+  if [[ -d "${SDK_WASM_DIR}" && -f "${SDK_WASM_DIR}/meerkat_web_runtime_bg.wasm" ]]; then
+    mkdir -p "${MEERKAT_PKG}"
+    cp "${SDK_WASM_DIR}/meerkat_web_runtime.js" "${MEERKAT_PKG}/"
+    cp "${SDK_WASM_DIR}/meerkat_web_runtime_bg.wasm" "${MEERKAT_PKG}/"
+  fi
+
   echo "Meerkat WASM runtime built to ${MEERKAT_PKG}/"
 else
   echo "Meerkat WASM runtime already built"

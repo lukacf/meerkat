@@ -10,7 +10,7 @@
     "preview": "vite preview"
   },
   "devDependencies": {
-    "@rkat/web": "^0.4.3",
+    "@rkat/web": "^0.4.5",
     "typescript": "^5.7.2",
     "vite": "^5.4.11"
   },

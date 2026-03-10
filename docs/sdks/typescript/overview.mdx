@@ -70,6 +70,8 @@ The TypeScript SDK (`@rkat/sdk`) lets you create sessions, run agent turns, stre
 | `createSessionStreaming(prompt, options?)` | Create a session and stream typed events from the first turn |
 | `listSessions()` | List active sessions |
 | `readSession(sessionId)` | Read raw session state |
+| `createMob(definition, options?)` | Create a mob, return a `Mob` |
+| `listMobs()` | List mobs |
 | `getConfig()` | Read runtime configuration |
 | `setConfig(config)` | Replace runtime configuration |
 | `patchConfig(patch)` | Merge-patch runtime configuration |
@@ -93,6 +95,28 @@ The TypeScript SDK (`@rkat/sdk`) lets you create sessions, run agent turns, stre
 | `session.invokeSkill(skillRef, prompt)` | Invoke a skill in this session |
 | `session.send(command)` | Send a comms command scoped to this session |
 | `session.peers()` | List peers visible to this session's comms runtime |
+| `session.subscribeEvents()` | Open a standalone event subscription; returns `EventSubscription<AgentEventEnvelope>` |
+
+### Mob methods
+
+| Method | Description |
+|--------|-------------|
+| `mob.mobId` | The mob's identifier |
+| `mob.status()` | Get mob status |
+| `mob.lifecycle(action)` | Stop, resume, complete, destroy, or reset the mob |
+| `mob.spawn(spec)` | Spawn a member |
+| `mob.retire(meerkatId)` | Retire a member |
+| `mob.respawn(meerkatId)` | Respawn a member |
+| `mob.wire(a, b)` | Wire two members |
+| `mob.unwire(a, b)` | Remove wiring |
+| `mob.listMembers()` | List mob members |
+| `mob.sendMessage(meerkatId, message)` | Send work to a member |
+| `mob.listFlows()` | List available flows |
+| `mob.runFlow(flowId, params)` | Start a flow run |
+| `mob.flowStatus(runId)` | Get flow run status |
+| `mob.cancelFlow(runId)` | Cancel a flow run |
+| `mob.subscribeMemberEvents(meerkatId)` | Subscribe to member events; returns `EventSubscription<AgentEventEnvelope>` |
+| `mob.subscribeEvents()` | Subscribe to mob-wide events; returns `EventSubscription<AttributedMobEvent>` |
 
 ---
 
@@ -311,6 +335,22 @@ Scope comms operations to this session. Requires the `comms` capability.
 ```typescript
 await session.send({ kind: "peer_message", to: "agent-b", body: "Hello!" });
 const peers = await session.peers();
+```
+
+### subscribeEvents()
+
+```typescript
+async subscribeEvents(): Promise<EventSubscription<AgentEventEnvelope>>
+```
+
+Open a standalone event subscription for this session. Returns an async-iterable `EventSubscription` that yields typed `AgentEventEnvelope` objects.
+
+```typescript
+const sub = await session.subscribeEvents();
+for await (const envelope of sub) {
+  console.log(envelope.payload.type, envelope.seq);
+}
+await sub.close();
 ```
 
 ---

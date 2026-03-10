@@ -10,6 +10,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - **Clean-cut comms/observability split** — removed mixed public interaction-stream APIs across Rust SDK, CLI, REST, RPC, MCP, WASM, and both Python/TypeScript SDKs. Public comms now exposes delivery (`inject`, `send_message`, `comms/send`) and explicit observation surfaces separately; interaction-scoped comms stream helpers remain runtime-internal only.
+- **First-class mob and session parity across all SDKs** — Python SDK, TypeScript SDK, and Web SDK now expose explicit `Mob` and `Session` classes with typed mob lifecycle, member management, flow control, and event subscription methods. RPC surface adds dedicated `mob/*` methods (`mob/create`, `mob/list`, `mob/status`, `mob/members`, `mob/spawn`, `mob/retire`, `mob/respawn`, `mob/wire`, `mob/unwire`, `mob/lifecycle`, `mob/send`, `mob/events`, `mob/stream_open`, `mob/stream_close`, `mob/append_system_context`, `mob/flows`, `mob/flow_run`, `mob/flow_status`, `mob/flow_cancel`) as the canonical typed substrate for SDKs.
+- **EventSubscription replaces CommsEventStream** — Python SDK exports `EventSubscription` instead of `CommsEventStream`/`CommsStreamEvent`. TypeScript SDK exports `EventSubscription<T>` (generic, async-iterable). Web SDK's `EventSubscription<T>` is now generic with a `parseEvents` callback.
+- **Standalone session event streaming** — RPC adds `session/stream_open` and `session/stream_close` for explicit event stream lifecycle. Web SDK adds `Session.subscribe()` returning `EventSubscription<EventEnvelope>`.
+- **Mob subscription methods are now async** — Web SDK `Mob.subscribe()` and `Mob.subscribeAll()` return `Promise<EventSubscription<T>>` instead of synchronous handles. `mob_member_subscribe` and `mob_subscribe_events` WASM exports are now async.
+- **Mob events use numeric cursors** — `mob_events` WASM export takes a numeric `afterCursor` parameter instead of a string. Web SDK `Mob.events()` converts string cursors to numbers internally.
+- **Mob create returns string directly** — `mob_create` WASM export returns a plain string mob ID instead of JSON. `mob_run_flow` similarly returns a plain string run ID.
+- **Typed mob observation** — `Mob.subscribeAll()` returns `EventSubscription<AttributedEvent>` (source + profile + envelope) on Web SDK. `Mob.events()` returns `MobEvent[]` (cursor + timestamp + mob_id + kind). TypeScript RPC SDK uses `AttributedMobEvent` and `AgentEventEnvelope` types for mob/member subscriptions.
+- **Web SDK types refined** — `SpawnResult` now has `status: 'ok' | 'error'` with optional `member_ref` and `error` fields. `MobMember` includes `member_ref`, `runtime_mode`, `state`, `wired_to`, and `labels`. `MobStatus` uses `state` field instead of `status` + `member_count`.
+
+### Removed
+
+- **`inject_and_subscribe`** — removed from WASM exports, Web SDK `Mob` class, and `MobWasmBindings` interface. Use `Mob.sendMessage()` + `Mob.subscribe()` separately.
+- **`CommsEventStream` / `CommsStreamEvent`** — removed from Python SDK. Use `EventSubscription` instead.
+- **`openCommsStream` / `sendAndStream`** — removed from TypeScript SDK `MeerkatClient` and `Session`. Use explicit mob/session observation subscriptions instead.
+
+### Fixed
+
+- **Stream termination and WASM subscription cleanup** — fixed event stream termination handling and subscription resource cleanup in the WASM runtime and RPC router.
+- **Config runtime lock cleanup** — hardened lock cleanup in the config runtime to prevent leaked locks on error paths.
+- **Mob-backed session routing** — hardened routing and control for mob-backed sessions, including proper session resolution for mob members.
+- **MCP run handler without comms** — fixed MCP `meerkat_run` handler crash when the `comms` feature is not compiled in.
+- **Pre-push unit hook stability** — serialized pre-push unit test runs across worktrees with a per-tree cache and one retry if `nextest` discovery hangs.
 
 ## [0.4.5] - 2026-03-07
 

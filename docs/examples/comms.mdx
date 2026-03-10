@@ -125,12 +125,14 @@ Push an event into a running session's comms inbox.
   </Tab>
   <Tab title="Python">
     ```python
-    await client.send(session_id, payload={"alert": "build failed"}, source="ci-pipeline")
+    session = await client.create_session("...", host_mode=True, comms_name="agent-a")
+    await session.send(payload={"alert": "build failed"}, source="ci-pipeline")
     ```
   </Tab>
   <Tab title="TypeScript">
     ```typescript
-    await client.send(sessionId, { payload: { alert: "build failed" }, source: "ci-pipeline" });
+    const session = await client.createSession("...", { hostMode: true, commsName: "agent-a" });
+    await session.send({ payload: { alert: "build failed" }, source: "ci-pipeline" });
     ```
   </Tab>
   <Tab title="Rust">
@@ -170,14 +172,14 @@ Discover trusted peers visible to a running session.
   </Tab>
   <Tab title="Python">
     ```python
-    peers = await client.peers(session_id)
-    for p in peers["peers"]:
+    peers = await session.peers()
+    for p in peers:
         print(f"{p['name']} @ {p['address']}")
     ```
   </Tab>
   <Tab title="TypeScript">
     ```typescript
-    const { peers } = await client.peers(sessionId);
+    const peers = await session.peers();
     peers.forEach(p => console.log(`${p.name} @ ${p.address}`));
     ```
   </Tab>
@@ -234,12 +236,12 @@ Push external events from outside systems into a running agent. Events are drain
   </Tab>
   <Tab title="Python">
     ```python
-    await client.send(session_id, payload={"event": "deploy_complete", "env": "prod"}, source="deploy-bot")
+    await session.send(payload={"event": "deploy_complete", "env": "prod"}, source="deploy-bot")
     ```
   </Tab>
   <Tab title="TypeScript">
     ```typescript
-    await client.send(sessionId, { payload: { event: "deploy_complete", env: "prod" }, source: "deploy-bot" });
+    await session.send({ payload: { event: "deploy_complete", env: "prod" }, source: "deploy-bot" });
     ```
   </Tab>
   <Tab title="Rust">

@@ -282,6 +282,8 @@ type AgentEvent =
   | HookPatchPublishedEvent
   | SkillsResolvedEvent
   | SkillResolutionFailedEvent
+  | InteractionCompleteEvent
+  | InteractionFailedEvent
   | StreamTruncatedEvent
   | ToolConfigChangedEvent
   | UnknownEvent;
@@ -370,6 +372,13 @@ interface HookPatchPublishedEvent { type: "hook_patch_published";  hookId: strin
 ```typescript
 interface SkillsResolvedEvent       { type: "skills_resolved";         skills: readonly string[]; injectionBytes: number }
 interface SkillResolutionFailedEvent { type: "skill_resolution_failed"; reference: string; error: string }
+```
+
+### Comms events
+
+```typescript
+interface InteractionCompleteEvent { type: "interaction_complete"; interactionId: string; result: string }
+interface InteractionFailedEvent   { type: "interaction_failed";   interactionId: string; error: string }
 ```
 
 ### Tool config events

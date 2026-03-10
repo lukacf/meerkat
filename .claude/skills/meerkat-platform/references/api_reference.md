@@ -303,11 +303,11 @@ Session methods:
 
 Mob methods:
 
-- `Mob.status()` / `Mob.lifecycle(action)`
-- `Mob.spawn(spec)` / `Mob.retire(meerkat_id)` / `Mob.respawn(meerkat_id)`
+- `Mob.id` (property) / `Mob.status()` / `Mob.lifecycle(action)`
+- `Mob.spawn(...)` / `Mob.retire(meerkat_id)` / `Mob.respawn(meerkat_id)`
 - `Mob.wire(a, b)` / `Mob.unwire(a, b)`
-- `Mob.list_members()` / `Mob.send_message(meerkat_id, message)`
-- `Mob.list_flows()` / `Mob.run_flow(flow_id, params)` / `Mob.flow_status(run_id)` / `Mob.cancel_flow(run_id)`
+- `Mob.members()` / `Mob.send_message(meerkat_id, message)`
+- `Mob.flows()` / `Mob.run_flow(flow_id, params)` / `Mob.flow_status(run_id)` / `Mob.cancel_flow(run_id)`
 - `Mob.subscribe_member_events(meerkat_id)` → `EventSubscription`
 - `Mob.subscribe_events()` → `EventSubscription`
 

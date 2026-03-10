@@ -115,17 +115,17 @@ client = MeerkatClient(rkat_path="/path/to/rkat-rpc")
 
 | Method | Description |
 |--------|-------------|
-| `mob.mob_id` | The mob's identifier |
+| `mob.id` | The mob's identifier |
 | `await mob.status()` | Get mob status |
 | `await mob.lifecycle(action)` | Stop, resume, complete, or destroy the mob |
-| `await mob.spawn(spec)` | Spawn a member into the mob |
+| `await mob.spawn(...)` | Spawn a member into the mob |
 | `await mob.retire(meerkat_id)` | Retire a member |
 | `await mob.respawn(meerkat_id)` | Respawn a member |
 | `await mob.wire(a, b)` | Wire two members for comms |
 | `await mob.unwire(a, b)` | Remove comms wiring |
-| `await mob.list_members()` | List mob members |
+| `await mob.members()` | List mob members |
 | `await mob.send_message(meerkat_id, message)` | Send work to a member |
-| `await mob.list_flows()` | List available flows |
+| `await mob.flows()` | List available flows |
 | `await mob.run_flow(flow_id, params)` | Start a flow run |
 | `await mob.flow_status(run_id)` | Get flow run status |
 | `await mob.cancel_flow(run_id)` | Cancel a flow run |
@@ -409,6 +409,8 @@ All events are frozen dataclasses importable from `meerkat`. Unknown event types
 | `HookRewriteApplied` | `hook_id`, `point`, `patch` | Hook rewrote part of request/response |
 | `SkillsResolved` | `skills`, `injection_bytes` | Skills resolved for this turn |
 | `SkillResolutionFailed` | `reference`, `error` | Skill reference could not be resolved |
+| `InteractionComplete` | `interaction_id`, `result` | Comms interaction completed |
+| `InteractionFailed` | `interaction_id`, `error` | Comms interaction failed |
 | `StreamTruncated` | `reason` | Event stream was truncated |
 | `ToolConfigChanged` | `payload` | Live tool configuration changed for this session |
 | `UnknownEvent` | `type`, `data` | Unrecognised event type (forward compat) |

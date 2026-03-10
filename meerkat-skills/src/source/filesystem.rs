@@ -93,7 +93,7 @@ static TEST_NOW_UNIX_SECS: AtomicU64 = AtomicU64::new(1_700_000_000);
 fn now_unix_secs() -> u64 {
     #[cfg(test)]
     {
-        return TEST_NOW_UNIX_SECS.fetch_add(1, Ordering::Relaxed);
+        TEST_NOW_UNIX_SECS.fetch_add(1, Ordering::Relaxed)
     }
 
     #[cfg(not(test))]

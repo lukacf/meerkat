@@ -60,6 +60,7 @@ impl CompositeDispatcher {
     ) -> Result<Self, CompositeDispatcherError> {
         let mut builtin_tools: Vec<Arc<dyn BuiltinTool>> = Vec::new();
         let project_root = project_root
+            .or_else(|| shell_config.as_ref().map(|cfg| cfg.project_root.clone()))
             .or_else(|| std::env::current_dir().ok())
             .ok_or_else(|| CompositeDispatcherError::ToolInitFailed {
                 name: "apply_patch".to_string(),

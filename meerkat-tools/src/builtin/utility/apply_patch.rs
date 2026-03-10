@@ -530,7 +530,9 @@ fn compute_replacements(
         }
 
         if chunk.old_lines.is_empty() {
-            let insertion_idx = if original_lines.last().is_some_and(String::is_empty) {
+            let insertion_idx = if chunk.change_context.is_some() {
+                line_index
+            } else if original_lines.last().is_some_and(String::is_empty) {
                 original_lines.len() - 1
             } else {
                 original_lines.len()
@@ -726,6 +728,22 @@ mod tests {
         apply_patch(root, &patch).unwrap();
 
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "alpha\ngamma");
+    }
+
+    #[test]
+    fn addition_only_chunk_inserts_after_context() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let path = root.join("imports.py");
+        std::fs::write(&path, "import a\nimport z\n").unwrap();
+
+        let patch = wrap_patch("*** Update File: imports.py\n@@ import a\n+import m");
+        apply_patch(root, &patch).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "import a\nimport m\nimport z\n"
+        );
     }
 
     #[test]

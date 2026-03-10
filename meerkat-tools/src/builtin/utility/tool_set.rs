@@ -1,10 +1,14 @@
 //! Utility tool set implementation
 
+#[cfg(not(target_arch = "wasm32"))]
+use super::ApplyPatchTool;
 use super::datetime::DateTimeTool;
 use super::wait::{WaitInterrupt, WaitTool};
 use crate::builtin::BuiltinTool;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio::sync::watch;
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::PathBuf;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::watch;
 
@@ -17,10 +21,14 @@ pub struct UtilityToolSet {
     pub wait: WaitTool,
     /// Tool for getting current date/time
     pub datetime: DateTimeTool,
+    /// Tool for applying structured file edits
+    #[cfg(not(target_arch = "wasm32"))]
+    pub apply_patch: ApplyPatchTool,
 }
 
 impl UtilityToolSet {
     /// Create a new UtilityToolSet without interrupt support
+    #[cfg(target_arch = "wasm32")]
     pub fn new() -> Self {
         Self {
             wait: WaitTool::new(),
@@ -28,9 +36,20 @@ impl UtilityToolSet {
         }
     }
 
+    /// Create a new UtilityToolSet without interrupt support.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new(project_root: PathBuf) -> Self {
+        Self {
+            wait: WaitTool::new(),
+            datetime: DateTimeTool::new(),
+            apply_patch: ApplyPatchTool::new(project_root),
+        }
+    }
+
     /// Create a UtilityToolSet with interrupt support for the wait tool
     ///
     /// The wait tool will be interrupted when a message is sent on the channel.
+    #[cfg(target_arch = "wasm32")]
     pub fn with_interrupt(interrupt_rx: watch::Receiver<Option<WaitInterrupt>>) -> Self {
         Self {
             wait: WaitTool::with_interrupt(interrupt_rx),
@@ -38,7 +57,21 @@ impl UtilityToolSet {
         }
     }
 
+    /// Create a UtilityToolSet with interrupt support for the wait tool.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_interrupt(
+        interrupt_rx: watch::Receiver<Option<WaitInterrupt>>,
+        project_root: PathBuf,
+    ) -> Self {
+        Self {
+            wait: WaitTool::with_interrupt(interrupt_rx),
+            datetime: DateTimeTool::new(),
+            apply_patch: ApplyPatchTool::new(project_root),
+        }
+    }
+
     /// Get references to all tools as a vector
+    #[cfg(target_arch = "wasm32")]
     pub fn tools(&self) -> Vec<&dyn BuiltinTool> {
         vec![
             &self.wait as &dyn BuiltinTool,
@@ -46,9 +79,26 @@ impl UtilityToolSet {
         ]
     }
 
+    /// Get references to all tools as a vector.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn tools(&self) -> Vec<&dyn BuiltinTool> {
+        vec![
+            &self.wait as &dyn BuiltinTool,
+            &self.datetime as &dyn BuiltinTool,
+            &self.apply_patch as &dyn BuiltinTool,
+        ]
+    }
+
     /// Get tool names in this set
+    #[cfg(target_arch = "wasm32")]
     pub fn tool_names() -> Vec<&'static str> {
         vec!["wait", "datetime"]
+    }
+
+    /// Get tool names in this set.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn tool_names() -> Vec<&'static str> {
+        vec!["wait", "datetime", "apply_patch"]
     }
 
     /// Get usage instructions for the LLM on how to use utility tools
@@ -63,6 +113,7 @@ You have access to utility tools for timing and coordination.
 ## Available Tools
 - `wait` - Pause execution for a specified number of seconds (max 300)
 - `datetime` - Get the current date and time
+- `apply_patch` - Apply structured file edits inside the project root
 
 ## Using the Wait Tool
 
@@ -90,8 +141,14 @@ Use `datetime` when you need to:
 }
 
 impl Default for UtilityToolSet {
+    #[cfg(target_arch = "wasm32")]
     fn default() -> Self {
         Self::new()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn default() -> Self {
+        Self::new(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     }
 }
 
@@ -102,34 +159,55 @@ mod tests {
 
     #[test]
     fn test_utility_tool_set_creation() {
+        #[cfg(target_arch = "wasm32")]
         let tool_set = UtilityToolSet::new();
+        #[cfg(not(target_arch = "wasm32"))]
+        let tool_set = UtilityToolSet::new(PathBuf::from("/tmp/test"));
         assert_eq!(tool_set.wait.name(), "wait");
         assert_eq!(tool_set.datetime.name(), "datetime");
+        #[cfg(not(target_arch = "wasm32"))]
+        assert_eq!(tool_set.apply_patch.name(), "apply_patch");
     }
 
     #[test]
     fn test_utility_tool_set_tools() {
+        #[cfg(target_arch = "wasm32")]
         let tool_set = UtilityToolSet::new();
+        #[cfg(not(target_arch = "wasm32"))]
+        let tool_set = UtilityToolSet::new(PathBuf::from("/tmp/test"));
         let tools = tool_set.tools();
 
+        #[cfg(target_arch = "wasm32")]
         assert_eq!(tools.len(), 2);
+        #[cfg(not(target_arch = "wasm32"))]
+        assert_eq!(tools.len(), 3);
 
         let names: Vec<_> = tools.iter().map(|t| t.name()).collect();
         assert!(names.contains(&"wait"));
         assert!(names.contains(&"datetime"));
+        #[cfg(not(target_arch = "wasm32"))]
+        assert!(names.contains(&"apply_patch"));
     }
 
     #[test]
     fn test_utility_tool_set_tool_names() {
         let names = UtilityToolSet::tool_names();
+        #[cfg(target_arch = "wasm32")]
         assert_eq!(names.len(), 2);
+        #[cfg(not(target_arch = "wasm32"))]
+        assert_eq!(names.len(), 3);
         assert!(names.contains(&"wait"));
         assert!(names.contains(&"datetime"));
+        #[cfg(not(target_arch = "wasm32"))]
+        assert!(names.contains(&"apply_patch"));
     }
 
     #[test]
     fn test_utility_tool_set_all_enabled_by_default() {
+        #[cfg(target_arch = "wasm32")]
         let tool_set = UtilityToolSet::new();
+        #[cfg(not(target_arch = "wasm32"))]
+        let tool_set = UtilityToolSet::new(PathBuf::from("/tmp/test"));
         let tools = tool_set.tools();
 
         for tool in tools {
@@ -152,6 +230,9 @@ mod tests {
     #[test]
     fn test_utility_tool_set_default() {
         let tool_set = UtilityToolSet::default();
+        #[cfg(target_arch = "wasm32")]
         assert_eq!(tool_set.tools().len(), 2);
+        #[cfg(not(target_arch = "wasm32"))]
+        assert_eq!(tool_set.tools().len(), 3);
     }
 }

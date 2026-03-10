@@ -905,11 +905,19 @@ impl AgentFactory {
         &self,
         store: Arc<dyn TaskStore>,
         config: &BuiltinToolConfig,
+        project_root: Option<PathBuf>,
         shell_config: Option<ShellConfig>,
         external: Option<Arc<dyn AgentToolDispatcher>>,
         session_id: Option<String>,
     ) -> Result<CompositeDispatcher, CompositeDispatcherError> {
-        CompositeDispatcher::new(store, config, shell_config, external, session_id)
+        CompositeDispatcher::new(
+            store,
+            config,
+            project_root,
+            shell_config,
+            external,
+            session_id,
+        )
     }
 
     /// Build a shared builtin dispatcher using the provided config.
@@ -918,6 +926,7 @@ impl AgentFactory {
         &self,
         store: Arc<dyn TaskStore>,
         config: BuiltinToolConfig,
+        project_root: Option<PathBuf>,
         shell_config: Option<ShellConfig>,
         external: Option<Arc<dyn AgentToolDispatcher>>,
         session_id: Option<String>,
@@ -925,6 +934,7 @@ impl AgentFactory {
         self.build_builtin_dispatcher_with_skills(
             store,
             config,
+            project_root,
             shell_config,
             external,
             session_id,
@@ -939,6 +949,7 @@ impl AgentFactory {
         &self,
         store: Arc<dyn TaskStore>,
         config: BuiltinToolConfig,
+        project_root: Option<PathBuf>,
         shell_config: Option<ShellConfig>,
         external: Option<Arc<dyn AgentToolDispatcher>>,
         session_id: Option<String>,
@@ -949,6 +960,7 @@ impl AgentFactory {
         self.build_builtin_dispatcher_with_skills_internal(
             store,
             config,
+            project_root,
             shell_config,
             external,
             session_id,
@@ -969,6 +981,7 @@ impl AgentFactory {
         &self,
         store: Arc<dyn TaskStore>,
         config: BuiltinToolConfig,
+        project_root: Option<PathBuf>,
         shell_config: Option<ShellConfig>,
         external: Option<Arc<dyn AgentToolDispatcher>>,
         session_id: Option<String>,
@@ -986,6 +999,7 @@ impl AgentFactory {
         let builder = BuiltinDispatcherConfig {
             store,
             config,
+            project_root,
             shell_config,
             external,
             session_id,
@@ -996,6 +1010,7 @@ impl AgentFactory {
             let mut composite = CompositeDispatcher::new(
                 builder.store,
                 &builder.config,
+                builder.project_root,
                 builder.shell_config,
                 builder.external,
                 builder.session_id,
@@ -1014,6 +1029,7 @@ impl AgentFactory {
             let mut composite = CompositeDispatcher::new(
                 builder.store,
                 &builder.config,
+                builder.project_root,
                 builder.shell_config,
                 builder.external,
                 builder.session_id,
@@ -1032,6 +1048,7 @@ impl AgentFactory {
             let BuiltinDispatcherConfig {
                 store,
                 config,
+                project_root,
                 shell_config,
                 external,
                 session_id,
@@ -1042,6 +1059,7 @@ impl AgentFactory {
                 .build_composite_dispatcher(
                     store,
                     &config,
+                    project_root.clone(),
                     shell_config,
                     external.clone(),
                     session_id,
@@ -1063,6 +1081,7 @@ impl AgentFactory {
                 .build_composite_dispatcher(
                     Arc::new(sub_agent_task_store),
                     &config,
+                    project_root,
                     shell_config_for_subagents,
                     external,
                     None,
@@ -1803,6 +1822,7 @@ impl AgentFactory {
             .build_builtin_dispatcher_with_skills_internal(
                 task_store,
                 builtin_config,
+                self.project_root.clone(),
                 shell_config,
                 external,
                 None,

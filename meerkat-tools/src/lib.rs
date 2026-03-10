@@ -18,7 +18,8 @@
 //!     .expect("no .rkat directory found");
 //! ensure_rkat_dir(&project_root).unwrap();
 //! let store = Arc::new(FileTaskStore::in_project(&project_root));
-//! let dispatcher = CompositeDispatcher::new(store, &BuiltinToolConfig::default(), None, None)?;
+//! let dispatcher =
+//!     CompositeDispatcher::new(store, &BuiltinToolConfig::default(), None, None, None, None)?;
 //! ```
 
 // On wasm32, use tokio_with_wasm as a drop-in replacement for tokio.
@@ -65,7 +66,7 @@ pub use schema::{empty_object_schema, schema_for};
 inventory::submit! {
     meerkat_contracts::CapabilityRegistration {
         id: meerkat_contracts::CapabilityId::Builtins,
-        description: "Built-in tools: task_list, task_create, task_get, task_update, wait, datetime",
+        description: "Built-in tools: task_list, task_create, task_get, task_update, wait, datetime, apply_patch",
         scope: meerkat_contracts::CapabilityScope::Universal,
         requires_feature: None,
         prerequisites: &[],

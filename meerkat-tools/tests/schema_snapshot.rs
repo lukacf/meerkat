@@ -46,7 +46,14 @@ fn generate_snapshot() -> Result<Value, Box<dyn std::error::Error>> {
     let temp_root = tempfile::tempdir()?;
     let shell_config = ShellConfig::with_project_root(temp_root.path().to_path_buf());
 
-    let dispatcher = CompositeDispatcher::new(store, &config, Some(shell_config), None, None)?;
+    let dispatcher = CompositeDispatcher::new(
+        store,
+        &config,
+        Some(temp_root.path().to_path_buf()),
+        Some(shell_config),
+        None,
+        None,
+    )?;
 
     let mut tools: Vec<_> = dispatcher.tools().iter().cloned().collect();
     tools.sort_by(|a, b| a.name.cmp(&b.name));

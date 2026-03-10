@@ -13,7 +13,7 @@ async fn test_agent_factory_builds_builtin_dispatcher() {
     let config = BuiltinToolConfig::default();
 
     let dispatcher = factory
-        .build_builtin_dispatcher(store, config, None, None, None)
+        .build_builtin_dispatcher(store, config, None, None, None, None)
         .await
         .expect("builtin dispatcher should build");
 

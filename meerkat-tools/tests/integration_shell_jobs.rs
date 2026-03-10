@@ -53,7 +53,14 @@ fn create_dispatcher_with_shell(
     };
 
     let store = Arc::new(MemoryTaskStore::new());
-    let dispatcher = CompositeDispatcher::new(store, &config, Some(shell_config), None, None)?;
+    let dispatcher = CompositeDispatcher::new(
+        store,
+        &config,
+        Some(temp_dir.path().to_path_buf()),
+        Some(shell_config),
+        None,
+        None,
+    )?;
     Ok(dispatcher)
 }
 

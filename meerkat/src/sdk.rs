@@ -123,7 +123,14 @@ pub async fn create_dispatcher_with_builtins(
 ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
     let store = Arc::new(MemoryTaskStore::new());
     factory
-        .build_builtin_dispatcher(store, config, shell_config, external, session_id)
+        .build_builtin_dispatcher(
+            store,
+            config,
+            factory.project_root.clone(),
+            shell_config,
+            external,
+            session_id,
+        )
         .await
 }
 
@@ -140,7 +147,14 @@ pub async fn create_dispatcher_with_builtins_persisted(
 ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
     let store = Arc::new(FileTaskStore::new(task_store_path.as_ref().to_path_buf()));
     factory
-        .build_builtin_dispatcher(store, config, shell_config, external, session_id)
+        .build_builtin_dispatcher(
+            store,
+            config,
+            factory.project_root.clone(),
+            shell_config,
+            external,
+            session_id,
+        )
         .await
 }
 
@@ -180,7 +194,14 @@ pub async fn create_dispatcher_with_builtins_in_project(
 
     let store = Arc::new(FileTaskStore::in_project(&project_root));
     factory
-        .build_builtin_dispatcher(store, config, shell_config, external, session_id)
+        .build_builtin_dispatcher(
+            store,
+            config,
+            Some(project_root),
+            shell_config,
+            external,
+            session_id,
+        )
         .await
 }
 

@@ -144,7 +144,8 @@ export class MeerkatClient {
   private pendingStreamRequestId: number | null = null;
   private unmatchedStreamBuffer = new Map<string, Record<string, unknown>[]>();
   private unmatchedStandaloneStreamBuffer = new Map<string, Record<string, unknown>[]>();
-  private unmatchedStandaloneStreamEnd = new Set<string>();
+  private unmatchedStandaloneStreamEnd = new Map<string, Record<string, unknown>>();
+  private streamTerminalOutcomes = new Map<string, Record<string, unknown>>();
   private rl: ReadlineInterface | null = null;
 
   constructor(rkatPath = "rkat-rpc") {
@@ -221,6 +222,7 @@ export class MeerkatClient {
       queue.put(null);
     }
     this.streamQueues.clear();
+    this.streamTerminalOutcomes.clear();
     if (this.pendingStreamQueue) {
       this.pendingStreamQueue.put(null);
       this.pendingStreamQueue = null;
@@ -657,6 +659,7 @@ export class MeerkatClient {
         await this.request(closeMethod, { stream_id: id });
       },
       parseEvent: parse,
+      getTerminalOutcome: () => this.streamTerminalOutcomes.get(streamId),
     });
   }
 
@@ -839,11 +842,14 @@ export class MeerkatClient {
       }
       if (method === "session/stream_end" || method === "mob/stream_end") {
         const streamId = String(params.stream_id ?? "");
+        if (streamId) {
+          this.streamTerminalOutcomes.set(streamId, params);
+        }
         const queue = this.streamQueues.get(streamId);
         if (queue) {
           queue.put(null);
         } else if (streamId) {
-          this.unmatchedStandaloneStreamEnd.add(streamId);
+          this.unmatchedStandaloneStreamEnd.set(streamId, params);
         }
         return;
       }

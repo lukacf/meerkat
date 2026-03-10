@@ -164,7 +164,8 @@ impl MobMcpState {
         mob_id: &MobId,
         spec: SpawnMemberSpec,
     ) -> Result<meerkat_mob::MemberRef, MobError> {
-        self.handle_for(mob_id).await?.spawn_spec(spec).await
+        let member_ref = self.handle_for(mob_id).await?.spawn_spec(spec).await?;
+        Ok(member_ref)
     }
 
     pub async fn mob_spawn_many(
@@ -176,34 +177,39 @@ impl MobMcpState {
     }
 
     pub async fn mob_retire(&self, mob_id: &MobId, meerkat_id: MeerkatId) -> Result<(), MobError> {
-        self.handle_for(mob_id).await?.retire(meerkat_id).await
+        self.handle_for(mob_id)
+            .await?
+            .retire(meerkat_id.clone())
+            .await
     }
 
     pub async fn retire_member_by_session_id(
         &self,
         session_id: &SessionId,
     ) -> Result<(), MobError> {
-        let mobs: Vec<(MobId, MobHandle)> = self
-            .mobs
-            .read()
-            .await
-            .iter()
-            .map(|(mob_id, managed)| (mob_id.clone(), managed.handle.clone()))
-            .collect();
-
-        for (mob_id, handle) in mobs {
-            let members = handle.list_all_members().await;
-            if let Some(member) = members
-                .into_iter()
-                .find(|entry| entry.member_ref.session_id() == Some(session_id))
-            {
-                return self.mob_retire(&mob_id, member.meerkat_id).await;
+        // Derive membership from authoritative live mob roster state rather than
+        // maintaining a separate reverse index that can drift during retirement,
+        // respawn, or policy-driven auto-spawn flows.
+        let mob_ids = self.mobs.read().await.keys().cloned().collect::<Vec<_>>();
+        let mut resolved = None;
+        for mob_id in mob_ids {
+            let members = self.handle_for(&mob_id).await?.list_all_members().await;
+            if let Some(member) = members.into_iter().find(|member| {
+                member
+                    .member_ref
+                    .session_id()
+                    .is_some_and(|candidate| candidate == session_id)
+            }) {
+                resolved = Some((mob_id, member.meerkat_id));
+                break;
             }
         }
-
-        Err(MobError::Internal(format!(
-            "session not found in any mob: {session_id}"
-        )))
+        let Some((mob_id, meerkat_id)) = resolved else {
+            return Err(MobError::Internal(format!(
+                "session not found in any live mob authority: {session_id}"
+            )));
+        };
+        self.mob_retire(&mob_id, meerkat_id).await
     }
 
     pub async fn mob_wire(
@@ -428,21 +434,30 @@ impl CoreCommsRuntime for LocalCommsRuntime {
 
 struct LocalSessionService {
     sessions: RwLock<HashMap<SessionId, Arc<LocalCommsRuntime>>>,
+    archived_views: RwLock<HashMap<SessionId, SessionView>>,
     pending_context: RwLock<HashMap<SessionId, Vec<AppendSystemContextRequest>>>,
     /// Per-session broadcast channels for event streaming.
     event_txs:
         RwLock<HashMap<SessionId, tokio::sync::broadcast::Sender<EventEnvelope<AgentEvent>>>>,
     counter: std::sync::atomic::AtomicU64,
+    archive_delay_ms: std::sync::atomic::AtomicU64,
 }
 
 impl LocalSessionService {
     fn new() -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
+            archived_views: RwLock::new(HashMap::new()),
             pending_context: RwLock::new(HashMap::new()),
             event_txs: RwLock::new(HashMap::new()),
             counter: std::sync::atomic::AtomicU64::new(0),
+            archive_delay_ms: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    fn set_archive_delay_ms(&self, delay_ms: u64) {
+        self.archive_delay_ms
+            .store(delay_ms, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -567,13 +582,22 @@ impl SessionService for LocalSessionService {
         })
     }
 
-    async fn interrupt(&self, _id: &SessionId) -> Result<(), SessionError> {
+    async fn interrupt(&self, id: &SessionId) -> Result<(), SessionError> {
+        if !self.sessions.read().await.contains_key(id) {
+            return Err(SessionError::NotFound { id: id.clone() });
+        }
         Ok(())
     }
 
     async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
         if !self.sessions.read().await.contains_key(id) {
-            return Err(SessionError::NotFound { id: id.clone() });
+            return self
+                .archived_views
+                .read()
+                .await
+                .get(id)
+                .cloned()
+                .ok_or_else(|| SessionError::NotFound { id: id.clone() });
         }
         Ok(SessionView {
             state: SessionInfo {
@@ -611,10 +635,34 @@ impl SessionService for LocalSessionService {
     }
 
     async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
+        let archive_delay_ms = self
+            .archive_delay_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if archive_delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(archive_delay_ms)).await;
+        }
         let removed = self.sessions.write().await.remove(id);
         self.pending_context.write().await.remove(id);
         self.event_txs.write().await.remove(id);
         if removed.is_some() {
+            self.archived_views.write().await.insert(
+                id.clone(),
+                SessionView {
+                    state: SessionInfo {
+                        session_id: id.clone(),
+                        created_at: SystemTime::now(),
+                        updated_at: SystemTime::now(),
+                        message_count: 0,
+                        is_active: false,
+                        last_assistant_text: None,
+                        labels: Default::default(),
+                    },
+                    billing: SessionUsage {
+                        total_tokens: 0,
+                        usage: Usage::default(),
+                    },
+                },
+            );
             Ok(())
         } else {
             Err(SessionError::NotFound { id: id.clone() })
@@ -710,6 +758,14 @@ impl MobSessionService for LocalSessionService {
 
     async fn session_belongs_to_mob(&self, _session_id: &SessionId, _mob_id: &MobId) -> bool {
         true
+    }
+}
+
+impl MobMcpState {
+    pub fn new_in_memory_with_archive_delay(delay_ms: u64) -> Arc<Self> {
+        let session_service = Arc::new(LocalSessionService::new());
+        session_service.set_archive_delay_ms(delay_ms);
+        Arc::new(Self::new(session_service))
     }
 }
 
@@ -1767,6 +1823,47 @@ mod tests {
 
         let pending = service.pending_context.read().await;
         assert_eq!(pending.get(&session_id).map(std::vec::Vec::len), Some(0));
+    }
+
+    #[tokio::test]
+    async fn local_session_service_archive_drops_staged_context() {
+        let service = LocalSessionService::new();
+        let run = service
+            .create_session(CreateSessionRequest {
+                model: "claude-sonnet-4-5".to_string(),
+                prompt: "hello".to_string(),
+                system_prompt: None,
+                max_tokens: None,
+                event_tx: None,
+                host_mode: false,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                build: None,
+                labels: None,
+            })
+            .await
+            .expect("create session");
+        let session_id = run.session_id;
+
+        service
+            .append_system_context(
+                &session_id,
+                AppendSystemContextRequest {
+                    text: "Remember the customer preference.".to_string(),
+                    source: Some("mob".to_string()),
+                    idempotency_key: Some("ctx-archive".to_string()),
+                },
+            )
+            .await
+            .expect("append context");
+
+        service.archive(&session_id).await.expect("archive session");
+
+        let pending = service.pending_context.read().await;
+        assert!(
+            !pending.contains_key(&session_id),
+            "archive must drop unapplied staged context"
+        );
     }
 
     #[tokio::test]

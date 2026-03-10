@@ -629,6 +629,17 @@ impl SessionRuntime {
         None
     }
 
+    /// Read the authoritative session view from the owning session service.
+    pub async fn read_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_core::service::SessionView, RpcError> {
+        self.service
+            .read(session_id)
+            .await
+            .map_err(session_error_to_rpc)
+    }
+
     /// Archive (remove) a session.
     pub async fn archive_session(&self, session_id: &SessionId) -> Result<(), RpcError> {
         // Check pending sessions first.

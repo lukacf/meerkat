@@ -490,6 +490,24 @@ class TestStandaloneSubscriptions:
         await d.stop()
 
     @pytest.mark.asyncio
+    async def test_stream_notifications_buffered_until_stream_queue_registered_preserve_order(self):
+        ev1 = {"event_id": "e1", "payload": {"type": "text_delta", "delta": "hi"}}
+        ev2 = {"event_id": "e2", "payload": {"type": "text_delta", "delta": "there"}}
+        reader = asyncio.StreamReader()
+        d = _StdoutDispatcher(reader)
+        d.start()
+        reader.feed_data((stream_notification("stream-1", ev1) + "\n").encode())
+        reader.feed_data((stream_notification("stream-1", ev2) + "\n").encode())
+        await asyncio.sleep(0)
+        queue = d.subscribe_stream("stream-1")
+        first = await asyncio.wait_for(queue.get(), timeout=1.0)
+        second = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert first == ev1
+        assert second == ev2
+        reader.feed_eof()
+        await d.stop()
+
+    @pytest.mark.asyncio
     async def test_stream_end_buffered_until_stream_queue_registered(self):
         reader = asyncio.StreamReader()
         d = _StdoutDispatcher(reader)
@@ -497,12 +515,29 @@ class TestStandaloneSubscriptions:
         reader.feed_data((jline({
             "jsonrpc": "2.0",
             "method": "session/stream_end",
-            "params": {"stream_id": "stream-1", "ended": True},
+            "params": {"stream_id": "stream-1", "ended": True, "outcome": "remote_end"},
         }) + "\n").encode())
         await asyncio.sleep(0)
         queue = d.subscribe_stream("stream-1")
         event = await asyncio.wait_for(queue.get(), timeout=1.0)
         assert event is None
+        expected = {
+            "stream_id": "stream-1",
+            "ended": True,
+            "outcome": "remote_end",
+        }
+        assert d.stream_terminal("stream-1") == expected
+
+        from meerkat.streaming import EventSubscription
+
+        subscription = EventSubscription(
+            stream_id="stream-1",
+            event_queue=queue,
+            dispatcher=d,
+            close_remote=lambda _stream_id: asyncio.sleep(0),
+            parse_event_fn=lambda event: event,
+        )
+        assert subscription.terminal_outcome == expected
         reader.feed_eof()
         await d.stop()
 

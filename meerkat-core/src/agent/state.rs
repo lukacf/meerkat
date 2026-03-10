@@ -125,10 +125,6 @@ where
                 return Ok(self.build_result(turn_count, tool_call_count).await);
             }
 
-            if self.state == LoopState::CallingLlm {
-                let _applied_system_contexts = self.apply_pending_system_context_boundary();
-            }
-
             // Check compaction trigger (before CallingLlm)
             if self.state == LoopState::CallingLlm
                 && let Some(ref compactor) = self.compactor
@@ -360,9 +356,12 @@ where
                     }
 
                     // Call LLM with retry
+                    let boundary_system_context = self.take_pending_system_context_boundary();
+                    let request_messages =
+                        self.llm_messages_with_runtime_system_context(&boundary_system_context);
                     let result = self
                         .call_llm_with_retry(
-                            self.session.messages(),
+                            &request_messages,
                             &tool_defs,
                             effective_max_tokens,
                             effective_temperature,

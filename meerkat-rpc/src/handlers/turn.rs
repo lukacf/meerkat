@@ -12,6 +12,8 @@ use meerkat_core::skills::{SkillKey, SkillRef};
 
 use super::{RpcResponseExt, parse_params, parse_session_id_for_runtime};
 use crate::NOTIFICATION_CHANNEL_CAPACITY;
+#[cfg(feature = "mob")]
+use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::router::NotificationSink;
 use crate::session_runtime::SessionRuntime;
@@ -138,6 +140,7 @@ pub async fn handle_interrupt(
     id: Option<RpcId>,
     params: Option<&RawValue>,
     runtime: &SessionRuntime,
+    #[cfg(feature = "mob")] mob_state: &meerkat_mob_mcp::MobMcpState,
 ) -> RpcResponse {
     let params: InterruptParams = match parse_params(params) {
         Ok(p) => p,
@@ -151,6 +154,15 @@ pub async fn handle_interrupt(
 
     match runtime.interrupt(&session_id).await {
         Ok(()) => RpcResponse::success(id, serde_json::json!({"interrupted": true})),
+        #[cfg(feature = "mob")]
+        Err(rpc_err) if rpc_err.code == error::SESSION_NOT_FOUND => {
+            match mob_state.session_service().interrupt(&session_id).await {
+                Ok(()) | Err(meerkat_core::service::SessionError::NotRunning { .. }) => {
+                    RpcResponse::success(id, serde_json::json!({"interrupted": true}))
+                }
+                Err(err) => RpcResponse::error(id, error::SESSION_NOT_FOUND, err.to_string()),
+            }
+        }
         Err(rpc_err) => RpcResponse::error(id, rpc_err.code, rpc_err.message),
     }
 }

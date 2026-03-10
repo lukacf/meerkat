@@ -261,6 +261,7 @@ describe("Skills v2.1", () => {
           params: {
             stream_id: "stream-end-1",
             ended: true,
+            outcome: "remote_end",
           },
         }));
         return { stream_id: "stream-end-1" };
@@ -278,6 +279,11 @@ describe("Skills v2.1", () => {
       new Promise((_, reject) => setTimeout(() => reject(new Error("stream did not terminate")), 200)),
     ]);
     assert.equal(first.done, true);
+    assert.deepEqual(sub.terminalOutcome, {
+      stream_id: "stream-end-1",
+      ended: true,
+      outcome: "remote_end",
+    });
     await sub.close();
   });
 
@@ -307,6 +313,47 @@ describe("Skills v2.1", () => {
     assert.equal(first.done, false);
     assert.equal(first.value.payload.type, "text_delta");
     assert.equal(first.value.payload.delta, "hi");
+    await sub.close();
+  });
+
+  it("preserves buffered standalone stream notification order", async () => {
+    const client = new MeerkatClient();
+    client.request = async (method, params) => {
+      if (method === "session/stream_open") {
+        client.handleLine(JSON.stringify({
+          jsonrpc: "2.0",
+          method: "session/stream_event",
+          params: {
+            stream_id: "stream-ordered",
+            event: { event_id: "e1", payload: { type: "text_delta", delta: "hi" } },
+          },
+        }));
+        client.handleLine(JSON.stringify({
+          jsonrpc: "2.0",
+          method: "session/stream_event",
+          params: {
+            stream_id: "stream-ordered",
+            event: { event_id: "e2", payload: { type: "text_delta", delta: "there" } },
+          },
+        }));
+        return { stream_id: "stream-ordered" };
+      }
+      if (method === "session/stream_close") {
+        return { closed: true };
+      }
+      return {};
+    };
+
+    const sub = await client.subscribeSessionEvents("s1");
+    const iterator = sub[Symbol.asyncIterator]();
+    const first = await iterator.next();
+    const second = await iterator.next();
+    assert.equal(first.done, false);
+    assert.equal(second.done, false);
+    assert.equal(first.value.payload.type, "text_delta");
+    assert.equal(first.value.payload.delta, "hi");
+    assert.equal(second.value.payload.type, "text_delta");
+    assert.equal(second.value.payload.delta, "there");
     await sub.close();
   });
 

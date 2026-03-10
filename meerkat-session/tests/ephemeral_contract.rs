@@ -17,12 +17,15 @@ use meerkat_core::types::{
     AssistantBlock, RunResult, SessionId, StopReason, ToolCallView, ToolDef, ToolResult, Usage,
 };
 use meerkat_core::{
-    Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, LlmStreamResult,
+    Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, HookDecision,
+    HookEngine, HookExecutionReport, HookId, HookInvocation, HookOutcome, HookPoint,
+    HookReasonCode, LlmStreamResult,
 };
 use meerkat_session::ephemeral::SessionSnapshot;
 use meerkat_session::{EphemeralSessionService, SessionAgent, SessionAgentBuilder};
 use serde_json::{Value, json};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 use tokio::sync::mpsc;
 
@@ -279,6 +282,58 @@ impl AgentToolDispatcher for StaticToolDispatcher {
 struct RecordingLlmClient {
     provider_visible_tools: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
     provider_visible_system_prompts: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    delay_ms: Option<u64>,
+}
+
+struct DenyNextPreLlmHookEngine {
+    deny_next: AtomicBool,
+}
+
+impl DenyNextPreLlmHookEngine {
+    fn new() -> Self {
+        Self {
+            deny_next: AtomicBool::new(true),
+        }
+    }
+}
+
+#[async_trait]
+impl HookEngine for DenyNextPreLlmHookEngine {
+    async fn execute(
+        &self,
+        invocation: HookInvocation,
+        _overrides: Option<&meerkat_core::config::HookRunOverrides>,
+    ) -> Result<HookExecutionReport, meerkat_core::HookEngineError> {
+        if invocation.point != HookPoint::PreLlmRequest
+            || !self.deny_next.swap(false, Ordering::AcqRel)
+        {
+            return Ok(HookExecutionReport::default());
+        }
+
+        let decision = HookDecision::deny(
+            HookId::new("deny-pre-llm"),
+            HookReasonCode::PolicyViolation,
+            "pre-llm turn denied",
+            None,
+        );
+
+        Ok(HookExecutionReport {
+            outcomes: vec![HookOutcome {
+                hook_id: HookId::new("deny-pre-llm"),
+                point: HookPoint::PreLlmRequest,
+                priority: 0,
+                registration_index: 0,
+                decision: Some(decision.clone()),
+                patches: Vec::new(),
+                published_patches: Vec::new(),
+                error: None,
+                duration_ms: None,
+            }],
+            decision: Some(decision),
+            patches: Vec::new(),
+            published_patches: Vec::new(),
+        })
+    }
 }
 
 #[async_trait]
@@ -296,6 +351,9 @@ impl AgentLlmClient for RecordingLlmClient {
             .lock()
             .expect("provider_visible_tools lock poisoned")
             .push(names);
+        if let Some(delay_ms) = self.delay_ms {
+            tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+        }
         self.provider_visible_system_prompts
             .lock()
             .expect("provider_visible_system_prompts lock poisoned")
@@ -396,6 +454,8 @@ impl SessionAgent for RealSessionAgent {
 struct RealAgentBuilder {
     provider_visible_tools: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
     provider_visible_system_prompts: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    llm_delay_ms: Option<u64>,
+    hook_engine: Option<Arc<dyn HookEngine>>,
 }
 
 #[async_trait]
@@ -414,10 +474,14 @@ impl SessionAgentBuilder for RealAgentBuilder {
         if let Some(system_prompt) = &req.system_prompt {
             builder = builder.system_prompt(system_prompt.clone());
         }
+        if let Some(hook_engine) = &self.hook_engine {
+            builder = builder.with_hook_engine(Arc::clone(hook_engine));
+        }
 
         let client = Arc::new(RecordingLlmClient {
             provider_visible_tools: Arc::clone(&self.provider_visible_tools),
             provider_visible_system_prompts: Arc::clone(&self.provider_visible_system_prompts),
+            delay_ms: self.llm_delay_ms,
         });
         let tools = Arc::new(StaticToolDispatcher::new(&["alpha", "beta"]));
         let store = Arc::new(NoopSessionStore);
@@ -846,6 +910,8 @@ async fn test_flow_tool_overlay_enforced_by_runtime_and_resets_next_turn() {
         RealAgentBuilder {
             provider_visible_tools: Arc::clone(&provider_visible_tools),
             provider_visible_system_prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            llm_delay_ms: None,
+            hook_engine: None,
         },
         10,
     ));
@@ -1033,6 +1099,8 @@ async fn test_staged_system_context_applies_at_next_llm_boundary() {
         RealAgentBuilder {
             provider_visible_tools: Arc::clone(&provider_visible_tools),
             provider_visible_system_prompts: Arc::clone(&provider_visible_system_prompts),
+            llm_delay_ms: None,
+            hook_engine: None,
         },
         10,
     ));
@@ -1126,6 +1194,278 @@ async fn test_staged_system_context_applies_at_next_llm_boundary() {
         .get("ctx-boundary")
         .expect("idempotency key should remain tracked");
     assert_eq!(seen.state, meerkat_core::SeenSystemContextState::Applied);
+}
+
+#[tokio::test]
+async fn test_staged_system_context_is_not_replayed_on_later_turns() {
+    let provider_visible_system_prompts =
+        Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
+    let service = Arc::new(EphemeralSessionService::new(
+        RealAgentBuilder {
+            provider_visible_tools: Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new())),
+            provider_visible_system_prompts: Arc::clone(&provider_visible_system_prompts),
+            llm_delay_ms: None,
+            hook_engine: None,
+        },
+        10,
+    ));
+
+    let mut request = create_req_deferred("runtime tool scope");
+    request.system_prompt = Some("Base system prompt".to_string());
+    let _ = service
+        .create_session(request)
+        .await
+        .expect("create deferred session");
+    let session_id = service
+        .list(SessionQuery::default())
+        .await
+        .expect("list sessions")[0]
+        .session_id
+        .clone();
+
+    service
+        .append_system_context(
+            &session_id,
+            AppendSystemContextRequest {
+                text: "You are coordinating with an external orchestrator.".to_string(),
+                source: Some("mob".to_string()),
+                idempotency_key: Some("ctx-boundary-replay".to_string()),
+            },
+        )
+        .await
+        .expect("append system context");
+
+    service
+        .start_turn(
+            &session_id,
+            StartTurnRequest {
+                host_mode: false,
+                skill_references: None,
+                flow_tool_overlay: None,
+                prompt: "apply staged context".to_string(),
+                event_tx: None,
+                additional_instructions: None,
+            },
+        )
+        .await
+        .expect("first turn should run");
+
+    service
+        .start_turn(
+            &session_id,
+            StartTurnRequest {
+                host_mode: false,
+                skill_references: None,
+                flow_tool_overlay: None,
+                prompt: "follow-up turn".to_string(),
+                event_tx: None,
+                additional_instructions: None,
+            },
+        )
+        .await
+        .expect("second turn should run");
+
+    let prompts = provider_visible_system_prompts
+        .lock()
+        .expect("provider_visible_system_prompts lock poisoned")
+        .clone();
+    assert_eq!(prompts.len(), 2, "expected one provider call per turn");
+    assert!(
+        prompts[0][0].contains("You are coordinating with an external orchestrator."),
+        "first turn should include staged context"
+    );
+    assert!(
+        !prompts[1][0].contains("You are coordinating with an external orchestrator."),
+        "second turn must not replay single-use staged context"
+    );
+}
+
+#[tokio::test]
+async fn test_staged_system_context_appended_during_active_turn_waits_for_next_turn() {
+    let provider_visible_system_prompts =
+        Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
+    let service = Arc::new(EphemeralSessionService::new(
+        RealAgentBuilder {
+            provider_visible_tools: Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new())),
+            provider_visible_system_prompts: Arc::clone(&provider_visible_system_prompts),
+            llm_delay_ms: Some(200),
+            hook_engine: None,
+        },
+        10,
+    ));
+
+    let mut request = create_req_deferred("runtime tool scope");
+    request.system_prompt = Some("Base system prompt".to_string());
+    let _ = service
+        .create_session(request)
+        .await
+        .expect("create deferred session");
+    let session_id = service
+        .list(SessionQuery::default())
+        .await
+        .expect("list sessions")[0]
+        .session_id
+        .clone();
+
+    let first_turn = {
+        let service = Arc::clone(&service);
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            service
+                .start_turn(
+                    &session_id,
+                    StartTurnRequest {
+                        host_mode: false,
+                        skill_references: None,
+                        flow_tool_overlay: None,
+                        prompt: "first turn".to_string(),
+                        event_tx: None,
+                        additional_instructions: None,
+                    },
+                )
+                .await
+        })
+    };
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    service
+        .append_system_context(
+            &session_id,
+            AppendSystemContextRequest {
+                text: "Late staged context".to_string(),
+                source: Some("mob".to_string()),
+                idempotency_key: Some("ctx-during-active-turn".to_string()),
+            },
+        )
+        .await
+        .expect("append during active turn");
+
+    first_turn
+        .await
+        .expect("first turn join")
+        .expect("first turn should finish");
+
+    service
+        .start_turn(
+            &session_id,
+            StartTurnRequest {
+                host_mode: false,
+                skill_references: None,
+                flow_tool_overlay: None,
+                prompt: "second turn".to_string(),
+                event_tx: None,
+                additional_instructions: None,
+            },
+        )
+        .await
+        .expect("second turn should run");
+
+    let prompts = provider_visible_system_prompts
+        .lock()
+        .expect("provider_visible_system_prompts lock poisoned")
+        .clone();
+    assert_eq!(prompts.len(), 2, "expected one provider call per turn");
+    assert!(
+        !prompts[0][0].contains("Late staged context"),
+        "context appended during an active turn must not enter the in-flight provider request"
+    );
+    assert!(
+        prompts[1][0].contains("Late staged context"),
+        "context appended during an active turn must stage for the subsequent eligible turn"
+    );
+}
+
+#[tokio::test]
+async fn test_pre_llm_denied_turn_does_not_consume_staged_system_context() {
+    let provider_visible_system_prompts =
+        Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
+    let service = Arc::new(EphemeralSessionService::new(
+        RealAgentBuilder {
+            provider_visible_tools: Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new())),
+            provider_visible_system_prompts: Arc::clone(&provider_visible_system_prompts),
+            llm_delay_ms: None,
+            hook_engine: Some(Arc::new(DenyNextPreLlmHookEngine::new())),
+        },
+        10,
+    ));
+
+    let mut request = create_req_deferred("runtime tool scope");
+    request.system_prompt = Some("Base system prompt".to_string());
+    let _ = service
+        .create_session(request)
+        .await
+        .expect("create deferred session");
+    let session_id = service
+        .list(SessionQuery::default())
+        .await
+        .expect("list sessions")[0]
+        .session_id
+        .clone();
+
+    service
+        .append_system_context(
+            &session_id,
+            AppendSystemContextRequest {
+                text: "You are coordinating with an external orchestrator.".to_string(),
+                source: Some("mob".to_string()),
+                idempotency_key: Some("ctx-pre-llm-deny".to_string()),
+            },
+        )
+        .await
+        .expect("append system context");
+
+    let denied = service
+        .start_turn(
+            &session_id,
+            StartTurnRequest {
+                host_mode: false,
+                skill_references: None,
+                flow_tool_overlay: None,
+                prompt: "denied turn".to_string(),
+                event_tx: None,
+                additional_instructions: None,
+            },
+        )
+        .await;
+    assert!(denied.is_err(), "pre-llm hook should deny the first turn");
+
+    let prompts = provider_visible_system_prompts
+        .lock()
+        .expect("provider_visible_system_prompts lock poisoned")
+        .clone();
+    assert!(
+        prompts.is_empty(),
+        "a denied pre-llm turn must not reach the provider"
+    );
+
+    service
+        .start_turn(
+            &session_id,
+            StartTurnRequest {
+                host_mode: false,
+                skill_references: None,
+                flow_tool_overlay: None,
+                prompt: "eligible turn".to_string(),
+                event_tx: None,
+                additional_instructions: None,
+            },
+        )
+        .await
+        .expect("next eligible turn should run");
+
+    let prompts = provider_visible_system_prompts
+        .lock()
+        .expect("provider_visible_system_prompts lock poisoned")
+        .clone();
+    assert_eq!(
+        prompts.len(),
+        1,
+        "only the eligible turn should reach the provider"
+    );
+    assert!(
+        prompts[0][0].contains("You are coordinating with an external orchestrator."),
+        "staged context must survive a denied pre-llm turn and apply on the next eligible turn"
+    );
 }
 
 #[tokio::test]

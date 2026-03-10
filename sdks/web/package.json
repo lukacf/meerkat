@@ -13,6 +13,7 @@
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
     },
+    "./wasm/*": "./wasm/*",
     "./proxy": {
       "import": "./proxy/index.mjs"
     }
@@ -27,7 +28,8 @@
     "build:ts": "tsc",
     "build": "npm run build:wasm && npm run build:ts",
     "prepublishOnly": "npm run build",
-    "test": "tsc --noEmit -p tests/tsconfig.json"
+    "test": "tsc --noEmit -p tests/tsconfig.json",
+    "test:e2e": "npm run build && node --test tests/e2e_wasm_runtime.test.mjs"
   },
   "license": "MIT OR Apache-2.0",
   "devDependencies": {

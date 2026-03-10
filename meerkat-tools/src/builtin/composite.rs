@@ -15,6 +15,7 @@ use meerkat_core::error::ToolError;
 use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
 use serde_json::Value;
 use std::collections::HashSet;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 use std::sync::Arc;
 

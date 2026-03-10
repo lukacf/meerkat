@@ -1785,17 +1785,15 @@ pub async fn mob_spawn(mob_id: &str, specs_json: &str) -> Result<JsValue, JsValu
             })?),
             None => None,
         };
-        spawn_specs.push(meerkat_mob::SpawnMemberSpec {
-            profile_name: meerkat_mob::ProfileName::from(s.profile.as_str()),
-            meerkat_id: MeerkatId::from(s.meerkat_id.as_str()),
-            initial_message: s.initial_message,
-            runtime_mode: s.runtime_mode,
-            backend: s.backend,
-            context: s.context,
-            labels: s.labels,
-            resume_session_id,
-            additional_instructions: s.additional_instructions,
-        });
+        let mut spec = meerkat_mob::SpawnMemberSpec::new(s.profile.as_str(), s.meerkat_id.as_str());
+        spec.initial_message = s.initial_message;
+        spec.runtime_mode = s.runtime_mode;
+        spec.backend = s.backend;
+        spec.context = s.context;
+        spec.labels = s.labels;
+        spec.resume_session_id = resume_session_id;
+        spec.additional_instructions = s.additional_instructions;
+        spawn_specs.push(spec);
     }
 
     let results = mob_state
@@ -2027,19 +2025,22 @@ pub async fn wire_cross_mob(
 }
 
 /// Send an external message to a spawned meerkat.
+///
+/// Returns the session ID of the session that handled the turn.
 #[wasm_bindgen]
 pub async fn mob_send_message(
     mob_id: &str,
     meerkat_id: &str,
     message: &str,
-) -> Result<(), JsValue> {
+) -> Result<String, JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
     let mid = MeerkatId::from(meerkat_id);
-    mob_state
+    let session_id = mob_state
         .mob_send_message(&id, mid, message.to_string())
         .await
-        .map_err(err_mob)
+        .map_err(err_mob)?;
+    Ok(session_id.to_string())
 }
 
 /// Retire and re-spawn a meerkat with the same profile.
@@ -2322,7 +2323,7 @@ mod tests {
         PendingSystemContextAppend, SeenSystemContextKey, SeenSystemContextState,
         SessionSystemContextState,
     };
-    use meerkat_mob::{MeerkatId, SpawnMemberSpec};
+    use meerkat_mob::SpawnMemberSpec;
     use serde_json::json;
     use std::collections::HashMap;
     use std::time::{Duration, SystemTime};
@@ -2436,17 +2437,10 @@ mod tests {
         let spawn_results = mob_state
             .mob_spawn_many(
                 &mob_id,
-                vec![SpawnMemberSpec {
-                    profile_name: meerkat_mob::ProfileName::from("worker"),
-                    meerkat_id: MeerkatId::from("worker-1"),
-                    initial_message: None,
-                    runtime_mode: Some(meerkat_mob::MobRuntimeMode::TurnDriven),
-                    backend: None,
-                    context: None,
-                    labels: None,
-                    resume_session_id: None,
-                    additional_instructions: None,
-                }],
+                vec![
+                    SpawnMemberSpec::new("worker", "worker-1")
+                        .with_runtime_mode(meerkat_mob::MobRuntimeMode::TurnDriven),
+                ],
             )
             .await
             .expect("spawn worker");

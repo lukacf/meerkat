@@ -283,6 +283,9 @@ impl JobManager {
         cmd.current_dir(work_dir);
         cmd.env("PWD", work_dir);
 
+        // Inject per-agent environment variables
+        cmd.envs(&self.config.env_vars);
+
         // Capture stdout/stderr
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
@@ -756,6 +759,7 @@ mod tests {
             max_concurrent_processes: 10,
             security_mode: SecurityMode::Unrestricted,
             security_patterns: vec![],
+            env_vars: std::collections::HashMap::new(),
         };
 
         let manager = JobManager::new(config);

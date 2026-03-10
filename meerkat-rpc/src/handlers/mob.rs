@@ -12,8 +12,8 @@ use crate::session_runtime::SessionRuntime;
 use meerkat_core::service::AppendSystemContextRequest;
 use meerkat_core::types::SessionId;
 use meerkat_mob::{
-    FlowId, MeerkatId, MobBackendKind, MobDefinition, MobId, MobRuntimeMode, Prefab, ProfileName,
-    RunId, SpawnMemberSpec,
+    FlowId, MeerkatId, MobBackendKind, MobDefinition, MobId, MobRuntimeMode, Prefab, RunId,
+    SpawnMemberSpec,
 };
 use meerkat_mob_mcp::MobMcpState;
 use std::collections::BTreeMap;
@@ -238,17 +238,14 @@ pub async fn handle_spawn(
         },
         None => None,
     };
-    let spec = SpawnMemberSpec {
-        profile_name: ProfileName::from(params.profile.as_str()),
-        meerkat_id: MeerkatId::from(params.meerkat_id.as_str()),
-        initial_message: params.initial_message,
-        runtime_mode: params.runtime_mode,
-        backend: params.backend,
-        context: params.context,
-        labels: params.labels,
-        resume_session_id,
-        additional_instructions: params.additional_instructions,
-    };
+    let mut spec = SpawnMemberSpec::new(params.profile.as_str(), params.meerkat_id.as_str());
+    spec.initial_message = params.initial_message;
+    spec.runtime_mode = params.runtime_mode;
+    spec.backend = params.backend;
+    spec.context = params.context;
+    spec.labels = params.labels;
+    spec.resume_session_id = resume_session_id;
+    spec.additional_instructions = params.additional_instructions;
     match state.mob_spawn_spec(&mob_id, spec).await {
         Ok(member_ref) => RpcResponse::success(
             id,
@@ -448,7 +445,10 @@ pub async fn handle_send(
         )
         .await
     {
-        Ok(()) => RpcResponse::success(id, serde_json::json!({"sent": true})),
+        Ok(session_id) => RpcResponse::success(
+            id,
+            serde_json::json!({"sent": true, "session_id": session_id}),
+        ),
         Err(err) => invalid_params(id, err.to_string()),
     }
 }

@@ -139,6 +139,7 @@ fn test_rct_contracts_shell_defaults_contract() -> Result<(), Box<dyn std::error
         max_concurrent_processes: 5,
         security_mode: meerkat_core::SecurityMode::Unrestricted,
         security_patterns: vec![],
+        env_vars: std::collections::HashMap::new(),
     };
     let json_str = serde_json::to_string(&tool)?;
     let json_val: serde_json::Value = serde_json::from_str(&json_str)?;

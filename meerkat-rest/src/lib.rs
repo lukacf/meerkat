@@ -379,6 +379,9 @@ pub struct CreateSessionRequest {
     /// Opaque application context passed through to custom builders.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_context: Option<Value>,
+    /// Per-agent environment variables injected into shell tool subprocesses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_env: Option<std::collections::HashMap<String, String>>,
 }
 
 fn default_structured_output_retries() -> u32 {
@@ -1297,6 +1300,7 @@ async fn create_session(
         max_inline_peer_notifications: None,
         app_context: req.app_context,
         additional_instructions: req.additional_instructions,
+        shell_env: req.shell_env,
     };
 
     let svc_req = SvcCreateSessionRequest {
@@ -1637,6 +1641,7 @@ async fn continue_session(
                 max_inline_peer_notifications: None,
                 app_context: None,
                 additional_instructions: None,
+                shell_env: None,
             };
 
             let svc_req = SvcCreateSessionRequest {

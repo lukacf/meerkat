@@ -153,21 +153,10 @@ impl MobMcpState {
         runtime_mode: Option<MobRuntimeMode>,
         backend: Option<MobBackendKind>,
     ) -> Result<meerkat_mob::MemberRef, MobError> {
-        self.mob_spawn_spec(
-            mob_id,
-            SpawnMemberSpec {
-                profile_name: profile,
-                meerkat_id,
-                initial_message: None,
-                runtime_mode,
-                backend,
-                context: None,
-                labels: None,
-                resume_session_id: None,
-                additional_instructions: None,
-            },
-        )
-        .await
+        let mut spec = SpawnMemberSpec::new(profile, meerkat_id);
+        spec.runtime_mode = runtime_mode;
+        spec.backend = backend;
+        self.mob_spawn_spec(mob_id, spec).await
     }
 
     pub async fn mob_spawn_spec(
@@ -276,7 +265,7 @@ impl MobMcpState {
         mob_id: &MobId,
         meerkat_id: MeerkatId,
         message: String,
-    ) -> Result<(), MobError> {
+    ) -> Result<SessionId, MobError> {
         self.handle_for(mob_id)
             .await?
             .send_message(meerkat_id, message)
@@ -1141,17 +1130,15 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                                 })
                             })
                             .transpose()?;
-                        Ok(SpawnMemberSpec {
-                            profile_name: ProfileName::from(spec.profile),
-                            meerkat_id: MeerkatId::from(spec.meerkat_id),
-                            initial_message: spec.initial_message,
-                            runtime_mode: spec.runtime_mode,
-                            backend: spec.backend,
-                            context: spec.context,
-                            labels: spec.labels,
-                            resume_session_id,
-                            additional_instructions: spec.additional_instructions,
-                        })
+                        let mut s = SpawnMemberSpec::new(spec.profile, spec.meerkat_id);
+                        s.initial_message = spec.initial_message;
+                        s.runtime_mode = spec.runtime_mode;
+                        s.backend = spec.backend;
+                        s.context = spec.context;
+                        s.labels = spec.labels;
+                        s.resume_session_id = resume_session_id;
+                        s.additional_instructions = spec.additional_instructions;
+                        Ok(s)
                     })
                     .collect::<Result<Vec<_>, ToolError>>()?;
                 // Single-spec fast path returns flat member_ref; multi-spec returns results array.
@@ -1244,7 +1231,8 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 let args: MessageArgs = call
                     .parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
-                self.state
+                let session_id = self
+                    .state
                     .mob_send_message(
                         &MobId::from(args.mob_id),
                         MeerkatId::from(args.meerkat_id),
@@ -1252,7 +1240,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     )
                     .await
                     .map_err(|e| map_mob_err(call, e))?;
-                encode(call, json!({"ok": true}))
+                encode(call, json!({"ok": true, "session_id": session_id}))
             }
             "mob_respawn" => {
                 let args: RespawnArgs = call

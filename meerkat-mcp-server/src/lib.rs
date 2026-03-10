@@ -153,6 +153,9 @@ pub struct MeerkatRunInput {
     /// Opaque application context forwarded to the agent build pipeline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_context: Option<serde_json::Value>,
+    /// Per-agent environment variables injected into shell tool subprocesses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_env: Option<std::collections::HashMap<String, String>>,
 }
 
 fn default_structured_output_retries() -> u32 {
@@ -2159,6 +2162,7 @@ async fn handle_meerkat_run(
         max_inline_peer_notifications: None,
         app_context: input.app_context.clone(),
         additional_instructions: input.additional_instructions.clone(),
+        shell_env: input.shell_env.clone(),
     };
 
     let req = CreateSessionRequest {
@@ -2359,6 +2363,7 @@ async fn handle_meerkat_resume(
         max_inline_peer_notifications: None,
         app_context: None,
         additional_instructions: input.additional_instructions.clone(),
+        shell_env: None,
     };
 
     let needs_rebuild = existing_adapter.is_none()
@@ -3110,6 +3115,7 @@ mod tests {
                 labels: None,
                 additional_instructions: None,
                 app_context: None,
+                shell_env: None,
             },
             None,
         )

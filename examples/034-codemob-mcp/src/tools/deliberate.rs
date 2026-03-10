@@ -65,17 +65,7 @@ pub async fn handle(
     // Spawn one agent per profile (meerkat_id = profile name for simplicity)
     let specs: Vec<SpawnMemberSpec> = profile_names
         .iter()
-        .map(|name| SpawnMemberSpec {
-            profile_name: ProfileName::from(name.as_str()),
-            meerkat_id: MeerkatId::from(name.as_str()),
-            initial_message: None,
-            runtime_mode: None,
-            backend: None,
-            context: None,
-            labels: None,
-            resume_session_id: None,
-            additional_instructions: None,
-        })
+        .map(|name| SpawnMemberSpec::new(name.as_str(), name.as_str()))
         .collect();
 
     let spawn_results = state

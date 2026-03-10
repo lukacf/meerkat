@@ -1,4 +1,18 @@
 {
+  "apply_patch": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "patch": {
+        "description": "Patch text in apply_patch format, beginning with '*** Begin Patch' and ending with '*** End Patch'",
+        "type": "string"
+      }
+    },
+    "required": [
+      "patch"
+    ],
+    "title": "ApplyPatchArgs",
+    "type": "object"
+  },
   "datetime": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "properties": {},

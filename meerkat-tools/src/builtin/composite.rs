@@ -15,6 +15,7 @@ use meerkat_core::error::ToolError;
 use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
 use serde_json::Value;
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Error returned by the composite dispatcher.
@@ -52,11 +53,19 @@ impl CompositeDispatcher {
     pub fn new(
         task_store: Arc<dyn TaskStore>,
         config: &BuiltinToolConfig,
+        project_root: Option<PathBuf>,
         shell_config: Option<ShellConfig>,
         external: Option<Arc<dyn AgentToolDispatcher>>,
         session_id: Option<String>,
     ) -> Result<Self, CompositeDispatcherError> {
         let mut builtin_tools: Vec<Arc<dyn BuiltinTool>> = Vec::new();
+        let project_root = project_root
+            .or_else(|| shell_config.as_ref().map(|cfg| cfg.project_root.clone()))
+            .or_else(|| std::env::current_dir().ok())
+            .ok_or_else(|| CompositeDispatcherError::ToolInitFailed {
+                name: "apply_patch".to_string(),
+                message: "failed to resolve project root".to_string(),
+            })?;
 
         // Add task tools
         use crate::builtin::tasks::{TaskCreateTool, TaskGetTool, TaskListTool, TaskUpdateTool};
@@ -72,9 +81,10 @@ impl CompositeDispatcher {
         )));
 
         // Add utility tools
-        use crate::builtin::utility::{DateTimeTool, WaitTool};
+        use crate::builtin::utility::{ApplyPatchTool, DateTimeTool, WaitTool};
         builtin_tools.push(Arc::new(WaitTool::new()));
         builtin_tools.push(Arc::new(DateTimeTool::new()));
+        builtin_tools.push(Arc::new(ApplyPatchTool::new(project_root)));
 
         // Add shell tools if enabled
         let job_manager = if let Some(cfg) = shell_config {
@@ -463,6 +473,7 @@ mod tests {
         let dispatcher = CompositeDispatcher::new(
             store,
             &BuiltinToolConfig::default(),
+            None,
             None,
             Some(external),
             None,

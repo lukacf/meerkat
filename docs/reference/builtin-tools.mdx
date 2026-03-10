@@ -24,6 +24,7 @@ icon: "wrench"
 | `memory_search` | Memory | N/A | `memory-store-session` | Search semantic memory |
 | `wait` | Utility | Yes | -- | Pause execution |
 | `datetime` | Utility | Yes | -- | Get current date/time |
+| `apply_patch` | Utility | Yes | -- | Apply structured file patches inside the project root |
 | `send` | Comms | Yes | `comms` | Send message/request/response to a peer |
 | `peers` | Comms | Yes | `comms` | List discoverable peers (trusted + inproc) |
 
@@ -34,7 +35,7 @@ icon: "wrench"
 
 | Flag | Builder Method | Default | Controls |
 |------|---------------|---------|----------|
-| `enable_builtins` | `.builtins(bool)` | `false` | Task tools, utility tools (`wait`, `datetime`) |
+| `enable_builtins` | `.builtins(bool)` | `false` | Task tools, utility tools (`wait`, `datetime`, `apply_patch`) |
 | `enable_shell` | `.shell(bool)` | `false` | All shell tools (`shell`, `shell_jobs`, `shell_job_status`, `shell_job_cancel`) |
 | `enable_subagents` | `.subagents(bool)` | `false` | All sub-agent tools (requires `sub-agents` feature) |
 | `enable_memory` | `.memory(bool)` | `false` | `memory_search` (requires `memory-store-session` feature) |
@@ -69,7 +70,7 @@ Individual tools can be enabled or disabled via `ToolPolicyLayer` in `BuiltinToo
 <Accordion title="Capability registrations">
 Capabilities are registered via the `inventory` crate in `meerkat-tools/src/lib.rs`:
 
-- **Builtins** (`CapabilityId::Builtins`): `task_list`, `task_create`, `task_get`, `task_update`, `wait`, `datetime`. Controlled by `config.tools.builtins_enabled`.
+- **Builtins** (`CapabilityId::Builtins`): `task_list`, `task_create`, `task_get`, `task_update`, `wait`, `datetime`, `apply_patch`. Controlled by `config.tools.builtins_enabled`.
 - **Shell** (`CapabilityId::Shell`): `shell`, `shell_jobs`, `shell_job_status`, `shell_job_cancel`. Controlled by `config.tools.shell_enabled`.
 - **SubAgents** (`CapabilityId::SubAgents`): `agent_spawn`, `agent_fork`, `agent_status`, `agent_cancel`, `agent_list`. Requires `sub-agents` feature.
 </Accordion>

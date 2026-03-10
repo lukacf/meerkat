@@ -1,5 +1,6 @@
 //! Shared tool dispatcher builders.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -38,6 +39,7 @@ pub struct McpDispatcherConfig {
 pub struct BuiltinDispatcherConfig {
     pub store: Arc<dyn TaskStore>,
     pub config: BuiltinToolConfig,
+    pub project_root: Option<PathBuf>,
     pub shell_config: Option<ShellConfig>,
     pub external: Option<Arc<dyn AgentToolDispatcher>>,
     pub session_id: Option<String>,
@@ -108,6 +110,7 @@ impl ToolDispatcherBuilder {
             ToolDispatcherSource::Composite(comp) => Arc::new(CompositeDispatcher::new(
                 comp.store,
                 &comp.config,
+                comp.project_root,
                 comp.shell_config,
                 comp.external,
                 comp.session_id,
@@ -146,6 +149,7 @@ pub fn build_builtin_dispatcher(
     Ok(Arc::new(CompositeDispatcher::new(
         config.store,
         &config.config,
+        config.project_root,
         config.shell_config,
         config.external,
         config.session_id,

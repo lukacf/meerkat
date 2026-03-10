@@ -22,7 +22,7 @@ Meerkat is a library-first agent runtime. The execution pipeline is shared acros
 | `meerkat-core` | Agent loop, types, budget, retry, state machine, ALL trait contracts | `AgentLlmClient`, `AgentToolDispatcher`, `AgentSessionStore`, `SessionService`, `CommsRuntime`, `HookEngine` |
 | `meerkat-client` | LLM providers (Anthropic, OpenAI, Gemini) | Implements `AgentLlmClient` (via `LlmClientAdapter`) |
 | `meerkat-store` | Session persistence (Jsonl, Memory, Redb) | Implements `SessionStore` |
-| `meerkat-tools` | Tool registry, dispatch, builtins | Implements `AgentToolDispatcher` |
+| `meerkat-tools` | Tool registry, dispatch, builtins (task tools, utility helpers like `apply_patch`, shell/comms/sub-agent surfaces) | Implements `AgentToolDispatcher` |
 | `meerkat-session` | Session orchestration (Ephemeral, Persistent) | Implements `SessionService` |
 | `meerkat-comms` | Inter-agent messaging (inproc, TCP, UDS) | Implements `CommsRuntime` |
 | `meerkat-mob` | Multi-agent orchestration (MobBuilder, FlowEngine) | `MobSessionService`, `MobProvisioner` (mob-local traits) |

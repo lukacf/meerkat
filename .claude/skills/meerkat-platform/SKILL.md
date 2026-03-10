@@ -143,7 +143,7 @@ await mob.spawn([{ profile: 'worker', meerkat_id: 'w1' }]);
 - Session lifecycle (EphemeralSessionService)
 - Mob orchestration (MobBuilder, MobActor, FlowEngine, in-memory storage)
 - Comms (inproc — InprocRegistry, Ed25519 signing, peer discovery)
-- Tool dispatch (task tools, comms tools, skill tools — no shell)
+- Tool dispatch (task tools, utility builtins like `wait`/`datetime`/`apply_patch`, comms tools, skill tools — no shell)
 - Skills (embedded + memory sources from mobpack)
 - Hooks (in-process + HTTP — no command hooks)
 - Config (in-memory, programmatic)

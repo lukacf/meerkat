@@ -30,6 +30,9 @@ pub struct CoreCreateParams {
     pub additional_instructions: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_context: Option<serde_json::Value>,
+    /// Per-agent environment variables injected into shell tool subprocesses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_env: Option<std::collections::HashMap<String, String>>,
 }
 
 /// Structured output parameters.
@@ -355,6 +358,7 @@ mod tests {
                 "Use JSON output.".to_string(),
             ]),
             app_context: Some(serde_json::json!({"org_id": "acme", "tier": "premium"})),
+            shell_env: None,
         };
         let json = serde_json::to_string(&params)?;
         let parsed: CoreCreateParams = serde_json::from_str(&json)?;
@@ -394,11 +398,13 @@ mod tests {
             labels: None,
             additional_instructions: None,
             app_context: None,
+            shell_env: None,
         };
         let json = serde_json::to_string(&params)?;
         assert!(!json.contains("\"labels\""));
         assert!(!json.contains("\"additional_instructions\""));
         assert!(!json.contains("\"app_context\""));
+        assert!(!json.contains("\"shell_env\""));
         Ok(())
     }
 }

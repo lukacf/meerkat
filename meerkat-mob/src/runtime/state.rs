@@ -91,7 +91,7 @@ pub(super) enum MobCommand {
     ExternalTurn {
         meerkat_id: MeerkatId,
         message: String,
-        reply_tx: oneshot::Sender<Result<(), MobError>>,
+        reply_tx: oneshot::Sender<Result<SessionId, MobError>>,
     },
     InternalTurn {
         meerkat_id: MeerkatId,

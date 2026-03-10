@@ -259,6 +259,9 @@ impl ShellTool {
             cmd.env("PWD", &self.config.project_root);
         }
 
+        // Inject per-agent environment variables
+        cmd.envs(&self.config.env_vars);
+
         // Capture stdout/stderr
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());

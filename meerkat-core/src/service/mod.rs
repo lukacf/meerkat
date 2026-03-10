@@ -200,6 +200,10 @@ pub struct SessionBuildOptions {
     /// Additional instruction sections appended to the system prompt after skill
     /// assembly, before tool instructions. Order preserved.
     pub additional_instructions: Option<Vec<String>>,
+    /// Environment variables injected into shell tool subprocesses for this agent.
+    /// Set by the application's `SessionAgentBuilder` — never by the LLM.
+    /// Values are not included in the agent's context window.
+    pub shell_env: Option<std::collections::HashMap<String, String>>,
 }
 
 impl Default for SessionBuildOptions {
@@ -233,6 +237,7 @@ impl Default for SessionBuildOptions {
             max_inline_peer_notifications: None,
             app_context: None,
             additional_instructions: None,
+            shell_env: None,
         }
     }
 }

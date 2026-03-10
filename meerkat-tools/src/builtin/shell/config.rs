@@ -7,7 +7,9 @@ use super::security::SecurityEngine;
 use meerkat_core::ShellDefaults;
 use meerkat_core::types::SecurityMode;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::ffi::OsStr;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -51,7 +53,7 @@ pub enum ShellError {
 ///
 /// Controls shell execution behavior including timeouts, working directory
 /// restrictions, and which shell to use.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ShellConfig {
     /// Whether shell tool is enabled (default: false)
     pub enabled: bool,
@@ -103,6 +105,30 @@ pub struct ShellConfig {
     /// Patterns for allow/deny lists (glob format)
     #[serde(default)]
     pub security_patterns: Vec<String>,
+
+    /// Per-agent environment variables injected into shell subprocesses.
+    /// Redacted from Debug output to avoid leaking secrets.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub env_vars: HashMap<String, String>,
+}
+
+impl fmt::Debug for ShellConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ShellConfig")
+            .field("enabled", &self.enabled)
+            .field("default_timeout_secs", &self.default_timeout_secs)
+            .field("restrict_to_project", &self.restrict_to_project)
+            .field("shell", &self.shell)
+            .field("shell_path", &self.shell_path)
+            .field("project_root", &self.project_root)
+            .field("max_completed_jobs", &self.max_completed_jobs)
+            .field("completed_job_ttl_secs", &self.completed_job_ttl_secs)
+            .field("max_concurrent_processes", &self.max_concurrent_processes)
+            .field("security_mode", &self.security_mode)
+            .field("security_patterns", &self.security_patterns)
+            .field("env_vars", &format_args!("<{} vars>", self.env_vars.len()))
+            .finish()
+    }
 }
 
 fn default_max_completed_jobs() -> usize {
@@ -132,6 +158,7 @@ impl Default for ShellConfig {
             max_concurrent_processes: default_max_concurrent_processes(),
             security_mode: defaults.security_mode,
             security_patterns: defaults.security_patterns,
+            env_vars: HashMap::new(),
         }
     }
 }
@@ -398,6 +425,7 @@ mod tests {
             max_concurrent_processes: 5,
             security_mode: SecurityMode::AllowList,
             security_patterns: vec!["echo".to_string(), "cat".to_string()],
+            env_vars: HashMap::new(),
         };
 
         assert!(config.enabled);
@@ -472,6 +500,7 @@ mod tests {
             max_concurrent_processes: 15,
             security_mode: SecurityMode::AllowList,
             security_patterns: vec!["ls".to_string(), "cat".to_string()],
+            env_vars: HashMap::new(),
         };
 
         // Serialize to JSON

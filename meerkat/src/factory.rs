@@ -300,6 +300,8 @@ pub struct AgentBuildConfig {
     /// servers finish connecting before starting the first agent turn.
     /// Default: false (servers connect in the background).
     pub wait_for_mcp: bool,
+    /// Per-agent environment variables injected into shell tool subprocesses.
+    pub shell_env: Option<std::collections::HashMap<String, String>>,
 }
 
 impl std::fmt::Debug for AgentBuildConfig {
@@ -403,6 +405,7 @@ impl AgentBuildConfig {
             app_context: None,
             additional_instructions: None,
             wait_for_mcp: false,
+            shell_env: None,
         }
     }
 
@@ -456,6 +459,7 @@ impl AgentBuildConfig {
         self.max_inline_peer_notifications = build.max_inline_peer_notifications;
         self.app_context = build.app_context.clone();
         self.additional_instructions = build.additional_instructions.clone();
+        self.shell_env = build.shell_env.clone();
     }
 
     /// Convert build options to the service transport representation.
@@ -492,6 +496,7 @@ impl AgentBuildConfig {
             max_inline_peer_notifications: self.max_inline_peer_notifications,
             app_context: self.app_context.clone(),
             additional_instructions: self.additional_instructions.clone(),
+            shell_env: self.shell_env.clone(),
         }
     }
 }
@@ -1386,6 +1391,7 @@ impl AgentFactory {
                         build_config.scoped_event_path.clone(),
                         #[cfg(all(feature = "sub-agents", feature = "comms"))]
                         sub_agent_comms,
+                        build_config.shell_env.take(),
                     )
                     .await?
                 }
@@ -1771,6 +1777,7 @@ impl AgentFactory {
         #[cfg(all(feature = "sub-agents", feature = "comms"))] sub_agent_comms: Option<
             SubAgentCommsWiring,
         >,
+        shell_env: Option<std::collections::HashMap<String, String>>,
     ) -> Result<(Arc<dyn AgentToolDispatcher>, String), BuildAgentError> {
         if !effective_builtins {
             // No builtins — return the external tools if provided, otherwise empty.
@@ -1796,7 +1803,11 @@ impl AgentFactory {
                 .project_root
                 .clone()
                 .unwrap_or_else(|| self.store_path.clone());
-            Some(ShellConfig::with_project_root(project_root))
+            let mut config = ShellConfig::with_project_root(project_root);
+            if let Some(env) = shell_env {
+                config.env_vars = env;
+            }
+            Some(config)
         } else {
             None
         };

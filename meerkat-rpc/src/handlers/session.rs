@@ -98,6 +98,10 @@ pub struct CreateSessionParams {
     /// Opaque application context passed to custom session builders.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_context: Option<serde_json::Value>,
+    /// Per-agent environment variables injected into shell tool subprocesses.
+    /// Set by the application — never visible to the LLM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_env: Option<std::collections::HashMap<String, String>>,
 }
 
 fn default_structured_output_retries() -> u32 {
@@ -255,6 +259,7 @@ pub async fn handle_create(
     build_config.provider_params = params.provider_params;
     build_config.additional_instructions = params.additional_instructions;
     build_config.app_context = params.app_context;
+    build_config.shell_env = params.shell_env;
     build_config.preload_skills = params
         .preload_skills
         .map(|ids| ids.into_iter().map(meerkat_core::skills::SkillId).collect());

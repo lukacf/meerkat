@@ -6618,39 +6618,9 @@ async fn test_spawn_many_member_refs_returns_results_in_input_order() {
     service.set_create_session_delay_ms(100);
 
     let specs = vec![
-        SpawnMemberSpec {
-            profile_name: ProfileName::from("worker"),
-            meerkat_id: MeerkatId::from("w-a"),
-            initial_message: None,
-            runtime_mode: None,
-            backend: None,
-            context: None,
-            labels: None,
-            resume_session_id: None,
-            additional_instructions: None,
-        },
-        SpawnMemberSpec {
-            profile_name: ProfileName::from("worker"),
-            meerkat_id: MeerkatId::from("w-b"),
-            initial_message: None,
-            runtime_mode: None,
-            backend: None,
-            context: None,
-            labels: None,
-            resume_session_id: None,
-            additional_instructions: None,
-        },
-        SpawnMemberSpec {
-            profile_name: ProfileName::from("worker"),
-            meerkat_id: MeerkatId::from("w-c"),
-            initial_message: None,
-            runtime_mode: None,
-            backend: None,
-            context: None,
-            labels: None,
-            resume_session_id: None,
-            additional_instructions: None,
-        },
+        SpawnMemberSpec::new("worker", "w-a"),
+        SpawnMemberSpec::new("worker", "w-b"),
+        SpawnMemberSpec::new("worker", "w-c"),
     ];
 
     let results = handle.spawn_many(specs).await;
@@ -6675,28 +6645,8 @@ async fn test_spawn_many_parallel_finalize_emits_single_worker_pair_wire_event()
     service.set_create_session_delay_ms(120);
 
     let specs = vec![
-        SpawnMemberSpec {
-            profile_name: ProfileName::from("worker"),
-            meerkat_id: MeerkatId::from("w-a"),
-            initial_message: None,
-            runtime_mode: None,
-            backend: None,
-            context: None,
-            labels: None,
-            resume_session_id: None,
-            additional_instructions: None,
-        },
-        SpawnMemberSpec {
-            profile_name: ProfileName::from("worker"),
-            meerkat_id: MeerkatId::from("w-b"),
-            initial_message: None,
-            runtime_mode: None,
-            backend: None,
-            context: None,
-            labels: None,
-            resume_session_id: None,
-            additional_instructions: None,
-        },
+        SpawnMemberSpec::new("worker", "w-a"),
+        SpawnMemberSpec::new("worker", "w-b"),
     ];
 
     let results = handle.spawn_many(specs).await;

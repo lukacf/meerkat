@@ -38,6 +38,7 @@ fn create_sh_config(temp_dir: &TempDir) -> ShellConfig {
         max_concurrent_processes: 0,       // Unlimited for e2e tests
         security_mode: Default::default(), // Unrestricted for e2e tests
         security_patterns: vec![],
+        env_vars: std::collections::HashMap::new(),
     }
 }
 

@@ -32,6 +32,7 @@ pub struct MobEventsView {
 
 /// Spawn request for first-class batch member provisioning.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct SpawnMemberSpec {
     pub profile_name: ProfileName,
     pub meerkat_id: MeerkatId,
@@ -46,9 +47,66 @@ pub struct SpawnMemberSpec {
     pub resume_session_id: Option<meerkat_core::types::SessionId>,
     /// Additional instruction sections appended to the system prompt for this member.
     pub additional_instructions: Option<Vec<String>>,
+    /// Per-agent environment variables injected into shell tool subprocesses.
+    pub shell_env: Option<std::collections::HashMap<String, String>>,
 }
 
 impl SpawnMemberSpec {
+    pub fn new(profile: impl Into<ProfileName>, meerkat_id: impl Into<MeerkatId>) -> Self {
+        Self {
+            profile_name: profile.into(),
+            meerkat_id: meerkat_id.into(),
+            initial_message: None,
+            runtime_mode: None,
+            backend: None,
+            context: None,
+            labels: None,
+            resume_session_id: None,
+            additional_instructions: None,
+            shell_env: None,
+        }
+    }
+
+    pub fn with_shell_env(mut self, env: std::collections::HashMap<String, String>) -> Self {
+        self.shell_env = Some(env);
+        self
+    }
+
+    pub fn with_initial_message(mut self, message: String) -> Self {
+        self.initial_message = Some(message);
+        self
+    }
+
+    pub fn with_runtime_mode(mut self, mode: crate::MobRuntimeMode) -> Self {
+        self.runtime_mode = Some(mode);
+        self
+    }
+
+    pub fn with_backend(mut self, backend: MobBackendKind) -> Self {
+        self.backend = Some(backend);
+        self
+    }
+
+    pub fn with_context(mut self, context: serde_json::Value) -> Self {
+        self.context = Some(context);
+        self
+    }
+
+    pub fn with_labels(mut self, labels: std::collections::BTreeMap<String, String>) -> Self {
+        self.labels = Some(labels);
+        self
+    }
+
+    pub fn with_resume_session_id(mut self, id: meerkat_core::types::SessionId) -> Self {
+        self.resume_session_id = Some(id);
+        self
+    }
+
+    pub fn with_additional_instructions(mut self, instructions: Vec<String>) -> Self {
+        self.additional_instructions = Some(instructions);
+        self
+    }
+
     pub fn from_wire(
         profile: String,
         meerkat_id: String,
@@ -56,17 +114,11 @@ impl SpawnMemberSpec {
         runtime_mode: Option<crate::MobRuntimeMode>,
         backend: Option<MobBackendKind>,
     ) -> Self {
-        Self {
-            profile_name: ProfileName::from(profile),
-            meerkat_id: MeerkatId::from(meerkat_id),
-            initial_message,
-            runtime_mode,
-            backend,
-            context: None,
-            labels: None,
-            resume_session_id: None,
-            additional_instructions: None,
-        }
+        let mut spec = Self::new(profile, meerkat_id);
+        spec.initial_message = initial_message;
+        spec.runtime_mode = runtime_mode;
+        spec.backend = backend;
+        spec
     }
 }
 
@@ -326,18 +378,11 @@ impl MobHandle {
         runtime_mode: Option<crate::MobRuntimeMode>,
         backend: Option<MobBackendKind>,
     ) -> Result<MemberRef, MobError> {
-        self.spawn_spec(SpawnMemberSpec {
-            profile_name,
-            meerkat_id,
-            initial_message,
-            runtime_mode,
-            backend,
-            context: None,
-            labels: None,
-            resume_session_id: None,
-            additional_instructions: None,
-        })
-        .await
+        let mut spec = SpawnMemberSpec::new(profile_name, meerkat_id);
+        spec.initial_message = initial_message;
+        spec.runtime_mode = runtime_mode;
+        spec.backend = backend;
+        self.spawn_spec(spec).await
     }
 
     /// Spawn a member from a fully-specified [`SpawnMemberSpec`].
@@ -437,11 +482,14 @@ impl MobHandle {
     }
 
     /// Send a message to a member (enforces external_addressable).
+    ///
+    /// Returns the [`SessionId`] of the session that handled the turn,
+    /// enabling callers to correlate injection events with agent responses.
     pub async fn send_message(
         &self,
         meerkat_id: MeerkatId,
         message: String,
-    ) -> Result<(), MobError> {
+    ) -> Result<meerkat_core::types::SessionId, MobError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(MobCommand::ExternalTurn {

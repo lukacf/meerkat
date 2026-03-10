@@ -999,6 +999,7 @@ impl MobActor {
             labels,
             resume_session_id,
             additional_instructions,
+            shell_env,
         } = spec;
         let prepare_result = async {
             if meerkat_id
@@ -1108,6 +1109,7 @@ impl MobActor {
                 context,
                 labels: labels.clone(),
                 additional_instructions,
+                shell_env,
             })
             .await?;
             if let Some(ref client) = self.default_llm_client {
@@ -1583,21 +1585,10 @@ impl MobActor {
         // Enqueue async spawn with same profile and meerkat ID.
         // The spawn result is delivered via MeerkatSpawned event.
         let (spawn_reply_tx, spawn_reply_rx) = oneshot::channel();
-        self.enqueue_spawn(
-            super::handle::SpawnMemberSpec {
-                profile_name,
-                meerkat_id: meerkat_id.clone(),
-                initial_message,
-                runtime_mode: None,
-                backend: None,
-                context: None,
-                labels: None,
-                resume_session_id: None,
-                additional_instructions: None,
-            },
-            spawn_reply_tx,
-        )
-        .await;
+        let mut respawn_spec =
+            super::handle::SpawnMemberSpec::new(profile_name, meerkat_id.clone());
+        respawn_spec.initial_message = initial_message;
+        self.enqueue_spawn(respawn_spec, spawn_reply_tx).await;
 
         // Fire-and-forget: log spawn failures but don't block the caller.
         let mid = meerkat_id.clone();
@@ -2203,7 +2194,7 @@ impl MobActor {
         &mut self,
         meerkat_id: MeerkatId,
         message: String,
-    ) -> Result<(), MobError> {
+    ) -> Result<SessionId, MobError> {
         // Look up the entry
         let entry = {
             let roster = self.roster.read().await;
@@ -2217,54 +2208,56 @@ impl MobActor {
                     && let Some(spec) = policy.resolve(&meerkat_id).await
                 {
                     let (spawn_reply_tx, spawn_reply_rx) = oneshot::channel();
-                    self.enqueue_spawn(
-                        super::handle::SpawnMemberSpec {
-                            profile_name: spec.profile,
-                            meerkat_id: meerkat_id.clone(),
-                            initial_message: None,
-                            runtime_mode: spec.runtime_mode,
-                            backend: None,
-                            context: None,
-                            labels: None,
-                            resume_session_id: None,
-                            additional_instructions: None,
-                        },
-                        spawn_reply_tx,
-                    )
-                    .await;
+                    let mut spawn_spec =
+                        super::handle::SpawnMemberSpec::new(spec.profile, meerkat_id.clone());
+                    spawn_spec.runtime_mode = spec.runtime_mode;
+                    self.enqueue_spawn(spawn_spec, spawn_reply_tx).await;
 
-                    // Schedule deferred message delivery after spawn completes.
+                    // Wait for spawn to complete, then deliver the message
+                    // via a deferred ExternalTurn command.
                     let command_tx = self.command_tx.clone();
                     let target_id = meerkat_id.clone();
+                    let member_ref = spawn_reply_rx
+                        .await
+                        .map_err(|_| MobError::Internal("auto-spawn reply channel dropped".into()))?
+                        .map_err(|e| {
+                            MobError::Internal(format!("auto-spawn failed for '{target_id}': {e}"))
+                        })?;
+
+                    let session_id = member_ref.session_id().cloned().ok_or_else(|| {
+                        MobError::Internal(format!(
+                            "auto-spawned member '{target_id}' has no session"
+                        ))
+                    })?;
+
+                    // Deferred delivery — fire and forget after spawn completes.
                     self.lifecycle_tasks.spawn(async move {
-                        if let Ok(Ok(_)) = spawn_reply_rx.await {
-                            let (reply_tx, reply_rx) = oneshot::channel();
-                            let _ = command_tx
-                                .send(MobCommand::ExternalTurn {
-                                    meerkat_id: target_id.clone(),
-                                    message,
-                                    reply_tx,
-                                })
-                                .await;
-                            match reply_rx.await {
-                                Ok(Ok(())) => {}
-                                Ok(Err(e)) => {
-                                    tracing::error!(
-                                        meerkat_id = %target_id,
-                                        error = %e,
-                                        "deferred delivery after auto-spawn failed"
-                                    );
-                                }
-                                Err(_) => {
-                                    tracing::error!(
-                                        meerkat_id = %target_id,
-                                        "deferred delivery channel dropped before response"
-                                    );
-                                }
+                        let (reply_tx, reply_rx) = oneshot::channel();
+                        let _ = command_tx
+                            .send(MobCommand::ExternalTurn {
+                                meerkat_id: target_id.clone(),
+                                message,
+                                reply_tx,
+                            })
+                            .await;
+                        match reply_rx.await {
+                            Ok(Ok(_)) => {}
+                            Ok(Err(e)) => {
+                                tracing::error!(
+                                    meerkat_id = %target_id,
+                                    error = %e,
+                                    "deferred delivery after auto-spawn failed"
+                                );
+                            }
+                            Err(_) => {
+                                tracing::error!(
+                                    meerkat_id = %target_id,
+                                    "deferred delivery channel dropped before response"
+                                );
                             }
                         }
                     });
-                    return Ok(());
+                    return Ok(session_id);
                 }
                 return Err(MobError::MeerkatNotFound(meerkat_id));
             }
@@ -2281,9 +2274,7 @@ impl MobActor {
             return Err(MobError::NotExternallyAddressable(meerkat_id));
         }
 
-        self.dispatch_member_turn(&entry, message).await?;
-
-        Ok(())
+        self.dispatch_member_turn(&entry, message).await
     }
 
     /// Internal-turn path bypasses external_addressable checks.
@@ -2300,15 +2291,14 @@ impl MobActor {
                 .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?
         };
 
-        self.dispatch_member_turn(&entry, message).await?;
-        Ok(())
+        self.dispatch_member_turn(&entry, message).await.map(|_| ())
     }
 
     async fn dispatch_member_turn(
         &self,
         entry: &RosterEntry,
         message: String,
-    ) -> Result<(), MobError> {
+    ) -> Result<SessionId, MobError> {
         match entry.runtime_mode {
             crate::MobRuntimeMode::AutonomousHost => {
                 let session_id = entry.member_ref.session_id().ok_or_else(|| {
@@ -2327,6 +2317,7 @@ impl MobActor {
                             entry.meerkat_id
                         ))
                     })?;
+                let session_id = session_id.clone();
                 injector
                     .inject(message, meerkat_core::PlainEventSource::Rpc)
                     .map_err(|error| {
@@ -2335,9 +2326,15 @@ impl MobActor {
                             entry.meerkat_id, error
                         ))
                     })?;
-                Ok(())
+                Ok(session_id)
             }
             crate::MobRuntimeMode::TurnDriven => {
+                let session_id = entry.member_ref.session_id().cloned().ok_or_else(|| {
+                    MobError::Internal(format!(
+                        "turn-driven dispatch requires session for '{}'",
+                        entry.meerkat_id
+                    ))
+                })?;
                 let req = meerkat_core::service::StartTurnRequest {
                     prompt: message,
                     event_tx: None,
@@ -2346,7 +2343,8 @@ impl MobActor {
                     flow_tool_overlay: None,
                     additional_instructions: None,
                 };
-                self.provisioner.start_turn(&entry.member_ref, req).await
+                self.provisioner.start_turn(&entry.member_ref, req).await?;
+                Ok(session_id)
             }
         }
     }

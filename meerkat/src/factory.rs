@@ -945,6 +945,7 @@ impl AgentFactory {
 
     /// Build a shared builtin dispatcher, optionally including skill tools.
     #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::too_many_arguments)]
     pub async fn build_builtin_dispatcher_with_skills(
         &self,
         store: Arc<dyn TaskStore>,

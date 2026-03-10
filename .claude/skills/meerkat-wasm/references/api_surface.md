@@ -173,15 +173,25 @@ const runtime = await MeerkatRuntime.init(wasm, {
 // Mob lifecycle
 const mob = await runtime.createMob(definition);
 await mob.spawn([{ profile: 'worker', meerkat_id: 'w1' }]);
-const sub = mob.subscribe('w1');
+const sub = await mob.subscribe('w1');       // async, returns EventSubscription<EventEnvelope>
 const events = sub.poll();
 sub.close();
-const mobWide = mob.subscribeAll();
+const mobWide = await mob.subscribeAll();    // async, returns EventSubscription<AttributedEvent>
 
 // Direct sessions
 const session = runtime.createSession({ model: '...', apiKey: '...' });
 const result = await session.turn('Hello');
-const sessionEvents = session.subscribe();
+const sessionEvents = session.subscribe();   // sync, returns EventSubscription<EventEnvelope>
 sessionEvents.poll();
 session.destroy();
 ```
+
+### Key type changes (0.4.6)
+
+- `Mob.subscribe()` and `Mob.subscribeAll()` are now **async** (return `Promise<EventSubscription<T>>`)
+- `EventSubscription<T>` is generic — `subscribe()` yields `EventEnvelope`, `subscribeAll()` yields `AttributedEvent`
+- `Mob.events()` returns `MobEvent[]` (structural mob events, not agent events)
+- `mob_create` and `mob_run_flow` return plain strings (not JSON-wrapped)
+- `SpawnResult` has `status: 'ok' | 'error'` with optional `member_ref` and `error` fields
+- `MobMember` includes `member_ref`, `runtime_mode`, `state`, `wired_to`, and `labels`
+- `MobStatus` uses `state` field instead of `status` + `member_count`

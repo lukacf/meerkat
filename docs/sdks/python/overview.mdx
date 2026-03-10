@@ -77,6 +77,8 @@ client = MeerkatClient(rkat_path="/path/to/rkat-rpc")
 | `client.create_session_streaming(prompt, ...)` | Create a session and stream typed events; returns `EventStream` |
 | `await client.list_sessions()` | List active sessions; returns `list[SessionInfo]` |
 | `await client.read_session(session_id)` | Read raw session state |
+| `await client.create_mob(definition, ...)` | Create a mob; returns `Mob` |
+| `await client.list_mobs()` | List mobs; returns `list[MobSummary]` |
 | `client.capabilities` | `list[Capability]` — capabilities fetched during handshake |
 | `client.has_capability(id)` | `True` if a capability is available |
 | `client.require_capability(id)` | Raises `CapabilityUnavailableError` if not available |
@@ -105,6 +107,30 @@ client = MeerkatClient(rkat_path="/path/to/rkat-rpc")
 | `await session.invoke_skill(skill_ref, prompt)` | Invoke a skill in this session |
 | `await session.send(**kwargs)` | Push a comms event into this session |
 | `await session.peers()` | List peers visible to this session's comms runtime |
+| `await session.subscribe_events()` | Open a standalone event subscription; returns `EventSubscription` |
+
+### Mob methods
+
+`create_mob()` returns a `Mob` object for explicit mob lifecycle control.
+
+| Method | Description |
+|--------|-------------|
+| `mob.mob_id` | The mob's identifier |
+| `await mob.status()` | Get mob status |
+| `await mob.lifecycle(action)` | Stop, resume, complete, or destroy the mob |
+| `await mob.spawn(spec)` | Spawn a member into the mob |
+| `await mob.retire(meerkat_id)` | Retire a member |
+| `await mob.respawn(meerkat_id)` | Respawn a member |
+| `await mob.wire(a, b)` | Wire two members for comms |
+| `await mob.unwire(a, b)` | Remove comms wiring |
+| `await mob.list_members()` | List mob members |
+| `await mob.send_message(meerkat_id, message)` | Send work to a member |
+| `await mob.list_flows()` | List available flows |
+| `await mob.run_flow(flow_id, params)` | Start a flow run |
+| `await mob.flow_status(run_id)` | Get flow run status |
+| `await mob.cancel_flow(run_id)` | Cancel a flow run |
+| `await mob.subscribe_member_events(meerkat_id)` | Subscribe to member events; returns `EventSubscription` |
+| `await mob.subscribe_events()` | Subscribe to mob-wide events; returns `EventSubscription` |
 
 ---
 
@@ -383,8 +409,6 @@ All events are frozen dataclasses importable from `meerkat`. Unknown event types
 | `HookRewriteApplied` | `hook_id`, `point`, `patch` | Hook rewrote part of request/response |
 | `SkillsResolved` | `skills`, `injection_bytes` | Skills resolved for this turn |
 | `SkillResolutionFailed` | `reference`, `error` | Skill reference could not be resolved |
-| `InteractionComplete` | `interaction_id`, `result` | Comms interaction completed |
-| `InteractionFailed` | `interaction_id`, `error` | Comms interaction failed |
 | `StreamTruncated` | `reason` | Event stream was truncated |
 | `ToolConfigChanged` | `payload` | Live tool configuration changed for this session |
 | `UnknownEvent` | `type`, `data` | Unrecognised event type (forward compat) |

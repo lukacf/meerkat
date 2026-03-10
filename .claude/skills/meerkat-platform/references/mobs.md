@@ -205,11 +205,12 @@ let build = SessionBuildOptions {
 | CLI `run` / `resume` | `mob_*` tools in prompt-driven runs | Primary CLI mob UX |
 | CLI `rkat mob ...` | direct command lifecycle | Secondary explicit operational surface |
 | CLI `rkat mob pack/deploy/web build` | artifact and browser distribution | Portable deploy + web target |
-| RPC | explicit session/mob methods | canonical typed substrate for SDKs; `mob/tools` / `mob/call` are escape hatches |
+| RPC | explicit `mob/*` methods | canonical typed substrate for SDKs; `mob/tools` / `mob/call` are escape hatches |
 | REST | session HTTP endpoints | compact mob lifecycle via `/mob/tools` + `/mob/call` plus SSE observe |
 | MCP | `meerkat_*` session tools | tool-oriented mob access for LLM ergonomics |
-| Python SDK | typed RPC wrapper | first-class mob handle + explicit send/session/member/mob observation |
-| TypeScript SDK | typed RPC wrapper | first-class mob handle + explicit send/session/member/mob observation |
+| Python SDK | `Mob` class via `create_mob()` | first-class mob lifecycle, member mgmt, flow control, event subscriptions |
+| TypeScript SDK | `Mob` class via `createMob()` | first-class mob lifecycle, member mgmt, flow control, event subscriptions |
+| Web SDK | `Mob` class via `createMob()` | same WASM-backed mob lifecycle with typed `EventSubscription<T>` |
 
 Runtime-mode behavior is shared across these surfaces because dispatch comes from the same mob runtime:
 
@@ -276,17 +277,17 @@ The web build produces a real meerkat surface — same agent loop, providers, an
 
 **Not available in browser:** filesystem config loading (programmatic config instead), stdio MCP servers (no processes), MCP protocol client (rmcp depends on tokio/mio — types work but connections blocked), shell tool, file-based persistence.
 
-**WASM API (29 exports):**
+**WASM API (28 exports):**
 See `SKILL.md` WASM section for the full export list. Key mob-related exports:
 ```
-mob_create(definition_json) → mob_id  [async]
+mob_create(definition_json) → mob_id string  [async]
 mob_spawn(mob_id, specs_json) → result JSON  [async]
 mob_wire / mob_unwire / mob_retire / mob_respawn  [async]
-mob_list_members / mob_send_message / mob_events / mob_status / mob_list
+mob_list_members / mob_send_message / mob_events(mob_id, after_cursor: u32, limit: u32) / mob_status / mob_list
 mob_lifecycle(mob_id, action)  [async]
-mob_run_flow / mob_flow_status / mob_cancel_flow  [async]
+mob_run_flow → run_id string  [async] / mob_flow_status / mob_cancel_flow  [async]
 wire_cross_mob(mob_id, a, b)  [async]
-mob_member_subscribe / mob_subscribe_events / poll_subscription / close_subscription
+mob_member_subscribe [async] / mob_subscribe_events [async] / poll_subscription / close_subscription
 ```
 
 ### RPC

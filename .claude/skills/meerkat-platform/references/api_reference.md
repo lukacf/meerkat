@@ -284,11 +284,11 @@ Client methods:
 - `create_session_streaming(prompt, ...)` → `EventStream`
 - `list_sessions()` → `list[SessionInfo]`
 - `read_session(session_id)` → dict
+- `create_mob(definition, ...)` → `Mob`
+- `list_mobs()` → `list[MobSummary]`
 - `get_config()` / `set_config(...)` / `patch_config(...)`
 - `mcp_add(params)` / `mcp_remove(params)` / `mcp_reload(params)`
 - `list_skills()` / `inspect_skill(id, source?)`
-- `list_mob_prefabs()` / `list_mob_tools()` / `call_mob_tool(name, args?)`
-- `send(session_id, **kwargs)` / `peers(session_id)`
 - `capabilities` (property, populated during `connect()`)
 
 Session methods:
@@ -299,6 +299,17 @@ Session methods:
 - `Session.interrupt()`
 - `Session.archive()`
 - `Session.send(**command)` / `Session.peers()`
+- `Session.subscribe_events()` → `EventSubscription`
+
+Mob methods:
+
+- `Mob.status()` / `Mob.lifecycle(action)`
+- `Mob.spawn(spec)` / `Mob.retire(meerkat_id)` / `Mob.respawn(meerkat_id)`
+- `Mob.wire(a, b)` / `Mob.unwire(a, b)`
+- `Mob.list_members()` / `Mob.send_message(meerkat_id, message)`
+- `Mob.list_flows()` / `Mob.run_flow(flow_id, params)` / `Mob.flow_status(run_id)` / `Mob.cancel_flow(run_id)`
+- `Mob.subscribe_member_events(meerkat_id)` → `EventSubscription`
+- `Mob.subscribe_events()` → `EventSubscription`
 
 `get_config()` / `patch_config()` return the config envelope.
 
@@ -334,12 +345,11 @@ Client methods:
 - `createSessionStreaming(prompt, options?)` → `EventStream`
 - `listSessions()` → `SessionInfo[]`
 - `readSession(sessionId)` → object
+- `createMob(definition, options?)` → `Mob`
+- `listMobs()` → `MobSummary[]`
 - `getConfig()` / `setConfig(...)` / `patchConfig(...)`
 - `mcpAdd(params)` / `mcpRemove(params)` / `mcpReload(params)`
 - `listSkills()` / `inspectSkill(id, options?)`
-- `listMobPrefabs()` / `listMobTools()` / `callMobTool(name, args?)`
-- `send(sessionId, command)` / `peers(sessionId)`
-- `openCommsStream(sessionId, ...)` / `sendAndStream(sessionId, ...)`
 - `capabilities` (property, populated during `connect()`)
 
 Session methods:
@@ -350,7 +360,17 @@ Session methods:
 - `Session.interrupt()`
 - `Session.archive()`
 - `Session.send(command)` / `Session.peers()`
-- `Session.openCommsStream(options?)` / `Session.sendAndStream(command)`
+- `Session.subscribeEvents()` → `EventSubscription<AgentEventEnvelope>`
+
+Mob methods:
+
+- `Mob.status()` / `Mob.lifecycle(action)`
+- `Mob.spawn(spec)` / `Mob.retire(meerkatId)` / `Mob.respawn(meerkatId)`
+- `Mob.wire(a, b)` / `Mob.unwire(a, b)`
+- `Mob.listMembers()` / `Mob.sendMessage(meerkatId, message)`
+- `Mob.listFlows()` / `Mob.runFlow(flowId, params)` / `Mob.flowStatus(runId)` / `Mob.cancelFlow(runId)`
+- `Mob.subscribeMemberEvents(meerkatId)` → `EventSubscription<AgentEventEnvelope>`
+- `Mob.subscribeEvents()` → `EventSubscription<AttributedMobEvent>`
 
 `getConfig()` / `patchConfig()` return the config envelope.
 

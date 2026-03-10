@@ -724,14 +724,14 @@ Events are injected into the agent's context with source tagging:
 - **RPC**: `[EVENT via rpc] <body>` (with optional `[source: name]` prefix)
 - **TCP/UDS**: `[EVENT via tcp] <body>` or `[EVENT via uds] <body>`
 
-### Delivery vs observation (Rust SDK)
+### Delivery vs observation
 
-When injecting events from application code, the public Rust SDK now keeps delivery and observation separate.
+When injecting events from application code, delivery and observation are separate concerns.
 
-The service's `event_injector()` returns an `Arc<dyn EventInjector>`. Use `inject()` to push an external event into the session inbox:
+**Delivery** — the service's `event_injector()` returns an `Arc<dyn EventInjector>`. Use `inject()` to push an external event into the session inbox:
 
 ```rust
-use meerkat::{EventInjector, PlainEventSource};
+use meerkat_core::{EventInjector, PlainEventSource};
 
 let injector = service.event_injector(&session_id).await
     .expect("comms must be enabled");
@@ -742,11 +742,11 @@ injector.inject(
 )?;
 ```
 
-If you need streaming output, subscribe at the scope you actually want:
+**Observation** — subscribe at the scope you need:
 
-- **session-scoped**: use the session's primary `event_tx`
-- **agent-scoped**: use `MobHandle::subscribe_agent_events(...)`
-- **mob-scoped**: use `MobHandle::subscribe_mob_events(...)`
+- **session-scoped**: use the session's primary `event_tx` or `session/stream_open` (RPC) / `Session.subscribe()` (Web SDK) / `session.subscribe_events()` (Python SDK) / `session.subscribeEvents()` (TypeScript SDK)
+- **agent-scoped**: use `MobHandle::subscribe_agent_events(...)` or `mob/stream_open` (RPC) / `Mob.subscribe(meerkatId)` (Web SDK) / `mob.subscribe_member_events(meerkat_id)` (Python/TypeScript SDK)
+- **mob-scoped**: use `MobHandle::subscribe_mob_events(...)` or `mob/stream_open` (RPC) / `Mob.subscribeAll()` (Web SDK) / `mob.subscribe_events()` (Python/TypeScript SDK)
 
 This makes the public contract explicit: comms delivers work, and observability chooses scope.
 
@@ -754,7 +754,7 @@ This makes the public contract explicit: comms delivers work, and observability 
 
 - The agent must be running in **host mode** if you expect inbox events to be drained promptly.
 - **Comms must be enabled.** Without comms, `event_injector()` returns `None`.
-- Any streaming surface must be configured separately from injection.
+- Observation subscriptions are independent of delivery — configure them separately.
 
 ## Security
 

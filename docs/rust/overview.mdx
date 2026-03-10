@@ -289,9 +289,6 @@ match event {
     AgentEvent::SkillsResolved { skills, injection_bytes } => {}
     AgentEvent::SkillResolutionFailed { reference, error } => {}
 
-    // Interaction-scoped streaming
-    AgentEvent::InteractionComplete { interaction_id, result } => {}
-    AgentEvent::InteractionFailed { interaction_id, error } => {}
     AgentEvent::StreamTruncated { reason } => {}
 
     // Tool config changes

@@ -205,7 +205,6 @@ from meerkat import (
     HookStarted, HookCompleted, HookFailed, HookDenied,
     HookRewriteApplied, HookPatchPublished,
     SkillsResolved, SkillResolutionFailed,
-    InteractionComplete, InteractionFailed,
     StreamTruncated,
     ToolConfigChanged, ToolConfigChangedPayload,
     UnknownEvent,
@@ -383,16 +382,6 @@ A skill reference could not be resolved.
 
 <ResponseField name="reference" type="str">The skill reference that failed.</ResponseField>
 <ResponseField name="error" type="str">Failure description.</ResponseField>
-</Accordion>
-
-### Comms events
-
-<Accordion title="InteractionComplete / InteractionFailed">
-Comms interaction lifecycle events.
-
-<ResponseField name="interaction_id" type="str">Interaction identifier.</ResponseField>
-<ResponseField name="result" type="str">`InteractionComplete` only — interaction result.</ResponseField>
-<ResponseField name="error" type="str">`InteractionFailed` only — failure description.</ResponseField>
 </Accordion>
 
 ### Forward compatibility

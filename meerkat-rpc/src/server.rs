@@ -131,6 +131,11 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> RpcServer<R, W> {
     /// EOF (reader returns `None`) triggers graceful shutdown.
     pub async fn run(&mut self) -> Result<(), ServerError> {
         loop {
+            // Sweep timed-out callback entries whose waiters dropped.
+            if !self.pending_callbacks.is_empty() {
+                self.pending_callbacks.retain(|_, tx| !tx.is_closed());
+            }
+
             tokio::select! {
                 biased;
 
@@ -197,8 +202,6 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> RpcServer<R, W> {
                 // Send callback requests to the client.
                 Some((request, response_tx)) = self.callback_request_rx.recv() => {
                     if let Some(ref req_id) = request.id {
-                        // Sweep stale entries whose waiters timed out / dropped.
-                        self.pending_callbacks.retain(|_, tx| !tx.is_closed());
                         self.pending_callbacks.insert(req_id.clone(), response_tx);
                     }
                     self.transport.write_request(&request).await?;
@@ -232,7 +235,13 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> RpcServer<R, W> {
         match self.registered_tools.write() {
             Ok(mut tools) => {
                 let count = params.tools.len();
-                tools.extend(params.tools);
+                for new_tool in params.tools {
+                    if let Some(existing) = tools.iter_mut().find(|t| t.name == new_tool.name) {
+                        *existing = new_tool;
+                    } else {
+                        tools.push(new_tool);
+                    }
+                }
                 RpcResponse::success(id, serde_json::json!({ "registered": count }))
             }
             Err(_) => RpcResponse::error(

@@ -785,6 +785,9 @@ impl SessionRuntime {
         }
 
         // Restore callback tools from globally registered definitions.
+        // Note: per-session external_tools (from CreateSessionParams) are
+        // ephemeral in-process handlers and cannot survive a runtime restart.
+        // Only globally registered tools (via tools/register) are restored.
         if let Some(tx) = self.callback_request_tx() {
             let tools: Vec<meerkat_core::ToolDef> = self
                 .registered_tools()

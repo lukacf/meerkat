@@ -224,9 +224,11 @@ class MeerkatClient:
                 "tools/register",
                 {"tools": self._tool_registry.definitions()},
             )
-            # Install the tool handler in the dispatch loop.
-            if self._dispatcher:
-                self._dispatcher.set_tool_handler(self._tool_registry)
+
+        # Always install the tool handler so post-connect @client.tool()
+        # registrations can serve callback requests.
+        if self._dispatcher:
+            self._dispatcher.set_tool_handler(self._tool_registry)
 
         return self
 

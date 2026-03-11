@@ -386,14 +386,21 @@ impl MethodRouter {
                     &self.notification_sink,
                 )
                 .await;
-                // Register runtime driver for newly created session
+                // Register runtime driver with executor for newly created session
                 if resp.error.is_none()
                     && let Some(ref result) = resp.result
                     && let Ok(val) = serde_json::from_str::<serde_json::Value>(result.get())
                     && let Some(sid_str) = val.get("session_id").and_then(|v| v.as_str())
                     && let Ok(sid) = meerkat_core::SessionId::parse(sid_str)
                 {
-                    self.runtime_adapter.register_session(sid).await;
+                    let executor = Box::new(crate::session_executor::SessionRuntimeExecutor::new(
+                        self.runtime.clone(),
+                        sid.clone(),
+                        self.notification_sink.clone(),
+                    ));
+                    self.runtime_adapter
+                        .register_session_with_executor(sid, executor)
+                        .await;
                 }
                 resp
             }

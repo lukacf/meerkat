@@ -39,6 +39,27 @@ impl PersistentRuntimeDriver {
         }
     }
 
+    /// Check if the runtime is idle (delegates to inner).
+    pub fn is_idle(&self) -> bool {
+        self.inner.is_idle()
+    }
+
+    /// Start a new run (delegates to inner).
+    pub fn start_run(
+        &mut self,
+        run_id: meerkat_core::lifecycle::RunId,
+    ) -> Result<(), crate::runtime_state::RuntimeStateTransitionError> {
+        self.inner.start_run(run_id)
+    }
+
+    /// Complete a run (delegates to inner).
+    pub fn complete_run(
+        &mut self,
+    ) -> Result<meerkat_core::lifecycle::RunId, crate::runtime_state::RuntimeStateTransitionError>
+    {
+        self.inner.complete_run()
+    }
+
     /// Get pending events (delegates to inner).
     pub fn drain_events(&mut self) -> Vec<RuntimeEventEnvelope> {
         self.inner.drain_events()

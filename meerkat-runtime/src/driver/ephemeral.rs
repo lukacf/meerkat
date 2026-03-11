@@ -60,6 +60,26 @@ impl EphemeralRuntimeDriver {
         }
     }
 
+    /// Check if the runtime is idle.
+    pub fn is_idle(&self) -> bool {
+        self.state_machine.is_idle()
+    }
+
+    /// Start a new run (Idle → Running).
+    pub fn start_run(
+        &mut self,
+        run_id: RunId,
+    ) -> Result<(), crate::runtime_state::RuntimeStateTransitionError> {
+        self.state_machine.start_run(run_id)
+    }
+
+    /// Complete a run (Running → Idle), returning the finished RunId.
+    pub fn complete_run(
+        &mut self,
+    ) -> Result<RunId, crate::runtime_state::RuntimeStateTransitionError> {
+        self.state_machine.complete_run()
+    }
+
     /// Check if a wake was requested (and clear the flag).
     pub fn take_wake_requested(&mut self) -> bool {
         std::mem::take(&mut self.wake_requested)

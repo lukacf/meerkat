@@ -32,6 +32,8 @@ pub mod policy;
 pub mod policy_table;
 pub mod queue;
 pub mod runtime_event;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod runtime_loop;
 pub mod runtime_state;
 pub mod service_ext;
 #[cfg(not(target_arch = "wasm32"))]

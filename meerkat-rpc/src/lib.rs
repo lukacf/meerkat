@@ -9,6 +9,7 @@ pub mod handlers;
 pub mod protocol;
 pub mod router;
 pub mod server;
+pub mod session_executor;
 pub mod session_runtime;
 pub mod transport;
 

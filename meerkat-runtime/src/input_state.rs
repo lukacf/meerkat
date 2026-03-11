@@ -137,6 +137,12 @@ pub struct InputState {
     /// Terminal outcome (set when state becomes terminal).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_outcome: Option<InputTerminalOutcome>,
+    /// Durability requirement (retained for recovery correctness).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub durability: Option<crate::input::InputDurability>,
+    /// Idempotency key (retained for dedup across restarts).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<crate::identifiers::IdempotencyKey>,
     /// Number of times this input has been applied (for crash-loop detection).
     #[serde(default)]
     pub attempt_count: u32,
@@ -164,6 +170,8 @@ impl InputState {
             current_state: InputLifecycleState::Accepted,
             policy: None,
             terminal_outcome: None,
+            durability: None,
+            idempotency_key: None,
             attempt_count: 0,
             recovery_count: 0,
             history: Vec::new(),

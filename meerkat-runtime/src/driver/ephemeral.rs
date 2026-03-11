@@ -371,7 +371,9 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
 
         // Check idempotency dedup
         let input_id = input.id().clone();
-        let state = InputState::new_accepted(input_id.clone());
+        let mut state = InputState::new_accepted(input_id.clone());
+        state.durability = Some(input.header().durability);
+        state.idempotency_key = input.header().idempotency_key.clone();
 
         if let Some(ref key) = input.header().idempotency_key {
             if let Some(existing_id) = self
@@ -517,8 +519,35 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                     .complete_run()
                     .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
             }
-            RunEvent::RunStarted { .. } | RunEvent::BoundaryApplied { .. } => {
+            RunEvent::RunStarted { .. } => {
                 // Informational — no state change needed
+            }
+            RunEvent::BoundaryApplied { run_id, receipt } => {
+                // Transition contributing inputs to AppliedPendingConsumption
+                for input_id in &receipt.contributing_input_ids {
+                    if let Some(state) = self.ledger.get_mut(input_id) {
+                        // Only transition if Staged (not already Applied)
+                        if state.current_state == InputLifecycleState::Staged {
+                            let _ = InputStateMachine::transition(
+                                state,
+                                InputLifecycleState::Applied,
+                                None,
+                            );
+                            let _ = InputStateMachine::transition(
+                                state,
+                                InputLifecycleState::AppliedPendingConsumption,
+                                None,
+                            );
+                            self.events
+                                .push(self.make_envelope(RuntimeEvent::InputLifecycle(
+                                    InputLifecycleEvent::Applied {
+                                        input_id: input_id.clone(),
+                                        run_id: run_id.clone(),
+                                    },
+                                )));
+                        }
+                    }
+                }
             }
             _ => {
                 // Forward-compatible: unknown RunEvent variants are ignored
@@ -555,6 +584,14 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
 
     fn runtime_state(&self) -> RuntimeState {
         self.state_machine.state()
+    }
+
+    async fn retire(&mut self) -> Result<RetireReport, RuntimeDriverError> {
+        EphemeralRuntimeDriver::retire(self)
+    }
+
+    async fn reset(&mut self) -> Result<ResetReport, RuntimeDriverError> {
+        EphemeralRuntimeDriver::reset(self)
     }
 
     fn input_state(&self, input_id: &InputId) -> Option<&InputState> {

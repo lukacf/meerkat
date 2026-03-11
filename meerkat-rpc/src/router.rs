@@ -266,6 +266,7 @@ pub struct MethodRouter {
     active_mob_streams: Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
     #[cfg(feature = "mob")]
     closed_mob_streams: Arc<Mutex<ClosedStreamSet>>,
+    runtime_adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
 }
 
 impl MethodRouter {
@@ -275,6 +276,7 @@ impl MethodRouter {
         config_store: Arc<dyn ConfigStore>,
         notification_sink: NotificationSink,
     ) -> Self {
+        let runtime_adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
         Self {
             runtime,
             config_store,
@@ -288,7 +290,13 @@ impl MethodRouter {
             active_mob_streams: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(feature = "mob")]
             closed_mob_streams: Arc::new(Mutex::new(ClosedStreamSet::new())),
+            runtime_adapter,
         }
+    }
+
+    /// Get a reference to the runtime adapter for session registration.
+    pub fn runtime_adapter(&self) -> &Arc<meerkat_runtime::RuntimeSessionAdapter> {
+        &self.runtime_adapter
     }
 
     #[cfg(all(test, feature = "mob"))]
@@ -311,6 +319,7 @@ impl MethodRouter {
             active_mob_streams: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(feature = "mob")]
             closed_mob_streams: Arc::new(Mutex::new(ClosedStreamSet::new())),
+            runtime_adapter: Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
         }
     }
 
@@ -370,13 +379,23 @@ impl MethodRouter {
         let response = match request.method.as_str() {
             "initialize" => handlers::initialize::handle_initialize(id),
             "session/create" => {
-                handlers::session::handle_create(
+                let resp = handlers::session::handle_create(
                     id,
                     params,
                     self.runtime.clone(),
                     &self.notification_sink,
                 )
-                .await
+                .await;
+                // Register runtime driver for newly created session
+                if resp.error.is_none()
+                    && let Some(ref result) = resp.result
+                    && let Ok(val) = serde_json::from_str::<serde_json::Value>(result.get())
+                    && let Some(sid_str) = val.get("session_id").and_then(|v| v.as_str())
+                    && let Ok(sid) = meerkat_core::SessionId::parse(sid_str)
+                {
+                    self.runtime_adapter.register_session(sid).await;
+                }
+                resp
             }
             "session/list" => handlers::session::handle_list(id, params, &self.runtime).await,
             "session/read" => self.handle_session_read(id, params).await,
@@ -497,6 +516,30 @@ impl MethodRouter {
             "mcp/add" => handlers::mcp::handle_add(id, params, &self.runtime).await,
             "mcp/remove" => handlers::mcp::handle_remove(id, params, &self.runtime).await,
             "mcp/reload" => handlers::mcp::handle_reload(id, params, &self.runtime).await,
+            "runtime/state" => {
+                handlers::runtime::handle_runtime_state(id, params, self.runtime_adapter.as_ref())
+                    .await
+            }
+            "runtime/accept" => {
+                handlers::runtime::handle_runtime_accept(id, params, self.runtime_adapter.as_ref())
+                    .await
+            }
+            "runtime/retire" => {
+                handlers::runtime::handle_runtime_retire(id, params, self.runtime_adapter.as_ref())
+                    .await
+            }
+            "runtime/reset" => {
+                handlers::runtime::handle_runtime_reset(id, params, self.runtime_adapter.as_ref())
+                    .await
+            }
+            "input/state" => {
+                handlers::runtime::handle_input_state(id, params, self.runtime_adapter.as_ref())
+                    .await
+            }
+            "input/list" => {
+                handlers::runtime::handle_input_list(id, params, self.runtime_adapter.as_ref())
+                    .await
+            }
             _ => RpcResponse::error(
                 id,
                 error::METHOD_NOT_FOUND,
@@ -589,7 +632,10 @@ impl MethodRouter {
         };
         match self.resolve_session_owner(&session_id).await {
             Some(SessionOwner::Runtime) => match self.runtime.archive_session(&session_id).await {
-                Ok(()) => RpcResponse::success(id, json!({"archived": true})),
+                Ok(()) => {
+                    self.runtime_adapter.unregister_session(&session_id).await;
+                    RpcResponse::success(id, json!({"archived": true}))
+                }
                 Err(rpc_err) => RpcResponse::error(id, rpc_err.code, rpc_err.message),
             },
             #[cfg(feature = "mob")]

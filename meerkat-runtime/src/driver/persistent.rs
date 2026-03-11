@@ -138,6 +138,14 @@ impl RuntimeDriver for PersistentRuntimeDriver {
         self.inner.recover().await
     }
 
+    async fn retire(&mut self) -> Result<crate::traits::RetireReport, RuntimeDriverError> {
+        EphemeralRuntimeDriver::retire(&mut self.inner)
+    }
+
+    async fn reset(&mut self) -> Result<crate::traits::ResetReport, RuntimeDriverError> {
+        EphemeralRuntimeDriver::reset(&mut self.inner)
+    }
+
     fn runtime_state(&self) -> RuntimeState {
         self.inner.runtime_state()
     }

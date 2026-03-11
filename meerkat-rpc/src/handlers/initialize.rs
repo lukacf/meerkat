@@ -48,6 +48,12 @@ pub fn handle_initialize(id: Option<RpcId>) -> RpcResponse {
                 "skills/list".to_string(),
                 "skills/inspect".to_string(),
                 "tools/register".to_string(),
+                "runtime/state".to_string(),
+                "runtime/accept".to_string(),
+                "runtime/retire".to_string(),
+                "runtime/reset".to_string(),
+                "input/state".to_string(),
+                "input/list".to_string(),
             ];
             #[cfg(feature = "mob")]
             {

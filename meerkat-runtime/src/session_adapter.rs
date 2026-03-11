@@ -147,16 +147,7 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
             .ok_or(RuntimeDriverError::NotReady {
                 state: RuntimeState::Destroyed,
             })?;
-        match entry {
-            DriverEntry::Ephemeral(d) => d.retire(),
-            DriverEntry::Persistent(_) => {
-                // For persistent, we need to delegate through the trait
-                // but retire() is on EphemeralRuntimeDriver, not the trait
-                Err(RuntimeDriverError::Internal(
-                    "retire not yet implemented for persistent driver".into(),
-                ))
-            }
-        }
+        entry.as_driver_mut().retire().await
     }
 
     async fn reset_runtime(
@@ -169,12 +160,7 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
             .ok_or(RuntimeDriverError::NotReady {
                 state: RuntimeState::Destroyed,
             })?;
-        match entry {
-            DriverEntry::Ephemeral(d) => d.reset(),
-            DriverEntry::Persistent(_) => Err(RuntimeDriverError::Internal(
-                "reset not yet implemented for persistent driver".into(),
-            )),
-        }
+        entry.as_driver_mut().reset().await
     }
 
     async fn input_state(

@@ -3,7 +3,7 @@
 //! Provides a generic `JsonlTransport` that reads JSON-RPC requests
 //! line-by-line and writes responses/notifications as JSONL.
 
-use crate::protocol::{RpcNotification, RpcRequest, RpcResponse};
+use crate::protocol::{RpcMessage, RpcNotification, RpcRequest, RpcResponse};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Errors that can occur during transport operations.
@@ -31,10 +31,11 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> JsonlTransport<R, W> {
         Self { reader, writer }
     }
 
-    /// Read the next JSON-RPC request from the transport.
+    /// Read the next JSON-RPC message (request or response) from the transport.
     ///
     /// Returns `Ok(None)` on EOF. Skips empty lines.
-    pub async fn read_message(&mut self) -> Result<Option<RpcRequest>, TransportError> {
+    /// Discriminates by field presence: `method` → Request, otherwise → Response.
+    pub async fn read_message(&mut self) -> Result<Option<RpcMessage>, TransportError> {
         let mut line = String::new();
         loop {
             line.clear();
@@ -46,9 +47,24 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> JsonlTransport<R, W> {
             if trimmed.is_empty() {
                 continue; // skip empty lines
             }
-            let request: RpcRequest = serde_json::from_str(trimmed)?;
-            return Ok(Some(request));
+            // Peek at the JSON to determine if it's a request or response.
+            let value: serde_json::Value = serde_json::from_str(trimmed)?;
+            if value.get("method").is_some() {
+                let request: RpcRequest = serde_json::from_value(value)?;
+                return Ok(Some(RpcMessage::Request(request)));
+            }
+            let response: RpcResponse = serde_json::from_value(value)?;
+            return Ok(Some(RpcMessage::Response(response)));
         }
+    }
+
+    /// Write a JSON-RPC request as a single JSONL line (for server→client callbacks).
+    pub async fn write_request(&mut self, request: &RpcRequest) -> Result<(), TransportError> {
+        let json = serde_json::to_string(request)?;
+        self.writer.write_all(json.as_bytes()).await?;
+        self.writer.write_all(b"\n").await?;
+        self.writer.flush().await?;
+        Ok(())
     }
 
     /// Write a JSON-RPC response as a single JSONL line.
@@ -88,6 +104,14 @@ mod tests {
         JsonlTransport::new(reader, writer)
     }
 
+    /// Unwrap an `RpcMessage` as a `Request`, panicking otherwise.
+    fn unwrap_request(msg: RpcMessage) -> RpcRequest {
+        match msg {
+            RpcMessage::Request(req) => req,
+            RpcMessage::Response(_) => panic!("expected Request, got Response"),
+        }
+    }
+
     #[tokio::test]
     async fn read_single_request() {
         let input =
@@ -97,7 +121,7 @@ mod tests {
 
         let msg = transport.read_message().await.unwrap();
         assert!(msg.is_some());
-        let req = msg.unwrap();
+        let req = unwrap_request(msg.unwrap());
         assert_eq!(req.id, Some(RpcId::Num(1)));
         assert_eq!(req.method, "session/create");
     }
@@ -110,13 +134,13 @@ mod tests {
         let input = format!("{line1}\n{line2}\n{line3}\n");
         let mut transport = make_transport(&input);
 
-        let r1 = transport.read_message().await.unwrap().unwrap();
+        let r1 = unwrap_request(transport.read_message().await.unwrap().unwrap());
         assert_eq!(r1.method, "a");
 
-        let r2 = transport.read_message().await.unwrap().unwrap();
+        let r2 = unwrap_request(transport.read_message().await.unwrap().unwrap());
         assert_eq!(r2.method, "b");
 
-        let r3 = transport.read_message().await.unwrap().unwrap();
+        let r3 = unwrap_request(transport.read_message().await.unwrap().unwrap());
         assert_eq!(r3.method, "c");
 
         // After all lines, should get None (EOF)
@@ -166,10 +190,10 @@ mod tests {
         );
         let mut transport = make_transport(&input);
 
-        let r1 = transport.read_message().await.unwrap().unwrap();
+        let r1 = unwrap_request(transport.read_message().await.unwrap().unwrap());
         assert_eq!(r1.method, "first");
 
-        let r2 = transport.read_message().await.unwrap().unwrap();
+        let r2 = unwrap_request(transport.read_message().await.unwrap().unwrap());
         assert_eq!(r2.method, "second");
 
         let r3 = transport.read_message().await.unwrap();
@@ -225,5 +249,22 @@ mod tests {
         let p3: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
         assert_eq!(p3["method"], "event");
         assert_eq!(p3["params"]["n"], 3);
+    }
+
+    #[tokio::test]
+    async fn read_message_parses_request_and_response() {
+        let req_line = r#"{"jsonrpc":"2.0","id":1,"method":"turn/start","params":{}}"#;
+        let resp_line =
+            r#"{"jsonrpc":"2.0","id":"srv-1","result":{"content":"ok","is_error":false}}"#;
+        let input = format!("{req_line}\n{resp_line}\n");
+        let mut transport = make_transport(&input);
+
+        // First line has `method` → should be Request.
+        let msg1 = transport.read_message().await.unwrap().unwrap();
+        assert!(matches!(msg1, RpcMessage::Request(_)));
+
+        // Second line has no `method` → should be Response.
+        let msg2 = transport.read_message().await.unwrap().unwrap();
+        assert!(matches!(msg2, RpcMessage::Response(_)));
     }
 }

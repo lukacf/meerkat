@@ -3,6 +3,7 @@
 //! Provides a JSON-RPC 2.0 stdio interface for IDE integration,
 //! desktop apps, and automation tools.
 
+pub mod callback_dispatcher;
 pub mod error;
 pub mod handlers;
 pub mod protocol;

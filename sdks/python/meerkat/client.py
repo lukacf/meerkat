@@ -38,6 +38,7 @@ from .generated.types import CONTRACT_VERSION
 from .mob import Mob
 from .session import DeferredSession, Session, _normalize_skill_ref
 from .streaming import EventStream, EventSubscription, _StdoutDispatcher
+from .tools import ToolRegistry
 from .types import (
     AttributedEvent,
     Capability,
@@ -94,6 +95,31 @@ class MeerkatClient:
         self._request_id = 0
         self._capabilities: list[Capability] | None = None
         self._dispatcher: _StdoutDispatcher | None = None
+        self._tool_registry = ToolRegistry()
+
+    # -- Tool registration -------------------------------------------------
+
+    def tool(
+        self,
+        name: str,
+        *,
+        description: str = "",
+        input_schema: dict[str, Any] | None = None,
+    ) -> Any:
+        """Decorator to register a callback tool handler.
+
+        Example::
+
+            @client.tool("search", description="Search the web")
+            async def handle_search(arguments: dict) -> str:
+                return f"Results for {arguments.get('q', '')}"
+        """
+        def decorator(fn: Any) -> Any:
+            self._tool_registry.register(
+                name, fn, description=description, input_schema=input_schema,
+            )
+            return fn
+        return decorator
 
     # -- Async context manager ---------------------------------------------
 
@@ -151,6 +177,8 @@ class MeerkatClient:
         )
         assert self._process.stdout is not None
         self._dispatcher = _StdoutDispatcher(self._process.stdout)
+        if self._process.stdin:
+            self._dispatcher.set_stdin_writer(self._process.stdin)
         self._dispatcher.start()
 
         result = await self._request("initialize", {})
@@ -170,6 +198,17 @@ class MeerkatClient:
             )
             for c in caps_result.get("capabilities", [])
         ]
+
+        # Register callback tools with the server if any were declared.
+        if self._tool_registry:
+            await self._request(
+                "tools/register",
+                {"tools": self._tool_registry.definitions()},
+            )
+            # Install the tool handler in the dispatch loop.
+            if self._dispatcher:
+                self._dispatcher.set_tool_handler(self._tool_registry)
+
         return self
 
     async def close(self) -> None:

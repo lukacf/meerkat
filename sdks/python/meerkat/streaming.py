@@ -36,6 +36,8 @@ class _StdoutDispatcher:
         self._unmatched_stream_end: set[str] = set()
         self._task: asyncio.Task[None] | None = None
         self._closed = False
+        self._tool_handler: Any = None  # ToolRegistry, set lazily
+        self._stdin_writer: asyncio.StreamWriter | None = None  # set on connect
 
     def start(self) -> None:
         self._task = asyncio.get_running_loop().create_task(self._read_loop())
@@ -91,6 +93,14 @@ class _StdoutDispatcher:
         self._pending_stream_request_id = None
         self._unmatched_buffer.clear()
 
+    def set_tool_handler(self, handler: Any) -> None:
+        """Set the tool registry for handling callback tool requests."""
+        self._tool_handler = handler
+
+    def set_stdin_writer(self, process: Any) -> None:
+        """Set the process for writing callback responses."""
+        self._stdin_writer = process
+
     async def _read_loop(self) -> None:
         while not self._closed:
             line = await self._stdout.readline()
@@ -100,6 +110,10 @@ class _StdoutDispatcher:
             try:
                 data = json.loads(line)
             except json.JSONDecodeError:
+                continue
+            # Server→client callback request (has both id and method).
+            if "id" in data and "method" in data:
+                await self._handle_callback_request(data)
                 continue
             if "id" in data:
                 request_id = data["id"]
@@ -169,6 +183,42 @@ class _StdoutDispatcher:
                     await queue.put(event)
                 elif self._pending_stream_queue is not None:
                     self._unmatched_buffer.setdefault(session_id, []).append(event)
+
+    async def _handle_callback_request(self, data: dict[str, Any]) -> None:
+        """Handle an incoming server→client tool/execute request."""
+        request_id = data.get("id")
+        method = data.get("method", "")
+        params = data.get("params", {})
+
+        if method == "tool/execute" and self._tool_handler is not None:
+            tool_name = params.get("name", "")
+            arguments = params.get("arguments", {})
+            content, is_error = await self._tool_handler.handle(tool_name, arguments)
+            response = {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {"content": content, "is_error": is_error},
+            }
+        else:
+            response = {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {
+                    "code": -32601,
+                    "message": f"Method not supported: {method}",
+                },
+            }
+
+        self._write_response(response)
+
+    def _write_response(self, response: dict[str, Any]) -> None:
+        """Write a JSON-RPC response back to the server via stdin."""
+        if self._stdin_writer is not None:
+            try:
+                data = (json.dumps(response) + "\n").encode()
+                self._stdin_writer.write(data)
+            except Exception:
+                pass  # Best-effort — process may have died.
 
     def _fail_all(self, code: str, message: str) -> None:
         for future in self._pending_responses.values():

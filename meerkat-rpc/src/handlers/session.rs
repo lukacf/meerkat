@@ -125,6 +125,10 @@ pub struct CreateSessionParams {
     /// Set by the application — never visible to the LLM.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell_env: Option<std::collections::HashMap<String, String>>,
+    /// External tool definitions provided by the client (callback tools).
+    /// These are merged with globally registered tools at build time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_tools: Option<Vec<meerkat_core::ToolDef>>,
 }
 
 fn default_structured_output_retries() -> u32 {
@@ -273,6 +277,28 @@ pub async fn handle_create(
     build_config.preload_skills = params
         .preload_skills
         .map(|ids| ids.into_iter().map(meerkat_core::skills::SkillId).collect());
+
+    // Wire callback tools if external_tools are provided or globally registered.
+    {
+        let mut all_tools: Vec<meerkat_core::ToolDef> = params.external_tools.unwrap_or_default();
+
+        // Merge globally registered tools.
+        if let Ok(global) = runtime.registered_tools().read() {
+            all_tools.extend(global.iter().cloned());
+        }
+
+        if !all_tools.is_empty()
+            && let Some(tx) = runtime.callback_request_tx()
+        {
+            let dispatcher: Arc<dyn meerkat_core::AgentToolDispatcher> =
+                Arc::new(crate::callback_dispatcher::CallbackToolDispatcher::new(
+                    all_tools,
+                    tx.clone(),
+                    runtime.callback_id_counter(),
+                ));
+            build_config.external_tools = Some(dispatcher);
+        }
+    }
 
     // Validate and canonicalize skill refs before creating a pending session.
     // This prevents invalid requests from consuming session slots.

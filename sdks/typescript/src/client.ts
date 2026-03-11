@@ -147,9 +147,36 @@ export class MeerkatClient {
   private unmatchedStandaloneStreamEnd = new Map<string, Record<string, unknown>>();
   private streamTerminalOutcomes = new Map<string, Record<string, unknown>>();
   private rl: ReadlineInterface | null = null;
+  private toolHandlers = new Map<
+    string,
+    {
+      description: string;
+      inputSchema: Record<string, unknown>;
+      handler: (args: Record<string, unknown>) => Promise<string>;
+    }
+  >();
 
   constructor(rkatPath = "rkat-rpc") {
     this.rkatPath = rkatPath;
+  }
+
+  /**
+   * Register a callback tool handler.
+   *
+   * @example
+   * ```ts
+   * client.registerTool("search", "Search the web", { type: "object" }, async (args) => {
+   *   return `Results for ${args.q}`;
+   * });
+   * ```
+   */
+  registerTool(
+    name: string,
+    description: string,
+    inputSchema: Record<string, unknown>,
+    handler: (args: Record<string, unknown>) => Promise<string>,
+  ): void {
+    this.toolHandlers.set(name, { description, inputSchema, handler });
   }
 
   // -- Connection ---------------------------------------------------------
@@ -197,6 +224,18 @@ export class MeerkatClient {
         status: MeerkatClient.normalizeStatus(cap.status),
       }),
     );
+
+    // Register callback tools if any were declared.
+    if (this.toolHandlers.size > 0) {
+      const tools = Array.from(this.toolHandlers.entries()).map(
+        ([name, { description, inputSchema }]) => ({
+          name,
+          description,
+          input_schema: inputSchema,
+        }),
+      );
+      await this.request("tools/register", { tools });
+    }
 
     return this;
   }
@@ -846,6 +885,12 @@ export class MeerkatClient {
       return;
     }
 
+    // Server→client callback request (has both id and method).
+    if ("id" in data && "method" in data) {
+      this.handleCallbackRequest(data);
+      return;
+    }
+
     if ("id" in data && typeof data.id === "number") {
       const pending = this.pendingRequests.get(data.id);
       if (pending) {
@@ -1056,6 +1101,53 @@ export class MeerkatClient {
       );
     }
     return raw as unknown as McpLiveOpResponse;
+  }
+
+  private handleCallbackRequest(data: Record<string, unknown>): void {
+    const requestId = data.id;
+    const method = String(data.method ?? "");
+    const params = (data.params ?? {}) as Record<string, unknown>;
+
+    if (method === "tool/execute") {
+      const toolName = String(params.name ?? "");
+      const handler = this.toolHandlers.get(toolName);
+
+      if (handler) {
+        const args = (params.arguments ?? {}) as Record<string, unknown>;
+        handler
+          .handler(args)
+          .then((content) => {
+            this.writeCallbackResponse(requestId, { content, is_error: false });
+          })
+          .catch((err: unknown) => {
+            this.writeCallbackResponse(requestId, {
+              content: `Tool error: ${err}`,
+              is_error: true,
+            });
+          });
+      } else {
+        this.writeCallbackResponse(requestId, {
+          content: `Unknown tool: ${toolName}`,
+          is_error: true,
+        });
+      }
+    } else {
+      // Unknown callback method.
+      const response = {
+        jsonrpc: "2.0",
+        id: requestId,
+        error: { code: -32601, message: `Method not supported: ${method}` },
+      };
+      this.process?.stdin?.write(JSON.stringify(response) + "\n");
+    }
+  }
+
+  private writeCallbackResponse(
+    requestId: unknown,
+    result: { content: string; is_error: boolean },
+  ): void {
+    const response = { jsonrpc: "2.0", id: requestId, result };
+    this.process?.stdin?.write(JSON.stringify(response) + "\n");
   }
 
   private static buildCreateParams(

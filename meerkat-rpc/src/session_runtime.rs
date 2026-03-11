@@ -133,6 +133,17 @@ pub struct SessionRuntime {
     skill_identity_registry: Arc<StdRwLock<SkillIdentityRegistryState>>,
     #[cfg(feature = "mcp")]
     mcp_sessions: RwLock<std::collections::HashMap<SessionId, SessionMcpState>>,
+    /// Channel for sending callback tool requests to the RPC server loop.
+    callback_request_tx: Option<
+        mpsc::Sender<(
+            crate::protocol::RpcRequest,
+            tokio::sync::oneshot::Sender<crate::protocol::RpcResponse>,
+        )>,
+    >,
+    /// Counter for generating unique server-originated callback request IDs.
+    callback_id_counter: Arc<std::sync::atomic::AtomicU64>,
+    /// Globally registered callback tool definitions (via `tools/register`).
+    registered_tools: Arc<StdRwLock<Vec<meerkat_core::ToolDef>>>,
 }
 
 impl SessionRuntime {
@@ -161,6 +172,9 @@ impl SessionRuntime {
             })),
             #[cfg(feature = "mcp")]
             mcp_sessions: RwLock::new(std::collections::HashMap::new()),
+            callback_request_tx: None,
+            callback_id_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            registered_tools: Arc::new(StdRwLock::new(Vec::new())),
         }
     }
 
@@ -191,6 +205,9 @@ impl SessionRuntime {
             })),
             #[cfg(feature = "mcp")]
             mcp_sessions: RwLock::new(std::collections::HashMap::new()),
+            callback_request_tx: None,
+            callback_id_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            registered_tools: Arc::new(StdRwLock::new(Vec::new())),
         }
     }
 
@@ -219,6 +236,43 @@ impl SessionRuntime {
     /// Shared config runtime used by config handlers.
     pub fn config_runtime(&self) -> Option<Arc<meerkat_core::ConfigRuntime>> {
         self.config_runtime.as_ref().map(Arc::clone)
+    }
+
+    /// Set the callback request channel for tool callbacks.
+    pub fn set_callback_channel(
+        &mut self,
+        tx: mpsc::Sender<(
+            crate::protocol::RpcRequest,
+            tokio::sync::oneshot::Sender<crate::protocol::RpcResponse>,
+        )>,
+        id_counter: Arc<std::sync::atomic::AtomicU64>,
+        registered_tools: Arc<StdRwLock<Vec<meerkat_core::ToolDef>>>,
+    ) {
+        self.callback_request_tx = Some(tx);
+        self.callback_id_counter = id_counter;
+        self.registered_tools = registered_tools;
+    }
+
+    /// Get the callback request sender, if configured.
+    pub fn callback_request_tx(
+        &self,
+    ) -> Option<
+        &mpsc::Sender<(
+            crate::protocol::RpcRequest,
+            tokio::sync::oneshot::Sender<crate::protocol::RpcResponse>,
+        )>,
+    > {
+        self.callback_request_tx.as_ref()
+    }
+
+    /// Get the callback ID counter.
+    pub fn callback_id_counter(&self) -> Arc<std::sync::atomic::AtomicU64> {
+        self.callback_id_counter.clone()
+    }
+
+    /// Get the globally registered callback tool definitions.
+    pub fn registered_tools(&self) -> Arc<StdRwLock<Vec<meerkat_core::ToolDef>>> {
+        self.registered_tools.clone()
     }
 
     pub fn set_skill_identity_registry(&self, registry: SourceIdentityRegistry) {

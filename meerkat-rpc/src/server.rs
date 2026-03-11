@@ -4,15 +4,18 @@
 //! channel. Uses `tokio::select!` to multiplex incoming requests, outgoing
 //! responses from spawned dispatch tasks, and event notifications.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use tokio::io::{AsyncBufRead, AsyncWrite, BufReader};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use meerkat_core::ConfigStore;
 
 use crate::NOTIFICATION_CHANNEL_CAPACITY;
-use crate::protocol::{RpcNotification, RpcResponse};
+use crate::handlers::RpcResponseExt;
+use crate::protocol::{RpcId, RpcMessage, RpcNotification, RpcRequest, RpcResponse};
 use crate::router::{MethodRouter, NotificationSink};
 use crate::session_runtime::SessionRuntime;
 use crate::transport::{JsonlTransport, TransportError};
@@ -36,6 +39,16 @@ pub struct RpcServer<R, W> {
     /// Channel for responses from concurrently dispatched requests.
     response_rx: mpsc::Receiver<RpcResponse>,
     response_tx: mpsc::Sender<RpcResponse>,
+    /// Channel for callback requests sent from tool dispatchers → server loop → client.
+    callback_request_rx: mpsc::Receiver<(RpcRequest, oneshot::Sender<RpcResponse>)>,
+    /// Sender half cloned into `CallbackToolDispatcher` instances.
+    callback_request_tx: mpsc::Sender<(RpcRequest, oneshot::Sender<RpcResponse>)>,
+    /// Outstanding server→client requests awaiting a response.
+    pending_callbacks: HashMap<RpcId, oneshot::Sender<RpcResponse>>,
+    /// Counter for generating server-originated request IDs.
+    callback_id_counter: Arc<AtomicU64>,
+    /// Tool definitions registered via `tools/register`.
+    registered_tools: Arc<std::sync::RwLock<Vec<meerkat_core::ToolDef>>>,
 }
 
 impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> RpcServer<R, W> {
@@ -66,13 +79,35 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> RpcServer<R, W> {
             .with_skill_runtime(skill_runtime);
         let transport = JsonlTransport::new(reader, writer);
         let (response_tx, response_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
+        let (callback_request_tx, callback_request_rx) =
+            mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         Self {
             transport,
             router,
             notification_rx,
             response_rx,
             response_tx,
+            callback_request_rx,
+            callback_request_tx,
+            pending_callbacks: HashMap::new(),
+            callback_id_counter: Arc::new(AtomicU64::new(0)),
+            registered_tools: Arc::new(std::sync::RwLock::new(Vec::new())),
         }
+    }
+
+    /// Get the callback request sender for creating `CallbackToolDispatcher` instances.
+    pub fn callback_request_tx(&self) -> mpsc::Sender<(RpcRequest, oneshot::Sender<RpcResponse>)> {
+        self.callback_request_tx.clone()
+    }
+
+    /// Get the callback ID counter for generating unique server-originated IDs.
+    pub fn callback_id_counter(&self) -> Arc<AtomicU64> {
+        self.callback_id_counter.clone()
+    }
+
+    /// Get the shared registered tools list.
+    pub fn registered_tools(&self) -> Arc<std::sync::RwLock<Vec<meerkat_core::ToolDef>>> {
+        self.registered_tools.clone()
     }
 
     /// Run the server until EOF or a fatal I/O error.
@@ -88,10 +123,20 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> RpcServer<R, W> {
             tokio::select! {
                 biased;
 
-                // Read the next request from the transport.
+                // Read the next message from the transport.
                 msg = self.transport.read_message() => {
                     match msg {
-                        Ok(Some(request)) => {
+                        Ok(Some(RpcMessage::Request(request))) => {
+                            // Handle `tools/register` synchronously (needs server state).
+                            if request.method == "tools/register" {
+                                let response = self.handle_tools_register(
+                                    request.id.clone(),
+                                    request.params.as_deref(),
+                                );
+                                self.transport.write_response(&response).await?;
+                                continue;
+                            }
+
                             let router = self.router.clone();
                             let resp_tx = self.response_tx.clone();
                             tokio::spawn(async move {
@@ -99,6 +144,19 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> RpcServer<R, W> {
                                     let _ = resp_tx.send(response).await;
                                 }
                             });
+                        }
+                        Ok(Some(RpcMessage::Response(response))) => {
+                            // Callback response from the client.
+                            if let Some(ref resp_id) = response.id {
+                                if let Some(tx) = self.pending_callbacks.remove(resp_id) {
+                                    let _ = tx.send(response);
+                                } else {
+                                    tracing::warn!(
+                                        id = ?resp_id,
+                                        "Received response for unknown callback ID"
+                                    );
+                                }
+                            }
                         }
                         Ok(None) => break, // EOF - clean shutdown
                         Err(TransportError::Parse(err)) => {
@@ -124,12 +182,52 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> RpcServer<R, W> {
                 Some(notification) = self.notification_rx.recv() => {
                     self.transport.write_notification(&notification).await?;
                 }
+
+                // Send callback requests to the client.
+                Some((request, response_tx)) = self.callback_request_rx.recv() => {
+                    if let Some(ref req_id) = request.id {
+                        self.pending_callbacks.insert(req_id.clone(), response_tx);
+                    }
+                    self.transport.write_request(&request).await?;
+                }
             }
         }
 
         // Graceful shutdown: close all sessions.
         self.router.runtime().shutdown().await;
         Ok(())
+    }
+
+    /// Handle `tools/register` — register callback tool definitions.
+    fn handle_tools_register(
+        &self,
+        id: Option<RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        #[derive(serde::Deserialize)]
+        struct RegisterParams {
+            tools: Vec<meerkat_core::ToolDef>,
+        }
+
+        let params: RegisterParams = match crate::handlers::parse_params(params) {
+            Ok(p) => p,
+            Err(resp) => {
+                return resp.with_id(id);
+            }
+        };
+
+        match self.registered_tools.write() {
+            Ok(mut tools) => {
+                let count = params.tools.len();
+                tools.extend(params.tools);
+                RpcResponse::success(id, serde_json::json!({ "registered": count }))
+            }
+            Err(_) => RpcResponse::error(
+                id,
+                crate::error::INTERNAL_ERROR,
+                "Failed to acquire tool registry lock",
+            ),
+        }
     }
 }
 

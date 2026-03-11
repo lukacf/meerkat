@@ -867,6 +867,62 @@ mod tests {
         }
     }
 
+    // Staged interactions runtime for host-mode tests that need multi-round drains.
+    // Returns one batch per drain call, auto-dismisses after all batches consumed.
+    struct StagedInteractionMockCommsRuntime {
+        batches: Mutex<Vec<Vec<crate::interaction::InboxInteraction>>>,
+        notify: Arc<Notify>,
+        dismiss: std::sync::atomic::AtomicBool,
+        had_interactions: std::sync::atomic::AtomicBool,
+    }
+
+    impl StagedInteractionMockCommsRuntime {
+        fn with_batches(batches: Vec<Vec<crate::interaction::InboxInteraction>>) -> Self {
+            Self {
+                batches: Mutex::new(batches),
+                notify: Arc::new(Notify::new()),
+                dismiss: std::sync::atomic::AtomicBool::new(false),
+                had_interactions: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl CommsRuntime for StagedInteractionMockCommsRuntime {
+        async fn drain_messages(&self) -> Vec<String> {
+            vec![]
+        }
+
+        fn inbox_notify(&self) -> Arc<Notify> {
+            self.notify.clone()
+        }
+
+        async fn drain_inbox_interactions(&self) -> Vec<crate::interaction::InboxInteraction> {
+            let mut batches = self.batches.lock().await;
+            if batches.is_empty() {
+                if self.had_interactions.load(Ordering::SeqCst) {
+                    self.dismiss.store(true, Ordering::SeqCst);
+                }
+                Vec::new()
+            } else {
+                let batch = batches.remove(0);
+                if !batch.is_empty() {
+                    self.had_interactions.store(true, Ordering::SeqCst);
+                }
+                batch
+            }
+        }
+
+        fn dismiss_received(&self) -> bool {
+            self.dismiss.load(Ordering::SeqCst)
+        }
+
+        async fn peers(&self) -> Vec<PeerDirectoryEntry> {
+            vec![]
+        }
+    }
+
     // Sequenced interactions runtime for non-host drain path tests.
     struct SequencedInteractionMockCommsRuntime {
         batches: Mutex<Vec<Vec<crate::interaction::InboxInteraction>>>,
@@ -1375,6 +1431,167 @@ mod tests {
         assert!(
             user_msgs.iter().any(|c| c.contains("completed")),
             "response should be injected as session context"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_response_after_completed_host_turn_triggers_continuation() {
+        // Regression test: the real OB3 case. Agent completes a host turn
+        // (LoopState goes to Completed), then a response arrives later.
+        // run_pending_inner resets state to CallingLlm so this works.
+        let message = make_interaction(
+            InteractionContent::Message {
+                body: "do something".into(),
+            },
+            "do something",
+        );
+        let response_id = crate::interaction::InteractionId(uuid::Uuid::new_v4());
+        let response = crate::interaction::InboxInteraction {
+            id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
+            from: "peer".into(),
+            content: InteractionContent::Response {
+                in_reply_to: response_id,
+                status: crate::interaction::ResponseStatus::Completed,
+                result: serde_json::json!({"review": "looks good"}),
+            },
+            rendered_text: "[Response] completed: {\"review\":\"looks good\"}".into(),
+        };
+
+        // Batch 1: message → triggers a normal host turn
+        // Batch 2: response → should trigger continuation via run_pending_inner
+        let comms = Arc::new(StagedInteractionMockCommsRuntime::with_batches(vec![
+            vec![message],
+            vec![response],
+        ]));
+
+        let mut agent = AgentBuilder::new()
+            .with_comms_runtime(comms as Arc<dyn CommsRuntime>)
+            .build(
+                Arc::new(MockLlmClient),
+                Arc::new(MockToolDispatcher),
+                Arc::new(MockSessionStore),
+            )
+            .await;
+
+        let result = agent.run_host_mode(String::new()).await.unwrap();
+
+        // result.turns is per-run (the last run), not cumulative.
+        // The continuation should have fired (turns > 0).
+        assert!(
+            result.turns > 0,
+            "continuation run should have fired after response injection"
+        );
+
+        // Session should have the full sequence:
+        // User("do something") → Assistant("Done") → User("[Response]...") → Assistant("Done")
+        // This proves run_pending_inner reset state after the first completed turn.
+        let msgs: Vec<&str> = agent
+            .session
+            .messages()
+            .iter()
+            .filter_map(|m| match m {
+                Message::User(u) => Some(u.content.as_str()),
+                Message::BlockAssistant(_) => Some("[assistant]"),
+                Message::Assistant(_) => Some("[assistant]"),
+                _ => None,
+            })
+            .collect();
+
+        // Find the response in session history
+        assert!(
+            msgs.iter().any(|c| c.contains("looks good")),
+            "response should be in session history: {msgs:?}"
+        );
+
+        // Count assistant messages — should be at least 2 (one per run)
+        let assistant_count = msgs.iter().filter(|m| **m == "[assistant]").count();
+        assert!(
+            assistant_count >= 2,
+            "expected at least 2 assistant messages (initial turn + continuation), got {assistant_count}: {msgs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_response_continuation_fires_run_hooks() {
+        use crate::hooks::{
+            HookEngine, HookEngineError, HookExecutionReport, HookInvocation, HookPoint,
+        };
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+        // Hook engine that counts RunStarted and RunCompleted invocations.
+        struct CountingHookEngine {
+            run_started: AtomicU32,
+            run_completed: AtomicU32,
+        }
+
+        impl CountingHookEngine {
+            fn new() -> Self {
+                Self {
+                    run_started: AtomicU32::new(0),
+                    run_completed: AtomicU32::new(0),
+                }
+            }
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl HookEngine for CountingHookEngine {
+            async fn execute(
+                &self,
+                invocation: HookInvocation,
+                _overrides: Option<&crate::config::HookRunOverrides>,
+            ) -> Result<HookExecutionReport, HookEngineError> {
+                match invocation.point {
+                    HookPoint::RunStarted => {
+                        self.run_started.fetch_add(1, AtomicOrdering::SeqCst);
+                    }
+                    HookPoint::RunCompleted => {
+                        self.run_completed.fetch_add(1, AtomicOrdering::SeqCst);
+                    }
+                    _ => {}
+                }
+                Ok(HookExecutionReport::empty())
+            }
+        }
+
+        let response_id = crate::interaction::InteractionId(uuid::Uuid::new_v4());
+        let response = crate::interaction::InboxInteraction {
+            id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
+            from: "peer".into(),
+            content: InteractionContent::Response {
+                in_reply_to: response_id,
+                status: crate::interaction::ResponseStatus::Completed,
+                result: serde_json::json!({"ok": true}),
+            },
+            rendered_text: "[Response] completed".into(),
+        };
+
+        let comms = Arc::new(SyncInteractionMockCommsRuntime::with_interactions(vec![
+            response,
+        ]));
+        let hook_engine = Arc::new(CountingHookEngine::new());
+
+        let mut agent = AgentBuilder::new()
+            .with_comms_runtime(comms as Arc<dyn CommsRuntime>)
+            .with_hook_engine(hook_engine.clone() as Arc<dyn HookEngine>)
+            .build(
+                Arc::new(MockLlmClient),
+                Arc::new(MockToolDispatcher),
+                Arc::new(MockSessionStore),
+            )
+            .await;
+
+        let result = agent.run_host_mode(String::new()).await.unwrap();
+        assert!(result.turns > 0, "continuation should have fired");
+
+        // run_pending_inner should have invoked both run lifecycle hooks.
+        assert!(
+            hook_engine.run_started.load(AtomicOrdering::SeqCst) > 0,
+            "RunStarted hook should fire on response-driven continuation"
+        );
+        assert!(
+            hook_engine.run_completed.load(AtomicOrdering::SeqCst) > 0,
+            "RunCompleted hook should fire on response-driven continuation"
         );
     }
 

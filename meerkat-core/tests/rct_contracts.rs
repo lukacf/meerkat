@@ -92,6 +92,7 @@ fn test_resume_metadata_contract() -> Result<(), Box<dyn std::error::Error>> {
             comms: false,
             subagents: true,
             mob: false,
+            memory: false,
             active_skills: None,
         },
         host_mode: true,

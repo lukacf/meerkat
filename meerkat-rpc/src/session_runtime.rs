@@ -771,6 +771,7 @@ impl SessionRuntime {
             build_config.override_shell = Some(meta.tooling.shell);
             build_config.override_subagents = Some(meta.tooling.subagents);
             build_config.override_mob = Some(meta.tooling.mob);
+            build_config.override_memory = Some(meta.tooling.memory);
             build_config.preload_skills = meta.tooling.active_skills.clone();
         }
 

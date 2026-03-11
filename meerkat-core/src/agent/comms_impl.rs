@@ -280,7 +280,14 @@ where
                             peer_lifecycle_batch.observe(peer, state);
                         }
                         CommsInteractionClass::InlineSessionOnly => {
-                            if matches!(&interaction.content, InteractionContent::Response { .. }) {
+                            if matches!(
+                                &interaction.content,
+                                InteractionContent::Response {
+                                    status: crate::interaction::ResponseStatus::Completed
+                                        | crate::interaction::ResponseStatus::Failed,
+                                    ..
+                                }
+                            ) {
                                 had_response_injections = true;
                             }
                             inject_response_into_session(&mut self.session, &interaction);
@@ -402,16 +409,31 @@ where
                     self.checkpoint_current_session().await;
                 }
 
-                // Continuation run: comms responses were injected into the session
-                // but no passthrough interaction triggered an LLM turn. While the
-                // inner loop correctly suppresses response-driven interrupts during
-                // active work (via host_drain_active), an idle host loop should give
-                // the agent a chance to act on newly arrived response context.
+                // Continuation run: terminal comms responses (Completed/Failed) were
+                // injected into the session but no passthrough interaction triggered
+                // an LLM turn. While the inner loop correctly suppresses response-
+                // driven interrupts during active work (via host_drain_active), an
+                // idle host loop should give the agent a chance to act on newly
+                // arrived response context.
                 //
-                // This does NOT fire for silent intents or peer lifecycle updates,
-                // which are genuinely non-actionable bookkeeping.
+                // Accepted (interim acknowledgement) does NOT trigger a continuation
+                // — only terminal statuses do. Silent intents and peer lifecycle
+                // updates also remain non-actionable.
                 if had_response_injections && !had_passthrough_work {
-                    tracing::debug!("Host mode: continuation run after inline session injections");
+                    tracing::debug!(
+                        "Host mode: continuation run after terminal response injection"
+                    );
+                    if let Some(ref tx) = event_tx {
+                        crate::event_tap::tap_emit(
+                            &self.event_tap,
+                            Some(tx),
+                            AgentEvent::RunStarted {
+                                session_id: self.session.id().clone(),
+                                prompt: String::new(),
+                            },
+                        )
+                        .await;
+                    }
                     let cont_result = match &event_tx {
                         Some(tx) => self.run_loop(Some(tx.clone())).await,
                         None => self.run_loop(None).await,
@@ -1178,6 +1200,191 @@ mod tests {
         assert!(
             !assistant_msgs.is_empty(),
             "expected assistant message from continuation run"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_accepted_response_does_not_trigger_continuation_run() {
+        let response_id = crate::interaction::InteractionId(uuid::Uuid::new_v4());
+        let response = crate::interaction::InboxInteraction {
+            id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
+            from: "peer".into(),
+            content: InteractionContent::Response {
+                in_reply_to: response_id,
+                status: crate::interaction::ResponseStatus::Accepted,
+                result: serde_json::json!({"ack": true}),
+            },
+            rendered_text: "[Response] accepted: {\"ack\":true}".into(),
+        };
+
+        let comms = Arc::new(SyncInteractionMockCommsRuntime::with_interactions(vec![
+            response,
+        ]));
+
+        let mut agent = AgentBuilder::new()
+            .with_comms_runtime(comms.clone() as Arc<dyn CommsRuntime>)
+            .build(
+                Arc::new(MockLlmClient),
+                Arc::new(MockToolDispatcher),
+                Arc::new(MockSessionStore),
+            )
+            .await;
+
+        let result = agent.run_host_mode(String::new()).await.unwrap();
+
+        // Accepted is an interim acknowledgement — should NOT trigger continuation.
+        assert_eq!(
+            result.turns, 0,
+            "accepted response should not trigger continuation run"
+        );
+
+        // But it should still be injected into the session as context.
+        let user_msgs: Vec<_> = agent
+            .session
+            .messages()
+            .iter()
+            .filter(|m| matches!(m, Message::User(_)))
+            .collect();
+        assert_eq!(user_msgs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_continuation_run_emits_run_started_in_events_mode() {
+        let response_id = crate::interaction::InteractionId(uuid::Uuid::new_v4());
+        let response = crate::interaction::InboxInteraction {
+            id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
+            from: "peer".into(),
+            content: InteractionContent::Response {
+                in_reply_to: response_id,
+                status: crate::interaction::ResponseStatus::Completed,
+                result: serde_json::json!({"ok": true}),
+            },
+            rendered_text: "[Response] completed: {\"ok\":true}".into(),
+        };
+
+        let comms = Arc::new(SyncInteractionMockCommsRuntime::with_interactions(vec![
+            response,
+        ]));
+        let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(4096);
+
+        let mut agent = AgentBuilder::new()
+            .with_comms_runtime(comms as Arc<dyn CommsRuntime>)
+            .with_default_event_tx(event_tx)
+            .build(
+                Arc::new(MockLlmClient),
+                Arc::new(MockToolDispatcher),
+                Arc::new(MockSessionStore),
+            )
+            .await;
+
+        let result = agent.run_host_mode(String::new()).await.unwrap();
+        assert!(result.turns > 0, "continuation run should have fired");
+
+        // Drain events and verify RunStarted was emitted before any turn output.
+        let mut saw_run_started = false;
+        while let Ok(event) = event_rx.try_recv() {
+            if matches!(event, AgentEvent::RunStarted { .. }) {
+                saw_run_started = true;
+                break;
+            }
+        }
+        assert!(
+            saw_run_started,
+            "continuation run must emit RunStarted for stream consumers"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_failed_response_triggers_continuation_run() {
+        let response_id = crate::interaction::InteractionId(uuid::Uuid::new_v4());
+        let response = crate::interaction::InboxInteraction {
+            id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
+            from: "peer".into(),
+            content: InteractionContent::Response {
+                in_reply_to: response_id,
+                status: crate::interaction::ResponseStatus::Failed,
+                result: serde_json::json!({"error": "timeout"}),
+            },
+            rendered_text: "[Response] failed: {\"error\":\"timeout\"}".into(),
+        };
+
+        let comms = Arc::new(SyncInteractionMockCommsRuntime::with_interactions(vec![
+            response,
+        ]));
+
+        let mut agent = AgentBuilder::new()
+            .with_comms_runtime(comms.clone() as Arc<dyn CommsRuntime>)
+            .build(
+                Arc::new(MockLlmClient),
+                Arc::new(MockToolDispatcher),
+                Arc::new(MockSessionStore),
+            )
+            .await;
+
+        let result = agent.run_host_mode(String::new()).await.unwrap();
+
+        // Failed is terminal — should trigger continuation like Completed.
+        assert!(
+            result.turns > 0,
+            "failed response should trigger continuation run"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_response_with_passthrough_message_no_separate_continuation() {
+        let response_id = crate::interaction::InteractionId(uuid::Uuid::new_v4());
+        let response = crate::interaction::InboxInteraction {
+            id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
+            from: "peer".into(),
+            content: InteractionContent::Response {
+                in_reply_to: response_id,
+                status: crate::interaction::ResponseStatus::Completed,
+                result: serde_json::json!({"ok": true}),
+            },
+            rendered_text: "[Response] completed: {\"ok\":true}".into(),
+        };
+        let message = make_interaction(
+            InteractionContent::Message {
+                body: "hello".into(),
+            },
+            "hello from peer",
+        );
+
+        let comms = Arc::new(SyncInteractionMockCommsRuntime::with_interactions(vec![
+            response, message,
+        ]));
+
+        let mut agent = AgentBuilder::new()
+            .with_comms_runtime(comms.clone() as Arc<dyn CommsRuntime>)
+            .build(
+                Arc::new(MockLlmClient),
+                Arc::new(MockToolDispatcher),
+                Arc::new(MockSessionStore),
+            )
+            .await;
+
+        let result = agent.run_host_mode(String::new()).await.unwrap();
+
+        // The passthrough message triggers the run; the response is absorbed
+        // as context. Should be exactly 1 turn (the message run), not 2.
+        assert_eq!(
+            result.turns, 1,
+            "response alongside message should not trigger a separate continuation"
+        );
+
+        // Response should still be injected into session as context.
+        let user_msgs: Vec<_> = agent
+            .session
+            .messages()
+            .iter()
+            .filter_map(|m| match m {
+                Message::User(u) => Some(u.content.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            user_msgs.iter().any(|c| c.contains("completed")),
+            "response should be injected as session context"
         );
     }
 

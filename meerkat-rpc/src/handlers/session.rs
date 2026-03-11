@@ -314,8 +314,16 @@ pub async fn handle_create(
         }
     };
 
-    // Create the session
-    let session_id = match runtime.create_session(build_config, params.labels).await {
+    // Create the session. When deferred, stash the prompt for the first turn.
+    let deferred_prompt = if params.initial_turn == Some(InitialTurn::Deferred) {
+        Some(params.prompt.clone())
+    } else {
+        None
+    };
+    let session_id = match runtime
+        .create_session(build_config, params.labels, deferred_prompt)
+        .await
+    {
         Ok(sid) => sid,
         Err(rpc_err) => {
             return RpcResponse::error(id, rpc_err.code, rpc_err.message);

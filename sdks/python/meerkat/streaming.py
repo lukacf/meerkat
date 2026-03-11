@@ -112,8 +112,13 @@ class _StdoutDispatcher:
             except json.JSONDecodeError:
                 continue
             # Server→client callback request (has both id and method).
+            # Spawn as a separate task to avoid blocking the read loop — if the
+            # tool handler makes a nested SDK call, the response needs to flow
+            # through this same _read_loop.
             if "id" in data and "method" in data:
-                await self._handle_callback_request(data)
+                asyncio.get_running_loop().create_task(
+                    self._handle_callback_request(data)
+                )
                 continue
             if "id" in data:
                 request_id = data["id"]

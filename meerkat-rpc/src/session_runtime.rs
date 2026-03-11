@@ -96,6 +96,9 @@ pub struct SessionInfo {
 struct PendingSession {
     phase: PendingSessionPhase,
     labels: Option<BTreeMap<String, String>>,
+    /// Prompt from `session/create` when `initial_turn` is deferred.
+    /// Prepended to the first `turn/start` prompt.
+    deferred_prompt: Option<String>,
 }
 
 enum PendingSessionPhase {
@@ -347,6 +350,7 @@ impl SessionRuntime {
         &self,
         build_config: AgentBuildConfig,
         labels: Option<BTreeMap<String, String>>,
+        deferred_prompt: Option<String>,
     ) -> Result<SessionId, RpcError> {
         // Check combined capacity (pending + active).
         {
@@ -391,6 +395,7 @@ impl SessionRuntime {
                         build_config: Box::new(build_config),
                     },
                     labels,
+                    deferred_prompt,
                 },
             );
         }
@@ -455,13 +460,21 @@ impl SessionRuntime {
                     let PendingSessionPhase::Staged { build_config } = phase else {
                         unreachable!("phase was checked before replacement");
                     };
-                    Some((*build_config, pending_session.labels.clone()))
+                    Some((
+                        *build_config,
+                        pending_session.labels.clone(),
+                        pending_session.deferred_prompt.clone(),
+                    ))
                 }
                 None => None,
             }
         };
 
-        if let Some((mut build_config, labels)) = pending_session {
+        if let Some((mut build_config, labels, deferred_prompt)) = pending_session {
+            // Prepend the deferred create-time prompt to the turn prompt.
+            if let Some(deferred) = deferred_prompt {
+                turn_prompt = format!("{deferred}\n\n{turn_prompt}");
+            }
             // Apply per-turn overrides to the pending build config.
             if let Some(ref ov) = overrides {
                 if let Some(ref model) = ov.model {
@@ -580,6 +593,7 @@ impl SessionRuntime {
                                     build_config: Box::new(build_config),
                                 },
                                 labels,
+                                deferred_prompt: None,
                             },
                         );
                     }
@@ -665,6 +679,7 @@ impl SessionRuntime {
                     build_config: Box::new(build_config),
                 },
                 labels,
+                deferred_prompt: None,
             },
         );
     }
@@ -749,6 +764,7 @@ impl SessionRuntime {
                         build_config: Box::new(build_config),
                     },
                     labels,
+                    deferred_prompt: None,
                 },
             );
         }
@@ -784,6 +800,7 @@ impl SessionRuntime {
                     PendingSession {
                         phase: PendingSessionPhase::Staged { build_config },
                         labels: pending_session.labels,
+                        deferred_prompt: None,
                     },
                 );
                 None
@@ -1081,10 +1098,24 @@ impl SessionRuntime {
             }
         }
 
-        // Try reading from the service. `read()` may block during active turns but
-        // the caller explicitly asked for detailed state.
-        if let Ok(view) = self.service.read(session_id).await {
-            return Some(view.state.into());
+        // Use list() instead of read() to avoid blocking while a turn is running.
+        // list() reads state from non-blocking watch receivers.
+        if let Ok(summaries) = self.service.list(Default::default()).await {
+            for summary in summaries {
+                if summary.session_id == *session_id {
+                    let wire: meerkat_contracts::WireSessionSummary = summary.into();
+                    return Some(meerkat_contracts::WireSessionInfo {
+                        session_id: wire.session_id,
+                        session_ref: None,
+                        created_at: wire.created_at,
+                        updated_at: wire.updated_at,
+                        message_count: wire.message_count,
+                        is_active: wire.is_active,
+                        last_assistant_text: None,
+                        labels: wire.labels,
+                    });
+                }
+            }
         }
 
         None
@@ -1683,7 +1714,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None)
+            .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
 
@@ -1698,7 +1729,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None)
+            .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -1729,7 +1760,7 @@ mod tests {
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
 
         let session_id = runtime
-            .create_session(slow_build_config(200), None)
+            .create_session(slow_build_config(200), None, None)
             .await
             .unwrap();
 
@@ -1804,7 +1835,7 @@ mod tests {
 
         // Use a slow mock to give us time to observe Running state
         let session_id = runtime
-            .create_session(slow_build_config(100), None)
+            .create_session(slow_build_config(100), None, None)
             .await
             .unwrap();
 
@@ -1867,7 +1898,7 @@ mod tests {
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
 
         let session_id = runtime
-            .create_session(slow_build_config(200), None)
+            .create_session(slow_build_config(200), None, None)
             .await
             .unwrap();
 
@@ -1935,7 +1966,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None)
+            .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
         let (event_tx, mut event_rx) = mpsc::channel(100);
@@ -1979,7 +2010,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None)
+            .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
 
@@ -2001,7 +2032,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None)
+            .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
 
@@ -2031,16 +2062,18 @@ mod tests {
 
         // Create two sessions (the max)
         let _s1 = runtime
-            .create_session(mock_build_config(), None)
+            .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
         let _s2 = runtime
-            .create_session(mock_build_config(), None)
+            .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
 
         // Third should fail
-        let result = runtime.create_session(mock_build_config(), None).await;
+        let result = runtime
+            .create_session(mock_build_config(), None, None)
+            .await;
         assert!(result.is_err(), "Third session should fail");
         let err = result.unwrap_err();
         assert!(
@@ -2067,11 +2100,11 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 10);
 
         let s1 = runtime
-            .create_session(mock_build_config(), None)
+            .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
         let s2 = runtime
-            .create_session(mock_build_config(), None)
+            .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
 
@@ -2096,7 +2129,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
         let session_id = runtime
-            .create_session(mock_build_config(), None)
+            .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
 
@@ -2168,7 +2201,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
         let session_id = runtime
-            .create_session(mock_build_config(), None)
+            .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
 
@@ -2232,7 +2265,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
         let session_id = runtime
-            .create_session(mock_build_config(), None)
+            .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
 
@@ -2329,7 +2362,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
         let session_id = runtime
-            .create_session(mock_build_config(), None)
+            .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
 
@@ -2439,7 +2472,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
         let session_id = runtime
-            .create_session(mock_build_config(), None)
+            .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
 
@@ -2620,7 +2653,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None)
+            .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
 
@@ -2636,7 +2669,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None)
+            .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
 
@@ -2666,7 +2699,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None)
+            .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
 
@@ -2719,7 +2752,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None)
+            .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
 
@@ -2755,7 +2788,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None)
+            .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
 

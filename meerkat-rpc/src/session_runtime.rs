@@ -99,6 +99,15 @@ struct PendingSession {
     /// Prompt from `session/create` when `initial_turn` is deferred.
     /// Prepended to the first `turn/start` prompt.
     deferred_prompt: Option<String>,
+    /// Stable creation timestamp (Unix seconds), set when the pending session is staged.
+    created_at_secs: u64,
+}
+
+fn now_unix_secs() -> u64 {
+    meerkat_core::time_compat::SystemTime::now()
+        .duration_since(meerkat_core::time_compat::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 enum PendingSessionPhase {
@@ -396,6 +405,7 @@ impl SessionRuntime {
                     },
                     labels,
                     deferred_prompt,
+                    created_at_secs: now_unix_secs(),
                 },
             );
         }
@@ -464,16 +474,19 @@ impl SessionRuntime {
                         *build_config,
                         pending_session.labels.clone(),
                         pending_session.deferred_prompt.clone(),
+                        pending_session.created_at_secs,
                     ))
                 }
                 None => None,
             }
         };
 
-        if let Some((mut build_config, labels, deferred_prompt)) = pending_session {
+        if let Some((mut build_config, labels, deferred_prompt, created_at_secs)) = pending_session
+        {
             // Prepend the deferred create-time prompt to the turn prompt.
-            // Keep a copy for rollback paths that re-stage the pending session.
+            // Keep copies for rollback paths that re-stage the pending session.
             let saved_deferred_prompt = deferred_prompt.clone();
+            let saved_created_at_secs = created_at_secs;
             if let Some(deferred) = deferred_prompt {
                 turn_prompt = format!("{deferred}\n\n{turn_prompt}");
             }
@@ -501,6 +514,7 @@ impl SessionRuntime {
                                 build_config,
                                 labels,
                                 saved_deferred_prompt,
+                                saved_created_at_secs,
                             )
                             .await;
                             return Err(RpcError {
@@ -601,6 +615,7 @@ impl SessionRuntime {
                                 },
                                 labels,
                                 deferred_prompt: saved_deferred_prompt.clone(),
+                                created_at_secs: saved_created_at_secs,
                             },
                         );
                     }
@@ -678,6 +693,7 @@ impl SessionRuntime {
         build_config: AgentBuildConfig,
         labels: Option<BTreeMap<String, String>>,
         deferred_prompt: Option<String>,
+        created_at_secs: u64,
     ) {
         let mut pending = self.pending.write().await;
         pending.insert(
@@ -688,6 +704,7 @@ impl SessionRuntime {
                 },
                 labels,
                 deferred_prompt,
+                created_at_secs,
             },
         );
     }
@@ -773,6 +790,7 @@ impl SessionRuntime {
                     },
                     labels,
                     deferred_prompt: None,
+                    created_at_secs: now_unix_secs(),
                 },
             );
         }
@@ -809,6 +827,7 @@ impl SessionRuntime {
                         phase: PendingSessionPhase::Staged { build_config },
                         labels: pending_session.labels,
                         deferred_prompt: None,
+                        created_at_secs: pending_session.created_at_secs,
                     },
                 );
                 None
@@ -1053,15 +1072,11 @@ impl SessionRuntime {
                         continue;
                     }
                 }
-                let now_secs = meerkat_core::time_compat::SystemTime::now()
-                    .duration_since(meerkat_core::time_compat::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
                 result.push(meerkat_contracts::WireSessionSummary {
                     session_id: session_id.clone(),
                     session_ref: None,
-                    created_at: now_secs,
-                    updated_at: now_secs,
+                    created_at: ps.created_at_secs,
+                    updated_at: ps.created_at_secs,
                     message_count: 0,
                     total_tokens: 0,
                     is_active: matches!(&ps.phase, PendingSessionPhase::Promoting { .. }),
@@ -1089,15 +1104,11 @@ impl SessionRuntime {
         {
             let pending = self.pending.read().await;
             if let Some(ps) = pending.get(session_id) {
-                let now_secs = meerkat_core::time_compat::SystemTime::now()
-                    .duration_since(meerkat_core::time_compat::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
                 return Some(meerkat_contracts::WireSessionInfo {
                     session_id: session_id.clone(),
                     session_ref: None,
-                    created_at: now_secs,
-                    updated_at: now_secs,
+                    created_at: ps.created_at_secs,
+                    updated_at: ps.created_at_secs,
                     message_count: 0,
                     is_active: matches!(&ps.phase, PendingSessionPhase::Promoting { .. }),
                     last_assistant_text: None,

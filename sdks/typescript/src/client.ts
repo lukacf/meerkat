@@ -177,6 +177,14 @@ export class MeerkatClient {
     handler: (args: Record<string, unknown>) => Promise<string>,
   ): void {
     this.toolHandlers.set(name, { description, inputSchema, handler });
+    // If already connected, register the new tool with the server immediately.
+    if (this.process?.stdin) {
+      this.request("tools/register", {
+        tools: [{ name, description, input_schema: inputSchema }],
+      }).catch(() => {
+        // Best-effort: tool registration may fail if connection is closing.
+      });
+    }
   }
 
   // -- Connection ---------------------------------------------------------

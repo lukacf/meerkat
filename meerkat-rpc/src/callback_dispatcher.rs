@@ -56,11 +56,13 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
 
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
         let request_id = self.next_id();
+        let arguments: serde_json::Value = serde_json::from_str(call.args.get()).map_err(|e| {
+            ToolError::invalid_arguments(call.name, format!("malformed tool-call arguments: {e}"))
+        })?;
         let params = serde_json::json!({
             "tool_use_id": call.id,
             "name": call.name,
-            "arguments": serde_json::from_str::<serde_json::Value>(call.args.get())
-                .unwrap_or(serde_json::Value::Null),
+            "arguments": arguments,
         });
 
         let params_raw = RawValue::from_string(serde_json::to_string(&params).map_err(|e| {

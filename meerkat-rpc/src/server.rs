@@ -197,6 +197,8 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> RpcServer<R, W> {
                 // Send callback requests to the client.
                 Some((request, response_tx)) = self.callback_request_rx.recv() => {
                     if let Some(ref req_id) = request.id {
+                        // Sweep stale entries whose waiters timed out / dropped.
+                        self.pending_callbacks.retain(|_, tx| !tx.is_closed());
                         self.pending_callbacks.insert(req_id.clone(), response_tx);
                     }
                     self.transport.write_request(&request).await?;

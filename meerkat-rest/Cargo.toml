@@ -42,7 +42,6 @@ meerkat-mob = { workspace = true, optional = true }
 meerkat-mob-mcp = { workspace = true, optional = true }
 meerkat-comms = { workspace = true, optional = true }
 meerkat-mcp = { workspace = true, optional = true }
-meerkat-runtime = { path = "../meerkat-runtime" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

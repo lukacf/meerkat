@@ -130,12 +130,12 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> RpcServer<R, W> {
     /// Parse errors are reported to the client and do not terminate the loop.
     /// EOF (reader returns `None`) triggers graceful shutdown.
     pub async fn run(&mut self) -> Result<(), ServerError> {
-        loop {
-            // Sweep timed-out callback entries whose waiters dropped.
-            if !self.pending_callbacks.is_empty() {
-                self.pending_callbacks.retain(|_, tx| !tx.is_closed());
-            }
+        // Periodic sweep for timed-out callback entries. Fires even when
+        // the connection is idle, preventing stale leaks.
+        let mut callback_sweep = tokio::time::interval(tokio::time::Duration::from_secs(30));
+        callback_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        loop {
             tokio::select! {
                 biased;
 
@@ -205,6 +205,11 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> RpcServer<R, W> {
                         self.pending_callbacks.insert(req_id.clone(), response_tx);
                     }
                     self.transport.write_request(&request).await?;
+                }
+
+                // Periodic sweep of timed-out callback entries.
+                _ = callback_sweep.tick() => {
+                    self.pending_callbacks.retain(|_, tx| !tx.is_closed());
                 }
             }
         }

@@ -1,7 +1,7 @@
 # Canonical Lifecycle and Execution Specification
 
-Status: Final normative proposal, ontology-aligned v5  
-Scope: Meerkat and Meerkat Mob architecture  
+Status: Final normative proposal, ontology-aligned v5
+Scope: Meerkat and Meerkat Mob architecture
 Applies to: `meerkat-core`, runtime/control-plane implementations, and operational surfaces
 
 ## 1. Purpose

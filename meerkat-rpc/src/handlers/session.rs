@@ -279,12 +279,19 @@ pub async fn handle_create(
         .map(|ids| ids.into_iter().map(meerkat_core::skills::SkillId).collect());
 
     // Wire callback tools if external_tools are provided or globally registered.
+    // Inline (per-session) tools take precedence over globals with the same name.
     {
         let mut all_tools: Vec<meerkat_core::ToolDef> = params.external_tools.unwrap_or_default();
+        let mut seen: std::collections::HashSet<String> =
+            all_tools.iter().map(|t| t.name.clone()).collect();
 
-        // Merge globally registered tools.
+        // Merge globally registered tools, skipping duplicates (inline wins).
         if let Ok(global) = runtime.registered_tools().read() {
-            all_tools.extend(global.iter().cloned());
+            for tool in global.iter() {
+                if seen.insert(tool.name.clone()) {
+                    all_tools.push(tool.clone());
+                }
+            }
         }
 
         if !all_tools.is_empty()

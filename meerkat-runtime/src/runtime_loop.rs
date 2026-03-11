@@ -10,6 +10,7 @@ use meerkat_core::lifecycle::run_primitive::{
     ConversationAppend, ConversationAppendRole, CoreRenderable, RunApplyBoundary, RunPrimitive,
     StagedRunInput,
 };
+use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
 use meerkat_core::lifecycle::{InputId, RunEvent, RunId};
 
 use crate::input::Input;
@@ -85,15 +86,12 @@ async fn process_queue(
                         break;
                     }
 
-                    // Stage the input (Queued → Staged)
+                    // Stage the input (Queued → Staged).
+                    // Do NOT apply here — apply only after successful execution.
+                    // If we pre-applied and the executor failed, the input would
+                    // be stranded in AppliedPendingConsumption because RunFailed
+                    // only rolls back Staged inputs.
                     if d.stage_input(&input_id, &run_id).is_err() {
-                        // Rollback: return to Idle
-                        let _ = d.complete_run();
-                        break;
-                    }
-
-                    // Apply the input (Staged → Applied → AppliedPendingConsumption)
-                    if d.apply_input(&input_id, &run_id).is_err() {
                         let _ = d.complete_run();
                         break;
                     }
@@ -107,13 +105,41 @@ async fn process_queue(
 
         match dequeued {
             Some((input_id, run_id, primitive)) => {
+                // Capture boundary info before moving primitive into executor
+                let boundary = match &primitive {
+                    RunPrimitive::StagedInput(s) => s.boundary,
+                    _ => RunApplyBoundary::Immediate,
+                };
+                let contributing_ids = primitive.contributing_input_ids().to_vec();
+
                 // Execute outside the driver lock (this calls start_turn, which is slow)
                 let result = executor.apply(primitive).await;
 
                 // Lock again to update driver state
                 let mut d = driver.lock().await;
                 match result {
-                    Ok(_receipt) => {
+                    Ok(_) => {
+                        // Build a receipt with the loop's own run_id (authoritative)
+                        let receipt = RunBoundaryReceipt {
+                            run_id: run_id.clone(),
+                            boundary,
+                            contributing_input_ids: contributing_ids,
+                            conversation_digest: None,
+                            message_count: 0,
+                            sequence: 0,
+                        };
+
+                        // BoundaryApplied transitions Staged → Applied → APC
+                        // and triggers atomic persistence in PersistentRuntimeDriver
+                        let _ = d
+                            .as_driver_mut()
+                            .on_run_event(RunEvent::BoundaryApplied {
+                                run_id: run_id.clone(),
+                                receipt,
+                            })
+                            .await;
+
+                        // RunCompleted transitions APC → Consumed and returns to Idle
                         let _ = d
                             .as_driver_mut()
                             .on_run_event(RunEvent::RunCompleted {
@@ -123,6 +149,7 @@ async fn process_queue(
                             .await;
                     }
                     Err(e) => {
+                        // RunFailed rolls back Staged → Queued and returns to Idle
                         let _ = d
                             .as_driver_mut()
                             .on_run_event(RunEvent::RunFailed {

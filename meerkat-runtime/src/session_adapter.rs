@@ -104,18 +104,6 @@ impl DriverEntry {
             DriverEntry::Persistent(d) => d.stage_input(input_id, run_id),
         }
     }
-
-    /// Apply an input (Staged → Applied → AppliedPendingConsumption).
-    pub(crate) fn apply_input(
-        &mut self,
-        input_id: &InputId,
-        run_id: &RunId,
-    ) -> Result<(), InputStateMachineError> {
-        match self {
-            DriverEntry::Ephemeral(d) => d.apply_input(input_id, run_id),
-            DriverEntry::Persistent(d) => d.apply_input(input_id, run_id),
-        }
-    }
 }
 
 /// Per-session state: driver + optional RuntimeLoop.
@@ -482,5 +470,116 @@ mod tests {
         // The input should be consumed (terminal)
         let active = adapter.list_active_inputs(&sid).await.unwrap();
         assert!(active.is_empty(), "All inputs should be consumed");
+    }
+
+    /// Test that a failed executor re-queues the input (not stranded in APC).
+    #[tokio::test]
+    async fn failed_executor_requeues_input() {
+        use crate::input_state::InputLifecycleState;
+        use meerkat_core::lifecycle::core_executor::{CoreExecutor, CoreExecutorError};
+        use meerkat_core::lifecycle::run_control::RunControlCommand;
+        use meerkat_core::lifecycle::run_primitive::RunPrimitive;
+        use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+
+        struct FailingExecutor;
+
+        #[async_trait::async_trait]
+        impl CoreExecutor for FailingExecutor {
+            async fn apply(
+                &mut self,
+                _primitive: RunPrimitive,
+            ) -> Result<RunBoundaryReceipt, CoreExecutorError> {
+                Err(CoreExecutorError::ApplyFailed {
+                    reason: "LLM error".into(),
+                })
+            }
+
+            async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+                Ok(())
+            }
+        }
+
+        let adapter = RuntimeSessionAdapter::ephemeral();
+        let sid = SessionId::new();
+        adapter
+            .register_session_with_executor(sid.clone(), Box::new(FailingExecutor))
+            .await;
+
+        let input = make_prompt("hello failing");
+        let input_id = input.id().clone();
+        adapter.accept_input(&sid, input).await.unwrap();
+
+        // Give the loop time to process and fail
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Runtime should be back to Idle (not stuck in Running)
+        let state = adapter.runtime_state(&sid).await.unwrap();
+        assert_eq!(state, RuntimeState::Idle);
+
+        // Input should be rolled back to Queued (not stranded in APC)
+        let is = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
+        assert_eq!(
+            is.current_state,
+            InputLifecycleState::Queued,
+            "Failed execution should roll input back to Queued, not strand in AppliedPendingConsumption"
+        );
+    }
+
+    /// Test that BoundaryApplied fires with correct receipt on success.
+    #[tokio::test]
+    async fn successful_execution_fires_boundary_applied() {
+        use crate::input_state::InputLifecycleState;
+        use meerkat_core::lifecycle::RunId;
+        use meerkat_core::lifecycle::core_executor::{CoreExecutor, CoreExecutorError};
+        use meerkat_core::lifecycle::run_control::RunControlCommand;
+        use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
+        use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+
+        struct SuccessExecutor;
+
+        #[async_trait::async_trait]
+        impl CoreExecutor for SuccessExecutor {
+            async fn apply(
+                &mut self,
+                primitive: RunPrimitive,
+            ) -> Result<RunBoundaryReceipt, CoreExecutorError> {
+                Ok(RunBoundaryReceipt {
+                    run_id: RunId::new(),
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                })
+            }
+
+            async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+                Ok(())
+            }
+        }
+
+        let adapter = RuntimeSessionAdapter::ephemeral();
+        let sid = SessionId::new();
+        adapter
+            .register_session_with_executor(sid.clone(), Box::new(SuccessExecutor))
+            .await;
+
+        let input = make_prompt("hello success");
+        let input_id = input.id().clone();
+        adapter.accept_input(&sid, input).await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Input should have gone through full lifecycle: Queued → Staged → Applied → APC → Consumed
+        let is = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
+        assert_eq!(
+            is.current_state,
+            InputLifecycleState::Consumed,
+            "Successful execution should consume the input"
+        );
+
+        // Runtime should be back to Idle
+        let state = adapter.runtime_state(&sid).await.unwrap();
+        assert_eq!(state, RuntimeState::Idle);
     }
 }

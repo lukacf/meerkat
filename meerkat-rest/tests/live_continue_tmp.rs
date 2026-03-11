@@ -70,6 +70,7 @@ async fn integration_real_live_continue_hangs() {
         config_runtime,
         realm_lease: Arc::new(tokio::sync::Mutex::new(None)),
         skill_runtime: None,
+        runtime_adapter: None,
         #[cfg(feature = "mob")]
         mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
         #[cfg(feature = "mcp")]

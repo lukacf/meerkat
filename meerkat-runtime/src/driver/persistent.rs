@@ -121,7 +121,24 @@ impl RuntimeDriver for PersistentRuntimeDriver {
     }
 
     async fn on_run_event(&mut self, event: RunEvent) -> Result<(), RuntimeDriverError> {
-        self.inner.on_run_event(event).await
+        // Delegate to inner first (updates state machine and input lifecycle)
+        self.inner.on_run_event(event.clone()).await?;
+
+        // For BoundaryApplied, persist receipt + updated input states atomically
+        if let RunEvent::BoundaryApplied { ref receipt, .. } = event {
+            let input_updates: Vec<InputState> = receipt
+                .contributing_input_ids
+                .iter()
+                .filter_map(|id| self.inner.input_state(id).cloned())
+                .collect();
+
+            self.store
+                .atomic_apply(&self.runtime_id, None, receipt.clone(), input_updates)
+                .await
+                .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
+        }
+
+        Ok(())
     }
 
     async fn on_runtime_control(
@@ -139,18 +156,15 @@ impl RuntimeDriver for PersistentRuntimeDriver {
             .await
             .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
 
-        // Inject stored states into the ephemeral driver's ledger
+        // Inject stored states into the ephemeral driver's ledger.
+        // Uses recover() which also rebuilds the idempotency index for
+        // dedup correctness and filters out Ephemeral inputs.
         for state in stored_states {
             // Only inject non-terminal states (terminal ones are already resolved)
             if !state.is_terminal() {
-                // The ephemeral ledger may already have some states from
-                // accept_input calls that survived in memory. Stored states
-                // take precedence as they represent the durable truth.
                 let ledger = &mut self.inner;
-                // Access the ledger directly — we need to rebuild from store
                 if ledger.input_state(&state.input_id).is_none() {
-                    // State exists in store but not in memory — add it
-                    ledger.ledger_mut().accept(state);
+                    ledger.ledger_mut().recover(state);
                 }
             }
         }
@@ -264,5 +278,101 @@ mod tests {
 
         // State should now be in the driver
         assert!(driver.input_state(&input_id).is_some());
+    }
+
+    #[tokio::test]
+    async fn recover_rebuilds_dedup_index() {
+        let store = Arc::new(InMemoryRuntimeStore::new());
+        let rid = LogicalRuntimeId::new("test");
+        let key = crate::identifiers::IdempotencyKey::new("dedup-key");
+
+        // Pre-populate store with a state that has an idempotency key
+        let input_id = InputId::new();
+        let mut state = InputState::new_accepted(input_id.clone());
+        state.idempotency_key = Some(key.clone());
+        state.durability = Some(InputDurability::Durable);
+        store.persist_input_state(&rid, &state).await.unwrap();
+
+        // Create a fresh driver and recover
+        let mut driver = PersistentRuntimeDriver::new(rid, store);
+        driver.recover().await.unwrap();
+
+        // Now try to accept a new input with the same idempotency key
+        let mut dup_input = make_prompt("duplicate");
+        if let Input::Prompt(ref mut p) = dup_input {
+            p.header.idempotency_key = Some(key);
+        }
+        let outcome = driver.accept_input(dup_input).await.unwrap();
+        assert!(
+            outcome.is_deduplicated(),
+            "After recovery, dedup index should be rebuilt so duplicates are caught"
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_filters_ephemeral_inputs() {
+        let store = Arc::new(InMemoryRuntimeStore::new());
+        let rid = LogicalRuntimeId::new("test");
+
+        // Pre-populate with an ephemeral input state
+        let input_id = InputId::new();
+        let mut state = InputState::new_accepted(input_id.clone());
+        state.durability = Some(InputDurability::Ephemeral);
+        store.persist_input_state(&rid, &state).await.unwrap();
+
+        // Create fresh driver and recover
+        let mut driver = PersistentRuntimeDriver::new(rid, store);
+        let report = driver.recover().await.unwrap();
+
+        // Ephemeral input should NOT be recovered (it shouldn't survive restart)
+        assert!(
+            driver.input_state(&input_id).is_none(),
+            "Ephemeral inputs should be filtered during recovery"
+        );
+        assert_eq!(report.inputs_recovered, 0);
+    }
+
+    #[tokio::test]
+    async fn boundary_applied_persists_atomically() {
+        use meerkat_core::lifecycle::RunId;
+        use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
+        use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+
+        let store = Arc::new(InMemoryRuntimeStore::new());
+        let rid = LogicalRuntimeId::new("test");
+        let mut driver = PersistentRuntimeDriver::new(rid.clone(), store.clone());
+
+        // Accept and manually process an input
+        let input = make_prompt("hello");
+        let input_id = input.id().clone();
+        driver.accept_input(input).await.unwrap();
+
+        let run_id = RunId::new();
+        driver.start_run(run_id.clone()).unwrap();
+        driver.stage_input(&input_id, &run_id).unwrap();
+
+        // Fire BoundaryApplied — this should persist atomically
+        let receipt = RunBoundaryReceipt {
+            run_id: run_id.clone(),
+            boundary: RunApplyBoundary::RunStart,
+            contributing_input_ids: vec![input_id.clone()],
+            conversation_digest: None,
+            message_count: 1,
+            sequence: 0,
+        };
+        driver
+            .on_run_event(meerkat_core::lifecycle::RunEvent::BoundaryApplied {
+                run_id: run_id.clone(),
+                receipt: receipt.clone(),
+            })
+            .await
+            .unwrap();
+
+        // Verify the receipt was persisted via atomic_apply
+        let loaded = store.load_boundary_receipt(&rid, &run_id, 0).await.unwrap();
+        assert!(
+            loaded.is_some(),
+            "BoundaryApplied should persist the receipt via atomic_apply"
+        );
     }
 }

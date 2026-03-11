@@ -323,6 +323,16 @@ impl MethodRouter {
         }
     }
 
+    /// Replace the default ephemeral runtime adapter with a custom one
+    /// (e.g., persistent-backed for durable runtime semantics).
+    pub fn with_runtime_adapter(
+        mut self,
+        adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
+    ) -> Self {
+        self.runtime_adapter = adapter;
+        self
+    }
+
     /// Set the skill runtime for introspection methods.
     pub fn with_skill_runtime(
         mut self,

@@ -76,6 +76,7 @@ fn build_state(
         config_runtime,
         realm_lease: Arc::new(tokio::sync::Mutex::new(None)),
         skill_runtime: None,
+        runtime_adapter: None,
         #[cfg(feature = "mob")]
         mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
         #[cfg(feature = "mcp")]

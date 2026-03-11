@@ -84,6 +84,7 @@ async fn inner_test_rest_resume_metadata() {
         config_runtime,
         realm_lease: Arc::new(tokio::sync::Mutex::new(None)),
         skill_runtime: None,
+        runtime_adapter: None,
         #[cfg(feature = "mob")]
         mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
         #[cfg(feature = "mcp")]
@@ -176,6 +177,7 @@ async fn inner_test_rest_resume_metadata() {
         config_runtime: config_runtime_resume,
         realm_lease: Arc::new(tokio::sync::Mutex::new(None)),
         skill_runtime: None,
+        runtime_adapter: None,
         #[cfg(feature = "mob")]
         mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
         #[cfg(feature = "mcp")]

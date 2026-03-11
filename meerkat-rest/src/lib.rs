@@ -46,6 +46,7 @@ use meerkat_core::{
     HookRunOverrides, Provider, RealmSelection, RuntimeBootstrap, SessionTooling, agent_event_type,
     format_verbose_event,
 };
+use meerkat_runtime::SessionServiceRuntimeExt as _;
 use meerkat_store::{RealmBackend, RealmOrigin};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -110,6 +111,8 @@ pub struct AppState {
     pub config_runtime: Arc<meerkat_core::ConfigRuntime>,
     pub realm_lease: Arc<tokio::sync::Mutex<Option<meerkat_store::RealmLeaseGuard>>>,
     pub skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
+    /// Optional v9 runtime adapter for runtime/input endpoints.
+    pub runtime_adapter: Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>,
     /// Shared in-process mob lifecycle state for protocol mob operations.
     #[cfg(feature = "mob")]
     pub mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
@@ -271,6 +274,7 @@ impl AppState {
             config_runtime,
             realm_lease: Arc::new(tokio::sync::Mutex::new(Some(lease))),
             skill_runtime,
+            runtime_adapter: None,
             #[cfg(feature = "mob")]
             mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
             #[cfg(feature = "mcp")]
@@ -531,7 +535,14 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health_check))
         .route("/skills", get(list_skills))
         .route("/skills/{id}", get(inspect_skill))
-        .route("/capabilities", get(get_capabilities));
+        .route("/capabilities", get(get_capabilities))
+        // v9 runtime/input endpoints
+        .route("/runtime/{id}/state", get(runtime_state))
+        .route("/runtime/{id}/accept", post(runtime_accept))
+        .route("/runtime/{id}/retire", post(runtime_retire))
+        .route("/runtime/{id}/reset", post(runtime_reset))
+        .route("/input/{id}/list", get(input_list))
+        .route("/input/{session_id}/{input_id}", get(input_state));
 
     #[cfg(feature = "mob")]
     let r = r
@@ -548,6 +559,168 @@ pub fn router(state: AppState) -> Router {
 
     r.with_state(state)
 }
+
+// ---------------------------------------------------------------------------
+// v9 Runtime / Input endpoints
+// ---------------------------------------------------------------------------
+
+/// Helper: get the runtime adapter or return 404.
+#[allow(clippy::result_large_err)]
+fn get_runtime_adapter(
+    state: &AppState,
+) -> Result<&Arc<meerkat_runtime::RuntimeSessionAdapter>, Response> {
+    state.runtime_adapter.as_ref().ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "v9 runtime not available"})),
+        )
+            .into_response()
+    })
+}
+
+/// GET /runtime/{id}/state
+async fn runtime_state(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, Response> {
+    let adapter = get_runtime_adapter(&state)?;
+    let sid = SessionId::parse(&id).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response()
+    })?;
+    let rs = adapter.runtime_state(&sid).await.map_err(|e| {
+        (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response()
+    })?;
+    Ok(Json(json!({"session_id": sid.to_string(), "state": rs})))
+}
+
+/// POST /runtime/{id}/accept
+async fn runtime_accept(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, Response> {
+    let adapter = get_runtime_adapter(&state)?;
+    let sid = SessionId::parse(&id).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response()
+    })?;
+    let input: meerkat_runtime::Input = serde_json::from_value(body).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response()
+    })?;
+    let outcome = adapter.accept_input(&sid, input).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response()
+    })?;
+    Ok(Json(serde_json::to_value(outcome).unwrap_or_default()))
+}
+
+/// POST /runtime/{id}/retire
+async fn runtime_retire(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, Response> {
+    let adapter = get_runtime_adapter(&state)?;
+    let sid = SessionId::parse(&id).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response()
+    })?;
+    let report = adapter.retire_runtime(&sid).await.map_err(|e| {
+        (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response()
+    })?;
+    Ok(Json(json!({"inputs_abandoned": report.inputs_abandoned})))
+}
+
+/// POST /runtime/{id}/reset
+async fn runtime_reset(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, Response> {
+    let adapter = get_runtime_adapter(&state)?;
+    let sid = SessionId::parse(&id).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response()
+    })?;
+    let report = adapter.reset_runtime(&sid).await.map_err(|e| {
+        (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response()
+    })?;
+    Ok(Json(json!({"inputs_abandoned": report.inputs_abandoned})))
+}
+
+/// GET /input/{id}/list
+async fn input_list(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, Response> {
+    let adapter = get_runtime_adapter(&state)?;
+    let sid = SessionId::parse(&id).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response()
+    })?;
+    let ids = adapter.list_active_inputs(&sid).await.map_err(|e| {
+        (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response()
+    })?;
+    let id_strs: Vec<String> = ids.iter().map(ToString::to_string).collect();
+    Ok(Json(json!({"input_ids": id_strs})))
+}
+
+/// GET /input/{session_id}/{input_id}
+async fn input_state(
+    State(state): State<AppState>,
+    Path((session_id_str, input_id_str)): Path<(String, String)>,
+) -> Result<Json<Value>, Response> {
+    let adapter = get_runtime_adapter(&state)?;
+    let sid = SessionId::parse(&session_id_str).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response()
+    })?;
+    let input_uuid = uuid::Uuid::parse_str(&input_id_str).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response()
+    })?;
+    let input_id = meerkat_core::lifecycle::InputId::from_uuid(input_uuid);
+    let is = adapter.input_state(&sid, &input_id).await.map_err(|e| {
+        (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response()
+    })?;
+    match is {
+        Some(s) => Ok(Json(serde_json::to_value(s).unwrap_or_default())),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "input not found"})),
+        )
+            .into_response()),
+    }
+}
+
+// ---------------------------------------------------------------------------
 
 /// Health check endpoint
 async fn health_check() -> &'static str {

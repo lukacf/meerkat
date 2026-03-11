@@ -6,6 +6,7 @@ use indexmap::IndexMap;
 use meerkat_core::lifecycle::InputId;
 
 use crate::identifiers::IdempotencyKey;
+use crate::input::InputDurability;
 use crate::input_state::InputState;
 
 /// In-memory ledger tracking InputState for all inputs.
@@ -42,6 +43,27 @@ impl InputLedger {
         self.idempotency_index.insert(key, input_id);
         self.states.insert(state.input_id.clone(), state);
         None
+    }
+
+    /// Recover a durable InputState from persistent storage.
+    ///
+    /// Unlike `accept()`, this also rebuilds the idempotency index
+    /// and filters out Ephemeral inputs (which should not survive restart).
+    /// Returns `true` if the state was inserted, `false` if filtered.
+    pub fn recover(&mut self, state: InputState) -> bool {
+        // Ephemeral inputs should not survive restarts
+        if state.durability == Some(InputDurability::Ephemeral) {
+            return false;
+        }
+
+        // Rebuild idempotency index so dedup works after restart
+        if let Some(ref key) = state.idempotency_key {
+            self.idempotency_index
+                .insert(key.clone(), state.input_id.clone());
+        }
+
+        self.states.insert(state.input_id.clone(), state);
+        true
     }
 
     /// Get the state of a specific input.
@@ -169,5 +191,45 @@ mod tests {
         assert_eq!(ids.len(), 2);
         assert!(ids.contains(&id1));
         assert!(ids.contains(&id2));
+    }
+
+    #[test]
+    fn recover_rebuilds_idempotency_index() {
+        let mut ledger = InputLedger::new();
+        let key = IdempotencyKey::new("req-123");
+
+        // Simulate recovery: inject state with an idempotency key
+        let id1 = InputId::new();
+        let mut state = InputState::new_accepted(id1.clone());
+        state.idempotency_key = Some(key.clone());
+        state.durability = Some(InputDurability::Durable);
+        assert!(ledger.recover(state));
+
+        // Now try to accept a new input with the same key → should be dedup'd
+        let id2 = InputId::new();
+        let state2 = InputState::new_accepted(id2);
+        let result = ledger.accept_with_idempotency(state2, key);
+        assert_eq!(result, Some(id1), "Dedup should find the recovered input");
+        assert_eq!(ledger.len(), 1, "No duplicate entry should be created");
+    }
+
+    #[test]
+    fn recover_filters_ephemeral() {
+        let mut ledger = InputLedger::new();
+
+        // Ephemeral input should be filtered out during recovery
+        let mut state = InputState::new_accepted(InputId::new());
+        state.durability = Some(InputDurability::Ephemeral);
+        assert!(
+            !ledger.recover(state),
+            "Ephemeral inputs should be filtered"
+        );
+        assert!(ledger.is_empty());
+
+        // Durable input should be kept
+        let mut state = InputState::new_accepted(InputId::new());
+        state.durability = Some(InputDurability::Durable);
+        assert!(ledger.recover(state), "Durable inputs should be kept");
+        assert_eq!(ledger.len(), 1);
     }
 }

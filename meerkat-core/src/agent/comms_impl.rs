@@ -272,6 +272,7 @@ where
                     Vec::new();
                 let mut peer_lifecycle_batch = PeerLifecycleBatch::default();
                 let mut had_session_injections = false;
+                let mut had_response_injections = false;
 
                 for interaction in interactions {
                     match classify_comms_interaction(&interaction, &self.silent_comms_intents) {
@@ -279,6 +280,9 @@ where
                             peer_lifecycle_batch.observe(peer, state);
                         }
                         CommsInteractionClass::InlineSessionOnly => {
+                            if matches!(&interaction.content, InteractionContent::Response { .. }) {
+                                had_response_injections = true;
+                            }
                             inject_response_into_session(&mut self.session, &interaction);
                             had_session_injections = true;
                         }
@@ -321,12 +325,11 @@ where
                 }
 
                 // Checkpoint after inline session injections mutate session state.
-                // Responses bypass the LLM loop (no run call), so without
-                // this checkpoint they would only be persisted if a later
-                // request/message triggers its own checkpoint.
                 if had_session_injections {
                     self.checkpoint_current_session().await;
                 }
+
+                let had_passthrough_work = !individual.is_empty() || !batched_texts.is_empty();
 
                 // Process individual interactions (requests, or subscriber-bound)
                 for (interaction, subscriber) in individual {
@@ -399,6 +402,37 @@ where
                     self.checkpoint_current_session().await;
                 }
 
+                // Continuation run: comms responses were injected into the session
+                // but no passthrough interaction triggered an LLM turn. While the
+                // inner loop correctly suppresses response-driven interrupts during
+                // active work (via host_drain_active), an idle host loop should give
+                // the agent a chance to act on newly arrived response context.
+                //
+                // This does NOT fire for silent intents or peer lifecycle updates,
+                // which are genuinely non-actionable bookkeeping.
+                if had_response_injections && !had_passthrough_work {
+                    tracing::debug!("Host mode: continuation run after inline session injections");
+                    let cont_result = match &event_tx {
+                        Some(tx) => self.run_loop(Some(tx.clone())).await,
+                        None => self.run_loop(None).await,
+                    };
+                    match cont_result {
+                        Ok(result) => {
+                            last_result = result;
+                            self.checkpoint_current_session().await;
+                        }
+                        Err(e) => {
+                            if e.is_graceful() {
+                                tracing::info!("Host mode: graceful exit - {}", e);
+                                self.host_drain_active = false;
+                                return Ok(last_result);
+                            }
+                            self.host_drain_active = false;
+                            return Err(e);
+                        }
+                    }
+                }
+
                 // Process batched messages as one run (no tap)
                 if !batched_texts.is_empty() {
                     let combined = batched_texts.join("\n\n");
@@ -442,8 +476,9 @@ where
 
 /// Inject a Response interaction into the session as a user message.
 ///
-/// Response interactions are never processed through the LLM loop.
-/// They are injected inline so the agent has the response context for subsequent turns.
+/// In the inner agent loop, response interactions are non-interrupting context.
+/// In host mode, the idle host loop triggers a continuation run after injection
+/// so the agent can decide whether to act on the new context.
 fn inject_response_into_session(session: &mut Session, interaction: &InboxInteraction) {
     session.push(Message::User(UserMessage {
         content: interaction.rendered_text.clone(),
@@ -1085,7 +1120,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_response_interaction_injected_into_session_not_run() {
+    async fn test_response_interaction_triggers_continuation_run_in_host_mode() {
         let response_id = crate::interaction::InteractionId(uuid::Uuid::new_v4());
         let response = crate::interaction::InboxInteraction {
             id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
@@ -1126,8 +1161,24 @@ mod tests {
             _ => unreachable!(),
         }
 
-        // Result should be the empty initial (no LLM was called for the response)
-        assert_eq!(result.turns, 0);
+        // Continuation run should have fired — the idle host loop gives the
+        // agent a chance to act on the injected response context.
+        assert!(
+            result.turns > 0,
+            "expected continuation run after response injection, got 0 turns"
+        );
+
+        // Session should contain the assistant's reply after the response
+        let assistant_msgs: Vec<_> = agent
+            .session
+            .messages()
+            .iter()
+            .filter(|m| matches!(m, Message::Assistant(_) | Message::BlockAssistant(_)))
+            .collect();
+        assert!(
+            !assistant_msgs.is_empty(),
+            "expected assistant message from continuation run"
+        );
     }
 
     #[tokio::test]

@@ -25,6 +25,25 @@ use crate::session_runtime::SessionRuntime;
 // Param types
 // ---------------------------------------------------------------------------
 
+/// Controls whether the first turn runs immediately on session creation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InitialTurn {
+    /// Run the first turn immediately (default).
+    #[default]
+    RunImmediately,
+    /// Create the session but defer the first turn.
+    Deferred,
+}
+
+/// Result for deferred `session/create` (no turn executed).
+#[derive(Debug, Serialize)]
+pub struct DeferredCreateResult {
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_ref: Option<String>,
+}
+
 /// Parameters for `session/create`.
 ///
 /// Mirrors the fields of [`AgentBuildConfig`] that are relevant for session
@@ -33,6 +52,10 @@ use crate::session_runtime::SessionRuntime;
 #[derive(Debug, Deserialize)]
 pub struct CreateSessionParams {
     pub prompt: String,
+    /// Controls whether the first turn runs immediately or is deferred.
+    /// Defaults to `run_immediately` when absent.
+    #[serde(default)]
+    pub initial_turn: Option<InitialTurn>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -102,6 +125,10 @@ pub struct CreateSessionParams {
     /// Set by the application — never visible to the LLM.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell_env: Option<std::collections::HashMap<String, String>>,
+    /// External tool definitions provided by the client (callback tools).
+    /// These are merged with globally registered tools at build time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_tools: Option<Vec<meerkat_core::ToolDef>>,
 }
 
 fn default_structured_output_retries() -> u32 {
@@ -127,6 +154,12 @@ pub struct ListSessionsParams {
     /// Filter sessions by label key-value pairs (AND match).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub labels: Option<BTreeMap<String, String>>,
+    /// Maximum number of sessions to return.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Number of sessions to skip.
+    #[serde(default)]
+    pub offset: Option<usize>,
 }
 
 /// Parameters for `session/read`.
@@ -159,33 +192,14 @@ pub struct InjectSystemContextParams {
 /// Result for `session/create` — uses canonical wire type from contracts.
 pub type CreateSessionResult = meerkat_contracts::WireRunResult;
 
-/// Result for `session/list`.
+/// Result for `session/list` — uses canonical wire type from contracts.
 #[derive(Debug, Serialize)]
 pub struct ListSessionsResult {
-    pub sessions: Vec<SessionInfoResult>,
+    pub sessions: Vec<meerkat_contracts::WireSessionSummary>,
 }
 
-/// Serializable session info.
-#[derive(Debug, Serialize)]
-pub struct SessionInfoResult {
-    pub session_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_ref: Option<String>,
-    pub state: String,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub labels: BTreeMap<String, String>,
-}
-
-/// Result for `session/read`.
-#[derive(Debug, Serialize)]
-pub struct ReadSessionResult {
-    pub session_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_ref: Option<String>,
-    pub state: String,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub labels: BTreeMap<String, String>,
-}
+/// Result for `session/read` — uses canonical wire type from contracts.
+pub type ReadSessionResult = meerkat_contracts::WireSessionInfo;
 
 /// Result for `session/inject_context`.
 #[derive(Debug, Serialize)]
@@ -264,6 +278,35 @@ pub async fn handle_create(
         .preload_skills
         .map(|ids| ids.into_iter().map(meerkat_core::skills::SkillId).collect());
 
+    // Wire callback tools if external_tools are provided or globally registered.
+    // Inline (per-session) tools take precedence over globals with the same name.
+    {
+        let mut all_tools: Vec<meerkat_core::ToolDef> = params.external_tools.unwrap_or_default();
+        let mut seen: std::collections::HashSet<String> =
+            all_tools.iter().map(|t| t.name.clone()).collect();
+
+        // Merge globally registered tools, skipping duplicates (inline wins).
+        if let Ok(global) = runtime.registered_tools().read() {
+            for tool in global.iter() {
+                if seen.insert(tool.name.clone()) {
+                    all_tools.push(tool.clone());
+                }
+            }
+        }
+
+        if !all_tools.is_empty()
+            && let Some(tx) = runtime.callback_request_tx()
+        {
+            let dispatcher: Arc<dyn meerkat_core::AgentToolDispatcher> =
+                Arc::new(crate::callback_dispatcher::CallbackToolDispatcher::new(
+                    all_tools,
+                    tx,
+                    runtime.callback_id_counter(),
+                ));
+            build_config.external_tools = Some(dispatcher);
+        }
+    }
+
     // Validate and canonicalize skill refs before creating a pending session.
     // This prevents invalid requests from consuming session slots.
     let skill_refs = match canonical_skill_ids(&runtime, params.skill_refs, params.skill_references)
@@ -278,13 +321,32 @@ pub async fn handle_create(
         }
     };
 
-    // Create the session
-    let session_id = match runtime.create_session(build_config, params.labels).await {
+    // Create the session. When deferred, stash the prompt for the first turn.
+    let deferred_prompt = if params.initial_turn == Some(InitialTurn::Deferred) {
+        Some(params.prompt.clone())
+    } else {
+        None
+    };
+    let session_id = match runtime
+        .create_session(build_config, params.labels, deferred_prompt)
+        .await
+    {
         Ok(sid) => sid,
         Err(rpc_err) => {
             return RpcResponse::error(id, rpc_err.code, rpc_err.message);
         }
     };
+
+    // Deferred mode: return session ID without running a turn.
+    if params.initial_turn == Some(InitialTurn::Deferred) {
+        let result = DeferredCreateResult {
+            session_id: session_id.to_string(),
+            session_ref: runtime
+                .realm_id()
+                .map(|realm| meerkat_contracts::format_session_ref(realm, &session_id)),
+        };
+        return RpcResponse::success(id, result);
+    }
 
     // Set up event forwarding. The spawned task exits naturally when `event_tx`
     // is dropped at the end of the turn (the session task holds the only sender).
@@ -312,6 +374,7 @@ pub async fn handle_create(
                     prompt_for_turn,
                     event_tx_for_turn,
                     skill_refs_for_turn,
+                    None,
                     None,
                     None,
                 )
@@ -345,7 +408,15 @@ pub async fn handle_create(
         }
     } else {
         match runtime
-            .start_turn(&session_id, params.prompt, event_tx, skill_refs, None, None)
+            .start_turn(
+                &session_id,
+                params.prompt,
+                event_tx,
+                skill_refs,
+                None,
+                None,
+                None,
+            )
             .await
         {
             Ok(r) => r,
@@ -411,20 +482,28 @@ pub async fn handle_list(
         ..Default::default()
     };
 
-    let sessions = runtime.list_sessions(query).await;
-    let result = ListSessionsResult {
-        sessions: sessions
-            .into_iter()
-            .map(|info| SessionInfoResult {
-                session_id: info.session_id.to_string(),
-                session_ref: runtime
-                    .realm_id()
-                    .map(|realm| meerkat_contracts::format_session_ref(realm, &info.session_id)),
-                state: info.state.as_str().to_string(),
-                labels: info.labels,
-            })
-            .collect(),
-    };
+    let mut sessions: Vec<meerkat_contracts::WireSessionSummary> = runtime
+        .list_sessions_rich(query)
+        .await
+        .into_iter()
+        .map(|mut ws| {
+            ws.session_ref = runtime
+                .realm_id()
+                .map(|realm| meerkat_contracts::format_session_ref(realm, &ws.session_id));
+            ws
+        })
+        .collect();
+
+    // Apply pagination.
+    let offset = list_params.offset.unwrap_or(0);
+    if offset > 0 {
+        sessions = sessions.into_iter().skip(offset).collect();
+    }
+    if let Some(limit) = list_params.limit {
+        sessions.truncate(limit);
+    }
+
+    let result = ListSessionsResult { sessions };
     RpcResponse::success(id, result)
 }
 
@@ -444,17 +523,12 @@ pub async fn handle_read(
         Err(resp) => return resp,
     };
 
-    match runtime.session_state(&session_id).await {
-        Some(info) => {
-            let result = ReadSessionResult {
-                session_id: session_id.to_string(),
-                session_ref: runtime
-                    .realm_id()
-                    .map(|realm| meerkat_contracts::format_session_ref(realm, &session_id)),
-                state: info.state.as_str().to_string(),
-                labels: info.labels,
-            };
-            RpcResponse::success(id, result)
+    match runtime.read_session_rich(&session_id).await {
+        Some(mut info) => {
+            info.session_ref = runtime
+                .realm_id()
+                .map(|realm| meerkat_contracts::format_session_ref(realm, &info.session_id));
+            RpcResponse::success(id, info)
         }
         None => RpcResponse::error(
             id,
@@ -497,6 +571,32 @@ mod tests {
             wire.skill_diagnostics.as_ref().unwrap().source_health.state,
             meerkat_core::skills::SourceHealthState::Degraded
         );
+    }
+
+    #[test]
+    fn create_session_params_deferred_deserialization() {
+        use super::{CreateSessionParams, InitialTurn};
+
+        // With initial_turn: "deferred"
+        let json = serde_json::json!({
+            "prompt": "hello",
+            "initial_turn": "deferred"
+        });
+        let params: CreateSessionParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.initial_turn, Some(InitialTurn::Deferred));
+
+        // With initial_turn: "run_immediately"
+        let json = serde_json::json!({
+            "prompt": "hello",
+            "initial_turn": "run_immediately"
+        });
+        let params: CreateSessionParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.initial_turn, Some(InitialTurn::RunImmediately));
+
+        // Without initial_turn (default)
+        let json = serde_json::json!({"prompt": "hello"});
+        let params: CreateSessionParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.initial_turn, None);
     }
 }
 

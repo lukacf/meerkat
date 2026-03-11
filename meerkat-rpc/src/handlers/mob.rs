@@ -260,6 +260,115 @@ pub async fn handle_spawn(
     }
 }
 
+// ---------------------------------------------------------------------------
+// mob/spawn_many
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct MobSpawnManyParams {
+    pub mob_id: String,
+    pub specs: Vec<MobSpawnSpecParams>,
+}
+
+/// Per-member spec within a `mob/spawn_many` batch.
+#[derive(Debug, Deserialize)]
+pub struct MobSpawnSpecParams {
+    pub profile: String,
+    pub meerkat_id: String,
+    #[serde(default)]
+    pub initial_message: Option<String>,
+    #[serde(default)]
+    pub runtime_mode: Option<MobRuntimeMode>,
+    #[serde(default)]
+    pub backend: Option<MobBackendKind>,
+    #[serde(default)]
+    pub resume_session_id: Option<String>,
+    #[serde(default)]
+    pub labels: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    pub context: Option<Value>,
+    #[serde(default)]
+    pub additional_instructions: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize)]
+struct SpawnManyResultEntry {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    member_ref: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// Handle `mob/spawn_many` — batch spawn multiple members.
+pub async fn handle_spawn_many(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobSpawnManyParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+
+    let mut specs = Vec::with_capacity(params.specs.len());
+    for s in &params.specs {
+        let resume_session_id = match &s.resume_session_id {
+            Some(raw) => match SessionId::parse(raw) {
+                Ok(sid) => Some(sid),
+                Err(err) => {
+                    return invalid_params(
+                        id,
+                        format!("Invalid resume_session_id for {}: {err}", s.meerkat_id),
+                    );
+                }
+            },
+            None => None,
+        };
+        let mut spec = SpawnMemberSpec::new(s.profile.as_str(), s.meerkat_id.as_str());
+        spec.initial_message = s.initial_message.clone();
+        spec.runtime_mode = s.runtime_mode;
+        spec.backend = s.backend;
+        spec.context = s.context.clone();
+        spec.labels = s.labels.clone();
+        spec.resume_session_id = resume_session_id;
+        spec.additional_instructions = s.additional_instructions.clone();
+        specs.push(spec);
+    }
+
+    match state.mob_spawn_many(&mob_id, specs).await {
+        Ok(results) => {
+            let entries: Vec<SpawnManyResultEntry> = results
+                .into_iter()
+                .map(|r| match r {
+                    Ok(member_ref) => SpawnManyResultEntry {
+                        ok: true,
+                        session_id: member_ref
+                            .session_id()
+                            .map(std::string::ToString::to_string),
+                        member_ref: serde_json::to_value(&member_ref).ok(),
+                        error: None,
+                    },
+                    Err(err) => SpawnManyResultEntry {
+                        ok: false,
+                        member_ref: None,
+                        session_id: None,
+                        error: Some(err.to_string()),
+                    },
+                })
+                .collect();
+            RpcResponse::success(id, serde_json::json!({ "results": entries }))
+        }
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct MobMemberParams {
     pub mob_id: String,

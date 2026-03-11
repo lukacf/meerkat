@@ -1738,6 +1738,7 @@ impl AgentFactory {
                 comms: comms_enabled,
                 subagents: effective_subagents,
                 mob: build_config.override_mob.unwrap_or(self.enable_mob),
+                memory: effective_memory,
                 active_skills: active_skill_ids,
             },
             host_mode: build_config.host_mode,

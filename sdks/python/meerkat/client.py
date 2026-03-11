@@ -36,8 +36,9 @@ from .errors import CapabilityUnavailableError, MeerkatError
 from .events import Usage, parse_event
 from .generated.types import CONTRACT_VERSION
 from .mob import Mob
-from .session import Session, _normalize_skill_ref
+from .session import DeferredSession, Session, _normalize_skill_ref
 from .streaming import EventStream, EventSubscription, _StdoutDispatcher
+from .tools import ToolRegistry
 from .types import (
     AttributedEvent,
     Capability,
@@ -94,6 +95,50 @@ class MeerkatClient:
         self._request_id = 0
         self._capabilities: list[Capability] | None = None
         self._dispatcher: _StdoutDispatcher | None = None
+        self._tool_registry = ToolRegistry()
+
+    # -- Tool registration -------------------------------------------------
+
+    def tool(
+        self,
+        name: str,
+        *,
+        description: str = "",
+        input_schema: dict[str, Any] | None = None,
+    ) -> Any:
+        """Decorator to register a callback tool handler.
+
+        Example::
+
+            @client.tool("search", description="Search the web")
+            async def handle_search(arguments: dict) -> str:
+                return f"Results for {arguments.get('q', '')}"
+        """
+        def decorator(fn: Any) -> Any:
+            self._tool_registry.register(
+                name, fn, description=description, input_schema=input_schema,
+            )
+            # If already connected, register the new tool with the server immediately.
+            if self._process and self._process.stdin:
+                asyncio.ensure_future(self._register_tool_with_server(name, description, input_schema))
+            return fn
+        return decorator
+
+    async def _register_tool_with_server(
+        self,
+        name: str,
+        description: str,
+        input_schema: dict[str, Any] | None,
+    ) -> None:
+        """Best-effort registration of a single tool with the server."""
+        try:
+            await self._request(
+                "tools/register",
+                {"tools": [{"name": name, "description": description or f"Tool: {name}",
+                             "input_schema": input_schema or {"type": "object"}}]},
+            )
+        except Exception:
+            pass  # Best-effort — server may be shutting down.
 
     # -- Async context manager ---------------------------------------------
 
@@ -151,6 +196,8 @@ class MeerkatClient:
         )
         assert self._process.stdout is not None
         self._dispatcher = _StdoutDispatcher(self._process.stdout)
+        if self._process.stdin:
+            self._dispatcher.set_stdin_writer(self._process.stdin)
         self._dispatcher.start()
 
         result = await self._request("initialize", {})
@@ -170,6 +217,19 @@ class MeerkatClient:
             )
             for c in caps_result.get("capabilities", [])
         ]
+
+        # Register callback tools with the server if any were declared.
+        if self._tool_registry:
+            await self._request(
+                "tools/register",
+                {"tools": self._tool_registry.definitions()},
+            )
+
+        # Always install the tool handler so post-connect @client.tool()
+        # registrations can serve callback requests.
+        if self._dispatcher:
+            self._dispatcher.set_tool_handler(self._tool_registry)
+
         return self
 
     async def close(self) -> None:
@@ -306,6 +366,66 @@ class MeerkatClient:
             dispatcher=self._dispatcher,
             parse_result=self._parse_run_result,
             pending_send=(self._process.stdin, data),
+        )
+
+    async def create_deferred_session(
+        self,
+        prompt: str,
+        *,
+        model: str | None = None,
+        provider: str | None = None,
+        system_prompt: str | None = None,
+        max_tokens: int | None = None,
+        output_schema: dict[str, Any] | None = None,
+        structured_output_retries: int = 2,
+        hooks_override: dict[str, Any] | None = None,
+        enable_builtins: bool = False,
+        enable_shell: bool = False,
+        enable_subagents: bool = False,
+        enable_memory: bool = False,
+        enable_mob: bool = False,
+        host_mode: bool = False,
+        comms_name: str | None = None,
+        peer_meta: dict[str, Any] | None = None,
+        budget_limits: dict[str, Any] | None = None,
+        provider_params: dict[str, Any] | None = None,
+        preload_skills: list[str] | None = None,
+        skill_refs: list[SkillRef] | None = None,
+        skill_references: list[str] | None = None,
+    ) -> DeferredSession:
+        """Create a new session without running the first turn.
+
+        Returns a :class:`~meerkat.DeferredSession` whose
+        :meth:`~meerkat.DeferredSession.start_turn` executes the first turn
+        with optional per-turn overrides.
+
+        Example::
+
+            deferred = await client.create_deferred_session(
+                "Summarise this project",
+                model="claude-sonnet-4-5",
+            )
+            result = await deferred.start_turn("Begin")
+        """
+        params = self._build_create_params(
+            prompt, model=model, provider=provider, system_prompt=system_prompt,
+            max_tokens=max_tokens, output_schema=output_schema,
+            structured_output_retries=structured_output_retries,
+            hooks_override=hooks_override, enable_builtins=enable_builtins,
+            enable_shell=enable_shell, enable_subagents=enable_subagents,
+            enable_memory=enable_memory, enable_mob=enable_mob,
+            host_mode=host_mode,
+            comms_name=comms_name, peer_meta=peer_meta,
+            budget_limits=budget_limits, provider_params=provider_params,
+            preload_skills=preload_skills,
+            skill_refs=skill_refs, skill_references=skill_references,
+        )
+        params["initial_turn"] = "deferred"
+        raw = await self._request("session/create", params)
+        return DeferredSession(
+            self,
+            session_id=raw.get("session_id", ""),
+            session_ref=raw.get("session_ref"),
         )
 
     # -- Session queries ---------------------------------------------------
@@ -671,6 +791,14 @@ class MeerkatClient:
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
         flow_tool_overlay: dict[str, Any] | None = None,
+        host_mode: bool | None = None,
+        model: str | None = None,
+        provider: str | None = None,
+        max_tokens: int | None = None,
+        system_prompt: str | None = None,
+        output_schema: dict[str, Any] | None = None,
+        structured_output_retries: int | None = None,
+        provider_params: dict[str, Any] | None = None,
     ) -> RunResult:
         params: dict[str, Any] = {"session_id": session_id, "prompt": prompt}
         wire_refs = _skill_refs_to_wire(skill_refs)
@@ -680,6 +808,22 @@ class MeerkatClient:
             params["skill_references"] = skill_references
         if flow_tool_overlay is not None:
             params["flow_tool_overlay"] = flow_tool_overlay
+        if host_mode is not None:
+            params["host_mode"] = host_mode
+        if model is not None:
+            params["model"] = model
+        if provider is not None:
+            params["provider"] = provider
+        if max_tokens is not None:
+            params["max_tokens"] = max_tokens
+        if system_prompt is not None:
+            params["system_prompt"] = system_prompt
+        if output_schema is not None:
+            params["output_schema"] = output_schema
+        if structured_output_retries is not None:
+            params["structured_output_retries"] = structured_output_retries
+        if provider_params is not None:
+            params["provider_params"] = provider_params
         raw = await self._request("turn/start", params)
         return self._parse_run_result(raw)
 

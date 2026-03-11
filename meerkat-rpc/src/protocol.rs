@@ -18,7 +18,7 @@ pub struct RpcRequest {
 }
 
 /// JSON-RPC message identifier (number or string).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum RpcId {
     Num(i64),
@@ -58,6 +58,18 @@ impl RpcRequest {
     pub fn is_notification(&self) -> bool {
         self.id.is_none()
     }
+}
+
+/// Discriminated union of incoming messages: either a request or a response.
+///
+/// The transport reads raw JSON and disambiguates by field presence:
+/// messages with a `method` field are requests; others are responses.
+#[derive(Debug)]
+pub enum RpcMessage {
+    /// An incoming JSON-RPC request or notification.
+    Request(RpcRequest),
+    /// An incoming JSON-RPC response (from the client in callback protocol).
+    Response(RpcResponse),
 }
 
 impl RpcResponse {

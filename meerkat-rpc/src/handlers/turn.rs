@@ -39,6 +39,31 @@ pub struct StartTurnParams {
     /// Additional instruction sections prepended as system notices for this turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_instructions: Option<Vec<String>>,
+    /// Override host mode for this turn. Only applies to pending (deferred) sessions.
+    #[serde(default)]
+    pub host_mode: Option<bool>,
+    // -- Resume-time overrides (pending/deferred sessions only) ---------------
+    /// Override model for this session. Rejected on materialized sessions.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Override provider for this session. Rejected on materialized sessions.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Override max_tokens for this session. Rejected on materialized sessions.
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    /// Override system prompt for this session. Rejected on materialized sessions.
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+    /// Override output schema for this session. Rejected on materialized sessions.
+    #[serde(default)]
+    pub output_schema: Option<serde_json::Value>,
+    /// Override structured output retries. Rejected on materialized sessions.
+    #[serde(default)]
+    pub structured_output_retries: Option<u32>,
+    /// Override provider-specific parameters. Rejected on materialized sessions.
+    #[serde(default)]
+    pub provider_params: Option<serde_json::Value>,
 }
 
 /// Parameters for `turn/interrupt`.
@@ -69,6 +94,32 @@ fn canonical_skill_ids(
         skill_references,
     };
     params.canonical_skill_keys_with_registry(&runtime.skill_identity_registry())
+}
+
+/// Collect per-turn override fields into a struct for `SessionRuntime::start_turn`.
+#[derive(Debug, Default)]
+pub struct TurnOverrides {
+    pub host_mode: Option<bool>,
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    pub max_tokens: Option<u32>,
+    pub system_prompt: Option<String>,
+    pub output_schema: Option<serde_json::Value>,
+    pub structured_output_retries: Option<u32>,
+    pub provider_params: Option<serde_json::Value>,
+}
+
+impl TurnOverrides {
+    fn is_empty(&self) -> bool {
+        self.host_mode.is_none()
+            && self.model.is_none()
+            && self.provider.is_none()
+            && self.max_tokens.is_none()
+            && self.system_prompt.is_none()
+            && self.output_schema.is_none()
+            && self.structured_output_retries.is_none()
+            && self.provider_params.is_none()
+    }
 }
 
 /// Handle `turn/start`.
@@ -111,6 +162,18 @@ pub async fn handle_start(
             );
         }
     };
+
+    let overrides = TurnOverrides {
+        host_mode: params.host_mode,
+        model: params.model,
+        provider: params.provider,
+        max_tokens: params.max_tokens,
+        system_prompt: params.system_prompt,
+        output_schema: params.output_schema,
+        structured_output_retries: params.structured_output_retries,
+        provider_params: params.provider_params,
+    };
+
     let result = match runtime
         .start_turn(
             &session_id,
@@ -119,6 +182,11 @@ pub async fn handle_start(
             skill_refs,
             params.flow_tool_overlay,
             params.additional_instructions,
+            if overrides.is_empty() {
+                None
+            } else {
+                Some(overrides)
+            },
         )
         .await
     {

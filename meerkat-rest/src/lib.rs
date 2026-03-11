@@ -1569,6 +1569,7 @@ async fn continue_session(
                     comms: false,
                     subagents: false,
                     mob: false,
+                    memory: false,
                     active_skills: None,
                 });
 

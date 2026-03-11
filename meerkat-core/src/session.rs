@@ -542,6 +542,9 @@ pub struct SessionTooling {
     /// Mob (multi-agent orchestration) tools enabled.
     #[serde(default)]
     pub mob: bool,
+    /// Semantic memory enabled.
+    #[serde(default)]
+    pub memory: bool,
     /// Active skills at session creation time (for deterministic resume).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_skills: Option<Vec<crate::skills::SkillId>>,

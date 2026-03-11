@@ -3200,6 +3200,7 @@ async fn resume_session_with_llm_override(
             comms: config.tools.comms_enabled,
             subagents: config.tools.subagents_enabled,
             mob: config.tools.mob_enabled,
+            memory: false,
             active_skills: None,
         });
     let host_mode_requested = stored_metadata.as_ref().is_some_and(|meta| meta.host_mode);

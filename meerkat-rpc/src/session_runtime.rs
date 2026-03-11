@@ -96,6 +96,20 @@ pub struct SessionInfo {
 struct PendingSession {
     phase: PendingSessionPhase,
     labels: Option<BTreeMap<String, String>>,
+    /// Prompt from `session/create` when `initial_turn` is deferred.
+    /// Prepended to the first `turn/start` prompt.
+    deferred_prompt: Option<String>,
+    /// Stable creation timestamp (Unix seconds), set when the pending session is staged.
+    created_at_secs: u64,
+    /// Last-modified timestamp (Unix seconds), updated on mutations like append_system_context.
+    updated_at_secs: u64,
+}
+
+fn now_unix_secs() -> u64 {
+    meerkat_core::time_compat::SystemTime::now()
+        .duration_since(meerkat_core::time_compat::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 enum PendingSessionPhase {
@@ -133,6 +147,21 @@ pub struct SessionRuntime {
     skill_identity_registry: Arc<StdRwLock<SkillIdentityRegistryState>>,
     #[cfg(feature = "mcp")]
     mcp_sessions: RwLock<std::collections::HashMap<SessionId, SessionMcpState>>,
+    /// Channel for sending callback tool requests to the RPC server loop.
+    /// Wrapped in `RwLock` so it can be set after Arc wrapping (server construction).
+    #[allow(clippy::type_complexity)]
+    callback_request_tx: StdRwLock<
+        Option<
+            mpsc::Sender<(
+                crate::protocol::RpcRequest,
+                tokio::sync::oneshot::Sender<crate::protocol::RpcResponse>,
+            )>,
+        >,
+    >,
+    /// Counter for generating unique server-originated callback request IDs.
+    callback_id_counter_slot: StdRwLock<Arc<std::sync::atomic::AtomicU64>>,
+    /// Globally registered callback tool definitions (via `tools/register`).
+    registered_tools_slot: StdRwLock<Arc<StdRwLock<Vec<meerkat_core::ToolDef>>>>,
 }
 
 impl SessionRuntime {
@@ -161,6 +190,11 @@ impl SessionRuntime {
             })),
             #[cfg(feature = "mcp")]
             mcp_sessions: RwLock::new(std::collections::HashMap::new()),
+            callback_request_tx: StdRwLock::new(None),
+            callback_id_counter_slot: StdRwLock::new(Arc::new(std::sync::atomic::AtomicU64::new(
+                0,
+            ))),
+            registered_tools_slot: StdRwLock::new(Arc::new(StdRwLock::new(Vec::new()))),
         }
     }
 
@@ -191,6 +225,11 @@ impl SessionRuntime {
             })),
             #[cfg(feature = "mcp")]
             mcp_sessions: RwLock::new(std::collections::HashMap::new()),
+            callback_request_tx: StdRwLock::new(None),
+            callback_id_counter_slot: StdRwLock::new(Arc::new(std::sync::atomic::AtomicU64::new(
+                0,
+            ))),
+            registered_tools_slot: StdRwLock::new(Arc::new(StdRwLock::new(Vec::new()))),
         }
     }
 
@@ -219,6 +258,66 @@ impl SessionRuntime {
     /// Shared config runtime used by config handlers.
     pub fn config_runtime(&self) -> Option<Arc<meerkat_core::ConfigRuntime>> {
         self.config_runtime.as_ref().map(Arc::clone)
+    }
+
+    /// Set the callback request channel for tool callbacks.
+    ///
+    /// Takes `&self` so it can be called after the runtime is wrapped in `Arc`
+    /// (e.g. during `RpcServer` construction).
+    pub fn set_callback_channel(
+        &self,
+        tx: mpsc::Sender<(
+            crate::protocol::RpcRequest,
+            tokio::sync::oneshot::Sender<crate::protocol::RpcResponse>,
+        )>,
+        id_counter: Arc<std::sync::atomic::AtomicU64>,
+        registered_tools: Arc<StdRwLock<Vec<meerkat_core::ToolDef>>>,
+    ) {
+        if let Ok(mut slot) = self.callback_request_tx.write() {
+            *slot = Some(tx);
+        }
+        // id_counter and registered_tools are already Arc-shared — the server
+        // passes its own Arcs into the runtime at construction time. When using
+        // the &self path (after Arc wrapping), we store them atomically.
+        if let Ok(mut c) = self.callback_id_counter_slot.write() {
+            *c = id_counter;
+        }
+        if let Ok(mut t) = self.registered_tools_slot.write() {
+            *t = registered_tools;
+        }
+    }
+
+    /// Get a clone of the callback request sender, if configured.
+    pub fn callback_request_tx(
+        &self,
+    ) -> Option<
+        mpsc::Sender<(
+            crate::protocol::RpcRequest,
+            tokio::sync::oneshot::Sender<crate::protocol::RpcResponse>,
+        )>,
+    > {
+        self.callback_request_tx
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+
+    /// Get the callback ID counter.
+    pub fn callback_id_counter(&self) -> Arc<std::sync::atomic::AtomicU64> {
+        self.callback_id_counter_slot
+            .read()
+            .ok()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    /// Get the globally registered callback tool definitions.
+    pub fn registered_tools(&self) -> Arc<StdRwLock<Vec<meerkat_core::ToolDef>>> {
+        self.registered_tools_slot
+            .read()
+            .ok()
+            .map(|g| g.clone())
+            .unwrap_or_else(|| Arc::new(StdRwLock::new(Vec::new())))
     }
 
     pub fn set_skill_identity_registry(&self, registry: SourceIdentityRegistry) {
@@ -262,6 +361,7 @@ impl SessionRuntime {
         &self,
         build_config: AgentBuildConfig,
         labels: Option<BTreeMap<String, String>>,
+        deferred_prompt: Option<String>,
     ) -> Result<SessionId, RpcError> {
         // Check combined capacity (pending + active).
         {
@@ -306,6 +406,9 @@ impl SessionRuntime {
                         build_config: Box::new(build_config),
                     },
                     labels,
+                    deferred_prompt,
+                    created_at_secs: now_unix_secs(),
+                    updated_at_secs: now_unix_secs(),
                 },
             );
         }
@@ -317,6 +420,12 @@ impl SessionRuntime {
     ///
     /// Events are forwarded to `event_tx` during the turn. Returns the
     /// `RunResult` when the turn completes.
+    ///
+    /// `overrides` may contain per-turn overrides. For pending (deferred)
+    /// sessions, all overrides are applied to the staged `AgentBuildConfig`.
+    /// For materialized sessions, only `host_mode` is allowed; all other
+    /// overrides are rejected with an error.
+    #[allow(clippy::too_many_arguments)]
     pub async fn start_turn(
         &self,
         session_id: &SessionId,
@@ -325,6 +434,7 @@ impl SessionRuntime {
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
         flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
         additional_instructions: Option<Vec<String>>,
+        overrides: Option<crate::handlers::turn::TurnOverrides>,
     ) -> Result<RunResult, RpcError> {
         #[allow(unused_mut)]
         let mut turn_prompt = prompt;
@@ -363,13 +473,75 @@ impl SessionRuntime {
                     let PendingSessionPhase::Staged { build_config } = phase else {
                         unreachable!("phase was checked before replacement");
                     };
-                    Some((*build_config, pending_session.labels.clone()))
+                    Some((
+                        *build_config,
+                        pending_session.labels.clone(),
+                        pending_session.deferred_prompt.clone(),
+                        pending_session.created_at_secs,
+                        pending_session.updated_at_secs,
+                    ))
                 }
                 None => None,
             }
         };
 
-        if let Some((mut build_config, labels)) = pending_session {
+        if let Some((mut build_config, labels, deferred_prompt, created_at_secs, updated_at_secs)) =
+            pending_session
+        {
+            // Prepend the deferred create-time prompt to the turn prompt.
+            // Keep copies for rollback paths that re-stage the pending session.
+            let saved_deferred_prompt = deferred_prompt.clone();
+            let saved_created_at_secs = created_at_secs;
+            let saved_updated_at_secs = updated_at_secs;
+            if let Some(deferred) = deferred_prompt {
+                turn_prompt = format!("{deferred}\n\n{turn_prompt}");
+            }
+            // Apply per-turn overrides to the pending build config.
+            if let Some(ref ov) = overrides {
+                if let Some(ref model) = ov.model {
+                    build_config.model = model.clone();
+                }
+                if let Some(ref provider) = ov.provider {
+                    build_config.provider = Some(meerkat_core::Provider::from_name(provider));
+                }
+                if let Some(max_tokens) = ov.max_tokens {
+                    build_config.max_tokens = Some(max_tokens);
+                }
+                if let Some(ref system_prompt) = ov.system_prompt {
+                    build_config.system_prompt = Some(system_prompt.clone());
+                }
+                if let Some(ref output_schema) = ov.output_schema {
+                    match meerkat_core::OutputSchema::from_json_value(output_schema.clone()) {
+                        Ok(os) => build_config.output_schema = Some(os),
+                        Err(e) => {
+                            // Restore pending state before returning error.
+                            self.restore_pending_from_promoting(
+                                session_id,
+                                build_config,
+                                labels,
+                                saved_deferred_prompt,
+                                saved_created_at_secs,
+                                saved_updated_at_secs,
+                            )
+                            .await;
+                            return Err(RpcError {
+                                code: error::INVALID_PARAMS,
+                                message: format!("Invalid output_schema override: {e}"),
+                                data: None,
+                            });
+                        }
+                    }
+                }
+                if let Some(retries) = ov.structured_output_retries {
+                    build_config.structured_output_retries = retries;
+                }
+                if let Some(ref pp) = ov.provider_params {
+                    build_config.provider_params = Some(pp.clone());
+                }
+                if let Some(host_mode) = ov.host_mode {
+                    build_config.host_mode = host_mode;
+                }
+            }
             // Inject default LLM client if the caller didn't provide one.
             if build_config.llm_client_override.is_none()
                 && let Some(ref client) = self.default_llm_client
@@ -449,6 +621,9 @@ impl SessionRuntime {
                                     build_config: Box::new(build_config),
                                 },
                                 labels,
+                                deferred_prompt: saved_deferred_prompt.clone(),
+                                created_at_secs: saved_created_at_secs,
+                                updated_at_secs: saved_updated_at_secs,
                             },
                         );
                     }
@@ -457,20 +632,214 @@ impl SessionRuntime {
             }
         }
 
-        // Normal turn on an existing session.
+        // Normal turn on an existing (materialized) session.
+        // Reject per-turn overrides that require pending state.
+        if let Some(ref ov) = overrides {
+            let rejected = [
+                ov.model.as_ref().map(|_| "model"),
+                ov.provider.as_ref().map(|_| "provider"),
+                ov.max_tokens.map(|_| "max_tokens"),
+                ov.system_prompt.as_ref().map(|_| "system_prompt"),
+                ov.output_schema.as_ref().map(|_| "output_schema"),
+                ov.structured_output_retries
+                    .map(|_| "structured_output_retries"),
+                ov.provider_params.as_ref().map(|_| "provider_params"),
+            ];
+            let rejected: Vec<&str> = rejected.into_iter().flatten().collect();
+            if !rejected.is_empty() {
+                return Err(RpcError {
+                    code: error::INVALID_PARAMS,
+                    message: format!(
+                        "Cannot override {} on a materialized session; use deferred session/create",
+                        rejected.join(", ")
+                    ),
+                    data: None,
+                });
+            }
+        }
+
+        let host_mode = overrides
+            .as_ref()
+            .and_then(|ov| ov.host_mode)
+            .unwrap_or(false);
+
         let req = StartTurnRequest {
-            prompt: turn_prompt,
-            event_tx: Some(event_tx),
-            host_mode: false,
+            prompt: turn_prompt.clone(),
+            event_tx: Some(event_tx.clone()),
+            host_mode,
+            skill_references: skill_references.clone(),
+            flow_tool_overlay: flow_tool_overlay.clone(),
+            additional_instructions: additional_instructions.clone(),
+        };
+
+        match self.service.start_turn(session_id, req).await {
+            Ok(result) => Ok(result),
+            Err(SessionError::NotFound { .. }) => {
+                // Attempt persisted session recovery: the session may exist in the
+                // store from a previous runtime lifetime.
+                self.try_recover_persisted_session(
+                    session_id,
+                    turn_prompt,
+                    event_tx,
+                    host_mode,
+                    skill_references,
+                    flow_tool_overlay,
+                    additional_instructions,
+                )
+                .await
+            }
+            Err(err) => Err(session_error_to_rpc(err)),
+        }
+    }
+
+    /// Restore a pending session from `Promoting` state back to `Staged` after
+    /// an override validation failure. Prevents the session from being stuck in
+    /// the promoting state when the turn is aborted before `create_session`.
+    async fn restore_pending_from_promoting(
+        &self,
+        session_id: &SessionId,
+        build_config: AgentBuildConfig,
+        labels: Option<BTreeMap<String, String>>,
+        deferred_prompt: Option<String>,
+        created_at_secs: u64,
+        updated_at_secs: u64,
+    ) {
+        let mut pending = self.pending.write().await;
+        pending.insert(
+            session_id.clone(),
+            PendingSession {
+                phase: PendingSessionPhase::Staged {
+                    build_config: Box::new(build_config),
+                },
+                labels,
+                deferred_prompt,
+                created_at_secs,
+                updated_at_secs,
+            },
+        );
+    }
+
+    /// Attempt to recover a persisted session that is no longer live.
+    ///
+    /// Mirrors the REST recovery path: load the session from the store, extract
+    /// stored metadata, build an `AgentBuildConfig`, stage as pending, and
+    /// fall through to the normal materialization path.
+    ///
+    /// Returns `SESSION_NOT_FOUND` if the session cannot be recovered.
+    #[allow(clippy::too_many_arguments)]
+    async fn try_recover_persisted_session(
+        &self,
+        session_id: &SessionId,
+        prompt: String,
+        event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
+        host_mode: bool,
+        skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
+        flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
+        additional_instructions: Option<Vec<String>>,
+    ) -> Result<RunResult, RpcError> {
+        let loaded_session = self
+            .service
+            .load_persisted(session_id)
+            .await
+            .map_err(session_error_to_rpc)?;
+
+        let Some(session) = loaded_session else {
+            return Err(RpcError {
+                code: error::SESSION_NOT_FOUND,
+                message: format!("Session not found: {session_id}"),
+                data: None,
+            });
+        };
+
+        let stored_metadata = session.session_metadata();
+
+        // Build config from stored metadata.
+        let model = stored_metadata
+            .as_ref()
+            .map(|m| m.model.clone())
+            .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
+        let mut build_config = AgentBuildConfig::new(model);
+        build_config.resume_session = Some(session);
+
+        if let Some(ref meta) = stored_metadata {
+            build_config.provider = Some(meta.provider);
+            build_config.max_tokens = Some(meta.max_tokens);
+            build_config.host_mode = meta.host_mode;
+            build_config.comms_name = meta.comms_name.clone();
+            build_config.peer_meta = meta.peer_meta.clone();
+            build_config.override_builtins = Some(meta.tooling.builtins);
+            build_config.override_shell = Some(meta.tooling.shell);
+            build_config.override_subagents = Some(meta.tooling.subagents);
+            build_config.override_mob = Some(meta.tooling.mob);
+            build_config.override_memory = Some(meta.tooling.memory);
+            build_config.preload_skills = meta.tooling.active_skills.clone();
+        }
+
+        // Apply caller-requested host_mode override (from turn/start params).
+        if host_mode {
+            build_config.host_mode = true;
+        }
+
+        // Inject default LLM client if available.
+        if let Some(ref client) = self.default_llm_client {
+            build_config.llm_client_override = Some(client.clone());
+        }
+
+        // Restore callback tools from globally registered definitions.
+        // Note: per-session external_tools (from CreateSessionParams) are
+        // ephemeral in-process handlers and cannot survive a runtime restart.
+        // Only globally registered tools (via tools/register) are restored.
+        if let Some(tx) = self.callback_request_tx() {
+            let tools: Vec<meerkat_core::ToolDef> = self
+                .registered_tools()
+                .read()
+                .map(|g| g.iter().cloned().collect())
+                .unwrap_or_default();
+            if !tools.is_empty() {
+                let dispatcher: Arc<dyn meerkat_core::AgentToolDispatcher> =
+                    Arc::new(crate::callback_dispatcher::CallbackToolDispatcher::new(
+                        tools,
+                        tx,
+                        self.callback_id_counter(),
+                    ));
+                build_config.external_tools = Some(dispatcher);
+            }
+        }
+
+        // Stage as pending and re-enter the materialization path.
+        // Labels are managed by the session service — pass None so
+        // CreateSessionRequest.labels is empty and the service preserves
+        // whatever labels were stored with the original session.
+        let labels: Option<BTreeMap<String, String>> = None;
+
+        {
+            let mut pending = self.pending.write().await;
+            pending.insert(
+                session_id.clone(),
+                PendingSession {
+                    phase: PendingSessionPhase::Staged {
+                        build_config: Box::new(build_config),
+                    },
+                    labels,
+                    deferred_prompt: None,
+                    created_at_secs: now_unix_secs(),
+                    updated_at_secs: now_unix_secs(),
+                },
+            );
+        }
+
+        // Recursively call start_turn which will now find the pending session.
+        // Use Box::pin to avoid infinite recursion concerns in async.
+        Box::pin(self.start_turn(
+            session_id,
+            prompt,
+            event_tx,
             skill_references,
             flow_tool_overlay,
             additional_instructions,
-        };
-
-        self.service
-            .start_turn(session_id, req)
-            .await
-            .map_err(session_error_to_rpc)
+            None,
+        ))
+        .await
     }
 
     async fn take_promoting_system_context_state(
@@ -490,6 +859,9 @@ impl SessionRuntime {
                     PendingSession {
                         phase: PendingSessionPhase::Staged { build_config },
                         labels: pending_session.labels,
+                        deferred_prompt: None,
+                        created_at_secs: pending_session.created_at_secs,
+                        updated_at_secs: pending_session.updated_at_secs,
                     },
                 );
                 None
@@ -580,6 +952,8 @@ impl SessionRuntime {
                             system_context_error_to_rpc(err.into_control_error(session_id))
                         })?,
                 };
+                // Bump updated_at on successful mutation.
+                pending_session.updated_at_secs = now_unix_secs();
                 return Ok(AppendSystemContextResult { status });
             }
         }
@@ -713,6 +1087,106 @@ impl SessionRuntime {
         }
 
         result
+    }
+
+    /// List all active sessions as canonical wire summaries, including pending sessions.
+    pub async fn list_sessions_rich(
+        &self,
+        query: SessionQuery,
+    ) -> Vec<meerkat_contracts::WireSessionSummary> {
+        let mut result = Vec::new();
+
+        // Include pending sessions as synthetic entries.
+        {
+            let pending = self.pending.read().await;
+            for (session_id, ps) in pending.iter() {
+                let pending_labels = ps.labels.as_ref();
+                if let Some(ref filter) = query.labels {
+                    let matches = pending_labels
+                        .is_some_and(|pl| filter.iter().all(|(k, v)| pl.get(k) == Some(v)));
+                    if !matches {
+                        continue;
+                    }
+                }
+                result.push(meerkat_contracts::WireSessionSummary {
+                    session_id: session_id.clone(),
+                    session_ref: None,
+                    created_at: ps.created_at_secs,
+                    updated_at: ps.updated_at_secs,
+                    message_count: 0,
+                    total_tokens: 0,
+                    is_active: matches!(&ps.phase, PendingSessionPhase::Promoting { .. }),
+                    labels: pending_labels.cloned().unwrap_or_default(),
+                });
+            }
+        }
+
+        // Include materialized sessions from the service.
+        if let Ok(summaries) = self.service.list(query).await {
+            for summary in summaries {
+                result.push(summary.into());
+            }
+        }
+
+        result
+    }
+
+    /// Read a session as a canonical wire info object, checking pending and materialized.
+    pub async fn read_session_rich(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<meerkat_contracts::WireSessionInfo> {
+        // Check pending sessions first.
+        {
+            let pending = self.pending.read().await;
+            if let Some(ps) = pending.get(session_id) {
+                return Some(meerkat_contracts::WireSessionInfo {
+                    session_id: session_id.clone(),
+                    session_ref: None,
+                    created_at: ps.created_at_secs,
+                    updated_at: ps.updated_at_secs,
+                    message_count: 0,
+                    is_active: matches!(&ps.phase, PendingSessionPhase::Promoting { .. }),
+                    last_assistant_text: None,
+                    labels: ps.labels.clone().unwrap_or_default(),
+                });
+            }
+        }
+
+        // Try list() first — non-blocking (uses watch receivers).
+        if let Ok(summaries) = self.service.list(Default::default()).await {
+            for summary in summaries {
+                if summary.session_id == *session_id {
+                    if !summary.is_active {
+                        // Idle session: safe to call read() without blocking,
+                        // which provides last_assistant_text.
+                        if let Ok(view) = self.service.read(session_id).await {
+                            return Some(view.state.into());
+                        }
+                    }
+                    // Active session: return summary without last_assistant_text
+                    // to avoid blocking the caller during a running turn.
+                    let wire: meerkat_contracts::WireSessionSummary = summary.into();
+                    return Some(meerkat_contracts::WireSessionInfo {
+                        session_id: wire.session_id,
+                        session_ref: None,
+                        created_at: wire.created_at,
+                        updated_at: wire.updated_at,
+                        message_count: wire.message_count,
+                        is_active: wire.is_active,
+                        last_assistant_text: None,
+                        labels: wire.labels,
+                    });
+                }
+            }
+        }
+
+        // Fallback: try read() for archived/persisted sessions not in the live list.
+        if let Ok(view) = self.service.read(session_id).await {
+            return Some(view.state.into());
+        }
+
+        None
     }
 
     /// Get the event injector for a session, if available.
@@ -1308,7 +1782,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None)
+            .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
 
@@ -1323,13 +1797,21 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None)
+            .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
         let (event_tx, _event_rx) = mpsc::channel(100);
 
         let result = runtime
-            .start_turn(&session_id, "Hello".to_string(), event_tx, None, None, None)
+            .start_turn(
+                &session_id,
+                "Hello".to_string(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap();
 
@@ -1346,7 +1828,7 @@ mod tests {
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
 
         let session_id = runtime
-            .create_session(slow_build_config(200), None)
+            .create_session(slow_build_config(200), None, None)
             .await
             .unwrap();
 
@@ -1355,7 +1837,15 @@ mod tests {
         let sid_clone = session_id.clone();
         let turn_handle = tokio::spawn(async move {
             runtime_clone
-                .start_turn(&sid_clone, "Hello".to_string(), event_tx, None, None, None)
+                .start_turn(
+                    &sid_clone,
+                    "Hello".to_string(),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
                 .await
         });
 
@@ -1413,7 +1903,7 @@ mod tests {
 
         // Use a slow mock to give us time to observe Running state
         let session_id = runtime
-            .create_session(slow_build_config(100), None)
+            .create_session(slow_build_config(100), None, None)
             .await
             .unwrap();
 
@@ -1430,7 +1920,15 @@ mod tests {
 
         let turn_handle = tokio::spawn(async move {
             runtime_clone
-                .start_turn(&sid_clone, "Hello".to_string(), event_tx, None, None, None)
+                .start_turn(
+                    &sid_clone,
+                    "Hello".to_string(),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
                 .await
         });
 
@@ -1468,7 +1966,7 @@ mod tests {
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
 
         let session_id = runtime
-            .create_session(slow_build_config(200), None)
+            .create_session(slow_build_config(200), None, None)
             .await
             .unwrap();
 
@@ -1478,7 +1976,15 @@ mod tests {
         let sid_clone = session_id.clone();
         let _turn_handle = tokio::spawn(async move {
             runtime_clone
-                .start_turn(&sid_clone, "First".to_string(), event_tx1, None, None, None)
+                .start_turn(
+                    &sid_clone,
+                    "First".to_string(),
+                    event_tx1,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
                 .await
         });
 
@@ -1507,6 +2013,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await;
 
@@ -1527,13 +2034,21 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None)
+            .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
         let (event_tx, mut event_rx) = mpsc::channel(100);
 
         let _result = runtime
-            .start_turn(&session_id, "Hello".to_string(), event_tx, None, None, None)
+            .start_turn(
+                &session_id,
+                "Hello".to_string(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap();
 
@@ -1563,7 +2078,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None)
+            .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
 
@@ -1585,7 +2100,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None)
+            .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
 
@@ -1615,16 +2130,18 @@ mod tests {
 
         // Create two sessions (the max)
         let _s1 = runtime
-            .create_session(mock_build_config(), None)
+            .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
         let _s2 = runtime
-            .create_session(mock_build_config(), None)
+            .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
 
         // Third should fail
-        let result = runtime.create_session(mock_build_config(), None).await;
+        let result = runtime
+            .create_session(mock_build_config(), None, None)
+            .await;
         assert!(result.is_err(), "Third session should fail");
         let err = result.unwrap_err();
         assert!(
@@ -1651,11 +2168,11 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 10);
 
         let s1 = runtime
-            .create_session(mock_build_config(), None)
+            .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
         let s2 = runtime
-            .create_session(mock_build_config(), None)
+            .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
 
@@ -1680,7 +2197,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
         let session_id = runtime
-            .create_session(mock_build_config(), None)
+            .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
 
@@ -1701,7 +2218,15 @@ mod tests {
         // (the broken server fails asynchronously, not at staging time).
         let (event_tx, mut event_rx) = mpsc::channel(32);
         let first = runtime
-            .start_turn(&session_id, "hello".to_string(), event_tx, None, None, None)
+            .start_turn(
+                &session_id,
+                "hello".to_string(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
             .await;
         assert!(
             first.is_ok(),
@@ -1726,6 +2251,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await;
         assert!(
@@ -1743,7 +2269,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
         let session_id = runtime
-            .create_session(mock_build_config(), None)
+            .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
 
@@ -1759,6 +2285,7 @@ mod tests {
                 &session_id,
                 "turn add".to_string(),
                 event_tx,
+                None,
                 None,
                 None,
                 None,
@@ -1785,6 +2312,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .expect("turn remove should apply staged remove");
@@ -1805,7 +2333,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
         let session_id = runtime
-            .create_session(mock_build_config(), None)
+            .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
 
@@ -1820,6 +2348,7 @@ mod tests {
                 &session_id,
                 "turn add".to_string(),
                 event_tx,
+                None,
                 None,
                 None,
                 None,
@@ -1854,6 +2383,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .expect("remove boundary");
@@ -1872,6 +2402,7 @@ mod tests {
                 &session_id,
                 "turn after timeout".to_string(),
                 event_tx,
+                None,
                 None,
                 None,
                 None,
@@ -1899,7 +2430,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
         let session_id = runtime
-            .create_session(mock_build_config(), None)
+            .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
 
@@ -1913,6 +2444,7 @@ mod tests {
                 &session_id,
                 "turn add first".to_string(),
                 event_tx,
+                None,
                 None,
                 None,
                 None,
@@ -1943,6 +2475,7 @@ mod tests {
                 &session_id,
                 "turn remove first".to_string(),
                 event_tx,
+                None,
                 None,
                 None,
                 None,
@@ -1980,6 +2513,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .expect("next boundary should apply staged add");
@@ -2006,7 +2540,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
         let session_id = runtime
-            .create_session(mock_build_config(), None)
+            .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
 
@@ -2020,6 +2554,7 @@ mod tests {
                 &session_id,
                 "turn add".to_string(),
                 event_tx,
+                None,
                 None,
                 None,
                 None,
@@ -2053,6 +2588,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .expect("remove boundary");
@@ -2078,6 +2614,7 @@ mod tests {
                 &session_id,
                 "turn failing apply".to_string(),
                 event_tx,
+                None,
                 None,
                 None,
                 None,
@@ -2171,5 +2708,357 @@ mod tests {
             result,
             Err(meerkat_core::skills::SkillError::MissingSkillRemaps { .. })
         ));
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 1 tests: Deferred create, host_mode override, per-turn overrides
+    // -----------------------------------------------------------------------
+
+    /// Deferred session/create returns a session in Idle state (no turn executed).
+    #[tokio::test]
+    async fn deferred_create_returns_idle_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .unwrap();
+
+        // Session exists and is idle (no turn started).
+        let info = runtime.session_state(&session_id).await.unwrap();
+        assert_eq!(info.state, SessionState::Idle);
+    }
+
+    /// Deferred create followed by turn/start works correctly.
+    #[tokio::test]
+    async fn deferred_create_then_turn_start_works() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .unwrap();
+
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let result = runtime
+            .start_turn(
+                &session_id,
+                "Hello".to_string(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.text.contains("Hello from mock"));
+    }
+
+    /// turn/start with host_mode override on a materialized session is not rejected.
+    #[tokio::test]
+    async fn turn_start_with_host_mode_override_accepted_on_materialized() {
+        use crate::handlers::turn::TurnOverrides;
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .unwrap();
+
+        // Materialize the session with a first turn.
+        let (event_tx, _rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "First".to_string(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Second turn with only host_mode override (no model/provider etc.)
+        // should not be rejected — host_mode is allowed on materialized sessions.
+        // Use host_mode: false to avoid needing comms runtime.
+        let (event_tx, _rx) = mpsc::channel(100);
+        let overrides = TurnOverrides {
+            host_mode: Some(false),
+            ..Default::default()
+        };
+        let result = runtime
+            .start_turn(
+                &session_id,
+                "Second".to_string(),
+                event_tx,
+                None,
+                None,
+                None,
+                Some(overrides),
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "host_mode override should succeed on materialized session"
+        );
+    }
+
+    /// turn/start on a pending session with model override applies it.
+    #[tokio::test]
+    async fn turn_start_on_pending_session_with_model_override() {
+        use crate::handlers::turn::TurnOverrides;
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .unwrap();
+
+        // Start turn with model override on pending session.
+        let (event_tx, _rx) = mpsc::channel(100);
+        let overrides = TurnOverrides {
+            model: Some("claude-opus-4-6".to_string()),
+            ..Default::default()
+        };
+        let result = runtime
+            .start_turn(
+                &session_id,
+                "Hello".to_string(),
+                event_tx,
+                None,
+                None,
+                None,
+                Some(overrides),
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "model override should succeed on pending session"
+        );
+    }
+
+    /// turn/start on a materialized session rejects model override.
+    #[tokio::test]
+    async fn turn_start_on_materialized_session_rejects_model_override() {
+        use crate::handlers::turn::TurnOverrides;
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .unwrap();
+
+        // Materialize the session.
+        let (event_tx, _rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "First".to_string(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Second turn with model override should be rejected.
+        let (event_tx, _rx) = mpsc::channel(100);
+        let overrides = TurnOverrides {
+            model: Some("claude-opus-4-6".to_string()),
+            ..Default::default()
+        };
+        let result = runtime
+            .start_turn(
+                &session_id,
+                "Second".to_string(),
+                event_tx,
+                None,
+                None,
+                None,
+                Some(overrides),
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "model override should be rejected on materialized session"
+        );
+        let err = result.unwrap_err();
+        assert_eq!(err.code, error::INVALID_PARAMS);
+        assert!(
+            err.message.contains("Cannot override model"),
+            "Error should mention the rejected field: {}",
+            err.message,
+        );
+    }
+
+    /// StartTurnParams deserializes with all fields.
+    #[test]
+    fn turn_start_params_deserialize_with_all_fields() {
+        use crate::handlers::turn::StartTurnParams;
+
+        let json = serde_json::json!({
+            "session_id": "test-id",
+            "prompt": "hello",
+            "host_mode": true,
+            "model": "claude-opus-4-6",
+            "provider": "anthropic",
+            "max_tokens": 4096,
+            "system_prompt": "You are helpful",
+            "output_schema": {"type": "object"},
+            "structured_output_retries": 3,
+            "provider_params": {"thinking": true}
+        });
+        let params: StartTurnParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.session_id, "test-id");
+        assert_eq!(params.prompt, "hello");
+        assert_eq!(params.host_mode, Some(true));
+        assert_eq!(params.model.as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(params.provider.as_deref(), Some("anthropic"));
+        assert_eq!(params.max_tokens, Some(4096));
+        assert_eq!(params.system_prompt.as_deref(), Some("You are helpful"));
+        assert!(params.output_schema.is_some());
+        assert_eq!(params.structured_output_retries, Some(3));
+        assert!(params.provider_params.is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 4: Persisted session recovery
+    // -----------------------------------------------------------------------
+
+    /// turn/start on a completely unknown session returns SESSION_NOT_FOUND.
+    #[tokio::test]
+    async fn turn_start_unknown_session_returns_not_found() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+
+        let unknown_id = SessionId::new();
+        let (event_tx, _rx) = mpsc::channel(100);
+        let result = runtime
+            .start_turn(
+                &unknown_id,
+                "Hello".to_string(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, error::SESSION_NOT_FOUND);
+    }
+
+    /// Pending session timestamps are stable across list calls.
+    #[tokio::test]
+    async fn pending_session_timestamps_are_stable() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .unwrap();
+
+        let list1 = runtime.list_sessions_rich(Default::default()).await;
+        let ts1 = list1.iter().find(|s| s.session_id == session_id).unwrap();
+        let created1 = ts1.created_at;
+        let updated1 = ts1.updated_at;
+        assert!(created1 > 0, "created_at should be non-zero");
+        assert_eq!(created1, updated1, "initial created_at == updated_at");
+
+        // Wait a moment and list again — timestamps should be identical.
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        let list2 = runtime.list_sessions_rich(Default::default()).await;
+        let ts2 = list2.iter().find(|s| s.session_id == session_id).unwrap();
+        assert_eq!(ts2.created_at, created1, "created_at must not drift");
+        assert_eq!(
+            ts2.updated_at, updated1,
+            "updated_at must not drift without mutation"
+        );
+    }
+
+    /// append_system_context on a pending session bumps updated_at.
+    #[tokio::test]
+    async fn pending_session_updated_at_advances_on_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .unwrap();
+
+        let before = runtime.read_session_rich(&session_id).await.unwrap();
+        let created = before.created_at;
+
+        // Wait so updated_at can differ.
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+        let req = AppendSystemContextRequest {
+            text: "new context".to_string(),
+            source: None,
+            idempotency_key: Some("key-1".to_string()),
+        };
+        runtime
+            .append_system_context(&session_id, req)
+            .await
+            .unwrap();
+
+        let after = runtime.read_session_rich(&session_id).await.unwrap();
+        assert_eq!(after.created_at, created, "created_at must not change");
+        assert!(
+            after.updated_at >= created,
+            "updated_at ({}) should be >= created_at ({}) after mutation",
+            after.updated_at,
+            created,
+        );
+    }
+
+    /// read_session_rich returns last_assistant_text for idle materialized sessions.
+    #[tokio::test]
+    async fn read_session_rich_returns_last_assistant_text_for_idle() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .unwrap();
+
+        // Materialize the session with a turn.
+        let (event_tx, _rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "Hello".to_string(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Session is now idle — read_session_rich should provide last_assistant_text.
+        let info = runtime.read_session_rich(&session_id).await.unwrap();
+        assert!(
+            info.last_assistant_text.is_some(),
+            "idle session should have last_assistant_text, got None"
+        );
     }
 }

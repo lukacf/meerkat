@@ -44,7 +44,7 @@ import {
   type McpReloadParams,
   type McpRemoveParams,
 } from "./generated/types.js";
-import { Session } from "./session.js";
+import { DeferredSession, Session } from "./session.js";
 import { Mob } from "./mob.js";
 import { parseCoreEvent } from "./events.js";
 import { EventStream, AsyncQueue } from "./streaming.js";
@@ -147,9 +147,44 @@ export class MeerkatClient {
   private unmatchedStandaloneStreamEnd = new Map<string, Record<string, unknown>>();
   private streamTerminalOutcomes = new Map<string, Record<string, unknown>>();
   private rl: ReadlineInterface | null = null;
+  private toolHandlers = new Map<
+    string,
+    {
+      description: string;
+      inputSchema: Record<string, unknown>;
+      handler: (args: Record<string, unknown>) => Promise<string>;
+    }
+  >();
 
   constructor(rkatPath = "rkat-rpc") {
     this.rkatPath = rkatPath;
+  }
+
+  /**
+   * Register a callback tool handler.
+   *
+   * @example
+   * ```ts
+   * client.registerTool("search", "Search the web", { type: "object" }, async (args) => {
+   *   return `Results for ${args.q}`;
+   * });
+   * ```
+   */
+  registerTool(
+    name: string,
+    description: string,
+    inputSchema: Record<string, unknown>,
+    handler: (args: Record<string, unknown>) => Promise<string>,
+  ): void {
+    this.toolHandlers.set(name, { description, inputSchema, handler });
+    // If already connected, register the new tool with the server immediately.
+    if (this.process?.stdin) {
+      this.request("tools/register", {
+        tools: [{ name, description, input_schema: inputSchema }],
+      }).catch(() => {
+        // Best-effort: tool registration may fail if connection is closing.
+      });
+    }
   }
 
   // -- Connection ---------------------------------------------------------
@@ -197,6 +232,18 @@ export class MeerkatClient {
         status: MeerkatClient.normalizeStatus(cap.status),
       }),
     );
+
+    // Register callback tools if any were declared.
+    if (this.toolHandlers.size > 0) {
+      const tools = Array.from(this.toolHandlers.entries()).map(
+        ([name, { description, inputSchema }]) => ({
+          name,
+          description,
+          input_schema: inputSchema,
+        }),
+      );
+      await this.request("tools/register", { tools });
+    }
 
     return this;
   }
@@ -308,6 +355,26 @@ export class MeerkatClient {
       responsePromise: wrappedPromise,
       parseResult: MeerkatClient.parseRunResult,
     });
+  }
+
+  /**
+   * Create a new session without running the first turn.
+   *
+   * Returns a {@link DeferredSession} whose `startTurn()` executes the first
+   * turn with optional per-turn overrides.
+   */
+  async createDeferredSession(
+    prompt: string,
+    options?: SessionOptions,
+  ): Promise<DeferredSession> {
+    const params = MeerkatClient.buildCreateParams(prompt, options);
+    params.initial_turn = "deferred";
+    const raw = await this.request("session/create", params);
+    return new DeferredSession(
+      this,
+      String(raw.session_id ?? ""),
+      raw.session_ref != null ? String(raw.session_ref) : undefined,
+    );
   }
 
   // -- Session queries ----------------------------------------------------
@@ -691,6 +758,14 @@ export class MeerkatClient {
       skillRefs?: SkillRef[];
       skillReferences?: string[];
       flowToolOverlay?: TurnToolOverlay;
+      hostMode?: boolean;
+      model?: string;
+      provider?: string;
+      maxTokens?: number;
+      systemPrompt?: string;
+      outputSchema?: Record<string, unknown>;
+      structuredOutputRetries?: number;
+      providerParams?: Record<string, unknown>;
     },
   ): Promise<RunResult> {
     const params: Record<string, unknown> = { session_id: sessionId, prompt };
@@ -707,6 +782,16 @@ export class MeerkatClient {
         blocked_tools: options.flowToolOverlay.blockedTools,
       };
     }
+    if (options?.hostMode != null) params.host_mode = options.hostMode;
+    if (options?.model) params.model = options.model;
+    if (options?.provider) params.provider = options.provider;
+    if (options?.maxTokens) params.max_tokens = options.maxTokens;
+    if (options?.systemPrompt) params.system_prompt = options.systemPrompt;
+    if (options?.outputSchema) params.output_schema = options.outputSchema;
+    if (options?.structuredOutputRetries != null) {
+      params.structured_output_retries = options.structuredOutputRetries;
+    }
+    if (options?.providerParams) params.provider_params = options.providerParams;
     const raw = await this.request("turn/start", params);
     return MeerkatClient.parseRunResult(raw);
   }
@@ -808,6 +893,12 @@ export class MeerkatClient {
       return;
     }
 
+    // Server→client callback request (has both id and method).
+    if ("id" in data && "method" in data) {
+      this.handleCallbackRequest(data);
+      return;
+    }
+
     if ("id" in data && typeof data.id === "number") {
       const pending = this.pendingRequests.get(data.id);
       if (pending) {
@@ -830,7 +921,14 @@ export class MeerkatClient {
       if (method === "session/stream_event" || method === "mob/stream_event") {
         const streamId = String(params.stream_id ?? "");
         const queue = this.streamQueues.get(streamId);
-        const event = (params.event ?? params) as Record<string, unknown>;
+        const rawEvent = (params.event ?? params) as Record<string, unknown>;
+        // Preserve scope fields when present (sub-agent / mob-member scoped events).
+        const scopeId = params.scope_id as string | undefined;
+        const scopePath = params.scope_path as unknown[] | undefined;
+        const event: Record<string, unknown> =
+          scopeId != null || scopePath != null
+            ? { event: rawEvent, scope_id: scopeId, scope_path: scopePath }
+            : rawEvent;
         if (queue && event) {
           queue.put(event);
         } else if (streamId && event) {
@@ -1011,6 +1109,53 @@ export class MeerkatClient {
       );
     }
     return raw as unknown as McpLiveOpResponse;
+  }
+
+  private handleCallbackRequest(data: Record<string, unknown>): void {
+    const requestId = data.id;
+    const method = String(data.method ?? "");
+    const params = (data.params ?? {}) as Record<string, unknown>;
+
+    if (method === "tool/execute") {
+      const toolName = String(params.name ?? "");
+      const handler = this.toolHandlers.get(toolName);
+
+      if (handler) {
+        const args = (params.arguments ?? {}) as Record<string, unknown>;
+        handler
+          .handler(args)
+          .then((content) => {
+            this.writeCallbackResponse(requestId, { content, is_error: false });
+          })
+          .catch((err: unknown) => {
+            this.writeCallbackResponse(requestId, {
+              content: `Tool error: ${err}`,
+              is_error: true,
+            });
+          });
+      } else {
+        this.writeCallbackResponse(requestId, {
+          content: `Unknown tool: ${toolName}`,
+          is_error: true,
+        });
+      }
+    } else {
+      // Unknown callback method.
+      const response = {
+        jsonrpc: "2.0",
+        id: requestId,
+        error: { code: -32601, message: `Method not supported: ${method}` },
+      };
+      this.process?.stdin?.write(JSON.stringify(response) + "\n");
+    }
+  }
+
+  private writeCallbackResponse(
+    requestId: unknown,
+    result: { content: string; is_error: boolean },
+  ): void {
+    const response = { jsonrpc: "2.0", id: requestId, result };
+    this.process?.stdin?.write(JSON.stringify(response) + "\n");
   }
 
   private static buildCreateParams(

@@ -23,7 +23,7 @@ Quick start::
 # Core client and session
 from .client import MeerkatClient
 from .mob import Mob
-from .session import Session
+from .session import DeferredSession, Session
 from .streaming import EventStream, EventSubscription
 
 # Domain types (clean, Wire-free public names)
@@ -96,6 +96,7 @@ from .events import (
 __all__ = [
     # Client & session
     "MeerkatClient",
+    "DeferredSession",
     "Session",
     "Mob",
     "EventStream",

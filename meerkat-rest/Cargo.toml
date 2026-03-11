@@ -26,6 +26,11 @@ name = "live_continue_tmp"
 path = "tests/live_continue_tmp.rs"
 required-features = ["integration-real-tests"]
 
+[[test]]
+name = "e2e_regression"
+path = "tests/e2e_regression.rs"
+required-features = ["integration-real-tests"]
+
 [dependencies]
 meerkat = { workspace = true, features = ["anthropic", "openai", "gemini", "jsonl-store", "session-store", "memory-store", "skills"] }
 meerkat-core = { workspace = true }
@@ -37,6 +42,7 @@ meerkat-mob = { workspace = true, optional = true }
 meerkat-mob-mcp = { workspace = true, optional = true }
 meerkat-comms = { workspace = true, optional = true }
 meerkat-mcp = { workspace = true, optional = true }
+meerkat-runtime = { path = "../meerkat-runtime" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

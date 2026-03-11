@@ -2341,9 +2341,21 @@ mod tests {
             .unwrap();
         let read_value = result_value(&read_resp);
 
-        assert_eq!(read_value["session_id"].as_str().unwrap(), session_id);
-        assert!(read_value["state"].is_string());
-        assert!(read_value["labels"].is_object());
+        assert_eq!(
+            read_value["session_id"].as_str().unwrap(),
+            session_id,
+            "read response: {read_value}"
+        );
+        // WireSessionInfo uses is_active (bool), not state (string)
+        assert!(
+            read_value["is_active"].is_boolean(),
+            "is_active should be boolean, got: {read_value}"
+        );
+        // labels may be omitted when empty (skip_serializing_if = "BTreeMap::is_empty")
+        assert!(
+            read_value.get("labels").is_none() || read_value["labels"].is_object(),
+            "labels should be object or absent, got: {read_value}"
+        );
     }
 
     #[cfg(feature = "mob")]

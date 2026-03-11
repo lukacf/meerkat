@@ -14,6 +14,7 @@ pub mod initialize;
 pub mod mcp;
 #[cfg(feature = "mob")]
 pub mod mob;
+pub mod runtime;
 pub mod session;
 pub mod skills;
 pub mod turn;

@@ -21,6 +21,7 @@ members = [
     "meerkat-mob-pack",
     "meerkat-web-runtime",
     "meerkat-mob-mcp",
+    "meerkat-runtime",
     "test-fixtures/mcp-test-server",
     "tests/integration",
 ]

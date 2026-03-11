@@ -2734,6 +2734,7 @@ dependencies = [
  "meerkat-mcp",
  "meerkat-mob",
  "meerkat-mob-mcp",
+ "meerkat-runtime",
  "meerkat-store",
  "meerkat-tools",
  "serde",
@@ -2764,6 +2765,7 @@ dependencies = [
  "meerkat-core",
  "meerkat-mob",
  "meerkat-mob-mcp",
+ "meerkat-runtime",
  "meerkat-store",
  "serde",
  "serde_json",
@@ -2772,6 +2774,24 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "meerkat-runtime"
+version = "0.4.6"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "indexmap",
+ "meerkat-core",
+ "redb",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 

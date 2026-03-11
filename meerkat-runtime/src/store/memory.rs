@@ -1,0 +1,279 @@
+//! InMemoryRuntimeStore — in-memory implementation for testing/ephemeral.
+//!
+//! Uses `tokio::sync::Mutex` per the in-memory concurrency rule.
+//! All mutations complete inside one lock acquisition (no lock held across .await).
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use indexmap::IndexMap;
+use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
+use tokio::sync::Mutex;
+
+use super::{RuntimeStore, RuntimeStoreError, SessionDelta};
+use crate::identifiers::LogicalRuntimeId;
+use crate::input_state::InputState;
+
+/// Receipt key: (runtime_id, run_id, sequence).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ReceiptKey {
+    runtime_id: String,
+    run_id: RunId,
+    sequence: u64,
+}
+
+/// Inner state protected by the mutex.
+#[derive(Debug, Default)]
+struct Inner {
+    /// runtime_id → (input_id → InputState). IndexMap for deterministic iteration order.
+    input_states: HashMap<String, IndexMap<InputId, InputState>>,
+    /// Receipt storage.
+    receipts: HashMap<ReceiptKey, RunBoundaryReceipt>,
+    /// Session snapshots (opaque bytes).
+    sessions: HashMap<String, Vec<u8>>,
+}
+
+/// In-memory runtime store. Thread-safe via `tokio::sync::Mutex`.
+#[derive(Debug, Clone)]
+pub struct InMemoryRuntimeStore {
+    inner: Arc<Mutex<Inner>>,
+}
+
+impl InMemoryRuntimeStore {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Inner::default())),
+        }
+    }
+}
+
+impl Default for InMemoryRuntimeStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait::async_trait]
+impl RuntimeStore for InMemoryRuntimeStore {
+    async fn atomic_apply(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        session_delta: Option<SessionDelta>,
+        receipt: RunBoundaryReceipt,
+        input_updates: Vec<InputState>,
+    ) -> Result<(), RuntimeStoreError> {
+        let mut inner = self.inner.lock().await;
+
+        // All writes in one lock acquisition (atomic for in-memory)
+        let rid = runtime_id.0.clone();
+
+        // Session delta
+        if let Some(delta) = session_delta {
+            inner.sessions.insert(rid.clone(), delta.session_snapshot);
+        }
+
+        // Receipt
+        let key = ReceiptKey {
+            runtime_id: rid.clone(),
+            run_id: receipt.run_id.clone(),
+            sequence: receipt.sequence,
+        };
+        inner.receipts.insert(key, receipt);
+
+        // Input states
+        let states = inner.input_states.entry(rid).or_default();
+        for state in input_updates {
+            states.insert(state.input_id.clone(), state);
+        }
+
+        Ok(())
+    }
+
+    async fn load_input_states(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Vec<InputState>, RuntimeStoreError> {
+        let inner = self.inner.lock().await;
+        let states = inner
+            .input_states
+            .get(&runtime_id.0)
+            .map(|m| m.values().cloned().collect())
+            .unwrap_or_default();
+        Ok(states)
+    }
+
+    async fn load_boundary_receipt(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        run_id: &RunId,
+        sequence: u64,
+    ) -> Result<Option<RunBoundaryReceipt>, RuntimeStoreError> {
+        let inner = self.inner.lock().await;
+        let key = ReceiptKey {
+            runtime_id: runtime_id.0.clone(),
+            run_id: run_id.clone(),
+            sequence,
+        };
+        Ok(inner.receipts.get(&key).cloned())
+    }
+
+    async fn persist_input_state(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        state: &InputState,
+    ) -> Result<(), RuntimeStoreError> {
+        let mut inner = self.inner.lock().await;
+        let states = inner.input_states.entry(runtime_id.0.clone()).or_default();
+        states.insert(state.input_id.clone(), state.clone());
+        Ok(())
+    }
+
+    async fn load_input_state(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        input_id: &InputId,
+    ) -> Result<Option<InputState>, RuntimeStoreError> {
+        let inner = self.inner.lock().await;
+        let state = inner
+            .input_states
+            .get(&runtime_id.0)
+            .and_then(|m| m.get(input_id).cloned());
+        Ok(state)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
+
+    fn make_receipt(run_id: RunId, seq: u64) -> RunBoundaryReceipt {
+        RunBoundaryReceipt {
+            run_id,
+            boundary: RunApplyBoundary::RunStart,
+            contributing_input_ids: vec![],
+            conversation_digest: None,
+            message_count: 0,
+            sequence: seq,
+        }
+    }
+
+    #[tokio::test]
+    async fn atomic_apply_roundtrip() {
+        let store = InMemoryRuntimeStore::new();
+        let rid = LogicalRuntimeId::new("test-runtime");
+        let run_id = RunId::new();
+        let input_id = InputId::new();
+
+        let state = InputState::new_accepted(input_id.clone());
+        let receipt = make_receipt(run_id.clone(), 0);
+
+        store
+            .atomic_apply(
+                &rid,
+                Some(SessionDelta {
+                    session_snapshot: b"session-data".to_vec(),
+                }),
+                receipt.clone(),
+                vec![state],
+            )
+            .await
+            .unwrap();
+
+        // Load input states
+        let states = store.load_input_states(&rid).await.unwrap();
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].input_id, input_id);
+
+        // Load receipt
+        let loaded = store.load_boundary_receipt(&rid, &run_id, 0).await.unwrap();
+        assert!(loaded.is_some());
+    }
+
+    #[tokio::test]
+    async fn persist_and_load_single_state() {
+        let store = InMemoryRuntimeStore::new();
+        let rid = LogicalRuntimeId::new("test");
+        let input_id = InputId::new();
+        let state = InputState::new_accepted(input_id.clone());
+
+        store.persist_input_state(&rid, &state).await.unwrap();
+
+        let loaded = store.load_input_state(&rid, &input_id).await.unwrap();
+        assert!(loaded.is_some());
+        assert_eq!(loaded.unwrap().input_id, input_id);
+    }
+
+    #[tokio::test]
+    async fn load_nonexistent_returns_none() {
+        let store = InMemoryRuntimeStore::new();
+        let rid = LogicalRuntimeId::new("test");
+
+        let states = store.load_input_states(&rid).await.unwrap();
+        assert!(states.is_empty());
+
+        let state = store.load_input_state(&rid, &InputId::new()).await.unwrap();
+        assert!(state.is_none());
+
+        let receipt = store
+            .load_boundary_receipt(&rid, &RunId::new(), 0)
+            .await
+            .unwrap();
+        assert!(receipt.is_none());
+    }
+
+    #[tokio::test]
+    async fn atomic_apply_updates_existing() {
+        let store = InMemoryRuntimeStore::new();
+        let rid = LogicalRuntimeId::new("test");
+        let input_id = InputId::new();
+
+        // First write
+        let state1 = InputState::new_accepted(input_id.clone());
+        store
+            .atomic_apply(&rid, None, make_receipt(RunId::new(), 0), vec![state1])
+            .await
+            .unwrap();
+
+        // Second write with updated state
+        let mut state2 = InputState::new_accepted(input_id.clone());
+        state2.current_state = crate::input_state::InputLifecycleState::Queued;
+        store
+            .atomic_apply(&rid, None, make_receipt(RunId::new(), 1), vec![state2])
+            .await
+            .unwrap();
+
+        let states = store.load_input_states(&rid).await.unwrap();
+        assert_eq!(states.len(), 1);
+        assert_eq!(
+            states[0].current_state,
+            crate::input_state::InputLifecycleState::Queued
+        );
+    }
+
+    #[tokio::test]
+    async fn multiple_runtimes_isolated() {
+        let store = InMemoryRuntimeStore::new();
+        let rid1 = LogicalRuntimeId::new("runtime-1");
+        let rid2 = LogicalRuntimeId::new("runtime-2");
+
+        store
+            .persist_input_state(&rid1, &InputState::new_accepted(InputId::new()))
+            .await
+            .unwrap();
+        store
+            .persist_input_state(&rid2, &InputState::new_accepted(InputId::new()))
+            .await
+            .unwrap();
+        store
+            .persist_input_state(&rid2, &InputState::new_accepted(InputId::new()))
+            .await
+            .unwrap();
+
+        let s1 = store.load_input_states(&rid1).await.unwrap();
+        let s2 = store.load_input_states(&rid2).await.unwrap();
+        assert_eq!(s1.len(), 1);
+        assert_eq!(s2.len(), 2);
+    }
+}

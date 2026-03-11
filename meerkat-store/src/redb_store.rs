@@ -46,6 +46,32 @@ pub struct RedbSessionStore {
 }
 
 impl RedbSessionStore {
+    /// Access the underlying redb database for shared use (e.g., RuntimeStore).
+    pub fn database(&self) -> Arc<Database> {
+        self.db.clone()
+    }
+
+    /// Create from an existing database (for sharing with RuntimeStore).
+    pub fn from_database(db: Arc<Database>) -> Result<Self, StoreError> {
+        // Ensure required tables exist.
+        let write_txn = db
+            .begin_write()
+            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+        {
+            let _ = write_txn
+                .open_table(SESSIONS_BY_ID)
+                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+            let _ = write_txn
+                .open_table(SESSIONS_BY_UPDATED)
+                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+        }
+        write_txn
+            .commit()
+            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+
+        Ok(Self { db })
+    }
+
     /// Open or create a session store at the given path.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let db = Database::create(path).map_err(|e| StoreError::Database(Box::new(e.into())))?;

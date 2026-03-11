@@ -31,6 +31,7 @@ pub mod event_tap;
 pub mod gateway;
 pub mod hooks;
 pub mod interaction;
+pub mod lifecycle;
 pub mod mcp_config;
 pub mod memory;
 pub mod ops;
@@ -102,6 +103,11 @@ pub use hooks::{
     HookRevision, HookToolCall, HookToolResult, default_failure_policy,
 };
 pub use interaction::{InboxInteraction, InteractionContent, InteractionId, ResponseStatus};
+pub use lifecycle::{
+    ConversationAppend, ConversationAppendRole, ConversationContextAppend, CoreExecutor,
+    CoreExecutorError, CoreRenderable, InputId, RunApplyBoundary, RunBoundaryReceipt,
+    RunControlCommand, RunEvent, RunId, RunPrimitive, StagedRunInput,
+};
 pub use mcp_config::{McpConfig, McpConfigError, McpScope, McpServerConfig, McpServerWithScope};
 pub use ops::{
     ConcurrencyLimits, ContextStrategy, ForkBranch, ForkBudgetPolicy, OpEvent, OperationId,

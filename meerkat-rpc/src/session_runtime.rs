@@ -472,6 +472,8 @@ impl SessionRuntime {
 
         if let Some((mut build_config, labels, deferred_prompt)) = pending_session {
             // Prepend the deferred create-time prompt to the turn prompt.
+            // Keep a copy for rollback paths that re-stage the pending session.
+            let saved_deferred_prompt = deferred_prompt.clone();
             if let Some(deferred) = deferred_prompt {
                 turn_prompt = format!("{deferred}\n\n{turn_prompt}");
             }
@@ -494,8 +496,13 @@ impl SessionRuntime {
                         Ok(os) => build_config.output_schema = Some(os),
                         Err(e) => {
                             // Restore pending state before returning error.
-                            self.restore_pending_from_promoting(session_id, build_config, labels)
-                                .await;
+                            self.restore_pending_from_promoting(
+                                session_id,
+                                build_config,
+                                labels,
+                                saved_deferred_prompt,
+                            )
+                            .await;
                             return Err(RpcError {
                                 code: error::INVALID_PARAMS,
                                 message: format!("Invalid output_schema override: {e}"),
@@ -593,7 +600,7 @@ impl SessionRuntime {
                                     build_config: Box::new(build_config),
                                 },
                                 labels,
-                                deferred_prompt: None,
+                                deferred_prompt: saved_deferred_prompt.clone(),
                             },
                         );
                     }
@@ -670,6 +677,7 @@ impl SessionRuntime {
         session_id: &SessionId,
         build_config: AgentBuildConfig,
         labels: Option<BTreeMap<String, String>>,
+        deferred_prompt: Option<String>,
     ) {
         let mut pending = self.pending.write().await;
         pending.insert(
@@ -679,7 +687,7 @@ impl SessionRuntime {
                     build_config: Box::new(build_config),
                 },
                 labels,
-                deferred_prompt: None,
+                deferred_prompt,
             },
         );
     }
@@ -1098,8 +1106,7 @@ impl SessionRuntime {
             }
         }
 
-        // Use list() instead of read() to avoid blocking while a turn is running.
-        // list() reads state from non-blocking watch receivers.
+        // Try list() first — non-blocking for live sessions (uses watch receivers).
         if let Ok(summaries) = self.service.list(Default::default()).await {
             for summary in summaries {
                 if summary.session_id == *session_id {
@@ -1116,6 +1123,13 @@ impl SessionRuntime {
                     });
                 }
             }
+        }
+
+        // Fallback: try read() for archived/persisted sessions not in the live list.
+        // This may block during active turns on the target session, but we only
+        // reach here when list() didn't find it (i.e. it's not live).
+        if let Ok(view) = self.service.read(session_id).await {
+            return Some(view.state.into());
         }
 
         None

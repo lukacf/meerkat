@@ -559,9 +559,7 @@ impl MethodRouter {
                             .map(|realm| meerkat_contracts::format_session_ref(realm, &session_id));
                         RpcResponse::success(id, info)
                     }
-                    Err(err) => {
-                        RpcResponse::error(id, error::SESSION_NOT_FOUND, err.to_string())
-                    }
+                    Err(err) => RpcResponse::error(id, error::SESSION_NOT_FOUND, err.to_string()),
                 }
             }
             None => RpcResponse::error(

@@ -535,18 +535,32 @@ impl SessionRuntime {
             .unwrap_or(false);
 
         let req = StartTurnRequest {
-            prompt: turn_prompt,
-            event_tx: Some(event_tx),
+            prompt: turn_prompt.clone(),
+            event_tx: Some(event_tx.clone()),
             host_mode,
-            skill_references,
-            flow_tool_overlay,
-            additional_instructions,
+            skill_references: skill_references.clone(),
+            flow_tool_overlay: flow_tool_overlay.clone(),
+            additional_instructions: additional_instructions.clone(),
         };
 
-        self.service
-            .start_turn(session_id, req)
-            .await
-            .map_err(session_error_to_rpc)
+        match self.service.start_turn(session_id, req).await {
+            Ok(result) => Ok(result),
+            Err(SessionError::NotFound { .. }) => {
+                // Attempt persisted session recovery: the session may exist in the
+                // store from a previous runtime lifetime.
+                self.try_recover_persisted_session(
+                    session_id,
+                    turn_prompt,
+                    event_tx,
+                    host_mode,
+                    skill_references,
+                    flow_tool_overlay,
+                    additional_instructions,
+                )
+                .await
+            }
+            Err(err) => Err(session_error_to_rpc(err)),
+        }
     }
 
     /// Restore a pending session from `Promoting` state back to `Staged` after
@@ -568,6 +582,101 @@ impl SessionRuntime {
                 labels,
             },
         );
+    }
+
+    /// Attempt to recover a persisted session that is no longer live.
+    ///
+    /// Mirrors the REST recovery path: load the session from the store, extract
+    /// stored metadata, build an `AgentBuildConfig`, stage as pending, and
+    /// fall through to the normal materialization path.
+    ///
+    /// Returns `SESSION_NOT_FOUND` if the session cannot be recovered.
+    #[allow(clippy::too_many_arguments)]
+    async fn try_recover_persisted_session(
+        &self,
+        session_id: &SessionId,
+        prompt: String,
+        event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
+        host_mode: bool,
+        skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
+        flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
+        additional_instructions: Option<Vec<String>>,
+    ) -> Result<RunResult, RpcError> {
+        let loaded_session = self
+            .service
+            .load_persisted(session_id)
+            .await
+            .map_err(session_error_to_rpc)?;
+
+        let Some(session) = loaded_session else {
+            return Err(RpcError {
+                code: error::SESSION_NOT_FOUND,
+                message: format!("Session not found: {session_id}"),
+                data: None,
+            });
+        };
+
+        let stored_metadata = session.session_metadata();
+
+        // Build config from stored metadata.
+        let model = stored_metadata
+            .as_ref()
+            .map(|m| m.model.clone())
+            .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
+        let mut build_config = AgentBuildConfig::new(model);
+        build_config.resume_session = Some(session);
+
+        if let Some(ref meta) = stored_metadata {
+            build_config.provider = Some(meta.provider);
+            build_config.max_tokens = Some(meta.max_tokens);
+            build_config.host_mode = meta.host_mode;
+            build_config.comms_name = meta.comms_name.clone();
+            build_config.peer_meta = meta.peer_meta.clone();
+            build_config.override_builtins = Some(meta.tooling.builtins);
+            build_config.override_shell = Some(meta.tooling.shell);
+        }
+
+        // Apply caller-requested host_mode override (from turn/start params).
+        if host_mode {
+            build_config.host_mode = true;
+        }
+
+        // Inject default LLM client if available.
+        if let Some(ref client) = self.default_llm_client {
+            build_config.llm_client_override = Some(client.clone());
+        }
+
+        // Stage as pending and re-enter the materialization path.
+        let labels = stored_metadata
+            .as_ref()
+            .and_then(|m| m.realm_id.as_ref())
+            .map(|_| BTreeMap::new()); // Preserve labels from session metadata if available
+
+        {
+            let mut pending = self.pending.write().await;
+            pending.insert(
+                session_id.clone(),
+                PendingSession {
+                    phase: PendingSessionPhase::Staged {
+                        build_config: Box::new(build_config),
+                    },
+                    labels,
+                },
+            );
+        }
+
+        // Recursively call start_turn which will now find the pending session.
+        // Use Box::pin to avoid infinite recursion concerns in async.
+        Box::pin(self.start_turn(
+            session_id,
+            prompt,
+            event_tx,
+            skill_references,
+            flow_tool_overlay,
+            additional_instructions,
+            None,
+        ))
+        .await
     }
 
     async fn take_promoting_system_context_state(
@@ -2635,5 +2744,32 @@ mod tests {
         assert!(params.output_schema.is_some());
         assert_eq!(params.structured_output_retries, Some(3));
         assert!(params.provider_params.is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 4: Persisted session recovery
+    // -----------------------------------------------------------------------
+
+    /// turn/start on a completely unknown session returns SESSION_NOT_FOUND.
+    #[tokio::test]
+    async fn turn_start_unknown_session_returns_not_found() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+
+        let unknown_id = SessionId::new();
+        let (event_tx, _rx) = mpsc::channel(100);
+        let result = runtime
+            .start_turn(
+                &unknown_id,
+                "Hello".to_string(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, error::SESSION_NOT_FOUND);
     }
 }

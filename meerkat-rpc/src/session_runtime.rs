@@ -101,6 +101,8 @@ struct PendingSession {
     deferred_prompt: Option<String>,
     /// Stable creation timestamp (Unix seconds), set when the pending session is staged.
     created_at_secs: u64,
+    /// Last-modified timestamp (Unix seconds), updated on mutations like append_system_context.
+    updated_at_secs: u64,
 }
 
 fn now_unix_secs() -> u64 {
@@ -406,6 +408,7 @@ impl SessionRuntime {
                     labels,
                     deferred_prompt,
                     created_at_secs: now_unix_secs(),
+                    updated_at_secs: now_unix_secs(),
                 },
             );
         }
@@ -475,18 +478,21 @@ impl SessionRuntime {
                         pending_session.labels.clone(),
                         pending_session.deferred_prompt.clone(),
                         pending_session.created_at_secs,
+                        pending_session.updated_at_secs,
                     ))
                 }
                 None => None,
             }
         };
 
-        if let Some((mut build_config, labels, deferred_prompt, created_at_secs)) = pending_session
+        if let Some((mut build_config, labels, deferred_prompt, created_at_secs, updated_at_secs)) =
+            pending_session
         {
             // Prepend the deferred create-time prompt to the turn prompt.
             // Keep copies for rollback paths that re-stage the pending session.
             let saved_deferred_prompt = deferred_prompt.clone();
             let saved_created_at_secs = created_at_secs;
+            let saved_updated_at_secs = updated_at_secs;
             if let Some(deferred) = deferred_prompt {
                 turn_prompt = format!("{deferred}\n\n{turn_prompt}");
             }
@@ -515,6 +521,7 @@ impl SessionRuntime {
                                 labels,
                                 saved_deferred_prompt,
                                 saved_created_at_secs,
+                                saved_updated_at_secs,
                             )
                             .await;
                             return Err(RpcError {
@@ -616,6 +623,7 @@ impl SessionRuntime {
                                 labels,
                                 deferred_prompt: saved_deferred_prompt.clone(),
                                 created_at_secs: saved_created_at_secs,
+                                updated_at_secs: saved_updated_at_secs,
                             },
                         );
                     }
@@ -694,6 +702,7 @@ impl SessionRuntime {
         labels: Option<BTreeMap<String, String>>,
         deferred_prompt: Option<String>,
         created_at_secs: u64,
+        updated_at_secs: u64,
     ) {
         let mut pending = self.pending.write().await;
         pending.insert(
@@ -705,6 +714,7 @@ impl SessionRuntime {
                 labels,
                 deferred_prompt,
                 created_at_secs,
+                updated_at_secs,
             },
         );
     }
@@ -774,6 +784,24 @@ impl SessionRuntime {
             build_config.llm_client_override = Some(client.clone());
         }
 
+        // Restore callback tools from globally registered definitions.
+        if let Some(tx) = self.callback_request_tx() {
+            let tools: Vec<meerkat_core::ToolDef> = self
+                .registered_tools()
+                .read()
+                .map(|g| g.iter().cloned().collect())
+                .unwrap_or_default();
+            if !tools.is_empty() {
+                let dispatcher: Arc<dyn meerkat_core::AgentToolDispatcher> =
+                    Arc::new(crate::callback_dispatcher::CallbackToolDispatcher::new(
+                        tools,
+                        tx,
+                        self.callback_id_counter(),
+                    ));
+                build_config.external_tools = Some(dispatcher);
+            }
+        }
+
         // Stage as pending and re-enter the materialization path.
         // Labels are managed by the session service — pass None so
         // CreateSessionRequest.labels is empty and the service preserves
@@ -791,6 +819,7 @@ impl SessionRuntime {
                     labels,
                     deferred_prompt: None,
                     created_at_secs: now_unix_secs(),
+                    updated_at_secs: now_unix_secs(),
                 },
             );
         }
@@ -828,6 +857,7 @@ impl SessionRuntime {
                         labels: pending_session.labels,
                         deferred_prompt: None,
                         created_at_secs: pending_session.created_at_secs,
+                        updated_at_secs: pending_session.updated_at_secs,
                     },
                 );
                 None
@@ -918,6 +948,8 @@ impl SessionRuntime {
                             system_context_error_to_rpc(err.into_control_error(session_id))
                         })?,
                 };
+                // Bump updated_at on successful mutation.
+                pending_session.updated_at_secs = now_unix_secs();
                 return Ok(AppendSystemContextResult { status });
             }
         }
@@ -1076,7 +1108,7 @@ impl SessionRuntime {
                     session_id: session_id.clone(),
                     session_ref: None,
                     created_at: ps.created_at_secs,
-                    updated_at: ps.created_at_secs,
+                    updated_at: ps.updated_at_secs,
                     message_count: 0,
                     total_tokens: 0,
                     is_active: matches!(&ps.phase, PendingSessionPhase::Promoting { .. }),
@@ -1108,7 +1140,7 @@ impl SessionRuntime {
                     session_id: session_id.clone(),
                     session_ref: None,
                     created_at: ps.created_at_secs,
-                    updated_at: ps.created_at_secs,
+                    updated_at: ps.updated_at_secs,
                     message_count: 0,
                     is_active: matches!(&ps.phase, PendingSessionPhase::Promoting { .. }),
                     last_assistant_text: None,
@@ -1117,10 +1149,19 @@ impl SessionRuntime {
             }
         }
 
-        // Try list() first — non-blocking for live sessions (uses watch receivers).
+        // Try list() first — non-blocking (uses watch receivers).
         if let Ok(summaries) = self.service.list(Default::default()).await {
             for summary in summaries {
                 if summary.session_id == *session_id {
+                    if !summary.is_active {
+                        // Idle session: safe to call read() without blocking,
+                        // which provides last_assistant_text.
+                        if let Ok(view) = self.service.read(session_id).await {
+                            return Some(view.state.into());
+                        }
+                    }
+                    // Active session: return summary without last_assistant_text
+                    // to avoid blocking the caller during a running turn.
                     let wire: meerkat_contracts::WireSessionSummary = summary.into();
                     return Some(meerkat_contracts::WireSessionInfo {
                         session_id: wire.session_id,
@@ -1137,8 +1178,6 @@ impl SessionRuntime {
         }
 
         // Fallback: try read() for archived/persisted sessions not in the live list.
-        // This may block during active turns on the target session, but we only
-        // reach here when list() didn't find it (i.e. it's not live).
         if let Ok(view) = self.service.read(session_id).await {
             return Some(view.state.into());
         }
@@ -2917,5 +2956,105 @@ mod tests {
             .await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, error::SESSION_NOT_FOUND);
+    }
+
+    /// Pending session timestamps are stable across list calls.
+    #[tokio::test]
+    async fn pending_session_timestamps_are_stable() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .unwrap();
+
+        let list1 = runtime.list_sessions_rich(Default::default()).await;
+        let ts1 = list1.iter().find(|s| s.session_id == session_id).unwrap();
+        let created1 = ts1.created_at;
+        let updated1 = ts1.updated_at;
+        assert!(created1 > 0, "created_at should be non-zero");
+        assert_eq!(created1, updated1, "initial created_at == updated_at");
+
+        // Wait a moment and list again — timestamps should be identical.
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        let list2 = runtime.list_sessions_rich(Default::default()).await;
+        let ts2 = list2.iter().find(|s| s.session_id == session_id).unwrap();
+        assert_eq!(ts2.created_at, created1, "created_at must not drift");
+        assert_eq!(
+            ts2.updated_at, updated1,
+            "updated_at must not drift without mutation"
+        );
+    }
+
+    /// append_system_context on a pending session bumps updated_at.
+    #[tokio::test]
+    async fn pending_session_updated_at_advances_on_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .unwrap();
+
+        let before = runtime.read_session_rich(&session_id).await.unwrap();
+        let created = before.created_at;
+
+        // Wait so updated_at can differ.
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+        let req = AppendSystemContextRequest {
+            text: "new context".to_string(),
+            source: None,
+            idempotency_key: Some("key-1".to_string()),
+        };
+        runtime
+            .append_system_context(&session_id, req)
+            .await
+            .unwrap();
+
+        let after = runtime.read_session_rich(&session_id).await.unwrap();
+        assert_eq!(after.created_at, created, "created_at must not change");
+        assert!(
+            after.updated_at >= created,
+            "updated_at ({}) should be >= created_at ({}) after mutation",
+            after.updated_at,
+            created,
+        );
+    }
+
+    /// read_session_rich returns last_assistant_text for idle materialized sessions.
+    #[tokio::test]
+    async fn read_session_rich_returns_last_assistant_text_for_idle() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .unwrap();
+
+        // Materialize the session with a turn.
+        let (event_tx, _rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "Hello".to_string(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Session is now idle — read_session_rich should provide last_assistant_text.
+        let info = runtime.read_session_rich(&session_id).await.unwrap();
+        assert!(
+            info.last_assistant_text.is_some(),
+            "idle session should have last_assistant_text, got None"
+        );
     }
 }

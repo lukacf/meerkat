@@ -118,8 +118,27 @@ class MeerkatClient:
             self._tool_registry.register(
                 name, fn, description=description, input_schema=input_schema,
             )
+            # If already connected, register the new tool with the server immediately.
+            if self._process and self._process.stdin:
+                asyncio.ensure_future(self._register_tool_with_server(name, description, input_schema))
             return fn
         return decorator
+
+    async def _register_tool_with_server(
+        self,
+        name: str,
+        description: str,
+        input_schema: dict[str, Any] | None,
+    ) -> None:
+        """Best-effort registration of a single tool with the server."""
+        try:
+            await self._request(
+                "tools/register",
+                {"tools": [{"name": name, "description": description or f"Tool: {name}",
+                             "input_schema": input_schema or {"type": "object"}}]},
+            )
+        except Exception:
+            pass  # Best-effort — server may be shutting down.
 
     # -- Async context manager ---------------------------------------------
 

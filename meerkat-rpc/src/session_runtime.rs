@@ -134,16 +134,20 @@ pub struct SessionRuntime {
     #[cfg(feature = "mcp")]
     mcp_sessions: RwLock<std::collections::HashMap<SessionId, SessionMcpState>>,
     /// Channel for sending callback tool requests to the RPC server loop.
-    callback_request_tx: Option<
-        mpsc::Sender<(
-            crate::protocol::RpcRequest,
-            tokio::sync::oneshot::Sender<crate::protocol::RpcResponse>,
-        )>,
+    /// Wrapped in `RwLock` so it can be set after Arc wrapping (server construction).
+    #[allow(clippy::type_complexity)]
+    callback_request_tx: StdRwLock<
+        Option<
+            mpsc::Sender<(
+                crate::protocol::RpcRequest,
+                tokio::sync::oneshot::Sender<crate::protocol::RpcResponse>,
+            )>,
+        >,
     >,
     /// Counter for generating unique server-originated callback request IDs.
-    callback_id_counter: Arc<std::sync::atomic::AtomicU64>,
+    callback_id_counter_slot: StdRwLock<Arc<std::sync::atomic::AtomicU64>>,
     /// Globally registered callback tool definitions (via `tools/register`).
-    registered_tools: Arc<StdRwLock<Vec<meerkat_core::ToolDef>>>,
+    registered_tools_slot: StdRwLock<Arc<StdRwLock<Vec<meerkat_core::ToolDef>>>>,
 }
 
 impl SessionRuntime {
@@ -172,9 +176,11 @@ impl SessionRuntime {
             })),
             #[cfg(feature = "mcp")]
             mcp_sessions: RwLock::new(std::collections::HashMap::new()),
-            callback_request_tx: None,
-            callback_id_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            registered_tools: Arc::new(StdRwLock::new(Vec::new())),
+            callback_request_tx: StdRwLock::new(None),
+            callback_id_counter_slot: StdRwLock::new(Arc::new(std::sync::atomic::AtomicU64::new(
+                0,
+            ))),
+            registered_tools_slot: StdRwLock::new(Arc::new(StdRwLock::new(Vec::new()))),
         }
     }
 
@@ -205,9 +211,11 @@ impl SessionRuntime {
             })),
             #[cfg(feature = "mcp")]
             mcp_sessions: RwLock::new(std::collections::HashMap::new()),
-            callback_request_tx: None,
-            callback_id_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            registered_tools: Arc::new(StdRwLock::new(Vec::new())),
+            callback_request_tx: StdRwLock::new(None),
+            callback_id_counter_slot: StdRwLock::new(Arc::new(std::sync::atomic::AtomicU64::new(
+                0,
+            ))),
+            registered_tools_slot: StdRwLock::new(Arc::new(StdRwLock::new(Vec::new()))),
         }
     }
 
@@ -239,8 +247,11 @@ impl SessionRuntime {
     }
 
     /// Set the callback request channel for tool callbacks.
+    ///
+    /// Takes `&self` so it can be called after the runtime is wrapped in `Arc`
+    /// (e.g. during `RpcServer` construction).
     pub fn set_callback_channel(
-        &mut self,
+        &self,
         tx: mpsc::Sender<(
             crate::protocol::RpcRequest,
             tokio::sync::oneshot::Sender<crate::protocol::RpcResponse>,
@@ -248,31 +259,51 @@ impl SessionRuntime {
         id_counter: Arc<std::sync::atomic::AtomicU64>,
         registered_tools: Arc<StdRwLock<Vec<meerkat_core::ToolDef>>>,
     ) {
-        self.callback_request_tx = Some(tx);
-        self.callback_id_counter = id_counter;
-        self.registered_tools = registered_tools;
+        if let Ok(mut slot) = self.callback_request_tx.write() {
+            *slot = Some(tx);
+        }
+        // id_counter and registered_tools are already Arc-shared — the server
+        // passes its own Arcs into the runtime at construction time. When using
+        // the &self path (after Arc wrapping), we store them atomically.
+        if let Ok(mut c) = self.callback_id_counter_slot.write() {
+            *c = id_counter;
+        }
+        if let Ok(mut t) = self.registered_tools_slot.write() {
+            *t = registered_tools;
+        }
     }
 
-    /// Get the callback request sender, if configured.
+    /// Get a clone of the callback request sender, if configured.
     pub fn callback_request_tx(
         &self,
     ) -> Option<
-        &mpsc::Sender<(
+        mpsc::Sender<(
             crate::protocol::RpcRequest,
             tokio::sync::oneshot::Sender<crate::protocol::RpcResponse>,
         )>,
     > {
-        self.callback_request_tx.as_ref()
+        self.callback_request_tx
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
     }
 
     /// Get the callback ID counter.
     pub fn callback_id_counter(&self) -> Arc<std::sync::atomic::AtomicU64> {
-        self.callback_id_counter.clone()
+        self.callback_id_counter_slot
+            .read()
+            .ok()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     /// Get the globally registered callback tool definitions.
     pub fn registered_tools(&self) -> Arc<StdRwLock<Vec<meerkat_core::ToolDef>>> {
-        self.registered_tools.clone()
+        self.registered_tools_slot
+            .read()
+            .ok()
+            .map(|g| g.clone())
+            .unwrap_or_else(|| Arc::new(StdRwLock::new(Vec::new())))
     }
 
     pub fn set_skill_identity_registry(&self, registry: SourceIdentityRegistry) {
@@ -688,6 +719,9 @@ impl SessionRuntime {
             build_config.peer_meta = meta.peer_meta.clone();
             build_config.override_builtins = Some(meta.tooling.builtins);
             build_config.override_shell = Some(meta.tooling.shell);
+            build_config.override_subagents = Some(meta.tooling.subagents);
+            build_config.override_mob = Some(meta.tooling.mob);
+            build_config.preload_skills = meta.tooling.active_skills.clone();
         }
 
         // Apply caller-requested host_mode override (from turn/start params).
@@ -701,10 +735,10 @@ impl SessionRuntime {
         }
 
         // Stage as pending and re-enter the materialization path.
-        let labels = stored_metadata
-            .as_ref()
-            .and_then(|m| m.realm_id.as_ref())
-            .map(|_| BTreeMap::new()); // Preserve labels from session metadata if available
+        // Labels are managed by the session service — pass None so
+        // CreateSessionRequest.labels is empty and the service preserves
+        // whatever labels were stored with the original session.
+        let labels: Option<BTreeMap<String, String>> = None;
 
         {
             let mut pending = self.pending.write().await;

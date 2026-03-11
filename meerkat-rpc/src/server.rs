@@ -75,12 +75,23 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> RpcServer<R, W> {
     ) -> Self {
         let (notification_tx, notification_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         let notification_sink = NotificationSink::new(notification_tx);
-        let router = MethodRouter::new(runtime, config_store, notification_sink)
-            .with_skill_runtime(skill_runtime);
         let transport = JsonlTransport::new(reader, writer);
         let (response_tx, response_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         let (callback_request_tx, callback_request_rx) =
             mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
+        let callback_id_counter = Arc::new(AtomicU64::new(0));
+        let registered_tools = Arc::new(std::sync::RwLock::new(Vec::new()));
+
+        // Wire callback tool state into the runtime so session/create handlers
+        // can build CallbackToolDispatchers that route through this server.
+        runtime.set_callback_channel(
+            callback_request_tx.clone(),
+            callback_id_counter.clone(),
+            registered_tools.clone(),
+        );
+
+        let router = MethodRouter::new(runtime, config_store, notification_sink)
+            .with_skill_runtime(skill_runtime);
         Self {
             transport,
             router,
@@ -90,8 +101,8 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> RpcServer<R, W> {
             callback_request_rx,
             callback_request_tx,
             pending_callbacks: HashMap::new(),
-            callback_id_counter: Arc::new(AtomicU64::new(0)),
-            registered_tools: Arc::new(std::sync::RwLock::new(Vec::new())),
+            callback_id_counter,
+            registered_tools,
         }
     }
 

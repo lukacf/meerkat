@@ -293,7 +293,7 @@ pub async fn handle_create(
             let dispatcher: Arc<dyn meerkat_core::AgentToolDispatcher> =
                 Arc::new(crate::callback_dispatcher::CallbackToolDispatcher::new(
                     all_tools,
-                    tx.clone(),
+                    tx,
                     runtime.callback_id_counter(),
                 ));
             build_config.external_tools = Some(dispatcher);

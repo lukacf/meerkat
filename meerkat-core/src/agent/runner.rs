@@ -833,8 +833,9 @@ where
     /// `run_pending_with_events()`.
     ///
     /// Uses the existing pending user message in the session (does NOT push a new one).
-    /// Emits lifecycle events when `event_tx` is provided.
-    async fn run_pending_inner(
+    /// Emits lifecycle events when `event_tx` is provided. Also used by
+    /// the host-mode continuation path after response injection.
+    pub(super) async fn run_pending_inner(
         &mut self,
         event_tx: Option<mpsc::Sender<AgentEvent>>,
     ) -> Result<RunResult, AgentError> {

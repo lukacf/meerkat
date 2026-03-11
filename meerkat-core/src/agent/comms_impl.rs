@@ -423,21 +423,7 @@ where
                     tracing::debug!(
                         "Host mode: continuation run after terminal response injection"
                     );
-                    if let Some(ref tx) = event_tx {
-                        crate::event_tap::tap_emit(
-                            &self.event_tap,
-                            Some(tx),
-                            AgentEvent::RunStarted {
-                                session_id: self.session.id().clone(),
-                                prompt: String::new(),
-                            },
-                        )
-                        .await;
-                    }
-                    let cont_result = match &event_tx {
-                        Some(tx) => self.run_loop(Some(tx.clone())).await,
-                        None => self.run_loop(None).await,
-                    };
+                    let cont_result = self.run_pending_inner(event_tx.clone()).await;
                     match cont_result {
                         Ok(result) => {
                             last_result = result;
@@ -1280,17 +1266,21 @@ mod tests {
         let result = agent.run_host_mode(String::new()).await.unwrap();
         assert!(result.turns > 0, "continuation run should have fired");
 
-        // Drain events and verify RunStarted was emitted before any turn output.
-        let mut saw_run_started = false;
+        // Drain events and verify RunStarted was emitted with the response text.
+        let mut run_started_prompt = None;
         while let Ok(event) = event_rx.try_recv() {
-            if matches!(event, AgentEvent::RunStarted { .. }) {
-                saw_run_started = true;
+            if let AgentEvent::RunStarted { prompt, .. } = event {
+                run_started_prompt = Some(prompt);
                 break;
             }
         }
         assert!(
-            saw_run_started,
+            run_started_prompt.is_some(),
             "continuation run must emit RunStarted for stream consumers"
+        );
+        assert!(
+            run_started_prompt.as_deref().unwrap().contains("completed"),
+            "RunStarted.prompt should contain the injected response text, got: {run_started_prompt:?}"
         );
     }
 

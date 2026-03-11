@@ -128,3 +128,75 @@ export class Session {
     return `Session(id=${this._id}${ref})`;
   }
 }
+
+/** Turn-time override options for deferred sessions. */
+export interface DeferredTurnOptions {
+  skillRefs?: SkillRef[];
+  skillReferences?: string[];
+  flowToolOverlay?: TurnToolOverlay;
+  hostMode?: boolean;
+  model?: string;
+  provider?: string;
+  maxTokens?: number;
+  systemPrompt?: string;
+  outputSchema?: Record<string, unknown>;
+  structuredOutputRetries?: number;
+  providerParams?: Record<string, unknown>;
+}
+
+/**
+ * A session created with `initial_turn: "deferred"`.
+ *
+ * No first turn has been executed yet. Use {@link startTurn} to run the first
+ * turn with optional per-turn overrides.
+ */
+export class DeferredSession {
+  private readonly _client: MeerkatClient;
+  private readonly _id: string;
+  private readonly _ref: string | undefined;
+
+  /** @internal — constructed by MeerkatClient, not directly. */
+  constructor(
+    client: MeerkatClient,
+    sessionId: string,
+    sessionRef?: string,
+  ) {
+    this._client = client;
+    this._id = sessionId;
+    this._ref = sessionRef;
+  }
+
+  get id(): string {
+    return this._id;
+  }
+
+  get ref(): string | undefined {
+    return this._ref;
+  }
+
+  /**
+   * Run the first turn on this deferred session.
+   *
+   * Accepts per-turn overrides (model, provider, etc.) that are applied
+   * before the session is materialized.
+   */
+  async startTurn(
+    prompt: string,
+    options?: DeferredTurnOptions,
+  ): Promise<RunResult> {
+    return this._client._startTurn(this._id, prompt, options);
+  }
+
+  async interrupt(): Promise<void> {
+    await this._client._interrupt(this._id);
+  }
+
+  async archive(): Promise<void> {
+    await this._client._archive(this._id);
+  }
+
+  toString(): string {
+    const ref = this._ref ? ` ref=${this._ref}` : "";
+    return `DeferredSession(id=${this._id}${ref})`;
+  }
+}

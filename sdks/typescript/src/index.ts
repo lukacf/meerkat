@@ -23,7 +23,8 @@
 
 export { MeerkatClient } from "./client.js";
 export type { ConnectOptions } from "./client.js";
-export { Session } from "./session.js";
+export { DeferredSession, Session } from "./session.js";
+export type { DeferredTurnOptions } from "./session.js";
 export { Mob } from "./mob.js";
 export { EventStream } from "./streaming.js";
 export { EventSubscription } from "./subscription.js";

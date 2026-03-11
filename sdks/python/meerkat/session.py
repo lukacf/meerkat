@@ -230,3 +230,91 @@ class Session:
     def __repr__(self) -> str:
         ref = f" ref={self._ref!r}" if self._ref else ""
         return f"<Session id={self._id!r}{ref}>"
+
+
+class DeferredSession:
+    """A session created with ``initial_turn="deferred"``.
+
+    Unlike :class:`Session`, no first turn has been executed yet. Use
+    :meth:`start_turn` to run the first turn, which returns a
+    :class:`~meerkat.RunResult`.
+
+    Example::
+
+        deferred = await client.create_deferred_session(
+            "Summarise this repo",
+            model="claude-sonnet-4-5",
+        )
+        result = await deferred.start_turn("Begin analysis")
+    """
+
+    __slots__ = ("_client", "_id", "_ref")
+
+    def __init__(
+        self,
+        client: MeerkatClient,
+        session_id: str,
+        session_ref: str | None = None,
+    ) -> None:
+        self._client = client
+        self._id = session_id
+        self._ref = session_ref
+
+    @property
+    def id(self) -> str:
+        """The stable UUID for this session."""
+        return self._id
+
+    @property
+    def ref(self) -> str | None:
+        """Optional human-readable session reference."""
+        return self._ref
+
+    async def start_turn(
+        self,
+        prompt: str,
+        *,
+        skill_refs: list[SkillRef] | None = None,
+        skill_references: list[str] | None = None,
+        flow_tool_overlay: dict[str, Any] | None = None,
+        host_mode: bool | None = None,
+        model: str | None = None,
+        provider: str | None = None,
+        max_tokens: int | None = None,
+        system_prompt: str | None = None,
+        output_schema: dict[str, Any] | None = None,
+        structured_output_retries: int | None = None,
+        provider_params: dict[str, Any] | None = None,
+    ) -> RunResult:
+        """Run the first turn on this deferred session.
+
+        Accepts per-turn overrides (model, provider, etc.) that are applied
+        before the session is materialized. Returns a :class:`~meerkat.RunResult`.
+        """
+        return await self._client._start_turn(  # noqa: SLF001
+            self._id,
+            prompt,
+            skill_refs=skill_refs,
+            skill_references=skill_references,
+            flow_tool_overlay=flow_tool_overlay,
+            host_mode=host_mode,
+            model=model,
+            provider=provider,
+            max_tokens=max_tokens,
+            system_prompt=system_prompt,
+            output_schema=output_schema,
+            structured_output_retries=structured_output_retries,
+            provider_params=provider_params,
+        )
+
+    async def interrupt(self) -> None:
+        """Cancel the currently running turn, if any."""
+        await self._client._interrupt(self._id)  # noqa: SLF001
+
+    async def archive(self) -> None:
+        """Archive (remove) this session from the server."""
+        await self._client._archive(self._id)  # noqa: SLF001
+
+    def __repr__(self) -> str:
+        ref = f" ref={self._ref!r}" if self._ref else ""
+        return f"<DeferredSession id={self._id!r}{ref}>"

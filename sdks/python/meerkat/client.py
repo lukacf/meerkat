@@ -36,7 +36,7 @@ from .errors import CapabilityUnavailableError, MeerkatError
 from .events import Usage, parse_event
 from .generated.types import CONTRACT_VERSION
 from .mob import Mob
-from .session import Session, _normalize_skill_ref
+from .session import DeferredSession, Session, _normalize_skill_ref
 from .streaming import EventStream, EventSubscription, _StdoutDispatcher
 from .types import (
     AttributedEvent,
@@ -306,6 +306,66 @@ class MeerkatClient:
             dispatcher=self._dispatcher,
             parse_result=self._parse_run_result,
             pending_send=(self._process.stdin, data),
+        )
+
+    async def create_deferred_session(
+        self,
+        prompt: str,
+        *,
+        model: str | None = None,
+        provider: str | None = None,
+        system_prompt: str | None = None,
+        max_tokens: int | None = None,
+        output_schema: dict[str, Any] | None = None,
+        structured_output_retries: int = 2,
+        hooks_override: dict[str, Any] | None = None,
+        enable_builtins: bool = False,
+        enable_shell: bool = False,
+        enable_subagents: bool = False,
+        enable_memory: bool = False,
+        enable_mob: bool = False,
+        host_mode: bool = False,
+        comms_name: str | None = None,
+        peer_meta: dict[str, Any] | None = None,
+        budget_limits: dict[str, Any] | None = None,
+        provider_params: dict[str, Any] | None = None,
+        preload_skills: list[str] | None = None,
+        skill_refs: list[SkillRef] | None = None,
+        skill_references: list[str] | None = None,
+    ) -> DeferredSession:
+        """Create a new session without running the first turn.
+
+        Returns a :class:`~meerkat.DeferredSession` whose
+        :meth:`~meerkat.DeferredSession.start_turn` executes the first turn
+        with optional per-turn overrides.
+
+        Example::
+
+            deferred = await client.create_deferred_session(
+                "Summarise this project",
+                model="claude-sonnet-4-5",
+            )
+            result = await deferred.start_turn("Begin")
+        """
+        params = self._build_create_params(
+            prompt, model=model, provider=provider, system_prompt=system_prompt,
+            max_tokens=max_tokens, output_schema=output_schema,
+            structured_output_retries=structured_output_retries,
+            hooks_override=hooks_override, enable_builtins=enable_builtins,
+            enable_shell=enable_shell, enable_subagents=enable_subagents,
+            enable_memory=enable_memory, enable_mob=enable_mob,
+            host_mode=host_mode,
+            comms_name=comms_name, peer_meta=peer_meta,
+            budget_limits=budget_limits, provider_params=provider_params,
+            preload_skills=preload_skills,
+            skill_refs=skill_refs, skill_references=skill_references,
+        )
+        params["initial_turn"] = "deferred"
+        raw = await self._request("session/create", params)
+        return DeferredSession(
+            self,
+            session_id=raw.get("session_id", ""),
+            session_ref=raw.get("session_ref"),
         )
 
     # -- Session queries ---------------------------------------------------
@@ -671,6 +731,14 @@ class MeerkatClient:
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
         flow_tool_overlay: dict[str, Any] | None = None,
+        host_mode: bool | None = None,
+        model: str | None = None,
+        provider: str | None = None,
+        max_tokens: int | None = None,
+        system_prompt: str | None = None,
+        output_schema: dict[str, Any] | None = None,
+        structured_output_retries: int | None = None,
+        provider_params: dict[str, Any] | None = None,
     ) -> RunResult:
         params: dict[str, Any] = {"session_id": session_id, "prompt": prompt}
         wire_refs = _skill_refs_to_wire(skill_refs)
@@ -680,6 +748,22 @@ class MeerkatClient:
             params["skill_references"] = skill_references
         if flow_tool_overlay is not None:
             params["flow_tool_overlay"] = flow_tool_overlay
+        if host_mode is not None:
+            params["host_mode"] = host_mode
+        if model is not None:
+            params["model"] = model
+        if provider is not None:
+            params["provider"] = provider
+        if max_tokens is not None:
+            params["max_tokens"] = max_tokens
+        if system_prompt is not None:
+            params["system_prompt"] = system_prompt
+        if output_schema is not None:
+            params["output_schema"] = output_schema
+        if structured_output_retries is not None:
+            params["structured_output_retries"] = structured_output_retries
+        if provider_params is not None:
+            params["provider_params"] = provider_params
         raw = await self._request("turn/start", params)
         return self._parse_run_result(raw)
 

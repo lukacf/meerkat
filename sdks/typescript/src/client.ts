@@ -44,7 +44,7 @@ import {
   type McpReloadParams,
   type McpRemoveParams,
 } from "./generated/types.js";
-import { Session } from "./session.js";
+import { DeferredSession, Session } from "./session.js";
 import { Mob } from "./mob.js";
 import { parseCoreEvent } from "./events.js";
 import { EventStream, AsyncQueue } from "./streaming.js";
@@ -308,6 +308,26 @@ export class MeerkatClient {
       responsePromise: wrappedPromise,
       parseResult: MeerkatClient.parseRunResult,
     });
+  }
+
+  /**
+   * Create a new session without running the first turn.
+   *
+   * Returns a {@link DeferredSession} whose `startTurn()` executes the first
+   * turn with optional per-turn overrides.
+   */
+  async createDeferredSession(
+    prompt: string,
+    options?: SessionOptions,
+  ): Promise<DeferredSession> {
+    const params = MeerkatClient.buildCreateParams(prompt, options);
+    params.initial_turn = "deferred";
+    const raw = await this.request("session/create", params);
+    return new DeferredSession(
+      this,
+      String(raw.session_id ?? ""),
+      raw.session_ref != null ? String(raw.session_ref) : undefined,
+    );
   }
 
   // -- Session queries ----------------------------------------------------
@@ -691,6 +711,14 @@ export class MeerkatClient {
       skillRefs?: SkillRef[];
       skillReferences?: string[];
       flowToolOverlay?: TurnToolOverlay;
+      hostMode?: boolean;
+      model?: string;
+      provider?: string;
+      maxTokens?: number;
+      systemPrompt?: string;
+      outputSchema?: Record<string, unknown>;
+      structuredOutputRetries?: number;
+      providerParams?: Record<string, unknown>;
     },
   ): Promise<RunResult> {
     const params: Record<string, unknown> = { session_id: sessionId, prompt };
@@ -707,6 +735,16 @@ export class MeerkatClient {
         blocked_tools: options.flowToolOverlay.blockedTools,
       };
     }
+    if (options?.hostMode != null) params.host_mode = options.hostMode;
+    if (options?.model) params.model = options.model;
+    if (options?.provider) params.provider = options.provider;
+    if (options?.maxTokens) params.max_tokens = options.maxTokens;
+    if (options?.systemPrompt) params.system_prompt = options.systemPrompt;
+    if (options?.outputSchema) params.output_schema = options.outputSchema;
+    if (options?.structuredOutputRetries != null) {
+      params.structured_output_retries = options.structuredOutputRetries;
+    }
+    if (options?.providerParams) params.provider_params = options.providerParams;
     const raw = await this.request("turn/start", params);
     return MeerkatClient.parseRunResult(raw);
   }

@@ -502,45 +502,37 @@ impl MethodRouter {
             Err(resp) => return resp,
         };
 
+        // Use resolve_session_owner (from main) with enriched WireSessionInfo (from this PR).
         match self.resolve_session_owner(&session_id).await {
             Some(SessionOwner::Runtime) => {
-                if let Some(info) = self.runtime.session_state(&session_id).await {
-                    return RpcResponse::success(
+                if let Some(mut info) = self.runtime.read_session_rich(&session_id).await {
+                    info.session_ref = self
+                        .runtime
+                        .realm_id()
+                        .map(|realm| meerkat_contracts::format_session_ref(realm, &session_id));
+                    RpcResponse::success(id, info)
+                } else {
+                    RpcResponse::error(
                         id,
-                        json!({
-                            "session_id": session_id.to_string(),
-                            "session_ref": self.runtime.realm_id().map(|realm| meerkat_contracts::format_session_ref(realm, &session_id)),
-                            "state": info.state.as_str(),
-                            "labels": info.labels,
-                        }),
-                    );
-                }
-                match self.runtime.read_session(&session_id).await {
-                    Ok(view) => RpcResponse::success(
-                        id,
-                        json!({
-                            "session_id": session_id.to_string(),
-                            "session_ref": self.runtime.realm_id().map(|realm| meerkat_contracts::format_session_ref(realm, &session_id)),
-                            "state": if view.state.is_active { "running" } else { "idle" },
-                            "labels": view.state.labels,
-                        }),
-                    ),
-                    Err(rpc_err) => RpcResponse::error(id, rpc_err.code, rpc_err.message),
+                        error::SESSION_NOT_FOUND,
+                        format!("Session not found: {session_id}"),
+                    )
                 }
             }
             #[cfg(feature = "mob")]
             Some(SessionOwner::Mob) => {
                 match self.mob_state.session_service().read(&session_id).await {
-                    Ok(view) => RpcResponse::success(
-                        id,
-                        json!({
-                            "session_id": session_id.to_string(),
-                            "session_ref": self.runtime.realm_id().map(|realm| meerkat_contracts::format_session_ref(realm, &session_id)),
-                            "state": if view.state.is_active { "running" } else { "idle" },
-                            "labels": view.state.labels,
-                        }),
-                    ),
-                    Err(err) => RpcResponse::error(id, error::SESSION_NOT_FOUND, err.to_string()),
+                    Ok(view) => {
+                        let mut info: meerkat_contracts::WireSessionInfo = view.state.into();
+                        info.session_ref = self
+                            .runtime
+                            .realm_id()
+                            .map(|realm| meerkat_contracts::format_session_ref(realm, &session_id));
+                        RpcResponse::success(id, info)
+                    }
+                    Err(err) => {
+                        RpcResponse::error(id, error::SESSION_NOT_FOUND, err.to_string())
+                    }
                 }
             }
             None => RpcResponse::error(

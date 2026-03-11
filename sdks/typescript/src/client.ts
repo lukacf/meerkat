@@ -868,7 +868,14 @@ export class MeerkatClient {
       if (method === "session/stream_event" || method === "mob/stream_event") {
         const streamId = String(params.stream_id ?? "");
         const queue = this.streamQueues.get(streamId);
-        const event = (params.event ?? params) as Record<string, unknown>;
+        const rawEvent = (params.event ?? params) as Record<string, unknown>;
+        // Preserve scope fields when present (sub-agent / mob-member scoped events).
+        const scopeId = params.scope_id as string | undefined;
+        const scopePath = params.scope_path as unknown[] | undefined;
+        const event: Record<string, unknown> =
+          scopeId != null || scopePath != null
+            ? { event: rawEvent, scope_id: scopeId, scope_path: scopePath }
+            : rawEvent;
         if (queue && event) {
           queue.put(event);
         } else if (streamId && event) {

@@ -66,6 +66,11 @@ impl NotificationSink {
     }
 
     /// Emit a standalone session stream event notification.
+    ///
+    /// When `scope_id` and `scope_path` are provided, they are included as
+    /// additional fields on the notification params alongside the event. This
+    /// allows SDKs to distinguish sub-agent and mob-member scoped events from
+    /// direct session events.
     async fn emit_session_stream_event(
         &self,
         stream_id: &Uuid,
@@ -85,6 +90,28 @@ impl NotificationSink {
             Err(TrySendError::Full(_)) => StreamEmitStatus::Overflow,
             Err(TrySendError::Closed(_)) => StreamEmitStatus::ReceiverGone,
         }
+    }
+
+    /// Emit a scoped session stream event notification with scope metadata.
+    pub async fn emit_scoped_session_stream_event(
+        &self,
+        stream_id: &Uuid,
+        sequence: u64,
+        session_id: &SessionId,
+        event: &EventEnvelope<AgentEvent>,
+        scope_id: &str,
+        scope_path: &[meerkat_core::event::StreamScopeFrame],
+    ) {
+        let params = serde_json::json!({
+            "stream_id": stream_id.to_string(),
+            "sequence": sequence,
+            "session_id": session_id.to_string(),
+            "event": event,
+            "scope_id": scope_id,
+            "scope_path": scope_path,
+        });
+        let notification = RpcNotification::new("session/stream_event", params);
+        let _ = self.tx.send(notification).await;
     }
 
     /// Emit an explicit terminal notification for a standalone session stream.
@@ -388,6 +415,8 @@ impl MethodRouter {
             "mob/lifecycle" => handlers::mob::handle_lifecycle(id, params, &self.mob_state).await,
             #[cfg(feature = "mob")]
             "mob/spawn" => handlers::mob::handle_spawn(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/spawn_many" => handlers::mob::handle_spawn_many(id, params, &self.mob_state).await,
             #[cfg(feature = "mob")]
             "mob/members" => handlers::mob::handle_members(id, params, &self.mob_state).await,
             #[cfg(feature = "mob")]

@@ -56,6 +56,7 @@ pub fn handle_initialize(id: Option<RpcId>) -> RpcResponse {
                 m.push("mob/status".to_string());
                 m.push("mob/lifecycle".to_string());
                 m.push("mob/spawn".to_string());
+                m.push("mob/spawn_many".to_string());
                 m.push("mob/retire".to_string());
                 m.push("mob/respawn".to_string());
                 m.push("mob/wire".to_string());

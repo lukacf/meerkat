@@ -134,7 +134,18 @@ class _StdoutDispatcher:
                 params = data.get("params", {})
                 if method in {"session/stream_event", "mob/stream_event"}:
                     stream_id = str(params.get("stream_id", ""))
-                    event = params.get("event") or params
+                    raw_event = params.get("event") or params
+                    # Preserve scope fields when present (sub-agent / mob-member scoped events).
+                    scope_id = params.get("scope_id")
+                    scope_path = params.get("scope_path")
+                    if scope_id is not None or scope_path is not None:
+                        event = {
+                            "event": raw_event,
+                            "scope_id": scope_id,
+                            "scope_path": scope_path,
+                        }
+                    else:
+                        event = raw_event
                     queue = self._stream_queues.get(stream_id)
                     if queue is not None:
                         await queue.put(event)

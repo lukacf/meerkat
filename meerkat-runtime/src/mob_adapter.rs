@@ -14,6 +14,8 @@ use crate::RuntimeSessionAdapter;
 use crate::input::{
     FlowStepInput, Input, InputDurability, InputHeader, InputOrigin, InputVisibility,
 };
+#[allow(unused_imports)]
+use crate::service_ext::SessionServiceRuntimeExt;
 use crate::traits::RuntimeDriverError;
 
 /// Create a FlowStepInput for a mob flow step.

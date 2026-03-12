@@ -180,6 +180,8 @@ mod persistence;
 pub use persistence::PersistenceBundle;
 #[cfg(feature = "session-store")]
 pub use persistence::PersistenceError;
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+pub use persistence::open_realm_persistence_in;
 
 // Factory-backed SessionService wiring
 mod service_factory;

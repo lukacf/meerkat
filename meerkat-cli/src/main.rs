@@ -33,7 +33,6 @@ use meerkat_mob_pack::pack::{
 };
 use meerkat_mob_pack::targz::extract_targz_safe;
 use meerkat_mob_pack::trust::{TrustPolicy, load_trusted_signers, verify_pack_trust};
-use meerkat_store::SessionStore;
 use meerkat_tools::find_project_root;
 use tokio::io::{AsyncBufRead, AsyncWrite, BufReader};
 use tokio::sync::mpsc;
@@ -1991,17 +1990,17 @@ async fn prune_realms_inner(
 }
 
 /// Create the realm-scoped session store backend.
-async fn create_session_store(
+async fn create_persistence_bundle(
     scope: &RuntimeScope,
-) -> anyhow::Result<(meerkat_store::RealmManifest, Arc<dyn SessionStore>)> {
-    meerkat_store::open_realm_session_store_in(
+) -> anyhow::Result<(meerkat_store::RealmManifest, PersistenceBundle)> {
+    meerkat::open_realm_persistence_in(
         &scope.locator.state_root,
         &scope.locator.realm_id,
         scope.backend_hint(),
         Some(scope.origin_hint),
     )
     .await
-    .map_err(|e| anyhow::anyhow!("Failed to open realm session store: {e}"))
+    .map_err(|e| anyhow::anyhow!("Failed to open realm persistence backend: {e}"))
 }
 
 fn realm_store_path(manifest: &meerkat_store::RealmManifest, scope: &RuntimeScope) -> PathBuf {
@@ -2627,7 +2626,8 @@ async fn build_deploy_mob_session_service(
     scope: &RuntimeScope,
     config: Config,
 ) -> anyhow::Result<Arc<dyn meerkat_mob::MobSessionService>> {
-    let (manifest, store) = create_session_store(scope).await?;
+    let (manifest, persistence) = create_persistence_bundle(scope).await?;
+    let store = persistence.session_store();
     let paths = meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id);
     let project_root = scope.context_root.clone().unwrap_or_else(|| {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -2647,9 +2647,7 @@ async fn build_deploy_mob_session_service(
     if let Some(user_root) = scope.user_config_root.clone() {
         factory = factory.user_config_root(user_root);
     }
-    let bundle = PersistenceBundle::from_session_store(store)
-        .map_err(|err| anyhow::anyhow!("failed to construct persistence bundle: {err}"))?;
-    let (store, runtime_store) = bundle.into_parts();
+    let (store, runtime_store) = persistence.into_parts();
     let builder = FactoryAgentBuilder::new(factory, config);
     let service = Arc::new(meerkat::PersistentSessionService::new(
         builder,
@@ -2926,7 +2924,8 @@ async fn run_agent(
         find_project_root(&cwd).unwrap_or(cwd)
     });
 
-    let (manifest, session_store) = create_session_store(scope).await?;
+    let (manifest, persistence) = create_persistence_bundle(scope).await?;
+    let session_store = persistence.session_store();
     let mut factory = AgentFactory::new(realm_store_path(&manifest, scope))
         .session_store(session_store)
         .runtime_root(
@@ -3399,7 +3398,8 @@ async fn resume_session_with_llm_override(
     let flow_tool_overlay = build_flow_tool_overlay(allow_tools, block_tools);
     let run_initial_turn_during_create = flow_tool_overlay.is_none();
     log_stage("create_session_store");
-    let (manifest, store) = create_session_store(scope).await?;
+    let (manifest, persistence) = create_persistence_bundle(scope).await?;
+    let store = persistence.session_store();
     log_stage("load_persisted");
     let session = store
         .load(&session_id)
@@ -3480,10 +3480,8 @@ async fn resume_session_with_llm_override(
 
     log_stage("build_cli_persistent_service");
     // Build persistent session service for resume — durable runtime semantics.
-    let bundle = PersistenceBundle::from_session_store(store.clone())
-        .map_err(|err| anyhow::anyhow!("failed to construct persistence bundle: {err}"))?;
-    let resume_adapter = bundle.runtime_adapter();
-    let runtime_store = bundle.runtime_store();
+    let resume_adapter = persistence.runtime_adapter();
+    let runtime_store = persistence.runtime_store();
     let builder = FactoryAgentBuilder::new(factory, config.clone());
     let service = Arc::new(meerkat::PersistentSessionService::new(
         builder,
@@ -3707,7 +3705,8 @@ async fn build_cli_persistent_service(
     meerkat::PersistentSessionService<FactoryAgentBuilder>,
     Arc<meerkat_runtime::RuntimeSessionAdapter>,
 )> {
-    let (manifest, store) = create_session_store(scope).await?;
+    let (manifest, persistence) = create_persistence_bundle(scope).await?;
+    let store = persistence.session_store();
     let project_root = scope.context_root.clone().unwrap_or_else(|| {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         find_project_root(&cwd).unwrap_or(cwd)
@@ -3729,10 +3728,8 @@ async fn build_cli_persistent_service(
         factory = factory.user_config_root(user_root);
     }
 
-    let bundle = PersistenceBundle::from_session_store(store.clone())
-        .map_err(|err| anyhow::anyhow!("failed to construct persistence bundle: {err}"))?;
-    let runtime_adapter = bundle.runtime_adapter();
-    let runtime_store = bundle.runtime_store();
+    let runtime_adapter = persistence.runtime_adapter();
+    let runtime_store = persistence.runtime_store();
     let builder = FactoryAgentBuilder::new(factory, config);
     Ok((
         meerkat::PersistentSessionService::new(builder, 64, store, runtime_store),
@@ -5817,7 +5814,8 @@ where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let (manifest, session_store) = create_session_store(scope).await?;
+    let (manifest, persistence) = create_persistence_bundle(scope).await?;
+    let session_store = persistence.session_store();
     let paths = meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id);
     let base_store: Arc<dyn ConfigStore> =
         Arc::new(FileConfigStore::new(paths.config_path.clone()));
@@ -5867,7 +5865,7 @@ where
         config.clone(),
         Arc::clone(&config_store),
         64,
-        session_store,
+        persistence,
         meerkat_rpc::router::NotificationSink::noop(),
     );
     let session_service = runtime.session_service();

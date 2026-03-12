@@ -2,8 +2,6 @@
 //!
 //! This crate provides storage backends for persisting conversation sessions.
 
-use std::any::Any;
-
 // On wasm32, use tokio_with_wasm as a drop-in replacement for tokio.
 #[cfg(target_arch = "wasm32")]
 pub mod tokio {
@@ -64,7 +62,7 @@ pub struct SessionFilter {
 /// Abstraction over session storage backends
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-pub trait SessionStore: Any + Send + Sync {
+pub trait SessionStore: Send + Sync {
     /// Save a session (create or update)
     async fn save(&self, session: &Session) -> Result<(), StoreError>;
 

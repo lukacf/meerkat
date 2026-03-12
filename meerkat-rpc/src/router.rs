@@ -1774,7 +1774,13 @@ mod tests {
         let factory = AgentFactory::new(temp.path().join("sessions"));
         let config = Config::default();
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
-        let mut runtime = SessionRuntime::new(factory, config, 10, store, NotificationSink::noop());
+        let mut runtime = SessionRuntime::new(
+            factory,
+            config,
+            10,
+            meerkat::PersistenceBundle::new(store, None),
+            NotificationSink::noop(),
+        );
         let config_store: Arc<dyn ConfigStore> =
             Arc::new(MemoryConfigStore::new(Config::default()));
         runtime.default_llm_client = Some(Arc::new(MockLlmClient));
@@ -1804,7 +1810,13 @@ mod tests {
         let factory = AgentFactory::new(temp.path().join("sessions"));
         let config = Config::default();
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
-        let mut runtime = SessionRuntime::new(factory, config, 10, store, NotificationSink::noop());
+        let mut runtime = SessionRuntime::new(
+            factory,
+            config,
+            10,
+            meerkat::PersistenceBundle::new(store, None),
+            NotificationSink::noop(),
+        );
         let config_store: Arc<dyn ConfigStore> =
             Arc::new(MemoryConfigStore::new(Config::default()));
         runtime.default_llm_client = Some(llm_client);
@@ -1827,7 +1839,13 @@ mod tests {
         let factory = AgentFactory::new(temp.path().join("sessions"));
         let config = Config::default();
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
-        let mut runtime = SessionRuntime::new(factory, config, 10, store, NotificationSink::noop());
+        let mut runtime = SessionRuntime::new(
+            factory,
+            config,
+            10,
+            meerkat::PersistenceBundle::new(store, None),
+            NotificationSink::noop(),
+        );
         let config_store: Arc<dyn ConfigStore> =
             Arc::new(MemoryConfigStore::new(Config::default()));
         runtime.default_llm_client = Some(llm_client);
@@ -1850,7 +1868,13 @@ mod tests {
         let factory = AgentFactory::new(temp.path().join("sessions"));
         let config = Config::default();
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
-        let mut runtime = SessionRuntime::new(factory, config, 10, store, NotificationSink::noop());
+        let mut runtime = SessionRuntime::new(
+            factory,
+            config,
+            10,
+            meerkat::PersistenceBundle::new(store, None),
+            NotificationSink::noop(),
+        );
         let config_store: Arc<dyn ConfigStore> =
             Arc::new(MemoryConfigStore::new(Config::default()));
         runtime.default_llm_client = Some(Arc::new(MockLlmClient));
@@ -1872,7 +1896,13 @@ mod tests {
         let factory = AgentFactory::new(temp.path().join("sessions"));
         let config = Config::default();
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
-        let mut runtime = SessionRuntime::new(factory, config, 10, store, NotificationSink::noop());
+        let mut runtime = SessionRuntime::new(
+            factory,
+            config,
+            10,
+            meerkat::PersistenceBundle::new(store, None),
+            NotificationSink::noop(),
+        );
         let config_store: Arc<dyn ConfigStore> =
             Arc::new(MemoryConfigStore::new(Config::default()));
         runtime.default_llm_client = Some(Arc::new(MockLlmClient));

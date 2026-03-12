@@ -19,7 +19,7 @@ use std::time::Duration;
 use indexmap::IndexMap;
 use meerkat::{
     AgentBuildConfig, AgentFactory, FactoryAgentBuilder, PersistenceBundle,
-    PersistentSessionService, SessionStore, encode_llm_client_override_for_service,
+    PersistentSessionService, encode_llm_client_override_for_service,
 };
 use meerkat_client::LlmClient;
 use meerkat_core::EventEnvelope;
@@ -180,14 +180,11 @@ impl SessionRuntime {
         factory: AgentFactory,
         config: Config,
         max_sessions: usize,
-        store: Arc<dyn SessionStore>,
+        persistence: PersistenceBundle,
         notification_sink: crate::router::NotificationSink,
     ) -> Self {
-        #[allow(clippy::expect_used)]
-        let bundle = PersistenceBundle::from_session_store(store)
-            .expect("persistent session runtime bundle construction must succeed");
-        let runtime_adapter = bundle.runtime_adapter();
-        let (store, runtime_store) = bundle.into_parts();
+        let runtime_adapter = persistence.runtime_adapter();
+        let (store, runtime_store) = persistence.into_parts();
         let builder = FactoryAgentBuilder::new(factory, config);
         let service = Arc::new(PersistentSessionService::new(
             builder,
@@ -227,14 +224,11 @@ impl SessionRuntime {
         initial_config: Config,
         config_store: Arc<dyn ConfigStore>,
         max_sessions: usize,
-        store: Arc<dyn SessionStore>,
+        persistence: PersistenceBundle,
         notification_sink: crate::router::NotificationSink,
     ) -> Self {
-        #[allow(clippy::expect_used)]
-        let bundle = PersistenceBundle::from_session_store(store)
-            .expect("persistent session runtime bundle construction must succeed");
-        let runtime_adapter = bundle.runtime_adapter();
-        let (store, runtime_store) = bundle.into_parts();
+        let runtime_adapter = persistence.runtime_adapter();
+        let (store, runtime_store) = persistence.into_parts();
         let builder =
             FactoryAgentBuilder::new_with_config_store(factory, initial_config, config_store);
         let service = Arc::new(PersistentSessionService::new(
@@ -2323,7 +2317,7 @@ mod tests {
             factory,
             Config::default(),
             max_sessions,
-            store,
+            meerkat::PersistenceBundle::new(store, None),
             crate::router::NotificationSink::noop(),
         )
     }

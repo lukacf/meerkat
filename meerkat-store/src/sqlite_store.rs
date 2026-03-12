@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 5_000;
 
-const CREATE_SESSIONS_TABLE_SQL: &str = r#"
+const CREATE_SESSIONS_TABLE_SQL: &str = r"
 CREATE TABLE IF NOT EXISTS sessions (
     session_id TEXT PRIMARY KEY,
     created_at_ms INTEGER NOT NULL,
@@ -20,11 +20,11 @@ CREATE TABLE IF NOT EXISTS sessions (
     total_tokens INTEGER NOT NULL,
     metadata_json TEXT NOT NULL,
     session_json BLOB NOT NULL
-)"#;
+)";
 
-const CREATE_SESSIONS_UPDATED_INDEX_SQL: &str = r#"
+const CREATE_SESSIONS_UPDATED_INDEX_SQL: &str = r"
 CREATE INDEX IF NOT EXISTS sessions_updated_idx
-ON sessions(updated_at_ms DESC, session_id ASC)"#;
+ON sessions(updated_at_ms DESC, session_id ASC)";
 
 fn system_time_millis(time: SystemTime) -> i64 {
     match time.duration_since(UNIX_EPOCH) {
@@ -75,7 +75,7 @@ pub fn write_session_snapshot_in_txn(
     let metadata_json = serde_json::to_string(session.metadata())?;
     let session_json = serde_json::to_vec(session)?;
     tx.execute(
-        r#"
+        r"
         INSERT INTO sessions (
             session_id,
             created_at_ms,
@@ -92,7 +92,7 @@ pub fn write_session_snapshot_in_txn(
             total_tokens = excluded.total_tokens,
             metadata_json = excluded.metadata_json,
             session_json = excluded.session_json
-        "#,
+        ",
         params![
             session_id,
             system_time_millis(session.created_at()),
@@ -168,7 +168,7 @@ impl SessionStore for SqliteSessionStore {
             let offset = i64::try_from(filter.offset.unwrap_or(0)).unwrap_or(i64::MAX);
 
             let mut stmt = conn.prepare(
-                r#"
+                r"
                 SELECT
                     session_id,
                     created_at_ms,
@@ -181,7 +181,7 @@ impl SessionStore for SqliteSessionStore {
                   AND (?2 IS NULL OR updated_at_ms >= ?2)
                 ORDER BY updated_at_ms DESC, session_id ASC
                 LIMIT ?3 OFFSET ?4
-                "#,
+                ",
             )?;
             let rows = stmt.query_map(
                 params![created_after, updated_after, limit, offset],

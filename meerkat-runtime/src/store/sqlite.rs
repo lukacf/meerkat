@@ -15,7 +15,7 @@ mod inner {
     use crate::runtime_state::RuntimeState;
     use crate::store::{RuntimeStore, RuntimeStoreError, SessionDelta, authoritative_receipt};
 
-    const CREATE_RUNTIME_SCHEMA_SQL: &str = r#"
+    const CREATE_RUNTIME_SCHEMA_SQL: &str = r"
 CREATE TABLE IF NOT EXISTS runtime_input_states (
     runtime_id TEXT NOT NULL,
     input_id TEXT NOT NULL,
@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS runtime_session_snapshots (
 CREATE TABLE IF NOT EXISTS runtime_states (
     runtime_id TEXT PRIMARY KEY,
     runtime_state_json BLOB NOT NULL
-)"#;
+)";
 
     fn ensure_runtime_schema(conn: &Connection) -> Result<(), RuntimeStoreError> {
         conn.execute_batch(CREATE_RUNTIME_SCHEMA_SQL)
@@ -68,11 +68,11 @@ CREATE TABLE IF NOT EXISTS runtime_states (
     ) -> Result<u64, RuntimeStoreError> {
         let next: i64 = tx
             .query_row(
-                r#"
+                r"
                 SELECT COALESCE(MAX(sequence), -1) + 1
                 FROM runtime_boundary_receipts
                 WHERE runtime_id = ?1 AND run_id = ?2
-                "#,
+                ",
                 params![runtime_id_text(runtime_id), run_id.0.to_string()],
                 |row| row.get(0),
             )
@@ -86,11 +86,11 @@ CREATE TABLE IF NOT EXISTS runtime_states (
         snapshot: &[u8],
     ) -> Result<(), RuntimeStoreError> {
         tx.execute(
-            r#"
+            r"
             INSERT INTO runtime_session_snapshots (runtime_id, session_snapshot)
             VALUES (?1, ?2)
             ON CONFLICT(runtime_id) DO UPDATE SET session_snapshot = excluded.session_snapshot
-            "#,
+            ",
             params![runtime_id_text(runtime_id), snapshot],
         )
         .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
@@ -105,10 +105,10 @@ CREATE TABLE IF NOT EXISTS runtime_states (
         let receipt_json = serde_json::to_vec(receipt)
             .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
         tx.execute(
-            r#"
+            r"
             INSERT INTO runtime_boundary_receipts (runtime_id, run_id, sequence, receipt_json)
             VALUES (?1, ?2, ?3, ?4)
-            "#,
+            ",
             params![
                 runtime_id_text(runtime_id),
                 receipt.run_id.0.to_string(),
@@ -129,11 +129,11 @@ CREATE TABLE IF NOT EXISTS runtime_states (
             let state_json = serde_json::to_vec(state)
                 .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
             tx.execute(
-                r#"
+                r"
                 INSERT INTO runtime_input_states (runtime_id, input_id, state_json)
                 VALUES (?1, ?2, ?3)
                 ON CONFLICT(runtime_id, input_id) DO UPDATE SET state_json = excluded.state_json
-                "#,
+                ",
                 params![
                     runtime_id_text(runtime_id),
                     state.input_id.0.to_string(),
@@ -153,11 +153,11 @@ CREATE TABLE IF NOT EXISTS runtime_states (
         let state_json = serde_json::to_vec(runtime_state)
             .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
         tx.execute(
-            r#"
+            r"
             INSERT INTO runtime_states (runtime_id, runtime_state_json)
             VALUES (?1, ?2)
             ON CONFLICT(runtime_id) DO UPDATE SET runtime_state_json = excluded.runtime_state_json
-            "#,
+            ",
             params![runtime_id_text(runtime_id), state_json],
         )
         .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
@@ -280,12 +280,12 @@ CREATE TABLE IF NOT EXISTS runtime_states (
                 let conn = open_runtime_connection(&path)?;
                 let mut stmt = conn
                     .prepare(
-                        r#"
+                        r"
                         SELECT state_json
                         FROM runtime_input_states
                         WHERE runtime_id = ?1
                         ORDER BY input_id ASC
-                        "#,
+                        ",
                     )
                     .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
                 let rows = stmt
@@ -317,11 +317,11 @@ CREATE TABLE IF NOT EXISTS runtime_states (
             tokio::task::spawn_blocking(move || {
                 let conn = open_runtime_connection(&path)?;
                 conn.query_row(
-                    r#"
+                    r"
                     SELECT receipt_json
                     FROM runtime_boundary_receipts
                     WHERE runtime_id = ?1 AND run_id = ?2 AND sequence = ?3
-                    "#,
+                    ",
                     params![
                         runtime_id_text(&runtime_id),
                         run_id.0.to_string(),
@@ -392,11 +392,11 @@ CREATE TABLE IF NOT EXISTS runtime_states (
             tokio::task::spawn_blocking(move || {
                 let conn = open_runtime_connection(&path)?;
                 conn.query_row(
-                    r#"
+                    r"
                     SELECT state_json
                     FROM runtime_input_states
                     WHERE runtime_id = ?1 AND input_id = ?2
-                    "#,
+                    ",
                     params![runtime_id_text(&runtime_id), input_id.0.to_string()],
                     |row| row.get::<_, Vec<u8>>(0),
                 )

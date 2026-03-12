@@ -303,7 +303,7 @@ impl AppState {
             llm_client_override: None,
             config_store,
             event_tx,
-            session_service,
+            session_service: session_service.clone(),
             webhook_auth: webhook::WebhookAuth::from_env(),
             realm_id,
             instance_id,

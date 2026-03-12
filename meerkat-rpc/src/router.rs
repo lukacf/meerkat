@@ -281,7 +281,7 @@ impl MethodRouter {
         #[cfg(feature = "mob")]
         let mob_state = Arc::new(meerkat_mob_mcp::MobMcpState::new(runtime.session_service()));
         Self {
-            runtime,
+            runtime: runtime.clone(),
             config_store,
             notification_sink,
             skill_runtime: None,
@@ -359,7 +359,7 @@ impl MethodRouter {
             }
             #[cfg(feature = "mob")]
             SessionOwner::Mob => Box::new(crate::session_executor::MobRpcRuntimeExecutor::new(
-                self.mob_state.session_service().clone(),
+                self.mob_state.session_service(),
                 session_id.clone(),
                 self.notification_sink.clone(),
             )),

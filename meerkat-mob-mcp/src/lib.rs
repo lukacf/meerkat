@@ -65,8 +65,8 @@ impl MobMcpState {
     }
 
     /// Access the underlying session service.
-    pub fn session_service(&self) -> &dyn MobSessionService {
-        &*self.session_service
+    pub fn session_service(&self) -> Arc<dyn MobSessionService> {
+        self.session_service.clone()
     }
 
     pub async fn mob_create_definition(

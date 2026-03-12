@@ -21,6 +21,8 @@ use tokio::sync::mpsc;
 #[cfg(target_arch = "wasm32")]
 use tokio_with_wasm::alias::sync::mpsc;
 
+#[cfg(feature = "session-store")]
+use crate::PersistenceBundle;
 use crate::{AgentBuildConfig, AgentFactory, DynAgent};
 use meerkat_client::LlmClient;
 
@@ -290,11 +292,9 @@ pub fn build_persistent_service(
     store: Arc<dyn meerkat_store::SessionStore>,
 ) -> meerkat_session::PersistentSessionService<FactoryAgentBuilder> {
     let builder = FactoryAgentBuilder::new(factory, config);
-    let runtime_store = store.shared_redb_database().and_then(|database| {
-        meerkat_runtime::store::RedbRuntimeStore::new(database)
-            .ok()
-            .map(|store| Arc::new(store) as Arc<dyn meerkat_runtime::RuntimeStore>)
-    });
+    let bundle = PersistenceBundle::from_session_store(store)
+        .expect("persistent service bundle construction must succeed");
+    let (store, runtime_store) = bundle.into_parts();
     meerkat_session::PersistentSessionService::new(builder, max_sessions, store, runtime_store)
 }
 

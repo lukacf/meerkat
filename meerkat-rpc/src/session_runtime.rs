@@ -18,8 +18,8 @@ use std::time::Duration;
 
 use indexmap::IndexMap;
 use meerkat::{
-    AgentBuildConfig, AgentFactory, FactoryAgentBuilder, PersistentSessionService, SessionStore,
-    encode_llm_client_override_for_service,
+    AgentBuildConfig, AgentFactory, FactoryAgentBuilder, PersistenceBundle,
+    PersistentSessionService, SessionStore, encode_llm_client_override_for_service,
 };
 use meerkat_client::LlmClient;
 use meerkat_core::EventEnvelope;
@@ -175,17 +175,6 @@ pub struct SessionRuntime {
 }
 
 impl SessionRuntime {
-    fn build_runtime_store(
-        store: &Arc<dyn SessionStore>,
-    ) -> Result<Option<Arc<dyn meerkat_runtime::RuntimeStore>>, String> {
-        let Some(database) = store.shared_redb_database() else {
-            return Ok(None);
-        };
-        let runtime_store = meerkat_runtime::store::RedbRuntimeStore::new(database)
-            .map_err(|err| format!("failed to initialize redb runtime store: {err}"))?;
-        Ok(Some(Arc::new(runtime_store)))
-    }
-
     /// Create a new session runtime.
     pub fn new(
         factory: AgentFactory,
@@ -195,8 +184,10 @@ impl SessionRuntime {
         notification_sink: crate::router::NotificationSink,
     ) -> Self {
         #[allow(clippy::expect_used)]
-        let runtime_store = Self::build_runtime_store(&store)
-            .expect("redb-backed SessionRuntime must initialize runtime store");
+        let bundle = PersistenceBundle::from_session_store(store)
+            .expect("persistent session runtime bundle construction must succeed");
+        let runtime_adapter = bundle.runtime_adapter();
+        let (store, runtime_store) = bundle.into_parts();
         let builder = FactoryAgentBuilder::new(factory, config);
         let service = Arc::new(PersistentSessionService::new(
             builder,
@@ -204,10 +195,6 @@ impl SessionRuntime {
             store,
             runtime_store.clone(),
         ));
-        let runtime_adapter = match &runtime_store {
-            Some(store) => Arc::new(RuntimeSessionAdapter::persistent(store.clone())),
-            None => Arc::new(RuntimeSessionAdapter::ephemeral()),
-        };
 
         Self {
             service,
@@ -244,8 +231,10 @@ impl SessionRuntime {
         notification_sink: crate::router::NotificationSink,
     ) -> Self {
         #[allow(clippy::expect_used)]
-        let runtime_store = Self::build_runtime_store(&store)
-            .expect("redb-backed SessionRuntime must initialize runtime store");
+        let bundle = PersistenceBundle::from_session_store(store)
+            .expect("persistent session runtime bundle construction must succeed");
+        let runtime_adapter = bundle.runtime_adapter();
+        let (store, runtime_store) = bundle.into_parts();
         let builder =
             FactoryAgentBuilder::new_with_config_store(factory, initial_config, config_store);
         let service = Arc::new(PersistentSessionService::new(
@@ -254,10 +243,6 @@ impl SessionRuntime {
             store,
             runtime_store.clone(),
         ));
-        let runtime_adapter = match &runtime_store {
-            Some(store) => Arc::new(RuntimeSessionAdapter::persistent(store.clone())),
-            None => Arc::new(RuntimeSessionAdapter::ephemeral()),
-        };
 
         Self {
             service,

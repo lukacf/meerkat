@@ -30,7 +30,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use futures::stream::Stream;
 use meerkat::{
-    AgentEvent, AgentFactory, FactoryAgentBuilder, LlmClient, OutputSchema,
+    AgentEvent, AgentFactory, FactoryAgentBuilder, LlmClient, OutputSchema, PersistenceBundle,
     PersistentSessionService, Session, SessionId, SessionService, SessionServiceControlExt,
     encode_llm_client_override_for_service,
 };
@@ -272,24 +272,17 @@ impl AppState {
 
         let skill_runtime = factory.build_skill_runtime(&config).await;
 
-        let runtime_store_session_store = session_store.clone();
         let builder =
             FactoryAgentBuilder::new_with_config_store(factory, config, Arc::clone(&config_store));
-        let runtime_store =
-            runtime_store_session_store
-                .shared_redb_database()
-                .and_then(|database| {
-                    meerkat_runtime::store::RedbRuntimeStore::new(database)
-                        .ok()
-                        .map(|store| Arc::new(store) as Arc<dyn meerkat_runtime::RuntimeStore>)
-                });
+        let bundle = PersistenceBundle::from_session_store(session_store)?;
+        let runtime_adapter = bundle.runtime_adapter();
+        let (session_store, runtime_store) = bundle.into_parts();
         let session_service = Arc::new(PersistentSessionService::new(
             builder,
             100,
             session_store,
             runtime_store,
         ));
-        let runtime_adapter = build_runtime_adapter(&runtime_store_session_store)?;
         #[cfg(feature = "mob")]
         let mob_session_service = session_service.clone();
 
@@ -339,19 +332,6 @@ impl AppState {
             runtime_adapter: self.runtime_adapter.clone(),
         }
     }
-}
-
-fn build_runtime_adapter(
-    session_store: &Arc<dyn meerkat_store::SessionStore>,
-) -> Result<Arc<meerkat_runtime::RuntimeSessionAdapter>, Box<dyn std::error::Error>> {
-    let Some(database) = session_store.shared_redb_database() else {
-        // No redb database — use ephemeral adapter (e.g. MemoryStore deployments)
-        return Ok(Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()));
-    };
-    let store = Arc::new(meerkat_runtime::store::RedbRuntimeStore::new(database)?);
-    Ok(Arc::new(
-        meerkat_runtime::RuntimeSessionAdapter::persistent(store),
-    ))
 }
 
 impl RestSessionRuntimeExecutor {

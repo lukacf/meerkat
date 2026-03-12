@@ -81,7 +81,7 @@ pub struct RedbSessionStore {
 }
 
 impl RedbSessionStore {
-    /// Access the underlying redb database for shared use (e.g., RuntimeStore).
+    /// Access the underlying redb database for backend-layer construction.
     pub fn database(&self) -> Arc<Database> {
         self.db.clone()
     }
@@ -305,10 +305,6 @@ impl SessionStore for RedbSessionStore {
         })
         .await
         .map_err(StoreError::Join)?
-    }
-
-    fn shared_redb_database(&self) -> Option<Arc<Database>> {
-        Some(self.database())
     }
 }
 

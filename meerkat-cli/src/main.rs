@@ -5,7 +5,7 @@ mod mcp;
 mod stdin_events;
 mod stream_renderer;
 
-use meerkat::{AgentFactory, EphemeralSessionService, FactoryAgentBuilder};
+use meerkat::{AgentFactory, EphemeralSessionService, FactoryAgentBuilder, PersistenceBundle};
 use meerkat_contracts::{SessionLocator, SessionLocatorError, SkillsParams, format_session_ref};
 use meerkat_core::AgentToolDispatcher;
 #[cfg(feature = "comms")]
@@ -2647,11 +2647,9 @@ async fn build_deploy_mob_session_service(
     if let Some(user_root) = scope.user_config_root.clone() {
         factory = factory.user_config_root(user_root);
     }
-    let runtime_store = store.shared_redb_database().and_then(|database| {
-        meerkat_runtime::store::RedbRuntimeStore::new(database)
-            .ok()
-            .map(|store| Arc::new(store) as Arc<dyn meerkat_runtime::RuntimeStore>)
-    });
+    let bundle = PersistenceBundle::from_session_store(store)
+        .map_err(|err| anyhow::anyhow!("failed to construct persistence bundle: {err}"))?;
+    let (store, runtime_store) = bundle.into_parts();
     let builder = FactoryAgentBuilder::new(factory, config);
     let service = Arc::new(meerkat::PersistentSessionService::new(
         builder,
@@ -3482,17 +3480,10 @@ async fn resume_session_with_llm_override(
 
     log_stage("build_cli_persistent_service");
     // Build persistent session service for resume — durable runtime semantics.
-    let runtime_store = store.shared_redb_database().and_then(|database| {
-        meerkat_runtime::store::RedbRuntimeStore::new(database)
-            .ok()
-            .map(|s| Arc::new(s) as Arc<dyn meerkat_runtime::RuntimeStore>)
-    });
-    let resume_adapter = match &runtime_store {
-        Some(rs) => Arc::new(meerkat_runtime::RuntimeSessionAdapter::persistent(
-            rs.clone(),
-        )),
-        None => Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
-    };
+    let bundle = PersistenceBundle::from_session_store(store.clone())
+        .map_err(|err| anyhow::anyhow!("failed to construct persistence bundle: {err}"))?;
+    let resume_adapter = bundle.runtime_adapter();
+    let runtime_store = bundle.runtime_store();
     let builder = FactoryAgentBuilder::new(factory, config.clone());
     let service = Arc::new(meerkat::PersistentSessionService::new(
         builder,
@@ -3738,17 +3729,10 @@ async fn build_cli_persistent_service(
         factory = factory.user_config_root(user_root);
     }
 
-    let runtime_store = store.shared_redb_database().and_then(|database| {
-        meerkat_runtime::store::RedbRuntimeStore::new(database)
-            .ok()
-            .map(|store| Arc::new(store) as Arc<dyn meerkat_runtime::RuntimeStore>)
-    });
-    let runtime_adapter = match &runtime_store {
-        Some(store) => Arc::new(meerkat_runtime::RuntimeSessionAdapter::persistent(
-            store.clone(),
-        )),
-        None => Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
-    };
+    let bundle = PersistenceBundle::from_session_store(store.clone())
+        .map_err(|err| anyhow::anyhow!("failed to construct persistence bundle: {err}"))?;
+    let runtime_adapter = bundle.runtime_adapter();
+    let runtime_store = bundle.runtime_store();
     let builder = FactoryAgentBuilder::new(factory, config);
     Ok((
         meerkat::PersistentSessionService::new(builder, 64, store, runtime_store),

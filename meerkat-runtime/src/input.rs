@@ -159,6 +159,26 @@ pub struct PromptInput {
     pub turn_metadata: Option<RuntimeTurnMetadata>,
 }
 
+impl PromptInput {
+    /// Create a new operator prompt with default header.
+    pub fn new(text: impl Into<String>, turn_metadata: Option<RuntimeTurnMetadata>) -> Self {
+        Self {
+            header: InputHeader {
+                id: meerkat_core::lifecycle::InputId::new(),
+                timestamp: chrono::Utc::now(),
+                source: InputOrigin::Operator,
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            text: text.into(),
+            turn_metadata,
+        }
+    }
+}
+
 /// Peer-originated input from comms.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerInput {

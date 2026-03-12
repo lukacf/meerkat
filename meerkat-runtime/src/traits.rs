@@ -83,6 +83,9 @@ pub struct RecoveryReport {
 pub struct RetireReport {
     /// How many non-terminal inputs were abandoned.
     pub inputs_abandoned: usize,
+    /// How many inputs are pending drain (will be processed before stopping).
+    #[serde(default)]
+    pub inputs_pending_drain: usize,
 }
 
 /// Report from a reset operation.

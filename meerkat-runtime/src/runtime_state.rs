@@ -36,6 +36,13 @@ impl RuntimeState {
         matches!(self, Self::Idle | Self::Running)
     }
 
+    /// Check if the runtime can process queued inputs in this state.
+    ///
+    /// Retired runtimes can still drain their queue but cannot accept new input.
+    pub fn can_process_queue(&self) -> bool {
+        matches!(self, Self::Idle | Self::Retired)
+    }
+
     /// Validate a transition from this state to another (§22 table).
     pub fn can_transition_to(&self, next: &RuntimeState) -> bool {
         use RuntimeState::{Destroyed, Idle, Initializing, Recovering, Retired, Running, Stopped};
@@ -45,12 +52,12 @@ impl RuntimeState {
             (Initializing, Idle | Stopped | Destroyed)
             // Idle → Running, Retired, Recovering, Stopped, Destroyed
             | (Idle, Running | Retired | Recovering | Stopped | Destroyed)
-            // Running → Idle, Recovering, Stopped, Destroyed
-            | (Running, Idle | Recovering | Stopped | Destroyed)
+            // Running → Idle, Recovering, Retired, Stopped, Destroyed
+            | (Running, Idle | Recovering | Retired | Stopped | Destroyed)
             // Recovering → Idle, Running, Stopped, Destroyed
             | (Recovering, Idle | Running | Stopped | Destroyed)
-            // Retired → Stopped, Destroyed
-            | (Retired, Stopped | Destroyed)
+            // Retired → Running (drain), Stopped, Destroyed
+            | (Retired, Running | Stopped | Destroyed)
         )
     }
 
@@ -119,6 +126,18 @@ mod tests {
         assert!(!RuntimeState::Destroyed.can_accept_input());
     }
 
+    #[test]
+    fn can_process_queue() {
+        assert!(RuntimeState::Idle.can_process_queue());
+        assert!(RuntimeState::Retired.can_process_queue());
+
+        assert!(!RuntimeState::Initializing.can_process_queue());
+        assert!(!RuntimeState::Running.can_process_queue());
+        assert!(!RuntimeState::Recovering.can_process_queue());
+        assert!(!RuntimeState::Stopped.can_process_queue());
+        assert!(!RuntimeState::Destroyed.can_process_queue());
+    }
+
     // §22 transition table — exhaustive valid transitions
     #[test]
     fn initializing_valid_transitions() {
@@ -153,13 +172,13 @@ mod tests {
         let s = RuntimeState::Running;
         assert!(s.can_transition_to(&RuntimeState::Idle));
         assert!(s.can_transition_to(&RuntimeState::Recovering));
+        assert!(s.can_transition_to(&RuntimeState::Retired));
         assert!(s.can_transition_to(&RuntimeState::Stopped));
         assert!(s.can_transition_to(&RuntimeState::Destroyed));
 
         // Invalid
         assert!(!s.can_transition_to(&RuntimeState::Initializing));
         assert!(!s.can_transition_to(&RuntimeState::Running));
-        assert!(!s.can_transition_to(&RuntimeState::Retired));
     }
 
     #[test]
@@ -179,13 +198,13 @@ mod tests {
     #[test]
     fn retired_valid_transitions() {
         let s = RuntimeState::Retired;
+        assert!(s.can_transition_to(&RuntimeState::Running));
         assert!(s.can_transition_to(&RuntimeState::Stopped));
         assert!(s.can_transition_to(&RuntimeState::Destroyed));
 
         // Invalid
         assert!(!s.can_transition_to(&RuntimeState::Initializing));
         assert!(!s.can_transition_to(&RuntimeState::Idle));
-        assert!(!s.can_transition_to(&RuntimeState::Running));
         assert!(!s.can_transition_to(&RuntimeState::Recovering));
         assert!(!s.can_transition_to(&RuntimeState::Retired));
     }

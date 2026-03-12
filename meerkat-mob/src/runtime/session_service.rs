@@ -234,6 +234,7 @@ where
         Ok(CoreApplyOutput {
             receipt,
             session_snapshot: Some(session_snapshot),
+            run_result: None,
         })
     }
 }

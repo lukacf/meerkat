@@ -104,6 +104,11 @@ impl EphemeralRuntimeDriver {
         &self.queue
     }
 
+    /// Get mutable access to the queue (for lifecycle cleanup).
+    pub fn queue_mut(&mut self) -> &mut InputQueue {
+        &mut self.queue
+    }
+
     /// Enqueue a recovered input payload back into the runtime queue.
     pub fn enqueue_recovered_input(&mut self, input_id: InputId, input: Input) {
         self.queue.enqueue(input_id, input);
@@ -152,6 +157,11 @@ impl EphemeralRuntimeDriver {
         let _ = self.ledger.remove(input_id);
         self.wake_requested = false;
         self.process_requested = false;
+    }
+
+    /// Get immutable access to the state machine.
+    pub fn state_machine_ref(&self) -> &RuntimeStateMachine {
+        &self.state_machine
     }
 
     /// Get mutable access to the state machine (for external lifecycle control).
@@ -255,7 +265,11 @@ impl EphemeralRuntimeDriver {
         Ok(())
     }
 
-    /// Retire: abandon all non-terminal inputs.
+    /// Retire: reject new input, continue draining queued/staged work.
+    ///
+    /// Unlike the previous implementation, retire does NOT abandon queued inputs.
+    /// The runtime loop continues to process them via the Retired → Running → Retired
+    /// drain cycle. The runtime remains Retired after all queued work completes.
     pub fn retire(&mut self) -> Result<RetireReport, RuntimeDriverError> {
         let from = self.state_machine.state();
         self.state_machine
@@ -267,14 +281,24 @@ impl EphemeralRuntimeDriver {
             to: RuntimeState::Retired,
         }));
 
-        let abandoned = self.abandon_all_non_terminal(InputAbandonReason::Retired);
+        let inputs_pending_drain = self.ledger.iter().filter(|(_, s)| !s.is_terminal()).count();
+
         Ok(RetireReport {
-            inputs_abandoned: abandoned,
+            inputs_abandoned: 0,
+            inputs_pending_drain,
         })
     }
 
     /// Reset: abandon all non-terminal inputs and return to Idle.
+    ///
+    /// Rejected when Running — wait for the current run to complete first.
     pub fn reset(&mut self) -> Result<ResetReport, RuntimeDriverError> {
+        if self.state_machine.is_running() {
+            return Err(RuntimeDriverError::Internal(
+                "cannot reset while running".into(),
+            ));
+        }
+
         let abandoned = self.abandon_all_non_terminal(InputAbandonReason::Reset);
 
         // Drain queue
@@ -410,7 +434,7 @@ impl EphemeralRuntimeDriver {
         }
     }
 
-    fn abandon_all_non_terminal(&mut self, reason: InputAbandonReason) -> usize {
+    pub fn abandon_all_non_terminal(&mut self, reason: InputAbandonReason) -> usize {
         let non_terminal_ids: Vec<InputId> = self
             .ledger
             .iter()
@@ -670,9 +694,19 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
     ) -> Result<(), RuntimeDriverError> {
         match command {
             RuntimeControlCommand::Stop => {
+                let from = self.state_machine.state();
                 self.state_machine
                     .transition(RuntimeState::Stopped)
                     .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
+
+                self.emit_event(RuntimeEvent::RuntimeStateChange(RuntimeStateChangeEvent {
+                    from,
+                    to: RuntimeState::Stopped,
+                }));
+
+                // Terminal states must not persist active inputs
+                self.abandon_all_non_terminal(InputAbandonReason::Destroyed);
+                self.queue.drain();
             }
             RuntimeControlCommand::Resume => {
                 // For ephemeral, resume just means ensure we're in Idle
@@ -912,14 +946,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retire_abandons_non_terminal() {
+    async fn retire_preserves_queued_for_drain() {
         let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
         driver.accept_input(make_prompt_input("a")).await.unwrap();
         driver.accept_input(make_prompt_input("b")).await.unwrap();
 
         let report = driver.retire().unwrap();
-        assert_eq!(report.inputs_abandoned, 2);
+        assert_eq!(report.inputs_abandoned, 0);
+        assert_eq!(report.inputs_pending_drain, 2);
         assert_eq!(driver.runtime_state(), RuntimeState::Retired);
+        // Queue is still intact for drain
+        assert_eq!(driver.queue().len(), 2);
     }
 
     #[tokio::test]
@@ -1162,7 +1199,114 @@ mod tests {
         let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
         driver.retire().unwrap();
         let abandoned = driver.destroy().unwrap();
-        assert_eq!(abandoned, 0); // Already abandoned by retire
+        assert_eq!(abandoned, 0);
         assert_eq!(driver.runtime_state(), RuntimeState::Destroyed);
+    }
+
+    // ---- Phase 1: State machine hardening tests ----
+
+    #[tokio::test]
+    async fn retired_can_drain_queue_via_run_cycle() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
+
+        // Accept an input
+        let input = make_prompt_input("drain me");
+        let input_id = input.id().clone();
+        driver.accept_input(input).await.unwrap();
+        let _ = driver.take_wake_requested();
+
+        // Retire — queue preserved for drain
+        let report = driver.retire().unwrap();
+        assert_eq!(report.inputs_abandoned, 0);
+        assert_eq!(report.inputs_pending_drain, 1);
+        assert_eq!(driver.queue().len(), 1);
+
+        // Can still dequeue and process (Retired → Running)
+        let (dequeued_id, _) = driver.dequeue_next().unwrap();
+        assert_eq!(dequeued_id, input_id);
+
+        let run_id = RunId::new();
+        driver.start_run(run_id.clone()).unwrap();
+        assert!(driver.state_machine_ref().is_running());
+
+        driver.stage_input(&input_id, &run_id).unwrap();
+        driver.apply_input(&input_id, &run_id).unwrap();
+
+        // Complete run → returns to Retired (not Idle)
+        driver
+            .on_run_event(RunEvent::RunCompleted {
+                run_id,
+                consumed_input_ids: vec![input_id],
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(driver.runtime_state(), RuntimeState::Retired);
+        assert!(driver.queue().is_empty());
+    }
+
+    #[tokio::test]
+    async fn retired_rejects_new_input_while_draining() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
+
+        driver
+            .accept_input(make_prompt_input("existing"))
+            .await
+            .unwrap();
+        driver.retire().unwrap();
+
+        // New input rejected
+        let result = driver.accept_input(make_prompt_input("rejected")).await;
+        assert!(result.is_err());
+
+        // But existing queue is intact
+        assert_eq!(driver.queue().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn reset_rejected_while_running() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
+
+        driver
+            .accept_input(make_prompt_input("hello"))
+            .await
+            .unwrap();
+        driver.start_run(RunId::new()).unwrap();
+
+        let result = driver.reset();
+        assert!(result.is_err());
+        assert!(driver.state_machine_ref().is_running());
+    }
+
+    #[tokio::test]
+    async fn stop_abandons_all_active_inputs() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
+
+        let input = make_prompt_input("stop me");
+        let input_id = input.id().clone();
+        driver.accept_input(input).await.unwrap();
+
+        driver
+            .on_runtime_control(RuntimeControlCommand::Stop)
+            .await
+            .unwrap();
+
+        assert_eq!(driver.runtime_state(), RuntimeState::Stopped);
+        assert!(driver.queue().is_empty());
+
+        let state = driver.input_state(&input_id).unwrap();
+        assert!(state.is_terminal());
+    }
+
+    #[tokio::test]
+    async fn destroy_with_queued_inputs_abandons_all() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
+        driver.accept_input(make_prompt_input("a")).await.unwrap();
+        driver.accept_input(make_prompt_input("b")).await.unwrap();
+
+        let abandoned = driver.destroy().unwrap();
+        assert_eq!(abandoned, 2);
+        assert!(driver.runtime_state().is_terminal());
+        assert!(driver.active_input_ids().is_empty());
     }
 }

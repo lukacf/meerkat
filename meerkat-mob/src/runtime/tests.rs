@@ -1080,6 +1080,7 @@ impl MobSessionService for MockSessionService {
                 sequence: 0,
             },
             session_snapshot: None,
+            run_result: None,
         })
     }
 }

@@ -328,11 +328,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     }
 
     pub fn runtime_mode(&self) -> RuntimeMode {
-        if self.runtime_store.is_some() {
-            RuntimeMode::V9Compliant
-        } else {
-            RuntimeMode::LegacyDegraded
-        }
+        RuntimeMode::V9Compliant
     }
 
     pub fn runtime_store(&self) -> Option<Arc<dyn RuntimeStore>> {
@@ -424,10 +420,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .await?;
 
         Ok((
-            run_result,
+            run_result.clone(),
             CoreApplyOutput {
                 receipt,
                 session_snapshot: Some(session_snapshot),
+                run_result: Some(run_result),
             },
         ))
     }
@@ -543,6 +540,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(CoreApplyOutput {
             receipt,
             session_snapshot: Some(session_snapshot),
+            run_result: None,
         })
     }
 }

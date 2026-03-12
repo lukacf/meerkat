@@ -115,7 +115,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retire_abandons_pending() {
+    async fn retire_preserves_pending_for_drain() {
         let adapter = RuntimeSessionAdapter::ephemeral();
         let sid = SessionId::new();
         register_mob_member(&adapter, sid.clone()).await;
@@ -125,9 +125,10 @@ mod tests {
             .await
             .unwrap();
 
-        // Retire
+        // Retire — preserves inputs for drain, doesn't abandon
         let report = retire_mob_member(&adapter, &sid).await.unwrap();
-        assert_eq!(report.inputs_abandoned, 1);
+        assert_eq!(report.inputs_abandoned, 0);
+        assert_eq!(report.inputs_pending_drain, 1);
     }
 
     #[tokio::test]

@@ -11,6 +11,8 @@ use crate::runtime_state::{RuntimeState, RuntimeStateTransitionError};
 pub struct RuntimeStateMachine {
     state: RuntimeState,
     current_run_id: Option<RunId>,
+    /// State before entering Running — used to return to Retired after drain.
+    pre_run_state: Option<RuntimeState>,
 }
 
 impl RuntimeStateMachine {
@@ -19,6 +21,7 @@ impl RuntimeStateMachine {
         Self {
             state: RuntimeState::Initializing,
             current_run_id: None,
+            pre_run_state: None,
         }
     }
 
@@ -27,6 +30,7 @@ impl RuntimeStateMachine {
         Self {
             state,
             current_run_id: None,
+            pre_run_state: None,
         }
     }
 
@@ -50,6 +54,13 @@ impl RuntimeStateMachine {
         self.state == RuntimeState::Running
     }
 
+    /// Check if the runtime can process queued inputs.
+    ///
+    /// True for Idle and Retired (Retired drains existing queue).
+    pub fn can_process_queue(&self) -> bool {
+        self.state.can_process_queue()
+    }
+
     /// Transition to a new state.
     pub fn transition(
         &mut self,
@@ -61,26 +72,39 @@ impl RuntimeStateMachine {
         // Clear run ID when leaving Running
         if from == RuntimeState::Running && next != RuntimeState::Running {
             self.current_run_id = None;
+            self.pre_run_state = None;
         }
 
         Ok(from)
     }
 
     /// Transition to Running with a specific run ID.
+    ///
+    /// Records the pre-run state so `complete_run()` can return to it
+    /// (e.g. Retired → Running → Retired for queue drain).
     pub fn start_run(&mut self, run_id: RunId) -> Result<(), RuntimeStateTransitionError> {
+        let from = self.state;
         self.state.transition(RuntimeState::Running)?;
+        self.pre_run_state = Some(from);
         self.current_run_id = Some(run_id);
         Ok(())
     }
 
-    /// Transition from Running to Idle (run completed).
+    /// Transition from Running back to the pre-run state (run completed).
+    ///
+    /// Returns to Retired if the run was started from Retired (drain mode),
+    /// otherwise returns to Idle.
     pub fn complete_run(&mut self) -> Result<RunId, RuntimeStateTransitionError> {
-        self.state.transition(RuntimeState::Idle)?;
+        let return_to = match self.pre_run_state.take() {
+            Some(RuntimeState::Retired) => RuntimeState::Retired,
+            _ => RuntimeState::Idle,
+        };
+        self.state.transition(return_to)?;
         self.current_run_id
             .take()
             .ok_or(RuntimeStateTransitionError {
                 from: RuntimeState::Running,
-                to: RuntimeState::Idle,
+                to: return_to,
             })
     }
 
@@ -91,22 +115,27 @@ impl RuntimeStateMachine {
 
     /// Reset the runtime back to Idle after lifecycle cleanup.
     ///
-    /// `reset` is allowed to revive a retired runtime so callers can keep
-    /// using the same logical runtime instance after abandoning queued work.
+    /// Allowed only when not Running. Revives a retired runtime so callers
+    /// can keep using the same logical runtime instance after abandoning
+    /// queued work.
     pub fn reset_to_idle(&mut self) -> Result<Option<RuntimeState>, RuntimeStateTransitionError> {
         let from = self.state;
         match from {
             RuntimeState::Idle => Ok(None),
+            RuntimeState::Running => Err(RuntimeStateTransitionError {
+                from: RuntimeState::Running,
+                to: RuntimeState::Idle,
+            }),
             RuntimeState::Retired => {
                 self.state = RuntimeState::Idle;
                 self.current_run_id = None;
+                self.pre_run_state = None;
                 Ok(Some(from))
             }
             _ => {
                 self.state.transition(RuntimeState::Idle)?;
-                if from == RuntimeState::Running {
-                    self.current_run_id = None;
-                }
+                self.current_run_id = None;
+                self.pre_run_state = None;
                 Ok(Some(from))
             }
         }
@@ -224,6 +253,15 @@ mod tests {
     }
 
     #[test]
+    fn reset_rejected_while_running() {
+        let mut sm = RuntimeStateMachine::new();
+        sm.initialize().unwrap();
+        sm.start_run(RunId::new()).unwrap();
+        assert!(sm.reset_to_idle().is_err());
+        assert!(sm.is_running()); // unchanged
+    }
+
+    #[test]
     fn destroy_from_idle() {
         let mut sm = RuntimeStateMachine::new();
         sm.initialize().unwrap();
@@ -236,5 +274,50 @@ mod tests {
         let mut sm = RuntimeStateMachine::from_state(RuntimeState::Recovering);
         sm.start_run(RunId::new()).unwrap();
         assert!(sm.is_running());
+    }
+
+    #[test]
+    fn retired_drain_cycle() {
+        let mut sm = RuntimeStateMachine::new();
+        sm.initialize().unwrap();
+        sm.transition(RuntimeState::Retired).unwrap();
+        assert!(sm.can_process_queue());
+
+        // Start a drain run from Retired
+        let run_id = RunId::new();
+        sm.start_run(run_id.clone()).unwrap();
+        assert!(sm.is_running());
+
+        // Complete returns to Retired (not Idle)
+        let completed = sm.complete_run().unwrap();
+        assert_eq!(completed, run_id);
+        assert_eq!(sm.state(), RuntimeState::Retired);
+    }
+
+    #[test]
+    fn idle_run_returns_to_idle() {
+        let mut sm = RuntimeStateMachine::new();
+        sm.initialize().unwrap();
+
+        let run_id = RunId::new();
+        sm.start_run(run_id.clone()).unwrap();
+        let completed = sm.complete_run().unwrap();
+        assert_eq!(completed, run_id);
+        assert_eq!(sm.state(), RuntimeState::Idle);
+    }
+
+    #[test]
+    fn can_process_queue_states() {
+        let sm_idle = RuntimeStateMachine::from_state(RuntimeState::Idle);
+        assert!(sm_idle.can_process_queue());
+
+        let sm_retired = RuntimeStateMachine::from_state(RuntimeState::Retired);
+        assert!(sm_retired.can_process_queue());
+
+        let sm_running = RuntimeStateMachine::from_state(RuntimeState::Running);
+        assert!(!sm_running.can_process_queue());
+
+        let sm_stopped = RuntimeStateMachine::from_state(RuntimeState::Stopped);
+        assert!(!sm_stopped.can_process_queue());
     }
 }

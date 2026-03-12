@@ -13,7 +13,8 @@ use crate::accept::AcceptOutcome;
 use crate::identifiers::LogicalRuntimeId;
 use crate::input::Input;
 use crate::input_state::{
-    InputLifecycleState, InputState, InputStateHistoryEntry, InputTerminalOutcome,
+    InputAbandonReason, InputLifecycleState, InputState, InputStateHistoryEntry,
+    InputTerminalOutcome,
 };
 use crate::runtime_event::RuntimeEventEnvelope;
 use crate::runtime_state::RuntimeState;
@@ -40,6 +41,11 @@ impl PersistentRuntimeDriver {
             store,
             runtime_id,
         }
+    }
+
+    /// Get immutable reference to the inner ephemeral driver.
+    pub fn inner_ref(&self) -> &EphemeralRuntimeDriver {
+        &self.inner
     }
 
     /// Check if the runtime is idle (delegates to inner).
@@ -237,11 +243,24 @@ impl RuntimeDriver for PersistentRuntimeDriver {
         &mut self,
         command: RuntimeControlCommand,
     ) -> Result<(), RuntimeDriverError> {
+        let checkpoint = self.inner.clone();
         self.inner.on_runtime_control(command).await?;
-        self.store
+        if let Err(err) = self
+            .store
             .persist_runtime_state(&self.runtime_id, self.inner.runtime_state())
             .await
-            .map_err(|e| RuntimeDriverError::Internal(e.to_string()))
+        {
+            self.inner = checkpoint;
+            return Err(RuntimeDriverError::Internal(format!(
+                "control op persist failed: {err}"
+            )));
+        }
+        // Persist input snapshot after control ops (e.g. Stop abandons inputs)
+        if let Err(err) = self.persist_snapshot().await {
+            self.inner = checkpoint;
+            return Err(err);
+        }
+        Ok(())
     }
 
     async fn recover(&mut self) -> Result<RecoveryReport, RuntimeDriverError> {
@@ -325,7 +344,11 @@ impl RuntimeDriver for PersistentRuntimeDriver {
                 RuntimeState::Retired if self.inner.runtime_state() != RuntimeState::Retired => {
                     EphemeralRuntimeDriver::retire(&mut self.inner)?;
                 }
-                RuntimeState::Stopped => {
+                RuntimeState::Stopped
+                    if self.inner.runtime_state() != RuntimeState::Stopped
+                        && self.inner.runtime_state() != RuntimeState::Destroyed =>
+                {
+                    // Never revive Destroyed as Stopped
                     self.inner
                         .on_runtime_control(RuntimeControlCommand::Stop)
                         .await?;
@@ -337,6 +360,30 @@ impl RuntimeDriver for PersistentRuntimeDriver {
                 }
                 _ => {}
             }
+
+            // Terminal states must not have active inputs. If persisted state
+            // is terminal but active inputs exist, treat as store corruption:
+            // terminalize those inputs instead of resurrecting work.
+            if runtime_state.is_terminal() {
+                let active = self.inner.active_input_ids();
+                if !active.is_empty() {
+                    tracing::warn!(
+                        runtime_id = %self.runtime_id,
+                        active_count = active.len(),
+                        persisted_state = %runtime_state,
+                        "terminal runtime has active inputs — terminalizing as corrupted"
+                    );
+                    let abandoned = self
+                        .inner
+                        .abandon_all_non_terminal(InputAbandonReason::Destroyed);
+                    self.inner.queue_mut().drain();
+                    tracing::warn!(
+                        runtime_id = %self.runtime_id,
+                        abandoned,
+                        "force-abandoned active inputs from terminal runtime"
+                    );
+                }
+            }
         }
 
         self.persist_snapshot().await?;
@@ -344,22 +391,42 @@ impl RuntimeDriver for PersistentRuntimeDriver {
     }
 
     async fn retire(&mut self) -> Result<crate::traits::RetireReport, RuntimeDriverError> {
+        let checkpoint = self.inner.clone();
         let report = EphemeralRuntimeDriver::retire(&mut self.inner)?;
-        self.persist_snapshot().await?;
-        self.store
+        if let Err(err) = self.persist_snapshot().await {
+            self.inner = checkpoint;
+            return Err(err);
+        }
+        if let Err(err) = self
+            .store
             .persist_runtime_state(&self.runtime_id, self.inner.runtime_state())
             .await
-            .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
+        {
+            self.inner = checkpoint;
+            return Err(RuntimeDriverError::Internal(format!(
+                "retire persist failed: {err}"
+            )));
+        }
         Ok(report)
     }
 
     async fn reset(&mut self) -> Result<crate::traits::ResetReport, RuntimeDriverError> {
+        let checkpoint = self.inner.clone();
         let report = EphemeralRuntimeDriver::reset(&mut self.inner)?;
-        self.persist_snapshot().await?;
-        self.store
+        if let Err(err) = self.persist_snapshot().await {
+            self.inner = checkpoint;
+            return Err(err);
+        }
+        if let Err(err) = self
+            .store
             .persist_runtime_state(&self.runtime_id, self.inner.runtime_state())
             .await
-            .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
+        {
+            self.inner = checkpoint;
+            return Err(RuntimeDriverError::Internal(format!(
+                "reset persist failed: {err}"
+            )));
+        }
         Ok(report)
     }
 
@@ -573,7 +640,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retire_persists_abandoned_inputs() {
+    async fn retire_preserves_inputs_for_drain() {
         let store = Arc::new(InMemoryRuntimeStore::new());
         let rid = LogicalRuntimeId::new("test");
         let mut driver = PersistentRuntimeDriver::new(rid.clone(), store.clone());
@@ -583,8 +650,10 @@ mod tests {
         driver.accept_input(input).await.unwrap();
 
         let report = driver.retire().await.unwrap();
-        assert_eq!(report.inputs_abandoned, 1);
+        assert_eq!(report.inputs_abandoned, 0);
+        assert_eq!(report.inputs_pending_drain, 1);
 
+        // Input is still queued, not abandoned
         let stored = store
             .load_input_state(&rid, &input_id)
             .await
@@ -592,7 +661,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             stored.current_state,
-            crate::input_state::InputLifecycleState::Abandoned
+            crate::input_state::InputLifecycleState::Queued
         );
     }
 

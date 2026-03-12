@@ -1,32 +1,15 @@
 //! v9 runtime RPC handlers — runtime/state, runtime/accept, runtime/retire, runtime/reset,
 //! input/state, input/list.
-//!
-//! Legacy-mode guard: all methods return METHOD_NOT_FOUND (-32601) when
-//! the runtime adapter reports LegacyDegraded mode.
 
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 use meerkat_core::{InputId, SessionId};
 use meerkat_runtime::RuntimeState;
-use meerkat_runtime::service_ext::{RuntimeMode, SessionServiceRuntimeExt};
+use meerkat_runtime::service_ext::SessionServiceRuntimeExt;
 
 use super::{RpcResponseExt, parse_params};
-use crate::error::METHOD_NOT_FOUND;
 use crate::protocol::{RpcId, RpcResponse};
-
-/// Check runtime mode and return error if legacy.
-fn guard_v9(adapter: &dyn SessionServiceRuntimeExt, id: Option<RpcId>) -> Option<RpcResponse> {
-    if adapter.runtime_mode() == RuntimeMode::LegacyDegraded {
-        Some(RpcResponse::error(
-            id,
-            METHOD_NOT_FOUND,
-            "v9 runtime not available",
-        ))
-    } else {
-        None
-    }
-}
 
 // ---- Param types ----
 
@@ -82,10 +65,6 @@ pub async fn handle_runtime_state(
     params: Option<&RawValue>,
     adapter: &dyn SessionServiceRuntimeExt,
 ) -> RpcResponse {
-    if let Some(resp) = guard_v9(adapter, id.clone()) {
-        return resp;
-    }
-
     let params: RuntimeStateParams = match parse_params(params) {
         Ok(p) => p,
         Err(resp) => return resp.with_id(id),
@@ -110,10 +89,6 @@ pub async fn handle_runtime_accept(
     params: Option<&RawValue>,
     adapter: &dyn SessionServiceRuntimeExt,
 ) -> RpcResponse {
-    if let Some(resp) = guard_v9(adapter, id.clone()) {
-        return resp;
-    }
-
     let params: RuntimeAcceptParams = match parse_params(params) {
         Ok(p) => p,
         Err(resp) => return resp.with_id(id),
@@ -138,10 +113,6 @@ pub async fn handle_runtime_retire(
     params: Option<&RawValue>,
     adapter: &dyn SessionServiceRuntimeExt,
 ) -> RpcResponse {
-    if let Some(resp) = guard_v9(adapter, id.clone()) {
-        return resp;
-    }
-
     let params: RuntimeRetireParams = match parse_params(params) {
         Ok(p) => p,
         Err(resp) => return resp.with_id(id),
@@ -166,10 +137,6 @@ pub async fn handle_runtime_reset(
     params: Option<&RawValue>,
     adapter: &dyn SessionServiceRuntimeExt,
 ) -> RpcResponse {
-    if let Some(resp) = guard_v9(adapter, id.clone()) {
-        return resp;
-    }
-
     let params: RuntimeResetParams = match parse_params(params) {
         Ok(p) => p,
         Err(resp) => return resp.with_id(id),
@@ -194,10 +161,6 @@ pub async fn handle_input_state(
     params: Option<&RawValue>,
     adapter: &dyn SessionServiceRuntimeExt,
 ) -> RpcResponse {
-    if let Some(resp) = guard_v9(adapter, id.clone()) {
-        return resp;
-    }
-
     let params: InputStateParams = match parse_params(params) {
         Ok(p) => p,
         Err(resp) => return resp.with_id(id),
@@ -227,10 +190,6 @@ pub async fn handle_input_list(
     params: Option<&RawValue>,
     adapter: &dyn SessionServiceRuntimeExt,
 ) -> RpcResponse {
-    if let Some(resp) = guard_v9(adapter, id.clone()) {
-        return resp;
-    }
-
     let params: InputListParams = match parse_params(params) {
         Ok(p) => p,
         Err(resp) => return resp.with_id(id),

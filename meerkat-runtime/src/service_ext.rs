@@ -14,12 +14,12 @@ use crate::runtime_state::RuntimeState;
 use crate::traits::{ResetReport, RetireReport, RuntimeDriverError};
 
 /// Runtime mode for a session service instance.
+///
+/// This branch is runtime-backed only. All sessions use v9 runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeMode {
-    /// Full v9 runtime-backed mode (RuntimeStore available).
+    /// Full v9 runtime-backed mode.
     V9Compliant,
-    /// Legacy/degraded mode (no RuntimeStore, existing behavior).
-    LegacyDegraded,
 }
 
 /// v9 runtime extensions for SessionService.
@@ -81,6 +81,5 @@ mod tests {
     #[test]
     fn runtime_mode_equality() {
         assert_eq!(RuntimeMode::V9Compliant, RuntimeMode::V9Compliant);
-        assert_ne!(RuntimeMode::V9Compliant, RuntimeMode::LegacyDegraded);
     }
 }

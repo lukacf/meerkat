@@ -65,6 +65,14 @@ impl DriverEntry {
         }
     }
 
+    /// Check if the runtime can process queued inputs (Idle or Retired).
+    pub(crate) fn can_process_queue(&self) -> bool {
+        match self {
+            DriverEntry::Ephemeral(d) => d.state_machine_ref().can_process_queue(),
+            DriverEntry::Persistent(d) => d.inner_ref().state_machine_ref().can_process_queue(),
+        }
+    }
+
     /// Check and clear the wake flag.
     pub(crate) fn take_wake_requested(&mut self) -> bool {
         match self {
@@ -156,10 +164,15 @@ impl DriverEntry {
     }
 }
 
+/// Shared completion registry (accessed by adapter for registration and loop for resolution).
+pub(crate) type SharedCompletionRegistry = Arc<Mutex<crate::completion::CompletionRegistry>>;
+
 /// Per-session state: driver + optional RuntimeLoop.
 struct RuntimeSessionEntry {
     /// Shared driver handle (accessed by both adapter methods and RuntimeLoop).
     driver: SharedDriver,
+    /// Completion waiters (accessed by accept_input_with_completion and RuntimeLoop).
+    completions: SharedCompletionRegistry,
     /// Wake signal sender (if a RuntimeLoop is attached).
     wake_tx: Option<mpsc::Sender<()>>,
     /// Run-control sender for cancelling the current run.
@@ -202,15 +215,6 @@ impl RuntimeSessionAdapter {
         }
     }
 
-    /// Create a legacy/degraded adapter (no runtime capabilities).
-    pub fn legacy() -> Self {
-        Self {
-            sessions: RwLock::new(HashMap::new()),
-            mode: RuntimeMode::LegacyDegraded,
-            store: None,
-        }
-    }
-
     /// Create a driver entry for a session.
     fn make_driver(&self, session_id: &SessionId) -> DriverEntry {
         let runtime_id = LogicalRuntimeId::new(session_id.to_string());
@@ -235,6 +239,7 @@ impl RuntimeSessionAdapter {
         }
         let session_entry = RuntimeSessionEntry {
             driver: Arc::new(Mutex::new(entry)),
+            completions: Arc::new(Mutex::new(crate::completion::CompletionRegistry::new())),
             wake_tx: None,
             control_tx: None,
             _loop_handle: None,
@@ -281,11 +286,12 @@ impl RuntimeSessionAdapter {
                     tracing::error!(%session_id, "executor missing while upgrading existing runtime session");
                     return;
                 };
-                let handle = crate::runtime_loop::spawn_runtime_loop(
+                let handle = crate::runtime_loop::spawn_runtime_loop_with_completions(
                     driver.clone(),
                     executor,
                     wake_rx,
                     control_rx,
+                    Some(entry.completions.clone()),
                 );
 
                 entry.wake_tx = Some(wake_tx.clone());
@@ -327,6 +333,9 @@ impl RuntimeSessionAdapter {
                     session_id.clone(),
                     RuntimeSessionEntry {
                         driver: driver.clone(),
+                        completions: Arc::new(Mutex::new(
+                            crate::completion::CompletionRegistry::new(),
+                        )),
                         wake_tx: None,
                         control_tx: None,
                         _loop_handle: None,
@@ -342,8 +351,20 @@ impl RuntimeSessionAdapter {
             tracing::error!(%session_id, "executor missing while registering runtime session");
             return;
         };
-        let handle =
-            crate::runtime_loop::spawn_runtime_loop(driver.clone(), executor, wake_rx, control_rx);
+
+        // Get or create completions for this session
+        let completions = {
+            let sessions = self.sessions.read().await;
+            sessions.get(&session_id).map(|e| e.completions.clone())
+        };
+
+        let handle = crate::runtime_loop::spawn_runtime_loop_with_completions(
+            driver.clone(),
+            executor,
+            wake_rx,
+            control_rx,
+            completions,
+        );
 
         let mut sessions = self.sessions.write().await;
         let Some(entry) = sessions.get_mut(&session_id) else {
@@ -533,6 +554,69 @@ impl RuntimeSessionAdapter {
                 Err(err)
             }
         }
+    }
+
+    /// Accept an input and return a completion handle that resolves when the
+    /// input reaches a terminal state (Consumed or Abandoned).
+    ///
+    /// The caller awaits the handle to get the `RunResult` or error.
+    /// This is the primary mechanism for surfaces that want to route execution
+    /// through the runtime while still awaiting the outcome.
+    pub async fn accept_input_with_completion(
+        &self,
+        session_id: &SessionId,
+        input: Input,
+    ) -> Result<(AcceptOutcome, crate::completion::CompletionHandle), RuntimeDriverError> {
+        let sessions = self.sessions.read().await;
+        let entry = sessions
+            .get(session_id)
+            .ok_or(RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            })?;
+
+        let (outcome, should_wake, should_process, handle) = {
+            let mut driver = entry.driver.lock().await;
+            let result = driver.as_driver_mut().accept_input(input).await?;
+
+            // Register a completion waiter for the accepted input
+            let input_id = match &result {
+                AcceptOutcome::Accepted { input_id, .. } => input_id.clone(),
+                AcceptOutcome::Deduplicated { existing_id, .. } => existing_id.clone(),
+                AcceptOutcome::Rejected { reason } => {
+                    return Err(RuntimeDriverError::ValidationFailed {
+                        reason: reason.clone(),
+                    });
+                }
+            };
+
+            let handle = {
+                let mut completions = entry.completions.lock().await;
+                completions.register(input_id)
+            };
+
+            let wake = driver.take_wake_requested();
+            let process_now = driver.take_process_requested();
+            (result, wake, process_now, handle)
+        };
+
+        if (should_wake || should_process)
+            && let Some(ref wake_tx) = entry.wake_tx
+        {
+            let _ = wake_tx.try_send(());
+        }
+
+        Ok((outcome, handle))
+    }
+
+    /// Get the shared completion registry for a session.
+    ///
+    /// Used by the runtime loop to resolve waiters on input consumption.
+    pub(crate) async fn completion_registry(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<SharedCompletionRegistry> {
+        let sessions = self.sessions.read().await;
+        sessions.get(session_id).map(|e| e.completions.clone())
     }
 }
 
@@ -863,12 +947,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_mode() {
-        let adapter = RuntimeSessionAdapter::legacy();
-        assert_eq!(adapter.runtime_mode(), RuntimeMode::LegacyDegraded);
-    }
-
-    #[tokio::test]
     async fn unregistered_session_errors() {
         let adapter = RuntimeSessionAdapter::ephemeral();
         let sid = SessionId::new();
@@ -925,6 +1003,7 @@ mod tests {
                         sequence: 0,
                     },
                     session_snapshot: None,
+                    run_result: None,
                 })
             }
 
@@ -1056,6 +1135,7 @@ mod tests {
                         sequence: 0,
                     },
                     session_snapshot: None,
+                    run_result: None,
                 })
             }
 
@@ -1144,6 +1224,7 @@ mod tests {
                         sequence: 0,
                     },
                     session_snapshot: None,
+                    run_result: None,
                 })
             }
 
@@ -1225,6 +1306,7 @@ mod tests {
                         sequence: 0,
                     },
                     session_snapshot: None,
+                    run_result: None,
                 })
             }
 
@@ -1301,6 +1383,7 @@ mod tests {
                             sequence: 0,
                         },
                         session_snapshot: None,
+                        run_result: None,
                     },
                 ))
             })
@@ -1352,6 +1435,7 @@ mod tests {
                         sequence: 0,
                     },
                     session_snapshot: None,
+                    run_result: None,
                 })
             }
 
@@ -1425,6 +1509,7 @@ mod tests {
                         sequence: 0,
                     },
                     session_snapshot: None,
+                    run_result: None,
                 })
             }
 
@@ -1506,6 +1591,7 @@ mod tests {
                                 sequence: 0,
                             },
                             session_snapshot: None,
+                            run_result: None,
                         },
                     ))
                 },
@@ -1567,6 +1653,7 @@ mod tests {
                         sequence: 0,
                     },
                     session_snapshot: None,
+                    run_result: None,
                 })
             }
 

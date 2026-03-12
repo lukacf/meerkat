@@ -25,6 +25,7 @@ pub use ::tokio;
 pub mod accept;
 pub mod coalescing;
 pub mod comms_bridge;
+pub mod completion;
 pub mod driver;
 pub mod durability;
 pub mod identifiers;
@@ -53,6 +54,7 @@ pub use coalescing::{
     AggregateDescriptor, CoalescingResult, SupersessionScope, apply_coalescing, apply_supersession,
     check_supersession, create_aggregate_input, is_coalescing_eligible,
 };
+pub use completion::{CompletionHandle, CompletionOutcome, CompletionRegistry};
 pub use driver::{EphemeralRuntimeDriver, PersistentRuntimeDriver};
 pub use durability::{DurabilityError, validate_durability};
 pub use identifiers::{

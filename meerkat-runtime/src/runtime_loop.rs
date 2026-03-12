@@ -80,12 +80,25 @@ pub(crate) fn spawn_runtime_loop(
         meerkat_core::lifecycle::run_control::RunControlCommand,
     >,
 ) -> tokio::task::JoinHandle<()> {
+    spawn_runtime_loop_with_completions(driver, executor, wake_rx, control_rx, None)
+}
+
+/// Spawn the per-session runtime loop with optional completion registry.
+pub(crate) fn spawn_runtime_loop_with_completions(
+    driver: crate::session_adapter::SharedDriver,
+    mut executor: Box<dyn meerkat_core::lifecycle::CoreExecutor>,
+    mut wake_rx: tokio::sync::mpsc::Receiver<()>,
+    mut control_rx: tokio::sync::mpsc::Receiver<
+        meerkat_core::lifecycle::run_control::RunControlCommand,
+    >,
+    completions: Option<crate::session_adapter::SharedCompletionRegistry>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             tokio::select! {
                 maybe_wake = wake_rx.recv() => {
                     match maybe_wake {
-                        Some(()) => process_queue(&driver, &mut *executor).await,
+                        Some(()) => process_queue(&driver, &mut *executor, completions.as_ref()).await,
                         None => break,
                     }
                 }
@@ -99,6 +112,13 @@ pub(crate) fn spawn_runtime_loop(
                 }
             }
         }
+
+        // Loop exiting — resolve any pending completion waiters as terminated.
+        // This ensures callers don't hang if the runtime shuts down mid-work.
+        if let Some(ref completions) = completions {
+            let mut reg = completions.lock().await;
+            reg.resolve_all_terminated("runtime loop exited");
+        }
     })
 }
 
@@ -106,14 +126,15 @@ pub(crate) fn spawn_runtime_loop(
 async fn process_queue(
     driver: &crate::session_adapter::SharedDriver,
     executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
+    completions: Option<&crate::session_adapter::SharedCompletionRegistry>,
 ) {
     loop {
         // Dequeue and prepare under the driver lock
         let dequeued = {
             let mut d = driver.lock().await;
 
-            // Only process if idle
-            if !d.is_idle() {
+            // Only process if the runtime can process queue (Idle or Retired)
+            if !d.can_process_queue() {
                 break;
             }
 
@@ -152,6 +173,9 @@ async fn process_queue(
                 let mut d = driver.lock().await;
                 match result {
                     Ok(output) => {
+                        // Capture run_result before moving output fields
+                        let run_result = output.run_result;
+
                         // BoundaryApplied transitions Staged → Applied → APC
                         // and triggers atomic persistence in PersistentRuntimeDriver
                         if let Err(err) = d
@@ -188,12 +212,12 @@ async fn process_queue(
                             break;
                         }
 
-                        // RunCompleted transitions APC → Consumed and returns to Idle
+                        // RunCompleted transitions APC → Consumed and returns to Idle/Retired
                         if let Err(err) = d
                             .as_driver_mut()
                             .on_run_event(RunEvent::RunCompleted {
                                 run_id,
-                                consumed_input_ids: vec![input_id],
+                                consumed_input_ids: vec![input_id.clone()],
                             })
                             .await
                         {
@@ -205,6 +229,14 @@ async fn process_queue(
                                 })
                                 .await;
                             break;
+                        }
+
+                        // Resolve completion waiter if present
+                        if let Some(ref completions) = completions {
+                            if let Some(result) = run_result {
+                                let mut reg = completions.lock().await;
+                                reg.resolve_completed(&input_id, result);
+                            }
                         }
                     }
                     Err(e) => {

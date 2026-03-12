@@ -8,6 +8,7 @@ use super::RunId;
 use super::run_control::RunControlCommand;
 use super::run_primitive::RunPrimitive;
 use super::run_receipt::RunBoundaryReceipt;
+use crate::types::RunResult;
 
 /// Errors from CoreExecutor operations.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -31,13 +32,18 @@ pub enum CoreExecutorError {
 }
 
 /// Successful result of applying a run primitive.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct CoreApplyOutput {
     /// The authoritative receipt proving boundary application.
     pub receipt: RunBoundaryReceipt,
     /// Optional serialized session snapshot to durably commit atomically with
     /// the receipt and input-state updates.
     pub session_snapshot: Option<Vec<u8>>,
+    /// The run result, if the execution produced one.
+    ///
+    /// Populated by executors that run full agent turns. Used by the runtime
+    /// loop to resolve completion waiters.
+    pub run_result: Option<RunResult>,
 }
 
 /// The interface core exposes for the runtime layer to apply run primitives.

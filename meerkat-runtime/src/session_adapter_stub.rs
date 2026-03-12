@@ -27,12 +27,8 @@ impl RuntimeSessionAdapter {
         Self
     }
 
-    pub fn legacy() -> Self {
-        Self
-    }
-
     pub fn runtime_mode(&self) -> RuntimeMode {
-        RuntimeMode::LegacyDegraded
+        RuntimeMode::V9Compliant
     }
 
     pub async fn register_session(&self, _session_id: SessionId) {}

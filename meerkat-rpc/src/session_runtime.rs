@@ -201,7 +201,7 @@ impl SessionRuntime {
         ));
         let runtime_adapter = match &runtime_store {
             Some(store) => Arc::new(RuntimeSessionAdapter::persistent(store.clone())),
-            None => Arc::new(RuntimeSessionAdapter::legacy()),
+            None => Arc::new(RuntimeSessionAdapter::ephemeral()),
         };
 
         Self {
@@ -249,7 +249,7 @@ impl SessionRuntime {
         ));
         let runtime_adapter = match &runtime_store {
             Some(store) => Arc::new(RuntimeSessionAdapter::persistent(store.clone())),
-            None => Arc::new(RuntimeSessionAdapter::legacy()),
+            None => Arc::new(RuntimeSessionAdapter::ephemeral()),
         };
 
         Self {
@@ -397,6 +397,83 @@ impl SessionRuntime {
         {
             slot.generation = generation;
             slot.registry = registry;
+        }
+    }
+
+    /// Start a turn by routing through the runtime input/completion waiter path.
+    ///
+    /// Instead of calling `SessionService::start_turn()` directly, this method:
+    /// 1. Creates an `Input::Prompt` from the request parameters
+    /// 2. Accepts it via `RuntimeSessionAdapter::accept_input_with_completion()`
+    /// 3. Awaits the completion handle
+    /// 4. Returns the `RunResult` produced by the executor
+    ///
+    /// This ensures all session-driving work flows through the single runtime
+    /// authority (the RuntimeLoop → CoreExecutor pipeline).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn start_turn_via_runtime(
+        &self,
+        session_id: &SessionId,
+        prompt: String,
+        event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
+        skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
+        flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
+        additional_instructions: Option<Vec<String>>,
+        overrides: Option<crate::handlers::turn::TurnOverrides>,
+    ) -> Result<RunResult, RpcError> {
+        use meerkat_runtime::completion::CompletionOutcome;
+        use meerkat_runtime::input::{Input, PromptInput};
+
+        // Build turn metadata from overrides
+        let turn_metadata = Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                host_mode: overrides
+                    .as_ref()
+                    .and_then(|ov| ov.host_mode)
+                    .unwrap_or(false),
+                skill_references,
+                flow_tool_overlay,
+                additional_instructions,
+            },
+        );
+
+        let input = Input::Prompt(PromptInput::new(prompt, turn_metadata));
+
+        // Ensure session is registered with the runtime adapter
+        if !self.runtime_adapter.contains_session(session_id).await {
+            return Err(RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!("session {session_id} has no runtime registration"),
+                data: None,
+            });
+        }
+
+        let (_outcome, handle) = self
+            .runtime_adapter
+            .accept_input_with_completion(session_id, input)
+            .await
+            .map_err(|e| RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!("runtime accept failed: {e}"),
+                data: None,
+            })?;
+
+        // Forward events while waiting for completion
+        // (Events are forwarded by the executor's forwarder task,
+        // which is spawned inside SessionRuntimeExecutor::apply())
+
+        match handle.wait().await {
+            CompletionOutcome::Completed(result) => Ok(result),
+            CompletionOutcome::Abandoned(reason) => Err(RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!("turn abandoned: {reason}"),
+                data: None,
+            }),
+            CompletionOutcome::RuntimeTerminated(reason) => Err(RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!("runtime terminated: {reason}"),
+                data: None,
+            }),
         }
     }
 

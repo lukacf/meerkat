@@ -24,6 +24,7 @@ meerkat-client = { workspace = true }
 meerkat-store = { workspace = true }
 meerkat-mob = { workspace = true, optional = true }
 meerkat-mob-mcp = { workspace = true, optional = true }
+meerkat-runtime = { path = "../meerkat-runtime", features = ["redb-store"] }
 futures = { workspace = true }
 async-trait = { workspace = true }
 indexmap = "2"
@@ -37,7 +38,7 @@ uuid = { workspace = true }
 clap = { workspace = true }
 
 [features]
-default = []
+default = ["comms", "mcp", "mob", "sub-agents"]
 comms = ["meerkat/comms"]
 mcp = ["meerkat/mcp"]
 mob = ["dep:meerkat-mob", "dep:meerkat-mob-mcp"]

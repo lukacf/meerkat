@@ -5,6 +5,7 @@ mod tokio {
 
 use async_trait::async_trait;
 
+use meerkat_client::LlmClient;
 use meerkat_core::AppendSystemContextStatus;
 use meerkat_core::ScopedAgentEvent;
 use meerkat_core::agent::{AgentToolDispatcher, CommsRuntime as CoreCommsRuntime};
@@ -40,23 +41,75 @@ struct ManagedMob {
     handle: MobHandle,
 }
 
+type DefaultLlmClientProvider = Arc<dyn Fn() -> Option<Arc<dyn LlmClient>> + Send + Sync + 'static>;
+
+fn persisted_mob_binding(session: &meerkat_core::Session) -> Option<meerkat_mob::MobId> {
+    let metadata = session.session_metadata()?;
+    let comms_name = metadata.comms_name.as_deref()?;
+    let mut parts = comms_name.split('/');
+    let mob_id = parts.next().filter(|part| !part.is_empty())?;
+    let profile = parts.next().filter(|part| !part.is_empty())?;
+    let meerkat_id = parts.next().filter(|part| !part.is_empty())?;
+    if parts.next().is_some() {
+        return None;
+    }
+    if metadata.realm_id.as_deref() != Some(&format!("mob:{mob_id}")) {
+        return None;
+    }
+    let peer_meta = metadata.peer_meta.as_ref()?;
+    if peer_meta.labels.get("mob_id").map(String::as_str) != Some(mob_id)
+        || peer_meta.labels.get("role").map(String::as_str) != Some(profile)
+        || peer_meta.labels.get("meerkat_id").map(String::as_str) != Some(meerkat_id)
+    {
+        return None;
+    }
+    Some(meerkat_mob::MobId::from(mob_id))
+}
+
 /// In-memory MCP state for multiple mobs.
 pub struct MobMcpState {
     session_service: Arc<dyn MobSessionService>,
+    runtime_adapter: Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>,
+    default_llm_client: Option<Arc<dyn LlmClient>>,
+    default_llm_client_provider: Option<DefaultLlmClientProvider>,
     mobs: RwLock<BTreeMap<MobId, ManagedMob>>,
 }
 
 impl MobMcpState {
     pub fn new(session_service: Arc<dyn MobSessionService>) -> Self {
+        let runtime_adapter = session_service.runtime_adapter();
+        Self::new_with_runtime_adapter(session_service, runtime_adapter)
+    }
+
+    pub fn new_with_runtime_adapter(
+        session_service: Arc<dyn MobSessionService>,
+        runtime_adapter: Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>,
+    ) -> Self {
         Self {
             session_service,
+            runtime_adapter,
+            default_llm_client: None,
+            default_llm_client_provider: None,
             mobs: RwLock::new(BTreeMap::new()),
         }
     }
 
+    pub fn with_default_llm_client(mut self, client: Option<Arc<dyn LlmClient>>) -> Self {
+        self.default_llm_client = client;
+        self
+    }
+
+    pub fn with_default_llm_client_provider(
+        mut self,
+        provider: Option<DefaultLlmClientProvider>,
+    ) -> Self {
+        self.default_llm_client_provider = provider;
+        self
+    }
+
     /// Access the underlying session service.
-    pub fn session_service(&self) -> &dyn MobSessionService {
-        &*self.session_service
+    pub fn session_service(&self) -> Arc<dyn MobSessionService> {
+        self.session_service.clone()
     }
 
     pub async fn mob_create_definition(
@@ -68,11 +121,21 @@ impl MobMcpState {
             return Err(MobError::Internal(format!("mob already exists: {mob_id}")));
         }
         let storage = MobStorage::in_memory();
-        let handle = MobBuilder::new(definition.clone(), storage)
+        let mut builder = MobBuilder::new(definition.clone(), storage)
             .with_session_service(self.session_service.clone())
-            .allow_ephemeral_sessions(!self.session_service.supports_persistent_sessions())
-            .create()
-            .await?;
+            .allow_ephemeral_sessions(!self.session_service.supports_persistent_sessions());
+        if let Some(adapter) = &self.runtime_adapter {
+            builder = builder.with_runtime_adapter(adapter.clone());
+        }
+        let default_llm_client = self.default_llm_client.clone().or_else(|| {
+            self.default_llm_client_provider
+                .as_ref()
+                .and_then(|provider| provider())
+        });
+        if let Some(client) = default_llm_client {
+            builder = builder.with_default_llm_client(client.clone());
+        }
+        let handle = builder.create().await?;
         match self.mobs.write().await.entry(mob_id.clone()) {
             Entry::Vacant(entry) => {
                 entry.insert(ManagedMob { handle });
@@ -205,11 +268,69 @@ impl MobMcpState {
             }
         }
         let Some((mob_id, meerkat_id)) = resolved else {
+            if self.owns_persisted_session(session_id).await {
+                return self
+                    .session_service()
+                    .archive(session_id)
+                    .await
+                    .map_err(|error| {
+                        MobError::Internal(format!(
+                            "failed to archive persisted mob-owned session '{session_id}': {error}"
+                        ))
+                    });
+            }
             return Err(MobError::Internal(format!(
                 "session not found in any live mob authority: {session_id}"
             )));
         };
         self.mob_retire(&mob_id, meerkat_id).await
+    }
+
+    pub async fn owns_live_session(&self, session_id: &SessionId) -> bool {
+        let mob_ids = self.mobs.read().await.keys().cloned().collect::<Vec<_>>();
+        for mob_id in mob_ids {
+            if let Ok(handle) = self.handle_for(&mob_id).await {
+                let members = handle.list_all_members().await;
+                if members.into_iter().any(|member| {
+                    member
+                        .member_ref
+                        .session_id()
+                        .is_some_and(|candidate| candidate == session_id)
+                }) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    pub async fn owns_persisted_session(&self, session_id: &SessionId) -> bool {
+        let Some(session) = self
+            .session_service()
+            .load_persisted_session(session_id)
+            .await
+            .ok()
+            .flatten()
+        else {
+            return false;
+        };
+
+        let Some(mob_id) = persisted_mob_binding(&session) else {
+            return false;
+        };
+        match self.handle_for(&mob_id).await {
+            Ok(handle) => handle.list_all_members().await.into_iter().any(|member| {
+                member
+                    .member_ref
+                    .session_id()
+                    .is_some_and(|candidate| candidate == session_id)
+            }),
+            Err(_) => {
+                self.session_service()
+                    .session_belongs_to_mob(session_id, &mob_id)
+                    .await
+            }
+        }
     }
 
     pub async fn mob_wire(
@@ -380,7 +501,10 @@ impl MobMcpState {
 
     /// Create MCP state backed by an in-memory local session service.
     pub fn new_in_memory() -> Arc<Self> {
-        Arc::new(Self::new(Arc::new(LocalSessionService::new())))
+        Arc::new(Self::new_with_runtime_adapter(
+            Arc::new(LocalSessionService::new()),
+            Some(Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral())),
+        ))
     }
 }
 
@@ -1419,6 +1543,7 @@ mod tests {
         SessionUsage, SessionView, StartTurnRequest,
     };
     use meerkat_core::types::{RunResult, SessionId, Usage};
+    use meerkat_core::{PeerMeta, Provider, Session, SessionMetadata, SessionTooling};
     use std::collections::{HashMap, HashSet};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::SystemTime;
@@ -1514,6 +1639,7 @@ mod tests {
 
     struct MockSessionSvc {
         sessions: RwLock<HashMap<SessionId, Arc<MockComms>>>,
+        persisted_sessions: RwLock<HashMap<SessionId, Session>>,
         host_mode_notifiers: RwLock<HashMap<SessionId, Arc<Notify>>>,
         counter: AtomicU64,
         start_turn_delay_ms: AtomicU64,
@@ -1523,6 +1649,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 sessions: RwLock::new(HashMap::new()),
+                persisted_sessions: RwLock::new(HashMap::new()),
                 host_mode_notifiers: RwLock::new(HashMap::new()),
                 counter: AtomicU64::new(0),
                 start_turn_delay_ms: AtomicU64::new(0),
@@ -1531,6 +1658,13 @@ mod tests {
 
         fn set_turn_delay_ms(&self, delay_ms: u64) {
             self.start_turn_delay_ms.store(delay_ms, Ordering::Relaxed);
+        }
+
+        async fn insert_persisted_session(&self, session: Session) {
+            self.persisted_sessions
+                .write()
+                .await
+                .insert(session.id().clone(), session);
         }
     }
 
@@ -1619,6 +1753,23 @@ mod tests {
 
         async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
             if !self.sessions.read().await.contains_key(id) {
+                if self.persisted_sessions.read().await.contains_key(id) {
+                    return Ok(SessionView {
+                        state: SessionInfo {
+                            session_id: id.clone(),
+                            created_at: SystemTime::now(),
+                            updated_at: SystemTime::now(),
+                            message_count: 0,
+                            is_active: false,
+                            last_assistant_text: None,
+                            labels: Default::default(),
+                        },
+                        billing: SessionUsage {
+                            total_tokens: 0,
+                            usage: Usage::default(),
+                        },
+                    });
+                }
                 return Err(SessionError::NotFound { id: id.clone() });
             }
             Ok(SessionView {
@@ -1657,11 +1808,16 @@ mod tests {
         }
 
         async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
-            self.sessions.write().await.remove(id);
+            let removed_live = self.sessions.write().await.remove(id).is_some();
+            let removed_persisted = self.persisted_sessions.write().await.remove(id).is_some();
             if let Some(notifier) = self.host_mode_notifiers.write().await.remove(id) {
                 notifier.notify_waiters();
             }
-            Ok(())
+            if removed_live || removed_persisted {
+                Ok(())
+            } else {
+                Err(SessionError::NotFound { id: id.clone() })
+            }
         }
     }
 
@@ -1720,6 +1876,18 @@ mod tests {
 
         async fn session_belongs_to_mob(&self, _session_id: &SessionId, _mob_id: &MobId) -> bool {
             true
+        }
+
+        async fn load_persisted_session(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<Option<Session>, SessionError> {
+            Ok(self
+                .persisted_sessions
+                .read()
+                .await
+                .get(session_id)
+                .cloned())
         }
     }
 
@@ -1944,6 +2112,143 @@ mod tests {
         let state = Arc::new(MobMcpState::new(svc));
         let d = MobMcpDispatcher::new(state);
         assert_eq!(d.tools().len(), 13);
+    }
+
+    #[tokio::test]
+    async fn test_owns_persisted_session_requires_actual_roster_membership() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let session_service: Arc<dyn meerkat_mob::MobSessionService> = svc.clone();
+        let state = Arc::new(MobMcpState::new(session_service));
+        let dispatcher = MobMcpDispatcher::new(Arc::clone(&state));
+
+        call_tool(
+            &dispatcher,
+            "mob_create",
+            json!({
+                "definition": {
+                    "id": "team",
+                    "orchestrator": {"profile": "lead"},
+                    "profiles": {
+                        "lead": {
+                            "model": "claude-opus-4-6",
+                            "tools": {"comms": true, "mob": true},
+                            "external_addressable": true
+                        }
+                    },
+                    "mcp_servers": {},
+                    "wiring": {"auto_wire_orchestrator": false, "role_wiring": []},
+                    "skills": {},
+                    "backend": {"default": "subagent"}
+                }
+            }),
+        )
+        .await;
+
+        let mut spoofed = Session::new();
+        let spoofed_id = spoofed.id().clone();
+        let _ = spoofed.set_session_metadata(SessionMetadata {
+            model: "claude-sonnet-4-5".to_string(),
+            max_tokens: 4096,
+            provider: Provider::Anthropic,
+            tooling: SessionTooling {
+                comms: true,
+                ..SessionTooling::default()
+            },
+            host_mode: false,
+            comms_name: Some("team/reviewer/alice".to_string()),
+            peer_meta: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+        });
+        svc.insert_persisted_session(spoofed).await;
+
+        assert!(
+            !state.owns_persisted_session(&spoofed_id).await,
+            "persisted session routing must verify real mob membership instead of trusting comms_name shape"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_owns_persisted_session_accepts_mob_marked_session_without_live_handle() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let session_service: Arc<dyn meerkat_mob::MobSessionService> = svc.clone();
+        let state = Arc::new(MobMcpState::new(session_service));
+
+        let mut persisted = Session::new();
+        let persisted_id = persisted.id().clone();
+        let _ = persisted.set_session_metadata(SessionMetadata {
+            model: "claude-sonnet-4-5".to_string(),
+            max_tokens: 4096,
+            provider: Provider::Anthropic,
+            tooling: SessionTooling {
+                comms: true,
+                ..SessionTooling::default()
+            },
+            host_mode: false,
+            comms_name: Some("team/reviewer/alice".to_string()),
+            peer_meta: Some(
+                PeerMeta::default()
+                    .with_label("mob_id", "team")
+                    .with_label("role", "reviewer")
+                    .with_label("meerkat_id", "alice"),
+            ),
+            realm_id: Some("mob:team".to_string()),
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+        });
+        svc.insert_persisted_session(persisted).await;
+
+        assert!(
+            state.owns_persisted_session(&persisted_id).await,
+            "persisted mob members must still route through mob ownership after restart even before a live handle is rehydrated"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retire_member_by_session_id_falls_back_to_archiving_persisted_member() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let session_service: Arc<dyn meerkat_mob::MobSessionService> = svc.clone();
+        let state = Arc::new(MobMcpState::new(session_service));
+
+        let mut persisted = Session::new();
+        let persisted_id = persisted.id().clone();
+        let _ = persisted.set_session_metadata(SessionMetadata {
+            model: "claude-sonnet-4-5".to_string(),
+            max_tokens: 4096,
+            provider: Provider::Anthropic,
+            tooling: SessionTooling {
+                comms: true,
+                ..SessionTooling::default()
+            },
+            host_mode: false,
+            comms_name: Some("team/reviewer/alice".to_string()),
+            peer_meta: Some(
+                PeerMeta::default()
+                    .with_label("mob_id", "team")
+                    .with_label("role", "reviewer")
+                    .with_label("meerkat_id", "alice"),
+            ),
+            realm_id: Some("mob:team".to_string()),
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+        });
+        svc.insert_persisted_session(persisted).await;
+
+        state
+            .retire_member_by_session_id(&persisted_id)
+            .await
+            .expect("persisted mob sessions should archive cleanly even without a live handle");
+        assert!(
+            svc.load_persisted_session(&persisted_id)
+                .await
+                .expect("load persisted")
+                .is_none(),
+            "archive fallback must remove the persisted session snapshot"
+        );
     }
 
     fn flow_enabled_definition() -> MobDefinition {

@@ -22,6 +22,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 futures = { workspace = true }
+sha2 = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
@@ -31,6 +32,7 @@ inventory = { workspace = true }
 # Optional dependencies (gated by features, not available on wasm32)
 meerkat-store = { workspace = true, optional = true }
 redb = { workspace = true, optional = true }
+meerkat-runtime = { path = "../meerkat-runtime", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio_with_wasm = { workspace = true }
@@ -42,7 +44,7 @@ meerkat-store = { workspace = true, features = ["memory"] }
 
 [features]
 default = []
-session-store = ["dep:redb", "dep:meerkat-store"]
+session-store = ["dep:redb", "dep:meerkat-store", "dep:meerkat-runtime"]
 session-compaction = []
 
 [lints]

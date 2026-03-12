@@ -1,0 +1,7 @@
+[mobpack]
+name = "Browser Smoke Pack"
+version = "0.1.0"
+description = "Minimal browser-safe mobpack fixture for WASM live smoke coverage"
+
+[requires]
+capabilities = ["comms"]

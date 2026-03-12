@@ -136,6 +136,10 @@ mod tests {
             Ok(())
         }
 
+        async fn reset_member(&self, _member_ref: &MemberRef) -> Result<(), MobError> {
+            Ok(())
+        }
+
         async fn interrupt_member(&self, _member_ref: &MemberRef) -> Result<(), MobError> {
             Ok(())
         }

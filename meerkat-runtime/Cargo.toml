@@ -1,0 +1,45 @@
+[package]
+name = "meerkat-runtime"
+description = "v9 runtime control-plane for Meerkat agent lifecycle"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+meerkat-core = { path = "../meerkat-core", default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+indexmap = { version = "2", features = ["serde"] }
+redb = { workspace = true, optional = true }
+tracing = { workspace = true }
+meerkat-store = { path = "../meerkat-store", default-features = false, optional = true }
+sha2 = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio_with_wasm = { workspace = true }
+
+[features]
+default = []
+redb-store = ["dep:redb", "dep:meerkat-store"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+tempfile = { workspace = true }
+redb = { workspace = true }
+
+[lints]
+workspace = true

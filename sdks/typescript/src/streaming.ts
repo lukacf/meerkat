@@ -25,23 +25,68 @@ import { MeerkatError } from "./generated/errors.js";
 /** @internal Queue with promise-based get(). */
 export class AsyncQueue<T> {
   private buffer: T[] = [];
-  private waiters: Array<(value: T) => void> = [];
+  private waiters: Array<{ id: number; resolve: () => void }> = [];
+  private nextWaiterId = 0;
 
   put(item: T): void {
-    if (this.waiters.length > 0) {
-      this.waiters.shift()!(item);
-    } else {
-      this.buffer.push(item);
+    this.buffer.push(item);
+    if (this.waiters.length === 0) {
+      return;
+    }
+
+    const waiters = this.waiters;
+    this.waiters = [];
+    for (const waiter of waiters) {
+      waiter.resolve();
     }
   }
 
   get(): Promise<T> {
-    if (this.buffer.length > 0) {
-      return Promise.resolve(this.buffer.shift()!);
+    return this._get();
+  }
+
+  private async _get(): Promise<T> {
+    while (this.buffer.length === 0) {
+      await this.waitForItemCancelable().promise;
     }
-    return new Promise((resolve) => {
-      this.waiters.push(resolve);
+    return this.buffer.shift()!;
+  }
+
+  waitForItemCancelable(): { promise: Promise<void>; cancel: () => void } {
+    if (this.buffer.length > 0) {
+      return {
+        promise: Promise.resolve(),
+        cancel: () => {
+          // Already resolved from the buffer.
+        },
+      };
+    }
+
+    const waiterId = this.nextWaiterId++;
+    let settled = false;
+    const promise = new Promise<void>((resolve) => {
+      this.waiters.push({
+        id: waiterId,
+        resolve: () => {
+          settled = true;
+          resolve();
+        },
+      });
     });
+
+    return {
+      promise,
+      cancel: () => {
+        if (settled) {
+          return;
+        }
+        const waiterIndex = this.waiters.findIndex((waiter) => waiter.id === waiterId);
+        if (waiterIndex >= 0) {
+          this.waiters.splice(waiterIndex, 1);
+        }
+        settled = true;
+      },
+    };
   }
 
   tryGet(): T | undefined {
@@ -53,17 +98,19 @@ export class AsyncQueue<T> {
   }
 
   failAll(error: Error): void {
-    // Waiters receive a rejected promise; we wrap by rejecting in the next tick
-    for (const waiter of this.waiters) {
-      // Use a sentinel; callers handle it
-      waiter(undefined as unknown as T);
+    // Wake every current waiter with a sentinel so pending gets can complete.
+    for (let i = 0; i < Math.max(this.waiters.length, 1); i += 1) {
+      this.buffer.push(undefined as unknown as T);
     }
+    const waiters = this.waiters;
     this.waiters = [];
+    for (const waiter of waiters) {
+      waiter.resolve();
+    }
   }
 }
 
-/** Sentinel for end-of-stream. */
-const SENTINEL = Symbol("eos");
+const RESPONSE_DRAIN_GRACE_MS = 75;
 
 /**
  * Typed async iterable of {@link StreamEvent} objects from a running turn.
@@ -122,31 +169,32 @@ export class EventStream implements AsyncIterable<StreamEvent> {
 
     while (true) {
       if (responseDone) {
-        // Drain remaining queued events
-        while (!this._eventQueue.isEmpty) {
-          const raw = this._eventQueue.tryGet();
-          if (raw == null) break;
-          yield parseEvent(raw);
-        }
+        yield* this._drainLateEvents();
         this._finalise(responseResult!);
         return;
       }
 
       // Race: next event vs response
-      const eventPromise = this._eventQueue.get();
+      const { promise: itemReady, cancel } = this._eventQueue.waitForItemCancelable();
       const result = await Promise.race([
-        eventPromise.then((raw) => ({ kind: "event" as const, raw })),
+        itemReady.then(() => ({ kind: "event" as const })),
         responseHandler.then(() => ({ kind: "response" as const, raw: null })),
       ]);
 
       if (result.kind === "event") {
-        if (result.raw == null) {
+        const raw = this._eventQueue.tryGet();
+        if (raw === undefined) {
+          continue;
+        }
+        if (raw === null) {
           // Sentinel — stream ended
           await responseHandler;
           this._finalise(responseResult!);
           return;
         }
-        yield parseEvent(result.raw);
+        yield parseEvent(raw);
+      } else {
+        cancel();
       }
       // If response, loop back to the top which handles drain
     }
@@ -169,6 +217,38 @@ export class EventStream implements AsyncIterable<StreamEvent> {
       }
     }
     return [parts.join(""), this.result];
+  }
+
+  private async *_drainLateEvents(): AsyncGenerator<StreamEvent, void, undefined> {
+    let deadline = Date.now() + RESPONSE_DRAIN_GRACE_MS;
+    while (true) {
+      let yieldedEvent = false;
+      while (!this._eventQueue.isEmpty) {
+        const raw = this._eventQueue.tryGet();
+        if (raw === undefined) {
+          break;
+        }
+        if (raw === null) {
+          return;
+        }
+        yieldedEvent = true;
+        yield parseEvent(raw);
+      }
+
+      if (yieldedEvent) {
+        deadline = Date.now() + RESPONSE_DRAIN_GRACE_MS;
+        continue;
+      }
+
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        return;
+      }
+
+      await new Promise((resolve) => {
+        setTimeout(resolve, Math.min(remainingMs, 5));
+      });
+    }
   }
 
   private _finalise(rawResult: Record<string, unknown>): void {

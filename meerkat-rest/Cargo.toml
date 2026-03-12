@@ -26,6 +26,16 @@ name = "live_continue_tmp"
 path = "tests/live_continue_tmp.rs"
 required-features = ["integration-real-tests"]
 
+[[test]]
+name = "e2e_regression"
+path = "tests/e2e_regression.rs"
+required-features = ["integration-real-tests"]
+
+[[test]]
+name = "live_smoke_matrix"
+path = "tests/live_smoke_matrix.rs"
+required-features = ["integration-real-tests"]
+
 [dependencies]
 meerkat = { workspace = true, features = ["anthropic", "openai", "gemini", "jsonl-store", "session-store", "memory-store", "skills"] }
 meerkat-core = { workspace = true }
@@ -33,6 +43,7 @@ meerkat-contracts = { workspace = true }
 meerkat-client = { workspace = true }
 meerkat-store = { workspace = true }
 meerkat-tools = { workspace = true }
+meerkat-runtime = { path = "../meerkat-runtime", features = ["redb-store"] }
 meerkat-mob = { workspace = true, optional = true }
 meerkat-mob-mcp = { workspace = true, optional = true }
 meerkat-comms = { workspace = true, optional = true }
@@ -67,6 +78,7 @@ hyper = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tempfile = { workspace = true }
 http-body-util = { workspace = true }
+reqwest = { workspace = true }
 
 [package.metadata.cargo-machete]
 ignored = [

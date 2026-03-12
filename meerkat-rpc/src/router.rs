@@ -15,6 +15,7 @@ use meerkat_core::ConfigStore;
 use meerkat_core::EventEnvelope;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::types::SessionId;
+use meerkat_runtime::SessionServiceRuntimeExt as _;
 use serde_json::json;
 
 use crate::error;
@@ -54,6 +55,13 @@ impl NotificationSink {
         Self { tx }
     }
 
+    /// Create a no-op sink that discards all notifications.
+    /// Used in test/CLI contexts where no RPC transport exists.
+    pub fn noop() -> Self {
+        let (tx, _rx) = mpsc::channel(1);
+        Self { tx }
+    }
+
     /// Emit an agent event as a JSON-RPC notification.
     pub async fn emit_event(&self, session_id: &SessionId, event: &EventEnvelope<AgentEvent>) {
         let params = serde_json::json!({
@@ -61,8 +69,11 @@ impl NotificationSink {
             "event": event,
         });
         let notification = RpcNotification::new("session/event", params);
-        // Best-effort: drop if the receiver is gone.
-        let _ = self.tx.send(notification).await;
+        // Best-effort: drop if the channel is full or the receiver is gone.
+        // Must not block — the runtime executor's event forwarder calls this,
+        // and blocking here backpressures through the session task into the
+        // agent run, causing deadlocks with bounded notification channels.
+        let _ = self.tx.try_send(notification);
     }
 
     /// Emit a standalone session stream event notification.
@@ -266,6 +277,7 @@ pub struct MethodRouter {
     active_mob_streams: Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
     #[cfg(feature = "mob")]
     closed_mob_streams: Arc<Mutex<ClosedStreamSet>>,
+    runtime_adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
 }
 
 impl MethodRouter {
@@ -275,29 +287,18 @@ impl MethodRouter {
         config_store: Arc<dyn ConfigStore>,
         notification_sink: NotificationSink,
     ) -> Self {
-        Self {
-            runtime,
-            config_store,
-            notification_sink,
-            skill_runtime: None,
-            active_session_streams: Arc::new(Mutex::new(HashMap::new())),
-            closed_session_streams: Arc::new(Mutex::new(ClosedStreamSet::new())),
-            #[cfg(feature = "mob")]
-            mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
-            #[cfg(feature = "mob")]
-            active_mob_streams: Arc::new(Mutex::new(HashMap::new())),
-            #[cfg(feature = "mob")]
-            closed_mob_streams: Arc::new(Mutex::new(ClosedStreamSet::new())),
-        }
-    }
-
-    #[cfg(all(test, feature = "mob"))]
-    fn new_with_mob_state(
-        runtime: Arc<SessionRuntime>,
-        config_store: Arc<dyn ConfigStore>,
-        notification_sink: NotificationSink,
-        mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
-    ) -> Self {
+        let runtime_adapter = runtime.runtime_adapter();
+        #[cfg(feature = "mob")]
+        let mob_state = Arc::new(
+            meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
+                runtime.session_service(),
+                Some(runtime_adapter.clone()),
+            )
+            .with_default_llm_client_provider(Some(Arc::new({
+                let runtime = runtime.clone();
+                move || runtime.default_llm_client()
+            }))),
+        );
         Self {
             runtime,
             config_store,
@@ -311,7 +312,120 @@ impl MethodRouter {
             active_mob_streams: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(feature = "mob")]
             closed_mob_streams: Arc::new(Mutex::new(ClosedStreamSet::new())),
+            runtime_adapter,
         }
+    }
+
+    /// Get a reference to the runtime adapter for session registration.
+    pub fn runtime_adapter(&self) -> &Arc<meerkat_runtime::RuntimeSessionAdapter> {
+        &self.runtime_adapter
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn session_id_from_runtime_params(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> Result<SessionId, RpcResponse> {
+        let Some(params) = params else {
+            return Err(RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                "missing params",
+            ));
+        };
+        let value: serde_json::Value = match serde_json::from_str(params.get()) {
+            Ok(value) => value,
+            Err(err) => {
+                return Err(RpcResponse::error(
+                    id,
+                    error::INVALID_PARAMS,
+                    format!("invalid params: {err}"),
+                ));
+            }
+        };
+        let Some(session_id) = value.get("session_id").and_then(|value| value.as_str()) else {
+            return Err(RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                "missing session_id",
+            ));
+        };
+        SessionId::parse(session_id)
+            .map_err(|err| RpcResponse::error(id, error::INVALID_PARAMS, err.to_string()))
+    }
+
+    async fn ensure_runtime_session_registered(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RpcResponse> {
+        let owner = self.resolve_session_owner(session_id).await;
+
+        if owner.is_none() {
+            return Err(RpcResponse::error(
+                None,
+                error::SESSION_NOT_FOUND,
+                format!("Session not found: {session_id}"),
+            ));
+        }
+
+        let executor: Box<dyn meerkat_core::lifecycle::CoreExecutor> = match owner {
+            Some(SessionOwner::Runtime) => {
+                Box::new(crate::session_executor::SessionRuntimeExecutor::new(
+                    self.runtime.clone(),
+                    session_id.clone(),
+                    self.notification_sink.clone(),
+                ))
+            }
+            #[cfg(feature = "mob")]
+            Some(SessionOwner::Mob) => {
+                Box::new(crate::session_executor::MobRpcRuntimeExecutor::new(
+                    self.mob_state.session_service(),
+                    session_id.clone(),
+                    self.notification_sink.clone(),
+                ))
+            }
+            None => return Ok(()),
+        };
+        self.runtime_adapter
+            .ensure_session_with_executor(session_id.clone(), executor)
+            .await;
+        Ok(())
+    }
+
+    #[cfg(feature = "mob")]
+    pub fn new_with_mob_state(
+        runtime: Arc<SessionRuntime>,
+        config_store: Arc<dyn ConfigStore>,
+        notification_sink: NotificationSink,
+        mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
+    ) -> Self {
+        let runtime_adapter = runtime.runtime_adapter();
+        Self {
+            runtime,
+            config_store,
+            notification_sink,
+            skill_runtime: None,
+            active_session_streams: Arc::new(Mutex::new(HashMap::new())),
+            closed_session_streams: Arc::new(Mutex::new(ClosedStreamSet::new())),
+            #[cfg(feature = "mob")]
+            mob_state,
+            #[cfg(feature = "mob")]
+            active_mob_streams: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(feature = "mob")]
+            closed_mob_streams: Arc::new(Mutex::new(ClosedStreamSet::new())),
+            runtime_adapter,
+        }
+    }
+
+    /// Replace the default ephemeral runtime adapter with a custom one
+    /// (e.g., persistent-backed for durable runtime semantics).
+    pub fn with_runtime_adapter(
+        mut self,
+        adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
+    ) -> Self {
+        self.runtime_adapter = adapter;
+        self
     }
 
     /// Set the skill runtime for introspection methods.
@@ -327,21 +441,25 @@ impl MethodRouter {
     // the authoritative operation-specific read again so they observe the
     // freshest lifecycle state instead of routing off a cached snapshot.
     async fn resolve_session_owner(&self, session_id: &SessionId) -> Option<SessionOwner> {
-        if self.runtime.session_state(session_id).await.is_some()
-            || self.runtime.read_session(session_id).await.is_ok()
-        {
-            return Some(SessionOwner::Runtime);
-        }
-
         #[cfg(feature = "mob")]
-        if self
-            .mob_state
-            .session_service()
-            .read(session_id)
-            .await
-            .is_ok()
+        if self.mob_state.owns_live_session(session_id).await
+            || self.mob_state.owns_persisted_session(session_id).await
         {
             return Some(SessionOwner::Mob);
+        }
+
+        if self.runtime.pending_session_exists(session_id).await
+            || self.runtime.session_state(session_id).await.is_some()
+            || self.runtime.read_session(session_id).await.is_ok()
+            || self
+                .runtime
+                .load_persisted_session(session_id)
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+        {
+            return Some(SessionOwner::Runtime);
         }
 
         None
@@ -351,6 +469,7 @@ impl MethodRouter {
     ///
     /// Returns `None` for notifications (requests without an id) that do not
     /// require a response.
+    #[allow(clippy::if_not_else)]
     pub async fn dispatch(&self, request: RpcRequest) -> Option<RpcResponse> {
         // Notifications (no id) are fire-and-forget
         if request.is_notification() {
@@ -368,13 +487,17 @@ impl MethodRouter {
         let params = request.params.as_deref();
 
         let response = match request.method.as_str() {
-            "initialize" => handlers::initialize::handle_initialize(id),
+            "initialize" => handlers::initialize::handle_initialize(
+                id,
+                self.runtime_adapter.runtime_mode() == meerkat_runtime::RuntimeMode::V9Compliant,
+            ),
             "session/create" => {
                 handlers::session::handle_create(
                     id,
                     params,
                     self.runtime.clone(),
                     &self.notification_sink,
+                    &self.runtime_adapter,
                 )
                 .await
             }
@@ -385,8 +508,14 @@ impl MethodRouter {
             "session/stream_open" => self.handle_session_stream_open(id, params).await,
             "session/stream_close" => self.handle_session_stream_close(id, params).await,
             "turn/start" => {
-                handlers::turn::handle_start(id, params, &self.runtime, &self.notification_sink)
-                    .await
+                handlers::turn::handle_start(
+                    id,
+                    params,
+                    self.runtime.clone(),
+                    &self.notification_sink,
+                    &self.runtime_adapter,
+                )
+                .await
             }
             "turn/interrupt" => {
                 #[cfg(feature = "mob")]
@@ -497,6 +626,140 @@ impl MethodRouter {
             "mcp/add" => handlers::mcp::handle_add(id, params, &self.runtime).await,
             "mcp/remove" => handlers::mcp::handle_remove(id, params, &self.runtime).await,
             "mcp/reload" => handlers::mcp::handle_reload(id, params, &self.runtime).await,
+            "runtime/state" => {
+                if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
+                {
+                    RpcResponse::error(
+                        id,
+                        error::METHOD_NOT_FOUND,
+                        "Method not found: runtime/state",
+                    )
+                } else {
+                    let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
+                        Ok(session_id) => session_id,
+                        Err(response) => return Some(response),
+                    };
+                    if let Err(response) = self.ensure_runtime_session_registered(&session_id).await
+                    {
+                        return Some(response.with_id(id));
+                    }
+                    handlers::runtime::handle_runtime_state(
+                        id,
+                        params,
+                        self.runtime_adapter.as_ref(),
+                    )
+                    .await
+                }
+            }
+            "runtime/accept" => {
+                if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
+                {
+                    RpcResponse::error(
+                        id,
+                        error::METHOD_NOT_FOUND,
+                        "Method not found: runtime/accept",
+                    )
+                } else {
+                    let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
+                        Ok(session_id) => session_id,
+                        Err(response) => return Some(response),
+                    };
+                    if let Err(response) = self.ensure_runtime_session_registered(&session_id).await
+                    {
+                        return Some(response.with_id(id));
+                    }
+                    handlers::runtime::handle_runtime_accept(
+                        id,
+                        params,
+                        self.runtime_adapter.as_ref(),
+                    )
+                    .await
+                }
+            }
+            "runtime/retire" => {
+                if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
+                {
+                    RpcResponse::error(
+                        id,
+                        error::METHOD_NOT_FOUND,
+                        "Method not found: runtime/retire",
+                    )
+                } else {
+                    let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
+                        Ok(session_id) => session_id,
+                        Err(response) => return Some(response),
+                    };
+                    if let Err(response) = self.ensure_runtime_session_registered(&session_id).await
+                    {
+                        return Some(response.with_id(id));
+                    }
+                    handlers::runtime::handle_runtime_retire(
+                        id,
+                        params,
+                        self.runtime_adapter.as_ref(),
+                    )
+                    .await
+                }
+            }
+            "runtime/reset" => {
+                if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
+                {
+                    RpcResponse::error(
+                        id,
+                        error::METHOD_NOT_FOUND,
+                        "Method not found: runtime/reset",
+                    )
+                } else {
+                    let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
+                        Ok(session_id) => session_id,
+                        Err(response) => return Some(response),
+                    };
+                    if let Err(response) = self.ensure_runtime_session_registered(&session_id).await
+                    {
+                        return Some(response.with_id(id));
+                    }
+                    handlers::runtime::handle_runtime_reset(
+                        id,
+                        params,
+                        self.runtime_adapter.as_ref(),
+                    )
+                    .await
+                }
+            }
+            "input/state" => {
+                if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
+                {
+                    RpcResponse::error(id, error::METHOD_NOT_FOUND, "Method not found: input/state")
+                } else {
+                    let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
+                        Ok(session_id) => session_id,
+                        Err(response) => return Some(response),
+                    };
+                    if let Err(response) = self.ensure_runtime_session_registered(&session_id).await
+                    {
+                        return Some(response.with_id(id));
+                    }
+                    handlers::runtime::handle_input_state(id, params, self.runtime_adapter.as_ref())
+                        .await
+                }
+            }
+            "input/list" => {
+                if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
+                {
+                    RpcResponse::error(id, error::METHOD_NOT_FOUND, "Method not found: input/list")
+                } else {
+                    let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
+                        Ok(session_id) => session_id,
+                        Err(response) => return Some(response),
+                    };
+                    if let Err(response) = self.ensure_runtime_session_registered(&session_id).await
+                    {
+                        return Some(response.with_id(id));
+                    }
+                    handlers::runtime::handle_input_list(id, params, self.runtime_adapter.as_ref())
+                        .await
+                }
+            }
             _ => RpcResponse::error(
                 id,
                 error::METHOD_NOT_FOUND,
@@ -589,7 +852,10 @@ impl MethodRouter {
         };
         match self.resolve_session_owner(&session_id).await {
             Some(SessionOwner::Runtime) => match self.runtime.archive_session(&session_id).await {
-                Ok(()) => RpcResponse::success(id, json!({"archived": true})),
+                Ok(()) => {
+                    self.runtime_adapter.unregister_session(&session_id).await;
+                    RpcResponse::success(id, json!({"archived": true}))
+                }
                 Err(rpc_err) => RpcResponse::error(id, rpc_err.code, rpc_err.message),
             },
             #[cfg(feature = "mob")]
@@ -848,8 +1114,9 @@ impl MethodRouter {
             }
             #[cfg(feature = "mob")]
             Some(SessionOwner::Mob) => {
+                let session_service = self.mob_state.session_service();
                 match meerkat_mob::MobSessionService::subscribe_session_events(
-                    self.mob_state.session_service(),
+                    &*session_service,
                     &session_id,
                 )
                 .await
@@ -1507,7 +1774,7 @@ mod tests {
         let factory = AgentFactory::new(temp.path().join("sessions"));
         let config = Config::default();
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
-        let mut runtime = SessionRuntime::new(factory, config, 10, store);
+        let mut runtime = SessionRuntime::new(factory, config, 10, store, NotificationSink::noop());
         let config_store: Arc<dyn ConfigStore> =
             Arc::new(MemoryConfigStore::new(Config::default()));
         runtime.default_llm_client = Some(Arc::new(MockLlmClient));
@@ -1522,6 +1789,14 @@ mod tests {
         (router, notif_rx)
     }
 
+    async fn test_router_with_v9_runtime() -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
+        let (router, notif_rx) = test_router().await;
+        let runtime_adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::persistent(
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+        ));
+        (router.with_runtime_adapter(runtime_adapter), notif_rx)
+    }
+
     async fn test_router_with_llm(
         llm_client: Arc<dyn LlmClient>,
     ) -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
@@ -1529,7 +1804,7 @@ mod tests {
         let factory = AgentFactory::new(temp.path().join("sessions"));
         let config = Config::default();
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
-        let mut runtime = SessionRuntime::new(factory, config, 10, store);
+        let mut runtime = SessionRuntime::new(factory, config, 10, store, NotificationSink::noop());
         let config_store: Arc<dyn ConfigStore> =
             Arc::new(MemoryConfigStore::new(Config::default()));
         runtime.default_llm_client = Some(llm_client);
@@ -1552,7 +1827,7 @@ mod tests {
         let factory = AgentFactory::new(temp.path().join("sessions"));
         let config = Config::default();
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
-        let mut runtime = SessionRuntime::new(factory, config, 10, store);
+        let mut runtime = SessionRuntime::new(factory, config, 10, store, NotificationSink::noop());
         let config_store: Arc<dyn ConfigStore> =
             Arc::new(MemoryConfigStore::new(Config::default()));
         runtime.default_llm_client = Some(llm_client);
@@ -1575,7 +1850,7 @@ mod tests {
         let factory = AgentFactory::new(temp.path().join("sessions"));
         let config = Config::default();
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
-        let mut runtime = SessionRuntime::new(factory, config, 10, store);
+        let mut runtime = SessionRuntime::new(factory, config, 10, store, NotificationSink::noop());
         let config_store: Arc<dyn ConfigStore> =
             Arc::new(MemoryConfigStore::new(Config::default()));
         runtime.default_llm_client = Some(Arc::new(MockLlmClient));
@@ -1597,7 +1872,7 @@ mod tests {
         let factory = AgentFactory::new(temp.path().join("sessions"));
         let config = Config::default();
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
-        let mut runtime = SessionRuntime::new(factory, config, 10, store);
+        let mut runtime = SessionRuntime::new(factory, config, 10, store, NotificationSink::noop());
         let config_store: Arc<dyn ConfigStore> =
             Arc::new(MemoryConfigStore::new(Config::default()));
         runtime.default_llm_client = Some(Arc::new(MockLlmClient));
@@ -1713,6 +1988,14 @@ mod tests {
     /// Extract the error code from an error response.
     fn error_code(resp: &RpcResponse) -> i32 {
         resp.error.as_ref().expect("Expected error response").code
+    }
+
+    fn error_message(resp: &RpcResponse) -> String {
+        resp.error
+            .as_ref()
+            .expect("Expected error response")
+            .message
+            .clone()
     }
 
     async fn drain_notifications(notif_rx: &mut mpsc::Receiver<RpcNotification>) {
@@ -2341,9 +2624,21 @@ mod tests {
             .unwrap();
         let read_value = result_value(&read_resp);
 
-        assert_eq!(read_value["session_id"].as_str().unwrap(), session_id);
-        assert!(read_value["state"].is_string());
-        assert!(read_value["labels"].is_object());
+        assert_eq!(
+            read_value["session_id"].as_str().unwrap(),
+            session_id,
+            "read response: {read_value}"
+        );
+        // WireSessionInfo uses is_active (bool), not state (string)
+        assert!(
+            read_value["is_active"].is_boolean(),
+            "is_active should be boolean, got: {read_value}"
+        );
+        // labels may be omitted when empty (skip_serializing_if = "BTreeMap::is_empty")
+        assert!(
+            read_value.get("labels").is_none() || read_value["labels"].is_object(),
+            "labels should be object or absent, got: {read_value}"
+        );
     }
 
     #[cfg(feature = "mob")]
@@ -3213,6 +3508,93 @@ mod tests {
 
         let resp = router.dispatch(req).await.unwrap();
         assert_eq!(error_code(&resp), error::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn session_create_rejects_reserved_mob_peer_meta_labels() {
+        let (router, _notif_rx) = test_router().await;
+        let req = make_request(
+            "session/create",
+            serde_json::json!({
+                "prompt": "hello",
+                "peer_meta": {
+                    "labels": {
+                        "mob_id": "team"
+                    }
+                }
+            }),
+        );
+
+        let resp = router.dispatch(req).await.unwrap();
+        assert_eq!(error_code(&resp), error::INVALID_PARAMS);
+        assert!(
+            error_message(&resp).contains("mob-managed sessions"),
+            "reserved mob label rejection should explain the trust boundary"
+        );
+    }
+
+    #[tokio::test]
+    async fn deferred_session_runtime_endpoints_register_pending_session() {
+        let (router, _notif_rx) = test_router_with_v9_runtime().await;
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "deferred",
+                    "initial_turn": "deferred"
+                }),
+            ))
+            .await
+            .unwrap();
+        let created = result_value(&create_resp);
+        let session_id = created["session_id"]
+            .as_str()
+            .expect("session_id")
+            .to_string();
+
+        let state_resp = router
+            .dispatch(make_request(
+                "runtime/state",
+                serde_json::json!({ "session_id": session_id }),
+            ))
+            .await
+            .unwrap();
+        let state = result_value(&state_resp);
+        assert_eq!(
+            state["state"].as_str(),
+            Some("idle"),
+            "deferred sessions should be routable through runtime/state before their first turn"
+        );
+
+        let accept_resp = router
+            .dispatch(make_request(
+                "runtime/accept",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "input": {
+                        "input_type": "prompt",
+                        "header": {
+                            "id": meerkat_core::InputId::new(),
+                            "timestamp": "2026-03-12T00:00:00Z",
+                            "source": { "type": "operator" },
+                            "durability": "durable",
+                            "visibility": {
+                                "transcript_eligible": true,
+                                "operator_eligible": true
+                            }
+                        },
+                        "text": "drive via runtime"
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let accepted = result_value(&accept_resp);
+        assert_eq!(
+            accepted["outcome_type"].as_str(),
+            Some("accepted"),
+            "deferred sessions should also be routable through runtime/accept before their first turn"
+        );
     }
 
     /// 5. `session/list` returns the list of sessions after creating one.

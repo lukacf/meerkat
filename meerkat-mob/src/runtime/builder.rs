@@ -11,6 +11,7 @@ pub struct MobBuilder {
     mode: BuilderMode,
     storage: MobStorage,
     session_service: Option<Arc<dyn MobSessionService>>,
+    runtime_adapter: Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>,
     allow_ephemeral_sessions: bool,
     notify_orchestrator_on_resume: bool,
     tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
@@ -38,6 +39,7 @@ impl MobBuilder {
             mode: BuilderMode::Create(Arc::new(definition)),
             storage,
             session_service: None,
+            runtime_adapter: None,
             allow_ephemeral_sessions: false,
             notify_orchestrator_on_resume: true,
             tool_bundles: BTreeMap::new(),
@@ -78,6 +80,7 @@ impl MobBuilder {
             mode: BuilderMode::Resume,
             storage,
             session_service: None,
+            runtime_adapter: None,
             allow_ephemeral_sessions: false,
             notify_orchestrator_on_resume: true,
             tool_bundles: BTreeMap::new(),
@@ -90,7 +93,19 @@ impl MobBuilder {
     /// The service must implement both `SessionService` and `MobSessionService`
     /// to provide comms runtime access for wiring operations.
     pub fn with_session_service(mut self, service: Arc<dyn MobSessionService>) -> Self {
+        if self.runtime_adapter.is_none() {
+            self.runtime_adapter = service.runtime_adapter();
+        }
         self.session_service = Some(service);
+        self
+    }
+
+    /// Attach a runtime adapter so member lifecycle and turns use the v9 runtime path.
+    pub fn with_runtime_adapter(
+        mut self,
+        adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
+    ) -> Self {
+        self.runtime_adapter = Some(adapter);
         self
     }
 
@@ -133,6 +148,7 @@ impl MobBuilder {
             mode,
             storage,
             session_service,
+            runtime_adapter,
             allow_ephemeral_sessions,
             notify_orchestrator_on_resume: _,
             tool_bundles,
@@ -198,6 +214,7 @@ impl MobBuilder {
             storage.events.clone(),
             storage.runs.clone(),
             session_service,
+            runtime_adapter,
             tool_bundles,
             default_llm_client,
         ))
@@ -214,6 +231,7 @@ impl MobBuilder {
             mode,
             storage,
             session_service,
+            runtime_adapter,
             allow_ephemeral_sessions,
             notify_orchestrator_on_resume,
             tool_bundles,
@@ -341,6 +359,7 @@ impl MobBuilder {
                 &definition,
                 &mut roster,
                 &session_service,
+                runtime_adapter.clone(),
                 notify_orchestrator_on_resume,
                 default_llm_client.clone(),
                 &tool_bundles,
@@ -358,6 +377,7 @@ impl MobBuilder {
             storage.events.clone(),
             storage.runs.clone(),
             session_service,
+            runtime_adapter,
             tool_bundles,
             default_llm_client,
         ))
@@ -381,10 +401,12 @@ impl MobBuilder {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn reconcile_resume(
         definition: &Arc<MobDefinition>,
         roster: &mut Roster,
         session_service: &Arc<dyn MobSessionService>,
+        runtime_adapter: Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>,
         notify_orchestrator_on_resume: bool,
         default_llm_client: Option<Arc<dyn LlmClient>>,
         tool_bundles: &BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
@@ -392,6 +414,7 @@ impl MobBuilder {
     ) -> Result<(), MobError> {
         let provisioner = MultiBackendProvisioner::new(
             session_service.clone(),
+            runtime_adapter,
             definition.backend.external.clone(),
         );
         let active_sessions = session_service
@@ -544,9 +567,9 @@ impl MobBuilder {
                         })?;
                 }
                 crate::MobRuntimeMode::TurnDriven => {
-                    session_service
+                    provisioner
                         .start_turn(
-                            session_id,
+                            &orchestrator_entry.member_ref,
                             meerkat_core::service::StartTurnRequest {
                                 prompt: resume_message,
                                 event_tx: None,
@@ -572,6 +595,7 @@ impl MobBuilder {
         events: Arc<dyn MobEventStore>,
         run_store: Arc<dyn MobRunStore>,
         session_service: Arc<dyn MobSessionService>,
+        runtime_adapter: Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>,
         tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         default_llm_client: Option<Arc<dyn LlmClient>>,
     ) -> MobHandle {
@@ -610,17 +634,20 @@ impl MobBuilder {
             events,
             run_store,
             session_service,
+            runtime_adapter,
             tool_bundles,
             default_llm_client,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn start_runtime_with_components(
         definition: Arc<MobDefinition>,
         wiring: RuntimeWiring,
         events: Arc<dyn MobEventStore>,
         run_store: Arc<dyn MobRunStore>,
         session_service: Arc<dyn MobSessionService>,
+        runtime_adapter: Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>,
         tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         default_llm_client: Option<Arc<dyn LlmClient>>,
     ) -> MobHandle {
@@ -647,6 +674,7 @@ impl MobBuilder {
         };
         let provisioner: Arc<dyn MobProvisioner> = Arc::new(MultiBackendProvisioner::new(
             session_service,
+            runtime_adapter,
             external_backend,
         ));
         let max_orphaned_turns = definition

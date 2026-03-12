@@ -5,8 +5,10 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+#[path = "../../test-fixtures/live_smoke/support.rs"]
+mod live_smoke;
+
 use std::sync::Arc;
-use std::time::Duration;
 
 use meerkat::AgentFactory;
 use meerkat_client::LlmClient;
@@ -21,23 +23,6 @@ use tokio::time::timeout;
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Return the Anthropic API key if set, or `None`.
-fn anthropic_api_key() -> Option<String> {
-    for var in &["ANTHROPIC_API_KEY", "RKAT_ANTHROPIC_API_KEY"] {
-        if let Ok(val) = std::env::var(var)
-            && !val.is_empty()
-        {
-            return Some(val);
-        }
-    }
-    None
-}
-
-/// Model to use for live smoke tests (defaults to a cheaper model).
-fn smoke_model() -> String {
-    std::env::var("SMOKE_MODEL").unwrap_or_else(|_| "claude-sonnet-4-5".to_string())
-}
-
 /// Set up a server with duplex streams using the given LLM client.
 fn spawn_test_server(
     client: Arc<dyn LlmClient>,
@@ -49,8 +34,15 @@ fn spawn_test_server(
     let temp = tempfile::tempdir().unwrap();
     let factory = AgentFactory::new(temp.path().join("sessions"));
     let config = Config::default();
-    let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
-    let mut runtime = SessionRuntime::new(factory, config, 10, store);
+    let store: Arc<dyn meerkat::SessionStore> =
+        Arc::new(meerkat::RedbSessionStore::open(temp.path().join("sessions.redb")).unwrap());
+    let mut runtime = SessionRuntime::new(
+        factory,
+        config,
+        10,
+        store,
+        meerkat_rpc::router::NotificationSink::noop(),
+    );
     let config_store: Arc<dyn meerkat_core::ConfigStore> =
         Arc::new(MemoryConfigStore::new(Config::default()));
     runtime.default_llm_client = Some(client);
@@ -130,7 +122,7 @@ async fn read_response_with_notifications(
 #[tokio::test]
 #[ignore = "integration-real: live API"]
 async fn e2e_scenario_15_full_rpc_conversation_flow() {
-    let api_key = match anthropic_api_key() {
+    let api_key = match live_smoke::anthropic_api_key() {
         Some(key) => key,
         None => {
             eprintln!("Skipping scenario 15: no ANTHROPIC_API_KEY set");
@@ -141,7 +133,7 @@ async fn e2e_scenario_15_full_rpc_conversation_flow() {
     let client = Arc::new(meerkat_client::AnthropicClient::new(api_key).unwrap());
     let (mut writer, mut reader, server_handle) = spawn_test_server(client);
 
-    let live_timeout = Duration::from_secs(120);
+    let live_timeout = live_smoke::live_timeout();
 
     // 1. Initialize
     let init_req = serde_json::json!({
@@ -162,7 +154,7 @@ async fn e2e_scenario_15_full_rpc_conversation_flow() {
     assert_eq!(init_resp["result"]["server_info"]["name"], "meerkat-rpc");
 
     // 2. session/create with real Anthropic
-    let model = smoke_model();
+    let model = live_smoke::smoke_model();
     let create_req = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 2,
@@ -246,7 +238,7 @@ async fn e2e_scenario_15_full_rpc_conversation_flow() {
         read_resp["result"]["session_id"].as_str().unwrap(),
         session_id
     );
-    assert_eq!(read_resp["result"]["state"].as_str().unwrap(), "idle");
+    assert_eq!(read_resp["result"]["is_active"], false);
 
     // 5. session/list (verify present)
     let list_req = serde_json::json!({
@@ -321,11 +313,11 @@ async fn e2e_scenario_15_full_rpc_conversation_flow() {
     server_handle.await.unwrap().unwrap();
 }
 
-/// Scenario 18: degraded/unhealthy diagnostics are projected consistently
+/// Supplemental: degraded/unhealthy diagnostics are projected consistently
 /// across RPC/REST wire payloads plus MCP/CLI JSON envelopes.
 #[tokio::test]
 #[ignore = "integration-real: diagnostics projection contract"]
-async fn e2e_scenario_18_degraded_unhealthy_diagnostics_across_cli_rest_rpc_mcp() {
+async fn e2e_diagnostics_projection_contract_across_cli_rest_rpc_mcp() {
     let run = meerkat_core::RunResult {
         text: "ok".to_string(),
         session_id: meerkat_core::SessionId::new(),
@@ -409,7 +401,7 @@ async fn e2e_scenario_18_degraded_unhealthy_diagnostics_across_cli_rest_rpc_mcp(
 #[tokio::test]
 #[ignore = "integration-real: live API"]
 async fn e2e_scenario_16_kitchen_sink() {
-    let api_key = match anthropic_api_key() {
+    let api_key = match live_smoke::anthropic_api_key() {
         Some(key) => key,
         None => {
             eprintln!("Skipping scenario 16: no ANTHROPIC_API_KEY set");
@@ -420,8 +412,8 @@ async fn e2e_scenario_16_kitchen_sink() {
     let client = Arc::new(meerkat_client::AnthropicClient::new(api_key).unwrap());
     let (mut writer, mut reader, server_handle) = spawn_test_server(client);
 
-    let t = Duration::from_secs(120);
-    let model = smoke_model();
+    let t = live_smoke::live_timeout();
+    let model = live_smoke::smoke_model();
     let mut req_id = 0u64;
     let mut next_id = || {
         req_id += 1;
@@ -446,7 +438,137 @@ async fn e2e_scenario_16_kitchen_sink() {
         resp["result"]["contract_version"]
     );
 
-    // --- 2. Create session A: shell + builtins enabled ---
+    // --- 2. Create a deferred session and drive it through runtime/* before any turn/start ---
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc":"2.0","id":id,"method":"session/create",
+            "params":{
+                "prompt": "Remember the marker RPC_RUNTIME_DEFERRED_16.",
+                "model": model,
+                "initial_turn": "deferred"
+            }
+        }),
+    )
+    .await;
+    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(
+        resp["error"].is_null(),
+        "deferred session/create failed: {resp}"
+    );
+    let deferred_session = resp["result"]["session_id"].as_str().unwrap().to_string();
+
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc":"2.0","id":id,"method":"runtime/state",
+            "params":{"session_id": deferred_session}
+        }),
+    )
+    .await;
+    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(
+        resp["error"].is_null(),
+        "runtime/state failed for deferred session: {resp}"
+    );
+    assert_eq!(resp["result"]["state"].as_str(), Some("idle"));
+
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc":"2.0","id":id,"method":"runtime/accept",
+            "params":{
+                "session_id": deferred_session,
+                "input": {
+                    "input_type": "prompt",
+                    "header": {
+                        "id": meerkat_core::InputId::new(),
+                        "timestamp": "2026-03-12T00:00:00Z",
+                        "source": { "type": "operator" },
+                        "durability": "durable",
+                        "visibility": {
+                            "transcript_eligible": true,
+                            "operator_eligible": true
+                        }
+                    },
+                    "text": "Reply with RPC_RUNTIME_DEFERRED_16 and confirm the saved marker."
+                }
+            }
+        }),
+    )
+    .await;
+    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(
+        resp["error"].is_null(),
+        "runtime/accept failed for deferred session: {resp}"
+    );
+    assert_eq!(resp["result"]["outcome_type"].as_str(), Some("accepted"));
+    let deferred_input_id = resp["result"]["input_id"].as_str().unwrap().to_string();
+
+    let mut consumed = false;
+    for _ in 0..120 {
+        let id = next_id();
+        send_request(
+            &mut writer,
+            &serde_json::json!({
+                "jsonrpc":"2.0","id":id,"method":"input/state",
+                "params":{"session_id": deferred_session, "input_id": deferred_input_id}
+            }),
+        )
+        .await;
+        let resp = timeout(t, read_response(&mut reader)).await.unwrap();
+        assert!(
+            resp["error"].is_null(),
+            "input/state failed for deferred session: {resp}"
+        );
+        if resp["result"]["current_state"].as_str() == Some("consumed") {
+            consumed = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    assert!(
+        consumed,
+        "runtime/accept should fully consume the deferred-session input before continuing"
+    );
+
+    let mut deferred_runtime_text = String::new();
+    for _ in 0..120 {
+        let id = next_id();
+        send_request(
+            &mut writer,
+            &serde_json::json!({
+                "jsonrpc":"2.0","id":id,"method":"session/read",
+                "params":{"session_id": deferred_session}
+            }),
+        )
+        .await;
+        let resp = timeout(t, read_response(&mut reader)).await.unwrap();
+        assert!(
+            resp["error"].is_null(),
+            "session/read failed for deferred session: {resp}"
+        );
+        deferred_runtime_text = resp["result"]["last_assistant_text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_lowercase();
+        if deferred_runtime_text.contains("rpc_runtime_deferred_16")
+            || deferred_runtime_text.contains("rpc runtime deferred 16")
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    assert!(
+        deferred_runtime_text.contains("rpc_runtime_deferred_16")
+            || deferred_runtime_text.contains("rpc runtime deferred 16"),
+        "deferred runtime turn should materialize an assistant reply via raw runtime/* methods, got: {deferred_runtime_text}"
+    );
+
+    // --- 3. Create session A: shell + builtins enabled ---
     let id = next_id();
     send_request(
         &mut writer,
@@ -479,7 +601,7 @@ async fn e2e_scenario_16_kitchen_sink() {
         "Session A should contain shell output, got: {text_a}"
     );
 
-    // --- 3. Follow-up turn on session A: context recall ---
+    // --- 4. Follow-up turn on session A: context recall ---
     let id = next_id();
     send_request(
         &mut writer,
@@ -501,7 +623,7 @@ async fn e2e_scenario_16_kitchen_sink() {
         "Follow-up should recall shell output, got: {text_a2}"
     );
 
-    // --- 4. session/read: verify idle ---
+    // --- 5. session/read: verify idle ---
     let id = next_id();
     send_request(
         &mut writer,
@@ -510,9 +632,9 @@ async fn e2e_scenario_16_kitchen_sink() {
     .await;
     let resp = timeout(t, read_response(&mut reader)).await.unwrap();
     assert!(resp["error"].is_null(), "session/read failed: {resp}");
-    assert_eq!(resp["result"]["state"], "idle");
+    assert_eq!(resp["result"]["is_active"], false);
 
-    // --- 5. Create session B: structured output ---
+    // --- 6. Create session B: structured output ---
     let id = next_id();
     send_request(
         &mut writer,
@@ -676,7 +798,7 @@ async fn e2e_scenario_16_kitchen_sink() {
 #[tokio::test]
 #[ignore = "integration-real: live API"]
 async fn e2e_scenario_17_multi_turn_event_streaming() {
-    let api_key = match anthropic_api_key() {
+    let api_key = match live_smoke::anthropic_api_key() {
         Some(key) => key,
         None => {
             eprintln!("Skipping scenario 17: no ANTHROPIC_API_KEY set");
@@ -687,7 +809,7 @@ async fn e2e_scenario_17_multi_turn_event_streaming() {
     let client = Arc::new(meerkat_client::AnthropicClient::new(api_key).unwrap());
     let (mut writer, mut reader, server_handle) = spawn_test_server(client);
 
-    let live_timeout = Duration::from_secs(120);
+    let live_timeout = live_smoke::live_timeout();
 
     // 1. Initialize
     let init_req = serde_json::json!({
@@ -707,7 +829,7 @@ async fn e2e_scenario_17_multi_turn_event_streaming() {
     );
 
     // 2. session/create - collect notifications emitted during the turn
-    let model = smoke_model();
+    let model = live_smoke::smoke_model();
     let create_req = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 2,

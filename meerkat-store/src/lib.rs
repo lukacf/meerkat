@@ -45,6 +45,8 @@ pub use redb_store::RedbSessionStore;
 use async_trait::async_trait;
 use meerkat_core::time_compat::SystemTime;
 use meerkat_core::{Session, SessionId, SessionMeta};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Arc;
 
 /// Filter for listing sessions
 #[derive(Debug, Clone, Default)]
@@ -78,6 +80,12 @@ pub trait SessionStore: Send + Sync {
     /// Check if a session exists
     async fn exists(&self, id: &SessionId) -> Result<bool, StoreError> {
         Ok(self.load(id).await?.is_some())
+    }
+
+    /// Return the shared redb database when this store is backed by redb.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn shared_redb_database(&self) -> Option<Arc<redb::Database>> {
+        None
     }
 }
 

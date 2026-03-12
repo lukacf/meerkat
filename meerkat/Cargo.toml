@@ -16,6 +16,7 @@ categories.workspace = true
 meerkat-core = { workspace = true, features = ["jsonschema"] }
 meerkat-client = { workspace = true }
 meerkat-store = { workspace = true }
+meerkat-runtime = { workspace = true, optional = true }
 meerkat-tools = { workspace = true }
 meerkat-session = { workspace = true }
 meerkat-memory = { workspace = true, optional = true }
@@ -29,6 +30,7 @@ serde_json = { workspace = true }
 futures = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+inventory = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
@@ -68,7 +70,7 @@ jsonl-store = ["meerkat-store/jsonl"]
 memory-store = ["meerkat-store/memory"]
 
 # Session capabilities
-session-store = ["meerkat-session/session-store"]
+session-store = ["meerkat-session/session-store", "dep:meerkat-runtime", "meerkat-runtime/redb-store"]
 session-compaction = ["meerkat-session/session-compaction"]
 memory-store-session = ["dep:meerkat-memory"]
 
@@ -189,4 +191,9 @@ required-features = ["integration-real-tests"]
 [[test]]
 name = "e2e_smoke"
 path = "tests/e2e_smoke.rs"
+required-features = ["integration-real-tests"]
+
+[[test]]
+name = "e2e_regression"
+path = "tests/e2e_regression.rs"
 required-features = ["integration-real-tests"]

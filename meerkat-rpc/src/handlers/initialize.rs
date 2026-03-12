@@ -20,7 +20,7 @@ pub struct ServerInfo {
 }
 
 /// Handle the `initialize` method.
-pub fn handle_initialize(id: Option<RpcId>) -> RpcResponse {
+pub fn handle_initialize(id: Option<RpcId>, runtime_available: bool) -> RpcResponse {
     let caps = ServerCapabilities {
         server_info: ServerInfo {
             name: "meerkat-rpc".to_string(),
@@ -49,6 +49,14 @@ pub fn handle_initialize(id: Option<RpcId>) -> RpcResponse {
                 "skills/inspect".to_string(),
                 "tools/register".to_string(),
             ];
+            if runtime_available {
+                m.push("runtime/state".to_string());
+                m.push("runtime/accept".to_string());
+                m.push("runtime/retire".to_string());
+                m.push("runtime/reset".to_string());
+                m.push("input/state".to_string());
+                m.push("input/list".to_string());
+            }
             #[cfg(feature = "mob")]
             {
                 m.push("mob/prefabs".to_string());

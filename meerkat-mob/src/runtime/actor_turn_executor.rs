@@ -272,7 +272,7 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
     async fn dispatch(
         &self,
         run_id: &RunId,
-        _step_id: &StepId,
+        step_id: &StepId,
         target: &MeerkatId,
         message: String,
         flow_tool_overlay: Option<TurnToolOverlay>,
@@ -341,8 +341,10 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
 
                 if let Err(error) = self
                     .provisioner
-                    .start_turn(
+                    .start_flow_step(
                         &entry.member_ref,
+                        run_id,
+                        step_id,
                         StartTurnRequest {
                             prompt: message,
                             event_tx: Some(event_tx),

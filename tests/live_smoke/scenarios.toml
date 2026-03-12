@@ -1,0 +1,705 @@
+# Canonical live smoke scenario registry.
+#
+# Each scenario is manual, live-provider backed, and intentionally out of CI.
+# The shared runner in `scripts/live_smoke/run` uses this file to list, filter,
+# and execute the numbered matrix.
+
+[[scenario]]
+id = 15
+title = "RPC full lifecycle and recall"
+surface = "rpc"
+kind = "rust"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = false
+timeout_secs = 900
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["cargo"]
+runner = "cargo"
+package = "meerkat-rpc"
+test_target = "e2e_smoke"
+test_name = "e2e_scenario_15_full_rpc_conversation_flow"
+
+[[scenario]]
+id = 16
+title = "RPC kitchen sink"
+surface = "rpc"
+kind = "rust"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = false
+timeout_secs = 1200
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["cargo"]
+runner = "cargo"
+package = "meerkat-rpc"
+test_target = "e2e_smoke"
+test_name = "e2e_scenario_16_kitchen_sink"
+
+[[scenario]]
+id = 17
+title = "RPC multi-turn event streaming"
+surface = "rpc"
+kind = "rust"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = false
+timeout_secs = 1200
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["cargo"]
+runner = "cargo"
+package = "meerkat-rpc"
+test_target = "e2e_smoke"
+test_name = "e2e_scenario_17_multi_turn_event_streaming"
+
+[[scenario]]
+id = 18
+title = "RPC config, capabilities, and errors"
+surface = "rpc"
+kind = "rust"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = false
+timeout_secs = 900
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["cargo"]
+runner = "cargo"
+package = "meerkat-rpc"
+test_target = "e2e_regression"
+test_name = "e2e_scenario_18_config_capabilities_errors"
+
+[[scenario]]
+id = 19
+title = "RPC context injection recall"
+surface = "rpc"
+kind = "rust"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = false
+timeout_secs = 900
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["cargo"]
+runner = "cargo"
+package = "meerkat-rpc"
+test_target = "e2e_regression"
+test_name = "e2e_scenario_19_inject_context_recall"
+
+[[scenario]]
+id = 20
+title = "RPC dedicated event stream roundtrip"
+surface = "rpc"
+kind = "rust"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = false
+timeout_secs = 900
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["cargo"]
+runner = "cargo"
+package = "meerkat-rpc"
+test_target = "e2e_regression"
+test_name = "e2e_scenario_20_streaming_events"
+
+[[scenario]]
+id = 21
+title = "REST runtime accept input roundtrip"
+surface = "rest"
+kind = "rust"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = false
+timeout_secs = 900
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["cargo"]
+runner = "cargo"
+package = "meerkat-rest"
+features = ["integration-real-tests"]
+test_target = "live_smoke_matrix"
+test_name = "e2e_scenario_21_rest_runtime_accept_input_roundtrip"
+
+[[scenario]]
+id = 22
+title = "REST runtime reset and retire semantics"
+surface = "rest"
+kind = "rust"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = false
+timeout_secs = 900
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["cargo"]
+runner = "cargo"
+package = "meerkat-rest"
+features = ["integration-real-tests"]
+test_target = "live_smoke_matrix"
+test_name = "e2e_scenario_22_rest_runtime_reset_and_retire_abandon_staged_inputs"
+
+[[scenario]]
+id = 23
+title = "REST SSE follow-up event stream"
+surface = "rest"
+kind = "rust"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = false
+timeout_secs = 900
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["cargo"]
+runner = "cargo"
+package = "meerkat-rest"
+features = ["integration-real-tests"]
+test_target = "live_smoke_matrix"
+test_name = "e2e_scenario_23_rest_sse_events_follow_continue_turn"
+
+[[scenario]]
+id = 24
+title = "REST config, capabilities, health, and skills"
+surface = "rest"
+kind = "rust"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = false
+timeout_secs = 600
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["cargo"]
+runner = "cargo"
+package = "meerkat-rest"
+features = ["integration-real-tests"]
+test_target = "live_smoke_matrix"
+test_name = "e2e_scenario_24_rest_config_capabilities_health_and_skills"
+
+[[scenario]]
+id = 25
+title = "REST reload and resume on same realm root"
+surface = "rest"
+kind = "rust"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = false
+timeout_secs = 900
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["cargo"]
+runner = "cargo"
+package = "meerkat-rest"
+features = ["integration-real-tests"]
+test_target = "live_smoke_matrix"
+test_name = "e2e_scenario_25_rest_reload_and_resume_on_same_realm_root"
+
+[[scenario]]
+id = 26
+title = "CLI run and resume persistence"
+surface = "cli"
+kind = "rust"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = false
+timeout_secs = 900
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["cargo"]
+runner = "cargo"
+package = "rkat"
+features = ["integration-real-tests"]
+test_target = "e2e_smoke"
+test_name = "e2e_scenario_26_cli_run_resume_persistence"
+
+[[scenario]]
+id = 27
+title = "CLI shell and structured output"
+surface = "cli"
+kind = "rust"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = false
+timeout_secs = 1200
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["cargo"]
+runner = "cargo"
+package = "rkat"
+features = ["integration-real-tests"]
+test_target = "e2e_smoke"
+test_name = "e2e_scenario_27_cli_shell_and_structured_output"
+
+[[scenario]]
+id = 28
+title = "CLI signed mobpack deploy"
+surface = "cli"
+kind = "rust"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = true
+timeout_secs = 1200
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["cargo"]
+runner = "cargo"
+package = "rkat"
+features = ["integration-real-tests"]
+test_target = "e2e_mobpack_smoke"
+test_name = "e2e_scenario_28_cli_mobpack_deploy_signed_strict_live"
+
+[[scenario]]
+id = 29
+title = "CLI mob member turn probe"
+surface = "cli"
+kind = "rust"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = true
+timeout_secs = 1500
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["cargo"]
+runner = "cargo"
+package = "rkat"
+features = ["integration-real-tests"]
+test_target = "e2e_mobpack_smoke"
+test_name = "e2e_scenario_29_cli_mob_rpc_member_turn_probe"
+
+[[scenario]]
+id = 30
+title = "CLI mob flow probe"
+surface = "cli"
+kind = "rust"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = true
+timeout_secs = 1800
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["cargo"]
+runner = "cargo"
+package = "rkat"
+features = ["integration-real-tests"]
+test_target = "e2e_mobpack_smoke"
+test_name = "e2e_scenario_30_cli_mob_rpc_flow_probe"
+
+[[scenario]]
+id = 31
+title = "MCP stdio run and resume lifecycle"
+surface = "mcp"
+kind = "rust"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = false
+timeout_secs = 1200
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["cargo"]
+runner = "cargo"
+pre_command = ["cargo", "build", "-p", "meerkat-mcp-server", "--bin", "rkat-mcp"]
+package = "meerkat-mcp-server"
+cargo_bin_env = ["rkat-mcp"]
+test_target = "live_smoke"
+test_name = "e2e_scenario_31_mcp_stdio_run_resume_lifecycle"
+
+[[scenario]]
+id = 32
+title = "MCP stdio config, capabilities, and skills"
+surface = "mcp"
+kind = "rust"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = false
+timeout_secs = 900
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["cargo"]
+runner = "cargo"
+pre_command = ["cargo", "build", "-p", "meerkat-mcp-server", "--bin", "rkat-mcp"]
+package = "meerkat-mcp-server"
+cargo_bin_env = ["rkat-mcp"]
+test_target = "live_smoke"
+test_name = "e2e_scenario_32_mcp_stdio_config_capabilities_and_skills"
+
+[[scenario]]
+id = 33
+title = "MCP stdio event stream roundtrip"
+surface = "mcp"
+kind = "rust"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = false
+timeout_secs = 1200
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["cargo"]
+runner = "cargo"
+pre_command = ["cargo", "build", "-p", "meerkat-mcp-server", "--bin", "rkat-mcp"]
+package = "meerkat-mcp-server"
+cargo_bin_env = ["rkat-mcp"]
+test_target = "live_smoke"
+test_name = "e2e_scenario_33_mcp_stdio_event_stream_read_roundtrip"
+
+[[scenario]]
+id = 34
+title = "MCP streamable HTTP run and resume lifecycle"
+surface = "mcp"
+kind = "rust"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = false
+timeout_secs = 1200
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["cargo"]
+runner = "cargo"
+package = "meerkat-mcp-server"
+test_target = "live_smoke"
+test_name = "e2e_scenario_34_mcp_streamable_http_run_resume_lifecycle"
+
+[[scenario]]
+id = 35
+title = "MCP streamable HTTP config, capabilities, and skills"
+surface = "mcp"
+kind = "rust"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = false
+timeout_secs = 900
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["cargo"]
+runner = "cargo"
+package = "meerkat-mcp-server"
+test_target = "live_smoke"
+test_name = "e2e_scenario_35_mcp_streamable_http_config_capabilities_and_skills"
+
+[[scenario]]
+id = 36
+title = "MCP streamable HTTP event stream and archive"
+surface = "mcp"
+kind = "rust"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = false
+timeout_secs = 1200
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["cargo"]
+runner = "cargo"
+package = "meerkat-mcp-server"
+test_target = "live_smoke"
+test_name = "e2e_scenario_36_mcp_streamable_http_event_stream_and_archive_roundtrip"
+
+[[scenario]]
+id = 37
+title = "Python SDK full lifecycle and capabilities"
+surface = "python-sdk"
+kind = "python"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = false
+timeout_secs = 1200
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["python3", "cargo"]
+runner = "pytest"
+cwd = "sdks/python"
+pre_command = ["cargo", "build", "-p", "meerkat-rpc", "--bin", "rkat-rpc", "--features", "mob"]
+test_file = "tests/test_e2e_smoke.py"
+test_name = "test_smoke_scenario_37_full_lifecycle_and_capabilities"
+
+[scenario.env]
+LIVE_SMOKE_SCENARIO = "37"
+MEERKAT_BIN_PATH = "{repo_root}/target/debug/rkat-rpc"
+
+[[scenario]]
+id = 38
+title = "Python SDK context injection and streaming"
+surface = "python-sdk"
+kind = "python"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = false
+timeout_secs = 1200
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["python3", "cargo"]
+runner = "pytest"
+cwd = "sdks/python"
+pre_command = ["cargo", "build", "-p", "meerkat-rpc", "--bin", "rkat-rpc", "--features", "mob"]
+test_file = "tests/test_e2e_smoke.py"
+test_name = "test_smoke_scenario_38_inject_context_and_streaming"
+
+[scenario.env]
+LIVE_SMOKE_SCENARIO = "38"
+MEERKAT_BIN_PATH = "{repo_root}/target/debug/rkat-rpc"
+
+[[scenario]]
+id = 39
+title = "Python SDK persistent reconnect and runtime accept"
+surface = "python-sdk"
+kind = "python"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = false
+timeout_secs = 1500
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["python3", "cargo"]
+runner = "pytest"
+cwd = "sdks/python"
+pre_command = ["cargo", "build", "-p", "meerkat-rpc", "--bin", "rkat-rpc", "--features", "mob"]
+test_file = "tests/test_e2e_smoke.py"
+test_name = "test_smoke_scenario_39_persistent_reconnect_and_runtime_accept"
+
+[scenario.env]
+LIVE_SMOKE_SCENARIO = "39"
+MEERKAT_BIN_PATH = "{repo_root}/target/debug/rkat-rpc"
+
+[[scenario]]
+id = 40
+title = "Python SDK mixed-provider swarm probe"
+surface = "python-sdk"
+kind = "python"
+providers = ["anthropic", "openai"]
+requires_browser = false
+uses_swarm = true
+timeout_secs = 1800
+required_env = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
+required_bins = ["python3", "cargo"]
+runner = "pytest"
+cwd = "sdks/python"
+pre_command = ["cargo", "build", "-p", "meerkat-rpc", "--bin", "rkat-rpc", "--features", "mob"]
+test_file = "tests/test_e2e_smoke.py"
+test_name = "test_smoke_scenario_40_mixed_provider_swarm_probe"
+
+[scenario.env]
+LIVE_SMOKE_SCENARIO = "40"
+MEERKAT_BIN_PATH = "{repo_root}/target/debug/rkat-rpc"
+
+[[scenario]]
+id = 41
+title = "TypeScript SDK full lifecycle and recall"
+surface = "typescript-sdk"
+kind = "node"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = false
+timeout_secs = 1500
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["node", "npm", "cargo"]
+runner = "node"
+cwd = "sdks/typescript"
+pre_commands = [
+  ["cargo", "build", "-p", "meerkat-rpc", "--bin", "rkat-rpc", "--features", "mob"],
+  ["npm", "run", "build"],
+]
+test_file = "tests/e2e_smoke.test.mjs"
+test_name = "Scenario 41"
+
+[scenario.env]
+LIVE_SMOKE_SCENARIO = "41"
+MEERKAT_BIN_PATH = "{repo_root}/target/debug/rkat-rpc"
+
+[[scenario]]
+id = 42
+title = "TypeScript SDK deferred context and streaming"
+surface = "typescript-sdk"
+kind = "node"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = false
+timeout_secs = 1500
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["node", "npm", "cargo"]
+runner = "node"
+cwd = "sdks/typescript"
+pre_commands = [
+  ["cargo", "build", "-p", "meerkat-rpc", "--bin", "rkat-rpc", "--features", "mob"],
+  ["npm", "run", "build"],
+]
+test_file = "tests/e2e_smoke.test.mjs"
+test_name = "Scenario 42"
+
+[scenario.env]
+LIVE_SMOKE_SCENARIO = "42"
+MEERKAT_BIN_PATH = "{repo_root}/target/debug/rkat-rpc"
+
+[[scenario]]
+id = 43
+title = "TypeScript SDK persistent reconnect and resume"
+surface = "typescript-sdk"
+kind = "node"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = false
+timeout_secs = 1500
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["node", "npm", "cargo"]
+runner = "node"
+cwd = "sdks/typescript"
+pre_commands = [
+  ["cargo", "build", "-p", "meerkat-rpc", "--bin", "rkat-rpc", "--features", "mob"],
+  ["npm", "run", "build"],
+]
+test_file = "tests/e2e_smoke.test.mjs"
+test_name = "Scenario 43"
+
+[scenario.env]
+LIVE_SMOKE_SCENARIO = "43"
+MEERKAT_BIN_PATH = "{repo_root}/target/debug/rkat-rpc"
+
+[[scenario]]
+id = 44
+title = "TypeScript SDK mixed-provider swarm probe"
+surface = "typescript-sdk"
+kind = "node"
+providers = ["anthropic", "openai"]
+requires_browser = false
+uses_swarm = true
+timeout_secs = 1800
+required_env = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
+required_bins = ["node", "npm", "cargo"]
+runner = "node"
+cwd = "sdks/typescript"
+pre_commands = [
+  ["cargo", "build", "-p", "meerkat-rpc", "--bin", "rkat-rpc", "--features", "mob"],
+  ["npm", "run", "build"],
+]
+test_file = "tests/e2e_smoke.test.mjs"
+test_name = "Scenario 44"
+
+[scenario.env]
+LIVE_SMOKE_SCENARIO = "44"
+MEERKAT_BIN_PATH = "{repo_root}/target/debug/rkat-rpc"
+
+[[scenario]]
+id = 45
+title = "Browser raw session lifecycle"
+surface = "wasm"
+kind = "browser"
+providers = ["anthropic"]
+requires_browser = true
+uses_swarm = false
+timeout_secs = 1800
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["node", "npm"]
+cwd = "tests/live_smoke/browser"
+command = ["npm", "run", "smoke", "--", "--scenario", "BROWSER-RAW-SESSION-001"]
+
+[[scenario]]
+id = 46
+title = "Browser raw session recall"
+surface = "wasm"
+kind = "browser"
+providers = ["anthropic"]
+requires_browser = true
+uses_swarm = false
+timeout_secs = 1800
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["node", "npm"]
+cwd = "tests/live_smoke/browser"
+command = ["npm", "run", "smoke", "--", "--scenario", "BROWSER-RAW-RECALL-002"]
+
+[[scenario]]
+id = 47
+title = "Browser mobpack session flow"
+surface = "wasm"
+kind = "browser"
+providers = ["anthropic"]
+requires_browser = true
+uses_swarm = true
+timeout_secs = 1800
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["node", "npm"]
+cwd = "tests/live_smoke/browser"
+command = ["npm", "run", "smoke", "--", "--scenario", "BROWSER-MOBPACK-SESSION-003"]
+
+[[scenario]]
+id = 48
+title = "Browser raw mob lifecycle"
+surface = "wasm"
+kind = "browser"
+providers = ["anthropic"]
+requires_browser = true
+uses_swarm = true
+timeout_secs = 1800
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["node", "npm"]
+cwd = "tests/live_smoke/browser"
+command = ["npm", "run", "smoke", "--", "--scenario", "BROWSER-RAW-MOB-004"]
+
+[[scenario]]
+id = 49
+title = "Cross-surface RPC to REST shared-realm roundtrip"
+surface = "cross-surface"
+kind = "rust"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = false
+timeout_secs = 1800
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["cargo"]
+runner = "cargo"
+package = "meerkat-integration-tests"
+test_target = "live_smoke_shared_realm"
+test_name = "e2e_scenario_49_rpc_rest_shared_realm_roundtrip"
+
+[[scenario]]
+id = 50
+title = "Cross-surface REST to CLI shared-realm roundtrip"
+surface = "cross-surface"
+kind = "rust"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = false
+timeout_secs = 1800
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["cargo"]
+runner = "cargo"
+package = "meerkat-integration-tests"
+test_target = "live_smoke_shared_realm"
+test_name = "e2e_scenario_50_rest_cli_shared_realm_roundtrip"
+
+[[scenario]]
+id = 51
+title = "Cross-surface RPC to MCP shared-realm parity"
+surface = "cross-surface"
+kind = "rust"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = false
+timeout_secs = 1800
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["cargo"]
+runner = "cargo"
+package = "meerkat-integration-tests"
+test_target = "live_smoke_shared_realm"
+test_name = "e2e_scenario_51_rpc_mcp_shared_realm_roundtrip"
+
+[[scenario]]
+id = 52
+title = "Cross-surface CLI to RPC to CLI continuity"
+surface = "cross-surface"
+kind = "rust"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = false
+timeout_secs = 1800
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["cargo"]
+runner = "cargo"
+package = "meerkat-integration-tests"
+test_target = "live_smoke_shared_realm"
+test_name = "e2e_scenario_52_cli_rpc_shared_realm_roundtrip"
+
+[[scenario]]
+id = 53
+title = "Cross-surface CLI to REST to CLI continuity"
+surface = "cross-surface"
+kind = "rust"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = false
+timeout_secs = 1800
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["cargo"]
+runner = "cargo"
+package = "meerkat-integration-tests"
+test_target = "live_smoke_shared_realm"
+test_name = "e2e_scenario_53_cli_rest_shared_realm_roundtrip"
+
+[[scenario]]
+id = 54
+title = "Cross-surface shared-realm mob visibility"
+surface = "cross-surface"
+kind = "rust"
+providers = ["anthropic"]
+requires_browser = false
+uses_swarm = true
+timeout_secs = 1800
+required_env = ["ANTHROPIC_API_KEY"]
+required_bins = ["cargo"]
+runner = "cargo"
+package = "meerkat-integration-tests"
+test_target = "live_smoke_shared_realm"
+test_name = "e2e_scenario_54_shared_realm_mob_sessions_visible_to_cli"

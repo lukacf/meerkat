@@ -411,6 +411,9 @@ impl SkillSource for FilesystemSkillSource {
             let skill_file = skill_dir.join("SKILL.md");
 
             let content = tokio::fs::read_to_string(&skill_file).await.map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    return SkillError::NotFound { id: id.clone() };
+                }
                 let error =
                     SkillError::Load(format!("failed to read {}: {e}", skill_file.display()).into());
                 if let Ok(mut guard) = self.state.write() {
@@ -565,6 +568,20 @@ mod tests {
 
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].id.0, "a/b/c");
+    }
+
+    #[tokio::test]
+    async fn test_load_missing_skill_returns_not_found() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        let source = FilesystemSkillSource::new(root, SkillScope::Project);
+        let err = source
+            .load(&SkillId("mob-communication".into()))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, SkillError::NotFound { .. }));
     }
 
     #[tokio::test]

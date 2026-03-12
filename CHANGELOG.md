@@ -495,7 +495,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - Features: `comms`, `mcp`, `sub-agents`
 - `meerkat` facade: comms, mcp, and sub-agents are now optional features (default: on)
   - Features: `comms`, `mcp`, `sub-agents`
-- `meerkat-rpc`: minimal by default -- no comms/mcp/sub-agents unless explicitly enabled
+- `meerkat-rpc`: comms, mcp, mob, and sub-agents are optional features (default: on)
+  - `--no-default-features` builds the minimal server surface
+  - Features: `comms`, `mcp`, `mob`, `sub-agents`
 - `meerkat-rest`: comms is opt-in (default: on), no comms code when disabled
 - `meerkat-mcp-server`: comms is opt-in (default: on), no comms code when disabled
 - `meerkat-cli`: comms and mcp are opt-in (default: on), all inline code cfg-gated

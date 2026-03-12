@@ -49,7 +49,12 @@ async fn inner_test_rest_resume_metadata() {
         .project_root(project_root.clone());
     let mut builder = FactoryAgentBuilder::new(factory, config.clone());
     builder.default_llm_client = Some(Arc::new(TestClient::default()));
-    let session_service = Arc::new(PersistentSessionService::new(builder, 100, store.clone()));
+    let session_service = Arc::new(PersistentSessionService::new(
+        builder,
+        100,
+        store.clone(),
+        None,
+    ));
     let config_store_arc: Arc<dyn meerkat_core::ConfigStore> = Arc::new(config_store);
     let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
         Arc::clone(&config_store_arc),
@@ -84,6 +89,7 @@ async fn inner_test_rest_resume_metadata() {
         config_runtime,
         realm_lease: Arc::new(tokio::sync::Mutex::new(None)),
         skill_runtime: None,
+        runtime_adapter: std::sync::Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
         #[cfg(feature = "mob")]
         mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
         #[cfg(feature = "mcp")]
@@ -140,7 +146,12 @@ async fn inner_test_rest_resume_metadata() {
         .project_root(project_root.clone());
     let mut builder2 = FactoryAgentBuilder::new(factory2, config.clone());
     builder2.default_llm_client = Some(Arc::new(TestClient::default()));
-    let session_service2 = Arc::new(PersistentSessionService::new(builder2, 100, store.clone()));
+    let session_service2 = Arc::new(PersistentSessionService::new(
+        builder2,
+        100,
+        store.clone(),
+        None,
+    ));
     let config_store_resume: Arc<dyn meerkat_core::ConfigStore> =
         Arc::new(MemoryConfigStore::new(config.clone()));
     let config_runtime_resume = Arc::new(meerkat_core::ConfigRuntime::new(
@@ -176,6 +187,7 @@ async fn inner_test_rest_resume_metadata() {
         config_runtime: config_runtime_resume,
         realm_lease: Arc::new(tokio::sync::Mutex::new(None)),
         skill_runtime: None,
+        runtime_adapter: std::sync::Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
         #[cfg(feature = "mob")]
         mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
         #[cfg(feature = "mcp")]

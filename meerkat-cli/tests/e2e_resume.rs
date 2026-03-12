@@ -63,7 +63,8 @@ async fn integration_real_cli_resume_tools() -> Result<(), Box<dyn std::error::E
     tokio::fs::create_dir_all(&data_dir).await?;
 
     let status = Command::new(std::env::current_exe()?)
-        .arg("e2e_cli_resume_tools")
+        .arg("integration_real_cli_resume_tools")
+        .arg("--ignored")
         .env("RUN_TEST_CLI_RESUME_INNER", "1")
         .env("HOME", temp_dir.path())
         .env("XDG_DATA_HOME", &data_dir)
@@ -72,7 +73,7 @@ async fn integration_real_cli_resume_tools() -> Result<(), Box<dyn std::error::E
         .status()
         .await?;
 
-    assert!(status.success());
+    assert!(status.success(), "inner test failed");
     Ok(())
 }
 
@@ -99,9 +100,10 @@ async fn inner_test_cli_resume_tools() -> Result<(), Box<dyn std::error::Error>>
             .args([
                 "run",
                 "Say the word 'ok' and nothing else.",
+                "--tools",
+                "safe",
                 "--output",
                 "json",
-                "--enable-builtins",
             ])
             .output(),
     )

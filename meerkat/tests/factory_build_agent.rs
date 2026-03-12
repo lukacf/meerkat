@@ -193,9 +193,9 @@ async fn build_agent_sets_session_metadata() {
     assert!(metadata.tooling.shell);
     assert!(!metadata.tooling.comms);
     assert!(!metadata.tooling.subagents);
-    // When skills feature is enabled, active_skills should be populated
+    // Skills become active only when they were explicitly preloaded.
     #[cfg(feature = "skills")]
-    assert!(metadata.tooling.active_skills.is_some());
+    assert!(metadata.tooling.active_skills.is_none());
     #[cfg(not(feature = "skills"))]
     assert!(metadata.tooling.active_skills.is_none());
     assert!(!metadata.host_mode);
@@ -542,6 +542,16 @@ async fn test_mixed_validity_skills_quarantine_preserves_valid_preload() {
         "Expected valid skill preload to succeed despite quarantined sibling; got: {:?}",
         valid_result.err()
     );
+    let metadata = valid_result
+        .unwrap()
+        .session()
+        .session_metadata()
+        .expect("valid preload session metadata");
+    assert_eq!(
+        metadata.tooling.active_skills,
+        Some(vec![meerkat_core::skills::SkillId("valid-skill".into())]),
+        "session metadata should persist only the explicitly preloaded skills"
+    );
 
     let invalid_build = AgentBuildConfig {
         llm_client_override: Some(Arc::new(MockLlmClient)),
@@ -552,6 +562,67 @@ async fn test_mixed_validity_skills_quarantine_preserves_valid_preload() {
     assert!(
         invalid_result.is_err(),
         "Expected quarantined invalid skill preload to fail deterministically"
+    );
+}
+
+#[cfg(feature = "skills")]
+#[tokio::test]
+async fn test_resume_filters_persisted_active_skills_unavailable_on_current_surface() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp);
+    let config = Config::default();
+
+    let mut resumed = Session::new();
+    resumed.push(meerkat::Message::User(UserMessage {
+        content: "Remember the codename ResumeOtter.".into(),
+    }));
+    resumed
+        .set_session_metadata(SessionMetadata {
+            model: "claude-sonnet-4-5".into(),
+            max_tokens: 2048,
+            provider: Provider::Anthropic,
+            tooling: SessionTooling {
+                builtins: false,
+                shell: false,
+                comms: false,
+                subagents: false,
+                mob: false,
+                memory: false,
+                active_skills: Some(vec![meerkat_core::skills::SkillId(
+                    "mob-communication".into(),
+                )]),
+            },
+            host_mode: false,
+            comms_name: None,
+            peer_meta: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+        })
+        .expect("resume metadata");
+
+    let build_config = AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        resume_session: Some(resumed),
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+
+    let agent = factory
+        .build_agent(build_config, &config)
+        .await
+        .expect("resume should drop incompatible persisted active skills");
+    let metadata = agent
+        .session()
+        .session_metadata()
+        .expect("session should have metadata");
+    assert!(
+        metadata
+            .tooling
+            .active_skills
+            .as_ref()
+            .is_none_or(Vec::is_empty),
+        "resume should not keep persisted active skills that are unavailable on the current surface"
     );
 }
 

@@ -2164,15 +2164,181 @@ async fn shutdown_mcp(_adapter: &Option<Arc<McpRouterAdapter>>) {
     }
 }
 
+/// CLI runtime executor — delegates to SessionService::start_turn() and synthesizes
+/// a structural receipt for the ephemeral runtime driver contract.
+/// CLI-side executor that bridges the runtime loop to the session service.
+///
+/// For ephemeral sessions: delegates to `SessionService::start_turn()` and fabricates
+/// a placeholder receipt (no snapshot, no digest).
+///
+/// For persistent sessions: delegates to `PersistentSessionService::apply_runtime_turn_with_result()`
+/// which exports the committed session snapshot and real receipt.
+struct CliRuntimeExecutor {
+    service: Arc<dyn meerkat_core::service::SessionService>,
+    /// Persistent service reference for durable boundary commits.
+    /// When `Some`, `apply()` uses `apply_runtime_turn_with_result()`.
+    persistent_service:
+        Option<Arc<meerkat::PersistentSessionService<meerkat::FactoryAgentBuilder>>>,
+    session_id: meerkat_core::types::SessionId,
+    runtime_adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
+}
+
+fn extract_cli_prompt(primitive: &meerkat_core::lifecycle::run_primitive::RunPrimitive) -> String {
+    match primitive {
+        meerkat_core::lifecycle::run_primitive::RunPrimitive::StagedInput(staged) => staged
+            .appends
+            .iter()
+            .filter_map(|a| match &a.content {
+                meerkat_core::lifecycle::run_primitive::CoreRenderable::Text { text } => {
+                    Some(text.as_str())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        meerkat_core::lifecycle::run_primitive::RunPrimitive::ImmediateAppend(append) => {
+            match &append.content {
+                meerkat_core::lifecycle::run_primitive::CoreRenderable::Text { text } => {
+                    text.clone()
+                }
+                _ => String::new(),
+            }
+        }
+        meerkat_core::lifecycle::run_primitive::RunPrimitive::ImmediateContextAppend(ctx) => {
+            match &ctx.content {
+                meerkat_core::lifecycle::run_primitive::CoreRenderable::Text { text } => {
+                    text.clone()
+                }
+                _ => String::new(),
+            }
+        }
+        _ => String::new(),
+    }
+}
+
+#[async_trait::async_trait]
+impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
+    async fn apply(
+        &mut self,
+        run_id: meerkat_core::lifecycle::RunId,
+        primitive: meerkat_core::lifecycle::run_primitive::RunPrimitive,
+    ) -> Result<
+        meerkat_core::lifecycle::core_executor::CoreApplyOutput,
+        meerkat_core::lifecycle::core_executor::CoreExecutorError,
+    > {
+        let prompt = extract_cli_prompt(&primitive);
+        let turn_req = StartTurnRequest {
+            prompt,
+            event_tx: None,
+            host_mode: primitive
+                .turn_metadata()
+                .and_then(|meta| meta.host_mode)
+                .unwrap_or(false),
+            skill_references: primitive
+                .turn_metadata()
+                .and_then(|meta| meta.skill_references.clone()),
+            flow_tool_overlay: primitive
+                .turn_metadata()
+                .and_then(|meta| meta.flow_tool_overlay.clone()),
+            additional_instructions: primitive
+                .turn_metadata()
+                .and_then(|meta| meta.additional_instructions.clone()),
+        };
+
+        // Persistent path: use apply_runtime_turn_with_result for real receipt + snapshot.
+        if let Some(ref persistent) = self.persistent_service {
+            let boundary = match &primitive {
+                meerkat_core::lifecycle::run_primitive::RunPrimitive::StagedInput(staged) => {
+                    staged.boundary
+                }
+                _ => meerkat_core::lifecycle::run_primitive::RunApplyBoundary::Immediate,
+            };
+            let (_run_result, output) = persistent
+                .apply_runtime_turn_with_result(
+                    &self.session_id,
+                    run_id,
+                    turn_req,
+                    boundary,
+                    primitive.contributing_input_ids().to_vec(),
+                )
+                .await
+                .map_err(|e| {
+                    meerkat_core::lifecycle::core_executor::CoreExecutorError::ApplyFailed {
+                        reason: e.to_string(),
+                    }
+                })?;
+            return Ok(output);
+        }
+
+        // Ephemeral path: start_turn + placeholder receipt.
+        let result = self
+            .service
+            .start_turn(&self.session_id, turn_req)
+            .await
+            .map_err(|e| {
+                meerkat_core::lifecycle::core_executor::CoreExecutorError::ApplyFailed {
+                    reason: e.to_string(),
+                }
+            })?;
+
+        Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
+            receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
+                run_id,
+                boundary: match &primitive {
+                    meerkat_core::lifecycle::run_primitive::RunPrimitive::StagedInput(staged) => {
+                        staged.boundary
+                    }
+                    _ => meerkat_core::lifecycle::run_primitive::RunApplyBoundary::Immediate,
+                },
+                contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                conversation_digest: None,
+                message_count: 0,
+                sequence: 0,
+            },
+            session_snapshot: None,
+            run_result: Some(result),
+        })
+    }
+
+    async fn control(
+        &mut self,
+        cmd: meerkat_core::lifecycle::run_control::RunControlCommand,
+    ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+        match cmd {
+            meerkat_core::lifecycle::run_control::RunControlCommand::CancelCurrentRun {
+                ..
+            } => {
+                let _ = self.service.interrupt(&self.session_id).await;
+                Ok(())
+            }
+            meerkat_core::lifecycle::run_control::RunControlCommand::StopRuntimeExecutor {
+                ..
+            } => {
+                // Discard live session state via concrete type (not on SessionService trait).
+                if let Some(ref persistent) = self.persistent_service {
+                    let _ = persistent.discard_live_session(&self.session_id).await;
+                }
+                self.runtime_adapter
+                    .unregister_session(&self.session_id)
+                    .await;
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
 /// Mob-facing session service wrapper used by CLI `run`/`resume` tool calls.
 ///
 /// Mob-managed meerkats are created through the same in-process session service as
 /// the parent CLI agent. Host-mode behavior is backend-driven by mob runtime
 /// requests and must not be overridden here.
+#[allow(dead_code)]
 struct RunMobSessionService {
     inner: Arc<EphemeralSessionService<FactoryAgentBuilder>>,
 }
 
+#[allow(dead_code)]
 impl RunMobSessionService {
     fn new(inner: Arc<EphemeralSessionService<FactoryAgentBuilder>>) -> Self {
         Self { inner }
@@ -2319,6 +2485,12 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
         true
     }
 
+    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::RuntimeSessionAdapter>> {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::runtime_adapter(
+            &self.inner,
+        )
+    }
+
     async fn session_belongs_to_mob(
         &self,
         _session_id: &SessionId,
@@ -2387,7 +2559,14 @@ async fn prepare_run_mob_tools(
     session_service: Arc<dyn meerkat_mob::MobSessionService>,
 ) -> anyhow::Result<RunMobToolsContext> {
     let _lock = acquire_mob_registry_lock(scope).await?;
-    let (state, registry) = hydrate_mob_state(scope, session_service).await?;
+    let (state, registry) = hydrate_mob_state(
+        scope,
+        session_service,
+        None,
+        None,
+        std::collections::BTreeMap::new(),
+    )
+    .await?;
     let known_mob_ids = registry.mobs.keys().cloned().collect();
     Ok(RunMobToolsContext {
         state,
@@ -2444,16 +2623,18 @@ fn build_cli_service(
     EphemeralSessionService::new(builder, 64)
 }
 
-fn build_deploy_mob_session_service(
+async fn build_deploy_mob_session_service(
     scope: &RuntimeScope,
     config: Config,
-) -> Arc<dyn meerkat_mob::MobSessionService> {
+) -> anyhow::Result<Arc<dyn meerkat_mob::MobSessionService>> {
+    let (manifest, store) = create_session_store(scope).await?;
     let paths = meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id);
     let project_root = scope.context_root.clone().unwrap_or_else(|| {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         find_project_root(&cwd).unwrap_or(cwd)
     });
-    let mut factory = AgentFactory::new(paths.root.clone())
+    let mut factory = AgentFactory::new(realm_store_path(&manifest, scope))
+        .session_store(store.clone())
         .runtime_root(paths.root)
         .project_root(project_root)
         .builtins(config.tools.builtins_enabled)
@@ -2466,8 +2647,19 @@ fn build_deploy_mob_session_service(
     if let Some(user_root) = scope.user_config_root.clone() {
         factory = factory.user_config_root(user_root);
     }
-    let service = Arc::new(build_cli_service(factory, config));
-    Arc::new(RunMobSessionService::new(service))
+    let runtime_store = store.shared_redb_database().and_then(|database| {
+        meerkat_runtime::store::RedbRuntimeStore::new(database)
+            .ok()
+            .map(|store| Arc::new(store) as Arc<dyn meerkat_runtime::RuntimeStore>)
+    });
+    let builder = FactoryAgentBuilder::new(factory, config);
+    let service = Arc::new(meerkat::PersistentSessionService::new(
+        builder,
+        64,
+        store,
+        runtime_store,
+    ));
+    Ok(Arc::new(MobCliSessionService::new(service)))
 }
 
 fn session_err_to_anyhow(e: meerkat_core::service::SessionError) -> anyhow::Error {
@@ -2508,7 +2700,8 @@ async fn resolve_flexible_session_id(
     };
 
     if let Some(offset) = offset {
-        let service = build_cli_persistent_service(scope, config.clone()).await?;
+        let (service, _runtime_adapter) =
+            build_cli_persistent_service(scope, config.clone()).await?;
         let sessions = service
             .list(SessionQuery {
                 limit: Some(offset + 1),
@@ -2547,7 +2740,7 @@ async fn resolve_flexible_session_id(
     }
 
     // Try short prefix match against all sessions (no limit).
-    let service = build_cli_persistent_service(scope, config.clone()).await?;
+    let (service, _runtime_adapter) = build_cli_persistent_service(scope, config.clone()).await?;
     let sessions = service
         .list(SessionQuery {
             limit: None,
@@ -2766,10 +2959,11 @@ async fn run_agent(
         config.comms.address = Some(addr.clone());
     }
 
-    let mob_persistent = get_or_create_mob_persistent_service(scope, config.clone()).await?;
-
     // Build the parent session service.
-    let service = build_cli_service(factory, config);
+    let service = build_cli_service(factory, config.clone());
+
+    // Create ephemeral runtime adapter for single-authority execution.
+    let runtime_adapter = std::sync::Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
 
     if host_mode {
         eprintln!(
@@ -2781,9 +2975,10 @@ async fn run_agent(
     // Wrap in Arc so we can share with the stdin reader task
     let service = Arc::new(service);
 
-    let run_mob_service: Arc<dyn meerkat_mob::MobSessionService> =
-        Arc::new(MobCliSessionService::new(mob_persistent));
     let mut run_mob_tools = if effective_mob {
+        let mob_persistent = get_or_create_mob_persistent_service(scope, config.clone()).await?;
+        let run_mob_service: Arc<dyn meerkat_mob::MobSessionService> =
+            Arc::new(MobCliSessionService::new(mob_persistent));
         Some(prepare_run_mob_tools(scope, run_mob_service).await?)
     } else {
         None
@@ -2829,6 +3024,7 @@ async fn run_agent(
             Some(instructions)
         },
         shell_env: None,
+        runtime_adapter_for_sink: Some(runtime_adapter.clone()),
     };
 
     let parsed_labels = if labels.is_empty() {
@@ -2850,11 +3046,8 @@ async fn run_agent(
         } else {
             None
         },
-        initial_turn: if run_initial_turn_during_create {
-            meerkat_core::service::InitialTurnPolicy::RunImmediately
-        } else {
-            meerkat_core::service::InitialTurnPolicy::Defer
-        },
+        // Always defer — the runtime adapter handles execution.
+        initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
         build: Some(build),
         labels: parsed_labels,
     };
@@ -2944,23 +3137,51 @@ async fn run_agent(
             .map_err(session_err_to_anyhow)?
     };
 
-    let result = if run_initial_turn_during_create {
-        create_result
-    } else {
-        service
-            .start_turn(
-                &create_result.session_id,
-                StartTurnRequest {
-                    prompt: prompt.to_string(),
-                    event_tx: event_tx.clone(),
-                    host_mode,
-                    skill_references: canonical_skill_refs,
-                    flow_tool_overlay,
-                    additional_instructions: None,
-                },
-            )
-            .await
-            .map_err(session_err_to_anyhow)?
+    // Register executor and route turn through runtime adapter.
+    let session_id = create_result.session_id.clone();
+    let executor = Box::new(CliRuntimeExecutor {
+        service: service.clone() as Arc<dyn meerkat_core::service::SessionService>,
+        persistent_service: None,
+        session_id: session_id.clone(),
+        runtime_adapter: runtime_adapter.clone(),
+    });
+    runtime_adapter
+        .register_session_with_executor(session_id.clone(), executor)
+        .await;
+
+    let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+        prompt.to_string(),
+        Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                host_mode: if host_mode { Some(true) } else { None },
+                skill_references: canonical_skill_refs,
+                flow_tool_overlay,
+                additional_instructions: None,
+            },
+        ),
+    ));
+    let (_outcome, handle) = runtime_adapter
+        .accept_input_with_completion(&session_id, input)
+        .await
+        .map_err(|err| anyhow::anyhow!("runtime accept failed: {err}"))?;
+    let result = match handle {
+        Some(handle) => match handle.wait().await {
+            meerkat_runtime::completion::CompletionOutcome::Completed(r) => r,
+            meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => {
+                anyhow::bail!("turn completed without result")
+            }
+            meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
+                anyhow::bail!("turn abandoned: {reason}")
+            }
+            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
+                anyhow::bail!("runtime terminated: {reason}")
+            }
+        },
+        None => {
+            // Dedup — shouldn't happen on first turn but handle gracefully
+            eprintln!("Warning: duplicate input — already processed");
+            create_result
+        }
     };
 
     // Abort stdin reader if it was running
@@ -3179,17 +3400,14 @@ async fn resume_session_with_llm_override(
     let canonical_skill_refs = canonical_skill_keys(&config, skill_refs, skill_references)?;
     let flow_tool_overlay = build_flow_tool_overlay(allow_tools, block_tools);
     let run_initial_turn_during_create = flow_tool_overlay.is_none();
-    log_stage("build_cli_persistent_service");
-    let loader_service = build_cli_persistent_service(scope, config.clone()).await?;
+    log_stage("create_session_store");
+    let (manifest, store) = create_session_store(scope).await?;
     log_stage("load_persisted");
-    let session = loader_service
-        .load_persisted(&session_id)
+    let session = store
+        .load(&session_id)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to load session: {e}"))?
         .ok_or_else(|| anyhow::anyhow!("Session not found: {session_id}"))?;
-    drop(loader_service);
-    log_stage("create_session_store");
-    let (manifest, store) = create_session_store(scope).await?;
     let stored_metadata = session.session_metadata();
     let tooling = stored_metadata
         .as_ref()
@@ -3262,16 +3480,33 @@ async fn resume_session_with_llm_override(
     #[cfg(feature = "comms")]
     let factory = factory.comms(tooling.comms || host_mode);
 
-    log_stage("get_or_create_mob_persistent_service");
-    let mob_persistent = get_or_create_mob_persistent_service(scope, config.clone()).await?;
-    log_stage("build_cli_service");
-    // Build the session service.
-    let service = Arc::new(build_cli_service(factory, config));
+    log_stage("build_cli_persistent_service");
+    // Build persistent session service for resume — durable runtime semantics.
+    let runtime_store = store.shared_redb_database().and_then(|database| {
+        meerkat_runtime::store::RedbRuntimeStore::new(database)
+            .ok()
+            .map(|s| Arc::new(s) as Arc<dyn meerkat_runtime::RuntimeStore>)
+    });
+    let resume_adapter = match &runtime_store {
+        Some(rs) => Arc::new(meerkat_runtime::RuntimeSessionAdapter::persistent(
+            rs.clone(),
+        )),
+        None => Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
+    };
+    let builder = FactoryAgentBuilder::new(factory, config.clone());
+    let service = Arc::new(meerkat::PersistentSessionService::new(
+        builder,
+        64,
+        store.clone(),
+        runtime_store,
+    ));
 
     log_stage("compose_external_tool_dispatchers");
-    let run_mob_service: Arc<dyn meerkat_mob::MobSessionService> =
-        Arc::new(MobCliSessionService::new(mob_persistent));
     let mut run_mob_tools = if tooling.mob {
+        log_stage("get_or_create_mob_persistent_service");
+        let mob_persistent = get_or_create_mob_persistent_service(scope, config.clone()).await?;
+        let run_mob_service: Arc<dyn meerkat_mob::MobSessionService> =
+            Arc::new(MobCliSessionService::new(mob_persistent));
         Some(prepare_run_mob_tools(scope, run_mob_service).await?)
     } else {
         None
@@ -3356,6 +3591,7 @@ async fn resume_session_with_llm_override(
         app_context: None,
         additional_instructions: None,
         shell_env: None,
+        runtime_adapter_for_sink: Some(resume_adapter.clone()),
     };
 
     // Route through SessionService::create_session() with the resumed session
@@ -3375,11 +3611,8 @@ async fn resume_session_with_llm_override(
             } else {
                 None
             },
-            initial_turn: if run_initial_turn_during_create {
-                meerkat_core::service::InitialTurnPolicy::RunImmediately
-            } else {
-                meerkat_core::service::InitialTurnPolicy::Defer
-            },
+            // Always defer — runtime adapter handles execution.
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             build: Some(build),
             labels: None,
         })
@@ -3390,23 +3623,51 @@ async fn resume_session_with_llm_override(
     } else {
         Some(instructions)
     };
-    let result = if run_initial_turn_during_create {
-        create_result
-    } else {
-        service
-            .start_turn(
-                &create_result.session_id,
-                StartTurnRequest {
-                    prompt: prompt.to_string(),
-                    event_tx,
-                    host_mode,
-                    skill_references: canonical_skill_refs,
-                    flow_tool_overlay,
-                    additional_instructions,
-                },
-            )
-            .await
-            .map_err(session_err_to_anyhow)?
+
+    // Route through runtime adapter (same pattern as run command)
+    let session_id = create_result.session_id.clone();
+    let executor = Box::new(CliRuntimeExecutor {
+        service: service.clone() as Arc<dyn meerkat_core::service::SessionService>,
+        persistent_service: Some(service.clone()),
+        session_id: session_id.clone(),
+        runtime_adapter: resume_adapter.clone(),
+    });
+    resume_adapter
+        .register_session_with_executor(session_id.clone(), executor)
+        .await;
+
+    let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+        prompt.to_string(),
+        Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                host_mode: if host_mode { Some(true) } else { None },
+                skill_references: canonical_skill_refs,
+                flow_tool_overlay,
+                additional_instructions,
+            },
+        ),
+    ));
+    let (_outcome, handle) = resume_adapter
+        .accept_input_with_completion(&session_id, input)
+        .await
+        .map_err(|err| anyhow::anyhow!("runtime accept failed: {err}"))?;
+    let result = match handle {
+        Some(handle) => match handle.wait().await {
+            meerkat_runtime::completion::CompletionOutcome::Completed(r) => r,
+            meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => {
+                anyhow::bail!("turn completed without result")
+            }
+            meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
+                anyhow::bail!("turn abandoned: {reason}")
+            }
+            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
+                anyhow::bail!("runtime terminated: {reason}")
+            }
+        },
+        None => {
+            eprintln!("Warning: duplicate input — already processed");
+            create_result
+        }
     };
     log_stage("service.create_session(done)");
 
@@ -3451,7 +3712,10 @@ async fn resume_session_with_llm_override(
 async fn build_cli_persistent_service(
     scope: &RuntimeScope,
     config: Config,
-) -> anyhow::Result<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
+) -> anyhow::Result<(
+    meerkat::PersistentSessionService<FactoryAgentBuilder>,
+    Arc<meerkat_runtime::RuntimeSessionAdapter>,
+)> {
     let (manifest, store) = create_session_store(scope).await?;
     let project_root = scope.context_root.clone().unwrap_or_else(|| {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -3474,8 +3738,22 @@ async fn build_cli_persistent_service(
         factory = factory.user_config_root(user_root);
     }
 
+    let runtime_store = store.shared_redb_database().and_then(|database| {
+        meerkat_runtime::store::RedbRuntimeStore::new(database)
+            .ok()
+            .map(|store| Arc::new(store) as Arc<dyn meerkat_runtime::RuntimeStore>)
+    });
+    let runtime_adapter = match &runtime_store {
+        Some(store) => Arc::new(meerkat_runtime::RuntimeSessionAdapter::persistent(
+            store.clone(),
+        )),
+        None => Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
+    };
     let builder = FactoryAgentBuilder::new(factory, config);
-    Ok(meerkat::PersistentSessionService::new(builder, 64, store))
+    Ok((
+        meerkat::PersistentSessionService::new(builder, 64, store, runtime_store),
+        runtime_adapter,
+    ))
 }
 
 type CliPersistentService = meerkat::PersistentSessionService<FactoryAgentBuilder>;
@@ -3509,7 +3787,9 @@ async fn get_or_create_mob_persistent_service(
         return Ok(existing);
     }
 
-    let created = Arc::new(build_cli_persistent_service(scope, config).await?);
+    let (persistent_service, _runtime_adapter) =
+        build_cli_persistent_service(scope, config).await?;
+    let created = Arc::new(persistent_service);
     let mut cache = mob_persistent_service_cache()
         .lock()
         .map_err(|_| anyhow::anyhow!("mob persistent service cache poisoned"))?;
@@ -3640,6 +3920,12 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         true
     }
 
+    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::RuntimeSessionAdapter>> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::runtime_adapter(
+            &self.inner,
+        )
+    }
+
     async fn session_belongs_to_mob(
         &self,
         session_id: &SessionId,
@@ -3662,7 +3948,7 @@ async fn list_sessions(
     scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
     let (config, _) = load_config(scope).await?;
-    let service = build_cli_persistent_service(scope, config).await?;
+    let (service, _runtime_adapter) = build_cli_persistent_service(scope, config).await?;
     let query = SessionQuery {
         limit: Some(limit),
         offset,
@@ -3745,7 +4031,7 @@ async fn show_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
     let session_id = resolve_scoped_session_id(id, scope)?;
 
     let (config, _) = load_config(scope).await?;
-    let service = build_cli_persistent_service(scope, config).await?;
+    let (service, _runtime_adapter) = build_cli_persistent_service(scope, config).await?;
     let session = service
         .load_persisted(&session_id)
         .await
@@ -3844,7 +4130,7 @@ async fn delete_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
     let session_id = resolve_scoped_session_id(id, scope)?;
 
     let (config, _) = load_config(scope).await?;
-    let service = build_cli_persistent_service(scope, config).await?;
+    let (service, _runtime_adapter) = build_cli_persistent_service(scope, config).await?;
 
     service
         .archive(&session_id)
@@ -3864,7 +4150,7 @@ async fn interrupt_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()>
     let session_id = resolve_scoped_session_id(id, scope)?;
 
     let (config, _) = load_config(scope).await?;
-    let service = build_cli_persistent_service(scope, config).await?;
+    let (service, _runtime_adapter) = build_cli_persistent_service(scope, config).await?;
 
     match service.interrupt(&session_id).await {
         Ok(()) | Err(SessionError::NotRunning { .. }) => {
@@ -4384,6 +4670,35 @@ async fn sync_mob_events(
     Ok(())
 }
 
+async fn persist_mob_handle_snapshot(
+    scope: &RuntimeScope,
+    session_service: Arc<dyn meerkat_mob::MobSessionService>,
+    handle: &meerkat_mob::MobHandle,
+    definition: Option<meerkat_mob::MobDefinition>,
+) -> anyhow::Result<()> {
+    let _lock = acquire_mob_registry_lock(scope).await?;
+    let mut registry = load_mob_registry(scope).await?;
+    let mob_id = handle.mob_id().to_string();
+    let entry = registry
+        .mobs
+        .entry(mob_id.clone())
+        .or_insert_with(|| PersistedMob {
+            definition: definition.clone(),
+            status: Some(handle.status().as_str().to_string()),
+            events: Vec::new(),
+            runs: std::collections::BTreeMap::new(),
+        });
+    if entry.definition.is_none() {
+        entry.definition = definition;
+    }
+    let state = Arc::new(meerkat_mob_mcp::MobMcpState::new(session_service));
+    state
+        .mob_insert_handle(handle.mob_id().clone(), handle.clone())
+        .await;
+    sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
+    save_mob_registry(scope, &registry).await
+}
+
 async fn refresh_persisted_run_snapshots(
     state: &meerkat_mob_mcp::MobMcpState,
     mob_id: &str,
@@ -4454,13 +4769,34 @@ fn parse_mob_state(value: &str) -> Option<meerkat_mob::MobState> {
     }
 }
 
+type LlmClientProvider =
+    Arc<dyn Fn() -> Option<Arc<dyn meerkat_client::LlmClient>> + Send + Sync + 'static>;
+
 async fn hydrate_mob_state(
     scope: &RuntimeScope,
     session_service: Arc<dyn meerkat_mob::MobSessionService>,
+    runtime_adapter: Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>,
+    default_llm_client_provider: Option<LlmClientProvider>,
+    seeded_handles: std::collections::BTreeMap<String, meerkat_mob::MobHandle>,
 ) -> anyhow::Result<(Arc<meerkat_mob_mcp::MobMcpState>, PersistedMobRegistry)> {
     let registry = load_mob_registry(scope).await?;
-    let state = Arc::new(meerkat_mob_mcp::MobMcpState::new(session_service.clone()));
+    let runtime_adapter = runtime_adapter.or_else(|| session_service.runtime_adapter());
+    let state = Arc::new(
+        meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
+            session_service.clone(),
+            runtime_adapter.clone(),
+        )
+        .with_default_llm_client_provider(default_llm_client_provider),
+    );
+    for (mob_id, handle) in &seeded_handles {
+        state
+            .mob_insert_handle(meerkat_mob::MobId::from(mob_id.clone()), handle.clone())
+            .await;
+    }
     for (mob_id, persisted) in &registry.mobs {
+        if seeded_handles.contains_key(mob_id) {
+            continue;
+        }
         let storage = meerkat_mob::MobStorage::in_memory();
         if persisted.events.is_empty() {
             let definition = persisted.definition.clone().ok_or_else(|| {
@@ -4504,12 +4840,13 @@ async fn hydrate_mob_state(
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
         }
 
-        let handle = meerkat_mob::MobBuilder::for_resume(storage)
+        let mut builder = meerkat_mob::MobBuilder::for_resume(storage)
             .with_session_service(session_service.clone())
-            .notify_orchestrator_on_resume(false)
-            .resume()
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            .notify_orchestrator_on_resume(false);
+        if let Some(adapter) = runtime_adapter.clone() {
+            builder = builder.with_runtime_adapter(adapter);
+        }
+        let handle = builder.resume().await.map_err(|e| anyhow::anyhow!("{e}"))?;
         let created = handle.mob_id().clone();
         if created.as_str() != mob_id {
             return Err(anyhow::anyhow!(
@@ -4653,7 +4990,14 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
     let persistent = get_or_create_mob_persistent_service(scope, config).await?;
     let session_service: Arc<dyn meerkat_mob::MobSessionService> =
         Arc::new(MobCliSessionService::new(persistent.clone()));
-    let (state, mut registry) = hydrate_mob_state(scope, session_service).await?;
+    let (state, mut registry) = hydrate_mob_state(
+        scope,
+        session_service,
+        None,
+        None,
+        std::collections::BTreeMap::new(),
+    )
+    .await?;
     let result = match command {
         MobCommands::RunFlow {
             mob_id,
@@ -5280,48 +5624,48 @@ async fn execute_mob_deploy_internal(
         observer(&effective_config);
     }
 
-    let session_service = build_deploy_mob_session_service(scope, effective_config.clone());
-    let handle = meerkat_mob::MobBuilder::from_mobpack(
-        archive.definition.clone(),
-        archive.skills.clone(),
-        meerkat_mob::MobStorage::in_memory(),
-    )
-    .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?
-    .with_session_service(session_service)
-    .create()
-    .await
-    .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
-
-    if let Some(orchestrator) = &archive.definition.orchestrator {
-        let roster = handle.roster().await;
-        if let Some(entry) = roster.by_profile(&orchestrator.profile).next() {
-            handle
-                .send_message(entry.meerkat_id.clone(), prompt.to_string())
-                .await
-                .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
-        }
-    }
-
-    if matches!(invocation.surface, DeploySurfaceArg::Rpc) {
+    let deployed_mob_id = if matches!(invocation.surface, DeploySurfaceArg::Rpc) {
         let (reader, writer): RpcDeployIo = invocation.rpc_io.unwrap_or_else(|| {
             (
                 Box::new(BufReader::new(tokio::io::stdin())),
                 Box::new(tokio::io::stdout()),
             )
         });
-        run_rpc_surface(
-            scope,
-            effective_config,
-            Some(handle.mob_id().to_string()),
-            reader,
-            writer,
+        run_rpc_surface(scope, effective_config, &archive, prompt, reader, writer).await?
+    } else {
+        let session_service =
+            build_deploy_mob_session_service(scope, effective_config.clone()).await?;
+        let mut builder = meerkat_mob::MobBuilder::from_mobpack(
+            archive.definition.clone(),
+            archive.skills.clone(),
+            meerkat_mob::MobStorage::in_memory(),
         )
-        .await?;
-    }
+        .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?
+        .with_session_service(session_service.clone());
+        if let Some(adapter) = session_service.runtime_adapter() {
+            builder = builder.with_runtime_adapter(adapter);
+        }
+        let handle = builder
+            .create()
+            .await
+            .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
+
+        if let Some(orchestrator) = &archive.definition.orchestrator {
+            let roster = handle.roster().await;
+            if let Some(entry) = roster.by_profile(&orchestrator.profile).next() {
+                handle
+                    .send_message(entry.meerkat_id.clone(), prompt.to_string())
+                    .await
+                    .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
+            }
+        }
+
+        handle.mob_id().to_string()
+    };
 
     let mut rendered = format!(
         "deployed\tmob={}\tsurface={}\tprompt_bytes={}",
-        handle.mob_id(),
+        deployed_mob_id,
         match invocation.surface {
             DeploySurfaceArg::Cli => "cli",
             DeploySurfaceArg::Rpc => "rpc",
@@ -5480,10 +5824,11 @@ fn validate_required_capabilities(
 async fn run_rpc_surface<R, W>(
     scope: &RuntimeScope,
     config: Config,
-    deployed_mob_id: Option<String>,
+    archive: &MobpackArchive,
+    prompt: &str,
     reader: R,
     writer: W,
-) -> anyhow::Result<()>
+) -> anyhow::Result<String>
 where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -5539,33 +5884,86 @@ where
         Arc::clone(&config_store),
         64,
         session_store,
+        meerkat_rpc::router::NotificationSink::noop(),
     );
+    let session_service = runtime.session_service();
+    let runtime_adapter = runtime.runtime_adapter();
     let identity_registry =
         meerkat_rpc::session_runtime::SessionRuntime::build_skill_identity_registry(&config)
             .map_err(|err| anyhow::anyhow!("failed to build skill identity registry: {err}"))?;
     runtime.set_skill_identity_registry(identity_registry);
+    runtime.set_config_runtime(config_runtime);
+
+    let mut builder = meerkat_mob::MobBuilder::from_mobpack(
+        archive.definition.clone(),
+        archive.skills.clone(),
+        meerkat_mob::MobStorage::in_memory(),
+    )
+    .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?
+    .with_session_service(session_service.clone());
+    builder = builder.with_runtime_adapter(runtime_adapter.clone());
+    let handle = builder
+        .create()
+        .await
+        .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
+
+    if let Some(orchestrator) = &archive.definition.orchestrator {
+        let roster = handle.roster().await;
+        if let Some(entry) = roster.by_profile(&orchestrator.profile).next() {
+            handle
+                .send_message(entry.meerkat_id.clone(), prompt.to_string())
+                .await
+                .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
+        }
+    }
+
+    let deployed_mob_id = handle.mob_id().to_string();
+    persist_mob_handle_snapshot(
+        scope,
+        session_service.clone(),
+        &handle,
+        Some(archive.definition.clone()),
+    )
+    .await?;
+
     runtime.set_realm_context(
         Some(scope.locator.realm_id.clone()),
         scope
             .instance_id
             .clone()
-            .or_else(|| deployed_mob_id.map(|mob_id| format!("mobpack:{mob_id}"))),
+            .or_else(|| Some(format!("mobpack:{deployed_mob_id}"))),
         Some(manifest.backend.as_str().to_string()),
     );
-    runtime.set_config_runtime(config_runtime);
     let runtime = Arc::new(runtime);
 
-    let mut server = meerkat_rpc::server::RpcServer::new_with_skill_runtime(
+    let default_llm_client_provider = Some(Arc::new({
+        let runtime = runtime.clone();
+        move || runtime.default_llm_client()
+    })
+        as Arc<dyn Fn() -> Option<Arc<dyn meerkat_client::LlmClient>> + Send + Sync + 'static>);
+    let seeded_handles = std::collections::BTreeMap::from([(deployed_mob_id.clone(), handle)]);
+    let (mob_state, _) = hydrate_mob_state(
+        scope,
+        session_service,
+        Some(runtime_adapter),
+        default_llm_client_provider,
+        seeded_handles,
+    )
+    .await?;
+
+    let mut server = meerkat_rpc::server::RpcServer::new_with_skill_runtime_and_mob_state(
         reader,
         writer,
         runtime,
         config_store,
         skill_runtime,
+        mob_state,
     );
     server
         .run()
         .await
-        .map_err(|err| anyhow::anyhow!("rpc server failed: {err}"))
+        .map_err(|err| anyhow::anyhow!("rpc server failed: {err}"))?;
+    Ok(deployed_mob_id)
 }
 
 /// LLM Provider selection

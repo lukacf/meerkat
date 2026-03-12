@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Meerkat Browser Live Smoke</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: "IBM Plex Sans", "Avenir Next", sans-serif;
+        background:
+          radial-gradient(circle at top, rgba(216, 232, 255, 0.9), transparent 50%),
+          linear-gradient(180deg, #f7f4eb 0%, #f0ece2 100%);
+        color: #182028;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+      }
+
+      main {
+        box-sizing: border-box;
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 32px 20px 48px;
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: clamp(28px, 5vw, 44px);
+        letter-spacing: -0.03em;
+      }
+
+      p {
+        margin: 0 0 20px;
+        max-width: 68ch;
+        line-height: 1.5;
+      }
+
+      .panel {
+        background: rgba(255, 255, 255, 0.82);
+        border: 1px solid rgba(24, 32, 40, 0.12);
+        border-radius: 20px;
+        box-shadow: 0 18px 50px rgba(65, 66, 76, 0.12);
+        overflow: hidden;
+      }
+
+      .panel header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 18px 22px;
+        border-bottom: 1px solid rgba(24, 32, 40, 0.1);
+        background: linear-gradient(90deg, rgba(244, 209, 162, 0.25), rgba(182, 212, 255, 0.25));
+      }
+
+      .status {
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .status.running {
+        color: #9a5200;
+      }
+
+      .status.pass {
+        color: #16723f;
+      }
+
+      .status.fail {
+        color: #a8292a;
+      }
+
+      #log {
+        margin: 0;
+        padding: 18px 22px 24px;
+        min-height: 260px;
+        max-height: 65vh;
+        overflow: auto;
+        white-space: pre-wrap;
+        font: 13px/1.5 "IBM Plex Mono", "SFMono-Regular", monospace;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Browser Live Smoke</h1>
+      <p>
+        Manual browser smoke page for the checked-in WASM package and browser-safe
+        mobpack flows. The Playwright harness drives this page headlessly, but you
+        can also open it directly for local debugging.
+      </p>
+      <section class="panel">
+        <header>
+          <strong>Scenario Log</strong>
+          <span id="status" class="status">idle</span>
+        </header>
+        <pre id="log"></pre>
+      </section>
+    </main>
+    <script type="module" src="./runner.mjs"></script>
+  </body>
+  </html>

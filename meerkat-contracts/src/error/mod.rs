@@ -35,6 +35,7 @@ pub enum ErrorCode {
     SkillResolutionFailed,
     InvalidParams,
     InternalError,
+    DuplicateInput,
 }
 
 impl ErrorCode {
@@ -53,6 +54,7 @@ impl ErrorCode {
             Self::SkillResolutionFailed => -32022,
             Self::InvalidParams => -32602,
             Self::InternalError => -32603,
+            Self::DuplicateInput => -32004,
         }
     }
 
@@ -60,7 +62,7 @@ impl ErrorCode {
     pub const fn http_status(self) -> u16 {
         match self {
             Self::SessionNotFound | Self::SkillNotFound => 404,
-            Self::SessionBusy | Self::SessionNotRunning => 409,
+            Self::SessionBusy | Self::SessionNotRunning | Self::DuplicateInput => 409,
             Self::ProviderError => 502,
             Self::BudgetExhausted => 429,
             Self::HookDenied => 403,
@@ -86,6 +88,7 @@ impl ErrorCode {
             Self::SkillResolutionFailed => 42,
             Self::InvalidParams => 2,
             Self::InternalError => 1,
+            Self::DuplicateInput => 13,
         }
     }
 }
@@ -122,9 +125,10 @@ impl ErrorCode {
     /// Get the category for this error code.
     pub fn category(self) -> ErrorCategory {
         match self {
-            Self::SessionNotFound | Self::SessionBusy | Self::SessionNotRunning => {
-                ErrorCategory::Session
-            }
+            Self::SessionNotFound
+            | Self::SessionBusy
+            | Self::SessionNotRunning
+            | Self::DuplicateInput => ErrorCategory::Session,
             Self::ProviderError => ErrorCategory::Provider,
             Self::BudgetExhausted => ErrorCategory::Budget,
             Self::HookDenied => ErrorCategory::Hook,
@@ -245,6 +249,7 @@ mod tests {
             ErrorCode::SkillResolutionFailed,
             ErrorCode::InvalidParams,
             ErrorCode::InternalError,
+            ErrorCode::DuplicateInput,
         ] {
             let _rpc = code.jsonrpc_code();
             let http = code.http_status();

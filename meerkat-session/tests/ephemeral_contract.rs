@@ -146,6 +146,15 @@ impl SessionAgent for MockAgent {
         session
     }
 
+    fn apply_runtime_system_context(
+        &mut self,
+        appends: &[meerkat_core::PendingSystemContextAppend],
+    ) {
+        let mut session = self.session_clone();
+        session.append_system_context_blocks(appends);
+        self.message_count = session.messages().len();
+    }
+
     fn system_context_state(
         &self,
     ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
@@ -442,6 +451,15 @@ impl SessionAgent for RealSessionAgent {
 
     fn session_clone(&self) -> meerkat_core::Session {
         self.agent.session_with_system_context_state()
+    }
+
+    fn apply_runtime_system_context(
+        &mut self,
+        appends: &[meerkat_core::PendingSystemContextAppend],
+    ) {
+        self.agent
+            .session_mut()
+            .append_system_context_blocks(appends);
     }
 
     fn system_context_state(

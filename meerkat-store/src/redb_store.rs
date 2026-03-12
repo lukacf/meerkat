@@ -7,7 +7,7 @@
 use crate::{SessionFilter, SessionStore, StoreError};
 use async_trait::async_trait;
 use meerkat_core::{Session, SessionId, SessionMeta};
-use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
+use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition, WriteTransaction};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -37,6 +37,41 @@ fn updated_key(id: &SessionId, updated_at: SystemTime) -> [u8; 24] {
     key
 }
 
+pub fn write_session_snapshot_in_txn(
+    write_txn: &WriteTransaction,
+    session: &Session,
+) -> Result<(), StoreError> {
+    let id_key = session_id_key(session.id());
+    let upd_key = updated_key(session.id(), session.updated_at());
+    let session_id = session.id().clone();
+    let json = serde_json::to_vec(session).map_err(StoreError::Serialization)?;
+
+    let mut by_id_table = write_txn
+        .open_table(SESSIONS_BY_ID)
+        .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+    let mut by_updated_table = write_txn
+        .open_table(SESSIONS_BY_UPDATED)
+        .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+
+    if let Some(old_data) = by_id_table
+        .get(id_key.as_slice())
+        .map_err(|e| StoreError::Database(Box::new(e.into())))?
+        && let Ok(old_session) = serde_json::from_slice::<Session>(old_data.value())
+    {
+        let old_key = updated_key(&session_id, old_session.updated_at());
+        let _ = by_updated_table.remove(old_key.as_slice());
+    }
+
+    by_id_table
+        .insert(id_key.as_slice(), json.as_slice())
+        .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+    by_updated_table
+        .insert(upd_key.as_slice(), EMPTY_VALUE)
+        .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+
+    Ok(())
+}
+
 /// redb-backed session store.
 ///
 /// All session data is stored in a single redb database. Writes are
@@ -46,6 +81,32 @@ pub struct RedbSessionStore {
 }
 
 impl RedbSessionStore {
+    /// Access the underlying redb database for shared use (e.g., RuntimeStore).
+    pub fn database(&self) -> Arc<Database> {
+        self.db.clone()
+    }
+
+    /// Create from an existing database (for sharing with RuntimeStore).
+    pub fn from_database(db: Arc<Database>) -> Result<Self, StoreError> {
+        // Ensure required tables exist.
+        let write_txn = db
+            .begin_write()
+            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+        {
+            let _ = write_txn
+                .open_table(SESSIONS_BY_ID)
+                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+            let _ = write_txn
+                .open_table(SESSIONS_BY_UPDATED)
+                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+        }
+        write_txn
+            .commit()
+            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+
+        Ok(Self { db })
+    }
+
     /// Open or create a session store at the given path.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let db = Database::create(path).map_err(|e| StoreError::Database(Box::new(e.into())))?;
@@ -73,42 +134,14 @@ impl RedbSessionStore {
 #[async_trait]
 impl SessionStore for RedbSessionStore {
     async fn save(&self, session: &Session) -> Result<(), StoreError> {
-        let id_key = session_id_key(session.id());
-        let upd_key = updated_key(session.id(), session.updated_at());
-        let session_id = session.id().clone();
-        let json = serde_json::to_vec(session).map_err(StoreError::Serialization)?;
+        let session = session.clone();
         let db = self.db.clone();
 
         tokio::task::spawn_blocking(move || {
             let write_txn = db
                 .begin_write()
                 .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-            {
-                let mut by_id_table = write_txn
-                    .open_table(SESSIONS_BY_ID)
-                    .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-                let mut by_updated_table = write_txn
-                    .open_table(SESSIONS_BY_UPDATED)
-                    .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-
-                // Remove old updated key if session already existed
-                if let Some(old_data) = by_id_table
-                    .get(id_key.as_slice())
-                    .map_err(|e| StoreError::Database(Box::new(e.into())))?
-                    && let Ok(old_session) = serde_json::from_slice::<Session>(old_data.value())
-                {
-                    let old_key = updated_key(&session_id, old_session.updated_at());
-                    let _ = by_updated_table.remove(old_key.as_slice());
-                }
-
-                by_id_table
-                    .insert(id_key.as_slice(), json.as_slice())
-                    .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-
-                by_updated_table
-                    .insert(upd_key.as_slice(), EMPTY_VALUE)
-                    .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-            }
+            write_session_snapshot_in_txn(&write_txn, &session)?;
             write_txn
                 .commit()
                 .map_err(|e| StoreError::Database(Box::new(e.into())))?;
@@ -272,6 +305,10 @@ impl SessionStore for RedbSessionStore {
         })
         .await
         .map_err(StoreError::Join)?
+    }
+
+    fn shared_redb_database(&self) -> Option<Arc<Database>> {
+        Some(self.database())
     }
 }
 

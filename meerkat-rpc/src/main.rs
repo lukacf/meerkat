@@ -156,6 +156,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&config_store),
         64,
         session_store,
+        meerkat_rpc::router::NotificationSink::noop(),
     );
     runtime.set_skill_identity_registry(identity_registry);
     runtime.set_realm_context(

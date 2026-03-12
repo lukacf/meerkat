@@ -11,6 +11,8 @@ mod runner;
 pub mod skills;
 mod state;
 
+pub use runner::RuntimeInputSink;
+
 use crate::budget::Budget;
 use crate::comms::{
     CommsCommand, EventStream, PeerDirectoryEntry, SendAndStreamError, SendError, SendReceipt,
@@ -458,6 +460,22 @@ where
     /// `drain_comms_inbox()` becomes a no-op to avoid stealing
     /// interaction-scoped messages through the legacy path.
     pub(crate) host_drain_active: bool,
+    /// Optional sink for routing host-mode new-run work through the runtime.
+    /// When set, passthrough interactions and continuation runs use the sink
+    /// instead of calling `self.run()` directly.
+    pub(crate) runtime_input_sink: Option<Arc<dyn RuntimeInputSink>>,
+    /// True after the agentic loop completes when `output_schema` is set.
+    /// Causes the next `CallingLlm` iteration to use extraction parameters
+    /// (no tools, temperature 0.0, structured_output provider params).
+    pub(crate) extraction_mode: bool,
+    /// Number of extraction attempts so far (for retry logic).
+    pub(crate) extraction_attempts: u32,
+    /// Populated on successful extraction validation — carried into RunResult.
+    pub(crate) extraction_result: Option<serde_json::Value>,
+    /// Schema warnings from compilation — carried into RunResult.
+    pub(crate) extraction_schema_warnings: Option<Vec<crate::schema::SchemaWarning>>,
+    /// Last validation error (for retry prompt).
+    pub(crate) extraction_last_error: Option<String>,
 }
 
 #[cfg(test)]

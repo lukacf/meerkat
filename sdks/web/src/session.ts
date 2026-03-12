@@ -55,7 +55,21 @@ export class Session {
         })
       : '{}';
     const json = await this.startTurnFn(this.handle, prompt, opts);
-    return JSON.parse(json) as TurnResult;
+    const parsed = JSON.parse(json) as Partial<TurnResult> & {
+      text?: string;
+      response?: string;
+    };
+    const text =
+      typeof parsed.text === 'string'
+        ? parsed.text
+        : typeof parsed.response === 'string'
+          ? parsed.response
+          : '';
+    return {
+      ...parsed,
+      text,
+      response: typeof parsed.response === 'string' ? parsed.response : text,
+    } as TurnResult;
   }
 
   /** Get the current session state. */

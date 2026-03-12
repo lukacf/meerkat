@@ -27,6 +27,27 @@ use super::{
     FilteredToolDispatcher,
 };
 
+/// Async trait for accepting runtime inputs from the host-mode comms layer.
+///
+/// Implementations live in `meerkat-runtime` and call `RuntimeSessionAdapter::accept_input()`.
+/// The host-mode code in `comms_impl.rs` uses this to route new-run work through the
+/// runtime authority instead of calling `self.run()` directly.
+///
+/// The sink awaits only admission (durable-before-ack), NOT execution completion.
+/// The host loop continues immediately after admission.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait RuntimeInputSink: Send + Sync {
+    /// Accept a peer interaction as a runtime input.
+    async fn accept_peer_input(
+        &self,
+        interaction: crate::interaction::InboxInteraction,
+    ) -> Result<(), String>;
+
+    /// Accept a continuation signal as a runtime input.
+    async fn accept_continuation(&self) -> Result<(), String>;
+}
+
 fn spawn_scoped_forwarder(
     mut child_event_rx: mpsc::Receiver<AgentEvent>,
     scoped_tx: mpsc::Sender<ScopedAgentEvent>,
@@ -110,6 +131,14 @@ where
             handle.clear_turn_overlay();
         }
         Ok(())
+    }
+
+    /// Set the runtime input sink for host-mode comms routing.
+    ///
+    /// When set, passthrough interactions and continuation runs in host-mode
+    /// are routed through the sink instead of calling `self.run()` directly.
+    pub fn set_runtime_input_sink(&mut self, sink: Arc<dyn RuntimeInputSink>) {
+        self.runtime_input_sink = Some(sink);
     }
 
     #[cfg(test)]
@@ -658,6 +687,13 @@ where
                     )
                     .await;
                     result.text.clone_from(text);
+                    if result.structured_output.is_some() {
+                        tracing::info!(
+                            hook_id = %outcome.hook_id,
+                            "clearing structured_output after hook text rewrite"
+                        );
+                        result.structured_output = None;
+                    }
                     self.apply_run_result_text_patch(text);
                 }
             }
@@ -666,6 +702,66 @@ where
             tracing::warn!("Failed to save session after run_completed hooks: {}", err);
         }
         Ok(())
+    }
+
+    async fn emit_run_completed_event(
+        &self,
+        result: &RunResult,
+        event_tx: Option<&mpsc::Sender<AgentEvent>>,
+    ) {
+        let _ = crate::event_tap::tap_emit(
+            &self.event_tap,
+            event_tx,
+            AgentEvent::RunCompleted {
+                session_id: self.session.id().clone(),
+                result: result.text.clone(),
+                usage: result.usage.clone(),
+            },
+        )
+        .await;
+    }
+
+    async fn emit_run_started_event(
+        &self,
+        prompt: &str,
+        event_tx: Option<&mpsc::Sender<AgentEvent>>,
+    ) {
+        let _ = crate::event_tap::tap_emit(
+            &self.event_tap,
+            event_tx,
+            AgentEvent::RunStarted {
+                session_id: self.session.id().clone(),
+                prompt: prompt.to_string(),
+            },
+        )
+        .await;
+    }
+
+    async fn emit_run_failed_event(
+        &self,
+        error: &AgentError,
+        event_tx: Option<&mpsc::Sender<AgentEvent>>,
+    ) {
+        let _ = crate::event_tap::tap_emit(
+            &self.event_tap,
+            event_tx,
+            AgentEvent::RunFailed {
+                session_id: self.session.id().clone(),
+                error: error.to_string(),
+            },
+        )
+        .await;
+    }
+
+    async fn handle_run_failure(
+        &self,
+        error: &AgentError,
+        event_tx: Option<&mpsc::Sender<AgentEvent>>,
+    ) {
+        if let Err(hook_err) = self.run_failed_hooks(error, event_tx).await {
+            tracing::warn!(?hook_err, "run_failed hook execution failed");
+        }
+        self.emit_run_failed_event(error, event_tx).await;
     }
 
     fn apply_run_result_text_patch(&mut self, text: &str) {
@@ -777,6 +873,11 @@ where
 
         // Reset state for new run (allows multi-turn on same agent)
         self.state = LoopState::CallingLlm;
+        self.extraction_mode = false;
+        self.extraction_attempts = 0;
+        self.extraction_result = None;
+        self.extraction_last_error = None;
+        self.extraction_schema_warnings = None;
 
         // Apply canonical per-turn skill references staged by the surface.
         let user_input = self.apply_skill_ref(user_input).await;
@@ -788,42 +889,29 @@ where
             content: user_input,
         }));
 
-        if let Some(ref tx) = event_tx {
-            let _ = crate::event_tap::tap_emit(
-                &self.event_tap,
-                Some(tx),
-                AgentEvent::RunStarted {
-                    session_id: self.session.id().clone(),
-                    prompt: run_prompt.clone(),
-                },
-            )
+        self.emit_run_started_event(&run_prompt, event_tx.as_ref())
             .await;
-        }
 
-        self.run_started_hooks(&run_prompt, event_tx.as_ref())
-            .await?;
+        if let Err(err) = self.run_started_hooks(&run_prompt, event_tx.as_ref()).await {
+            self.handle_run_failure(&err, event_tx.as_ref()).await;
+            return Err(err);
+        }
 
         match self.run_loop(event_tx.clone()).await {
             Ok(mut result) => {
-                self.run_completed_hooks(&mut result, event_tx.as_ref())
-                    .await?;
+                if let Err(err) = self
+                    .run_completed_hooks(&mut result, event_tx.as_ref())
+                    .await
+                {
+                    self.handle_run_failure(&err, event_tx.as_ref()).await;
+                    return Err(err);
+                }
+                self.emit_run_completed_event(&result, event_tx.as_ref())
+                    .await;
                 Ok(result)
             }
             Err(err) => {
-                if let Err(hook_err) = self.run_failed_hooks(&err, event_tx.as_ref()).await {
-                    tracing::warn!(?hook_err, "run_failed hook execution failed");
-                }
-                if let Some(ref tx) = event_tx {
-                    let _ = crate::event_tap::tap_emit(
-                        &self.event_tap,
-                        Some(tx),
-                        AgentEvent::RunFailed {
-                            session_id: self.session.id().clone(),
-                            error: err.to_string(),
-                        },
-                    )
-                    .await;
-                }
+                self.handle_run_failure(&err, event_tx.as_ref()).await;
                 Err(err)
             }
         }
@@ -854,42 +942,35 @@ where
 
         // Reset state for new run (allows multi-turn on same agent)
         self.state = LoopState::CallingLlm;
+        self.extraction_mode = false;
+        self.extraction_attempts = 0;
+        self.extraction_result = None;
+        self.extraction_last_error = None;
+        self.extraction_schema_warnings = None;
 
-        if let Some(ref tx) = event_tx {
-            let _ = crate::event_tap::tap_emit(
-                &self.event_tap,
-                Some(tx),
-                AgentEvent::RunStarted {
-                    session_id: self.session.id().clone(),
-                    prompt: prompt.clone(),
-                },
-            )
+        self.emit_run_started_event(&prompt, event_tx.as_ref())
             .await;
-        }
 
-        self.run_started_hooks(&prompt, event_tx.as_ref()).await?;
+        if let Err(err) = self.run_started_hooks(&prompt, event_tx.as_ref()).await {
+            self.handle_run_failure(&err, event_tx.as_ref()).await;
+            return Err(err);
+        }
 
         match self.run_loop(event_tx.clone()).await {
             Ok(mut result) => {
-                self.run_completed_hooks(&mut result, event_tx.as_ref())
-                    .await?;
+                if let Err(err) = self
+                    .run_completed_hooks(&mut result, event_tx.as_ref())
+                    .await
+                {
+                    self.handle_run_failure(&err, event_tx.as_ref()).await;
+                    return Err(err);
+                }
+                self.emit_run_completed_event(&result, event_tx.as_ref())
+                    .await;
                 Ok(result)
             }
             Err(err) => {
-                if let Err(hook_err) = self.run_failed_hooks(&err, event_tx.as_ref()).await {
-                    tracing::warn!(?hook_err, "run_failed hook execution failed");
-                }
-                if let Some(ref tx) = event_tx {
-                    let _ = crate::event_tap::tap_emit(
-                        &self.event_tap,
-                        Some(tx),
-                        AgentEvent::RunFailed {
-                            session_id: self.session.id().clone(),
-                            error: err.to_string(),
-                        },
-                    )
-                    .await;
-                }
+                self.handle_run_failure(&err, event_tx.as_ref()).await;
                 Err(err)
             }
         }

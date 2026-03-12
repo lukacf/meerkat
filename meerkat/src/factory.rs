@@ -302,6 +302,11 @@ pub struct AgentBuildConfig {
     pub wait_for_mcp: bool,
     /// Per-agent environment variables injected into shell tool subprocesses.
     pub shell_env: Option<std::collections::HashMap<String, String>>,
+    /// Optional opaque runtime adapter for constructing a per-session `RuntimeInputSink`.
+    /// When the `session-store` feature is enabled, the factory downcasts this to the
+    /// runtime adapter type after agent construction and wires a `RuntimeCommsInputSink`
+    /// using the adapter and the agent's session_id.
+    pub runtime_adapter_for_sink: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 impl std::fmt::Debug for AgentBuildConfig {
@@ -406,6 +411,7 @@ impl AgentBuildConfig {
             additional_instructions: None,
             wait_for_mcp: false,
             shell_env: None,
+            runtime_adapter_for_sink: None,
         }
     }
 
@@ -460,6 +466,7 @@ impl AgentBuildConfig {
         self.app_context = build.app_context.clone();
         self.additional_instructions = build.additional_instructions.clone();
         self.shell_env = build.shell_env.clone();
+        self.runtime_adapter_for_sink = build.runtime_adapter_for_sink.clone();
     }
 
     /// Convert build options to the service transport representation.
@@ -497,6 +504,7 @@ impl AgentBuildConfig {
             app_context: self.app_context.clone(),
             additional_instructions: self.additional_instructions.clone(),
             shell_env: self.shell_env.clone(),
+            runtime_adapter_for_sink: self.runtime_adapter_for_sink.clone(),
         }
     }
 }
@@ -1486,10 +1494,41 @@ impl AgentFactory {
                 };
 
                 // Normalize preload_skills: Some([]) → None
-                let preload = build_config
+                let mut preload = build_config
                     .preload_skills
                     .take()
                     .and_then(|ids| if ids.is_empty() { None } else { Some(ids) });
+
+                // Resumed sessions may carry persisted skill IDs from an older
+                // surface or older metadata semantics. Filter to the skills
+                // currently available on this surface instead of failing the
+                // rebuild outright on an incompatible preload.
+                if build_config.resume_session.is_some()
+                    && let Some(ids) = preload.as_mut()
+                {
+                    let available: std::collections::HashSet<_> = engine
+                        .list_skills(&meerkat_core::skills::SkillFilter::default())
+                        .await
+                        .map(|descs| descs.into_iter().map(|desc| desc.id).collect())
+                        .unwrap_or_default();
+                    let mut dropped = Vec::new();
+                    ids.retain(|id| {
+                        let keep = available.contains(id);
+                        if !keep {
+                            dropped.push(id.0.clone());
+                        }
+                        keep
+                    });
+                    if !dropped.is_empty() {
+                        tracing::warn!(
+                            dropped_skills = ?dropped,
+                            "dropping persisted active skills that are unavailable on the current surface"
+                        );
+                    }
+                    if ids.is_empty() {
+                        preload = None;
+                    }
+                }
 
                 // Pre-load requested skills into system prompt (Level 2)
                 let mut preloaded_sections = Vec::new();
@@ -1508,16 +1547,10 @@ impl AgentFactory {
                     }
                 }
 
-                // Collect active skill IDs
-                let skill_ids: Vec<meerkat_core::skills::SkillId> = match engine
-                    .list_skills(&meerkat_core::skills::SkillFilter::default())
-                    .await
-                {
-                    Ok(descs) => descs.into_iter().map(|d| d.id).collect(),
-                    Err(_) => Vec::new(),
-                };
+                // Persist the skills explicitly activated for this session.
+                let skill_ids = preload.clone();
 
-                (inventory, preloaded_sections, Some(skill_ids))
+                (inventory, preloaded_sections, skill_ids)
             } else {
                 // Skills disabled or no source
                 (String::new(), Vec::new(), None)
@@ -1724,8 +1757,25 @@ impl AgentFactory {
         builder =
             builder.with_max_inline_peer_notifications(build_config.max_inline_peer_notifications);
 
+        // 12h. Runtime adapter for sink — deferred until after build (needs session_id)
+        #[cfg(feature = "session-store")]
+        let runtime_adapter_for_sink = build_config.runtime_adapter_for_sink.take();
+
         // 13. Build agent
         let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
+
+        // 13b. Wire runtime input sink (needs session_id from the built agent)
+        #[cfg(feature = "session-store")]
+        if let Some(opaque) = runtime_adapter_for_sink
+            && let Ok(adapter) =
+                opaque.downcast::<meerkat_runtime::session_adapter::RuntimeSessionAdapter>()
+        {
+            let session_id = agent.session().id().clone();
+            let sink = std::sync::Arc::new(
+                meerkat_runtime::comms_sink::RuntimeCommsInputSink::new(adapter, session_id),
+            );
+            agent.set_runtime_input_sink(sink);
+        }
 
         // 14. Set SessionMetadata
         let metadata = SessionMetadata {

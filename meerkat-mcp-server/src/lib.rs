@@ -283,6 +283,10 @@ fn resolve_host_mode(requested: bool) -> Result<bool, String> {
     }
 }
 
+fn validate_public_peer_meta(peer_meta: Option<&meerkat_core::PeerMeta>) -> Result<(), String> {
+    meerkat::surface::validate_public_peer_meta(peer_meta)
+}
+
 fn tagged_realm_config_store(
     realms_root: &std::path::Path,
     realm_id: &str,
@@ -462,7 +466,7 @@ impl MeerkatMcpState {
         let skill_runtime = factory.build_skill_runtime(&config).await;
 
         let builder = FactoryAgentBuilder::new_with_config_store(factory, config, config_store);
-        let service = PersistentSessionService::new(builder, 100, session_store);
+        let service = PersistentSessionService::new(builder, 100, session_store, None);
 
         Ok(Self {
             service,
@@ -529,7 +533,7 @@ impl MeerkatMcpState {
         }
 
         let builder = FactoryAgentBuilder::new_with_config_store(factory, config, config_store);
-        let service = PersistentSessionService::new(builder, 100, store);
+        let service = PersistentSessionService::new(builder, 100, store, None);
 
         Self {
             service,
@@ -1157,21 +1161,26 @@ pub async fn handle_tools_call_with_notifier(
         "meerkat_config" => {
             let input: MeerkatConfigInput = serde_json::from_value(arguments.clone())
                 .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
-            handle_meerkat_config(state, input).await
+            handle_meerkat_config(state, input)
+                .await
+                .map(wrap_tool_payload)
         }
         "meerkat_capabilities" => handle_meerkat_capabilities(state)
             .await
+            .map(wrap_tool_payload)
             .map_err(ToolCallError::internal),
         "meerkat_skills" => {
             let input: MeerkatSkillsInput = serde_json::from_value(arguments.clone())
                 .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
             handle_meerkat_skills(state, input)
                 .await
+                .map(wrap_tool_payload)
                 .map_err(ToolCallError::internal)
         }
         #[cfg(feature = "mob")]
         "meerkat_mob_prefabs" => handle_meerkat_mob_prefabs()
             .await
+            .map(wrap_tool_payload)
             .map_err(ToolCallError::internal),
         "meerkat_read" => {
             let input: MeerkatSessionIdInput = serde_json::from_value(arguments.clone())
@@ -2071,6 +2080,7 @@ async fn handle_meerkat_run(
     input: MeerkatRunInput,
     notifier: Option<EventNotifier>,
 ) -> Result<Value, String> {
+    validate_public_peer_meta(input.peer_meta.as_ref())?;
     let host_mode = resolve_host_mode(input.host_mode)?;
     if host_mode
         && input
@@ -2163,6 +2173,7 @@ async fn handle_meerkat_run(
         app_context: input.app_context.clone(),
         additional_instructions: input.additional_instructions.clone(),
         shell_env: input.shell_env.clone(),
+        runtime_adapter_for_sink: None,
     };
 
     let req = CreateSessionRequest {
@@ -2198,6 +2209,7 @@ async fn handle_meerkat_resume(
     input: MeerkatResumeInput,
     notifier: Option<EventNotifier>,
 ) -> Result<Value, String> {
+    validate_public_peer_meta(input.peer_meta.as_ref())?;
     let config = state
         .config_runtime
         .get()
@@ -2364,6 +2376,7 @@ async fn handle_meerkat_resume(
         app_context: None,
         additional_instructions: input.additional_instructions.clone(),
         shell_env: None,
+        runtime_adapter_for_sink: None,
     };
 
     let needs_rebuild = existing_adapter.is_none()

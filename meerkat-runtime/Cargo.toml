@@ -29,6 +29,9 @@ sha2 = { workspace = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio_with_wasm = { workspace = true }
+
 [features]
 default = []
 redb-store = ["dep:redb", "dep:meerkat-store"]

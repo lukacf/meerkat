@@ -9,7 +9,10 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::Mutex;
+#[cfg(target_arch = "wasm32")]
+use tokio_with_wasm::alias::sync::Mutex;
 
 use super::{RuntimeStore, RuntimeStoreError, SessionDelta, authoritative_receipt};
 use crate::identifiers::LogicalRuntimeId;
@@ -57,7 +60,8 @@ impl Default for InMemoryRuntimeStore {
     }
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl RuntimeStore for InMemoryRuntimeStore {
     async fn commit_session_boundary(
         &self,

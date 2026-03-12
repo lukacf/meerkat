@@ -252,7 +252,7 @@ impl MobMcpState {
             .and_then(|session| {
                 session
                     .session_metadata()
-                    .and_then(|metadata| metadata.comms_name.clone())
+                    .and_then(|metadata| metadata.comms_name)
             })
         else {
             return false;

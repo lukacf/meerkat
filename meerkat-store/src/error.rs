@@ -14,6 +14,10 @@ pub enum StoreError {
     #[error("Database error: {0}")]
     Database(#[from] Box<redb::Error>),
 
+    #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
+    #[error("SQLite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+
     #[error("Session not found: {0}")]
     NotFound(SessionId),
 

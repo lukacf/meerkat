@@ -38,6 +38,7 @@ struct Cli {
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum RealmBackendArg {
     Jsonl,
+    Sqlite,
     Redb,
 }
 
@@ -45,6 +46,7 @@ impl From<RealmBackendArg> for RealmBackend {
     fn from(value: RealmBackendArg) -> Self {
         match value {
             RealmBackendArg::Jsonl => RealmBackend::Jsonl,
+            RealmBackendArg::Sqlite => RealmBackend::Sqlite,
             RealmBackendArg::Redb => RealmBackend::Redb,
         }
     }
@@ -76,10 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let locator = realm_cfg.resolve_locator()?;
 
-    let backend_hint = cli
-        .realm_backend
-        .map(Into::into)
-        .or(Some(RealmBackend::Redb));
+    let backend_hint = cli.realm_backend.map(Into::into);
     let (manifest, persistence) = meerkat::open_realm_persistence_in(
         &locator.state_root,
         &locator.realm_id,
@@ -103,6 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 manifest_path: realm_paths.manifest_path.display().to_string(),
                 config_path: realm_paths.config_path.display().to_string(),
                 sessions_redb_path: realm_paths.sessions_redb_path.display().to_string(),
+                sessions_sqlite_path: Some(realm_paths.sessions_sqlite_path.display().to_string()),
                 sessions_jsonl_dir: realm_paths.sessions_jsonl_dir.display().to_string(),
             }),
         },
@@ -121,10 +121,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ))
             })?;
 
-    let store_path = match manifest.backend {
-        RealmBackend::Jsonl => realm_paths.sessions_jsonl_dir.clone(),
-        RealmBackend::Redb => realm_paths.root.clone(),
-    };
+    let store_path = persistence
+        .store_path()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| match manifest.backend {
+            RealmBackend::Jsonl => realm_paths.sessions_jsonl_dir.clone(),
+            RealmBackend::Sqlite | RealmBackend::Redb => realm_paths.root.clone(),
+        });
     let project_root = cli
         .context_root
         .clone()

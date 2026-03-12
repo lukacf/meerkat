@@ -22,6 +22,7 @@ thiserror = { workspace = true }
 async-trait = { workspace = true }
 indexmap = { version = "2", features = ["serde"] }
 redb = { workspace = true, optional = true }
+rusqlite = { workspace = true, optional = true }
 tracing = { workspace = true }
 meerkat-store = { path = "../meerkat-store", default-features = false, optional = true }
 sha2 = { workspace = true }
@@ -35,6 +36,7 @@ tokio_with_wasm = { workspace = true }
 [features]
 default = []
 redb-store = ["dep:redb", "dep:meerkat-store"]
+sqlite-store = ["dep:rusqlite", "dep:meerkat-store", "meerkat-store/sqlite"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

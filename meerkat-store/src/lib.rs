@@ -24,6 +24,8 @@ pub mod memory;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod redb_store;
+#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
+pub mod sqlite_store;
 
 pub use adapter::StoreAdapter;
 pub use error::StoreError;
@@ -41,6 +43,8 @@ pub use realm::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use redb_store::RedbSessionStore;
+#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
+pub use sqlite_store::SqliteSessionStore;
 
 use async_trait::async_trait;
 use meerkat_core::time_compat::SystemTime;

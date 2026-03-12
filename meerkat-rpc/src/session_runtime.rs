@@ -175,6 +175,20 @@ pub struct SessionRuntime {
 }
 
 impl SessionRuntime {
+    async fn live_session_is_stale(&self, session_id: &SessionId) -> Result<bool, RpcError> {
+        let live = match self.service.export_live_session(session_id).await {
+            Ok(session) => session,
+            Err(SessionError::NotFound { .. }) => return Ok(false),
+            Err(err) => return Err(session_error_to_rpc(err)),
+        };
+        let Some(stored) = self.load_persisted_session(session_id).await? else {
+            return Ok(false);
+        };
+        Ok(stored.updated_at() > live.updated_at()
+            || (stored.updated_at() == live.updated_at()
+                && stored.messages().len() > live.messages().len()))
+    }
+
     /// Create a new session runtime.
     pub fn new(
         factory: AgentFactory,
@@ -424,6 +438,11 @@ impl SessionRuntime {
 
         let input = Input::Prompt(PromptInput::new(prompt, turn_metadata));
 
+        if self.live_session_is_stale(session_id).await? {
+            let _ = self.service.discard_live_session(session_id).await;
+            self.runtime_adapter.unregister_session(session_id).await;
+        }
+
         // Lazy-register executor if not already registered.
         if !self.runtime_adapter.contains_session(session_id).await {
             // Verify the session exists before registering to avoid creating
@@ -590,7 +609,7 @@ impl SessionRuntime {
             .or(persisted_host_mode)
             .unwrap_or(false);
 
-        if pending_session.is_none() {
+        if pending_session.is_none() && !self.live_session_is_stale(session_id).await? {
             let req = StartTurnRequest {
                 prompt: prompt.clone(),
                 event_tx: Some(event_tx.clone()),
@@ -1244,6 +1263,20 @@ impl SessionRuntime {
             flow_tool_overlay: flow_tool_overlay.clone(),
             additional_instructions: additional_instructions.clone(),
         };
+
+        if self.live_session_is_stale(session_id).await? {
+            return self
+                .try_recover_persisted_session(
+                    session_id,
+                    turn_prompt,
+                    event_tx,
+                    host_mode,
+                    skill_references,
+                    flow_tool_overlay,
+                    additional_instructions,
+                )
+                .await;
+        }
 
         match self.service.start_turn(session_id, req).await {
             Ok(result) => Ok(result),

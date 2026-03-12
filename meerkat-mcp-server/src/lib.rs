@@ -306,6 +306,7 @@ fn tagged_realm_config_store(
                 manifest_path: paths.manifest_path.display().to_string(),
                 config_path: paths.config_path.display().to_string(),
                 sessions_redb_path: paths.sessions_redb_path.display().to_string(),
+                sessions_sqlite_path: Some(paths.sessions_sqlite_path.display().to_string()),
                 sessions_jsonl_dir: paths.sessions_jsonl_dir.display().to_string(),
             }),
         },
@@ -320,14 +321,10 @@ async fn realm_config_store(
     origin_hint: Option<meerkat_store::RealmOrigin>,
     instance_id: Option<&str>,
 ) -> Result<Arc<dyn ConfigStore>, String> {
-    let (manifest, _) = meerkat_store::open_realm_session_store_in(
-        realms_root,
-        realm_id,
-        backend_hint.or(Some(meerkat_store::RealmBackend::Redb)),
-        origin_hint,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    let manifest =
+        meerkat_store::ensure_realm_manifest_in(realms_root, realm_id, backend_hint, origin_hint)
+            .await
+            .map_err(|e| e.to_string())?;
     Ok(tagged_realm_config_store(
         realms_root,
         realm_id,
@@ -344,7 +341,7 @@ fn realm_store_path(
     let paths = meerkat_store::realm_paths_in(realms_root, realm_id);
     match backend {
         meerkat_store::RealmBackend::Jsonl => paths.sessions_jsonl_dir,
-        meerkat_store::RealmBackend::Redb => paths.root,
+        meerkat_store::RealmBackend::Sqlite | meerkat_store::RealmBackend::Redb => paths.root,
     }
 }
 
@@ -406,8 +403,7 @@ impl MeerkatMcpState {
             .realm
             .backend_hint
             .as_deref()
-            .and_then(parse_backend_hint)
-            .or(Some(meerkat_store::RealmBackend::Redb));
+            .and_then(parse_backend_hint);
         let origin_hint = Some(realm_origin_from_selection(&bootstrap.realm.selection));
         let config = load_config_async(
             &realm_id,
@@ -417,14 +413,15 @@ impl MeerkatMcpState {
             bootstrap.realm.instance_id.as_deref(),
         )
         .await;
-        let (manifest, session_store) = meerkat_store::open_realm_session_store_in(
-            &realms_root,
-            &realm_id,
-            backend_hint,
-            origin_hint,
-        )
-        .await?;
-        let store_path = realm_store_path(&realms_root, &realm_id, manifest.backend);
+        let (manifest, persistence) =
+            meerkat::open_realm_persistence_in(&realms_root, &realm_id, backend_hint, origin_hint)
+                .await?;
+        let store_path = persistence
+            .store_path()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| realm_store_path(&realms_root, &realm_id, manifest.backend));
+        let runtime_store = persistence.runtime_store();
+        let session_store = persistence.session_store();
         let realm_paths = meerkat_store::realm_paths_in(&realms_root, &realm_id);
         let conventions_context_root = bootstrap.context.context_root.clone();
         let project_root = conventions_context_root
@@ -466,7 +463,7 @@ impl MeerkatMcpState {
         let skill_runtime = factory.build_skill_runtime(&config).await;
 
         let builder = FactoryAgentBuilder::new_with_config_store(factory, config, config_store);
-        let service = PersistentSessionService::new(builder, 100, session_store, None);
+        let service = PersistentSessionService::new(builder, 100, session_store, runtime_store);
 
         Ok(Self {
             service,
@@ -503,19 +500,19 @@ impl MeerkatMcpState {
         let config = load_config_async(
             &realm_id,
             &realms_root,
-            Some(meerkat_store::RealmBackend::Redb),
+            Some(meerkat_store::RealmBackend::Sqlite),
             Some(meerkat_store::RealmOrigin::Generated),
             bootstrap.realm.instance_id.as_deref(),
         )
         .await;
         let store_path =
-            realm_store_path(&realms_root, &realm_id, meerkat_store::RealmBackend::Redb);
+            realm_store_path(&realms_root, &realm_id, meerkat_store::RealmBackend::Sqlite);
         let realm_paths = meerkat_store::realm_paths_in(&realms_root, &realm_id);
         let project_root = realm_paths.root.clone();
         let config_store = tagged_realm_config_store(
             &realms_root,
             &realm_id,
-            meerkat_store::RealmBackend::Redb,
+            meerkat_store::RealmBackend::Sqlite,
             bootstrap.realm.instance_id.as_deref(),
         );
         let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
@@ -538,7 +535,7 @@ impl MeerkatMcpState {
         Self {
             service,
             realm_id,
-            backend: "redb".to_string(),
+            backend: "sqlite".to_string(),
             instance_id: bootstrap.realm.instance_id,
             expose_paths: false,
             config_runtime,
@@ -598,6 +595,7 @@ impl MeerkatMcpState {
 fn parse_backend_hint(raw: &str) -> Option<meerkat_store::RealmBackend> {
     match raw {
         "jsonl" => Some(meerkat_store::RealmBackend::Jsonl),
+        "sqlite" => Some(meerkat_store::RealmBackend::Sqlite),
         "redb" => Some(meerkat_store::RealmBackend::Redb),
         _ => None,
     }
@@ -2651,6 +2649,7 @@ mod tests {
                     manifest_path: "/tmp/root/realm_manifest.json".to_string(),
                     config_path: "/tmp/root/config.toml".to_string(),
                     sessions_redb_path: "/tmp/root/sessions.redb".to_string(),
+                    sessions_sqlite_path: Some("/tmp/root/sessions.sqlite3".to_string()),
                     sessions_jsonl_dir: "/tmp/root/sessions_jsonl".to_string(),
                 }),
             }),
@@ -2674,6 +2673,7 @@ mod tests {
                     manifest_path: "/tmp/root/realm_manifest.json".to_string(),
                     config_path: "/tmp/root/config.toml".to_string(),
                     sessions_redb_path: "/tmp/root/sessions.redb".to_string(),
+                    sessions_sqlite_path: Some("/tmp/root/sessions.sqlite3".to_string()),
                     sessions_jsonl_dir: "/tmp/root/sessions_jsonl".to_string(),
                 }),
             }),

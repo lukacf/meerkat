@@ -68,9 +68,16 @@ all-providers = ["anthropic", "openai", "gemini"]
 # Storage backends
 jsonl-store = ["meerkat-store/jsonl"]
 memory-store = ["meerkat-store/memory"]
+sqlite-store = ["meerkat-store/sqlite", "meerkat-runtime/sqlite-store"]
 
 # Session capabilities
-session-store = ["meerkat-session/session-store", "dep:meerkat-runtime", "meerkat-runtime/redb-store"]
+session-store = [
+    "meerkat-session/session-store",
+    "dep:meerkat-runtime",
+    "meerkat-runtime/redb-store",
+    "meerkat-runtime/sqlite-store",
+    "meerkat-store/sqlite",
+]
 session-compaction = ["meerkat-session/session-compaction"]
 memory-store-session = ["dep:meerkat-memory"]
 

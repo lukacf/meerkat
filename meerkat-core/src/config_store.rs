@@ -17,6 +17,8 @@ pub struct ConfigResolvedPaths {
     pub manifest_path: String,
     pub config_path: String,
     pub sessions_redb_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sessions_sqlite_path: Option<String>,
     pub sessions_jsonl_dir: String,
 }
 

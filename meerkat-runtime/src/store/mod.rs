@@ -6,6 +6,8 @@
 pub mod memory;
 #[cfg(feature = "redb-store")]
 pub mod redb;
+#[cfg(feature = "sqlite-store")]
+pub mod sqlite;
 
 use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
@@ -174,3 +176,5 @@ pub trait RuntimeStore: Send + Sync {
 pub use memory::InMemoryRuntimeStore;
 #[cfg(feature = "redb-store")]
 pub use redb::RedbRuntimeStore;
+#[cfg(feature = "sqlite-store")]
+pub use sqlite::SqliteRuntimeStore;

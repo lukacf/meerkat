@@ -174,6 +174,14 @@ pub struct SessionRuntime {
     registered_tools_slot: StdRwLock<Arc<StdRwLock<Vec<meerkat_core::ToolDef>>>>,
 }
 
+fn session_metadata_marks_archived(session: &Session) -> bool {
+    session
+        .metadata()
+        .get("session_archived")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
 impl SessionRuntime {
     async fn live_session_is_stale(&self, session_id: &SessionId) -> Result<bool, RpcError> {
         let live = match self.service.export_live_session(session_id).await {
@@ -1356,6 +1364,13 @@ impl SessionRuntime {
                 data: None,
             });
         };
+        if session_metadata_marks_archived(&session) {
+            return Err(RpcError {
+                code: error::SESSION_NOT_FOUND,
+                message: format!("Session not found: {session_id}"),
+                data: None,
+            });
+        }
 
         let stored_metadata = session.session_metadata();
 

@@ -15,6 +15,7 @@ use meerkat_core::ConfigStore;
 use meerkat_core::EventEnvelope;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::SessionHistoryQuery;
+use meerkat_core::session::Session;
 use meerkat_core::types::SessionId;
 use meerkat_runtime::SessionServiceRuntimeExt as _;
 use serde_json::json;
@@ -282,6 +283,14 @@ pub struct MethodRouter {
 }
 
 impl MethodRouter {
+    fn session_metadata_marks_archived(session: &Session) -> bool {
+        session
+            .metadata()
+            .get("session_archived")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    }
+
     /// Create a new method router.
     pub fn new(
         runtime: Arc<SessionRuntime>,
@@ -360,6 +369,23 @@ impl MethodRouter {
         &self,
         session_id: &SessionId,
     ) -> Result<(), RpcResponse> {
+        let persisted = self
+            .runtime
+            .load_persisted_session(session_id)
+            .await
+            .ok()
+            .flatten();
+        if persisted
+            .as_ref()
+            .is_some_and(Self::session_metadata_marks_archived)
+        {
+            return Err(RpcResponse::error(
+                None,
+                error::SESSION_NOT_FOUND,
+                format!("Session not found: {session_id}"),
+            ));
+        }
+
         let owner = self.resolve_session_owner(session_id).await;
 
         if owner.is_none() {

@@ -354,8 +354,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let stored_is_newer = stored.updated_at() > live.updated_at()
             || (stored.updated_at() == live.updated_at()
                 && stored.messages().len() > live.messages().len());
+        let stored_is_archived = metadata_marks_archived(stored.metadata());
 
-        if !stored_is_newer {
+        if !stored_is_newer && !stored_is_archived {
             return Ok(false);
         }
 
@@ -365,6 +366,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             stored_updated_at = ?stored.updated_at(),
             live_message_count = live.messages().len(),
             stored_message_count = stored.messages().len(),
+            stored_is_archived,
             "discarding stale live session in favor of newer durable session-store snapshot"
         );
         self.discard_live_session(id).await?;

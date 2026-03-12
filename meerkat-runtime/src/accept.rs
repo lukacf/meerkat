@@ -10,6 +10,7 @@ use crate::policy::PolicyDecision;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "outcome_type", rename_all = "snake_case")]
 #[non_exhaustive]
+#[allow(clippy::large_enum_variant)]
 pub enum AcceptOutcome {
     /// Input was accepted and processing has begun.
     Accepted {

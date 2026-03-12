@@ -117,6 +117,7 @@ impl DriverEntry {
     }
 
     /// Apply an input after successful immediate execution.
+    #[allow(dead_code)]
     pub(crate) fn apply_input(
         &mut self,
         input_id: &InputId,
@@ -129,6 +130,7 @@ impl DriverEntry {
     }
 
     /// Consume an input after successful immediate execution.
+    #[allow(dead_code)]
     pub(crate) fn consume_inputs(
         &mut self,
         input_ids: &[InputId],
@@ -141,6 +143,7 @@ impl DriverEntry {
     }
 
     /// Roll back staged inputs after failed immediate execution.
+    #[allow(dead_code)]
     pub(crate) fn rollback_staged(
         &mut self,
         input_ids: &[InputId],

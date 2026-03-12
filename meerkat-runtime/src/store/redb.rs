@@ -640,8 +640,11 @@ mod inner {
             let loaded = store
                 .load_boundary_receipt(&rid, &receipt.run_id, receipt.sequence)
                 .await
-                .unwrap()
-                .expect("receipt should be persisted");
+                .unwrap();
+            let loaded = match loaded {
+                Some(receipt) => receipt,
+                None => panic!("receipt should be persisted"),
+            };
             assert_eq!(loaded, receipt);
         }
     }

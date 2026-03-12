@@ -31,6 +31,7 @@ fn build_runtime_receipt(
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn session_has_persisted_mob_binding(session: &Session, mob_id: &MobId) -> bool {
     let Some(metadata) = session.session_metadata() else {
         return false;
@@ -74,6 +75,7 @@ fn ephemeral_runtime_adapter_cache()
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn persistent_runtime_adapter_cache()
 -> &'static Mutex<HashMap<usize, Weak<meerkat_runtime::RuntimeSessionAdapter>>> {
     static CACHE: OnceLock<Mutex<HashMap<usize, Weak<meerkat_runtime::RuntimeSessionAdapter>>>> =

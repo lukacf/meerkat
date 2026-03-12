@@ -190,8 +190,7 @@ impl AppState {
             .realm
             .backend_hint
             .as_deref()
-            .and_then(parse_backend_hint)
-            .or(Some(RealmBackend::Redb));
+            .and_then(parse_backend_hint);
         let origin_hint = Some(realm_origin_from_selection(&bootstrap.realm.selection));
         let realms_root = locator.state_root;
         let (manifest, persistence) =
@@ -203,6 +202,7 @@ impl AppState {
             manifest_path: realm_paths.manifest_path.display().to_string(),
             config_path: realm_paths.config_path.display().to_string(),
             sessions_redb_path: realm_paths.sessions_redb_path.display().to_string(),
+            sessions_sqlite_path: Some(realm_paths.sessions_sqlite_path.display().to_string()),
             sessions_jsonl_dir: realm_paths.sessions_jsonl_dir.display().to_string(),
         };
         let base_config_store: Arc<dyn ConfigStore> =
@@ -236,10 +236,15 @@ impl AppState {
             tracing::warn!("Failed to apply env overrides: {}", err);
         }
 
-        let store_path = match manifest.backend {
-            meerkat_store::RealmBackend::Jsonl => realm_paths.sessions_jsonl_dir.clone(),
-            meerkat_store::RealmBackend::Redb => realm_paths.root.clone(),
-        };
+        let store_path = persistence
+            .store_path()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| match manifest.backend {
+                meerkat_store::RealmBackend::Jsonl => realm_paths.sessions_jsonl_dir.clone(),
+                meerkat_store::RealmBackend::Sqlite | meerkat_store::RealmBackend::Redb => {
+                    realm_paths.root.clone()
+                }
+            });
 
         let enable_builtins = config.tools.builtins_enabled;
         let enable_shell = config.tools.shell_enabled;
@@ -633,6 +638,7 @@ fn rest_instance_root() -> PathBuf {
 fn parse_backend_hint(raw: &str) -> Option<RealmBackend> {
     match raw {
         "jsonl" => Some(RealmBackend::Jsonl),
+        "sqlite" => Some(RealmBackend::Sqlite),
         "redb" => Some(RealmBackend::Redb),
         _ => None,
     }
@@ -922,19 +928,42 @@ fn get_runtime_adapter(state: &AppState) -> &Arc<meerkat_runtime::RuntimeSession
     &state.runtime_adapter
 }
 
+fn session_metadata_marks_archived(session: &Session) -> bool {
+    session
+        .metadata()
+        .get("session_archived")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
 async fn ensure_runtime_session_registered(
     state: &AppState,
     session_id: &SessionId,
 ) -> Result<(), Response> {
     let adapter = get_runtime_adapter(state);
 
-    let session_exists = state.session_service.read(session_id).await.is_ok()
-        || state
-            .session_service
-            .load_persisted(session_id)
-            .await
-            .map(|session| session.is_some())
-            .unwrap_or(false);
+    let persisted = state
+        .session_service
+        .load_persisted(session_id)
+        .await
+        .ok()
+        .flatten();
+    if persisted
+        .as_ref()
+        .is_some_and(session_metadata_marks_archived)
+    {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("Session not found: {session_id}")})),
+        )
+            .into_response());
+    }
+
+    let session_exists = if persisted.is_some() {
+        true
+    } else {
+        state.session_service.read(session_id).await.is_ok()
+    };
 
     if !session_exists {
         return Err((

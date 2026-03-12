@@ -223,6 +223,8 @@ pub use meerkat_store::MemoryStore;
 
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub use meerkat_store::RedbSessionStore;
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+pub use meerkat_store::SqliteSessionStore;
 
 // Re-export tools
 #[cfg(not(target_arch = "wasm32"))]

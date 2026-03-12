@@ -351,6 +351,7 @@ struct Cli {
 enum RealmBackendArg {
     #[cfg(feature = "jsonl-store")]
     Jsonl,
+    Sqlite,
     Redb,
 }
 
@@ -359,6 +360,7 @@ impl From<RealmBackendArg> for RealmBackend {
         match value {
             #[cfg(feature = "jsonl-store")]
             RealmBackendArg::Jsonl => RealmBackend::Jsonl,
+            RealmBackendArg::Sqlite => RealmBackend::Sqlite,
             RealmBackendArg::Redb => RealmBackend::Redb,
         }
     }
@@ -2008,7 +2010,7 @@ fn realm_store_path(manifest: &meerkat_store::RealmManifest, scope: &RuntimeScop
     match manifest.backend {
         #[cfg(feature = "jsonl-store")]
         RealmBackend::Jsonl => paths.sessions_jsonl_dir,
-        RealmBackend::Redb => paths.root,
+        RealmBackend::Sqlite | RealmBackend::Redb => paths.root,
         #[cfg(not(feature = "jsonl-store"))]
         _ => paths.root,
     }
@@ -2640,12 +2642,16 @@ async fn build_deploy_mob_session_service(
 ) -> anyhow::Result<Arc<dyn meerkat_mob::MobSessionService>> {
     let (manifest, persistence) = create_persistence_bundle(scope).await?;
     let store = persistence.session_store();
+    let store_path = persistence
+        .store_path()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| realm_store_path(&manifest, scope));
     let paths = meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id);
     let project_root = scope.context_root.clone().unwrap_or_else(|| {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         find_project_root(&cwd).unwrap_or(cwd)
     });
-    let mut factory = AgentFactory::new(realm_store_path(&manifest, scope))
+    let mut factory = AgentFactory::new(store_path)
         .session_store(store.clone())
         .runtime_root(paths.root)
         .project_root(project_root)
@@ -3470,8 +3476,12 @@ async fn resume_session_with_llm_override(
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         find_project_root(&cwd).unwrap_or(cwd)
     });
+    let store_path = persistence
+        .store_path()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| realm_store_path(&manifest, scope));
 
-    let mut factory = AgentFactory::new(realm_store_path(&manifest, scope))
+    let mut factory = AgentFactory::new(store_path)
         .session_store(store.clone())
         .runtime_root(
             meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id).root,
@@ -3719,12 +3729,16 @@ async fn build_cli_persistent_service(
 )> {
     let (manifest, persistence) = create_persistence_bundle(scope).await?;
     let store = persistence.session_store();
+    let store_path = persistence
+        .store_path()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| realm_store_path(&manifest, scope));
     let project_root = scope.context_root.clone().unwrap_or_else(|| {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         find_project_root(&cwd).unwrap_or(cwd)
     });
 
-    let mut factory = AgentFactory::new(realm_store_path(&manifest, scope))
+    let mut factory = AgentFactory::new(store_path)
         .session_store(store.clone())
         .runtime_root(
             meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id).root,
@@ -5854,6 +5868,7 @@ where
                 manifest_path: paths.manifest_path.display().to_string(),
                 config_path: paths.config_path.display().to_string(),
                 sessions_redb_path: paths.sessions_redb_path.display().to_string(),
+                sessions_sqlite_path: Some(paths.sessions_sqlite_path.display().to_string()),
                 sessions_jsonl_dir: paths.sessions_jsonl_dir.display().to_string(),
             }),
         },

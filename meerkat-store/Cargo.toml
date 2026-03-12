@@ -24,6 +24,7 @@ uuid = { workspace = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
 redb = { workspace = true }
+rusqlite = { workspace = true, optional = true }
 dirs = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -38,6 +39,7 @@ toml = { workspace = true }
 default = ["jsonl", "memory"]
 jsonl = []
 memory = []
+sqlite = ["dep:rusqlite"]
 
 [package.metadata.cargo-machete]
 ignored = ["toml"]  # dev-dependency used in tests

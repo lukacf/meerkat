@@ -1,5 +1,7 @@
 #[cfg(feature = "jsonl")]
 use crate::JsonlStore;
+#[cfg(feature = "sqlite")]
+use crate::SqliteSessionStore;
 use crate::{RedbSessionStore, SessionStore, StoreError};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -17,6 +19,8 @@ use uuid::Uuid;
 pub enum RealmBackend {
     #[cfg(feature = "jsonl")]
     Jsonl,
+    #[cfg(feature = "sqlite")]
+    Sqlite,
     Redb,
 }
 
@@ -25,6 +29,8 @@ impl RealmBackend {
         match self {
             #[cfg(feature = "jsonl")]
             Self::Jsonl => "jsonl",
+            #[cfg(feature = "sqlite")]
+            Self::Sqlite => "sqlite",
             Self::Redb => "redb",
         }
     }
@@ -68,6 +74,7 @@ pub struct RealmPaths {
     pub manifest_path: PathBuf,
     pub config_path: PathBuf,
     pub sessions_redb_path: PathBuf,
+    pub sessions_sqlite_path: PathBuf,
     pub sessions_jsonl_dir: PathBuf,
 }
 
@@ -242,6 +249,7 @@ pub fn realm_paths_in(realms_root: &Path, realm_id: &str) -> RealmPaths {
         manifest_path: root.join("realm_manifest.json"),
         config_path: root.join("config.toml"),
         sessions_redb_path: root.join("sessions.redb"),
+        sessions_sqlite_path: root.join("sessions.sqlite3"),
         sessions_jsonl_dir: root.join("sessions_jsonl"),
         root,
     }
@@ -492,11 +500,15 @@ pub async fn ensure_realm_manifest_in(
 }
 
 fn default_backend() -> RealmBackend {
-    #[cfg(feature = "jsonl")]
+    #[cfg(feature = "sqlite")]
+    {
+        RealmBackend::Sqlite
+    }
+    #[cfg(all(not(feature = "sqlite"), feature = "jsonl"))]
     {
         RealmBackend::Jsonl
     }
-    #[cfg(not(feature = "jsonl"))]
+    #[cfg(all(not(feature = "sqlite"), not(feature = "jsonl")))]
     {
         RealmBackend::Redb
     }
@@ -625,6 +637,11 @@ pub async fn open_realm_session_store_in(
     let store: Arc<dyn SessionStore> = match manifest.backend {
         #[cfg(feature = "jsonl")]
         RealmBackend::Jsonl => Arc::new(JsonlStore::new(paths.sessions_jsonl_dir)),
+        #[cfg(feature = "sqlite")]
+        RealmBackend::Sqlite => {
+            let sqlite_store = SqliteSessionStore::open(paths.sessions_sqlite_path.clone())?;
+            Arc::new(sqlite_store)
+        }
         RealmBackend::Redb => {
             if let Some(parent) = paths.sessions_redb_path.parent() {
                 tokio::fs::create_dir_all(parent)

@@ -1,5 +1,8 @@
 use std::sync::Arc;
 
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+use std::path::{Path, PathBuf};
+
 use crate::SessionStore;
 
 #[cfg(feature = "session-store")]
@@ -10,6 +13,8 @@ use meerkat_runtime::{RuntimeSessionAdapter, RuntimeStore, RuntimeStoreError};
     not(target_arch = "wasm32")
 ))]
 use meerkat_store::JsonlStore;
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+use meerkat_store::SqliteSessionStore;
 #[cfg(all(feature = "session-store", target_arch = "wasm32"))]
 use meerkat_store::StoreError;
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
@@ -30,6 +35,10 @@ pub enum PersistenceError {
 /// Backend-owned pairing of a session store with its matching runtime companion.
 #[derive(Clone)]
 pub struct PersistenceBundle {
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    manifest: Option<RealmManifest>,
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    store_path: Option<PathBuf>,
     session_store: Arc<dyn SessionStore>,
     #[cfg(feature = "session-store")]
     runtime_store: Option<Arc<dyn RuntimeStore>>,
@@ -48,6 +57,10 @@ impl PersistenceBundle {
             None => Arc::new(RuntimeSessionAdapter::ephemeral()),
         };
         Self {
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+            manifest: None,
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+            store_path: None,
             session_store,
             runtime_store,
             runtime_adapter,
@@ -56,11 +69,40 @@ impl PersistenceBundle {
 
     #[cfg(not(feature = "session-store"))]
     pub fn new(session_store: Arc<dyn SessionStore>) -> Self {
-        Self { session_store }
+        Self {
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+            manifest: None,
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+            store_path: None,
+            session_store,
+        }
+    }
+
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    pub fn with_realm_context(
+        manifest: RealmManifest,
+        store_path: PathBuf,
+        session_store: Arc<dyn SessionStore>,
+        runtime_store: Option<Arc<dyn RuntimeStore>>,
+    ) -> Self {
+        let mut bundle = Self::new(session_store, runtime_store);
+        bundle.manifest = Some(manifest);
+        bundle.store_path = Some(store_path);
+        bundle
     }
 
     pub fn session_store(&self) -> Arc<dyn SessionStore> {
         self.session_store.clone()
+    }
+
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    pub fn manifest(&self) -> Option<&RealmManifest> {
+        self.manifest.as_ref()
+    }
+
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    pub fn store_path(&self) -> Option<&Path> {
+        self.store_path.as_deref()
     }
 
     #[cfg(feature = "session-store")]
@@ -89,13 +131,24 @@ pub async fn open_realm_persistence_in(
     let manifest =
         ensure_realm_manifest_in(realms_root, realm_id, backend_hint, origin_hint).await?;
     let paths = realm_paths_in(realms_root, realm_id);
+    let store_path = match manifest.backend {
+        #[cfg(feature = "jsonl-store")]
+        RealmBackend::Jsonl => paths.sessions_jsonl_dir.clone(),
+        RealmBackend::Sqlite => paths.root.clone(),
+        RealmBackend::Redb => paths.root.clone(),
+    };
 
     let bundle = match manifest.backend {
         #[cfg(feature = "jsonl-store")]
         RealmBackend::Jsonl => {
             let session_store: Arc<dyn SessionStore> =
                 Arc::new(JsonlStore::new(paths.sessions_jsonl_dir));
-            PersistenceBundle::new(session_store, None)
+            PersistenceBundle::with_realm_context(
+                manifest.clone(),
+                store_path.clone(),
+                session_store,
+                None,
+            )
         }
         #[cfg(not(feature = "jsonl-store"))]
         RealmBackend::Jsonl => {
@@ -103,6 +156,18 @@ pub async fn open_realm_persistence_in(
                 "jsonl realm opened without jsonl-store feature".to_string(),
             )
             .into());
+        }
+        RealmBackend::Sqlite => {
+            let sqlite_store = Arc::new(SqliteSessionStore::open(paths.sessions_sqlite_path)?);
+            let runtime_store = Arc::new(meerkat_runtime::store::SqliteRuntimeStore::new(
+                sqlite_store.path().to_path_buf(),
+            )?) as Arc<dyn RuntimeStore>;
+            PersistenceBundle::with_realm_context(
+                manifest.clone(),
+                store_path.clone(),
+                sqlite_store as Arc<dyn SessionStore>,
+                Some(runtime_store),
+            )
         }
         RealmBackend::Redb => {
             if let Some(parent) = paths.sessions_redb_path.parent() {
@@ -118,7 +183,12 @@ pub async fn open_realm_persistence_in(
             let runtime_store = Arc::new(meerkat_runtime::store::RedbRuntimeStore::new(
                 redb_store.database(),
             )?) as Arc<dyn RuntimeStore>;
-            PersistenceBundle::new(redb_store as Arc<dyn SessionStore>, Some(runtime_store))
+            PersistenceBundle::with_realm_context(
+                manifest.clone(),
+                store_path.clone(),
+                redb_store as Arc<dyn SessionStore>,
+                Some(runtime_store),
+            )
         }
     };
 

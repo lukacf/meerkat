@@ -70,6 +70,7 @@ fn build_state(
             manifest_path: String::new(),
             config_path: String::new(),
             sessions_redb_path: String::new(),
+            sessions_sqlite_path: None,
             sessions_jsonl_dir: String::new(),
         },
         expose_paths: false,

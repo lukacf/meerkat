@@ -160,6 +160,22 @@ fn metadata_marks_archived(metadata: &serde_json::Map<String, serde_json::Value>
 }
 
 impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
+    fn archived_not_found(id: &SessionId) -> SessionControlError {
+        SessionControlError::Session(SessionError::NotFound { id: id.clone() })
+    }
+
+    async fn reject_if_archived_session(
+        &self,
+        id: &SessionId,
+        session: &Session,
+    ) -> Result<(), SessionControlError> {
+        if metadata_marks_archived(session.metadata()) {
+            self.remember_archived_session(session.clone()).await;
+            return Err(Self::archived_not_found(id));
+        }
+        Ok(())
+    }
+
     fn runtime_id_for_session(id: &SessionId) -> LogicalRuntimeId {
         LogicalRuntimeId::new(id.to_string())
     }
@@ -316,6 +332,47 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         })
     }
 
+    async fn discard_stale_live_session_if_needed(
+        &self,
+        id: &SessionId,
+    ) -> Result<bool, SessionError> {
+        let live = match self.export_live_session(id).await {
+            Ok(session) => session,
+            Err(SessionError::NotFound { .. }) => return Ok(false),
+            Err(err) => return Err(err),
+        };
+
+        let Some(stored) = self
+            .store
+            .load(id)
+            .await
+            .map_err(|e| SessionError::Store(Box::new(e)))?
+        else {
+            return Ok(false);
+        };
+
+        let stored_is_newer = stored.updated_at() > live.updated_at()
+            || (stored.updated_at() == live.updated_at()
+                && stored.messages().len() > live.messages().len());
+        let stored_is_archived = metadata_marks_archived(stored.metadata());
+
+        if !stored_is_newer && !stored_is_archived {
+            return Ok(false);
+        }
+
+        tracing::debug!(
+            session_id = %id,
+            live_updated_at = ?live.updated_at(),
+            stored_updated_at = ?stored.updated_at(),
+            live_message_count = live.messages().len(),
+            stored_message_count = stored.messages().len(),
+            stored_is_archived,
+            "discarding stale live session in favor of newer durable session-store snapshot"
+        );
+        self.discard_live_session(id).await?;
+        Ok(true)
+    }
+
     pub async fn export_live_session(&self, id: &SessionId) -> Result<Session, SessionError> {
         self.export_session_with_labels(id).await
     }
@@ -430,6 +487,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         boundary: RunApplyBoundary,
         contributing_input_ids: Vec<InputId>,
     ) -> Result<(RunResult, CoreApplyOutput), SessionError> {
+        let _ = self.discard_stale_live_session_if_needed(id).await?;
         let run_result = self.inner.start_turn(id, req).await?;
 
         let session = self.export_session_with_labels(id).await?;
@@ -624,6 +682,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         id: &SessionId,
         req: StartTurnRequest,
     ) -> Result<RunResult, SessionError> {
+        let _ = self.discard_stale_live_session_if_needed(id).await?;
         let result = self.inner.start_turn(id, req).await?;
 
         // Always persist after a direct start_turn call. Runtime-backed sessions
@@ -639,6 +698,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
     }
 
     async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
+        let _ = self.discard_stale_live_session_if_needed(id).await?;
         // Try live session first
         match self.inner.read(id).await {
             Ok(view) => Ok(view),
@@ -837,6 +897,10 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
         id: &SessionId,
         req: AppendSystemContextRequest,
     ) -> Result<AppendSystemContextResult, SessionControlError> {
+        if self.cached_archived_session(id).await.is_some() {
+            return Err(Self::archived_not_found(id));
+        }
+
         let existing_gate = self.existing_gate_for_session(id).await;
         if let Some(state_arc) = self.inner.system_context_state(id).await {
             let created_gate = existing_gate.is_none();
@@ -906,6 +970,7 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                     }
                 };
 
+                self.reject_if_archived_session(id, &session).await?;
                 write_system_context_state(&mut session, persisted_state)?;
                 self.store
                     .save(&session)
@@ -975,6 +1040,7 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                 }));
             }
         };
+        self.reject_if_archived_session(id, &session).await?;
         let mut state = session.system_context_state().unwrap_or_default();
         let status = state
             .stage_append(&req, meerkat_core::time_compat::SystemTime::now())
@@ -1557,14 +1623,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_append_system_context_does_not_recreate_archived_store_row() {
+    async fn test_append_system_context_does_not_mutate_archived_store_row() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let service = PersistentSessionService::new(DummyBuilder, 4, Arc::clone(&store), None);
         let session = Session::new();
         let id = session.id().clone();
         store.save(&session).await.unwrap();
         service.archive(&id).await.unwrap();
-        assert!(store.load(&id).await.unwrap().is_none());
+        let archived = store
+            .load(&id)
+            .await
+            .unwrap()
+            .expect("archive should retain a durable archived snapshot");
 
         let err = service
             .append_system_context(
@@ -1578,10 +1648,13 @@ mod tests {
             .await
             .expect_err("archived session must not be recreated by append");
         assert_eq!(err.code(), "SESSION_NOT_FOUND");
-        assert!(
-            store.load(&id).await.unwrap().is_none(),
-            "append after archive must not recreate the store row"
-        );
+        let persisted = store
+            .load(&id)
+            .await
+            .unwrap()
+            .expect("append after archive must preserve the archived store row");
+        assert_eq!(persisted.metadata(), archived.metadata());
+        assert_eq!(persisted.messages().len(), archived.messages().len());
     }
 
     #[tokio::test]

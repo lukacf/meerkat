@@ -13,6 +13,8 @@ use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunApplyBoundary, RunPrimitive};
 use meerkat_core::service::{CreateSessionRequest, StartTurnRequest};
 use meerkat_core::types::SessionId;
+#[allow(unused_imports)]
+use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
 use meerkat_runtime::{
     Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PromptInput,
     RuntimeSessionAdapter,

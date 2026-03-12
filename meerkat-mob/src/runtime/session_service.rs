@@ -114,7 +114,14 @@ where
     }
 
     fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::RuntimeSessionAdapter>> {
-        Some(Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()))
+        #[cfg(target_arch = "wasm32")]
+        {
+            None
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Some(Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()))
+        }
     }
 
     async fn subscribe_session_events(
@@ -175,8 +182,15 @@ where
     }
 
     fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::RuntimeSessionAdapter>> {
-        self.runtime_store()
-            .map(|store| Arc::new(meerkat_runtime::RuntimeSessionAdapter::persistent(store)))
+        #[cfg(target_arch = "wasm32")]
+        {
+            None
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.runtime_store()
+                .map(|store| Arc::new(meerkat_runtime::RuntimeSessionAdapter::persistent(store)))
+        }
     }
 
     async fn subscribe_session_events(

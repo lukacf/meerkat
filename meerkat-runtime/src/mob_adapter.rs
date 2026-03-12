@@ -10,11 +10,10 @@
 use meerkat_core::lifecycle::InputId;
 use meerkat_core::types::SessionId;
 
+use crate::RuntimeSessionAdapter;
 use crate::input::{
     FlowStepInput, Input, InputDurability, InputHeader, InputOrigin, InputVisibility,
 };
-use crate::service_ext::SessionServiceRuntimeExt;
-use crate::session_adapter::RuntimeSessionAdapter;
 use crate::traits::RuntimeDriverError;
 
 /// Create a FlowStepInput for a mob flow step.

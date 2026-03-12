@@ -26,7 +26,6 @@ pub mod input_machine;
 pub mod input_scope;
 pub mod input_state;
 pub mod lifecycle_ops;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod mob_adapter;
 pub mod policy;
 pub mod policy_table;
@@ -38,6 +37,8 @@ pub mod runtime_state;
 pub mod service_ext;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod session_adapter;
+#[cfg(target_arch = "wasm32")]
+pub mod session_adapter_stub;
 pub mod state_machine;
 pub mod store;
 pub mod traits;
@@ -78,6 +79,8 @@ pub use runtime_state::{RuntimeState, RuntimeStateTransitionError};
 pub use service_ext::{RuntimeMode, SessionServiceRuntimeExt};
 #[cfg(not(target_arch = "wasm32"))]
 pub use session_adapter::RuntimeSessionAdapter;
+#[cfg(target_arch = "wasm32")]
+pub use session_adapter_stub::RuntimeSessionAdapter;
 pub use state_machine::RuntimeStateMachine;
 pub use store::{InMemoryRuntimeStore, RuntimeStore, RuntimeStoreError, SessionDelta};
 pub use traits::{

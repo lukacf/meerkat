@@ -2,6 +2,8 @@ use super::*;
 use crate::MobBackendKind;
 use crate::definition::ExternalBackendConfig;
 use crate::event::MemberRef;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use async_trait::async_trait;
 use meerkat_core::comms::TrustedPeerSpec;
 use meerkat_core::event_injector::SubscribableInjector;
@@ -11,7 +13,6 @@ use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunApplyBoundary, RunPrimitive};
 use meerkat_core::service::{CreateSessionRequest, StartTurnRequest};
 use meerkat_core::types::SessionId;
-use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
 use meerkat_runtime::{
     Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PromptInput,
     RuntimeSessionAdapter,
@@ -187,7 +188,8 @@ fn extract_prompt(primitive: &RunPrimitive) -> String {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl CoreExecutor for MobSessionRuntimeExecutor {
     async fn apply(
         &mut self,

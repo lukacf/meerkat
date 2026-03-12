@@ -29,8 +29,8 @@ use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
 use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
-    SessionBuildOptions, SessionControlError, SessionError, SessionQuery, SessionService,
-    SessionServiceControlExt, StartTurnRequest,
+    SessionBuildOptions, SessionControlError, SessionError, SessionHistoryQuery, SessionQuery,
+    SessionService, SessionServiceControlExt, SessionServiceHistoryExt, StartTurnRequest,
 };
 use meerkat_core::skills::{SkillError, SourceIdentityRegistry};
 use meerkat_core::types::{RunResult, SessionId};
@@ -1775,6 +1775,34 @@ impl SessionRuntime {
         }
 
         None
+    }
+
+    /// Read a session transcript as canonical wire history, including pending sessions.
+    pub async fn read_session_history_rich(
+        &self,
+        session_id: &SessionId,
+        query: SessionHistoryQuery,
+    ) -> Option<meerkat_contracts::WireSessionHistory> {
+        {
+            let pending = self.pending.read().await;
+            if pending.contains_key(session_id) {
+                return Some(meerkat_contracts::WireSessionHistory {
+                    session_id: session_id.clone(),
+                    session_ref: None,
+                    message_count: 0,
+                    offset: query.offset,
+                    limit: query.limit,
+                    has_more: false,
+                    messages: Vec::new(),
+                });
+            }
+        }
+
+        self.service
+            .read_history(session_id, query)
+            .await
+            .ok()
+            .map(Into::into)
     }
 
     /// Get the event injector for a session, if available.

@@ -27,8 +27,15 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "McpLiveOpStatus": schema_for!(crate::wire::McpLiveOpStatus),
         "McpLiveOperation": schema_for!(crate::wire::McpLiveOperation),
         "McpLiveOpResponse": schema_for!(crate::wire::McpLiveOpResponse),
+        "WireAssistantBlock": schema_for!(crate::wire::WireAssistantBlock),
+        "WireProviderMeta": schema_for!(crate::wire::WireProviderMeta),
+        "WireSessionHistory": schema_for!(crate::wire::WireSessionHistory),
         "WireSessionInfo": schema_for!(crate::wire::WireSessionInfo),
+        "WireSessionMessage": schema_for!(crate::wire::WireSessionMessage),
         "WireSessionSummary": schema_for!(crate::wire::WireSessionSummary),
+        "WireStopReason": schema_for!(crate::wire::WireStopReason),
+        "WireToolCall": schema_for!(crate::wire::WireToolCall),
+        "WireToolResult": schema_for!(crate::wire::WireToolResult),
     });
     fs::write(
         output_dir.join("wire-types.json"),
@@ -114,6 +121,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
             {"name": "session/create", "description": "Create session + run first turn"},
             {"name": "session/list", "description": "List active sessions"},
             {"name": "session/read", "description": "Get session state"},
+            {"name": "session/history", "description": "Get full session history"},
             {"name": "session/archive", "description": "Remove session"},
             {"name": "turn/start", "description": "Start a new turn on existing session"},
             {"name": "turn/interrupt", "description": "Cancel in-flight turn"},
@@ -161,6 +169,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "paths": {
             "/sessions": {"post": {"summary": "Create and run a new session"}},
             "/sessions/{id}": {"get": {"summary": "Get session details"}},
+            "/sessions/{id}/history": {"get": {"summary": "Get full session history"}},
             "/sessions/{id}/messages": {"post": {"summary": "Continue session with new message"}},
             "/sessions/{id}/events": {"get": {"summary": "SSE event stream"}},
             "/sessions/{id}/mcp/add": {"post": {

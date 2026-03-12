@@ -60,8 +60,13 @@ import type {
   MobSummary,
   RunResult,
   SchemaWarning,
+  SessionAssistantBlock,
+  SessionHistory,
   SessionInfo,
+  SessionMessage,
   SessionOptions,
+  SessionToolCall,
+  SessionToolResult,
   SkillKey,
   SkillRef,
   SkillRuntimeDiagnostics,
@@ -403,6 +408,21 @@ export class MeerkatClient {
 
   async readSession(sessionId: string): Promise<Record<string, unknown>> {
     return this.request("session/read", { session_id: sessionId });
+  }
+
+  async readSessionHistory(
+    sessionId: string,
+    options?: { offset?: number; limit?: number },
+  ): Promise<SessionHistory> {
+    const params: Record<string, unknown> = {
+      session_id: sessionId,
+      offset: options?.offset ?? 0,
+    };
+    if (options?.limit !== undefined) {
+      params.limit = options.limit;
+    }
+    const raw = await this.request("session/history", params);
+    return MeerkatClient.parseSessionHistory(raw);
   }
 
   // -- Capabilities -------------------------------------------------------
@@ -1087,6 +1107,65 @@ export class MeerkatClient {
       structuredOutput: data.structured_output,
       schemaWarnings,
       skillDiagnostics: MeerkatClient.parseSkillDiagnostics(data.skill_diagnostics),
+    };
+  }
+
+  static parseSessionHistory(data: Record<string, unknown>): SessionHistory {
+    const rawMessages = Array.isArray(data.messages)
+      ? (data.messages as Array<Record<string, unknown>>)
+      : [];
+    return {
+      sessionId: String(data.session_id ?? ""),
+      sessionRef: data.session_ref != null ? String(data.session_ref) : undefined,
+      messageCount: Number(data.message_count ?? 0),
+      offset: Number(data.offset ?? 0),
+      limit: data.limit != null ? Number(data.limit) : undefined,
+      hasMore: Boolean(data.has_more ?? false),
+      messages: rawMessages.map((message) => MeerkatClient.parseSessionMessage(message)),
+    };
+  }
+
+  static parseSessionMessage(data: Record<string, unknown>): SessionMessage {
+    const rawToolCalls = Array.isArray(data.tool_calls)
+      ? (data.tool_calls as Array<Record<string, unknown>>)
+      : [];
+    const rawBlocks = Array.isArray(data.blocks)
+      ? (data.blocks as Array<Record<string, unknown>>)
+      : [];
+    const rawResults = Array.isArray(data.results)
+      ? (data.results as Array<Record<string, unknown>>)
+      : [];
+    return {
+      role: String(data.role ?? ""),
+      content: data.content != null ? String(data.content) : undefined,
+      toolCalls: rawToolCalls.map(
+        (toolCall): SessionToolCall => ({
+          id: String(toolCall.id ?? ""),
+          name: String(toolCall.name ?? ""),
+          args: toolCall.args,
+        }),
+      ),
+      stopReason: data.stop_reason != null ? String(data.stop_reason) : undefined,
+      blocks: rawBlocks.map((block) => MeerkatClient.parseSessionAssistantBlock(block)),
+      results: rawResults.map(
+        (result): SessionToolResult => ({
+          toolUseId: String(result.tool_use_id ?? ""),
+          content: String(result.content ?? ""),
+          isError: Boolean(result.is_error ?? false),
+        }),
+      ),
+    };
+  }
+
+  static parseSessionAssistantBlock(data: Record<string, unknown>): SessionAssistantBlock {
+    const blockData = (data.data as Record<string, unknown> | undefined) ?? {};
+    return {
+      blockType: String(data.block_type ?? ""),
+      text: blockData.text != null ? String(blockData.text) : undefined,
+      id: blockData.id != null ? String(blockData.id) : undefined,
+      name: blockData.name != null ? String(blockData.name) : undefined,
+      args: blockData.args,
+      meta: blockData.meta as Record<string, unknown> | undefined,
     };
   }
 

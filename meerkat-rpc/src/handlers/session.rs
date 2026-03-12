@@ -169,6 +169,16 @@ pub struct ReadSessionParams {
     pub session_id: String,
 }
 
+/// Parameters for `session/history`.
+#[derive(Debug, Deserialize)]
+pub struct ReadSessionHistoryParams {
+    pub session_id: String,
+    #[serde(default)]
+    pub offset: Option<usize>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
 /// Parameters for `session/archive`.
 #[derive(Debug, Deserialize)]
 pub struct ArchiveSessionParams {
@@ -201,6 +211,9 @@ pub struct ListSessionsResult {
 
 /// Result for `session/read` — uses canonical wire type from contracts.
 pub type ReadSessionResult = meerkat_contracts::WireSessionInfo;
+
+/// Result for `session/history` — uses canonical wire type from contracts.
+pub type ReadSessionHistoryResult = meerkat_contracts::WireSessionHistory;
 
 /// Result for `session/inject_context`.
 #[derive(Debug, Serialize)]

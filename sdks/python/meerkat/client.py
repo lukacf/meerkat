@@ -46,7 +46,12 @@ from .types import (
     McpLiveOpResponse,
     RunResult,
     SchemaWarning,
+    SessionAssistantBlock,
+    SessionHistory,
     SessionInfo,
+    SessionMessage,
+    SessionToolCall,
+    SessionToolResult,
     SkillKey,
     SkillQuarantineDiagnostic,
     SkillRef,
@@ -451,6 +456,20 @@ class MeerkatClient:
     async def read_session(self, session_id: str) -> dict[str, Any]:
         """Read detailed session state."""
         return await self._request("session/read", {"session_id": session_id})
+
+    async def read_session_history(
+        self,
+        session_id: str,
+        *,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> SessionHistory:
+        """Read paginated session transcript history."""
+        params: dict[str, Any] = {"session_id": session_id, "offset": offset}
+        if limit is not None:
+            params["limit"] = limit
+        raw = await self._request("session/history", params)
+        return self._parse_session_history(raw)
 
     # -- Capabilities ------------------------------------------------------
 
@@ -1225,4 +1244,60 @@ class MeerkatClient:
             skill_diagnostics=MeerkatClient._parse_skill_diagnostics(
                 data.get("skill_diagnostics")
             ),
+        )
+
+    @staticmethod
+    def _parse_session_history(data: dict[str, Any]) -> SessionHistory:
+        return SessionHistory(
+            session_id=data.get("session_id", ""),
+            session_ref=data.get("session_ref"),
+            message_count=data.get("message_count", 0),
+            offset=data.get("offset", 0),
+            limit=data.get("limit"),
+            has_more=bool(data.get("has_more", False)),
+            messages=[
+                MeerkatClient._parse_session_message(message)
+                for message in data.get("messages", [])
+            ],
+        )
+
+    @staticmethod
+    def _parse_session_message(data: dict[str, Any]) -> SessionMessage:
+        role = data.get("role", "")
+        return SessionMessage(
+            role=role,
+            content=data.get("content"),
+            tool_calls=[
+                SessionToolCall(
+                    id=tool_call.get("id", ""),
+                    name=tool_call.get("name", ""),
+                    args=tool_call.get("args"),
+                )
+                for tool_call in data.get("tool_calls", [])
+            ],
+            stop_reason=data.get("stop_reason"),
+            blocks=[
+                MeerkatClient._parse_session_assistant_block(block)
+                for block in data.get("blocks", [])
+            ],
+            results=[
+                SessionToolResult(
+                    tool_use_id=result.get("tool_use_id", ""),
+                    content=result.get("content", ""),
+                    is_error=bool(result.get("is_error", False)),
+                )
+                for result in data.get("results", [])
+            ],
+        )
+
+    @staticmethod
+    def _parse_session_assistant_block(data: dict[str, Any]) -> SessionAssistantBlock:
+        block_data = data.get("data", {})
+        return SessionAssistantBlock(
+            block_type=data.get("block_type", ""),
+            text=block_data.get("text"),
+            id=block_data.get("id"),
+            name=block_data.get("name"),
+            args=block_data.get("args"),
+            meta=block_data.get("meta"),
         )

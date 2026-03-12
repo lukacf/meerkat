@@ -140,6 +140,46 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     types_content += "    structured_output: Optional[Any] = None\n"
     types_content += "    schema_warnings: Optional[list] = None\n\n\n"
 
+    types_content += "@dataclass\nclass WireProviderMeta:\n"
+    types_content += '    """Provider continuity metadata."""\n'
+    types_content += "    provider: str = ''\n\n\n"
+
+    types_content += "@dataclass\nclass WireAssistantBlock:\n"
+    types_content += '    """Block assistant transcript item."""\n'
+    types_content += "    block_type: str = ''\n"
+    types_content += "    data: Optional[dict] = None\n\n\n"
+
+    types_content += "@dataclass\nclass WireToolCall:\n"
+    types_content += '    """Legacy assistant tool call."""\n'
+    types_content += "    id: str = ''\n"
+    types_content += "    name: str = ''\n"
+    types_content += "    args: Optional[Any] = None\n\n\n"
+
+    types_content += "@dataclass\nclass WireToolResult:\n"
+    types_content += '    """Tool result transcript item."""\n'
+    types_content += "    tool_use_id: str = ''\n"
+    types_content += "    content: str = ''\n"
+    types_content += "    is_error: Optional[bool] = None\n\n\n"
+
+    types_content += "@dataclass\nclass WireSessionMessage:\n"
+    types_content += '    """Canonical transcript message."""\n'
+    types_content += "    role: str = ''\n"
+    types_content += "    content: Optional[str] = None\n"
+    types_content += "    tool_calls: Optional[list] = None\n"
+    types_content += "    stop_reason: Optional[str] = None\n"
+    types_content += "    blocks: Optional[list] = None\n"
+    types_content += "    results: Optional[list] = None\n\n\n"
+
+    types_content += "@dataclass\nclass WireSessionHistory:\n"
+    types_content += '    """Paginated transcript page."""\n'
+    types_content += "    session_id: str = ''\n"
+    types_content += "    session_ref: Optional[str] = None\n"
+    types_content += "    message_count: int = 0\n"
+    types_content += "    offset: int = 0\n"
+    types_content += "    limit: Optional[int] = None\n"
+    types_content += "    has_more: bool = False\n"
+    types_content += "    messages: list = field(default_factory=list)\n\n\n"
+
     # WireEvent
     types_content += "@dataclass\nclass WireEvent:\n"
     types_content += '    """Event from agent execution stream."""\n'
@@ -255,6 +295,47 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     types_content += "  usage: WireUsage;\n"
     types_content += "  structured_output?: unknown;\n"
     types_content += "  schema_warnings?: Array<{ provider: string; path: string; message: string }>;\n"
+    types_content += "}\n\n"
+
+    types_content += "export interface WireProviderMeta {\n"
+    types_content += "  provider: string;\n"
+    types_content += "  [key: string]: unknown;\n"
+    types_content += "}\n\n"
+
+    types_content += "export interface WireAssistantBlock {\n"
+    types_content += "  block_type: string;\n"
+    types_content += "  data: Record<string, unknown>;\n"
+    types_content += "}\n\n"
+
+    types_content += "export interface WireToolCall {\n"
+    types_content += "  id: string;\n"
+    types_content += "  name: string;\n"
+    types_content += "  args: unknown;\n"
+    types_content += "}\n\n"
+
+    types_content += "export interface WireToolResult {\n"
+    types_content += "  tool_use_id: string;\n"
+    types_content += "  content: string;\n"
+    types_content += "  is_error?: boolean;\n"
+    types_content += "}\n\n"
+
+    types_content += "export interface WireSessionMessage {\n"
+    types_content += "  role: string;\n"
+    types_content += "  content?: string;\n"
+    types_content += "  tool_calls?: WireToolCall[];\n"
+    types_content += "  stop_reason?: string;\n"
+    types_content += "  blocks?: WireAssistantBlock[];\n"
+    types_content += "  results?: WireToolResult[];\n"
+    types_content += "}\n\n"
+
+    types_content += "export interface WireSessionHistory {\n"
+    types_content += "  session_id: string;\n"
+    types_content += "  session_ref?: string;\n"
+    types_content += "  message_count: number;\n"
+    types_content += "  offset: number;\n"
+    types_content += "  limit?: number;\n"
+    types_content += "  has_more: boolean;\n"
+    types_content += "  messages: WireSessionMessage[];\n"
     types_content += "}\n\n"
 
     types_content += "export interface WireEvent {\n"

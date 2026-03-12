@@ -34,6 +34,58 @@ class WireRunResult:
 
 
 @dataclass
+class WireProviderMeta:
+    """Provider continuity metadata."""
+    provider: str = ''
+
+
+@dataclass
+class WireAssistantBlock:
+    """Block assistant transcript item."""
+    block_type: str = ''
+    data: Optional[dict] = None
+
+
+@dataclass
+class WireToolCall:
+    """Legacy assistant tool call."""
+    id: str = ''
+    name: str = ''
+    args: Optional[Any] = None
+
+
+@dataclass
+class WireToolResult:
+    """Tool result transcript item."""
+    tool_use_id: str = ''
+    content: str = ''
+    is_error: Optional[bool] = None
+
+
+@dataclass
+class WireSessionMessage:
+    """Canonical transcript message."""
+    role: str = ''
+    content: Optional[str] = None
+    tool_calls: Optional[list] = None
+    stop_reason: Optional[str] = None
+    blocks: Optional[list] = None
+    results: Optional[list] = None
+
+
+@dataclass
+class WireSessionHistory:
+    """Paginated transcript page."""
+    session_id: str = ''
+    session_ref: Optional[str] = None
+    message_count: int = 0
+    offset: int = 0
+    limit: Optional[int] = None
+    has_more: bool = False
+    messages: list = field(default_factory=list)
+
+
+@dataclass
 class WireEvent:
     """Event from agent execution stream."""
     session_id: str = ''

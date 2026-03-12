@@ -15,6 +15,8 @@ import {
   isRunCompleted,
   isTurnCompleted,
   MeerkatClient,
+  Session,
+  DeferredSession,
 } from "../dist/index.js";
 
 // ---------------------------------------------------------------------------
@@ -250,6 +252,99 @@ describe("Typed Events", () => {
     }
   });
 
+  it("should parse session history payloads", () => {
+    const history = MeerkatClient.parseSessionHistory({
+      session_id: "s1",
+      session_ref: "ref-1",
+      message_count: 3,
+      offset: 1,
+      limit: 2,
+      has_more: true,
+      messages: [
+        { role: "system", content: "rules" },
+        {
+          role: "assistant",
+          content: "working",
+          tool_calls: [{ id: "tc_1", name: "search", args: { q: "rust" } }],
+          stop_reason: "tool_use",
+        },
+        {
+          role: "block_assistant",
+          blocks: [
+            {
+              block_type: "tool_use",
+              data: { id: "tc_2", name: "lookup", args: { item: "history" } },
+            },
+          ],
+          stop_reason: "end_turn",
+        },
+      ],
+    });
+
+    assert.equal(history.sessionId, "s1");
+    assert.equal(history.sessionRef, "ref-1");
+    assert.equal(history.limit, 2);
+    assert.equal(history.hasMore, true);
+    assert.equal(history.messages[1].toolCalls[0].name, "search");
+    assert.equal(history.messages[2].blocks[0].name, "lookup");
+  });
+
+  it("Session.history should delegate to readSessionHistory", async () => {
+    const expected = {
+      sessionId: "s1",
+      messageCount: 0,
+      offset: 0,
+      limit: undefined,
+      hasMore: false,
+      messages: [],
+    };
+    const calls = [];
+    const session = new Session(
+      {
+        readSessionHistory: async (sessionId, options) => {
+          calls.push({ sessionId, options });
+          return expected;
+        },
+      },
+      {
+        sessionId: "s1",
+        text: "ok",
+        turns: 1,
+        toolCalls: 0,
+        usage: { inputTokens: 0, outputTokens: 0 },
+      },
+    );
+
+    const history = await session.history({ offset: 2, limit: 5 });
+    assert.deepEqual(calls, [{ sessionId: "s1", options: { offset: 2, limit: 5 } }]);
+    assert.equal(history, expected);
+  });
+
+  it("DeferredSession.history should delegate to readSessionHistory", async () => {
+    const expected = {
+      sessionId: "s2",
+      messageCount: 0,
+      offset: 0,
+      limit: undefined,
+      hasMore: false,
+      messages: [],
+    };
+    const calls = [];
+    const session = new DeferredSession(
+      {
+        readSessionHistory: async (sessionId, options) => {
+          calls.push({ sessionId, options });
+          return expected;
+        },
+      },
+      "s2",
+    );
+
+    const history = await session.history({ offset: 1 });
+    assert.deepEqual(calls, [{ sessionId: "s2", options: { offset: 1 } }]);
+    assert.equal(history, expected);
+  });
+
   it("should tolerate malformed tool_config_changed payload", () => {
     const event = parseEvent({
       type: "tool_config_changed",
@@ -444,6 +539,40 @@ describe("Comms methods", () => {
     assert.equal(sendReceipt.kind, "peer_message_sent");
     assert.deepEqual(peers.peers, [{ name: "agent-a" }]);
     assert.deepEqual(calls.map((call) => call.method), ["comms/send", "comms/peers"]);
+  });
+
+  it("readSessionHistory routes through session/history and parses typed messages", async () => {
+    const client = new MeerkatClient();
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      return {
+        session_id: params.session_id,
+        session_ref: "history-ref",
+        message_count: 3,
+        offset: params.offset,
+        limit: params.limit,
+        has_more: false,
+        messages: [
+          { role: "user", content: "hello" },
+          { role: "assistant", content: "ok", stop_reason: "end_turn" },
+        ],
+      };
+    };
+
+    const history = await client.readSessionHistory("s1", { offset: 1, limit: 2 });
+
+    assert.equal(history.sessionId, "s1");
+    assert.equal(history.sessionRef, "history-ref");
+    assert.equal(history.offset, 1);
+    assert.equal(history.limit, 2);
+    assert.equal(history.messages[1].role, "assistant");
+    assert.deepEqual(calls, [
+      {
+        method: "session/history",
+        params: { session_id: "s1", offset: 1, limit: 2 },
+      },
+    ]);
   });
 
   it("mcpAdd/mcpRemove/mcpReload send correct RPC methods and payloads", async () => {

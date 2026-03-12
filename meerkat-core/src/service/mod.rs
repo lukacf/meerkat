@@ -11,7 +11,7 @@ use crate::session::SystemContextStageError;
 use crate::time_compat::SystemTime;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
-use crate::types::{RunResult, SessionId, Usage};
+use crate::types::{Message, RunResult, SessionId, Usage};
 use crate::{
     AgentToolDispatcher, BudgetLimits, HookRunOverrides, OutputSchema, PeerMeta, Provider, Session,
 };
@@ -405,6 +405,52 @@ impl SessionView {
     }
 }
 
+/// Query parameters for reading session history.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionHistoryQuery {
+    /// Number of messages to skip from the start of the transcript.
+    pub offset: usize,
+    /// Maximum number of messages to return.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+/// Paginated transcript page for a session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionHistoryPage {
+    pub session_id: SessionId,
+    pub message_count: usize,
+    pub offset: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    pub has_more: bool,
+    pub messages: Vec<Message>,
+}
+
+impl SessionHistoryPage {
+    /// Build a transcript page from the full ordered message list.
+    pub fn from_messages(
+        session_id: SessionId,
+        messages: &[Message],
+        query: SessionHistoryQuery,
+    ) -> Self {
+        let message_count = messages.len();
+        let start = query.offset.min(message_count);
+        let end = match query.limit {
+            Some(limit) => start.saturating_add(limit).min(message_count),
+            None => message_count,
+        };
+        Self {
+            session_id,
+            message_count,
+            offset: start,
+            limit: query.limit,
+            has_more: end < message_count,
+            messages: messages[start..end].to_vec(),
+        }
+    }
+}
+
 /// Canonical session lifecycle abstraction.
 ///
 /// All surfaces delegate to this trait. Implementations control persistence,
@@ -499,6 +545,24 @@ pub trait SessionServiceControlExt: SessionService {
         id: &SessionId,
         req: AppendSystemContextRequest,
     ) -> Result<AppendSystemContextResult, SessionControlError>;
+}
+
+/// Optional history-read extension for `SessionService`.
+///
+/// Keeps the base lifecycle contract lightweight while allowing surfaces to
+/// fetch full transcript contents when they explicitly opt in.
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+pub trait SessionServiceHistoryExt: SessionService {
+    /// Read the committed transcript for a session.
+    ///
+    /// Implementations may return `PersistenceDisabled` if they cannot provide
+    /// authoritative history for the requested lifecycle state.
+    async fn read_history(
+        &self,
+        id: &SessionId,
+        query: SessionHistoryQuery,
+    ) -> Result<SessionHistoryPage, SessionError>;
 }
 
 /// Extension trait for `Arc<dyn SessionService>` to allow calling methods directly.

@@ -32,7 +32,7 @@ use futures::stream::Stream;
 use meerkat::{
     AgentEvent, AgentFactory, FactoryAgentBuilder, LlmClient, OutputSchema,
     PersistentSessionService, Session, SessionId, SessionService, SessionServiceControlExt,
-    encode_llm_client_override_for_service, open_realm_persistence_in,
+    SessionServiceHistoryExt, encode_llm_client_override_for_service, open_realm_persistence_in,
 };
 use meerkat_contracts::{SessionLocator, SkillsParams, format_session_ref};
 use meerkat_core::EventEnvelope;
@@ -833,6 +833,14 @@ pub struct ListSessionsQuery {
     pub label: Option<Vec<String>>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SessionHistoryQuery {
+    #[serde(default)]
+    pub offset: Option<usize>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
 /// Session response — canonical wire type from contracts.
 pub type SessionResponse = meerkat_contracts::WireRunResult;
 
@@ -864,6 +872,7 @@ pub fn router(state: AppState) -> Router {
     let r = Router::new()
         .route("/sessions", get(list_sessions).post(create_session))
         .route("/sessions/{id}", get(get_session).delete(archive_session))
+        .route("/sessions/{id}/history", get(get_session_history))
         .route("/sessions/{id}/interrupt", post(interrupt_session))
         .route("/sessions/{id}/system_context", post(append_system_context))
         .route("/sessions/{id}/messages", post(continue_session))
@@ -2001,6 +2010,36 @@ async fn get_session(
     }))
 }
 
+/// Get full session history.
+async fn get_session_history(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<SessionHistoryQuery>,
+) -> Result<Json<meerkat_contracts::WireSessionHistory>, ApiError> {
+    let session_id = resolve_session_id_for_state(&id, &state)?;
+    let history = state
+        .session_service
+        .read_history(
+            &session_id,
+            meerkat_core::service::SessionHistoryQuery {
+                offset: query.offset.unwrap_or(0),
+                limit: query.limit,
+            },
+        )
+        .await
+        .map_err(|e| match e {
+            SessionError::NotFound { .. } => ApiError::NotFound(format!("Session not found: {id}")),
+            SessionError::PersistenceDisabled => {
+                ApiError::BadRequest(format!("Session history is unavailable for session: {id}"))
+            }
+            _ => ApiError::Internal(format!("{e}")),
+        })?;
+
+    let mut wire: meerkat_contracts::WireSessionHistory = history.into();
+    wire.session_ref = Some(format_session_ref(&state.realm_id, &session_id));
+    Ok(Json(wire))
+}
+
 /// Interrupt an in-flight turn on a session.
 async fn interrupt_session(
     State(state): State<AppState>,
@@ -3060,6 +3099,107 @@ mod tests {
             StatusCode::OK,
             "runtime state request failed: {}",
             String::from_utf8_lossy(&body)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_session_history_route_returns_messages_for_live_and_archived_sessions() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let session_service = state.session_service.clone();
+        let created = session_service
+            .create_session(SvcCreateSessionRequest {
+                model: state.default_model.to_string(),
+                prompt: "Hello".to_string(),
+                system_prompt: None,
+                max_tokens: Some(state.max_tokens),
+                event_tx: None,
+                host_mode: false,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::RunImmediately,
+                build: Some(SessionBuildOptions {
+                    llm_client_override: state
+                        .llm_client_override
+                        .clone()
+                        .map(encode_llm_client_override_for_service),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("session create should succeed");
+        let session_id = created.session_id.to_string();
+
+        session_service
+            .start_turn(
+                &created.session_id,
+                meerkat_core::service::StartTurnRequest {
+                    prompt: "Follow up".to_string(),
+                    event_tx: None,
+                    host_mode: false,
+                    skill_references: None,
+                    flow_tool_overlay: None,
+                    additional_instructions: None,
+                },
+            )
+            .await
+            .expect("second turn should succeed");
+
+        let app = router(state.clone());
+        let request = axum::http::Request::builder()
+            .method("GET")
+            .uri(format!("/sessions/{session_id}/history?offset=1&limit=2"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(status, StatusCode::OK);
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["session_id"], session_id);
+        assert!(
+            payload["message_count"].as_u64().unwrap_or(0) >= 4,
+            "history should expose the full multi-turn transcript: {payload}"
+        );
+        assert_eq!(payload["offset"], 1);
+        assert_eq!(payload["limit"], 2);
+        assert_eq!(payload["has_more"], true);
+        assert_eq!(payload["messages"].as_array().unwrap().len(), 2);
+
+        session_service
+            .archive(&created.session_id)
+            .await
+            .expect("archive should succeed");
+
+        let archived_request = axum::http::Request::builder()
+            .method("GET")
+            .uri(format!("/sessions/{session_id}/history"))
+            .body(Body::empty())
+            .unwrap();
+        let archived_response = app.oneshot(archived_request).await.unwrap();
+        let archived_status = archived_response.status();
+        let archived_body = archived_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        assert_eq!(archived_status, StatusCode::OK);
+        let archived_payload: serde_json::Value = serde_json::from_slice(&archived_body).unwrap();
+        assert!(
+            archived_payload["message_count"].as_u64().unwrap_or(0) >= 4,
+            "archived history should preserve the transcript: {archived_payload}"
+        );
+        assert!(
+            archived_payload["messages"].as_array().unwrap().len() >= 4,
+            "archived history should return the full transcript"
         );
     }
 

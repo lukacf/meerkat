@@ -25,6 +25,7 @@ pub use version::ContractVersion;
 pub use wire::{
     CommsParams, CoreCreateParams, HookParams, McpAddParams, McpLiveOpResponse, McpLiveOpStatus,
     McpLiveOperation, McpReloadParams, McpRemoveParams, SkillEntry, SkillInspectResponse,
-    SkillListResponse, SkillsParams, StructuredOutputParams, WireEvent, WireRunResult,
-    WireSessionInfo, WireSessionSummary, WireUsage,
+    SkillListResponse, SkillsParams, StructuredOutputParams, WireAssistantBlock, WireEvent,
+    WireProviderMeta, WireRunResult, WireSessionHistory, WireSessionInfo, WireSessionMessage,
+    WireSessionSummary, WireStopReason, WireToolCall, WireToolResult, WireUsage,
 };

@@ -4,7 +4,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { Session } from "../dist/session.js";
+import { DeferredSession, Session } from "../dist/session.js";
 import { MeerkatClient } from "../dist/client.js";
 
 describe("Skills v2.1", () => {
@@ -188,6 +188,65 @@ describe("Skills v2.1", () => {
     const peers = await session.peers();
     assert.deepEqual(peers, [{ id: "peer-a" }, { id: "peer-b" }]);
     assert.deepEqual(calls, ["s-1"]);
+  });
+
+  it("Session.history forwards to readSessionHistory", async () => {
+    const calls = [];
+    const mockClient = {
+      async readSessionHistory(sessionId, options) {
+        calls.push({ sessionId, options });
+        return {
+          sessionId,
+          sessionRef: "ref-1",
+          messageCount: 2,
+          offset: options?.offset ?? 0,
+          limit: options?.limit,
+          hasMore: false,
+          messages: [
+            { role: "user", content: "hello", toolCalls: [], blocks: [], results: [] },
+            { role: "assistant", content: "ok", stopReason: "end_turn", toolCalls: [], blocks: [], results: [] },
+          ],
+        };
+      },
+    };
+
+    const session = new Session(mockClient, {
+      sessionId: "s-1", text: "init", turns: 0, toolCalls: 0,
+      usage: { inputTokens: 0, outputTokens: 0 },
+    });
+
+    const history = await session.history({ offset: 1, limit: 5 });
+
+    assert.equal(history.sessionId, "s-1");
+    assert.equal(history.messages[1].role, "assistant");
+    assert.deepEqual(calls, [{ sessionId: "s-1", options: { offset: 1, limit: 5 } }]);
+  });
+
+  it("DeferredSession.history forwards to readSessionHistory", async () => {
+    const calls = [];
+    const mockClient = {
+      async readSessionHistory(sessionId, options) {
+        calls.push({ sessionId, options });
+        return {
+          sessionId,
+          sessionRef: "ref-2",
+          messageCount: 1,
+          offset: options?.offset ?? 0,
+          limit: options?.limit,
+          hasMore: false,
+          messages: [
+            { role: "assistant", content: "pending", stopReason: "end_turn", toolCalls: [], blocks: [], results: [] },
+          ],
+        };
+      },
+    };
+
+    const session = new DeferredSession(mockClient, "s-2", "ref-2");
+    const history = await session.history({ offset: 2, limit: 3 });
+
+    assert.equal(history.sessionId, "s-2");
+    assert.equal(history.sessionRef, "ref-2");
+    assert.deepEqual(calls, [{ sessionId: "s-2", options: { offset: 2, limit: 3 } }]);
   });
 
   it("createSessionStreaming buffers early events before session id is bound", async () => {

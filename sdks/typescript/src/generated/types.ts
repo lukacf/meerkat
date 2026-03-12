@@ -22,6 +22,47 @@ export interface WireRunResult {
   schema_warnings?: Array<{ provider: string; path: string; message: string }>;
 }
 
+export interface WireProviderMeta {
+  provider: string;
+  [key: string]: unknown;
+}
+
+export interface WireAssistantBlock {
+  block_type: string;
+  data: Record<string, unknown>;
+}
+
+export interface WireToolCall {
+  id: string;
+  name: string;
+  args: unknown;
+}
+
+export interface WireToolResult {
+  tool_use_id: string;
+  content: string;
+  is_error?: boolean;
+}
+
+export interface WireSessionMessage {
+  role: string;
+  content?: string;
+  tool_calls?: WireToolCall[];
+  stop_reason?: string;
+  blocks?: WireAssistantBlock[];
+  results?: WireToolResult[];
+}
+
+export interface WireSessionHistory {
+  session_id: string;
+  session_ref?: string;
+  message_count: number;
+  offset: number;
+  limit?: number;
+  has_more: boolean;
+  messages: WireSessionMessage[];
+}
+
 export interface WireEvent {
   session_id: string;
   sequence: number;

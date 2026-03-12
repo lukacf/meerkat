@@ -9,7 +9,7 @@
 
 use meerkat_contracts::{
     ContractVersion, CoreCreateParams, ErrorCode, WireError, WireEvent, WireRunResult,
-    WireSessionInfo, WireSessionSummary, WireUsage,
+    WireSessionHistory, WireSessionInfo, WireSessionMessage, WireSessionSummary, WireUsage,
 };
 use meerkat_core::{
     AgentEvent, BudgetType, HookPatch, HookPoint, HookReasonCode, RunResult, SessionId, StopReason,
@@ -179,7 +179,81 @@ fn wire_session_summary_required_fields() {
 }
 
 // ---------------------------------------------------------------------------
-// 6. WireEvent envelope shape
+// 6. WireSessionHistory required fields
+// ---------------------------------------------------------------------------
+
+#[test]
+fn wire_session_history_required_fields() {
+    let wire = WireSessionHistory {
+        session_id: SessionId::new(),
+        session_ref: Some("session-ref".to_string()),
+        message_count: 3,
+        offset: 1,
+        limit: Some(2),
+        has_more: false,
+        messages: vec![
+            WireSessionMessage::System {
+                content: "system".to_string(),
+            },
+            WireSessionMessage::User {
+                content: "user".to_string(),
+            },
+        ],
+    };
+    let value = serde_json::to_value(&wire).unwrap();
+
+    assert!(value.get("session_id").is_some(), "missing session_id");
+    assert!(
+        value.get("message_count").is_some(),
+        "missing message_count"
+    );
+    assert!(value.get("offset").is_some(), "missing offset");
+    assert!(value.get("has_more").is_some(), "missing has_more");
+    assert!(value.get("messages").is_some(), "missing messages");
+}
+
+// ---------------------------------------------------------------------------
+// 7. WireSessionHistory roundtrip
+// ---------------------------------------------------------------------------
+
+#[test]
+fn wire_session_history_roundtrip() {
+    let wire = WireSessionHistory {
+        session_id: SessionId::new(),
+        session_ref: Some("history-ref".to_string()),
+        message_count: 4,
+        offset: 2,
+        limit: Some(2),
+        has_more: true,
+        messages: vec![
+            WireSessionMessage::BlockAssistant {
+                blocks: vec![],
+                stop_reason: meerkat_contracts::WireStopReason::EndTurn,
+            },
+            WireSessionMessage::ToolResults {
+                results: vec![meerkat_contracts::WireToolResult {
+                    tool_use_id: "tool-1".to_string(),
+                    content: "ok".to_string(),
+                    is_error: false,
+                }],
+            },
+        ],
+    };
+
+    let json = serde_json::to_value(&wire).unwrap();
+    let roundtrip: WireSessionHistory = serde_json::from_value(json).unwrap();
+
+    assert_eq!(wire.session_id, roundtrip.session_id);
+    assert_eq!(wire.session_ref, roundtrip.session_ref);
+    assert_eq!(wire.message_count, roundtrip.message_count);
+    assert_eq!(wire.offset, roundtrip.offset);
+    assert_eq!(wire.limit, roundtrip.limit);
+    assert_eq!(wire.has_more, roundtrip.has_more);
+    assert_eq!(wire.messages, roundtrip.messages);
+}
+
+// ---------------------------------------------------------------------------
+// 8. WireEvent envelope shape
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -202,7 +276,7 @@ fn wire_event_envelope_shape() {
 }
 
 // ---------------------------------------------------------------------------
-// 7. WireUsage fields
+// 9. WireUsage fields
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -225,7 +299,7 @@ fn wire_usage_fields() {
 }
 
 // ---------------------------------------------------------------------------
-// 8. WireError shape
+// 10. WireError shape
 // ---------------------------------------------------------------------------
 
 #[test]

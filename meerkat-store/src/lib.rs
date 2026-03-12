@@ -47,7 +47,6 @@ pub use redb_store::RedbSessionStore;
 use async_trait::async_trait;
 use meerkat_core::time_compat::SystemTime;
 use meerkat_core::{Session, SessionId, SessionMeta};
-#[cfg(not(target_arch = "wasm32"))]
 
 /// Filter for listing sessions
 #[derive(Debug, Clone, Default)]

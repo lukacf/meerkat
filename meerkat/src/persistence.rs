@@ -110,38 +110,43 @@ mod tests {
     }
 
     #[test]
-    fn redb_bundle_resolves_runtime_store_and_persistent_adapter() {
-        let temp = TempDir::new().expect("tempdir");
-        let store: Arc<dyn SessionStore> = Arc::new(
-            RedbSessionStore::open(temp.path().join("sessions.redb")).expect("open redb store"),
-        );
+    fn redb_bundle_resolves_runtime_store_and_persistent_adapter()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
+        let store: Arc<dyn SessionStore> =
+            Arc::new(RedbSessionStore::open(temp.path().join("sessions.redb"))?);
 
-        let bundle = PersistenceBundle::from_session_store(store).expect("build bundle");
+        let bundle = PersistenceBundle::from_session_store(store)?;
 
         assert!(bundle.runtime_store().is_some());
         let _ = bundle.runtime_adapter();
+        Ok(())
     }
 
     #[test]
-    fn memory_bundle_keeps_existing_session_store_behavior_without_runtime_companion() {
+    fn memory_bundle_keeps_existing_session_store_behavior_without_runtime_companion()
+    -> Result<(), Box<dyn std::error::Error>> {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
 
-        let bundle = PersistenceBundle::from_session_store(store).expect("build bundle");
+        let bundle = PersistenceBundle::from_session_store(store)?;
 
         assert!(bundle.runtime_store().is_none());
         let _ = bundle.runtime_adapter();
+        Ok(())
     }
 
     #[cfg(feature = "jsonl-store")]
     #[test]
-    fn jsonl_bundle_keeps_existing_session_store_behavior_without_runtime_companion() {
-        let temp = TempDir::new().expect("tempdir");
+    fn jsonl_bundle_keeps_existing_session_store_behavior_without_runtime_companion()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
         let store: Arc<dyn SessionStore> = Arc::new(JsonlStore::new(temp.path().join("jsonl")));
 
-        let bundle = PersistenceBundle::from_session_store(store).expect("build bundle");
+        let bundle = PersistenceBundle::from_session_store(store)?;
 
         assert!(bundle.runtime_store().is_none());
         let _ = bundle.runtime_adapter();
+        Ok(())
     }
 
     #[test]
@@ -152,11 +157,12 @@ mod tests {
     }
 
     #[test]
-    fn unknown_store_has_no_runtime_companion() {
+    fn unknown_store_has_no_runtime_companion() -> Result<(), Box<dyn std::error::Error>> {
         let store: Arc<dyn SessionStore> = Arc::new(UnknownStore);
 
-        let bundle = PersistenceBundle::from_session_store(store).expect("build bundle");
+        let bundle = PersistenceBundle::from_session_store(store)?;
 
         assert!(bundle.runtime_store().is_none());
+        Ok(())
     }
 }

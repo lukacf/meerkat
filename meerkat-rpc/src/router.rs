@@ -378,7 +378,7 @@ impl MethodRouter {
         mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
     ) -> Self {
         Self {
-            runtime,
+            runtime: runtime.clone(),
             config_store,
             notification_sink,
             skill_runtime: None,
@@ -1099,8 +1099,9 @@ impl MethodRouter {
             }
             #[cfg(feature = "mob")]
             Some(SessionOwner::Mob) => {
+                let session_service = self.mob_state.session_service();
                 match meerkat_mob::MobSessionService::subscribe_session_events(
-                    self.mob_state.session_service(),
+                    &session_service,
                     &session_id,
                 )
                 .await

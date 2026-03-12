@@ -315,7 +315,7 @@ impl AppState {
             skill_runtime,
             runtime_adapter,
             #[cfg(feature = "mob")]
-            mob_state: Arc::new(meerkat_mob_mcp::MobMcpState::new(session_service.clone())),
+            mob_state: Arc::new(meerkat_mob_mcp::MobMcpState::new(session_service)),
             #[cfg(feature = "mcp")]
             mcp_sessions: Arc::new(RwLock::new(std::collections::HashMap::new())),
         })

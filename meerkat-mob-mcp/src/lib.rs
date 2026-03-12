@@ -43,13 +43,23 @@ struct ManagedMob {
 /// In-memory MCP state for multiple mobs.
 pub struct MobMcpState {
     session_service: Arc<dyn MobSessionService>,
+    runtime_adapter: Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>,
     mobs: RwLock<BTreeMap<MobId, ManagedMob>>,
 }
 
 impl MobMcpState {
     pub fn new(session_service: Arc<dyn MobSessionService>) -> Self {
+        let runtime_adapter = session_service.runtime_adapter();
+        Self::new_with_runtime_adapter(session_service, runtime_adapter)
+    }
+
+    pub fn new_with_runtime_adapter(
+        session_service: Arc<dyn MobSessionService>,
+        runtime_adapter: Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>,
+    ) -> Self {
         Self {
             session_service,
+            runtime_adapter,
             mobs: RwLock::new(BTreeMap::new()),
         }
     }
@@ -68,11 +78,13 @@ impl MobMcpState {
             return Err(MobError::Internal(format!("mob already exists: {mob_id}")));
         }
         let storage = MobStorage::in_memory();
-        let handle = MobBuilder::new(definition.clone(), storage)
+        let mut builder = MobBuilder::new(definition.clone(), storage)
             .with_session_service(self.session_service.clone())
-            .allow_ephemeral_sessions(!self.session_service.supports_persistent_sessions())
-            .create()
-            .await?;
+            .allow_ephemeral_sessions(!self.session_service.supports_persistent_sessions());
+        if let Some(adapter) = &self.runtime_adapter {
+            builder = builder.with_runtime_adapter(adapter.clone());
+        }
+        let handle = builder.create().await?;
         match self.mobs.write().await.entry(mob_id.clone()) {
             Entry::Vacant(entry) => {
                 entry.insert(ManagedMob { handle });
@@ -210,6 +222,56 @@ impl MobMcpState {
             )));
         };
         self.mob_retire(&mob_id, meerkat_id).await
+    }
+
+    pub async fn owns_live_session(&self, session_id: &SessionId) -> bool {
+        let mob_ids = self.mobs.read().await.keys().cloned().collect::<Vec<_>>();
+        for mob_id in mob_ids {
+            if let Ok(handle) = self.handle_for(&mob_id).await {
+                let members = handle.list_all_members().await;
+                if members.into_iter().any(|member| {
+                    member
+                        .member_ref
+                        .session_id()
+                        .is_some_and(|candidate| candidate == session_id)
+                }) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    pub async fn owns_persisted_session(&self, session_id: &SessionId) -> bool {
+        let Some(comms_name) = self
+            .session_service()
+            .load_persisted_session(session_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|session| {
+                session
+                    .session_metadata()
+                    .and_then(|metadata| metadata.comms_name.clone())
+            })
+        else {
+            return false;
+        };
+
+        let mut parts = comms_name.split('/');
+        let Some(mob_id) = parts.next().filter(|part| !part.is_empty()) else {
+            return false;
+        };
+        let has_profile = parts.next().is_some_and(|part| !part.is_empty());
+        let has_member = parts.next().is_some_and(|part| !part.is_empty());
+        if !(has_profile && has_member) || parts.next().is_some() {
+            return false;
+        }
+
+        self.mobs
+            .read()
+            .await
+            .contains_key(&meerkat_mob::MobId::from(mob_id))
     }
 
     pub async fn mob_wire(
@@ -380,7 +442,10 @@ impl MobMcpState {
 
     /// Create MCP state backed by an in-memory local session service.
     pub fn new_in_memory() -> Arc<Self> {
-        Arc::new(Self::new(Arc::new(LocalSessionService::new())))
+        Arc::new(Self::new_with_runtime_adapter(
+            Arc::new(LocalSessionService::new()),
+            Some(Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral())),
+        ))
     }
 }
 

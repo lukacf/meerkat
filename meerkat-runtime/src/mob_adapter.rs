@@ -23,6 +23,7 @@ pub fn create_flow_step_input(
     instructions: &str,
     flow_id: &str,
     step_index: usize,
+    turn_metadata: Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
 ) -> Input {
     Input::FlowStep(FlowStepInput {
         header: InputHeader {
@@ -40,6 +41,7 @@ pub fn create_flow_step_input(
         },
         step_id: step_id.into(),
         instructions: instructions.into(),
+        turn_metadata,
     })
 }
 
@@ -62,7 +64,7 @@ pub async fn deliver_flow_step(
     flow_id: &str,
     step_index: usize,
 ) -> Result<crate::AcceptOutcome, RuntimeDriverError> {
-    let input = create_flow_step_input(step_id, instructions, flow_id, step_index);
+    let input = create_flow_step_input(step_id, instructions, flow_id, step_index, None);
     adapter.accept_input(session_id, input).await
 }
 
@@ -105,7 +107,7 @@ mod tests {
         assert!(outcome.is_accepted());
 
         // Verify policy: flow_step → StageRunStart + WakeIfIdle
-        let input = create_flow_step_input("s", "i", "f", 0);
+        let input = create_flow_step_input("s", "i", "f", 0, None);
         let policy = DefaultPolicyTable::resolve(&input, true);
         assert_eq!(policy.apply_mode, crate::ApplyMode::StageRunStart);
         assert_eq!(policy.wake_mode, crate::WakeMode::WakeIfIdle);

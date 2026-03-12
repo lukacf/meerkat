@@ -19,6 +19,7 @@ path = "src/main.rs"
 [dependencies]
 meerkat-core = { workspace = true }
 meerkat-mob = { workspace = true }
+meerkat-runtime = { path = "../meerkat-runtime" }
 meerkat-client = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

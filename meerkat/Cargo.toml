@@ -16,6 +16,7 @@ categories.workspace = true
 meerkat-core = { workspace = true, features = ["jsonschema"] }
 meerkat-client = { workspace = true }
 meerkat-store = { workspace = true }
+meerkat-runtime = { workspace = true, optional = true }
 meerkat-tools = { workspace = true }
 meerkat-session = { workspace = true }
 meerkat-memory = { workspace = true, optional = true }
@@ -68,7 +69,7 @@ jsonl-store = ["meerkat-store/jsonl"]
 memory-store = ["meerkat-store/memory"]
 
 # Session capabilities
-session-store = ["meerkat-session/session-store"]
+session-store = ["meerkat-session/session-store", "dep:meerkat-runtime", "meerkat-runtime/redb-store"]
 session-compaction = ["meerkat-session/session-compaction"]
 memory-store-session = ["dep:meerkat-memory"]
 

@@ -3474,8 +3474,18 @@ async fn build_cli_persistent_service(
         factory = factory.user_config_root(user_root);
     }
 
+    let runtime_store = store.shared_redb_database().and_then(|database| {
+        meerkat_runtime::store::RedbRuntimeStore::new(database)
+            .ok()
+            .map(|store| Arc::new(store) as Arc<dyn meerkat_runtime::RuntimeStore>)
+    });
     let builder = FactoryAgentBuilder::new(factory, config);
-    Ok(meerkat::PersistentSessionService::new(builder, 64, store))
+    Ok(meerkat::PersistentSessionService::new(
+        builder,
+        64,
+        store,
+        runtime_store,
+    ))
 }
 
 type CliPersistentService = meerkat::PersistentSessionService<FactoryAgentBuilder>;
@@ -4504,12 +4514,13 @@ async fn hydrate_mob_state(
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
         }
 
-        let handle = meerkat_mob::MobBuilder::for_resume(storage)
+        let mut builder = meerkat_mob::MobBuilder::for_resume(storage)
             .with_session_service(session_service.clone())
-            .notify_orchestrator_on_resume(false)
-            .resume()
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            .notify_orchestrator_on_resume(false);
+        if let Some(adapter) = session_service.runtime_adapter() {
+            builder = builder.with_runtime_adapter(adapter);
+        }
+        let handle = builder.resume().await.map_err(|e| anyhow::anyhow!("{e}"))?;
         let created = handle.mob_id().clone();
         if created.as_str() != mob_id {
             return Err(anyhow::anyhow!(
@@ -5281,16 +5292,20 @@ async fn execute_mob_deploy_internal(
     }
 
     let session_service = build_deploy_mob_session_service(scope, effective_config.clone());
-    let handle = meerkat_mob::MobBuilder::from_mobpack(
+    let mut builder = meerkat_mob::MobBuilder::from_mobpack(
         archive.definition.clone(),
         archive.skills.clone(),
         meerkat_mob::MobStorage::in_memory(),
     )
     .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?
-    .with_session_service(session_service)
-    .create()
-    .await
-    .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
+    .with_session_service(session_service.clone());
+    if let Some(adapter) = session_service.runtime_adapter() {
+        builder = builder.with_runtime_adapter(adapter);
+    }
+    let handle = builder
+        .create()
+        .await
+        .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
 
     if let Some(orchestrator) = &archive.definition.orchestrator {
         let roster = handle.roster().await;

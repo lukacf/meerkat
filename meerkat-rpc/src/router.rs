@@ -15,6 +15,7 @@ use meerkat_core::ConfigStore;
 use meerkat_core::EventEnvelope;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::types::SessionId;
+use meerkat_runtime::SessionServiceRuntimeExt as _;
 use serde_json::json;
 
 use crate::error;
@@ -276,7 +277,9 @@ impl MethodRouter {
         config_store: Arc<dyn ConfigStore>,
         notification_sink: NotificationSink,
     ) -> Self {
-        let runtime_adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
+        let runtime_adapter = runtime.runtime_adapter();
+        #[cfg(feature = "mob")]
+        let mob_state = Arc::new(meerkat_mob_mcp::MobMcpState::new(runtime.session_service()));
         Self {
             runtime,
             config_store,
@@ -285,7 +288,7 @@ impl MethodRouter {
             active_session_streams: Arc::new(Mutex::new(HashMap::new())),
             closed_session_streams: Arc::new(Mutex::new(ClosedStreamSet::new())),
             #[cfg(feature = "mob")]
-            mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
+            mob_state,
             #[cfg(feature = "mob")]
             active_mob_streams: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(feature = "mob")]
@@ -297,6 +300,74 @@ impl MethodRouter {
     /// Get a reference to the runtime adapter for session registration.
     pub fn runtime_adapter(&self) -> &Arc<meerkat_runtime::RuntimeSessionAdapter> {
         &self.runtime_adapter
+    }
+
+    fn session_id_from_runtime_params(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> Result<SessionId, RpcResponse> {
+        let Some(params) = params else {
+            return Err(RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                "missing params",
+            ));
+        };
+        let value: serde_json::Value = match serde_json::from_str(params.get()) {
+            Ok(value) => value,
+            Err(err) => {
+                return Err(RpcResponse::error(
+                    id,
+                    error::INVALID_PARAMS,
+                    format!("invalid params: {err}"),
+                ));
+            }
+        };
+        let Some(session_id) = value.get("session_id").and_then(|value| value.as_str()) else {
+            return Err(RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                "missing session_id",
+            ));
+        };
+        SessionId::parse(session_id)
+            .map_err(|err| RpcResponse::error(id, error::INVALID_PARAMS, err.to_string()))
+    }
+
+    async fn ensure_runtime_session_registered(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RpcResponse> {
+        let owner = self.resolve_session_owner(session_id).await;
+
+        if owner.is_none() {
+            return Err(RpcResponse::error(
+                None,
+                error::SESSION_NOT_FOUND,
+                format!("Session not found: {session_id}"),
+            ));
+        }
+
+        let executor: Box<dyn meerkat_core::lifecycle::CoreExecutor> = match owner.unwrap() {
+            SessionOwner::Runtime => {
+                Box::new(crate::session_executor::SessionRuntimeExecutor::new(
+                    self.runtime.clone(),
+                    session_id.clone(),
+                    self.notification_sink.clone(),
+                ))
+            }
+            #[cfg(feature = "mob")]
+            SessionOwner::Mob => Box::new(crate::session_executor::MobRpcRuntimeExecutor::new(
+                self.mob_state.session_service().clone(),
+                session_id.clone(),
+                self.notification_sink.clone(),
+            )),
+        };
+        self.runtime_adapter
+            .ensure_session_with_executor(session_id.clone(), executor)
+            .await;
+        Ok(())
     }
 
     #[cfg(all(test, feature = "mob"))]
@@ -319,7 +390,7 @@ impl MethodRouter {
             active_mob_streams: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(feature = "mob")]
             closed_mob_streams: Arc::new(Mutex::new(ClosedStreamSet::new())),
-            runtime_adapter: Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
+            runtime_adapter: runtime.runtime_adapter(),
         }
     }
 
@@ -346,21 +417,24 @@ impl MethodRouter {
     // the authoritative operation-specific read again so they observe the
     // freshest lifecycle state instead of routing off a cached snapshot.
     async fn resolve_session_owner(&self, session_id: &SessionId) -> Option<SessionOwner> {
-        if self.runtime.session_state(session_id).await.is_some()
-            || self.runtime.read_session(session_id).await.is_ok()
-        {
-            return Some(SessionOwner::Runtime);
-        }
-
         #[cfg(feature = "mob")]
-        if self
-            .mob_state
-            .session_service()
-            .read(session_id)
-            .await
-            .is_ok()
+        if self.mob_state.owns_live_session(session_id).await
+            || self.mob_state.owns_persisted_session(session_id).await
         {
             return Some(SessionOwner::Mob);
+        }
+
+        if self.runtime.session_state(session_id).await.is_some()
+            || self.runtime.read_session(session_id).await.is_ok()
+            || self
+                .runtime
+                .load_persisted_session(session_id)
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+        {
+            return Some(SessionOwner::Runtime);
         }
 
         None
@@ -387,7 +461,10 @@ impl MethodRouter {
         let params = request.params.as_deref();
 
         let response = match request.method.as_str() {
-            "initialize" => handlers::initialize::handle_initialize(id),
+            "initialize" => handlers::initialize::handle_initialize(
+                id,
+                self.runtime_adapter.runtime_mode() == meerkat_runtime::RuntimeMode::V9Compliant,
+            ),
             "session/create" => {
                 let resp = handlers::session::handle_create(
                     id,
@@ -397,7 +474,8 @@ impl MethodRouter {
                 )
                 .await;
                 // Register runtime driver with executor for newly created session
-                if resp.error.is_none()
+                if self.runtime_adapter.runtime_mode() == meerkat_runtime::RuntimeMode::V9Compliant
+                    && resp.error.is_none()
                     && let Some(ref result) = resp.result
                     && let Ok(val) = serde_json::from_str::<serde_json::Value>(result.get())
                     && let Some(sid_str) = val.get("session_id").and_then(|v| v.as_str())
@@ -534,28 +612,138 @@ impl MethodRouter {
             "mcp/remove" => handlers::mcp::handle_remove(id, params, &self.runtime).await,
             "mcp/reload" => handlers::mcp::handle_reload(id, params, &self.runtime).await,
             "runtime/state" => {
-                handlers::runtime::handle_runtime_state(id, params, self.runtime_adapter.as_ref())
+                if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
+                {
+                    RpcResponse::error(
+                        id,
+                        error::METHOD_NOT_FOUND,
+                        "Method not found: runtime/state",
+                    )
+                } else {
+                    let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
+                        Ok(session_id) => session_id,
+                        Err(response) => return Some(response),
+                    };
+                    if let Err(response) = self.ensure_runtime_session_registered(&session_id).await
+                    {
+                        return Some(response.with_id(id));
+                    }
+                    handlers::runtime::handle_runtime_state(
+                        id,
+                        params,
+                        self.runtime_adapter.as_ref(),
+                    )
                     .await
+                }
             }
             "runtime/accept" => {
-                handlers::runtime::handle_runtime_accept(id, params, self.runtime_adapter.as_ref())
+                if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
+                {
+                    RpcResponse::error(
+                        id,
+                        error::METHOD_NOT_FOUND,
+                        "Method not found: runtime/accept",
+                    )
+                } else {
+                    let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
+                        Ok(session_id) => session_id,
+                        Err(response) => return Some(response),
+                    };
+                    if let Err(response) = self.ensure_runtime_session_registered(&session_id).await
+                    {
+                        return Some(response.with_id(id));
+                    }
+                    handlers::runtime::handle_runtime_accept(
+                        id,
+                        params,
+                        self.runtime_adapter.as_ref(),
+                    )
                     .await
+                }
             }
             "runtime/retire" => {
-                handlers::runtime::handle_runtime_retire(id, params, self.runtime_adapter.as_ref())
+                if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
+                {
+                    RpcResponse::error(
+                        id,
+                        error::METHOD_NOT_FOUND,
+                        "Method not found: runtime/retire",
+                    )
+                } else {
+                    let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
+                        Ok(session_id) => session_id,
+                        Err(response) => return Some(response),
+                    };
+                    if let Err(response) = self.ensure_runtime_session_registered(&session_id).await
+                    {
+                        return Some(response.with_id(id));
+                    }
+                    handlers::runtime::handle_runtime_retire(
+                        id,
+                        params,
+                        self.runtime_adapter.as_ref(),
+                    )
                     .await
+                }
             }
             "runtime/reset" => {
-                handlers::runtime::handle_runtime_reset(id, params, self.runtime_adapter.as_ref())
+                if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
+                {
+                    RpcResponse::error(
+                        id,
+                        error::METHOD_NOT_FOUND,
+                        "Method not found: runtime/reset",
+                    )
+                } else {
+                    let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
+                        Ok(session_id) => session_id,
+                        Err(response) => return Some(response),
+                    };
+                    if let Err(response) = self.ensure_runtime_session_registered(&session_id).await
+                    {
+                        return Some(response.with_id(id));
+                    }
+                    handlers::runtime::handle_runtime_reset(
+                        id,
+                        params,
+                        self.runtime_adapter.as_ref(),
+                    )
                     .await
+                }
             }
             "input/state" => {
-                handlers::runtime::handle_input_state(id, params, self.runtime_adapter.as_ref())
-                    .await
+                if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
+                {
+                    RpcResponse::error(id, error::METHOD_NOT_FOUND, "Method not found: input/state")
+                } else {
+                    let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
+                        Ok(session_id) => session_id,
+                        Err(response) => return Some(response),
+                    };
+                    if let Err(response) = self.ensure_runtime_session_registered(&session_id).await
+                    {
+                        return Some(response.with_id(id));
+                    }
+                    handlers::runtime::handle_input_state(id, params, self.runtime_adapter.as_ref())
+                        .await
+                }
             }
             "input/list" => {
-                handlers::runtime::handle_input_list(id, params, self.runtime_adapter.as_ref())
-                    .await
+                if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
+                {
+                    RpcResponse::error(id, error::METHOD_NOT_FOUND, "Method not found: input/list")
+                } else {
+                    let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
+                        Ok(session_id) => session_id,
+                        Err(response) => return Some(response),
+                    };
+                    if let Err(response) = self.ensure_runtime_session_registered(&session_id).await
+                    {
+                        return Some(response.with_id(id));
+                    }
+                    handlers::runtime::handle_input_list(id, params, self.runtime_adapter.as_ref())
+                        .await
+                }
             }
             _ => RpcResponse::error(
                 id,

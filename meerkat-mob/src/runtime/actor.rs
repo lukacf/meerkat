@@ -1559,50 +1559,34 @@ impl MobActor {
         Ok(())
     }
 
-    /// Retire a member and re-spawn it with the same profile (non-blocking).
-    ///
-    /// Retire completes synchronously within this call. Spawn is enqueued
-    /// asynchronously — the new member becomes available when
-    /// `MeerkatSpawned` is emitted. Returns `Ok(())` once retire completes
-    /// and spawn is enqueued.
+    /// Reset a member runtime in place and restart its autonomous loop when
+    /// applicable.
     async fn handle_respawn(
         &mut self,
         meerkat_id: MeerkatId,
         initial_message: Option<String>,
     ) -> Result<(), MobError> {
-        // Capture profile before retire removes entry.
-        let profile_name = {
+        let entry = {
             let roster = self.roster.read().await;
-            let entry = roster
+            roster
                 .get(&meerkat_id)
-                .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?;
-            entry.profile.clone()
+                .cloned()
+                .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?
         };
 
-        // Full retire (disposal pipeline).
-        self.handle_retire(meerkat_id.clone()).await?;
+        if entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost {
+            self.stop_autonomous_host_loop_for_member(&meerkat_id, &entry.member_ref)
+                .await?;
+        }
 
-        // Enqueue async spawn with same profile and meerkat ID.
-        // The spawn result is delivered via MeerkatSpawned event.
-        let (spawn_reply_tx, spawn_reply_rx) = oneshot::channel();
-        let mut respawn_spec =
-            super::handle::SpawnMemberSpec::new(profile_name, meerkat_id.clone());
-        respawn_spec.initial_message = initial_message;
-        self.enqueue_spawn(respawn_spec, spawn_reply_tx).await;
+        self.provisioner.reset_member(&entry.member_ref).await?;
 
-        // Fire-and-forget: log spawn failures but don't block the caller.
-        let mid = meerkat_id.clone();
-        self.lifecycle_tasks.spawn(async move {
-            match spawn_reply_rx.await {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => {
-                    tracing::error!(meerkat_id = %mid, error = %e, "respawn: spawn failed after retire");
-                }
-                Err(_) => {
-                    tracing::error!(meerkat_id = %mid, "respawn: spawn reply dropped");
-                }
-            }
-        });
+        if entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost {
+            let prompt = initial_message
+                .unwrap_or_else(|| self.fallback_spawn_prompt(&entry.profile, &meerkat_id));
+            self.start_autonomous_host_loop(&meerkat_id, &entry.member_ref, prompt)
+                .await?;
+        }
 
         Ok(())
     }

@@ -29,6 +29,7 @@ use crate::traits::{
 };
 
 /// Ephemeral runtime driver — all state in-memory.
+#[derive(Clone)]
 pub struct EphemeralRuntimeDriver {
     /// Logical identity of this runtime.
     runtime_id: LogicalRuntimeId,
@@ -42,6 +43,8 @@ pub struct EphemeralRuntimeDriver {
     events: Vec<RuntimeEventEnvelope>,
     /// Whether wake was requested.
     wake_requested: bool,
+    /// Whether immediate processing was requested without a normal wake.
+    process_requested: bool,
 }
 
 impl EphemeralRuntimeDriver {
@@ -57,6 +60,7 @@ impl EphemeralRuntimeDriver {
             queue: InputQueue::new(),
             events: Vec::new(),
             wake_requested: false,
+            process_requested: false,
         }
     }
 
@@ -85,6 +89,11 @@ impl EphemeralRuntimeDriver {
         std::mem::take(&mut self.wake_requested)
     }
 
+    /// Check if immediate processing was requested (and clear the flag).
+    pub fn take_process_requested(&mut self) -> bool {
+        std::mem::take(&mut self.process_requested)
+    }
+
     /// Get pending events (and drain them).
     pub fn drain_events(&mut self) -> Vec<RuntimeEventEnvelope> {
         std::mem::take(&mut self.events)
@@ -95,6 +104,25 @@ impl EphemeralRuntimeDriver {
         &self.queue
     }
 
+    /// Enqueue a recovered input payload back into the runtime queue.
+    pub fn enqueue_recovered_input(&mut self, input_id: InputId, input: Input) {
+        self.queue.enqueue(input_id, input);
+    }
+
+    /// Check whether a specific input is already queued.
+    pub fn has_queued_input(&self, input_id: &InputId) -> bool {
+        self.queue
+            .input_ids()
+            .iter()
+            .any(|queued_id| queued_id == input_id)
+    }
+
+    /// Remove an input entirely (used when durable persistence fails).
+    pub fn remove_input(&mut self, input_id: &InputId) {
+        let _ = self.queue.remove(input_id);
+        let _ = self.ledger.remove(input_id);
+    }
+
     /// Get the ledger for external inspection.
     pub fn ledger(&self) -> &InputLedger {
         &self.ledger
@@ -103,6 +131,19 @@ impl EphemeralRuntimeDriver {
     /// Get mutable access to the ledger (for recovery injection).
     pub fn ledger_mut(&mut self) -> &mut InputLedger {
         &mut self.ledger
+    }
+
+    /// Snapshot all tracked input states.
+    pub fn input_states_snapshot(&self) -> Vec<InputState> {
+        self.ledger.iter().map(|(_, state)| state.clone()).collect()
+    }
+
+    /// Remove a previously accepted input from the ledger/queue.
+    pub fn forget_input(&mut self, input_id: &InputId) {
+        let _ = self.queue.remove(input_id);
+        let _ = self.ledger.remove(input_id);
+        self.wake_requested = false;
+        self.process_requested = false;
     }
 
     /// Get mutable access to the state machine (for external lifecycle control).
@@ -129,6 +170,7 @@ impl EphemeralRuntimeDriver {
                     from: InputLifecycleState::Accepted,
                     to: InputLifecycleState::Staged,
                 })?;
+        state.last_run_id = Some(run_id.clone());
         InputStateMachine::transition(state, InputLifecycleState::Staged, None)?;
         self.emit_event(RuntimeEvent::InputLifecycle(InputLifecycleEvent::Staged {
             input_id: input_id.clone(),
@@ -185,6 +227,7 @@ impl EphemeralRuntimeDriver {
     /// Rollback staged inputs to queued (on run failure).
     pub fn rollback_staged(&mut self, input_ids: &[InputId]) -> Result<(), InputStateMachineError> {
         for input_id in input_ids {
+            let mut requeue_input = None;
             if let Some(state) = self.ledger.get_mut(input_id)
                 && state.current_state == InputLifecycleState::Staged
             {
@@ -193,6 +236,12 @@ impl EphemeralRuntimeDriver {
                     InputLifecycleState::Queued,
                     Some("run failed, rollback".into()),
                 )?;
+                requeue_input = state.persisted_input.clone();
+            }
+            if !self.has_queued_input(input_id)
+                && let Some(input) = requeue_input
+            {
+                self.queue.enqueue(input_id.clone(), input);
             }
         }
         Ok(())
@@ -451,6 +500,7 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
             ApplyMode::InjectNow => {
                 // Queue for immediate processing
                 if let Some(s) = self.ledger.get_mut(&input_id) {
+                    s.persisted_input = Some(input.clone());
                     let _ = InputStateMachine::transition(s, InputLifecycleState::Queued, None);
                 }
                 self.queue.enqueue(input_id.clone(), input);
@@ -461,6 +511,7 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
             ApplyMode::StageRunStart | ApplyMode::StageRunBoundary => {
                 // Queue for run boundary
                 if let Some(s) = self.ledger.get_mut(&input_id) {
+                    s.persisted_input = Some(input.clone());
                     let _ = InputStateMachine::transition(s, InputLifecycleState::Queued, None);
                 }
                 self.queue.enqueue(input_id.clone(), input);
@@ -471,8 +522,11 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
         }
 
         // Set wake flag
-        if policy.wake_mode == WakeMode::WakeIfIdle && runtime_idle {
+        if runtime_idle && policy.wake_mode == WakeMode::WakeIfIdle {
             self.wake_requested = true;
+        }
+        if runtime_idle && policy.apply_mode == ApplyMode::InjectNow {
+            self.process_requested = true;
         }
 
         // Get the final state
@@ -542,10 +596,14 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
             RunEvent::RunStarted { .. } => {
                 // Informational — no state change needed
             }
-            RunEvent::BoundaryApplied { run_id, receipt } => {
+            RunEvent::BoundaryApplied {
+                run_id, receipt, ..
+            } => {
                 // Transition contributing inputs to AppliedPendingConsumption
                 for input_id in &receipt.contributing_input_ids {
                     if let Some(state) = self.ledger.get_mut(input_id) {
+                        state.last_run_id = Some(run_id.clone());
+                        state.last_boundary_sequence = Some(receipt.sequence);
                         // Only transition if Staged (not already Applied)
                         if state.current_state == InputLifecycleState::Staged {
                             let _ = InputStateMachine::transition(
@@ -644,6 +702,7 @@ mod tests {
                 correlation_id: None,
             },
             text: text.into(),
+            turn_metadata: None,
         })
     }
 
@@ -773,9 +832,10 @@ mod tests {
         let input = make_system_generated();
         let result = driver.accept_input(input).await.unwrap();
 
-        // SystemGenerated: InjectNow, no wake, OnAccept
+        // InjectNow should request immediate processing without a normal wake.
         assert!(result.is_accepted());
         assert!(!driver.take_wake_requested());
+        assert!(driver.take_process_requested());
         // InjectNow still queues (it will be applied immediately by the runtime loop)
         assert_eq!(driver.queue().len(), 1);
     }
@@ -815,6 +875,7 @@ mod tests {
                 correlation_id: None,
             },
             text: "hi".into(),
+            turn_metadata: None,
         });
         let result = driver.accept_input(input).await.unwrap();
         assert!(result.is_rejected());

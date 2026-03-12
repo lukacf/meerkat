@@ -98,6 +98,7 @@ mod tests {
         let input = Input::Prompt(PromptInput {
             header: make_header(InputDurability::Derived, InputOrigin::System),
             text: "hi".into(),
+            turn_metadata: None,
         });
         assert!(validate_durability(&input).is_err());
     }
@@ -107,6 +108,7 @@ mod tests {
         let input = Input::Prompt(PromptInput {
             header: make_header(InputDurability::Durable, InputOrigin::Operator),
             text: "hi".into(),
+            turn_metadata: None,
         });
         assert!(validate_durability(&input).is_ok());
     }
@@ -116,6 +118,7 @@ mod tests {
         let input = Input::Prompt(PromptInput {
             header: make_header(InputDurability::Ephemeral, InputOrigin::Operator),
             text: "hi".into(),
+            turn_metadata: None,
         });
         assert!(validate_durability(&input).is_ok());
     }
@@ -175,6 +178,7 @@ mod tests {
             header: make_header(InputDurability::Derived, InputOrigin::System),
             step_id: "s1".into(),
             instructions: "do it".into(),
+            turn_metadata: None,
         });
         assert!(validate_durability(&input).is_err());
     }

@@ -10,7 +10,7 @@ use crate::input::InputDurability;
 use crate::input_state::InputState;
 
 /// In-memory ledger tracking InputState for all inputs.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct InputLedger {
     /// InputId → InputState (insertion order preserved).
     states: IndexMap<InputId, InputState>,
@@ -69,6 +69,15 @@ impl InputLedger {
     /// Get the state of a specific input.
     pub fn get(&self, input_id: &InputId) -> Option<&InputState> {
         self.states.get(input_id)
+    }
+
+    /// Remove an input from the ledger and dedup index.
+    pub fn remove(&mut self, input_id: &InputId) -> Option<InputState> {
+        let removed = self.states.shift_remove(input_id)?;
+        if let Some(key) = &removed.idempotency_key {
+            self.idempotency_index.shift_remove(key);
+        }
+        Some(removed)
     }
 
     /// Get mutable reference to the state of a specific input.

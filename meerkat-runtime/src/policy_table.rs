@@ -463,6 +463,7 @@ mod tests {
         let input = Input::Prompt(PromptInput {
             header,
             text: "hello".into(),
+            turn_metadata: None,
         });
         let decision = DefaultPolicyTable::resolve(&input, true);
         assert_eq!(decision.apply_mode, ApplyMode::StageRunStart);

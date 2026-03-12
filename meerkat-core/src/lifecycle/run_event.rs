@@ -25,6 +25,9 @@ pub enum RunEvent {
         run_id: RunId,
         /// The receipt proving application.
         receipt: RunBoundaryReceipt,
+        /// Optional serialized session snapshot to persist atomically with the receipt.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_snapshot: Option<Vec<u8>>,
     },
 
     /// A run completed successfully.
@@ -106,6 +109,7 @@ mod tests {
         let event = RunEvent::BoundaryApplied {
             run_id: receipt.run_id.clone(),
             receipt: receipt.clone(),
+            session_snapshot: Some(b"session".to_vec()),
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["event_type"], "boundary_applied");

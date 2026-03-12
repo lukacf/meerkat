@@ -9,16 +9,16 @@ use std::sync::Arc;
 
 use meerkat_core::EventEnvelope;
 use meerkat_core::event::AgentEvent;
-use meerkat_core::lifecycle::RunId;
-use meerkat_core::lifecycle::core_executor::{CoreExecutor, CoreExecutorError};
+use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
 use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunPrimitive};
-use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
 use meerkat_core::types::SessionId;
 use tokio::sync::mpsc;
 
 use crate::router::NotificationSink;
 use crate::session_runtime::SessionRuntime;
+#[cfg(feature = "mob")]
+use meerkat_mob::MobSessionService;
 
 /// Implements `CoreExecutor` by delegating to `SessionRuntime::start_turn()`.
 ///
@@ -29,6 +29,28 @@ pub struct SessionRuntimeExecutor {
     runtime: Arc<SessionRuntime>,
     session_id: SessionId,
     notification_sink: NotificationSink,
+}
+
+#[cfg(feature = "mob")]
+pub struct MobRpcRuntimeExecutor {
+    session_service: Arc<dyn MobSessionService>,
+    session_id: SessionId,
+    notification_sink: NotificationSink,
+}
+
+#[cfg(feature = "mob")]
+impl MobRpcRuntimeExecutor {
+    pub fn new(
+        session_service: Arc<dyn MobSessionService>,
+        session_id: SessionId,
+        notification_sink: NotificationSink,
+    ) -> Self {
+        Self {
+            session_service,
+            session_id,
+            notification_sink,
+        }
+    }
 }
 
 impl SessionRuntimeExecutor {
@@ -74,8 +96,9 @@ fn extract_prompt(primitive: &RunPrimitive) -> String {
 impl CoreExecutor for SessionRuntimeExecutor {
     async fn apply(
         &mut self,
+        run_id: meerkat_core::lifecycle::RunId,
         primitive: RunPrimitive,
-    ) -> Result<RunBoundaryReceipt, CoreExecutorError> {
+    ) -> Result<CoreApplyOutput, CoreExecutorError> {
         let prompt = extract_prompt(&primitive);
 
         // Create an event channel and forward events to the notification sink
@@ -90,14 +113,31 @@ impl CoreExecutor for SessionRuntimeExecutor {
 
         let result = self
             .runtime
-            .start_turn(
+            .apply_runtime_turn(
                 &self.session_id,
+                run_id,
+                &primitive,
                 prompt,
                 event_tx,
-                None, // skill_references
-                None, // flow_tool_overlay
-                None, // additional_instructions
-                None, // overrides
+                primitive
+                    .turn_metadata()
+                    .and_then(|meta| meta.skill_references.clone()),
+                primitive
+                    .turn_metadata()
+                    .and_then(|meta| meta.flow_tool_overlay.clone()),
+                primitive
+                    .turn_metadata()
+                    .and_then(|meta| meta.additional_instructions.clone()),
+                Some(crate::handlers::turn::TurnOverrides {
+                    host_mode: primitive.turn_metadata().map(|meta| meta.host_mode),
+                    model: None,
+                    provider: None,
+                    max_tokens: None,
+                    system_prompt: None,
+                    output_schema: None,
+                    structured_output_retries: None,
+                    provider_params: None,
+                }),
             )
             .await;
 
@@ -105,20 +145,7 @@ impl CoreExecutor for SessionRuntimeExecutor {
         let _ = forwarder.await;
 
         match result {
-            Ok(_run_result) => {
-                let boundary = match &primitive {
-                    RunPrimitive::StagedInput(staged) => staged.boundary,
-                    _ => meerkat_core::lifecycle::run_primitive::RunApplyBoundary::Immediate,
-                };
-                Ok(RunBoundaryReceipt {
-                    run_id: RunId::new(),
-                    boundary,
-                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
-                    conversation_digest: None,
-                    message_count: 0,
-                    sequence: 0,
-                })
-            }
+            Ok(output) => Ok(output),
             Err(rpc_err) => Err(CoreExecutorError::ApplyFailed {
                 reason: rpc_err.message,
             }),
@@ -132,7 +159,87 @@ impl CoreExecutor for SessionRuntimeExecutor {
                 .interrupt(&self.session_id)
                 .await
                 .map_err(|e| CoreExecutorError::ControlFailed { reason: e.message }),
-            RunControlCommand::StopRuntimeExecutor { .. } => Ok(()),
+            RunControlCommand::StopRuntimeExecutor { .. } => self
+                .runtime
+                .discard_live_session(&self.session_id)
+                .await
+                .map_err(|err| CoreExecutorError::ControlFailed {
+                    reason: err.to_string(),
+                }),
+            _ => Ok(()),
+        }
+    }
+}
+
+#[cfg(feature = "mob")]
+#[async_trait::async_trait]
+impl CoreExecutor for MobRpcRuntimeExecutor {
+    async fn apply(
+        &mut self,
+        run_id: meerkat_core::lifecycle::RunId,
+        primitive: RunPrimitive,
+    ) -> Result<CoreApplyOutput, CoreExecutorError> {
+        let prompt = extract_prompt(&primitive);
+        let (event_tx, mut event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(128);
+        let sink = self.notification_sink.clone();
+        let sid = self.session_id.clone();
+        let forwarder = tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                sink.emit_event(&sid, &event).await;
+            }
+        });
+
+        let req = meerkat_core::service::StartTurnRequest {
+            prompt,
+            event_tx: Some(event_tx),
+            host_mode: primitive.turn_metadata().is_some_and(|meta| meta.host_mode),
+            skill_references: primitive
+                .turn_metadata()
+                .and_then(|meta| meta.skill_references.clone()),
+            flow_tool_overlay: primitive
+                .turn_metadata()
+                .and_then(|meta| meta.flow_tool_overlay.clone()),
+            additional_instructions: primitive
+                .turn_metadata()
+                .and_then(|meta| meta.additional_instructions.clone()),
+        };
+
+        let result = self
+            .session_service
+            .apply_runtime_turn(
+                &self.session_id,
+                run_id,
+                req,
+                match &primitive {
+                    RunPrimitive::StagedInput(staged) => staged.boundary,
+                    _ => meerkat_core::lifecycle::run_primitive::RunApplyBoundary::Immediate,
+                },
+                primitive.contributing_input_ids().to_vec(),
+            )
+            .await;
+
+        let _ = forwarder.await;
+        result.map_err(|err| CoreExecutorError::ApplyFailed {
+            reason: err.to_string(),
+        })
+    }
+
+    async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        match command {
+            RunControlCommand::CancelCurrentRun { .. } => self
+                .session_service
+                .interrupt(&self.session_id)
+                .await
+                .map_err(|e| CoreExecutorError::ControlFailed {
+                    reason: e.to_string(),
+                }),
+            RunControlCommand::StopRuntimeExecutor { .. } => self
+                .session_service
+                .discard_live_session(&self.session_id)
+                .await
+                .map_err(|err| CoreExecutorError::ControlFailed {
+                    reason: err.to_string(),
+                }),
             _ => Ok(()),
         }
     }

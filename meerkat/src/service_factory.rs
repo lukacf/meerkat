@@ -118,6 +118,15 @@ impl SessionAgent for FactoryAgent {
         self.agent.session_with_system_context_state()
     }
 
+    fn apply_runtime_system_context(
+        &mut self,
+        appends: &[meerkat_core::PendingSystemContextAppend],
+    ) {
+        self.agent
+            .session_mut()
+            .append_system_context_blocks(appends);
+    }
+
     fn system_context_state(
         &self,
     ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
@@ -281,7 +290,12 @@ pub fn build_persistent_service(
     store: Arc<dyn meerkat_store::SessionStore>,
 ) -> meerkat_session::PersistentSessionService<FactoryAgentBuilder> {
     let builder = FactoryAgentBuilder::new(factory, config);
-    meerkat_session::PersistentSessionService::new(builder, max_sessions, store)
+    let runtime_store = store.shared_redb_database().and_then(|database| {
+        meerkat_runtime::store::RedbRuntimeStore::new(database)
+            .ok()
+            .map(|store| Arc::new(store) as Arc<dyn meerkat_runtime::RuntimeStore>)
+    });
+    meerkat_session::PersistentSessionService::new(builder, max_sessions, store, runtime_store)
 }
 
 #[cfg(test)]

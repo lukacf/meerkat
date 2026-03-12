@@ -7,7 +7,7 @@ use meerkat_core::lifecycle::RunId;
 use crate::runtime_state::{RuntimeState, RuntimeStateTransitionError};
 
 /// Concrete runtime state machine with run tracking.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RuntimeStateMachine {
     state: RuntimeState,
     current_run_id: Option<RunId>,

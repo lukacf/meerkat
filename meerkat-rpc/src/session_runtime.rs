@@ -19,22 +19,27 @@ use std::time::Duration;
 use indexmap::IndexMap;
 use meerkat::{
     AgentBuildConfig, AgentFactory, FactoryAgentBuilder, PersistentSessionService, SessionStore,
+    encode_llm_client_override_for_service,
 };
 use meerkat_client::LlmClient;
 use meerkat_core::EventEnvelope;
+use meerkat_core::RunId;
 use meerkat_core::event::AgentEvent;
+use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
+use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
-    SessionControlError, SessionError, SessionQuery, SessionService, SessionServiceControlExt,
-    StartTurnRequest,
+    SessionBuildOptions, SessionControlError, SessionError, SessionQuery, SessionService,
+    SessionServiceControlExt, StartTurnRequest,
 };
 use meerkat_core::skills::{SkillError, SourceIdentityRegistry};
 use meerkat_core::types::{RunResult, SessionId};
 #[cfg(feature = "mcp")]
 use meerkat_core::{AgentToolDispatcher, ToolGateway};
-use meerkat_core::{Config, ConfigStore, Session, SessionSystemContextState};
+use meerkat_core::{Config, ConfigStore, HookRunOverrides, Session, SessionSystemContextState};
 #[cfg(all(test, feature = "mcp"))]
 use meerkat_core::{ToolConfigChangeOperation, ToolConfigChangedPayload};
+use meerkat_runtime::{RuntimeSessionAdapter, RuntimeStore};
 use tokio::sync::{RwLock, mpsc};
 
 use crate::error;
@@ -133,7 +138,7 @@ enum PendingSessionPhase {
 /// Wraps [`PersistentSessionService`] for session lifecycle management while
 /// preserving the two-step create-then-run API required by JSON-RPC handlers.
 pub struct SessionRuntime {
-    service: PersistentSessionService<FactoryAgentBuilder>,
+    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     /// Sessions that have been "created" (ID returned to caller) but not yet
     /// materialized in the service. The first `start_turn` call promotes them.
     pending: RwLock<IndexMap<SessionId, PendingSession>>,
@@ -144,6 +149,7 @@ pub struct SessionRuntime {
     instance_id: Option<String>,
     backend: Option<String>,
     config_runtime: Option<Arc<meerkat_core::ConfigRuntime>>,
+    runtime_store: Option<Arc<dyn RuntimeStore>>,
     skill_identity_registry: Arc<StdRwLock<SkillIdentityRegistryState>>,
     #[cfg(feature = "mcp")]
     mcp_sessions: RwLock<std::collections::HashMap<SessionId, SessionMcpState>>,
@@ -165,6 +171,17 @@ pub struct SessionRuntime {
 }
 
 impl SessionRuntime {
+    fn build_runtime_store(
+        store: &Arc<dyn SessionStore>,
+    ) -> Result<Option<Arc<dyn meerkat_runtime::RuntimeStore>>, String> {
+        let Some(database) = store.shared_redb_database() else {
+            return Ok(None);
+        };
+        let runtime_store = meerkat_runtime::store::RedbRuntimeStore::new(database)
+            .map_err(|err| format!("failed to initialize redb runtime store: {err}"))?;
+        Ok(Some(Arc::new(runtime_store)))
+    }
+
     /// Create a new session runtime.
     pub fn new(
         factory: AgentFactory,
@@ -172,8 +189,15 @@ impl SessionRuntime {
         max_sessions: usize,
         store: Arc<dyn SessionStore>,
     ) -> Self {
+        let runtime_store = Self::build_runtime_store(&store)
+            .expect("redb-backed SessionRuntime must initialize runtime store");
         let builder = FactoryAgentBuilder::new(factory, config);
-        let service = PersistentSessionService::new(builder, max_sessions, store);
+        let service = Arc::new(PersistentSessionService::new(
+            builder,
+            max_sessions,
+            store,
+            runtime_store.clone(),
+        ));
 
         Self {
             service,
@@ -184,6 +208,7 @@ impl SessionRuntime {
             instance_id: None,
             backend: None,
             config_runtime: None,
+            runtime_store,
             skill_identity_registry: Arc::new(StdRwLock::new(SkillIdentityRegistryState {
                 generation: 0,
                 registry: SourceIdentityRegistry::default(),
@@ -206,9 +231,16 @@ impl SessionRuntime {
         max_sessions: usize,
         store: Arc<dyn SessionStore>,
     ) -> Self {
+        let runtime_store = Self::build_runtime_store(&store)
+            .expect("redb-backed SessionRuntime must initialize runtime store");
         let builder =
             FactoryAgentBuilder::new_with_config_store(factory, initial_config, config_store);
-        let service = PersistentSessionService::new(builder, max_sessions, store);
+        let service = Arc::new(PersistentSessionService::new(
+            builder,
+            max_sessions,
+            store,
+            runtime_store.clone(),
+        ));
 
         Self {
             service,
@@ -219,6 +251,7 @@ impl SessionRuntime {
             instance_id: None,
             backend: None,
             config_runtime: None,
+            runtime_store,
             skill_identity_registry: Arc::new(StdRwLock::new(SkillIdentityRegistryState {
                 generation: 0,
                 registry: SourceIdentityRegistry::default(),
@@ -258,6 +291,23 @@ impl SessionRuntime {
     /// Shared config runtime used by config handlers.
     pub fn config_runtime(&self) -> Option<Arc<meerkat_core::ConfigRuntime>> {
         self.config_runtime.as_ref().map(Arc::clone)
+    }
+
+    /// Build the runtime adapter appropriate for this runtime's persistence mode.
+    pub fn runtime_adapter(&self) -> Arc<RuntimeSessionAdapter> {
+        match &self.runtime_store {
+            Some(store) => Arc::new(RuntimeSessionAdapter::persistent(store.clone())),
+            None => Arc::new(RuntimeSessionAdapter::legacy()),
+        }
+    }
+
+    pub async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
+        self.service.discard_live_session(session_id).await
+    }
+
+    #[cfg(feature = "mob")]
+    pub fn session_service(&self) -> Arc<dyn meerkat_mob::MobSessionService> {
+        self.service.clone()
     }
 
     /// Set the callback request channel for tool callbacks.
@@ -337,6 +387,193 @@ impl SessionRuntime {
             slot.generation = generation;
             slot.registry = registry;
         }
+    }
+
+    pub async fn apply_runtime_turn(
+        &self,
+        session_id: &SessionId,
+        run_id: RunId,
+        primitive: &RunPrimitive,
+        prompt: String,
+        event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
+        skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
+        flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
+        additional_instructions: Option<Vec<String>>,
+        overrides: Option<crate::handlers::turn::TurnOverrides>,
+    ) -> Result<CoreApplyOutput, RpcError> {
+        if let RunPrimitive::StagedInput(staged) = primitive
+            && staged.appends.is_empty()
+            && !staged.context_appends.is_empty()
+            && staged.boundary == RunApplyBoundary::Immediate
+        {
+            return self
+                .service
+                .apply_runtime_context_appends(
+                    session_id,
+                    run_id,
+                    staged.context_appends.clone(),
+                    staged.contributing_input_ids.clone(),
+                )
+                .await
+                .map_err(session_error_to_rpc);
+        }
+
+        let is_pending = self.pending.read().await.contains_key(session_id);
+        let host_mode = match overrides.as_ref().and_then(|ov| ov.host_mode) {
+            Some(host_mode) => host_mode,
+            None => self
+                .load_persisted_session(session_id)
+                .await?
+                .and_then(|session| session.session_metadata().map(|meta| meta.host_mode))
+                .unwrap_or(false),
+        };
+
+        if !is_pending {
+            let req = StartTurnRequest {
+                prompt: prompt.clone(),
+                event_tx: Some(event_tx.clone()),
+                host_mode,
+                skill_references: skill_references.clone(),
+                flow_tool_overlay: flow_tool_overlay.clone(),
+                additional_instructions: additional_instructions.clone(),
+            };
+
+            match self
+                .service
+                .apply_runtime_turn(
+                    session_id,
+                    run_id.clone(),
+                    req,
+                    match primitive {
+                        RunPrimitive::StagedInput(staged) => staged.boundary,
+                        _ => RunApplyBoundary::Immediate,
+                    },
+                    primitive.contributing_input_ids().to_vec(),
+                )
+                .await
+            {
+                Ok(output) => return Ok(output),
+                Err(SessionError::NotFound { .. }) => {}
+                Err(err) => return Err(session_error_to_rpc(err)),
+            }
+        }
+
+        let stored_session = self
+            .load_persisted_session(session_id)
+            .await?
+            .ok_or_else(|| RpcError {
+                code: error::SESSION_NOT_FOUND,
+                message: format!("session not found: {session_id}"),
+                data: None,
+            })?;
+        let stored_metadata = stored_session.session_metadata();
+        let tooling = stored_metadata
+            .as_ref()
+            .map(|meta| meta.tooling.clone())
+            .unwrap_or_default();
+        let current_generation = match self.config_runtime.as_ref() {
+            Some(runtime) => runtime.get().await.ok().map(|snapshot| snapshot.generation),
+            None => None,
+        };
+        let build = SessionBuildOptions {
+            provider: stored_metadata.as_ref().map(|meta| meta.provider),
+            output_schema: None,
+            structured_output_retries: 2,
+            hooks_override: HookRunOverrides::default(),
+            comms_name: stored_metadata
+                .as_ref()
+                .and_then(|meta| meta.comms_name.clone()),
+            peer_meta: stored_metadata
+                .as_ref()
+                .and_then(|meta| meta.peer_meta.clone()),
+            resume_session: Some(stored_session),
+            budget_limits: None,
+            provider_params: None,
+            external_tools: None,
+            llm_client_override: self
+                .default_llm_client
+                .clone()
+                .map(encode_llm_client_override_for_service),
+            scoped_event_tx: None,
+            scoped_event_path: None,
+            override_builtins: Some(tooling.builtins),
+            override_shell: Some(tooling.shell),
+            override_subagents: Some(tooling.subagents),
+            override_memory: Some(tooling.memory),
+            override_mob: Some(tooling.mob),
+            preload_skills: None,
+            realm_id: stored_metadata
+                .as_ref()
+                .and_then(|meta| meta.realm_id.clone())
+                .or_else(|| self.realm_id.clone()),
+            instance_id: stored_metadata
+                .as_ref()
+                .and_then(|meta| meta.instance_id.clone())
+                .or_else(|| self.instance_id.clone()),
+            backend: stored_metadata
+                .as_ref()
+                .and_then(|meta| meta.backend.clone())
+                .or_else(|| self.backend.clone()),
+            config_generation: stored_metadata
+                .as_ref()
+                .and_then(|meta| meta.config_generation)
+                .or(current_generation),
+            checkpointer: None,
+            silent_comms_intents: Vec::new(),
+            max_inline_peer_notifications: None,
+            app_context: None,
+            additional_instructions: None,
+            shell_env: None,
+        };
+        self.service
+            .create_session(CreateSessionRequest {
+                model: stored_metadata
+                    .as_ref()
+                    .map(|meta| meta.model.clone())
+                    .ok_or_else(|| RpcError {
+                        code: error::INTERNAL_ERROR,
+                        message: format!(
+                            "persisted session {session_id} is missing session metadata"
+                        ),
+                        data: None,
+                    })?,
+                prompt: prompt.clone(),
+                system_prompt: overrides.as_ref().and_then(|ov| ov.system_prompt.clone()),
+                max_tokens: overrides
+                    .as_ref()
+                    .and_then(|ov| ov.max_tokens)
+                    .or_else(|| stored_metadata.as_ref().map(|meta| meta.max_tokens)),
+                event_tx: None,
+                host_mode,
+                skill_references: skill_references.clone(),
+                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                build: Some(build),
+                labels: None,
+            })
+            .await
+            .map_err(session_error_to_rpc)?;
+        let (_, output) = self
+            .service
+            .apply_runtime_turn_with_result(
+                session_id,
+                run_id,
+                StartTurnRequest {
+                    prompt,
+                    event_tx: Some(event_tx),
+                    host_mode,
+                    skill_references,
+                    flow_tool_overlay,
+                    additional_instructions,
+                },
+                match primitive {
+                    RunPrimitive::StagedInput(staged) => staged.boundary,
+                    _ => RunApplyBoundary::Immediate,
+                },
+                primitive.contributing_input_ids().to_vec(),
+            )
+            .await
+            .map_err(session_error_to_rpc)?;
+        Ok(output)
     }
 
     pub fn skill_identity_registry(&self) -> SourceIdentityRegistry {
@@ -658,10 +895,14 @@ impl SessionRuntime {
             }
         }
 
-        let host_mode = overrides
-            .as_ref()
-            .and_then(|ov| ov.host_mode)
-            .unwrap_or(false);
+        let host_mode = match overrides.as_ref().and_then(|ov| ov.host_mode) {
+            Some(host_mode) => host_mode,
+            None => self
+                .load_persisted_session(session_id)
+                .await?
+                .and_then(|session| session.session_metadata().map(|meta| meta.host_mode))
+                .unwrap_or(false),
+        };
 
         let req = StartTurnRequest {
             prompt: turn_prompt.clone(),
@@ -1010,6 +1251,17 @@ impl SessionRuntime {
     ) -> Result<meerkat_core::service::SessionView, RpcError> {
         self.service
             .read(session_id)
+            .await
+            .map_err(session_error_to_rpc)
+    }
+
+    /// Load the persisted session snapshot for authoritative post-turn inspection.
+    pub async fn load_persisted_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Session>, RpcError> {
+        self.service
+            .load_persisted(session_id)
             .await
             .map_err(session_error_to_rpc)
     }

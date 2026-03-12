@@ -6,6 +6,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::identifiers::InputId;
+use crate::service::TurnToolOverlay;
+use crate::skills::SkillKey;
 
 /// When to apply a conversation mutation relative to the run lifecycle.
 #[non_exhaustive]
@@ -69,6 +71,19 @@ pub struct ConversationContextAppend {
 }
 
 /// An input staged for application at a run boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RuntimeTurnMetadata {
+    #[serde(default)]
+    pub host_mode: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_references: Option<Vec<SkillKey>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_tool_overlay: Option<TurnToolOverlay>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_instructions: Option<Vec<String>>,
+}
+
+/// An input staged for application at a run boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StagedRunInput {
     /// When to apply this input.
@@ -82,6 +97,9 @@ pub struct StagedRunInput {
     /// Input IDs contributing to this staged input (opaque to core).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contributing_input_ids: Vec<InputId>,
+    /// Optional turn semantics that must survive crash recovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_metadata: Option<RuntimeTurnMetadata>,
 }
 
 /// The ONLY type core receives from the runtime layer for run execution.
@@ -107,6 +125,13 @@ impl RunPrimitive {
         match self {
             RunPrimitive::StagedInput(staged) => &staged.contributing_input_ids,
             RunPrimitive::ImmediateAppend(_) | RunPrimitive::ImmediateContextAppend(_) => &[],
+        }
+    }
+
+    pub fn turn_metadata(&self) -> Option<&RuntimeTurnMetadata> {
+        match self {
+            RunPrimitive::StagedInput(staged) => staged.turn_metadata.as_ref(),
+            RunPrimitive::ImmediateAppend(_) | RunPrimitive::ImmediateContextAppend(_) => None,
         }
     }
 }
@@ -203,6 +228,10 @@ mod tests {
             }],
             context_appends: vec![],
             contributing_input_ids: vec![InputId::new()],
+            turn_metadata: Some(RuntimeTurnMetadata {
+                host_mode: true,
+                ..Default::default()
+            }),
         };
         let json = serde_json::to_value(&staged).unwrap();
         let parsed: StagedRunInput = serde_json::from_value(json).unwrap();
@@ -216,6 +245,7 @@ mod tests {
             appends: vec![],
             context_appends: vec![],
             contributing_input_ids: vec![InputId::new(), InputId::new()],
+            turn_metadata: None,
         });
         let json = serde_json::to_value(&primitive).unwrap();
         assert_eq!(json["primitive_type"], "staged_input");

@@ -4,10 +4,11 @@
 //! through the runtime lifecycle.
 
 use chrono::{DateTime, Utc};
-use meerkat_core::lifecycle::InputId;
+use meerkat_core::lifecycle::{InputId, RunId};
 use serde::{Deserialize, Serialize};
 
 use crate::identifiers::PolicyVersion;
+use crate::input::Input;
 use crate::policy::PolicyDecision;
 
 /// The lifecycle state of an input.
@@ -155,6 +156,15 @@ pub struct InputState {
     /// How to reconstruct this input (for derived inputs).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reconstruction_source: Option<ReconstructionSource>,
+    /// Persisted input payload used to rebuild queued work after recovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persisted_input: Option<Input>,
+    /// Last run that touched this input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_id: Option<RunId>,
+    /// Boundary receipt sequence for the last applied run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_boundary_sequence: Option<u64>,
     /// When the input was created.
     pub created_at: DateTime<Utc>,
     /// When the input was last updated.
@@ -176,6 +186,9 @@ impl InputState {
             recovery_count: 0,
             history: Vec::new(),
             reconstruction_source: None,
+            persisted_input: None,
+            last_run_id: None,
+            last_boundary_sequence: None,
             created_at: now,
             updated_at: now,
         }

@@ -20,6 +20,7 @@ meerkat-skills = { workspace = true }
 meerkat = { workspace = true, features = ["comms", "skills", "session-compaction", "memory-store", "anthropic", "openai", "gemini"] }
 meerkat-session = { workspace = true, features = ["session-compaction"] }
 meerkat-client = { workspace = true }
+meerkat-runtime = { path = "../meerkat-runtime" }
 
 # Async runtime
 async-trait = { workspace = true }
@@ -45,6 +46,7 @@ indexmap = { workspace = true }
 jsonschema = { workspace = true }
 futures = { workspace = true }
 tokio-util = { workspace = true }
+sha2 = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }

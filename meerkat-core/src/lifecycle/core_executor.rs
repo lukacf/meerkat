@@ -4,6 +4,7 @@
 //! RunPrimitive into Agent session mutations. The trait lives in core so both
 //! layers can reference it without circular dependencies.
 
+use super::RunId;
 use super::run_control::RunControlCommand;
 use super::run_primitive::RunPrimitive;
 use super::run_receipt::RunBoundaryReceipt;
@@ -29,6 +30,16 @@ pub enum CoreExecutorError {
     Internal(String),
 }
 
+/// Successful result of applying a run primitive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreApplyOutput {
+    /// The authoritative receipt proving boundary application.
+    pub receipt: RunBoundaryReceipt,
+    /// Optional serialized session snapshot to durably commit atomically with
+    /// the receipt and input-state updates.
+    pub session_snapshot: Option<Vec<u8>>,
+}
+
 /// The interface core exposes for the runtime layer to apply run primitives.
 ///
 /// The runtime layer creates an implementation that wraps an `Agent` and
@@ -46,8 +57,9 @@ pub trait CoreExecutor: Send + Sync {
     /// conversation state after mutation.
     async fn apply(
         &mut self,
+        run_id: RunId,
         primitive: RunPrimitive,
-    ) -> Result<RunBoundaryReceipt, CoreExecutorError>;
+    ) -> Result<CoreApplyOutput, CoreExecutorError>;
 
     /// Execute an out-of-band control command.
     async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError>;

@@ -11,8 +11,11 @@
 //! marks inputs as consumed.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 
+use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
+use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::types::SessionId;
 use tokio::sync::{Mutex, RwLock, mpsc};
@@ -69,6 +72,14 @@ impl DriverEntry {
         }
     }
 
+    /// Check and clear the immediate processing flag.
+    pub(crate) fn take_process_requested(&mut self) -> bool {
+        match self {
+            DriverEntry::Ephemeral(d) => d.take_process_requested(),
+            DriverEntry::Persistent(d) => d.take_process_requested(),
+        }
+    }
+
     /// Dequeue the next input for processing.
     pub(crate) fn dequeue_next(&mut self) -> Option<(InputId, Input)> {
         match self {
@@ -104,6 +115,41 @@ impl DriverEntry {
             DriverEntry::Persistent(d) => d.stage_input(input_id, run_id),
         }
     }
+
+    /// Apply an input after successful immediate execution.
+    pub(crate) fn apply_input(
+        &mut self,
+        input_id: &InputId,
+        run_id: &RunId,
+    ) -> Result<(), InputStateMachineError> {
+        match self {
+            DriverEntry::Ephemeral(d) => d.apply_input(input_id, run_id),
+            DriverEntry::Persistent(d) => d.apply_input(input_id, run_id),
+        }
+    }
+
+    /// Consume an input after successful immediate execution.
+    pub(crate) fn consume_inputs(
+        &mut self,
+        input_ids: &[InputId],
+        run_id: &RunId,
+    ) -> Result<(), InputStateMachineError> {
+        match self {
+            DriverEntry::Ephemeral(d) => d.consume_inputs(input_ids, run_id),
+            DriverEntry::Persistent(d) => d.consume_inputs(input_ids, run_id),
+        }
+    }
+
+    /// Roll back staged inputs after failed immediate execution.
+    pub(crate) fn rollback_staged(
+        &mut self,
+        input_ids: &[InputId],
+    ) -> Result<(), InputStateMachineError> {
+        match self {
+            DriverEntry::Ephemeral(d) => d.rollback_staged(input_ids),
+            DriverEntry::Persistent(d) => d.rollback_staged(input_ids),
+        }
+    }
 }
 
 /// Per-session state: driver + optional RuntimeLoop.
@@ -112,6 +158,8 @@ struct RuntimeSessionEntry {
     driver: SharedDriver,
     /// Wake signal sender (if a RuntimeLoop is attached).
     wake_tx: Option<mpsc::Sender<()>>,
+    /// Run-control sender for cancelling the current run.
+    control_tx: Option<mpsc::Sender<RunControlCommand>>,
     /// Loop task handle (dropped on unregister, which closes the channel).
     _loop_handle: Option<tokio::task::JoinHandle<()>>,
 }
@@ -173,16 +221,22 @@ impl RuntimeSessionAdapter {
     /// Register a runtime driver for a session (no RuntimeLoop — inputs queue but
     /// nothing processes them automatically). Useful for tests and legacy mode.
     pub async fn register_session(&self, session_id: SessionId) {
-        let entry = self.make_driver(&session_id);
+        if self.contains_session(&session_id).await {
+            return;
+        }
+        let mut entry = self.make_driver(&session_id);
+        if let Err(err) = entry.as_driver_mut().recover().await {
+            tracing::error!(%session_id, error = %err, "failed to recover runtime driver during registration");
+            return;
+        }
         let session_entry = RuntimeSessionEntry {
             driver: Arc::new(Mutex::new(entry)),
             wake_tx: None,
+            control_tx: None,
             _loop_handle: None,
         };
-        self.sessions
-            .write()
-            .await
-            .insert(session_id, session_entry);
+        let mut sessions = self.sessions.write().await;
+        sessions.entry(session_id).or_insert(session_entry);
     }
 
     /// Register a runtime driver for a session WITH a RuntimeLoop backed by a
@@ -194,19 +248,44 @@ impl RuntimeSessionAdapter {
         session_id: SessionId,
         executor: Box<dyn meerkat_core::lifecycle::CoreExecutor>,
     ) {
-        let entry = self.make_driver(&session_id);
+        self.ensure_session_with_executor(session_id, executor)
+            .await;
+    }
+
+    /// Ensure a runtime driver with executor exists for the session.
+    ///
+    /// If a driver is already registered, the provided executor is dropped and
+    /// the existing driver is preserved.
+    pub async fn ensure_session_with_executor(
+        &self,
+        session_id: SessionId,
+        executor: Box<dyn meerkat_core::lifecycle::CoreExecutor>,
+    ) {
+        if self.contains_session(&session_id).await {
+            return;
+        }
+
+        let mut entry = self.make_driver(&session_id);
+        if let Err(err) = entry.as_driver_mut().recover().await {
+            tracing::error!(%session_id, error = %err, "failed to recover runtime driver during registration");
+            return;
+        }
         let driver = Arc::new(Mutex::new(entry));
         let (wake_tx, wake_rx) = mpsc::channel(16);
-        let handle = crate::runtime_loop::spawn_runtime_loop(driver.clone(), executor, wake_rx);
+        let (control_tx, control_rx) = mpsc::channel(16);
+        let handle =
+            crate::runtime_loop::spawn_runtime_loop(driver.clone(), executor, wake_rx, control_rx);
         let session_entry = RuntimeSessionEntry {
             driver,
             wake_tx: Some(wake_tx),
+            control_tx: Some(control_tx),
             _loop_handle: Some(handle),
         };
-        self.sessions
-            .write()
-            .await
-            .insert(session_id, session_entry);
+        let mut sessions = self.sessions.write().await;
+        if sessions.contains_key(&session_id) {
+            return;
+        }
+        sessions.insert(session_id, session_entry);
     }
 
     /// Unregister a session's runtime driver.
@@ -214,6 +293,141 @@ impl RuntimeSessionAdapter {
     /// Drops the wake channel sender, which causes the RuntimeLoop to exit.
     pub async fn unregister_session(&self, session_id: &SessionId) {
         self.sessions.write().await.remove(session_id);
+    }
+
+    /// Check whether a runtime driver is already registered for a session.
+    pub async fn contains_session(&self, session_id: &SessionId) -> bool {
+        self.sessions.read().await.contains_key(session_id)
+    }
+
+    /// Cancel the currently-running turn for a registered session.
+    pub async fn interrupt_current_run(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RuntimeDriverError> {
+        let sessions = self.sessions.read().await;
+        let entry = sessions
+            .get(session_id)
+            .ok_or(RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            })?;
+        let Some(control_tx) = &entry.control_tx else {
+            return Err(RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            });
+        };
+        control_tx
+            .send(RunControlCommand::CancelCurrentRun {
+                reason: "mob interrupt".to_string(),
+            })
+            .await
+            .map_err(|err| RuntimeDriverError::Internal(format!("failed to send interrupt: {err}")))
+    }
+
+    /// Accept an input and execute it synchronously through the runtime driver.
+    ///
+    /// This is useful for surfaces that need the legacy request/response shape
+    /// while still preserving v9 input lifecycle semantics.
+    pub async fn accept_input_and_run<T, F, Fut>(
+        &self,
+        session_id: &SessionId,
+        input: Input,
+        op: F,
+    ) -> Result<T, RuntimeDriverError>
+    where
+        F: FnOnce(RunId, meerkat_core::lifecycle::run_primitive::RunPrimitive) -> Fut,
+        Fut: Future<Output = Result<(T, CoreApplyOutput), RuntimeDriverError>>,
+    {
+        let driver = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?
+                .driver
+                .clone()
+        };
+
+        let (input_id, run_id, primitive) = {
+            let mut driver = driver.lock().await;
+            if !driver.is_idle() || !driver.as_driver().active_input_ids().is_empty() {
+                return Err(RuntimeDriverError::NotReady {
+                    state: driver.as_driver().runtime_state(),
+                });
+            }
+            let outcome = driver.as_driver_mut().accept_input(input).await?;
+            let input_id = match outcome {
+                AcceptOutcome::Accepted { input_id, .. } => input_id,
+                AcceptOutcome::Deduplicated { existing_id, .. } => existing_id,
+                AcceptOutcome::Rejected { reason } => {
+                    return Err(RuntimeDriverError::ValidationFailed { reason });
+                }
+            };
+
+            if !driver.is_idle() {
+                return Err(RuntimeDriverError::NotReady {
+                    state: driver.as_driver().runtime_state(),
+                });
+            }
+
+            let (dequeued_id, dequeued_input) = driver.dequeue_next().ok_or_else(|| {
+                RuntimeDriverError::Internal("accepted input was not queued for execution".into())
+            })?;
+            if dequeued_id != input_id {
+                return Err(RuntimeDriverError::NotReady {
+                    state: driver.as_driver().runtime_state(),
+                });
+            }
+            let run_id = RunId::new();
+            driver.start_run(run_id.clone()).map_err(|err| {
+                RuntimeDriverError::Internal(format!("failed to start runtime run: {err}"))
+            })?;
+            driver.stage_input(&dequeued_id, &run_id).map_err(|err| {
+                RuntimeDriverError::Internal(format!("failed to stage accepted input: {err}"))
+            })?;
+            let primitive = crate::runtime_loop::input_to_primitive(&dequeued_input, dequeued_id);
+            (input_id, run_id, primitive)
+        };
+
+        match op(run_id.clone(), primitive.clone()).await {
+            Ok((result, output)) => {
+                let mut driver = driver.lock().await;
+                if let Err(err) = driver
+                    .as_driver_mut()
+                    .on_run_event(meerkat_core::lifecycle::RunEvent::BoundaryApplied {
+                        run_id: run_id.clone(),
+                        receipt: output.receipt,
+                        session_snapshot: output.session_snapshot,
+                    })
+                    .await
+                {
+                    return Err(RuntimeDriverError::Internal(format!(
+                        "runtime boundary commit failed: {err}"
+                    )));
+                }
+                driver
+                    .as_driver_mut()
+                    .on_run_event(meerkat_core::lifecycle::RunEvent::RunCompleted {
+                        run_id,
+                        consumed_input_ids: vec![input_id],
+                    })
+                    .await?;
+                Ok(result)
+            }
+            Err(err) => {
+                let mut driver = driver.lock().await;
+                driver
+                    .as_driver_mut()
+                    .on_run_event(meerkat_core::lifecycle::RunEvent::RunFailed {
+                        run_id,
+                        error: err.to_string(),
+                        recoverable: true,
+                    })
+                    .await?;
+                Err(err)
+            }
+        }
     }
 }
 
@@ -236,15 +450,18 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
             })?;
 
         // Accept input and check wake under the driver lock
-        let (outcome, should_wake) = {
+        let (outcome, should_wake, should_process) = {
             let mut driver = entry.driver.lock().await;
             let result = driver.as_driver_mut().accept_input(input).await?;
             let wake = driver.take_wake_requested();
-            (result, wake)
+            let process_now = driver.take_process_requested();
+            (result, wake, process_now)
         };
 
-        // Signal the RuntimeLoop if wake was requested
-        if should_wake && let Some(ref wake_tx) = entry.wake_tx {
+        // Signal the RuntimeLoop if wake or immediate processing was requested.
+        if (should_wake || should_process)
+            && let Some(ref wake_tx) = entry.wake_tx
+        {
             // Non-blocking: if the channel is full, the loop is already processing
             let _ = wake_tx.try_send(());
         }
@@ -291,6 +508,11 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
                 state: RuntimeState::Destroyed,
             })?;
         let mut driver = entry.driver.lock().await;
+        if matches!(driver.as_driver().runtime_state(), RuntimeState::Running) {
+            return Err(RuntimeDriverError::NotReady {
+                state: RuntimeState::Running,
+            });
+        }
         driver.as_driver_mut().reset().await
     }
 
@@ -344,6 +566,7 @@ mod tests {
                 correlation_id: None,
             },
             text: text.into(),
+            turn_metadata: None,
         })
     }
 
@@ -405,7 +628,9 @@ mod tests {
     #[tokio::test]
     async fn accept_with_executor_triggers_loop() {
         use meerkat_core::lifecycle::RunId;
-        use meerkat_core::lifecycle::core_executor::{CoreExecutor, CoreExecutorError};
+        use meerkat_core::lifecycle::core_executor::{
+            CoreApplyOutput, CoreExecutor, CoreExecutorError,
+        };
         use meerkat_core::lifecycle::run_control::RunControlCommand;
         use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
         use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
@@ -423,16 +648,20 @@ mod tests {
         impl CoreExecutor for TestExecutor {
             async fn apply(
                 &mut self,
+                run_id: RunId,
                 primitive: RunPrimitive,
-            ) -> Result<RunBoundaryReceipt, CoreExecutorError> {
+            ) -> Result<CoreApplyOutput, CoreExecutorError> {
                 self.called.store(true, Ordering::SeqCst);
-                Ok(RunBoundaryReceipt {
-                    run_id: RunId::new(),
-                    boundary: RunApplyBoundary::RunStart,
-                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
-                    conversation_digest: None,
-                    message_count: 0,
-                    sequence: 0,
+                Ok(CoreApplyOutput {
+                    receipt: RunBoundaryReceipt {
+                        run_id,
+                        boundary: RunApplyBoundary::RunStart,
+                        contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                        conversation_digest: None,
+                        message_count: 0,
+                        sequence: 0,
+                    },
+                    session_snapshot: None,
                 })
             }
 
@@ -476,19 +705,20 @@ mod tests {
     #[tokio::test]
     async fn failed_executor_requeues_input() {
         use crate::input_state::InputLifecycleState;
-        use meerkat_core::lifecycle::core_executor::{CoreExecutor, CoreExecutorError};
+        use meerkat_core::lifecycle::core_executor::{
+            CoreApplyOutput, CoreExecutor, CoreExecutorError,
+        };
         use meerkat_core::lifecycle::run_control::RunControlCommand;
         use meerkat_core::lifecycle::run_primitive::RunPrimitive;
-        use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
-
         struct FailingExecutor;
 
         #[async_trait::async_trait]
         impl CoreExecutor for FailingExecutor {
             async fn apply(
                 &mut self,
+                _run_id: RunId,
                 _primitive: RunPrimitive,
-            ) -> Result<RunBoundaryReceipt, CoreExecutorError> {
+            ) -> Result<CoreApplyOutput, CoreExecutorError> {
                 Err(CoreExecutorError::ApplyFailed {
                     reason: "LLM error".into(),
                 })
@@ -530,7 +760,9 @@ mod tests {
     async fn successful_execution_fires_boundary_applied() {
         use crate::input_state::InputLifecycleState;
         use meerkat_core::lifecycle::RunId;
-        use meerkat_core::lifecycle::core_executor::{CoreExecutor, CoreExecutorError};
+        use meerkat_core::lifecycle::core_executor::{
+            CoreApplyOutput, CoreExecutor, CoreExecutorError,
+        };
         use meerkat_core::lifecycle::run_control::RunControlCommand;
         use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
         use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
@@ -541,15 +773,19 @@ mod tests {
         impl CoreExecutor for SuccessExecutor {
             async fn apply(
                 &mut self,
+                run_id: RunId,
                 primitive: RunPrimitive,
-            ) -> Result<RunBoundaryReceipt, CoreExecutorError> {
-                Ok(RunBoundaryReceipt {
-                    run_id: RunId::new(),
-                    boundary: RunApplyBoundary::RunStart,
-                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
-                    conversation_digest: None,
-                    message_count: 0,
-                    sequence: 0,
+            ) -> Result<CoreApplyOutput, CoreExecutorError> {
+                Ok(CoreApplyOutput {
+                    receipt: RunBoundaryReceipt {
+                        run_id,
+                        boundary: RunApplyBoundary::RunStart,
+                        contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                        conversation_digest: None,
+                        message_count: 0,
+                        sequence: 0,
+                    },
+                    session_snapshot: None,
                 })
             }
 

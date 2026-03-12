@@ -7,14 +7,14 @@ use meerkat_core::lifecycle::InputId;
 use crate::input::Input;
 
 /// A queued input entry.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct QueuedInput {
     pub input_id: InputId,
     pub input: Input,
 }
 
 /// FIFO input queue.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct InputQueue {
     queue: VecDeque<QueuedInput>,
 }
@@ -90,6 +90,7 @@ mod tests {
                 correlation_id: None,
             },
             text: "test".into(),
+            turn_metadata: None,
         })
     }
 

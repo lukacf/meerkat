@@ -6,6 +6,7 @@
 
 use chrono::{DateTime, Utc};
 use meerkat_core::lifecycle::InputId;
+use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
 use serde::{Deserialize, Serialize};
 
 use crate::identifiers::{
@@ -154,6 +155,8 @@ pub struct PromptInput {
     pub header: InputHeader,
     /// The prompt text.
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_metadata: Option<RuntimeTurnMetadata>,
 }
 
 /// Peer-originated input from comms.
@@ -222,6 +225,8 @@ pub struct FlowStepInput {
     pub step_id: String,
     /// Step instructions/prompt.
     pub instructions: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_metadata: Option<RuntimeTurnMetadata>,
 }
 
 /// External event input.
@@ -281,6 +286,7 @@ mod tests {
         let input = Input::Prompt(PromptInput {
             header: make_header(),
             text: "hello".into(),
+            turn_metadata: None,
         });
         let json = serde_json::to_value(&input).unwrap();
         assert_eq!(json["input_type"], "prompt");
@@ -356,6 +362,7 @@ mod tests {
             header: make_header(),
             step_id: "step-1".into(),
             instructions: "analyze the data".into(),
+            turn_metadata: None,
         });
         let json = serde_json::to_value(&input).unwrap();
         assert_eq!(json["input_type"], "flow_step");
@@ -411,6 +418,7 @@ mod tests {
         let prompt = Input::Prompt(PromptInput {
             header: make_header(),
             text: "hi".into(),
+            turn_metadata: None,
         });
         assert_eq!(prompt.kind_id().0, "prompt");
 

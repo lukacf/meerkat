@@ -1987,6 +1987,12 @@ impl SessionAgent for PersistentMockAgent {
         Session::with_id(self.session_id.clone())
     }
 
+    fn apply_runtime_system_context(
+        &mut self,
+        _appends: &[meerkat_core::PendingSystemContextAppend],
+    ) {
+    }
+
     fn system_context_state(&self) -> Arc<std::sync::Mutex<SessionSystemContextState>> {
         Arc::clone(&self.system_context_state)
     }
@@ -2018,6 +2024,7 @@ async fn create_test_mob_with_persistent_service(definition: MobDefinition) -> M
         PersistentMockBuilder,
         16,
         store,
+        None,
     ));
     MobBuilder::new(definition, MobStorage::in_memory())
         .with_session_service(service)
@@ -2169,6 +2176,15 @@ impl SessionAgent for OverlayProbeSessionAgent {
 
     fn session_clone(&self) -> Session {
         self.agent.session_with_system_context_state()
+    }
+
+    fn apply_runtime_system_context(
+        &mut self,
+        appends: &[meerkat_core::PendingSystemContextAppend],
+    ) {
+        self.agent
+            .session_mut()
+            .append_system_context_blocks(appends);
     }
 
     fn system_context_state(&self) -> Arc<std::sync::Mutex<SessionSystemContextState>> {

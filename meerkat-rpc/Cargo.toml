@@ -24,12 +24,13 @@ meerkat-client = { workspace = true }
 meerkat-store = { workspace = true }
 meerkat-mob = { workspace = true, optional = true }
 meerkat-mob-mcp = { workspace = true, optional = true }
-meerkat-runtime = { path = "../meerkat-runtime" }
+meerkat-runtime = { path = "../meerkat-runtime", features = ["redb-store"] }
 futures = { workspace = true }
 async-trait = { workspace = true }
 indexmap = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

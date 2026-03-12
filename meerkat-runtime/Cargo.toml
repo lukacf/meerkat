@@ -22,13 +22,16 @@ thiserror = { workspace = true }
 async-trait = { workspace = true }
 indexmap = { version = "2", features = ["serde"] }
 redb = { workspace = true, optional = true }
+tracing = { workspace = true }
+meerkat-store = { path = "../meerkat-store", default-features = false, optional = true }
+sha2 = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
 
 [features]
 default = []
-redb-store = ["dep:redb"]
+redb-store = ["dep:redb", "dep:meerkat-store"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

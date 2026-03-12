@@ -462,7 +462,7 @@ impl MeerkatMcpState {
         let skill_runtime = factory.build_skill_runtime(&config).await;
 
         let builder = FactoryAgentBuilder::new_with_config_store(factory, config, config_store);
-        let service = PersistentSessionService::new(builder, 100, session_store);
+        let service = PersistentSessionService::new(builder, 100, session_store, None);
 
         Ok(Self {
             service,
@@ -529,7 +529,7 @@ impl MeerkatMcpState {
         }
 
         let builder = FactoryAgentBuilder::new_with_config_store(factory, config, config_store);
-        let service = PersistentSessionService::new(builder, 100, store);
+        let service = PersistentSessionService::new(builder, 100, store, None);
 
         Self {
             service,

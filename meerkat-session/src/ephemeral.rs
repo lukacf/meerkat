@@ -6,7 +6,6 @@
 
 use async_trait::async_trait;
 use indexmap::IndexMap;
-use meerkat_core::SessionSystemContextState;
 use meerkat_core::event::{AgentEvent, EventEnvelope};
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
@@ -16,6 +15,7 @@ use meerkat_core::service::{
 };
 use meerkat_core::time_compat::SystemTime;
 use meerkat_core::types::{RunResult, SessionId, Usage};
+use meerkat_core::{PendingSystemContextAppend, SessionSystemContextState};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -77,6 +77,10 @@ enum SessionCommand {
     /// Export the full session (messages + metadata) for persistence.
     ExportSession {
         reply_tx: oneshot::Sender<meerkat_core::Session>,
+    },
+    ApplyRuntimeSystemContext {
+        appends: Vec<PendingSystemContextAppend>,
+        reply_tx: oneshot::Sender<()>,
     },
     Shutdown,
 }
@@ -193,6 +197,9 @@ pub trait SessionAgent: Send {
     /// after each turn.
     fn session_clone(&self) -> meerkat_core::Session;
 
+    /// Apply runtime-owned system-context blocks immediately to the canonical session.
+    fn apply_runtime_system_context(&mut self, appends: &[PendingSystemContextAppend]);
+
     /// Get shared runtime control state for system-context append requests.
     fn system_context_state(
         &self,
@@ -298,6 +305,47 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 ))
             })?;
 
+        reply_rx.await.map_err(|_| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                "Session task dropped the reply channel".to_string(),
+            ))
+        })
+    }
+
+    /// Drop a live session handle without archiving it.
+    ///
+    /// This is used when a runtime-backed turn mutates the in-memory session
+    /// but fails to durably commit its boundary. Discarding the live handle
+    /// forces subsequent access to recover from the last persisted snapshot.
+    pub async fn discard_live_session(&self, id: &SessionId) -> Result<(), SessionError> {
+        let mut sessions = self.sessions.write().await;
+        let handle = sessions
+            .swap_remove(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        drop(sessions);
+        let _ = handle.command_tx.send(SessionCommand::Shutdown).await;
+        Ok(())
+    }
+
+    pub async fn apply_runtime_system_context(
+        &self,
+        id: &SessionId,
+        appends: Vec<PendingSystemContextAppend>,
+    ) -> Result<(), SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .command_tx
+            .send(SessionCommand::ApplyRuntimeSystemContext { appends, reply_tx })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
         reply_rx.await.map_err(|_| {
             SessionError::Agent(meerkat_core::error::AgentError::InternalError(
                 "Session task dropped the reply channel".to_string(),
@@ -1002,6 +1050,16 @@ async fn session_task<A: SessionAgent>(
             }
             SessionCommand::ExportSession { reply_tx } => {
                 let _ = reply_tx.send(agent.session_clone());
+            }
+            SessionCommand::ApplyRuntimeSystemContext { appends, reply_tx } => {
+                agent.apply_runtime_system_context(&appends);
+                let snap = agent.snapshot();
+                control.summary_tx.send_replace(SessionSummaryCache {
+                    updated_at: snap.updated_at,
+                    message_count: snap.message_count,
+                    total_tokens: snap.total_tokens,
+                });
+                let _ = reply_tx.send(());
             }
             SessionCommand::Shutdown => {
                 control.state_tx.send_replace(SessionState::ShuttingDown);

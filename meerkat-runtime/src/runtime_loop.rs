@@ -10,7 +10,6 @@ use meerkat_core::lifecycle::run_primitive::{
     ConversationAppend, ConversationAppendRole, CoreRenderable, RunApplyBoundary, RunPrimitive,
     StagedRunInput,
 };
-use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
 use meerkat_core::lifecycle::{InputId, RunEvent, RunId};
 
 use crate::input::Input;
@@ -31,16 +30,40 @@ pub(crate) fn input_to_prompt(input: &Input) -> String {
 
 /// Convert an `Input` + its ID to a `RunPrimitive` for `CoreExecutor::apply()`.
 pub(crate) fn input_to_primitive(input: &Input, input_id: InputId) -> RunPrimitive {
-    let prompt = input_to_prompt(input);
-    RunPrimitive::StagedInput(StagedRunInput {
-        boundary: RunApplyBoundary::RunStart,
-        appends: vec![ConversationAppend {
-            role: ConversationAppendRole::User,
-            content: CoreRenderable::Text { text: prompt },
-        }],
-        context_appends: vec![],
-        contributing_input_ids: vec![input_id],
-    })
+    match input {
+        Input::SystemGenerated(system) => RunPrimitive::StagedInput(StagedRunInput {
+            boundary: RunApplyBoundary::Immediate,
+            appends: vec![],
+            context_appends: vec![
+                meerkat_core::lifecycle::run_primitive::ConversationContextAppend {
+                    key: format!("system-generated:{input_id}"),
+                    content: CoreRenderable::Text {
+                        text: system.content.clone(),
+                    },
+                },
+            ],
+            contributing_input_ids: vec![input_id],
+            turn_metadata: None,
+        }),
+        _ => {
+            let prompt = input_to_prompt(input);
+            let turn_metadata = match input {
+                Input::Prompt(prompt) => prompt.turn_metadata.clone(),
+                Input::FlowStep(flow_step) => flow_step.turn_metadata.clone(),
+                _ => None,
+            };
+            RunPrimitive::StagedInput(StagedRunInput {
+                boundary: RunApplyBoundary::RunStart,
+                appends: vec![ConversationAppend {
+                    role: ConversationAppendRole::User,
+                    content: CoreRenderable::Text { text: prompt },
+                }],
+                context_appends: vec![],
+                contributing_input_ids: vec![input_id],
+                turn_metadata,
+            })
+        }
+    }
 }
 
 /// Spawn the per-session runtime loop.
@@ -53,10 +76,28 @@ pub(crate) fn spawn_runtime_loop(
     driver: crate::session_adapter::SharedDriver,
     mut executor: Box<dyn meerkat_core::lifecycle::CoreExecutor>,
     mut wake_rx: tokio::sync::mpsc::Receiver<()>,
+    mut control_rx: tokio::sync::mpsc::Receiver<
+        meerkat_core::lifecycle::run_control::RunControlCommand,
+    >,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        while let Some(()) = wake_rx.recv().await {
-            process_queue(&driver, &mut *executor).await;
+        loop {
+            tokio::select! {
+                maybe_wake = wake_rx.recv() => {
+                    match maybe_wake {
+                        Some(()) => process_queue(&driver, &mut *executor).await,
+                        None => break,
+                    }
+                }
+                maybe_command = control_rx.recv() => {
+                    match maybe_command {
+                        Some(command) => {
+                            let _ = executor.control(command).await;
+                        }
+                        None => break,
+                    }
+                }
+            }
         }
     })
 }
@@ -105,59 +146,63 @@ async fn process_queue(
 
         match dequeued {
             Some((input_id, run_id, primitive)) => {
-                // Capture boundary info before moving primitive into executor
-                let boundary = match &primitive {
-                    RunPrimitive::StagedInput(s) => s.boundary,
-                    _ => RunApplyBoundary::Immediate,
-                };
-                let contributing_ids = primitive.contributing_input_ids().to_vec();
-
                 // Execute outside the driver lock (this calls start_turn, which is slow)
-                let result = executor.apply(primitive).await;
+                let result = executor.apply(run_id.clone(), primitive).await;
 
                 // Lock again to update driver state
                 let mut d = driver.lock().await;
                 match result {
-                    Ok(_) => {
-                        // Build a receipt with the loop's own run_id (authoritative)
-                        let receipt = RunBoundaryReceipt {
-                            run_id: run_id.clone(),
-                            boundary,
-                            contributing_input_ids: contributing_ids,
-                            conversation_digest: None,
-                            message_count: 0,
-                            sequence: 0,
-                        };
-
+                    Ok(output) => {
                         // BoundaryApplied transitions Staged → Applied → APC
                         // and triggers atomic persistence in PersistentRuntimeDriver
-                        let _ = d
+                        if let Err(err) = d
                             .as_driver_mut()
                             .on_run_event(RunEvent::BoundaryApplied {
                                 run_id: run_id.clone(),
-                                receipt,
+                                receipt: output.receipt,
+                                session_snapshot: output.session_snapshot,
                             })
-                            .await;
+                            .await
+                        {
+                            tracing::error!(%run_id, error = %err, "failed to record boundary-applied event");
+                            let _ = executor
+                                .control(meerkat_core::lifecycle::run_control::RunControlCommand::StopRuntimeExecutor {
+                                    reason: format!("runtime boundary commit failed for run {run_id}: {err}"),
+                                })
+                                .await;
+                            break;
+                        }
 
                         // RunCompleted transitions APC → Consumed and returns to Idle
-                        let _ = d
+                        if let Err(err) = d
                             .as_driver_mut()
                             .on_run_event(RunEvent::RunCompleted {
                                 run_id,
                                 consumed_input_ids: vec![input_id],
                             })
-                            .await;
+                            .await
+                        {
+                            tracing::error!(error = %err, "failed to record run-completed event");
+                            break;
+                        }
                     }
                     Err(e) => {
                         // RunFailed rolls back Staged → Queued and returns to Idle
-                        let _ = d
+                        if let Err(err) = d
                             .as_driver_mut()
                             .on_run_event(RunEvent::RunFailed {
                                 run_id,
                                 error: e.to_string(),
                                 recoverable: true,
                             })
-                            .await;
+                            .await
+                        {
+                            tracing::error!(error = %err, "failed to record run-failed event");
+                            break;
+                        }
+                        // Leave the input queued for a future wake instead of hot-looping
+                        // on the same failing payload indefinitely.
+                        break;
                     }
                 }
             }
@@ -186,6 +231,7 @@ mod tests {
                 correlation_id: None,
             },
             text: text.into(),
+            turn_metadata: None,
         })
     }
 

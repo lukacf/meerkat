@@ -7,12 +7,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use indexmap::IndexMap;
+use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
 use tokio::sync::Mutex;
 
-use super::{RuntimeStore, RuntimeStoreError, SessionDelta};
+use super::{RuntimeStore, RuntimeStoreError, SessionDelta, authoritative_receipt};
 use crate::identifiers::LogicalRuntimeId;
 use crate::input_state::InputState;
+use crate::runtime_state::RuntimeState;
 
 /// Receipt key: (runtime_id, run_id, sequence).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -31,6 +33,8 @@ struct Inner {
     receipts: HashMap<ReceiptKey, RunBoundaryReceipt>,
     /// Session snapshots (opaque bytes).
     sessions: HashMap<String, Vec<u8>>,
+    /// Persisted runtime state.
+    runtime_states: HashMap<String, RuntimeState>,
 }
 
 /// In-memory runtime store. Thread-safe via `tokio::sync::Mutex`.
@@ -55,6 +59,56 @@ impl Default for InMemoryRuntimeStore {
 
 #[async_trait::async_trait]
 impl RuntimeStore for InMemoryRuntimeStore {
+    async fn commit_session_boundary(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        session_delta: SessionDelta,
+        run_id: RunId,
+        boundary: RunApplyBoundary,
+        contributing_input_ids: Vec<InputId>,
+        input_updates: Vec<InputState>,
+    ) -> Result<RunBoundaryReceipt, RuntimeStoreError> {
+        let mut inner = self.inner.lock().await;
+        let rid = runtime_id.0.clone();
+        let sequence = inner
+            .receipts
+            .keys()
+            .filter(|key| key.runtime_id == rid && key.run_id == run_id)
+            .map(|key| key.sequence)
+            .max()
+            .map(|seq| seq + 1)
+            .unwrap_or(0);
+        let receipt = authoritative_receipt(
+            Some(&session_delta),
+            run_id,
+            boundary,
+            contributing_input_ids,
+            sequence,
+        )?;
+        let mut input_updates = input_updates;
+        for state in &mut input_updates {
+            state.last_run_id = Some(receipt.run_id.clone());
+            state.last_boundary_sequence = Some(receipt.sequence);
+        }
+
+        inner
+            .sessions
+            .insert(rid.clone(), session_delta.session_snapshot);
+        let key = ReceiptKey {
+            runtime_id: rid.clone(),
+            run_id: receipt.run_id.clone(),
+            sequence: receipt.sequence,
+        };
+        inner.receipts.insert(key, receipt.clone());
+
+        let states = inner.input_states.entry(rid).or_default();
+        for state in input_updates {
+            states.insert(state.input_id.clone(), state);
+        }
+
+        Ok(receipt)
+    }
+
     async fn atomic_apply(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -139,6 +193,24 @@ impl RuntimeStore for InMemoryRuntimeStore {
             .get(&runtime_id.0)
             .and_then(|m| m.get(input_id).cloned());
         Ok(state)
+    }
+
+    async fn persist_runtime_state(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        state: RuntimeState,
+    ) -> Result<(), RuntimeStoreError> {
+        let mut inner = self.inner.lock().await;
+        inner.runtime_states.insert(runtime_id.0.clone(), state);
+        Ok(())
+    }
+
+    async fn load_runtime_state(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<RuntimeState>, RuntimeStoreError> {
+        let inner = self.inner.lock().await;
+        Ok(inner.runtime_states.get(&runtime_id.0).copied())
     }
 }
 
@@ -250,6 +322,40 @@ mod tests {
             states[0].current_state,
             crate::input_state::InputLifecycleState::Queued
         );
+    }
+
+    #[tokio::test]
+    async fn commit_session_boundary_returns_authoritative_receipt() {
+        let store = InMemoryRuntimeStore::new();
+        let rid = LogicalRuntimeId::new("test");
+        let run_id = RunId::new();
+        let input_id = InputId::new();
+        let session = meerkat_core::Session::new();
+        let snapshot = serde_json::to_vec(&session).unwrap();
+
+        let receipt = store
+            .commit_session_boundary(
+                &rid,
+                SessionDelta {
+                    session_snapshot: snapshot,
+                },
+                run_id.clone(),
+                RunApplyBoundary::Immediate,
+                vec![input_id.clone()],
+                vec![InputState::new_accepted(input_id)],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(receipt.sequence, 0);
+        assert_eq!(receipt.run_id, run_id);
+        assert!(receipt.conversation_digest.is_some());
+        let loaded = store
+            .load_boundary_receipt(&rid, &receipt.run_id, receipt.sequence)
+            .await
+            .unwrap()
+            .expect("receipt should be persisted");
+        assert_eq!(loaded, receipt);
     }
 
     #[tokio::test]

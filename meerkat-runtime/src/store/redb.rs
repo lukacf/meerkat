@@ -13,7 +13,9 @@ mod inner {
 
     use crate::identifiers::LogicalRuntimeId;
     use crate::input_state::InputState;
-    use crate::store::{RuntimeStore, RuntimeStoreError, SessionDelta};
+    use crate::runtime_state::RuntimeState;
+    use crate::store::{RuntimeStore, RuntimeStoreError, SessionDelta, authoritative_receipt};
+    use meerkat_store::redb_store::write_session_snapshot_in_txn;
 
     /// Table: (runtime_id + input_id bytes) → InputState JSON
     const INPUT_STATES: TableDefinition<&[u8], &[u8]> =
@@ -22,10 +24,8 @@ mod inner {
     /// Table: (runtime_id + run_id + sequence bytes) → Receipt JSON
     const BOUNDARY_RECEIPTS: TableDefinition<&[u8], &[u8]> =
         TableDefinition::new("runtime_boundary_receipts");
-
-    /// Table: runtime_id → session snapshot bytes
-    const SESSION_SNAPSHOTS: TableDefinition<&[u8], &[u8]> =
-        TableDefinition::new("runtime_session_snapshots");
+    /// Table: runtime_id → RuntimeState JSON
+    const RUNTIME_STATES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("runtime_states");
 
     /// Key prefix length for runtime ID (stored as UTF-8 length-prefixed).
     fn runtime_prefix(runtime_id: &LogicalRuntimeId) -> Vec<u8> {
@@ -68,7 +68,7 @@ mod inner {
                 let _ = write_txn.open_table(BOUNDARY_RECEIPTS).map_err(|e| {
                     RuntimeStoreError::WriteFailed(format!("Failed to create table: {e}"))
                 })?;
-                let _ = write_txn.open_table(SESSION_SNAPSHOTS).map_err(|e| {
+                let _ = write_txn.open_table(RUNTIME_STATES).map_err(|e| {
                     RuntimeStoreError::WriteFailed(format!("Failed to create table: {e}"))
                 })?;
             }
@@ -87,6 +87,116 @@ mod inner {
 
     #[async_trait::async_trait]
     impl RuntimeStore for RedbRuntimeStore {
+        async fn commit_session_boundary(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            session_delta: SessionDelta,
+            run_id: RunId,
+            boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
+            contributing_input_ids: Vec<InputId>,
+            input_updates: Vec<InputState>,
+        ) -> Result<RunBoundaryReceipt, RuntimeStoreError> {
+            let db = self.db.clone();
+            let rid = runtime_id.clone();
+            let session_snapshot =
+                serde_json::from_slice::<meerkat_core::Session>(&session_delta.session_snapshot)
+                    .map_err(|e| RuntimeStoreError::WriteFailed(e.to_string()))?;
+            tokio::task::spawn_blocking(move || {
+                let write_txn = db.begin_write().map_err(|e| {
+                    RuntimeStoreError::WriteFailed(format!("Failed to begin write: {e}"))
+                })?;
+                let receipt = {
+                    let mut max_sequence = None;
+                    {
+                        let receipts_table =
+                            write_txn.open_table(BOUNDARY_RECEIPTS).map_err(|e| {
+                                RuntimeStoreError::WriteFailed(format!("Failed to open table: {e}"))
+                            })?;
+                        let iter = receipts_table.iter().map_err(|e| {
+                            RuntimeStoreError::WriteFailed(format!("Failed to iterate: {e}"))
+                        })?;
+                        let receipt_prefix = {
+                            let mut prefix = runtime_prefix(&rid);
+                            prefix.extend_from_slice(run_id.0.as_bytes());
+                            prefix
+                        };
+                        for row in iter {
+                            let (key, _) = row.map_err(|e| {
+                                RuntimeStoreError::WriteFailed(format!("Failed to read row: {e}"))
+                            })?;
+                            let key_bytes = key.value();
+                            if key_bytes.starts_with(&receipt_prefix) && key_bytes.len() >= 8 {
+                                let seq_offset = key_bytes.len() - 8;
+                                let mut seq_bytes = [0_u8; 8];
+                                seq_bytes.copy_from_slice(&key_bytes[seq_offset..]);
+                                let seq = u64::from_be_bytes(seq_bytes);
+                                max_sequence =
+                                    Some(max_sequence.map_or(seq, |cur: u64| cur.max(seq)));
+                            }
+                        }
+                    }
+
+                    authoritative_receipt(
+                        Some(&session_delta),
+                        run_id,
+                        boundary,
+                        contributing_input_ids,
+                        max_sequence.map(|seq| seq + 1).unwrap_or(0),
+                    )?
+                };
+                let mut input_updates = input_updates;
+                for state in &mut input_updates {
+                    state.last_run_id = Some(receipt.run_id.clone());
+                    state.last_boundary_sequence = Some(receipt.sequence);
+                }
+                let input_jsons: Vec<(Vec<u8>, Vec<u8>)> = input_updates
+                    .iter()
+                    .map(|s| {
+                        let key = input_state_key(&rid, &s.input_id);
+                        let val = serde_json::to_vec(s)
+                            .map_err(|e| RuntimeStoreError::WriteFailed(e.to_string()));
+                        val.map(|v| (key, v))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                {
+                    write_session_snapshot_in_txn(&write_txn, &session_snapshot)
+                        .map_err(|e| RuntimeStoreError::WriteFailed(e.to_string()))?;
+
+                    let receipt_json = serde_json::to_vec(&receipt)
+                        .map_err(|e| RuntimeStoreError::WriteFailed(e.to_string()))?;
+                    let rkey = receipt_key(&rid, &receipt.run_id, receipt.sequence);
+                    let mut receipts_table =
+                        write_txn.open_table(BOUNDARY_RECEIPTS).map_err(|e| {
+                            RuntimeStoreError::WriteFailed(format!("Failed to open table: {e}"))
+                        })?;
+                    receipts_table
+                        .insert(rkey.as_slice(), receipt_json.as_slice())
+                        .map_err(|e| {
+                            RuntimeStoreError::WriteFailed(format!("Failed to insert: {e}"))
+                        })?;
+
+                    let mut states_table = write_txn.open_table(INPUT_STATES).map_err(|e| {
+                        RuntimeStoreError::WriteFailed(format!("Failed to open table: {e}"))
+                    })?;
+                    for (key, val) in &input_jsons {
+                        states_table
+                            .insert(key.as_slice(), val.as_slice())
+                            .map_err(|e| {
+                                RuntimeStoreError::WriteFailed(format!("Failed to insert: {e}"))
+                            })?;
+                    }
+                }
+
+                write_txn.commit().map_err(|e| {
+                    RuntimeStoreError::WriteFailed(format!("Failed to commit: {e}"))
+                })?;
+                Ok(receipt)
+            })
+            .await
+            .map_err(|e| RuntimeStoreError::Internal(format!("Task join failed: {e}")))?
+        }
+
         async fn atomic_apply(
             &self,
             runtime_id: &LogicalRuntimeId,
@@ -108,25 +218,21 @@ mod inner {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let rkey = receipt_key(&rid, &receipt.run_id, receipt.sequence);
-            let session_data = session_delta.map(|d| d.session_snapshot);
-            let rid_for_session = rid.clone();
+            let session_snapshot = session_delta
+                .map(|d| {
+                    serde_json::from_slice::<meerkat_core::Session>(&d.session_snapshot)
+                        .map_err(|e| RuntimeStoreError::WriteFailed(e.to_string()))
+                })
+                .transpose()?;
 
             tokio::task::spawn_blocking(move || {
                 let write_txn = db.begin_write().map_err(|e| {
                     RuntimeStoreError::WriteFailed(format!("Failed to begin write: {e}"))
                 })?;
                 {
-                    // Session snapshot
-                    if let Some(data) = session_data {
-                        let mut table = write_txn.open_table(SESSION_SNAPSHOTS).map_err(|e| {
-                            RuntimeStoreError::WriteFailed(format!("Failed to open table: {e}"))
-                        })?;
-                        let skey = runtime_prefix(&rid_for_session);
-                        table
-                            .insert(skey.as_slice(), data.as_slice())
-                            .map_err(|e| {
-                                RuntimeStoreError::WriteFailed(format!("Failed to insert: {e}"))
-                            })?;
+                    if let Some(session) = session_snapshot.as_ref() {
+                        write_session_snapshot_in_txn(&write_txn, session)
+                            .map_err(|e| RuntimeStoreError::WriteFailed(e.to_string()))?;
                     }
 
                     // Receipt
@@ -294,6 +400,70 @@ mod inner {
             .await
             .map_err(|e| RuntimeStoreError::Internal(format!("Task join failed: {e}")))?
         }
+
+        async fn persist_runtime_state(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            state: RuntimeState,
+        ) -> Result<(), RuntimeStoreError> {
+            let db = self.db.clone();
+            let key = runtime_prefix(runtime_id);
+            let value = serde_json::to_vec(&state)
+                .map_err(|e| RuntimeStoreError::WriteFailed(e.to_string()))?;
+
+            tokio::task::spawn_blocking(move || {
+                let write_txn = db.begin_write().map_err(|e| {
+                    RuntimeStoreError::WriteFailed(format!("Failed to begin write: {e}"))
+                })?;
+                {
+                    let mut table = write_txn.open_table(RUNTIME_STATES).map_err(|e| {
+                        RuntimeStoreError::WriteFailed(format!("Failed to open table: {e}"))
+                    })?;
+                    table
+                        .insert(key.as_slice(), value.as_slice())
+                        .map_err(|e| {
+                            RuntimeStoreError::WriteFailed(format!("Failed to insert: {e}"))
+                        })?;
+                }
+                write_txn.commit().map_err(|e| {
+                    RuntimeStoreError::WriteFailed(format!("Failed to commit: {e}"))
+                })?;
+                Ok(())
+            })
+            .await
+            .map_err(|e| RuntimeStoreError::Internal(format!("Task join failed: {e}")))?
+        }
+
+        async fn load_runtime_state(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<RuntimeState>, RuntimeStoreError> {
+            let db = self.db.clone();
+            let key = runtime_prefix(runtime_id);
+
+            tokio::task::spawn_blocking(move || {
+                let read_txn = db.begin_read().map_err(|e| {
+                    RuntimeStoreError::ReadFailed(format!("Failed to begin read: {e}"))
+                })?;
+                let table = read_txn.open_table(RUNTIME_STATES).map_err(|e| {
+                    RuntimeStoreError::ReadFailed(format!("Failed to open table: {e}"))
+                })?;
+                match table.get(key.as_slice()) {
+                    Ok(Some(data)) => {
+                        let state = serde_json::from_slice(data.value()).map_err(|e| {
+                            RuntimeStoreError::ReadFailed(format!("Failed to deserialize: {e}"))
+                        })?;
+                        Ok(Some(state))
+                    }
+                    Ok(None) => Ok(None),
+                    Err(e) => Err(RuntimeStoreError::ReadFailed(format!(
+                        "Failed to get runtime state: {e}"
+                    ))),
+                }
+            })
+            .await
+            .map_err(|e| RuntimeStoreError::Internal(format!("Task join failed: {e}")))?
+        }
     }
 
     #[cfg(test)]
@@ -332,13 +502,12 @@ mod inner {
 
             let state = InputState::new_accepted(input_id.clone());
             let receipt = make_receipt(run_id.clone(), 0);
+            let session_snapshot = serde_json::to_vec(&meerkat_core::Session::new()).unwrap();
 
             store
                 .atomic_apply(
                     &rid,
-                    Some(SessionDelta {
-                        session_snapshot: b"session-data".to_vec(),
-                    }),
+                    Some(SessionDelta { session_snapshot }),
                     receipt,
                     vec![state],
                 )
@@ -442,6 +611,38 @@ mod inner {
             // Receipt should be visible
             let receipt = store.load_boundary_receipt(&rid, &run_id, 0).await.unwrap();
             assert!(receipt.is_some());
+        }
+
+        #[tokio::test]
+        async fn commit_session_boundary_returns_authoritative_receipt() {
+            let db = temp_db();
+            let store = RedbRuntimeStore::new(db).unwrap();
+            let rid = LogicalRuntimeId::new("test");
+            let run_id = RunId::new();
+            let input_id = InputId::new();
+            let session_snapshot = serde_json::to_vec(&meerkat_core::Session::new()).unwrap();
+
+            let receipt = store
+                .commit_session_boundary(
+                    &rid,
+                    SessionDelta { session_snapshot },
+                    run_id.clone(),
+                    RunApplyBoundary::Immediate,
+                    vec![input_id.clone()],
+                    vec![InputState::new_accepted(input_id)],
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(receipt.sequence, 0);
+            assert_eq!(receipt.run_id, run_id);
+            assert!(receipt.conversation_digest.is_some());
+            let loaded = store
+                .load_boundary_receipt(&rid, &receipt.run_id, receipt.sequence)
+                .await
+                .unwrap()
+                .expect("receipt should be persisted");
+            assert_eq!(loaded, receipt);
         }
     }
 }

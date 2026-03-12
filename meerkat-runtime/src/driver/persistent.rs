@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use chrono::Utc;
 use meerkat_core::lifecycle::{InputId, RunEvent};
 
 use crate::accept::AcceptOutcome;
@@ -70,6 +71,11 @@ impl PersistentRuntimeDriver {
         self.inner.take_wake_requested()
     }
 
+    /// Check and clear immediate processing flag (delegates to inner).
+    pub fn take_process_requested(&mut self) -> bool {
+        self.inner.take_process_requested()
+    }
+
     /// Dequeue next input (delegates to inner).
     pub fn dequeue_next(&mut self) -> Option<(InputId, Input)> {
         self.inner.dequeue_next()
@@ -92,22 +98,68 @@ impl PersistentRuntimeDriver {
     ) -> Result<(), crate::input_machine::InputStateMachineError> {
         self.inner.apply_input(input_id, run_id)
     }
+
+    /// Roll back staged inputs (delegates to inner).
+    pub fn rollback_staged(
+        &mut self,
+        input_ids: &[InputId],
+    ) -> Result<(), crate::input_machine::InputStateMachineError> {
+        self.inner.rollback_staged(input_ids)
+    }
+
+    /// Consume applied inputs without completing a runtime run.
+    pub fn consume_inputs(
+        &mut self,
+        input_ids: &[InputId],
+        run_id: &meerkat_core::lifecycle::RunId,
+    ) -> Result<(), crate::input_machine::InputStateMachineError> {
+        self.inner.consume_inputs(input_ids, run_id)
+    }
+
+    /// Remove a previously accepted input from the ledger/queue.
+    pub fn forget_input(&mut self, input_id: &InputId) {
+        self.inner.forget_input(input_id);
+    }
+
+    async fn persist_state(&self, state: &InputState) -> Result<(), RuntimeDriverError> {
+        self.store
+            .persist_input_state(&self.runtime_id, state)
+            .await
+            .map_err(|e| RuntimeDriverError::Internal(e.to_string()))
+    }
+
+    async fn persist_snapshot(&self) -> Result<(), RuntimeDriverError> {
+        for state in self.inner.input_states_snapshot() {
+            self.persist_state(&state).await?;
+        }
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
 impl RuntimeDriver for PersistentRuntimeDriver {
     async fn accept_input(&mut self, input: Input) -> Result<AcceptOutcome, RuntimeDriverError> {
+        let input_for_recovery = input.clone();
+
         // Delegate to ephemeral for state machine logic
-        let outcome = self.inner.accept_input(input).await?;
+        let mut outcome = self.inner.accept_input(input).await?;
 
         // Durable-before-ack: persist InputState before returning
-        if let AcceptOutcome::Accepted { ref input_id, .. } = outcome
-            && let Some(state) = self.inner.input_state(input_id)
+        if let AcceptOutcome::Accepted {
+            ref input_id,
+            ref mut state,
+            ..
+        } = outcome
+            && let Some(inner_state) = self.inner.input_state(input_id).cloned()
         {
-            self.store
-                .persist_input_state(&self.runtime_id, state)
-                .await
-                .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
+            let mut persisted = inner_state;
+            persisted.persisted_input = Some(input_for_recovery);
+            self.inner.ledger_mut().accept(persisted.clone());
+            if let Err(err) = self.persist_state(&persisted).await {
+                self.forget_input(input_id);
+                return Err(err);
+            }
+            *state = persisted;
         }
 
         Ok(outcome)
@@ -121,21 +173,54 @@ impl RuntimeDriver for PersistentRuntimeDriver {
     }
 
     async fn on_run_event(&mut self, event: RunEvent) -> Result<(), RuntimeDriverError> {
-        // Delegate to inner first (updates state machine and input lifecycle)
-        self.inner.on_run_event(event.clone()).await?;
+        match event {
+            // BoundaryApplied persists the receipt and the applied state atomically.
+            RunEvent::BoundaryApplied {
+                ref receipt,
+                ref session_snapshot,
+                ..
+            } => {
+                let checkpoint = self.inner.clone();
+                self.inner.on_run_event(event.clone()).await?;
+                if self
+                    .store
+                    .load_boundary_receipt(&self.runtime_id, &receipt.run_id, receipt.sequence)
+                    .await
+                    .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?
+                    .is_some()
+                {
+                    return Ok(());
+                }
+                let input_updates: Vec<InputState> = receipt
+                    .contributing_input_ids
+                    .iter()
+                    .filter_map(|id| self.inner.input_state(id).cloned())
+                    .collect();
 
-        // For BoundaryApplied, persist receipt + updated input states atomically
-        if let RunEvent::BoundaryApplied { ref receipt, .. } = event {
-            let input_updates: Vec<InputState> = receipt
-                .contributing_input_ids
-                .iter()
-                .filter_map(|id| self.inner.input_state(id).cloned())
-                .collect();
-
-            self.store
-                .atomic_apply(&self.runtime_id, None, receipt.clone(), input_updates)
-                .await
-                .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
+                self.store
+                    .atomic_apply(
+                        &self.runtime_id,
+                        session_snapshot.clone().map(|session_snapshot| {
+                            crate::store::SessionDelta { session_snapshot }
+                        }),
+                        receipt.clone(),
+                        input_updates,
+                    )
+                    .await
+                    .map_err(|e| {
+                        self.inner = checkpoint;
+                        RuntimeDriverError::Internal(format!("runtime boundary commit failed: {e}"))
+                    })?;
+            }
+            RunEvent::RunCompleted { .. }
+            | RunEvent::RunFailed { .. }
+            | RunEvent::RunCancelled { .. } => {
+                self.inner.on_run_event(event).await?;
+                self.persist_snapshot().await?;
+            }
+            _ => {
+                self.inner.on_run_event(event).await?;
+            }
         }
 
         Ok(())
@@ -145,7 +230,11 @@ impl RuntimeDriver for PersistentRuntimeDriver {
         &mut self,
         command: RuntimeControlCommand,
     ) -> Result<(), RuntimeDriverError> {
-        self.inner.on_runtime_control(command).await
+        self.inner.on_runtime_control(command).await?;
+        self.store
+            .persist_runtime_state(&self.runtime_id, self.inner.runtime_state())
+            .await
+            .map_err(|e| RuntimeDriverError::Internal(e.to_string()))
     }
 
     async fn recover(&mut self) -> Result<RecoveryReport, RuntimeDriverError> {
@@ -156,12 +245,46 @@ impl RuntimeDriver for PersistentRuntimeDriver {
             .await
             .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
 
+        let mut recovered_payloads = Vec::new();
+
         // Inject stored states into the ephemeral driver's ledger.
         // Uses recover() which also rebuilds the idempotency index for
         // dedup correctness and filters out Ephemeral inputs.
-        for state in stored_states {
+        for mut state in stored_states {
             // Only inject non-terminal states (terminal ones are already resolved)
             if !state.is_terminal() {
+                if matches!(
+                    state.current_state,
+                    crate::input_state::InputLifecycleState::Applied
+                        | crate::input_state::InputLifecycleState::AppliedPendingConsumption
+                ) {
+                    let has_receipt =
+                        match (state.last_run_id.clone(), state.last_boundary_sequence) {
+                            (Some(run_id), Some(sequence)) => self
+                                .store
+                                .load_boundary_receipt(&self.runtime_id, &run_id, sequence)
+                                .await
+                                .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?
+                                .is_some(),
+                            _ => false,
+                        };
+                    if !has_receipt {
+                        let now = Utc::now();
+                        state
+                            .history
+                            .push(crate::input_state::InputStateHistoryEntry {
+                                timestamp: now,
+                                from: state.current_state,
+                                to: crate::input_state::InputLifecycleState::Queued,
+                                reason: Some("recovery: missing boundary receipt".into()),
+                            });
+                        state.current_state = crate::input_state::InputLifecycleState::Queued;
+                        state.updated_at = now;
+                    }
+                }
+                if let Some(input) = state.persisted_input.clone() {
+                    recovered_payloads.push((state.input_id.clone(), input));
+                }
                 let ledger = &mut self.inner;
                 if ledger.input_state(&state.input_id).is_none() {
                     ledger.ledger_mut().recover(state);
@@ -170,15 +293,58 @@ impl RuntimeDriver for PersistentRuntimeDriver {
         }
 
         // Then run ephemeral recovery logic (requeue Accepted/Staged)
-        self.inner.recover().await
+        let report = self.inner.recover().await?;
+
+        for (input_id, input) in recovered_payloads {
+            let should_requeue = self.inner.input_state(&input_id).is_some_and(|state| {
+                state.current_state == crate::input_state::InputLifecycleState::Queued
+            });
+            if should_requeue && !self.inner.has_queued_input(&input_id) {
+                self.inner.enqueue_recovered_input(input_id, input);
+            }
+        }
+
+        if let Some(runtime_state) = self
+            .store
+            .load_runtime_state(&self.runtime_id)
+            .await
+            .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?
+        {
+            match runtime_state {
+                RuntimeState::Retired if self.inner.runtime_state() != RuntimeState::Retired => {
+                    EphemeralRuntimeDriver::retire(&mut self.inner)?;
+                }
+                RuntimeState::Stopped | RuntimeState::Destroyed => {
+                    self.inner
+                        .on_runtime_control(RuntimeControlCommand::Stop)
+                        .await?;
+                }
+                _ => {}
+            }
+        }
+
+        self.persist_snapshot().await?;
+        Ok(report)
     }
 
     async fn retire(&mut self) -> Result<crate::traits::RetireReport, RuntimeDriverError> {
-        EphemeralRuntimeDriver::retire(&mut self.inner)
+        let report = EphemeralRuntimeDriver::retire(&mut self.inner)?;
+        self.persist_snapshot().await?;
+        self.store
+            .persist_runtime_state(&self.runtime_id, self.inner.runtime_state())
+            .await
+            .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
+        Ok(report)
     }
 
     async fn reset(&mut self) -> Result<crate::traits::ResetReport, RuntimeDriverError> {
-        EphemeralRuntimeDriver::reset(&mut self.inner)
+        let report = EphemeralRuntimeDriver::reset(&mut self.inner)?;
+        self.persist_snapshot().await?;
+        self.store
+            .persist_runtime_state(&self.runtime_id, self.inner.runtime_state())
+            .await
+            .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
+        Ok(report)
     }
 
     fn runtime_state(&self) -> RuntimeState {
@@ -215,6 +381,7 @@ mod tests {
                 correlation_id: None,
             },
             text: text.into(),
+            turn_metadata: None,
         })
     }
 
@@ -232,6 +399,7 @@ mod tests {
         // Verify state was persisted to store BEFORE we returned
         let stored = store.load_input_state(&rid, &input_id).await.unwrap();
         assert!(stored.is_some());
+        assert!(stored.unwrap().persisted_input.is_some());
     }
 
     #[tokio::test]
@@ -265,8 +433,11 @@ mod tests {
         let rid = LogicalRuntimeId::new("test");
 
         // Pre-populate store with a state (simulating crash recovery)
-        let input_id = InputId::new();
-        let state = InputState::new_accepted(input_id.clone());
+        let input = make_prompt("hello");
+        let input_id = input.id().clone();
+        let mut state = InputState::new_accepted(input_id.clone());
+        state.persisted_input = Some(input.clone());
+        state.durability = Some(InputDurability::Durable);
         store.persist_input_state(&rid, &state).await.unwrap();
 
         // Create a fresh driver (simulating restart)
@@ -278,6 +449,14 @@ mod tests {
 
         // State should now be in the driver
         assert!(driver.input_state(&input_id).is_some());
+        let dequeued = driver.dequeue_next();
+        assert!(
+            dequeued.is_some(),
+            "Recovered queued input should be re-enqueued"
+        );
+        let (queued_id, queued_input) = dequeued.unwrap();
+        assert_eq!(queued_id, input_id);
+        assert_eq!(queued_input.id(), &input_id);
     }
 
     #[tokio::test]
@@ -364,6 +543,7 @@ mod tests {
             .on_run_event(meerkat_core::lifecycle::RunEvent::BoundaryApplied {
                 run_id: run_id.clone(),
                 receipt: receipt.clone(),
+                session_snapshot: Some(b"session-data".to_vec()),
             })
             .await
             .unwrap();
@@ -373,6 +553,54 @@ mod tests {
         assert!(
             loaded.is_some(),
             "BoundaryApplied should persist the receipt via atomic_apply"
+        );
+    }
+
+    #[tokio::test]
+    async fn retire_persists_abandoned_inputs() {
+        let store = Arc::new(InMemoryRuntimeStore::new());
+        let rid = LogicalRuntimeId::new("test");
+        let mut driver = PersistentRuntimeDriver::new(rid.clone(), store.clone());
+
+        let input = make_prompt("hello");
+        let input_id = input.id().clone();
+        driver.accept_input(input).await.unwrap();
+
+        let report = driver.retire().await.unwrap();
+        assert_eq!(report.inputs_abandoned, 1);
+
+        let stored = store
+            .load_input_state(&rid, &input_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.current_state,
+            crate::input_state::InputLifecycleState::Abandoned
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_persists_abandoned_inputs() {
+        let store = Arc::new(InMemoryRuntimeStore::new());
+        let rid = LogicalRuntimeId::new("test");
+        let mut driver = PersistentRuntimeDriver::new(rid.clone(), store.clone());
+
+        let input = make_prompt("hello");
+        let input_id = input.id().clone();
+        driver.accept_input(input).await.unwrap();
+
+        let report = driver.reset().await.unwrap();
+        assert_eq!(report.inputs_abandoned, 1);
+
+        let stored = store
+            .load_input_state(&rid, &input_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.current_state,
+            crate::input_state::InputLifecycleState::Abandoned
         );
     }
 }

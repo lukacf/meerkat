@@ -67,22 +67,6 @@ pub(crate) fn input_to_primitive(input: &Input, input_id: InputId) -> RunPrimiti
     }
 }
 
-/// Spawn the per-session runtime loop.
-///
-/// Returns a `JoinHandle` that runs until the wake channel closes.
-/// The loop dequeues inputs from the driver, converts them to `RunPrimitive`,
-/// and applies them via the `CoreExecutor`.
-pub(crate) fn spawn_runtime_loop(
-    driver: crate::session_adapter::SharedDriver,
-    mut executor: Box<dyn meerkat_core::lifecycle::CoreExecutor>,
-    mut wake_rx: tokio::sync::mpsc::Receiver<()>,
-    mut control_rx: tokio::sync::mpsc::Receiver<
-        meerkat_core::lifecycle::run_control::RunControlCommand,
-    >,
-) -> tokio::task::JoinHandle<()> {
-    spawn_runtime_loop_with_completions(driver, executor, wake_rx, control_rx, None)
-}
-
 /// Spawn the per-session runtime loop with optional completion registry.
 pub(crate) fn spawn_runtime_loop_with_completions(
     driver: crate::session_adapter::SharedDriver,
@@ -232,11 +216,11 @@ async fn process_queue(
                         }
 
                         // Resolve completion waiter if present
-                        if let Some(ref completions) = completions {
-                            if let Some(result) = run_result {
-                                let mut reg = completions.lock().await;
-                                reg.resolve_completed(&input_id, result);
-                            }
+                        if let Some(completions) = completions.as_ref()
+                            && let Some(result) = run_result
+                        {
+                            let mut reg = completions.lock().await;
+                            reg.resolve_completed(&input_id, result);
                         }
                     }
                     Err(e) => {

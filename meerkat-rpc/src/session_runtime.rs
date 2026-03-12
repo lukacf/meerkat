@@ -415,7 +415,7 @@ impl SessionRuntime {
         &self,
         session_id: &SessionId,
         prompt: String,
-        event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
+        _event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
         flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
         additional_instructions: Option<Vec<String>>,

@@ -22,15 +22,12 @@ fn workspace_root() -> PathBuf {
 
 fn binary_path(name: &str) -> Option<PathBuf> {
     let root = workspace_root();
-    for candidate in [
+    [
         root.join(format!("target/debug/{name}")),
         root.join(format!("target/release/{name}")),
-    ] {
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-    None
+    ]
+    .into_iter()
+    .find(|candidate| candidate.exists())
 }
 
 fn first_env(vars: &[&str]) -> Option<String> {
@@ -1389,7 +1386,7 @@ async fn e2e_scenario_54_shared_realm_mob_sessions_visible_to_cli()
 
     rpc_send_line(
         &mut rpc,
-        &format!(r#"{{"jsonrpc":"2.0","id":2,"method":"mob/list","params":{{}}}}"#),
+        r#"{"jsonrpc":"2.0","id":2,"method":"mob/list","params":{}}"#,
     )
     .await?;
     let list = rpc_read_response_line(&mut rpc, 20).await?;

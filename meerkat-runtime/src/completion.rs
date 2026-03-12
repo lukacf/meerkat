@@ -104,7 +104,7 @@ impl CompletionRegistry {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
     use meerkat_core::types::{SessionId, Usage};
@@ -136,7 +136,7 @@ mod tests {
 
         match handle.wait().await {
             CompletionOutcome::Completed(r) => assert_eq!(r.text, "hello"),
-            other => panic!("Expected Completed, got {:?}", other),
+            other => panic!("Expected Completed, got {other:?}"),
         }
     }
 
@@ -150,7 +150,7 @@ mod tests {
 
         match handle.wait().await {
             CompletionOutcome::Abandoned(reason) => assert_eq!(reason, "retired"),
-            other => panic!("Expected Abandoned, got {:?}", other),
+            other => panic!("Expected Abandoned, got {other:?}"),
         }
     }
 
@@ -166,11 +166,11 @@ mod tests {
 
         match h1.wait().await {
             CompletionOutcome::RuntimeTerminated(r) => assert_eq!(r, "runtime stopped"),
-            other => panic!("Expected RuntimeTerminated, got {:?}", other),
+            other => panic!("Expected RuntimeTerminated, got {other:?}"),
         }
         match h2.wait().await {
             CompletionOutcome::RuntimeTerminated(r) => assert_eq!(r, "runtime stopped"),
-            other => panic!("Expected RuntimeTerminated, got {:?}", other),
+            other => panic!("Expected RuntimeTerminated, got {other:?}"),
         }
     }
 
@@ -192,7 +192,7 @@ mod tests {
 
         match handle.wait().await {
             CompletionOutcome::RuntimeTerminated(_) => {}
-            other => panic!("Expected RuntimeTerminated, got {:?}", other),
+            other => panic!("Expected RuntimeTerminated, got {other:?}"),
         }
     }
 }

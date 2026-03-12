@@ -611,6 +611,7 @@ impl RuntimeSessionAdapter {
     /// Get the shared completion registry for a session.
     ///
     /// Used by the runtime loop to resolve waiters on input consumption.
+    #[allow(dead_code)]
     pub(crate) async fn completion_registry(
         &self,
         session_id: &SessionId,

@@ -2169,10 +2169,12 @@ async fn shutdown_mcp(_adapter: &Option<Arc<McpRouterAdapter>>) {
 /// Mob-managed meerkats are created through the same in-process session service as
 /// the parent CLI agent. Host-mode behavior is backend-driven by mob runtime
 /// requests and must not be overridden here.
+#[allow(dead_code)]
 struct RunMobSessionService {
     inner: Arc<EphemeralSessionService<FactoryAgentBuilder>>,
 }
 
+#[allow(dead_code)]
 impl RunMobSessionService {
     fn new(inner: Arc<EphemeralSessionService<FactoryAgentBuilder>>) -> Self {
         Self { inner }
@@ -4521,13 +4523,14 @@ fn parse_mob_state(value: &str) -> Option<meerkat_mob::MobState> {
     }
 }
 
+type LlmClientProvider =
+    Arc<dyn Fn() -> Option<Arc<dyn meerkat_client::LlmClient>> + Send + Sync + 'static>;
+
 async fn hydrate_mob_state(
     scope: &RuntimeScope,
     session_service: Arc<dyn meerkat_mob::MobSessionService>,
     runtime_adapter: Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>,
-    default_llm_client_provider: Option<
-        Arc<dyn Fn() -> Option<Arc<dyn meerkat_client::LlmClient>> + Send + Sync + 'static>,
-    >,
+    default_llm_client_provider: Option<LlmClientProvider>,
     seeded_handles: std::collections::BTreeMap<String, meerkat_mob::MobHandle>,
 ) -> anyhow::Result<(Arc<meerkat_mob_mcp::MobMcpState>, PersistedMobRegistry)> {
     let registry = load_mob_registry(scope).await?;

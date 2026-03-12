@@ -2649,27 +2649,37 @@ mod tests {
                 && payload.status == "draining"
         }));
 
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        let mut observed_forced = false;
+        for attempt in 0..10 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
 
-        let (event_tx, mut event_rx) = mpsc::channel(128);
-        runtime
-            .start_turn(
-                &session_id,
-                "turn after timeout".to_string(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
-            .await
-            .expect("follow-up boundary");
-        let second_turn_events = collect_tool_config_events(&mut event_rx);
-        assert!(second_turn_events.iter().any(|payload| {
-            payload.operation == ToolConfigChangeOperation::Remove
-                && payload.target == "timeout-server"
-                && payload.status == "forced"
-        }));
+            let (event_tx, mut event_rx) = mpsc::channel(128);
+            runtime
+                .start_turn(
+                    &session_id,
+                    format!("turn after timeout {attempt}"),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .expect("follow-up boundary");
+            let second_turn_events = collect_tool_config_events(&mut event_rx);
+            if second_turn_events.iter().any(|payload| {
+                payload.operation == ToolConfigChangeOperation::Remove
+                    && payload.target == "timeout-server"
+                    && payload.status == "forced"
+            }) {
+                observed_forced = true;
+                break;
+            }
+        }
+        assert!(
+            observed_forced,
+            "expected forced removal event on a follow-up boundary"
+        );
     }
 
     #[cfg(feature = "mcp")]

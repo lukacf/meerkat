@@ -60,7 +60,6 @@ chrono = { workspace = true }
 dirs = { workspace = true }
 subtle = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
-sha2 = { workspace = true }
 
 [features]
 default = ["comms", "mcp"]

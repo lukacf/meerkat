@@ -354,9 +354,9 @@ mod tests {
             .load_boundary_receipt(&rid, &receipt.run_id, receipt.sequence)
             .await
             .unwrap();
-        let loaded = match loaded {
-            Some(receipt) => receipt,
-            None => panic!("receipt should be persisted"),
+        assert!(loaded.is_some(), "receipt should be persisted");
+        let Some(loaded) = loaded else {
+            unreachable!("asserted above");
         };
         assert_eq!(loaded, receipt);
     }

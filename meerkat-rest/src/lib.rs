@@ -1911,10 +1911,12 @@ async fn create_session(
         });
         let session_service = state.session_service.clone();
         let session_id_for_run = session_id.clone();
+        let caller_event_tx_for_run = caller_event_tx.clone();
         adapter
             .accept_input_and_run(&session_id, input, move |run_id, primitive| {
                 let session_service = session_service.clone();
                 let session_id = session_id_for_run.clone();
+                let caller_event_tx = caller_event_tx_for_run.clone();
                 async move {
                     let build_req = SvcCreateSessionRequest {
                         initial_turn: InitialTurnPolicy::Defer,
@@ -1973,6 +1975,9 @@ async fn create_session(
                 _ => ApiError::Agent(err.to_string()),
             })
     };
+
+    // Drop the sender so the forwarder sees channel closure and can drain.
+    drop(caller_event_tx);
 
     // Wait for the event forwarder to drain
     let _ = forward_task.await;

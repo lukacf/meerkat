@@ -279,7 +279,16 @@ impl MethodRouter {
     ) -> Self {
         let runtime_adapter = runtime.runtime_adapter();
         #[cfg(feature = "mob")]
-        let mob_state = Arc::new(meerkat_mob_mcp::MobMcpState::new(runtime.session_service()));
+        let mob_state = Arc::new(
+            meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
+                runtime.session_service(),
+                Some(runtime_adapter.clone()),
+            )
+            .with_default_llm_client_provider(Some(Arc::new({
+                let runtime = runtime.clone();
+                move || runtime.default_llm_client()
+            }))),
+        );
         Self {
             runtime,
             config_store,

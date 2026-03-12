@@ -7,6 +7,10 @@ use meerkat_core::service::StartTurnRequest;
 use meerkat_core::service::{SessionError, SessionServiceCommsExt, SessionServiceControlExt};
 use meerkat_core::{InputId, RunId};
 use sha2::{Digest, Sha256};
+#[cfg(not(target_arch = "wasm32"))]
+use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{Mutex, OnceLock, Weak};
 
 fn build_runtime_receipt(
     run_id: RunId,
@@ -27,6 +31,40 @@ fn build_runtime_receipt(
         message_count: session.messages().len(),
         sequence: 0,
     })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn ephemeral_runtime_adapter_cache()
+-> &'static Mutex<HashMap<usize, Weak<meerkat_runtime::RuntimeSessionAdapter>>> {
+    static CACHE: OnceLock<Mutex<HashMap<usize, Weak<meerkat_runtime::RuntimeSessionAdapter>>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn persistent_runtime_adapter_cache()
+-> &'static Mutex<HashMap<usize, Weak<meerkat_runtime::RuntimeSessionAdapter>>> {
+    static CACHE: OnceLock<Mutex<HashMap<usize, Weak<meerkat_runtime::RuntimeSessionAdapter>>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn cached_runtime_adapter(
+    cache: &'static Mutex<HashMap<usize, Weak<meerkat_runtime::RuntimeSessionAdapter>>>,
+    key: usize,
+    init: impl FnOnce() -> Arc<meerkat_runtime::RuntimeSessionAdapter>,
+) -> Arc<meerkat_runtime::RuntimeSessionAdapter> {
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache.retain(|_, adapter| adapter.strong_count() > 0);
+    if let Some(existing) = cache.get(&key).and_then(Weak::upgrade) {
+        return existing;
+    }
+    let adapter = init();
+    cache.insert(key, Arc::downgrade(&adapter));
+    adapter
 }
 
 // ---------------------------------------------------------------------------
@@ -120,7 +158,12 @@ where
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            Some(Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()))
+            let key = std::ptr::from_ref(self) as usize;
+            Some(cached_runtime_adapter(
+                ephemeral_runtime_adapter_cache(),
+                key,
+                || Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
+            ))
         }
     }
 
@@ -188,8 +231,12 @@ where
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.runtime_store()
-                .map(|store| Arc::new(meerkat_runtime::RuntimeSessionAdapter::persistent(store)))
+            let key = std::ptr::from_ref(self) as usize;
+            self.runtime_store().map(|store| {
+                cached_runtime_adapter(persistent_runtime_adapter_cache(), key, || {
+                    Arc::new(meerkat_runtime::RuntimeSessionAdapter::persistent(store))
+                })
+            })
         }
     }
 

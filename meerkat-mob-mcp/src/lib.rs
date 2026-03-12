@@ -5,6 +5,7 @@ mod tokio {
 
 use async_trait::async_trait;
 
+use meerkat_client::LlmClient;
 use meerkat_core::AppendSystemContextStatus;
 use meerkat_core::ScopedAgentEvent;
 use meerkat_core::agent::{AgentToolDispatcher, CommsRuntime as CoreCommsRuntime};
@@ -40,10 +41,14 @@ struct ManagedMob {
     handle: MobHandle,
 }
 
+type DefaultLlmClientProvider = Arc<dyn Fn() -> Option<Arc<dyn LlmClient>> + Send + Sync + 'static>;
+
 /// In-memory MCP state for multiple mobs.
 pub struct MobMcpState {
     session_service: Arc<dyn MobSessionService>,
     runtime_adapter: Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>,
+    default_llm_client: Option<Arc<dyn LlmClient>>,
+    default_llm_client_provider: Option<DefaultLlmClientProvider>,
     mobs: RwLock<BTreeMap<MobId, ManagedMob>>,
 }
 
@@ -60,8 +65,23 @@ impl MobMcpState {
         Self {
             session_service,
             runtime_adapter,
+            default_llm_client: None,
+            default_llm_client_provider: None,
             mobs: RwLock::new(BTreeMap::new()),
         }
+    }
+
+    pub fn with_default_llm_client(mut self, client: Option<Arc<dyn LlmClient>>) -> Self {
+        self.default_llm_client = client;
+        self
+    }
+
+    pub fn with_default_llm_client_provider(
+        mut self,
+        provider: Option<DefaultLlmClientProvider>,
+    ) -> Self {
+        self.default_llm_client_provider = provider;
+        self
     }
 
     /// Access the underlying session service.
@@ -83,6 +103,14 @@ impl MobMcpState {
             .allow_ephemeral_sessions(!self.session_service.supports_persistent_sessions());
         if let Some(adapter) = &self.runtime_adapter {
             builder = builder.with_runtime_adapter(adapter.clone());
+        }
+        let default_llm_client = self.default_llm_client.clone().or_else(|| {
+            self.default_llm_client_provider
+                .as_ref()
+                .and_then(|provider| provider())
+        });
+        if let Some(client) = default_llm_client {
+            builder = builder.with_default_llm_client(client.clone());
         }
         let handle = builder.create().await?;
         match self.mobs.write().await.entry(mob_id.clone()) {

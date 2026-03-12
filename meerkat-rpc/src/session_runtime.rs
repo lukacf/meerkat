@@ -39,7 +39,7 @@ use meerkat_core::{AgentToolDispatcher, ToolGateway};
 use meerkat_core::{Config, ConfigStore, HookRunOverrides, Session, SessionSystemContextState};
 #[cfg(all(test, feature = "mcp"))]
 use meerkat_core::{ToolConfigChangeOperation, ToolConfigChangedPayload};
-use meerkat_runtime::{RuntimeSessionAdapter, RuntimeStore};
+use meerkat_runtime::RuntimeSessionAdapter;
 use tokio::sync::{RwLock, mpsc};
 
 use crate::error;
@@ -149,7 +149,7 @@ pub struct SessionRuntime {
     instance_id: Option<String>,
     backend: Option<String>,
     config_runtime: Option<Arc<meerkat_core::ConfigRuntime>>,
-    runtime_store: Option<Arc<dyn RuntimeStore>>,
+    runtime_adapter: Arc<RuntimeSessionAdapter>,
     skill_identity_registry: Arc<StdRwLock<SkillIdentityRegistryState>>,
     #[cfg(feature = "mcp")]
     mcp_sessions: RwLock<std::collections::HashMap<SessionId, SessionMcpState>>,
@@ -199,6 +199,10 @@ impl SessionRuntime {
             store,
             runtime_store.clone(),
         ));
+        let runtime_adapter = match &runtime_store {
+            Some(store) => Arc::new(RuntimeSessionAdapter::persistent(store.clone())),
+            None => Arc::new(RuntimeSessionAdapter::legacy()),
+        };
 
         Self {
             service,
@@ -209,7 +213,7 @@ impl SessionRuntime {
             instance_id: None,
             backend: None,
             config_runtime: None,
-            runtime_store,
+            runtime_adapter,
             skill_identity_registry: Arc::new(StdRwLock::new(SkillIdentityRegistryState {
                 generation: 0,
                 registry: SourceIdentityRegistry::default(),
@@ -243,6 +247,10 @@ impl SessionRuntime {
             store,
             runtime_store.clone(),
         ));
+        let runtime_adapter = match &runtime_store {
+            Some(store) => Arc::new(RuntimeSessionAdapter::persistent(store.clone())),
+            None => Arc::new(RuntimeSessionAdapter::legacy()),
+        };
 
         Self {
             service,
@@ -253,7 +261,7 @@ impl SessionRuntime {
             instance_id: None,
             backend: None,
             config_runtime: None,
-            runtime_store,
+            runtime_adapter,
             skill_identity_registry: Arc::new(StdRwLock::new(SkillIdentityRegistryState {
                 generation: 0,
                 registry: SourceIdentityRegistry::default(),
@@ -297,10 +305,11 @@ impl SessionRuntime {
 
     /// Build the runtime adapter appropriate for this runtime's persistence mode.
     pub fn runtime_adapter(&self) -> Arc<RuntimeSessionAdapter> {
-        match &self.runtime_store {
-            Some(store) => Arc::new(RuntimeSessionAdapter::persistent(store.clone())),
-            None => Arc::new(RuntimeSessionAdapter::legacy()),
-        }
+        self.runtime_adapter.clone()
+    }
+
+    pub fn default_llm_client(&self) -> Option<Arc<dyn LlmClient>> {
+        self.default_llm_client.clone()
     }
 
     pub async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
@@ -2649,36 +2658,42 @@ mod tests {
                 && payload.status == "draining"
         }));
 
-        let mut observed_forced = false;
-        for attempt in 0..10 {
-            tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if !adapter
+                    .has_removing_servers()
+                    .await
+                    .expect("check removing state")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for forced removal to finalize");
 
-            let (event_tx, mut event_rx) = mpsc::channel(128);
-            runtime
-                .start_turn(
-                    &session_id,
-                    format!("turn after timeout {attempt}"),
-                    event_tx,
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-                .await
-                .expect("follow-up boundary");
-            let second_turn_events = collect_tool_config_events(&mut event_rx);
-            if second_turn_events.iter().any(|payload| {
+        let (event_tx, mut event_rx) = mpsc::channel(128);
+        runtime
+            .start_turn(
+                &session_id,
+                "turn after timeout".to_string(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("follow-up boundary");
+        let second_turn_events = collect_tool_config_events(&mut event_rx);
+        assert!(
+            second_turn_events.iter().any(|payload| {
                 payload.operation == ToolConfigChangeOperation::Remove
                     && payload.target == "timeout-server"
                     && payload.status == "forced"
-            }) {
-                observed_forced = true;
-                break;
-            }
-        }
-        assert!(
-            observed_forced,
-            "expected forced removal event on a follow-up boundary"
+            }),
+            "expected forced removal event on a follow-up boundary, got: {second_turn_events:?}"
         );
     }
 

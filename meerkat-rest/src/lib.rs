@@ -928,19 +928,42 @@ fn get_runtime_adapter(state: &AppState) -> &Arc<meerkat_runtime::RuntimeSession
     &state.runtime_adapter
 }
 
+fn session_metadata_marks_archived(session: &Session) -> bool {
+    session
+        .metadata()
+        .get("session_archived")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
 async fn ensure_runtime_session_registered(
     state: &AppState,
     session_id: &SessionId,
 ) -> Result<(), Response> {
     let adapter = get_runtime_adapter(state);
 
-    let session_exists = state.session_service.read(session_id).await.is_ok()
-        || state
-            .session_service
-            .load_persisted(session_id)
-            .await
-            .map(|session| session.is_some())
-            .unwrap_or(false);
+    let persisted = state
+        .session_service
+        .load_persisted(session_id)
+        .await
+        .ok()
+        .flatten();
+    if persisted
+        .as_ref()
+        .is_some_and(session_metadata_marks_archived)
+    {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("Session not found: {session_id}")})),
+        )
+            .into_response());
+    }
+
+    let session_exists = if persisted.is_some() {
+        true
+    } else {
+        state.session_service.read(session_id).await.is_ok()
+    };
 
     if !session_exists {
         return Err((

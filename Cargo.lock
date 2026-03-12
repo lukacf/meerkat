@@ -3587,6 +3587,7 @@ dependencies = [
  "meerkat-mob-mcp",
  "meerkat-mob-pack",
  "meerkat-rpc",
+ "meerkat-runtime",
  "meerkat-store",
  "meerkat-tools",
  "nix 0.29.0",

@@ -80,13 +80,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .realm_backend
         .map(Into::into)
         .or(Some(RealmBackend::Redb));
-    let (manifest, session_store) = meerkat_store::open_realm_session_store_in(
+    let (manifest, persistence) = meerkat::open_realm_persistence_in(
         &locator.state_root,
         &locator.realm_id,
         backend_hint,
         Some(origin_hint),
     )
     .await?;
+    let session_store = persistence.session_store();
     let realm_paths = meerkat_store::realm_paths_in(&locator.state_root, &locator.realm_id);
 
     let base_store: Arc<dyn ConfigStore> =
@@ -155,7 +156,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config,
         Arc::clone(&config_store),
         64,
-        session_store,
+        persistence,
         meerkat_rpc::router::NotificationSink::noop(),
     );
     runtime.set_skill_identity_registry(identity_registry);

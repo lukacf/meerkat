@@ -34,13 +34,19 @@ fn spawn_test_server(
     let temp = tempfile::tempdir().unwrap();
     let factory = AgentFactory::new(temp.path().join("sessions"));
     let config = Config::default();
-    let store: Arc<dyn meerkat::SessionStore> =
+    let store =
         Arc::new(meerkat::RedbSessionStore::open(temp.path().join("sessions.redb")).unwrap());
+    let runtime_store =
+        Arc::new(meerkat_runtime::store::RedbRuntimeStore::new(store.database()).unwrap())
+            as Arc<dyn meerkat_runtime::RuntimeStore>;
     let mut runtime = SessionRuntime::new(
         factory,
         config,
         10,
-        store,
+        meerkat::PersistenceBundle::new(
+            store as Arc<dyn meerkat::SessionStore>,
+            Some(runtime_store),
+        ),
         meerkat_rpc::router::NotificationSink::noop(),
     );
     let config_store: Arc<dyn meerkat_core::ConfigStore> =

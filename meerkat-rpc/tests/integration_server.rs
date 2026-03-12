@@ -76,7 +76,7 @@ fn spawn_test_server() -> (
         factory,
         config,
         10,
-        store,
+        meerkat::PersistenceBundle::new(store, None),
         meerkat_rpc::router::NotificationSink::noop(),
     );
     let config_store: Arc<dyn meerkat_core::ConfigStore> =

@@ -420,7 +420,7 @@ impl SessionRuntime {
     /// authority (the RuntimeLoop → CoreExecutor pipeline).
     #[allow(clippy::too_many_arguments)]
     pub async fn start_turn_via_runtime(
-        &self,
+        self: &Arc<Self>,
         session_id: &SessionId,
         prompt: String,
         _event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
@@ -436,10 +436,7 @@ impl SessionRuntime {
         // Build turn metadata from overrides
         let turn_metadata = Some(
             meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                host_mode: overrides
-                    .as_ref()
-                    .and_then(|ov| ov.host_mode)
-                    .unwrap_or(false),
+                host_mode: overrides.as_ref().and_then(|ov| ov.host_mode),
                 skill_references,
                 flow_tool_overlay,
                 additional_instructions,
@@ -449,17 +446,32 @@ impl SessionRuntime {
         let input = Input::Prompt(PromptInput::new(prompt, turn_metadata));
 
         // Lazy-register executor if not already registered.
-        // Uses self.notification_sink for event forwarding in the executor.
         if !self.runtime_adapter.contains_session(session_id).await {
-            // We need Arc<Self> for the executor. Since we're called from a handler
-            // that has Arc<SessionRuntime>, the caller must pass it. For now, return
-            // an error if not registered — the handler's lazy-register should prevent
-            // this from happening.
-            return Err(RpcError {
-                code: error::INTERNAL_ERROR,
-                message: format!("session {session_id} has no runtime registration"),
-                data: None,
-            });
+            // Verify the session exists before registering to avoid creating
+            // dead executors for nonexistent sessions.
+            let session_exists = self.pending.read().await.contains_key(session_id)
+                || self.service.read(session_id).await.is_ok()
+                || self
+                    .load_persisted_session(session_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some();
+            if !session_exists {
+                return Err(RpcError {
+                    code: error::SESSION_NOT_FOUND,
+                    message: format!("session not found: {session_id}"),
+                    data: None,
+                });
+            }
+            let executor = Box::new(crate::session_executor::SessionRuntimeExecutor::new(
+                Arc::clone(self),
+                session_id.clone(),
+                self.notification_sink.clone(),
+            ));
+            self.runtime_adapter
+                .ensure_session_with_executor(session_id.clone(), executor)
+                .await;
         }
 
         let (outcome, handle) = self
@@ -698,6 +710,10 @@ impl SessionRuntime {
                 None
             };
 
+            // Inject runtime adapter so the factory can construct a per-session
+            // RuntimeInputSink for host-mode comms routing.
+            build_config.runtime_adapter_for_sink = Some(self.runtime_adapter.clone());
+
             let mut build = build_config.to_session_build_options();
             build.realm_id = build.realm_id.or_else(|| self.realm_id.clone());
             build.instance_id = build.instance_id.or_else(|| self.instance_id.clone());
@@ -858,7 +874,7 @@ impl SessionRuntime {
             app_context: None,
             additional_instructions: None,
             shell_env: None,
-            runtime_input_sink: None,
+            runtime_adapter_for_sink: Some(self.runtime_adapter.clone()),
         };
         self.service
             .create_session(CreateSessionRequest {
@@ -1129,6 +1145,8 @@ impl SessionRuntime {
             } else {
                 None
             };
+
+            build_config.runtime_adapter_for_sink = Some(self.runtime_adapter.clone());
 
             let mut build = build_config.to_session_build_options();
             build.realm_id = build.realm_id.or_else(|| self.realm_id.clone());

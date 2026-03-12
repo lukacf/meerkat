@@ -705,6 +705,15 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
             })?;
         let mut driver = entry.driver.lock().await;
         let report = driver.as_driver_mut().retire().await?;
+        drop(driver); // Release driver lock before waking
+
+        if report.inputs_pending_drain > 0 {
+            // Wake the runtime loop so it drains already-queued inputs.
+            // Retired state allows processing but rejects new accepts.
+            if let Some(ref wake_tx) = entry.wake_tx {
+                let _ = wake_tx.send(()).await;
+            }
+        }
 
         // If no loop is attached, nothing will drain — resolve all pending waiters
         if entry.wake_tx.is_none() {

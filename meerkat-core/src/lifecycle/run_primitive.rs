@@ -73,8 +73,9 @@ pub struct ConversationContextAppend {
 /// An input staged for application at a run boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RuntimeTurnMetadata {
-    #[serde(default)]
-    pub host_mode: bool,
+    /// `None` = use session default; `Some(true)` = force host mode; `Some(false)` = force non-host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_mode: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_references: Option<Vec<SkillKey>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -229,7 +230,7 @@ mod tests {
             context_appends: vec![],
             contributing_input_ids: vec![InputId::new()],
             turn_metadata: Some(RuntimeTurnMetadata {
-                host_mode: true,
+                host_mode: Some(true),
                 ..Default::default()
             }),
         };

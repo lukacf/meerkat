@@ -463,8 +463,6 @@ where
     /// Optional sink for routing host-mode new-run work through the runtime.
     /// When set, passthrough interactions and continuation runs use the sink
     /// instead of calling `self.run()` directly.
-    /// Currently wired but not yet consumed — B6 comms host-mode cutover pending.
-    #[allow(dead_code)]
     pub(crate) runtime_input_sink: Option<Arc<dyn RuntimeInputSink>>,
     /// True after the agentic loop completes when `output_schema` is set.
     /// Causes the next `CallingLlm` iteration to use extraction parameters

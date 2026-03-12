@@ -130,12 +130,9 @@ impl CoreExecutor for SessionRuntimeExecutor {
                     .turn_metadata()
                     .and_then(|meta| meta.additional_instructions.clone()),
                 Some(crate::handlers::turn::TurnOverrides {
-                    // Only pass host_mode override if explicitly true — false is the
-                    // default and should not override a session's persisted host_mode.
-                    host_mode: primitive
-                        .turn_metadata()
-                        .map(|meta| meta.host_mode)
-                        .filter(|&h| h),
+                    // Pass through explicit host_mode override (Some(true)/Some(false))
+                    // or None to use session default.
+                    host_mode: primitive.turn_metadata().and_then(|meta| meta.host_mode),
                     model: None,
                     provider: None,
                     max_tokens: None,
@@ -204,7 +201,10 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
         let req = meerkat_core::service::StartTurnRequest {
             prompt,
             event_tx: Some(event_tx),
-            host_mode: primitive.turn_metadata().is_some_and(|meta| meta.host_mode),
+            host_mode: primitive
+                .turn_metadata()
+                .and_then(|meta| meta.host_mode)
+                .unwrap_or(false),
             skill_references: primitive
                 .turn_metadata()
                 .and_then(|meta| meta.skill_references.clone()),

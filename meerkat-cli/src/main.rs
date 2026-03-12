@@ -2166,9 +2166,54 @@ async fn shutdown_mcp(_adapter: &Option<Arc<McpRouterAdapter>>) {
 
 /// CLI runtime executor — delegates to SessionService::start_turn() and synthesizes
 /// a structural receipt for the ephemeral runtime driver contract.
+/// CLI-side executor that bridges the runtime loop to the session service.
+///
+/// For ephemeral sessions: delegates to `SessionService::start_turn()` and fabricates
+/// a placeholder receipt (no snapshot, no digest).
+///
+/// For persistent sessions: delegates to `PersistentSessionService::apply_runtime_turn_with_result()`
+/// which exports the committed session snapshot and real receipt.
 struct CliRuntimeExecutor {
-    service: Arc<EphemeralSessionService<FactoryAgentBuilder>>,
+    service: Arc<dyn meerkat_core::service::SessionService>,
+    /// Persistent service reference for durable boundary commits.
+    /// When `Some`, `apply()` uses `apply_runtime_turn_with_result()`.
+    persistent_service:
+        Option<Arc<meerkat::PersistentSessionService<meerkat::FactoryAgentBuilder>>>,
     session_id: meerkat_core::types::SessionId,
+    runtime_adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
+}
+
+fn extract_cli_prompt(primitive: &meerkat_core::lifecycle::run_primitive::RunPrimitive) -> String {
+    match primitive {
+        meerkat_core::lifecycle::run_primitive::RunPrimitive::StagedInput(staged) => staged
+            .appends
+            .iter()
+            .filter_map(|a| match &a.content {
+                meerkat_core::lifecycle::run_primitive::CoreRenderable::Text { text } => {
+                    Some(text.as_str())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        meerkat_core::lifecycle::run_primitive::RunPrimitive::ImmediateAppend(append) => {
+            match &append.content {
+                meerkat_core::lifecycle::run_primitive::CoreRenderable::Text { text } => {
+                    text.clone()
+                }
+                _ => String::new(),
+            }
+        }
+        meerkat_core::lifecycle::run_primitive::RunPrimitive::ImmediateContextAppend(ctx) => {
+            match &ctx.content {
+                meerkat_core::lifecycle::run_primitive::CoreRenderable::Text { text } => {
+                    text.clone()
+                }
+                _ => String::new(),
+            }
+        }
+        _ => String::new(),
+    }
 }
 
 #[async_trait::async_trait]
@@ -2181,23 +2226,14 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
         meerkat_core::lifecycle::core_executor::CoreApplyOutput,
         meerkat_core::lifecycle::core_executor::CoreExecutorError,
     > {
-        let prompt = match &primitive {
-            meerkat_core::lifecycle::run_primitive::RunPrimitive::StagedInput(staged) => staged
-                .appends
-                .first()
-                .map(|a| match &a.content {
-                    meerkat_core::lifecycle::run_primitive::CoreRenderable::Text { text } => {
-                        text.clone()
-                    }
-                    _ => String::new(),
-                })
-                .unwrap_or_default(),
-            _ => String::new(),
-        };
+        let prompt = extract_cli_prompt(&primitive);
         let turn_req = StartTurnRequest {
             prompt,
             event_tx: None,
-            host_mode: primitive.turn_metadata().is_some_and(|meta| meta.host_mode),
+            host_mode: primitive
+                .turn_metadata()
+                .and_then(|meta| meta.host_mode)
+                .unwrap_or(false),
             skill_references: primitive
                 .turn_metadata()
                 .and_then(|meta| meta.skill_references.clone()),
@@ -2208,6 +2244,33 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
                 .turn_metadata()
                 .and_then(|meta| meta.additional_instructions.clone()),
         };
+
+        // Persistent path: use apply_runtime_turn_with_result for real receipt + snapshot.
+        if let Some(ref persistent) = self.persistent_service {
+            let boundary = match &primitive {
+                meerkat_core::lifecycle::run_primitive::RunPrimitive::StagedInput(staged) => {
+                    staged.boundary
+                }
+                _ => meerkat_core::lifecycle::run_primitive::RunApplyBoundary::Immediate,
+            };
+            let (_run_result, output) = persistent
+                .apply_runtime_turn_with_result(
+                    &self.session_id,
+                    run_id,
+                    turn_req,
+                    boundary,
+                    primitive.contributing_input_ids().to_vec(),
+                )
+                .await
+                .map_err(|e| {
+                    meerkat_core::lifecycle::core_executor::CoreExecutorError::ApplyFailed {
+                        reason: e.to_string(),
+                    }
+                })?;
+            return Ok(output);
+        }
+
+        // Ephemeral path: start_turn + placeholder receipt.
         let result = self
             .service
             .start_turn(&self.session_id, turn_req)
@@ -2241,13 +2304,27 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
         &mut self,
         cmd: meerkat_core::lifecycle::run_control::RunControlCommand,
     ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
-        if matches!(
-            cmd,
-            meerkat_core::lifecycle::run_control::RunControlCommand::CancelCurrentRun { .. }
-        ) {
-            let _ = self.service.interrupt(&self.session_id).await;
+        match cmd {
+            meerkat_core::lifecycle::run_control::RunControlCommand::CancelCurrentRun {
+                ..
+            } => {
+                let _ = self.service.interrupt(&self.session_id).await;
+                Ok(())
+            }
+            meerkat_core::lifecycle::run_control::RunControlCommand::StopRuntimeExecutor {
+                ..
+            } => {
+                // Discard live session state via concrete type (not on SessionService trait).
+                if let Some(ref persistent) = self.persistent_service {
+                    let _ = persistent.discard_live_session(&self.session_id).await;
+                }
+                self.runtime_adapter
+                    .unregister_session(&self.session_id)
+                    .await;
+                Ok(())
+            }
+            _ => Ok(()),
         }
-        Ok(())
     }
 }
 
@@ -2947,7 +3024,7 @@ async fn run_agent(
             Some(instructions)
         },
         shell_env: None,
-        runtime_input_sink: None,
+        runtime_adapter_for_sink: Some(runtime_adapter.clone()),
     };
 
     let parsed_labels = if labels.is_empty() {
@@ -3063,8 +3140,10 @@ async fn run_agent(
     // Register executor and route turn through runtime adapter.
     let session_id = create_result.session_id.clone();
     let executor = Box::new(CliRuntimeExecutor {
-        service: service.clone(),
+        service: service.clone() as Arc<dyn meerkat_core::service::SessionService>,
+        persistent_service: None,
         session_id: session_id.clone(),
+        runtime_adapter: runtime_adapter.clone(),
     });
     runtime_adapter
         .register_session_with_executor(session_id.clone(), executor)
@@ -3074,7 +3153,7 @@ async fn run_agent(
         prompt.to_string(),
         Some(
             meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                host_mode,
+                host_mode: if host_mode { Some(true) } else { None },
                 skill_references: canonical_skill_refs,
                 flow_tool_overlay,
                 additional_instructions: None,
@@ -3401,9 +3480,26 @@ async fn resume_session_with_llm_override(
     #[cfg(feature = "comms")]
     let factory = factory.comms(tooling.comms || host_mode);
 
-    log_stage("build_cli_service");
-    // Build the session service.
-    let service = Arc::new(build_cli_service(factory, config.clone()));
+    log_stage("build_cli_persistent_service");
+    // Build persistent session service for resume — durable runtime semantics.
+    let runtime_store = store.shared_redb_database().and_then(|database| {
+        meerkat_runtime::store::RedbRuntimeStore::new(database)
+            .ok()
+            .map(|s| Arc::new(s) as Arc<dyn meerkat_runtime::RuntimeStore>)
+    });
+    let resume_adapter = match &runtime_store {
+        Some(rs) => Arc::new(meerkat_runtime::RuntimeSessionAdapter::persistent(
+            rs.clone(),
+        )),
+        None => Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
+    };
+    let builder = FactoryAgentBuilder::new(factory, config.clone());
+    let service = Arc::new(meerkat::PersistentSessionService::new(
+        builder,
+        64,
+        store.clone(),
+        runtime_store,
+    ));
 
     log_stage("compose_external_tool_dispatchers");
     let mut run_mob_tools = if tooling.mob {
@@ -3495,7 +3591,7 @@ async fn resume_session_with_llm_override(
         app_context: None,
         additional_instructions: None,
         shell_env: None,
-        runtime_input_sink: None,
+        runtime_adapter_for_sink: Some(resume_adapter.clone()),
     };
 
     // Route through SessionService::create_session() with the resumed session
@@ -3529,11 +3625,12 @@ async fn resume_session_with_llm_override(
     };
 
     // Route through runtime adapter (same pattern as run command)
-    let resume_adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
     let session_id = create_result.session_id.clone();
     let executor = Box::new(CliRuntimeExecutor {
-        service: service.clone(),
+        service: service.clone() as Arc<dyn meerkat_core::service::SessionService>,
+        persistent_service: Some(service.clone()),
         session_id: session_id.clone(),
+        runtime_adapter: resume_adapter.clone(),
     });
     resume_adapter
         .register_session_with_executor(session_id.clone(), executor)
@@ -3543,7 +3640,7 @@ async fn resume_session_with_llm_override(
         prompt.to_string(),
         Some(
             meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                host_mode,
+                host_mode: if host_mode { Some(true) } else { None },
                 skill_references: canonical_skill_refs,
                 flow_tool_overlay,
                 additional_instructions,

@@ -229,12 +229,13 @@ async fn process_queue(
                         }
                     }
                     Err(e) => {
+                        let error_msg = e.to_string();
                         // RunFailed rolls back Staged → Queued and returns to Idle
                         if let Err(err) = d
                             .as_driver_mut()
                             .on_run_event(RunEvent::RunFailed {
                                 run_id,
-                                error: e.to_string(),
+                                error: error_msg.clone(),
                                 recoverable: true,
                             })
                             .await
@@ -246,7 +247,21 @@ async fn process_queue(
                                     reason: format!("runtime failure snapshot failed: {err}"),
                                 })
                                 .await;
+                            // Resolve waiter before breaking so callers don't hang.
+                            if let Some(completions) = completions.as_ref() {
+                                completions.lock().await.resolve_abandoned(
+                                    &input_id,
+                                    format!("runtime failure snapshot failed: {err}"),
+                                );
+                            }
                             break;
+                        }
+                        // Resolve completion waiter so callers don't hang.
+                        if let Some(completions) = completions.as_ref() {
+                            completions
+                                .lock()
+                                .await
+                                .resolve_abandoned(&input_id, format!("apply failed: {error_msg}"));
                         }
                         let should_continue = d.take_wake_requested();
                         drop(d);

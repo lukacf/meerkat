@@ -69,8 +69,11 @@ impl NotificationSink {
             "event": event,
         });
         let notification = RpcNotification::new("session/event", params);
-        // Best-effort: drop if the receiver is gone.
-        let _ = self.tx.send(notification).await;
+        // Best-effort: drop if the channel is full or the receiver is gone.
+        // Must not block — the runtime executor's event forwarder calls this,
+        // and blocking here backpressures through the session task into the
+        // agent run, causing deadlocks with bounded notification channels.
+        let _ = self.tx.try_send(notification);
     }
 
     /// Emit a standalone session stream event notification.

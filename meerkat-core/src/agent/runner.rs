@@ -133,6 +133,14 @@ where
         Ok(())
     }
 
+    /// Set the runtime input sink for host-mode comms routing.
+    ///
+    /// When set, passthrough interactions and continuation runs in host-mode
+    /// are routed through the sink instead of calling `self.run()` directly.
+    pub fn set_runtime_input_sink(&mut self, sink: Arc<dyn RuntimeInputSink>) {
+        self.runtime_input_sink = Some(sink);
+    }
+
     #[cfg(test)]
     pub(crate) fn inject_tool_scope_boundary_failure_once_for_test(&self) {
         self.tool_scope.inject_boundary_failure_once_for_test();

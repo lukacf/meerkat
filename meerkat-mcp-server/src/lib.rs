@@ -2173,7 +2173,7 @@ async fn handle_meerkat_run(
         app_context: input.app_context.clone(),
         additional_instructions: input.additional_instructions.clone(),
         shell_env: input.shell_env.clone(),
-        runtime_input_sink: None,
+        runtime_adapter_for_sink: None,
     };
 
     let req = CreateSessionRequest {
@@ -2376,7 +2376,7 @@ async fn handle_meerkat_resume(
         app_context: None,
         additional_instructions: input.additional_instructions.clone(),
         shell_env: None,
-        runtime_input_sink: None,
+        runtime_adapter_for_sink: None,
     };
 
     let needs_rebuild = existing_adapter.is_none()

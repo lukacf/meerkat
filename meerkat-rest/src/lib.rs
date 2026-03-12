@@ -416,7 +416,10 @@ async fn apply_runtime_turn(
         session_id.clone(),
         false,
     );
-    let host_mode = match primitive.turn_metadata().map(|metadata| metadata.host_mode) {
+    let host_mode = match primitive
+        .turn_metadata()
+        .and_then(|metadata| metadata.host_mode)
+    {
         Some(host_mode) => host_mode,
         None => context
             .session_service
@@ -538,7 +541,7 @@ async fn apply_runtime_turn(
                 app_context: None,
                 additional_instructions: None,
                 shell_env: None,
-                runtime_input_sink: None,
+                runtime_adapter_for_sink: Some(context.runtime_adapter.clone()),
             };
             let create_req = SvcCreateSessionRequest {
                 model: stored_metadata.as_ref().map_or_else(
@@ -569,7 +572,10 @@ async fn apply_runtime_turn(
                     SvcStartTurnRequest {
                         prompt: extract_runtime_prompt(primitive),
                         event_tx: Some(event_tx.clone()),
-                        host_mode: primitive.turn_metadata().is_some_and(|meta| meta.host_mode),
+                        host_mode: primitive
+                            .turn_metadata()
+                            .and_then(|meta| meta.host_mode)
+                            .unwrap_or(false),
                         skill_references: primitive
                             .turn_metadata()
                             .and_then(|meta| meta.skill_references.clone()),
@@ -1842,7 +1848,7 @@ async fn create_session(
         app_context: req.app_context,
         additional_instructions: req.additional_instructions,
         shell_env: req.shell_env,
-        runtime_input_sink: None,
+        runtime_adapter_for_sink: Some(state.runtime_adapter.clone()),
     };
 
     let svc_req = SvcCreateSessionRequest {
@@ -1887,7 +1893,7 @@ async fn create_session(
         req.prompt,
         Some(
             meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                host_mode,
+                host_mode: if host_mode { Some(true) } else { None },
                 skill_references,
                 flow_tool_overlay: None,
                 additional_instructions: None,
@@ -1895,7 +1901,7 @@ async fn create_session(
         ),
     ));
 
-    let (_outcome, handle) = adapter
+    let (outcome, handle) = adapter
         .accept_input_with_completion(&create_result.session_id, input)
         .await
         .map_err(|err| ApiError::Internal(err.to_string()))?;
@@ -1913,9 +1919,15 @@ async fn create_session(
                 Err(ApiError::Internal(format!("runtime terminated: {reason}")))
             }
         },
-        None => Err(ApiError::Conflict(
-            "duplicate input — already processed".to_string(),
-        )),
+        None => {
+            let existing_id = match &outcome {
+                meerkat_runtime::AcceptOutcome::Deduplicated { existing_id, .. } => {
+                    existing_id.to_string()
+                }
+                _ => String::new(),
+            };
+            Err(ApiError::DuplicateInput { existing_id })
+        }
     };
 
     // Drop the sender so the forwarder sees channel closure and can drain.
@@ -2158,14 +2170,14 @@ async fn continue_session(
         svc_req.prompt.clone(),
         Some(
             meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                host_mode: svc_req.host_mode,
+                host_mode: if svc_req.host_mode { Some(true) } else { None },
                 skill_references: svc_req.skill_references.clone(),
                 flow_tool_overlay: svc_req.flow_tool_overlay.clone(),
                 additional_instructions: svc_req.additional_instructions.clone(),
             },
         ),
     ));
-    let (_outcome, handle) = adapter
+    let (outcome, handle) = adapter
         .accept_input_with_completion(&session_id, input)
         .await
         .map_err(|err| ApiError::Internal(err.to_string()))?;
@@ -2183,9 +2195,15 @@ async fn continue_session(
                 Err(ApiError::Internal(format!("runtime terminated: {reason}")))
             }
         },
-        None => Err(ApiError::Conflict(format!(
-            "duplicate input — already processed for session {session_id}"
-        ))),
+        None => {
+            let existing_id = match &outcome {
+                meerkat_runtime::AcceptOutcome::Deduplicated { existing_id, .. } => {
+                    existing_id.to_string()
+                }
+                _ => String::new(),
+            };
+            Err(ApiError::DuplicateInput { existing_id })
+        }
     };
 
     // Drop the sender so the forwarder sees channel closure and can drain.
@@ -2588,6 +2606,7 @@ pub enum ApiError {
     Unauthorized(String),
     NotFound(String),
     Conflict(String),
+    DuplicateInput { existing_id: String },
     Configuration(String),
     Agent(String),
     Internal(String),
@@ -2602,6 +2621,14 @@ impl IntoResponse for ApiError {
             ApiError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED", msg),
             ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, "NOT_FOUND", msg),
             ApiError::Conflict(msg) => (StatusCode::CONFLICT, "CONFLICT", msg),
+            ApiError::DuplicateInput { existing_id } => {
+                let body = Json(serde_json::json!({
+                    "error": "duplicate_input",
+                    "code": "DUPLICATE_INPUT",
+                    "existing_id": existing_id,
+                }));
+                return (StatusCode::CONFLICT, body).into_response();
+            }
             ApiError::Configuration(msg) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "CONFIGURATION_ERROR",
@@ -3538,6 +3565,22 @@ mod tests {
             let err = ApiError::Conflict("test conflict".to_string());
             let response = err.into_response();
             assert_eq!(response.status(), StatusCode::CONFLICT);
+        }
+
+        #[tokio::test]
+        async fn test_duplicate_input_error_returns_409_with_existing_id() {
+            let err = ApiError::DuplicateInput {
+                existing_id: "input-abc-123".to_string(),
+            };
+            let response = err.into_response();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(json["error"], "duplicate_input");
+            assert_eq!(json["code"], "DUPLICATE_INPUT");
+            assert_eq!(json["existing_id"], "input-abc-123");
         }
     }
 

@@ -173,34 +173,16 @@ impl SubagentBackend {
         // before the terminal outcome.
         if let Some(ref state) = state {
             let prompt = extract_prompt_from_input(&input);
+            let meta = extract_turn_metadata(&input);
             state.queued_turns.lock().await.push_back(StartTurnRequest {
                 prompt,
                 event_tx,
-                host_mode: match &input {
-                    Input::Prompt(p) => p.turn_metadata.as_ref().is_some_and(|meta| meta.host_mode),
-                    _ => false,
-                },
-                skill_references: match &input {
-                    Input::Prompt(p) => p
-                        .turn_metadata
-                        .as_ref()
-                        .and_then(|meta| meta.skill_references.clone()),
-                    _ => None,
-                },
-                flow_tool_overlay: match &input {
-                    Input::Prompt(p) => p
-                        .turn_metadata
-                        .as_ref()
-                        .and_then(|meta| meta.flow_tool_overlay.clone()),
-                    _ => None,
-                },
-                additional_instructions: match &input {
-                    Input::Prompt(p) => p
-                        .turn_metadata
-                        .as_ref()
-                        .and_then(|meta| meta.additional_instructions.clone()),
-                    _ => None,
-                },
+                host_mode: meta.as_ref().and_then(|m| m.host_mode).unwrap_or(false),
+                skill_references: meta.as_ref().and_then(|m| m.skill_references.clone()),
+                flow_tool_overlay: meta.as_ref().and_then(|m| m.flow_tool_overlay.clone()),
+                additional_instructions: meta
+                    .as_ref()
+                    .and_then(|m| m.additional_instructions.clone()),
             });
         }
 
@@ -272,6 +254,16 @@ fn extract_prompt_from_input(input: &Input) -> String {
     }
 }
 
+fn extract_turn_metadata(
+    input: &Input,
+) -> Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> {
+    match input {
+        Input::Prompt(p) => p.turn_metadata.clone(),
+        Input::FlowStep(f) => f.turn_metadata.clone(),
+        _ => None,
+    }
+}
+
 fn extract_prompt(primitive: &RunPrimitive) -> String {
     match primitive {
         RunPrimitive::StagedInput(staged) => staged
@@ -308,7 +300,10 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             queued_turns.pop_front().unwrap_or(StartTurnRequest {
                 prompt: extract_prompt(&primitive),
                 event_tx: None,
-                host_mode: primitive.turn_metadata().is_some_and(|meta| meta.host_mode),
+                host_mode: primitive
+                    .turn_metadata()
+                    .and_then(|meta| meta.host_mode)
+                    .unwrap_or(false),
                 skill_references: primitive
                     .turn_metadata()
                     .and_then(|meta| meta.skill_references.clone()),
@@ -435,7 +430,7 @@ impl MobProvisioner for SubagentBackend {
                     let _ = self.session_service.interrupt(&session_id).await;
                 }
 
-                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
                 loop {
                     let runtime_state = adapter
                         .runtime_state(&session_id)
@@ -444,7 +439,7 @@ impl MobProvisioner for SubagentBackend {
                     if !matches!(runtime_state, RuntimeState::Running) {
                         break;
                     }
-                    if tokio::time::Instant::now() >= deadline {
+                    if std::time::Instant::now() >= deadline {
                         return Err(MobError::Internal(format!(
                             "timed out waiting for member runtime to stop before reset: {session_id}"
                         )));
@@ -473,7 +468,7 @@ impl MobProvisioner for SubagentBackend {
         let session_id = Self::require_session(member_ref, "start turn")?;
         if self.runtime_adapter.is_some() {
             let turn_metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                host_mode: req.host_mode,
+                host_mode: if req.host_mode { Some(true) } else { None },
                 skill_references: req.skill_references.clone(),
                 flow_tool_overlay: req.flow_tool_overlay.clone(),
                 additional_instructions: req.additional_instructions.clone(),
@@ -520,7 +515,7 @@ impl MobProvisioner for SubagentBackend {
                 0,
                 Some(
                     meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                        host_mode: req.host_mode,
+                        host_mode: if req.host_mode { Some(true) } else { None },
                         skill_references: req.skill_references.clone(),
                         flow_tool_overlay: req.flow_tool_overlay.clone(),
                         additional_instructions: req.additional_instructions.clone(),

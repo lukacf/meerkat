@@ -420,32 +420,34 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .as_ref()
                 .map(|meta| meta.tooling.clone())
                 .unwrap_or_default();
-            let mut build = SessionBuildOptions::default();
-            build.provider = stored_metadata.as_ref().map(|meta| meta.provider);
-            build.comms_name = stored_metadata
-                .as_ref()
-                .and_then(|meta| meta.comms_name.clone());
-            build.peer_meta = stored_metadata
-                .as_ref()
-                .and_then(|meta| meta.peer_meta.clone());
-            build.resume_session = Some(stored);
-            build.override_builtins = Some(tooling.builtins);
-            build.override_shell = Some(tooling.shell);
-            build.override_subagents = Some(tooling.subagents);
-            build.override_memory = Some(tooling.memory);
-            build.override_mob = Some(tooling.mob);
-            build.realm_id = stored_metadata
-                .as_ref()
-                .and_then(|meta| meta.realm_id.clone());
-            build.instance_id = stored_metadata
-                .as_ref()
-                .and_then(|meta| meta.instance_id.clone());
-            build.backend = stored_metadata
-                .as_ref()
-                .and_then(|meta| meta.backend.clone());
-            build.config_generation = stored_metadata
-                .as_ref()
-                .and_then(|meta| meta.config_generation);
+            let build = SessionBuildOptions {
+                provider: stored_metadata.as_ref().map(|meta| meta.provider),
+                comms_name: stored_metadata
+                    .as_ref()
+                    .and_then(|meta| meta.comms_name.clone()),
+                peer_meta: stored_metadata
+                    .as_ref()
+                    .and_then(|meta| meta.peer_meta.clone()),
+                resume_session: Some(stored),
+                override_builtins: Some(tooling.builtins),
+                override_shell: Some(tooling.shell),
+                override_subagents: Some(tooling.subagents),
+                override_memory: Some(tooling.memory),
+                override_mob: Some(tooling.mob),
+                realm_id: stored_metadata
+                    .as_ref()
+                    .and_then(|meta| meta.realm_id.clone()),
+                instance_id: stored_metadata
+                    .as_ref()
+                    .and_then(|meta| meta.instance_id.clone()),
+                backend: stored_metadata
+                    .as_ref()
+                    .and_then(|meta| meta.backend.clone()),
+                config_generation: stored_metadata
+                    .as_ref()
+                    .and_then(|meta| meta.config_generation),
+                ..SessionBuildOptions::default()
+            };
 
             self.create_session(CreateSessionRequest {
                 model: stored_metadata
@@ -1141,7 +1143,7 @@ mod tests {
                 .build
                 .as_ref()
                 .and_then(|build| build.resume_session.clone())
-                .unwrap_or_else(Session::new);
+                .unwrap_or_default();
             let system_context_state = session.system_context_state().unwrap_or_default();
             Ok(DummyAgent {
                 session: Arc::new(std::sync::Mutex::new(session)),

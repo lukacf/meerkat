@@ -281,7 +281,7 @@ impl MethodRouter {
         #[cfg(feature = "mob")]
         let mob_state = Arc::new(meerkat_mob_mcp::MobMcpState::new(runtime.session_service()));
         Self {
-            runtime: runtime.clone(),
+            runtime,
             config_store,
             notification_sink,
             skill_runtime: None,
@@ -302,6 +302,7 @@ impl MethodRouter {
         &self.runtime_adapter
     }
 
+    #[allow(clippy::result_large_err)]
     fn session_id_from_runtime_params(
         &self,
         id: Option<crate::protocol::RpcId>,
@@ -349,8 +350,8 @@ impl MethodRouter {
             ));
         }
 
-        let executor: Box<dyn meerkat_core::lifecycle::CoreExecutor> = match owner.unwrap() {
-            SessionOwner::Runtime => {
+        let executor: Box<dyn meerkat_core::lifecycle::CoreExecutor> = match owner {
+            Some(SessionOwner::Runtime) => {
                 Box::new(crate::session_executor::SessionRuntimeExecutor::new(
                     self.runtime.clone(),
                     session_id.clone(),
@@ -358,11 +359,14 @@ impl MethodRouter {
                 ))
             }
             #[cfg(feature = "mob")]
-            SessionOwner::Mob => Box::new(crate::session_executor::MobRpcRuntimeExecutor::new(
-                self.mob_state.session_service(),
-                session_id.clone(),
-                self.notification_sink.clone(),
-            )),
+            Some(SessionOwner::Mob) => {
+                Box::new(crate::session_executor::MobRpcRuntimeExecutor::new(
+                    self.mob_state.session_service(),
+                    session_id.clone(),
+                    self.notification_sink.clone(),
+                ))
+            }
+            None => return Ok(()),
         };
         self.runtime_adapter
             .ensure_session_with_executor(session_id.clone(), executor)
@@ -377,8 +381,9 @@ impl MethodRouter {
         notification_sink: NotificationSink,
         mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
     ) -> Self {
+        let runtime_adapter = runtime.runtime_adapter();
         Self {
-            runtime: runtime.clone(),
+            runtime,
             config_store,
             notification_sink,
             skill_runtime: None,
@@ -390,7 +395,7 @@ impl MethodRouter {
             active_mob_streams: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(feature = "mob")]
             closed_mob_streams: Arc::new(Mutex::new(ClosedStreamSet::new())),
-            runtime_adapter: runtime.runtime_adapter(),
+            runtime_adapter,
         }
     }
 
@@ -444,6 +449,7 @@ impl MethodRouter {
     ///
     /// Returns `None` for notifications (requests without an id) that do not
     /// require a response.
+    #[allow(clippy::if_not_else)]
     pub async fn dispatch(&self, request: RpcRequest) -> Option<RpcResponse> {
         // Notifications (no id) are fire-and-forget
         if request.is_notification() {

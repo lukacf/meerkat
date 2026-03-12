@@ -189,6 +189,7 @@ impl SessionRuntime {
         max_sessions: usize,
         store: Arc<dyn SessionStore>,
     ) -> Self {
+        #[allow(clippy::expect_used)]
         let runtime_store = Self::build_runtime_store(&store)
             .expect("redb-backed SessionRuntime must initialize runtime store");
         let builder = FactoryAgentBuilder::new(factory, config);
@@ -231,6 +232,7 @@ impl SessionRuntime {
         max_sessions: usize,
         store: Arc<dyn SessionStore>,
     ) -> Self {
+        #[allow(clippy::expect_used)]
         let runtime_store = Self::build_runtime_store(&store)
             .expect("redb-backed SessionRuntime must initialize runtime store");
         let builder =
@@ -389,6 +391,7 @@ impl SessionRuntime {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn apply_runtime_turn(
         &self,
         session_id: &SessionId,

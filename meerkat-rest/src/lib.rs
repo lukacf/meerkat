@@ -290,6 +290,8 @@ impl AppState {
             runtime_store,
         ));
         let runtime_adapter = build_runtime_adapter(&runtime_store_session_store)?;
+        #[cfg(feature = "mob")]
+        let mob_session_service = session_service.clone();
 
         Ok(Self {
             store_path,
@@ -303,7 +305,7 @@ impl AppState {
             llm_client_override: None,
             config_store,
             event_tx,
-            session_service: session_service.clone(),
+            session_service,
             webhook_auth: webhook::WebhookAuth::from_env(),
             realm_id,
             instance_id,
@@ -315,7 +317,7 @@ impl AppState {
             skill_runtime,
             runtime_adapter,
             #[cfg(feature = "mob")]
-            mob_state: Arc::new(meerkat_mob_mcp::MobMcpState::new(session_service)),
+            mob_state: Arc::new(meerkat_mob_mcp::MobMcpState::new(mob_session_service)),
             #[cfg(feature = "mcp")]
             mcp_sessions: Arc::new(RwLock::new(std::collections::HashMap::new())),
         })

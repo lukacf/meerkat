@@ -275,6 +275,7 @@ mod tests {
             appends: vec![],
             context_appends: vec![],
             contributing_input_ids: ids.clone(),
+            turn_metadata: None,
         });
         assert_eq!(primitive.contributing_input_ids(), &ids);
 

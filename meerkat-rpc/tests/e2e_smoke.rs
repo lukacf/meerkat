@@ -246,7 +246,7 @@ async fn e2e_scenario_15_full_rpc_conversation_flow() {
         read_resp["result"]["session_id"].as_str().unwrap(),
         session_id
     );
-    assert_eq!(read_resp["result"]["state"].as_str().unwrap(), "idle");
+    assert_eq!(read_resp["result"]["is_active"], false);
 
     // 5. session/list (verify present)
     let list_req = serde_json::json!({
@@ -510,7 +510,7 @@ async fn e2e_scenario_16_kitchen_sink() {
     .await;
     let resp = timeout(t, read_response(&mut reader)).await.unwrap();
     assert!(resp["error"].is_null(), "session/read failed: {resp}");
-    assert_eq!(resp["result"]["state"], "idle");
+    assert_eq!(resp["result"]["is_active"], false);
 
     // --- 5. Create session B: structured output ---
     let id = next_id();

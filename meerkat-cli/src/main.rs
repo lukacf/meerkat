@@ -2164,6 +2164,93 @@ async fn shutdown_mcp(_adapter: &Option<Arc<McpRouterAdapter>>) {
     }
 }
 
+/// CLI runtime executor — delegates to SessionService::start_turn() and synthesizes
+/// a structural receipt for the ephemeral runtime driver contract.
+struct CliRuntimeExecutor {
+    service: Arc<EphemeralSessionService<FactoryAgentBuilder>>,
+    session_id: meerkat_core::types::SessionId,
+}
+
+#[async_trait::async_trait]
+impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
+    async fn apply(
+        &mut self,
+        run_id: meerkat_core::lifecycle::RunId,
+        primitive: meerkat_core::lifecycle::run_primitive::RunPrimitive,
+    ) -> Result<
+        meerkat_core::lifecycle::core_executor::CoreApplyOutput,
+        meerkat_core::lifecycle::core_executor::CoreExecutorError,
+    > {
+        let prompt = match &primitive {
+            meerkat_core::lifecycle::run_primitive::RunPrimitive::StagedInput(staged) => staged
+                .appends
+                .first()
+                .map(|a| match &a.content {
+                    meerkat_core::lifecycle::run_primitive::CoreRenderable::Text { text } => {
+                        text.clone()
+                    }
+                    _ => String::new(),
+                })
+                .unwrap_or_default(),
+            _ => String::new(),
+        };
+        let turn_req = StartTurnRequest {
+            prompt,
+            event_tx: None,
+            host_mode: primitive.turn_metadata().is_some_and(|meta| meta.host_mode),
+            skill_references: primitive
+                .turn_metadata()
+                .and_then(|meta| meta.skill_references.clone()),
+            flow_tool_overlay: primitive
+                .turn_metadata()
+                .and_then(|meta| meta.flow_tool_overlay.clone()),
+            additional_instructions: primitive
+                .turn_metadata()
+                .and_then(|meta| meta.additional_instructions.clone()),
+        };
+        let result = self
+            .service
+            .start_turn(&self.session_id, turn_req)
+            .await
+            .map_err(|e| {
+                meerkat_core::lifecycle::core_executor::CoreExecutorError::ApplyFailed {
+                    reason: e.to_string(),
+                }
+            })?;
+
+        Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
+            receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
+                run_id,
+                boundary: match &primitive {
+                    meerkat_core::lifecycle::run_primitive::RunPrimitive::StagedInput(staged) => {
+                        staged.boundary
+                    }
+                    _ => meerkat_core::lifecycle::run_primitive::RunApplyBoundary::Immediate,
+                },
+                contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                conversation_digest: None,
+                message_count: 0,
+                sequence: 0,
+            },
+            session_snapshot: None,
+            run_result: Some(result),
+        })
+    }
+
+    async fn control(
+        &mut self,
+        cmd: meerkat_core::lifecycle::run_control::RunControlCommand,
+    ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+        if matches!(
+            cmd,
+            meerkat_core::lifecycle::run_control::RunControlCommand::CancelCurrentRun { .. }
+        ) {
+            let _ = self.service.interrupt(&self.session_id).await;
+        }
+        Ok(())
+    }
+}
+
 /// Mob-facing session service wrapper used by CLI `run`/`resume` tool calls.
 ///
 /// Mob-managed meerkats are created through the same in-process session service as
@@ -2797,6 +2884,9 @@ async fn run_agent(
     // Build the parent session service.
     let service = build_cli_service(factory, config.clone());
 
+    // Create ephemeral runtime adapter for single-authority execution.
+    let runtime_adapter = std::sync::Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
+
     if host_mode {
         eprintln!(
             "Running in host mode{} (Ctrl+C to exit)...",
@@ -2856,6 +2946,7 @@ async fn run_agent(
             Some(instructions)
         },
         shell_env: None,
+        runtime_input_sink: None,
     };
 
     let parsed_labels = if labels.is_empty() {
@@ -2877,11 +2968,8 @@ async fn run_agent(
         } else {
             None
         },
-        initial_turn: if run_initial_turn_during_create {
-            meerkat_core::service::InitialTurnPolicy::RunImmediately
-        } else {
-            meerkat_core::service::InitialTurnPolicy::Defer
-        },
+        // Always defer — the runtime adapter handles execution.
+        initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
         build: Some(build),
         labels: parsed_labels,
     };
@@ -2971,23 +3059,49 @@ async fn run_agent(
             .map_err(session_err_to_anyhow)?
     };
 
-    let result = if run_initial_turn_during_create {
-        create_result
-    } else {
-        service
-            .start_turn(
-                &create_result.session_id,
-                StartTurnRequest {
-                    prompt: prompt.to_string(),
-                    event_tx: event_tx.clone(),
-                    host_mode,
-                    skill_references: canonical_skill_refs,
-                    flow_tool_overlay,
-                    additional_instructions: None,
-                },
-            )
-            .await
-            .map_err(session_err_to_anyhow)?
+    // Register executor and route turn through runtime adapter.
+    let session_id = create_result.session_id.clone();
+    let executor = Box::new(CliRuntimeExecutor {
+        service: service.clone(),
+        session_id: session_id.clone(),
+    });
+    runtime_adapter
+        .register_session_with_executor(session_id.clone(), executor)
+        .await;
+
+    let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+        prompt.to_string(),
+        Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                host_mode,
+                skill_references: canonical_skill_refs,
+                flow_tool_overlay,
+                additional_instructions: None,
+            },
+        ),
+    ));
+    let (_outcome, handle) = runtime_adapter
+        .accept_input_with_completion(&session_id, input)
+        .await
+        .map_err(|err| anyhow::anyhow!("runtime accept failed: {err}"))?;
+    let result = match handle {
+        Some(handle) => match handle.wait().await {
+            meerkat_runtime::completion::CompletionOutcome::Completed(r) => r,
+            meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => {
+                anyhow::bail!("turn completed without result")
+            }
+            meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
+                anyhow::bail!("turn abandoned: {reason}")
+            }
+            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
+                anyhow::bail!("runtime terminated: {reason}")
+            }
+        },
+        None => {
+            // Dedup — shouldn't happen on first turn but handle gracefully
+            eprintln!("Warning: duplicate input — already processed");
+            create_result
+        }
     };
 
     // Abort stdin reader if it was running
@@ -3380,6 +3494,7 @@ async fn resume_session_with_llm_override(
         app_context: None,
         additional_instructions: None,
         shell_env: None,
+        runtime_input_sink: None,
     };
 
     // Route through SessionService::create_session() with the resumed session

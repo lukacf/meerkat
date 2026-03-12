@@ -23,9 +23,9 @@ where
 {
     /// Perform the extraction turn to get structured output.
     ///
-    /// This is called after the agentic loop completes (no more tool calls)
-    /// when `output_schema` is configured. It prompts the LLM to produce
-    /// validated JSON matching the schema.
+    /// Deprecated: extraction is now integrated into the main state machine loop
+    /// in state.rs. This function is retained only for reference.
+    #[allow(dead_code)]
     pub(super) async fn perform_extraction_turn(
         &mut self,
         turn_count: u32,
@@ -169,7 +169,7 @@ where
 /// Strip markdown code fences from JSON content.
 ///
 /// LLMs sometimes wrap JSON in ```json ... ``` even when asked not to.
-fn strip_code_fences(content: &str) -> &str {
+pub(super) fn strip_code_fences(content: &str) -> &str {
     let trimmed = content.trim();
 
     // Check for ```json or ``` at start
@@ -194,7 +194,7 @@ fn strip_code_fences(content: &str) -> &str {
 /// (for example, `{"advisor": {...actual schema object...}}`).
 /// When the envelope key is the schema name and the inner object clearly
 /// matches the root schema shape better than the wrapped object, unwrap it.
-fn unwrap_named_object_wrapper(parsed: Value, output_schema: &OutputSchema) -> Value {
+pub(super) fn unwrap_named_object_wrapper(parsed: Value, output_schema: &OutputSchema) -> Value {
     let Some(wrapper_key) = output_schema.name.as_deref() else {
         return parsed;
     };

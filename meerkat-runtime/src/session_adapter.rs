@@ -559,14 +559,17 @@ impl RuntimeSessionAdapter {
     /// Accept an input and return a completion handle that resolves when the
     /// input reaches a terminal state (Consumed or Abandoned).
     ///
-    /// The caller awaits the handle to get the `RunResult` or error.
-    /// This is the primary mechanism for surfaces that want to route execution
-    /// through the runtime while still awaiting the outcome.
+    /// Returns `(AcceptOutcome, Option<CompletionHandle>)`:
+    /// - `(Accepted, Some(handle))` — await handle for result
+    /// - `(Deduplicated, Some(handle))` — joined in-flight waiter
+    /// - `(Deduplicated, None)` — input already terminal; no waiter needed
+    /// - `(Rejected, _)` — returned as `Err(ValidationFailed)`
     pub async fn accept_input_with_completion(
         &self,
         session_id: &SessionId,
         input: Input,
-    ) -> Result<(AcceptOutcome, crate::completion::CompletionHandle), RuntimeDriverError> {
+    ) -> Result<(AcceptOutcome, Option<crate::completion::CompletionHandle>), RuntimeDriverError>
+    {
         let sessions = self.sessions.read().await;
         let entry = sessions
             .get(session_id)
@@ -578,25 +581,41 @@ impl RuntimeSessionAdapter {
             let mut driver = entry.driver.lock().await;
             let result = driver.as_driver_mut().accept_input(input).await?;
 
-            // Register a completion waiter for the accepted input
-            let input_id = match &result {
-                AcceptOutcome::Accepted { input_id, .. } => input_id.clone(),
-                AcceptOutcome::Deduplicated { existing_id, .. } => existing_id.clone(),
+            match &result {
+                AcceptOutcome::Accepted { input_id, .. } => {
+                    let handle = {
+                        let mut completions = entry.completions.lock().await;
+                        completions.register(input_id.clone())
+                    };
+                    let wake = driver.take_wake_requested();
+                    let process_now = driver.take_process_requested();
+                    (result, wake, process_now, Some(handle))
+                }
+                AcceptOutcome::Deduplicated { existing_id, .. } => {
+                    // Check if the existing input is already terminal
+                    let existing_state = driver.as_driver().input_state(existing_id);
+                    let is_terminal = existing_state
+                        .map(|s| s.current_state.is_terminal())
+                        .unwrap_or(true); // missing state = already cleaned up = terminal
+
+                    if is_terminal {
+                        // Input already processed — no handle, no waiter
+                        (result, false, false, None)
+                    } else {
+                        // In-flight — join existing waiters via multi-waiter Vec
+                        let handle = {
+                            let mut completions = entry.completions.lock().await;
+                            completions.register(existing_id.clone())
+                        };
+                        (result, false, false, Some(handle))
+                    }
+                }
                 AcceptOutcome::Rejected { reason } => {
                     return Err(RuntimeDriverError::ValidationFailed {
                         reason: reason.clone(),
                     });
                 }
-            };
-
-            let handle = {
-                let mut completions = entry.completions.lock().await;
-                completions.register(input_id)
-            };
-
-            let wake = driver.take_wake_requested();
-            let process_now = driver.take_process_requested();
-            (result, wake, process_now, handle)
+            }
         };
 
         if (should_wake || should_process)
@@ -685,7 +704,15 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
                 state: RuntimeState::Destroyed,
             })?;
         let mut driver = entry.driver.lock().await;
-        driver.as_driver_mut().retire().await
+        let report = driver.as_driver_mut().retire().await?;
+
+        // If no loop is attached, nothing will drain — resolve all pending waiters
+        if entry.wake_tx.is_none() {
+            let mut completions = entry.completions.lock().await;
+            completions.resolve_all_terminated("retired without runtime loop");
+        }
+
+        Ok(report)
     }
 
     async fn reset_runtime(
@@ -704,7 +731,13 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
                 state: RuntimeState::Running,
             });
         }
-        driver.as_driver_mut().reset().await
+        let report = driver.as_driver_mut().reset().await?;
+
+        // Resolve all pending completion waiters — reset discards all queued work
+        let mut completions = entry.completions.lock().await;
+        completions.resolve_all_terminated("runtime reset");
+
+        Ok(report)
     }
 
     async fn input_state(
@@ -769,6 +802,9 @@ mod tests {
     struct HarnessRuntimeStore {
         inner: crate::store::InMemoryRuntimeStore,
         fail_atomic_apply: bool,
+        /// Fail atomic_lifecycle_commit after N successful calls (None = never fail).
+        fail_atomic_lifecycle_commit_after: Option<usize>,
+        atomic_lifecycle_commit_calls: AtomicUsize,
         load_input_states_delay: Duration,
         fail_persist_input_state_after: Option<usize>,
         persist_input_state_calls: AtomicUsize,
@@ -779,6 +815,8 @@ mod tests {
             Self {
                 inner: crate::store::InMemoryRuntimeStore::new(),
                 fail_atomic_apply: true,
+                fail_atomic_lifecycle_commit_after: None,
+                atomic_lifecycle_commit_calls: AtomicUsize::new(0),
                 load_input_states_delay: Duration::ZERO,
                 fail_persist_input_state_after: None,
                 persist_input_state_calls: AtomicUsize::new(0),
@@ -789,6 +827,8 @@ mod tests {
             Self {
                 inner: crate::store::InMemoryRuntimeStore::new(),
                 fail_atomic_apply: false,
+                fail_atomic_lifecycle_commit_after: None,
+                atomic_lifecycle_commit_calls: AtomicUsize::new(0),
                 load_input_states_delay: delay,
                 fail_persist_input_state_after: None,
                 persist_input_state_calls: AtomicUsize::new(0),
@@ -799,8 +839,12 @@ mod tests {
             Self {
                 inner: crate::store::InMemoryRuntimeStore::new(),
                 fail_atomic_apply: false,
+                // Recovery calls atomic_lifecycle_commit once (call 0 succeeds),
+                // the terminal event call (call 1) fails.
+                fail_atomic_lifecycle_commit_after: Some(1),
+                atomic_lifecycle_commit_calls: AtomicUsize::new(0),
                 load_input_states_delay: Duration::ZERO,
-                fail_persist_input_state_after: Some(1),
+                fail_persist_input_state_after: None,
                 persist_input_state_calls: AtomicUsize::new(0),
             }
         }
@@ -915,6 +959,28 @@ mod tests {
             runtime_id: &crate::identifiers::LogicalRuntimeId,
         ) -> Result<Option<RuntimeState>, RuntimeStoreError> {
             self.inner.load_runtime_state(runtime_id).await
+        }
+
+        async fn atomic_lifecycle_commit(
+            &self,
+            runtime_id: &crate::identifiers::LogicalRuntimeId,
+            runtime_state: RuntimeState,
+            input_states: &[InputState],
+        ) -> Result<(), RuntimeStoreError> {
+            let call_index = self
+                .atomic_lifecycle_commit_calls
+                .fetch_add(1, Ordering::SeqCst);
+            if self
+                .fail_atomic_lifecycle_commit_after
+                .is_some_and(|fail_after| call_index >= fail_after)
+            {
+                return Err(RuntimeStoreError::WriteFailed(
+                    "synthetic atomic_lifecycle_commit failure".to_string(),
+                ));
+            }
+            self.inner
+                .atomic_lifecycle_commit(runtime_id, runtime_state, input_states)
+                .await
         }
     }
 
@@ -1607,8 +1673,10 @@ mod tests {
         };
 
         assert!(
-            err.to_string()
-                .contains("failed to persist runtime completion snapshot"),
+            err.to_string().contains("terminal event persist failed")
+                || err
+                    .to_string()
+                    .contains("failed to persist runtime completion snapshot"),
             "unexpected error: {err}"
         );
         let runtime_state = adapter.runtime_state(&sid).await;
@@ -1620,6 +1688,322 @@ mod tests {
                 })
             ),
             "sync path should unregister the broken runtime session"
+        );
+    }
+
+    // ─── Phase A gate tests ───
+
+    /// Gate A2: Dedup on terminal input returns (Deduplicated, None) — no hang.
+    #[tokio::test]
+    async fn dedup_terminal_input_returns_none_handle() {
+        use crate::identifiers::IdempotencyKey;
+        use meerkat_core::lifecycle::core_executor::{
+            CoreApplyOutput, CoreExecutor, CoreExecutorError,
+        };
+        use meerkat_core::lifecycle::run_control::RunControlCommand;
+        use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
+        use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+        use meerkat_core::types::{RunResult, Usage};
+
+        struct ResultExecutor;
+        #[async_trait::async_trait]
+        impl CoreExecutor for ResultExecutor {
+            async fn apply(
+                &mut self,
+                run_id: RunId,
+                primitive: RunPrimitive,
+            ) -> Result<CoreApplyOutput, CoreExecutorError> {
+                Ok(CoreApplyOutput {
+                    receipt: RunBoundaryReceipt {
+                        run_id,
+                        boundary: RunApplyBoundary::RunStart,
+                        contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                        conversation_digest: None,
+                        message_count: 0,
+                        sequence: 0,
+                    },
+                    session_snapshot: None,
+                    run_result: Some(RunResult {
+                        text: "done".into(),
+                        session_id: SessionId::new(),
+                        usage: Usage::default(),
+                        turns: 1,
+                        tool_calls: 0,
+                        structured_output: None,
+                        schema_warnings: None,
+                        skill_diagnostics: None,
+                    }),
+                })
+            }
+            async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+                Ok(())
+            }
+        }
+
+        let adapter = RuntimeSessionAdapter::ephemeral();
+        let sid = SessionId::new();
+        adapter
+            .register_session_with_executor(sid.clone(), Box::new(ResultExecutor))
+            .await;
+
+        // Accept first input with idempotency key
+        let key = IdempotencyKey::new("gate-a2");
+        let mut input1 = make_prompt("first");
+        if let Input::Prompt(ref mut p) = input1 {
+            p.header.idempotency_key = Some(key.clone());
+        }
+        let (outcome1, handle1) = adapter
+            .accept_input_with_completion(&sid, input1)
+            .await
+            .unwrap();
+        assert!(outcome1.is_accepted());
+        assert!(handle1.is_some(), "accepted input should have a handle");
+
+        // Wait for it to complete
+        let result = handle1.unwrap().wait().await;
+        assert!(
+            matches!(result, crate::completion::CompletionOutcome::Completed(_)),
+            "first input should complete successfully"
+        );
+
+        // Now send duplicate — input is already terminal (Consumed)
+        let mut input2 = make_prompt("duplicate");
+        if let Input::Prompt(ref mut p) = input2 {
+            p.header.idempotency_key = Some(key);
+        }
+        let (outcome2, handle2) = adapter
+            .accept_input_with_completion(&sid, input2)
+            .await
+            .unwrap();
+        assert!(
+            outcome2.is_deduplicated(),
+            "second input with same key should be deduplicated"
+        );
+        assert!(
+            handle2.is_none(),
+            "dedup on terminal input should return None handle"
+        );
+    }
+
+    /// Gate A3: Dedup on in-flight input returns (Deduplicated, Some(handle))
+    /// that resolves when the original completes.
+    #[tokio::test]
+    async fn dedup_inflight_input_returns_handle_that_resolves() {
+        use crate::identifiers::IdempotencyKey;
+        use meerkat_core::lifecycle::core_executor::{
+            CoreApplyOutput, CoreExecutor, CoreExecutorError,
+        };
+        use meerkat_core::lifecycle::run_control::RunControlCommand;
+        use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
+        use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+        use meerkat_core::types::{RunResult, Usage};
+
+        struct SlowExecutor;
+        #[async_trait::async_trait]
+        impl CoreExecutor for SlowExecutor {
+            async fn apply(
+                &mut self,
+                run_id: RunId,
+                primitive: RunPrimitive,
+            ) -> Result<CoreApplyOutput, CoreExecutorError> {
+                // Simulate slow execution so duplicate arrives while in-flight
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                Ok(CoreApplyOutput {
+                    receipt: RunBoundaryReceipt {
+                        run_id,
+                        boundary: RunApplyBoundary::RunStart,
+                        contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                        conversation_digest: None,
+                        message_count: 0,
+                        sequence: 0,
+                    },
+                    session_snapshot: None,
+                    run_result: Some(RunResult {
+                        text: "slow done".into(),
+                        session_id: SessionId::new(),
+                        usage: Usage::default(),
+                        turns: 1,
+                        tool_calls: 0,
+                        structured_output: None,
+                        schema_warnings: None,
+                        skill_diagnostics: None,
+                    }),
+                })
+            }
+            async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+                Ok(())
+            }
+        }
+
+        let adapter = RuntimeSessionAdapter::ephemeral();
+        let sid = SessionId::new();
+        adapter
+            .register_session_with_executor(sid.clone(), Box::new(SlowExecutor))
+            .await;
+
+        // Accept first input with idempotency key
+        let key = IdempotencyKey::new("gate-a3");
+        let mut input1 = make_prompt("original");
+        if let Input::Prompt(ref mut p) = input1 {
+            p.header.idempotency_key = Some(key.clone());
+        }
+        let (outcome1, handle1) = adapter
+            .accept_input_with_completion(&sid, input1)
+            .await
+            .unwrap();
+        assert!(outcome1.is_accepted());
+
+        // Wait briefly so the input is in-flight (Staged/Running), not yet terminal
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Send duplicate while original is still running
+        let mut input2 = make_prompt("duplicate");
+        if let Input::Prompt(ref mut p) = input2 {
+            p.header.idempotency_key = Some(key);
+        }
+        let (outcome2, handle2) = adapter
+            .accept_input_with_completion(&sid, input2)
+            .await
+            .unwrap();
+        assert!(
+            outcome2.is_deduplicated(),
+            "second input should be deduplicated"
+        );
+        assert!(
+            handle2.is_some(),
+            "dedup on in-flight input should return Some(handle)"
+        );
+
+        // Both handles should resolve when the original completes
+        let result1 = handle1.unwrap().wait().await;
+        let result2 = handle2.unwrap().wait().await;
+        assert!(
+            matches!(result1, crate::completion::CompletionOutcome::Completed(ref r) if r.text == "slow done"),
+            "original handle should complete with result"
+        );
+        assert!(
+            matches!(result2, crate::completion::CompletionOutcome::Completed(ref r) if r.text == "slow done"),
+            "duplicate handle should also complete with same result"
+        );
+    }
+
+    /// Gate A4 (part 1): resolve_without_result sends CompletedWithoutResult
+    /// when executor returns run_result: None.
+    #[tokio::test]
+    async fn completion_handle_resolves_without_result() {
+        use meerkat_core::lifecycle::core_executor::{
+            CoreApplyOutput, CoreExecutor, CoreExecutorError,
+        };
+        use meerkat_core::lifecycle::run_control::RunControlCommand;
+        use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
+        use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+
+        struct NoResultExecutor;
+        #[async_trait::async_trait]
+        impl CoreExecutor for NoResultExecutor {
+            async fn apply(
+                &mut self,
+                run_id: RunId,
+                primitive: RunPrimitive,
+            ) -> Result<CoreApplyOutput, CoreExecutorError> {
+                Ok(CoreApplyOutput {
+                    receipt: RunBoundaryReceipt {
+                        run_id,
+                        boundary: RunApplyBoundary::RunStart,
+                        contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                        conversation_digest: None,
+                        message_count: 0,
+                        sequence: 0,
+                    },
+                    session_snapshot: None,
+                    run_result: None, // No RunResult
+                })
+            }
+            async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+                Ok(())
+            }
+        }
+
+        let adapter = RuntimeSessionAdapter::ephemeral();
+        let sid = SessionId::new();
+        adapter
+            .register_session_with_executor(sid.clone(), Box::new(NoResultExecutor))
+            .await;
+
+        let input = make_prompt("context append");
+        let (outcome, handle) = adapter
+            .accept_input_with_completion(&sid, input)
+            .await
+            .unwrap();
+        assert!(outcome.is_accepted());
+
+        let result = handle.unwrap().wait().await;
+        assert!(
+            matches!(
+                result,
+                crate::completion::CompletionOutcome::CompletedWithoutResult
+            ),
+            "executor returning run_result: None should resolve as CompletedWithoutResult, got {result:?}"
+        );
+    }
+
+    /// Gate A5: reset_runtime resolves all pending waiters.
+    #[tokio::test]
+    async fn reset_runtime_resolves_pending_waiters() {
+        // Register without executor so inputs queue but don't process
+        let adapter = RuntimeSessionAdapter::ephemeral();
+        let sid = SessionId::new();
+        adapter.register_session(sid.clone()).await;
+
+        let input = make_prompt("pending");
+        let (outcome, handle) = adapter
+            .accept_input_with_completion(&sid, input)
+            .await
+            .unwrap();
+        assert!(outcome.is_accepted());
+        assert!(handle.is_some());
+
+        // Reset the runtime
+        adapter.reset_runtime(&sid).await.unwrap();
+
+        // Handle should resolve as terminated
+        let result = handle.unwrap().wait().await;
+        assert!(
+            matches!(
+                result,
+                crate::completion::CompletionOutcome::RuntimeTerminated(_)
+            ),
+            "reset should resolve pending waiters as terminated, got {result:?}"
+        );
+    }
+
+    /// Gate A6: retire_runtime without loop resolves waiters.
+    #[tokio::test]
+    async fn retire_without_loop_resolves_waiters() {
+        // Register without executor (no RuntimeLoop)
+        let adapter = RuntimeSessionAdapter::ephemeral();
+        let sid = SessionId::new();
+        adapter.register_session(sid.clone()).await;
+
+        let input = make_prompt("will be retired");
+        let (outcome, handle) = adapter
+            .accept_input_with_completion(&sid, input)
+            .await
+            .unwrap();
+        assert!(outcome.is_accepted());
+        assert!(handle.is_some());
+
+        // Retire without loop attached
+        adapter.retire_runtime(&sid).await.unwrap();
+
+        // Handle should resolve as terminated since no loop will drain
+        let result = handle.unwrap().wait().await;
+        assert!(
+            matches!(
+                result,
+                crate::completion::CompletionOutcome::RuntimeTerminated(_)
+            ),
+            "retire without loop should resolve pending waiters as terminated, got {result:?}"
         );
     }
 

@@ -10,6 +10,7 @@ use meerkat_core::event::AgentEvent;
 use meerkat_core::service::SessionQuery;
 use meerkat_core::skills::{SkillKey, SkillRef};
 use meerkat_core::{BudgetLimits, HookRunOverrides, OutputSchema, Provider};
+use meerkat_runtime::SessionServiceRuntimeExt;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use tokio::sync::mpsc;
@@ -217,6 +218,7 @@ pub async fn handle_create(
     params: Option<&RawValue>,
     runtime: Arc<SessionRuntime>,
     notification_sink: &NotificationSink,
+    runtime_adapter: &meerkat_runtime::RuntimeSessionAdapter,
 ) -> RpcResponse {
     let params: CreateSessionParams = match parse_params(params) {
         Ok(p) => p,
@@ -340,6 +342,20 @@ pub async fn handle_create(
         }
     };
 
+    // Eagerly register executor BEFORE the first turn so the runtime loop
+    // is available from the start. This replaces the post-response registration
+    // that previously happened in the router.
+    if runtime_adapter.runtime_mode() == meerkat_runtime::RuntimeMode::V9Compliant {
+        let executor = Box::new(crate::session_executor::SessionRuntimeExecutor::new(
+            runtime.clone(),
+            session_id.clone(),
+            notification_sink.clone(),
+        ));
+        runtime_adapter
+            .ensure_session_with_executor(session_id.clone(), executor)
+            .await;
+    }
+
     // Deferred mode: return session ID without running a turn.
     if params.initial_turn == Some(InitialTurn::Deferred) {
         let result = DeferredCreateResult {
@@ -363,7 +379,7 @@ pub async fn handle_create(
         }
     });
 
-    // Start the initial turn
+    // Start the initial turn — route through runtime for V9 consistency
     let result = if params.host_mode {
         let runtime_for_turn = Arc::clone(&runtime);
         let sid_for_turn = session_id.clone();
@@ -372,7 +388,7 @@ pub async fn handle_create(
         let skill_refs_for_turn = skill_refs.clone();
         tokio::spawn(async move {
             if let Err(rpc_err) = runtime_for_turn
-                .start_turn(
+                .start_turn_via_runtime(
                     &sid_for_turn,
                     prompt_for_turn,
                     event_tx_for_turn,
@@ -411,7 +427,7 @@ pub async fn handle_create(
         }
     } else {
         match runtime
-            .start_turn(
+            .start_turn_via_runtime(
                 &session_id,
                 params.prompt,
                 event_tx,

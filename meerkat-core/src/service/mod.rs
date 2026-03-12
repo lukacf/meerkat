@@ -204,6 +204,8 @@ pub struct SessionBuildOptions {
     /// Set by the application's `SessionAgentBuilder` — never by the LLM.
     /// Values are not included in the agent's context window.
     pub shell_env: Option<std::collections::HashMap<String, String>>,
+    /// Optional runtime input sink for routing host-mode new-run work through the runtime.
+    pub runtime_input_sink: Option<std::sync::Arc<dyn crate::agent::RuntimeInputSink>>,
 }
 
 impl Default for SessionBuildOptions {
@@ -238,6 +240,7 @@ impl Default for SessionBuildOptions {
             app_context: None,
             additional_instructions: None,
             shell_env: None,
+            runtime_input_sink: None,
         }
     }
 }

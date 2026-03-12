@@ -135,13 +135,6 @@ impl PersistentRuntimeDriver {
             .await
             .map_err(|e| RuntimeDriverError::Internal(e.to_string()))
     }
-
-    async fn persist_snapshot(&self) -> Result<(), RuntimeDriverError> {
-        for state in self.inner.input_states_snapshot() {
-            self.persist_state(&state).await?;
-        }
-        Ok(())
-    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
@@ -226,9 +219,20 @@ impl RuntimeDriver for PersistentRuntimeDriver {
             | RunEvent::RunCancelled { .. } => {
                 let checkpoint = self.inner.clone();
                 self.inner.on_run_event(event).await?;
-                if let Err(err) = self.persist_snapshot().await {
+                let input_states = self.inner.input_states_snapshot();
+                if let Err(err) = self
+                    .store
+                    .atomic_lifecycle_commit(
+                        &self.runtime_id,
+                        self.inner.runtime_state(),
+                        &input_states,
+                    )
+                    .await
+                {
                     self.inner = checkpoint;
-                    return Err(err);
+                    return Err(RuntimeDriverError::Internal(format!(
+                        "terminal event persist failed: {err}"
+                    )));
                 }
             }
             _ => {
@@ -245,20 +249,16 @@ impl RuntimeDriver for PersistentRuntimeDriver {
     ) -> Result<(), RuntimeDriverError> {
         let checkpoint = self.inner.clone();
         self.inner.on_runtime_control(command).await?;
+        let input_states = self.inner.input_states_snapshot();
         if let Err(err) = self
             .store
-            .persist_runtime_state(&self.runtime_id, self.inner.runtime_state())
+            .atomic_lifecycle_commit(&self.runtime_id, self.inner.runtime_state(), &input_states)
             .await
         {
             self.inner = checkpoint;
             return Err(RuntimeDriverError::Internal(format!(
                 "control op persist failed: {err}"
             )));
-        }
-        // Persist input snapshot after control ops (e.g. Stop abandons inputs)
-        if let Err(err) = self.persist_snapshot().await {
-            self.inner = checkpoint;
-            return Err(err);
         }
         Ok(())
     }
@@ -386,20 +386,22 @@ impl RuntimeDriver for PersistentRuntimeDriver {
             }
         }
 
-        self.persist_snapshot().await?;
+        // Persist recovered state atomically
+        let input_states = self.inner.input_states_snapshot();
+        self.store
+            .atomic_lifecycle_commit(&self.runtime_id, self.inner.runtime_state(), &input_states)
+            .await
+            .map_err(|e| RuntimeDriverError::Internal(format!("recovery persist failed: {e}")))?;
         Ok(report)
     }
 
     async fn retire(&mut self) -> Result<crate::traits::RetireReport, RuntimeDriverError> {
         let checkpoint = self.inner.clone();
         let report = EphemeralRuntimeDriver::retire(&mut self.inner)?;
-        if let Err(err) = self.persist_snapshot().await {
-            self.inner = checkpoint;
-            return Err(err);
-        }
+        let input_states = self.inner.input_states_snapshot();
         if let Err(err) = self
             .store
-            .persist_runtime_state(&self.runtime_id, self.inner.runtime_state())
+            .atomic_lifecycle_commit(&self.runtime_id, self.inner.runtime_state(), &input_states)
             .await
         {
             self.inner = checkpoint;
@@ -413,13 +415,10 @@ impl RuntimeDriver for PersistentRuntimeDriver {
     async fn reset(&mut self) -> Result<crate::traits::ResetReport, RuntimeDriverError> {
         let checkpoint = self.inner.clone();
         let report = EphemeralRuntimeDriver::reset(&mut self.inner)?;
-        if let Err(err) = self.persist_snapshot().await {
-            self.inner = checkpoint;
-            return Err(err);
-        }
+        let input_states = self.inner.input_states_snapshot();
         if let Err(err) = self
             .store
-            .persist_runtime_state(&self.runtime_id, self.inner.runtime_state())
+            .atomic_lifecycle_commit(&self.runtime_id, self.inner.runtime_state(), &input_states)
             .await
         {
             self.inner = checkpoint;

@@ -595,8 +595,12 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
     ) -> Result<RunResult, SessionError> {
         let result = self.inner.start_turn(id, req).await?;
 
-        // Persist full session snapshot after turn.
-        let _ = self.persist_full_session(id).await?;
+        // Persist full session snapshot after turn — but ONLY for non-runtime-backed
+        // sessions. Runtime-backed sessions write their session projection atomically
+        // via the boundary commit in apply_runtime_turn_with_result().
+        if self.runtime_store.is_none() {
+            let _ = self.persist_full_session(id).await?;
+        }
 
         Ok(result)
     }

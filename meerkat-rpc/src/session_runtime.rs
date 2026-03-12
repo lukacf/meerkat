@@ -421,6 +421,7 @@ impl SessionRuntime {
         additional_instructions: Option<Vec<String>>,
         overrides: Option<crate::handlers::turn::TurnOverrides>,
     ) -> Result<RunResult, RpcError> {
+        use meerkat_runtime::accept::AcceptOutcome;
         use meerkat_runtime::completion::CompletionOutcome;
         use meerkat_runtime::input::{Input, PromptInput};
 
@@ -448,7 +449,7 @@ impl SessionRuntime {
             });
         }
 
-        let (_outcome, handle) = self
+        let (outcome, handle) = self
             .runtime_adapter
             .accept_input_with_completion(session_id, input)
             .await
@@ -462,8 +463,26 @@ impl SessionRuntime {
         // (Events are forwarded by the executor's forwarder task,
         // which is spawned inside SessionRuntimeExecutor::apply())
 
+        let Some(handle) = handle else {
+            // Input already terminal (dedup of completed input)
+            let existing_id = match outcome {
+                AcceptOutcome::Deduplicated { existing_id, .. } => existing_id.to_string(),
+                _ => "unknown".to_string(),
+            };
+            return Err(RpcError {
+                code: error::DUPLICATE_INPUT,
+                message: "input already processed".to_string(),
+                data: Some(serde_json::json!({ "existing_id": existing_id })),
+            });
+        };
+
         match handle.wait().await {
             CompletionOutcome::Completed(result) => Ok(result),
+            CompletionOutcome::CompletedWithoutResult => Err(RpcError {
+                code: error::INTERNAL_ERROR,
+                message: "turn completed without result".to_string(),
+                data: None,
+            }),
             CompletionOutcome::Abandoned(reason) => Err(RpcError {
                 code: error::INTERNAL_ERROR,
                 message: format!("turn abandoned: {reason}"),
@@ -826,6 +845,7 @@ impl SessionRuntime {
             app_context: None,
             additional_instructions: None,
             shell_env: None,
+            runtime_input_sink: None,
         };
         self.service
             .create_session(CreateSessionRequest {

@@ -224,6 +224,25 @@ impl RuntimeStore for InMemoryRuntimeStore {
         let inner = self.inner.lock().await;
         Ok(inner.runtime_states.get(&runtime_id.0).copied())
     }
+
+    async fn atomic_lifecycle_commit(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        runtime_state: RuntimeState,
+        input_states: &[InputState],
+    ) -> Result<(), RuntimeStoreError> {
+        let mut inner = self.inner.lock().await;
+        let rid = runtime_id.0.clone();
+
+        // Single lock acquisition — atomic for in-memory
+        inner.runtime_states.insert(rid.clone(), runtime_state);
+        let states = inner.input_states.entry(rid).or_default();
+        for state in input_states {
+            states.insert(state.input_id.clone(), state.clone());
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]

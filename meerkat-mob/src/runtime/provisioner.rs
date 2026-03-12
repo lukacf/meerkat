@@ -155,7 +155,7 @@ impl SubagentBackend {
         &self,
         session_id: &SessionId,
         input: Input,
-        event_tx: Option<
+        _event_tx: Option<
             tokio::sync::mpsc::Sender<meerkat_core::EventEnvelope<meerkat_core::AgentEvent>>,
         >,
     ) -> Result<(), MobError> {
@@ -165,49 +165,28 @@ impl SubagentBackend {
             ))
         })?;
         let _ = self.runtime_session_state(session_id).await;
-        let session_service = self.session_service.clone();
-        let session_id = session_id.clone();
         let adapter_session_id = session_id.clone();
 
-        adapter
-            .accept_input_and_run(&adapter_session_id, input, move |run_id, primitive| {
-                let session_service = session_service.clone();
-                let session_id = session_id.clone();
-                let event_tx = event_tx.clone();
-                async move {
-                    let output = session_service
-                        .apply_runtime_turn(
-                            &session_id,
-                            run_id,
-                            StartTurnRequest {
-                                prompt: extract_prompt(&primitive),
-                                event_tx,
-                                host_mode: primitive
-                                    .turn_metadata()
-                                    .is_some_and(|meta| meta.host_mode),
-                                skill_references: primitive
-                                    .turn_metadata()
-                                    .and_then(|meta| meta.skill_references.clone()),
-                                flow_tool_overlay: primitive
-                                    .turn_metadata()
-                                    .and_then(|meta| meta.flow_tool_overlay.clone()),
-                                additional_instructions: primitive
-                                    .turn_metadata()
-                                    .and_then(|meta| meta.additional_instructions.clone()),
-                            },
-                            match &primitive {
-                                RunPrimitive::StagedInput(staged) => staged.boundary,
-                                _ => RunApplyBoundary::Immediate,
-                            },
-                            primitive.contributing_input_ids().to_vec(),
-                        )
-                        .await
-                        .map_err(|err| RuntimeDriverError::Internal(err.to_string()))?;
-                    Ok(((), output))
-                }
-            })
+        let (_outcome, handle) = adapter
+            .accept_input_with_completion(&adapter_session_id, input)
             .await
-            .map_err(|err| MobError::Internal(err.to_string()))
+            .map_err(|err| MobError::Internal(err.to_string()))?;
+
+        // Terminal dedup: input already processed — idempotent success
+        let Some(handle) = handle else {
+            return Ok(());
+        };
+
+        match handle.wait().await {
+            meerkat_runtime::completion::CompletionOutcome::Completed(_) => Ok(()),
+            meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => Ok(()),
+            meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
+                Err(MobError::Internal(format!("turn abandoned: {reason}")))
+            }
+            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
+                Err(MobError::Internal(format!("runtime terminated: {reason}")))
+            }
+        }
     }
 }
 

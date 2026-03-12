@@ -41,6 +41,7 @@ pub struct AgentBuilder {
     pub(super) skill_engine: Option<Arc<crate::skills::SkillRuntime>>,
     pub(super) checkpointer: Option<Arc<dyn crate::checkpoint::SessionCheckpointer>>,
     pub(super) silent_comms_intents: Vec<String>,
+    pub(super) runtime_input_sink: Option<Arc<dyn crate::agent::runner::RuntimeInputSink>>,
     pub(super) max_inline_peer_notifications: Option<i32>,
     pub(super) event_tap: Option<crate::event_tap::EventTap>,
     pub(super) default_event_tx: Option<mpsc::Sender<crate::event::AgentEvent>>,
@@ -67,6 +68,7 @@ impl AgentBuilder {
             skill_engine: None,
             checkpointer: None,
             silent_comms_intents: Vec::new(),
+            runtime_input_sink: None,
             max_inline_peer_notifications: None,
             event_tap: None,
             default_event_tx: None,
@@ -261,6 +263,12 @@ impl AgentBuilder {
             default_scoped_event_tx: self.default_scoped_event_tx,
             default_scope_path: self.default_scope_path,
             host_drain_active: false,
+            runtime_input_sink: self.runtime_input_sink,
+            extraction_mode: false,
+            extraction_attempts: 0,
+            extraction_result: None,
+            extraction_schema_warnings: None,
+            extraction_last_error: None,
         };
 
         if let Some(raw_filter) = agent
@@ -317,6 +325,12 @@ impl AgentBuilder {
     /// Set max peer-count threshold for inline peer lifecycle notification injection.
     pub fn with_max_inline_peer_notifications(mut self, threshold: Option<i32>) -> Self {
         self.max_inline_peer_notifications = threshold;
+        self
+    }
+
+    /// Set the runtime input sink for routing host-mode new-run work through the runtime.
+    pub fn with_runtime_input_sink(mut self, sink: Arc<dyn super::RuntimeInputSink>) -> Self {
+        self.runtime_input_sink = Some(sink);
         self
     }
 

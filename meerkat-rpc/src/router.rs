@@ -482,31 +482,14 @@ impl MethodRouter {
                 self.runtime_adapter.runtime_mode() == meerkat_runtime::RuntimeMode::V9Compliant,
             ),
             "session/create" => {
-                let resp = handlers::session::handle_create(
+                handlers::session::handle_create(
                     id,
                     params,
                     self.runtime.clone(),
                     &self.notification_sink,
+                    &self.runtime_adapter,
                 )
-                .await;
-                // Register runtime driver with executor for newly created session
-                if self.runtime_adapter.runtime_mode() == meerkat_runtime::RuntimeMode::V9Compliant
-                    && resp.error.is_none()
-                    && let Some(ref result) = resp.result
-                    && let Ok(val) = serde_json::from_str::<serde_json::Value>(result.get())
-                    && let Some(sid_str) = val.get("session_id").and_then(|v| v.as_str())
-                    && let Ok(sid) = meerkat_core::SessionId::parse(sid_str)
-                {
-                    let executor = Box::new(crate::session_executor::SessionRuntimeExecutor::new(
-                        self.runtime.clone(),
-                        sid.clone(),
-                        self.notification_sink.clone(),
-                    ));
-                    self.runtime_adapter
-                        .register_session_with_executor(sid, executor)
-                        .await;
-                }
-                resp
+                .await
             }
             "session/list" => handlers::session::handle_list(id, params, &self.runtime).await,
             "session/read" => self.handle_session_read(id, params).await,
@@ -515,8 +498,14 @@ impl MethodRouter {
             "session/stream_open" => self.handle_session_stream_open(id, params).await,
             "session/stream_close" => self.handle_session_stream_close(id, params).await,
             "turn/start" => {
-                handlers::turn::handle_start(id, params, &self.runtime, &self.notification_sink)
-                    .await
+                handlers::turn::handle_start(
+                    id,
+                    params,
+                    self.runtime.clone(),
+                    &self.notification_sink,
+                    &self.runtime_adapter,
+                )
+                .await
             }
             "turn/interrupt" => {
                 #[cfg(feature = "mob")]

@@ -7,7 +7,7 @@ use chrono::Utc;
 use meerkat_core::interaction::{InboxInteraction, InteractionContent, ResponseStatus};
 use meerkat_core::lifecycle::InputId;
 
-use crate::identifiers::LogicalRuntimeId;
+use crate::identifiers::{CorrelationId, LogicalRuntimeId};
 use crate::input::{
     Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PeerConvention, PeerInput,
     ResponseProgressPhase, ResponseTerminalStatus,
@@ -36,7 +36,7 @@ pub fn interaction_to_peer_input(
             },
             idempotency_key: None,
             supersession_key: None,
-            correlation_id: None,
+            correlation_id: Some(CorrelationId::from_uuid(interaction.id.0)),
         },
         convention: Some(convention),
         body,

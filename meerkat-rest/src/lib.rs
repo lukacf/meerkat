@@ -537,6 +537,7 @@ async fn apply_runtime_turn(
                 app_context: None,
                 additional_instructions: None,
                 shell_env: None,
+                runtime_input_sink: None,
             };
             let create_req = SvcCreateSessionRequest {
                 model: stored_metadata.as_ref().map_or_else(
@@ -1885,29 +1886,111 @@ async fn create_session(
         app_context: req.app_context,
         additional_instructions: req.additional_instructions,
         shell_env: req.shell_env,
+        runtime_input_sink: None,
     };
 
     let svc_req = SvcCreateSessionRequest {
         model: model.to_string(),
-        prompt: req.prompt,
+        prompt: req.prompt.clone(),
         system_prompt: req.system_prompt,
         max_tokens: Some(max_tokens),
         event_tx: Some(caller_event_tx.clone()),
         host_mode,
-        skill_references,
-        initial_turn: InitialTurnPolicy::RunImmediately,
+        skill_references: skill_references.clone(),
+        initial_turn: if state.runtime_adapter.is_some() {
+            InitialTurnPolicy::Defer
+        } else {
+            InitialTurnPolicy::RunImmediately
+        },
         build: Some(build),
         labels: req.labels,
     };
-    let result = state
-        .session_service
-        .create_session(svc_req)
-        .await
-        .map_err(|err| match err {
-            SessionError::NotFound { .. } => ApiError::NotFound(err.to_string()),
-            SessionError::Busy { .. } => ApiError::BadRequest(err.to_string()),
-            _ => ApiError::Agent(err.to_string()),
-        });
+
+    let result = if let Some(adapter) = state.runtime_adapter.clone() {
+        // Runtime-backed path: create session with Defer, then route through runtime
+        let create_result = state
+            .session_service
+            .create_session(svc_req)
+            .await
+            .map_err(|err| match err {
+                SessionError::NotFound { .. } => ApiError::NotFound(err.to_string()),
+                SessionError::Busy { .. } => ApiError::BadRequest(err.to_string()),
+                _ => ApiError::Agent(err.to_string()),
+            })?;
+
+        // Register executor for the new session
+        if let Err(_resp) =
+            ensure_runtime_session_registered(&state, &create_result.session_id).await
+        {
+            drop(caller_event_tx);
+            drain_event_forwarder(&session_id, forward_task).await;
+            #[cfg(feature = "mcp")]
+            cleanup_mcp_session(&state, &session_id).await;
+            return Err(ApiError::Internal(
+                "failed to register runtime executor".to_string(),
+            ));
+        }
+
+        // Create input and route through runtime
+        let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+            req.prompt,
+            Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    host_mode,
+                    skill_references,
+                    flow_tool_overlay: None,
+                    additional_instructions: None,
+                },
+            ),
+        ));
+
+        let (_outcome, handle) = adapter
+            .accept_input_with_completion(&create_result.session_id, input)
+            .await
+            .map_err(|err| ApiError::Internal(err.to_string()))?;
+
+        let Some(handle) = handle else {
+            drop(caller_event_tx);
+            drain_event_forwarder(&session_id, forward_task).await;
+            return Err(ApiError::Conflict(
+                "duplicate input — already processed".to_string(),
+            ));
+        };
+
+        match handle.wait().await {
+            meerkat_runtime::completion::CompletionOutcome::Completed(run_result) => Ok(run_result),
+            meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => Err(
+                ApiError::Internal("turn completed without result".to_string()),
+            ),
+            meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
+                Err(ApiError::Internal(format!("turn abandoned: {reason}")))
+            }
+            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
+                Err(ApiError::Internal(format!("runtime terminated: {reason}")))
+            }
+        }
+    } else {
+        // Legacy path: no runtime adapter, use RunImmediately
+        state
+            .session_service
+            .create_session(svc_req)
+            .await
+            .map(|r| meerkat_core::RunResult {
+                text: r.text,
+                session_id: r.session_id,
+                usage: r.usage,
+                turns: r.turns,
+                tool_calls: r.tool_calls,
+                structured_output: r.structured_output,
+                schema_warnings: r.schema_warnings,
+                skill_diagnostics: r.skill_diagnostics,
+            })
+            .map_err(|err| match err {
+                SessionError::NotFound { .. } => ApiError::NotFound(err.to_string()),
+                SessionError::Busy { .. } => ApiError::BadRequest(err.to_string()),
+                _ => ApiError::Agent(err.to_string()),
+            })
+    };
 
     // Drop the sender so the forwarder sees channel closure and can drain.
     drop(caller_event_tx);
@@ -2139,8 +2222,15 @@ async fn continue_session(
         additional_instructions: req.additional_instructions.clone(),
     };
     let final_result = if let Some(adapter) = state.runtime_adapter.clone() {
-        if !adapter.contains_session(&session_id).await {
-            adapter.register_session(session_id.clone()).await;
+        // Ensure session is registered with executor for runtime-backed execution.
+        // This upgrades register_session → ensure_session_with_executor so the
+        // RuntimeLoop can process the input via CoreExecutor.
+        if let Err(_resp) = ensure_runtime_session_registered(&state, &session_id).await {
+            drop(caller_event_tx);
+            drain_event_forwarder(&session_id, forward_task).await;
+            return Err(ApiError::NotFound(format!(
+                "Session not found: {session_id}"
+            )));
         }
         let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput {
             header: meerkat_runtime::InputHeader {
@@ -2163,204 +2253,30 @@ async fn continue_session(
                 },
             ),
         });
-        let session_service = state.session_service.clone();
-        let state_for_run = state.clone();
-        let req_for_run = req;
-        let id_for_run = id.clone();
-        let session_id_for_run = session_id.clone();
-        let skill_references_for_run = skill_references;
-        let caller_event_tx_for_run = caller_event_tx.clone();
-        let host_mode_requested_for_run = host_mode_requested;
-        let enable_builtins = state.enable_builtins;
-        let enable_shell = state.enable_shell;
-        adapter
-            .accept_input_and_run(&session_id, input, move |run_id, primitive| {
-                let session_service = session_service.clone();
-                let state = state_for_run.clone();
-                let session_id = session_id_for_run.clone();
-                let skill_references = skill_references_for_run.clone();
-                let caller_event_tx = caller_event_tx_for_run.clone();
-                let req = req_for_run.clone();
-                let id = id_for_run.clone();
-                async move {
-                    match session_service
-                        .apply_runtime_turn_with_result(
-                            &session_id,
-                            run_id.clone(),
-                            svc_req,
-                            match &primitive {
-                                RunPrimitive::StagedInput(staged) => staged.boundary,
-                                _ => RunApplyBoundary::Immediate,
-                            },
-                            primitive.contributing_input_ids().to_vec(),
-                        )
-                        .await
-                    {
-                        Ok((run_result, output)) => return Ok((run_result, output)),
-                        Err(SessionError::NotFound { .. }) => {
-                            let session = session_service
-                                .load_persisted(&session_id)
-                                .await
-                                .map_err(|e| {
-                                    meerkat_runtime::RuntimeDriverError::Internal(e.to_string())
-                                })?
-                                .ok_or_else(|| {
-                                    meerkat_runtime::RuntimeDriverError::Internal(format!(
-                                        "Session not found: {id}"
-                                    ))
-                                })?;
-                            let stored_metadata = session.session_metadata();
-                            let tooling = stored_metadata
-                                .as_ref()
-                                .map(|meta| meta.tooling.clone())
-                                .unwrap_or(SessionTooling {
-                                    builtins: enable_builtins,
-                                    shell: enable_shell,
-                                    comms: false,
-                                    subagents: false,
-                                    mob: false,
-                                    memory: false,
-                                    active_skills: None,
-                                });
-                            let model = req
-                                .model
-                                .or_else(|| {
-                                    stored_metadata
-                                        .as_ref()
-                                        .map(|meta| meta.model.clone().into())
-                                })
-                                .unwrap_or_else(|| state.default_model.clone());
-                            let max_tokens = req
-                                .max_tokens
-                                .or_else(|| stored_metadata.as_ref().map(|meta| meta.max_tokens))
-                                .unwrap_or(state.max_tokens);
-                            let provider = req
-                                .provider
-                                .or_else(|| stored_metadata.as_ref().map(|meta| meta.provider));
-                            let continue_host_mode_requested = host_mode_requested_for_run
-                                || stored_metadata.as_ref().is_some_and(|meta| meta.host_mode);
-                            let continue_host_mode = resolve_host_mode(
-                                continue_host_mode_requested,
-                            )
-                            .map_err(|e| match e {
-                                ApiError::BadRequest(message) => {
-                                    meerkat_runtime::RuntimeDriverError::Internal(message)
-                                }
-                                other => meerkat_runtime::RuntimeDriverError::Internal(format!(
-                                    "{other:?}"
-                                )),
-                            })?;
-                            let comms_name = req.comms_name.clone().or_else(|| {
-                                stored_metadata
-                                    .as_ref()
-                                    .and_then(|meta| meta.comms_name.clone())
-                            });
-                            let current_generation =
-                                state.config_runtime.get().await.ok().map(|s| s.generation);
-                            let build = SessionBuildOptions {
-                                provider,
-                                output_schema: req.output_schema,
-                                structured_output_retries: req.structured_output_retries,
-                                hooks_override: req.hooks_override.unwrap_or_default(),
-                                comms_name,
-                                resume_session: Some(session),
-                                budget_limits: None,
-                                provider_params: None,
-                                external_tools: None,
-                                llm_client_override: state
-                                    .llm_client_override
-                                    .clone()
-                                    .map(encode_llm_client_override_for_service),
-                                scoped_event_tx: None,
-                                scoped_event_path: None,
-                                override_builtins: Some(tooling.builtins),
-                                override_shell: Some(tooling.shell),
-                                override_subagents: Some(tooling.subagents),
-                                override_memory: Some(tooling.memory),
-                                override_mob: Some(tooling.mob),
-                                preload_skills: tooling.active_skills.clone(),
-                                peer_meta: req.peer_meta.clone().or_else(|| {
-                                    stored_metadata.as_ref().and_then(|m| m.peer_meta.clone())
-                                }),
-                                realm_id: stored_metadata
-                                    .as_ref()
-                                    .and_then(|m| m.realm_id.clone())
-                                    .or_else(|| Some(state.realm_id.clone())),
-                                instance_id: stored_metadata
-                                    .as_ref()
-                                    .and_then(|m| m.instance_id.clone())
-                                    .or_else(|| state.instance_id.clone()),
-                                backend: stored_metadata
-                                    .as_ref()
-                                    .and_then(|m| m.backend.clone())
-                                    .or_else(|| Some(state.backend.clone())),
-                                config_generation: current_generation,
-                                checkpointer: None,
-                                silent_comms_intents: Vec::new(),
-                                max_inline_peer_notifications: None,
-                                app_context: None,
-                                additional_instructions: None,
-                                shell_env: None,
-                            };
-                            session_service
-                                .create_session(SvcCreateSessionRequest {
-                                    model: model.to_string(),
-                                    prompt: turn_prompt.clone(),
-                                    system_prompt: req.system_prompt,
-                                    max_tokens: Some(max_tokens),
-                                    event_tx: None,
-                                    host_mode: continue_host_mode,
-                                    skill_references,
-                                    initial_turn: InitialTurnPolicy::Defer,
-                                    build: Some(build),
-                                    labels: None,
-                                })
-                                .await
-                                .map_err(|e| {
-                                    meerkat_runtime::RuntimeDriverError::Internal(e.to_string())
-                                })
-                        }
-                        Err(err) => {
-                            return Err(meerkat_runtime::RuntimeDriverError::Internal(
-                                err.to_string(),
-                            ));
-                        }
-                    }?;
-                    let (run_result, output) = session_service
-                        .apply_runtime_turn_with_result(
-                            &session_id,
-                            run_id,
-                            SvcStartTurnRequest {
-                                prompt: extract_runtime_prompt(&primitive),
-                                event_tx: Some(caller_event_tx),
-                                host_mode: primitive
-                                    .turn_metadata()
-                                    .is_some_and(|meta| meta.host_mode),
-                                skill_references: primitive
-                                    .turn_metadata()
-                                    .and_then(|meta| meta.skill_references.clone()),
-                                flow_tool_overlay: primitive
-                                    .turn_metadata()
-                                    .and_then(|meta| meta.flow_tool_overlay.clone()),
-                                additional_instructions: primitive
-                                    .turn_metadata()
-                                    .and_then(|meta| meta.additional_instructions.clone()),
-                            },
-                            match &primitive {
-                                RunPrimitive::StagedInput(staged) => staged.boundary,
-                                _ => RunApplyBoundary::Immediate,
-                            },
-                            primitive.contributing_input_ids().to_vec(),
-                        )
-                        .await
-                        .map_err(|err| {
-                            meerkat_runtime::RuntimeDriverError::Internal(err.to_string())
-                        })?;
-                    Ok((run_result, output))
-                }
-            })
+        let (_outcome, handle) = adapter
+            .accept_input_with_completion(&session_id, input)
             .await
-            .map_err(|err| ApiError::Internal(err.to_string()))
+            .map_err(|err| ApiError::Internal(err.to_string()))?;
+
+        let Some(handle) = handle else {
+            // Terminal dedup: input already processed
+            return Err(ApiError::Conflict(format!(
+                "duplicate input — already processed for session {session_id}"
+            )));
+        };
+
+        match handle.wait().await {
+            meerkat_runtime::completion::CompletionOutcome::Completed(run_result) => Ok(run_result),
+            meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => Err(
+                ApiError::Internal("turn completed without result".to_string()),
+            ),
+            meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
+                Err(ApiError::Internal(format!("turn abandoned: {reason}")))
+            }
+            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
+                Err(ApiError::Internal(format!("runtime terminated: {reason}")))
+            }
+        }
     } else {
         let result = state.session_service.start_turn(&session_id, svc_req).await;
         match result {
@@ -2456,6 +2372,7 @@ async fn continue_session(
                     app_context: None,
                     additional_instructions: None,
                     shell_env: None,
+                    runtime_input_sink: None,
                 };
                 state
                     .session_service

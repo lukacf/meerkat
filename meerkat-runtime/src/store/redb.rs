@@ -522,6 +522,64 @@ mod inner {
             .await
             .map_err(|e| RuntimeStoreError::Internal(format!("Task join failed: {e}")))?
         }
+
+        async fn atomic_lifecycle_commit(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            runtime_state: RuntimeState,
+            input_states: &[InputState],
+        ) -> Result<(), RuntimeStoreError> {
+            let db = self.db.clone();
+            let rid = runtime_id.clone();
+            let runtime_key = runtime_prefix(&rid);
+            let runtime_value = serde_json::to_vec(&runtime_state)
+                .map_err(|e| RuntimeStoreError::WriteFailed(e.to_string()))?;
+            let input_jsons: Vec<(Vec<u8>, Vec<u8>)> = input_states
+                .iter()
+                .map(|s| {
+                    let key = input_state_key(&rid, &s.input_id);
+                    let val = serde_json::to_vec(s)
+                        .map_err(|e| RuntimeStoreError::WriteFailed(e.to_string()));
+                    val.map(|v| (key, v))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
+            tokio::task::spawn_blocking(move || {
+                let write_txn = db.begin_write().map_err(|e| {
+                    RuntimeStoreError::WriteFailed(format!("Failed to begin write: {e}"))
+                })?;
+                {
+                    // Write runtime state
+                    let mut rt_table = write_txn.open_table(RUNTIME_STATES).map_err(|e| {
+                        RuntimeStoreError::WriteFailed(format!("Failed to open table: {e}"))
+                    })?;
+                    rt_table
+                        .insert(runtime_key.as_slice(), runtime_value.as_slice())
+                        .map_err(|e| {
+                            RuntimeStoreError::WriteFailed(format!("Failed to insert: {e}"))
+                        })?;
+
+                    // Write input states
+                    let mut states_table = write_txn.open_table(INPUT_STATES).map_err(|e| {
+                        RuntimeStoreError::WriteFailed(format!("Failed to open table: {e}"))
+                    })?;
+                    for (key, val) in &input_jsons {
+                        states_table
+                            .insert(key.as_slice(), val.as_slice())
+                            .map_err(|e| {
+                                RuntimeStoreError::WriteFailed(format!("Failed to insert: {e}"))
+                            })?;
+                    }
+                }
+                // Single atomic commit
+                write_txn.commit().map_err(|e| {
+                    RuntimeStoreError::WriteFailed(format!("Failed to commit: {e}"))
+                })?;
+                Ok(())
+            })
+            .await
+            .map_err(|e| RuntimeStoreError::Internal(format!("Task join failed: {e}")))?
+        }
     }
 
     #[cfg(test)]

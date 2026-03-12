@@ -27,6 +27,27 @@ use super::{
     FilteredToolDispatcher,
 };
 
+/// Async trait for accepting runtime inputs from the host-mode comms layer.
+///
+/// Implementations live in `meerkat-runtime` and call `RuntimeSessionAdapter::accept_input()`.
+/// The host-mode code in `comms_impl.rs` uses this to route new-run work through the
+/// runtime authority instead of calling `self.run()` directly.
+///
+/// The sink awaits only admission (durable-before-ack), NOT execution completion.
+/// The host loop continues immediately after admission.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait RuntimeInputSink: Send + Sync {
+    /// Accept a peer interaction as a runtime input.
+    async fn accept_peer_input(
+        &self,
+        interaction: crate::interaction::InboxInteraction,
+    ) -> Result<(), String>;
+
+    /// Accept a continuation signal as a runtime input.
+    async fn accept_continuation(&self) -> Result<(), String>;
+}
+
 fn spawn_scoped_forwarder(
     mut child_event_rx: mpsc::Receiver<AgentEvent>,
     scoped_tx: mpsc::Sender<ScopedAgentEvent>,
@@ -658,6 +679,13 @@ where
                     )
                     .await;
                     result.text.clone_from(text);
+                    if result.structured_output.is_some() {
+                        tracing::info!(
+                            hook_id = %outcome.hook_id,
+                            "clearing structured_output after hook text rewrite"
+                        );
+                        result.structured_output = None;
+                    }
                     self.apply_run_result_text_patch(text);
                 }
             }

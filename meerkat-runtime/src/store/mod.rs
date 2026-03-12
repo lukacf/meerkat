@@ -151,6 +151,17 @@ pub trait RuntimeStore: Send + Sync {
         &self,
         runtime_id: &LogicalRuntimeId,
     ) -> Result<Option<RuntimeState>, RuntimeStoreError>;
+
+    /// Atomically commit lifecycle state changes (retire/reset/stop/destroy).
+    ///
+    /// Writes runtime state + all input state updates in a single atomic
+    /// operation. Used for lifecycle ops that don't produce boundary receipts.
+    async fn atomic_lifecycle_commit(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        runtime_state: RuntimeState,
+        input_states: &[InputState],
+    ) -> Result<(), RuntimeStoreError>;
 }
 
 pub use memory::InMemoryRuntimeStore;

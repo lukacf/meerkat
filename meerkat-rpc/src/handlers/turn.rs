@@ -1,5 +1,7 @@
 //! `turn/*` method handlers.
 
+use std::sync::Arc;
+
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use tokio::sync::mpsc;
@@ -17,6 +19,7 @@ use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::router::NotificationSink;
 use crate::session_runtime::SessionRuntime;
+use meerkat_runtime::SessionServiceRuntimeExt;
 
 // ---------------------------------------------------------------------------
 // Param types
@@ -126,15 +129,16 @@ impl TurnOverrides {
 pub async fn handle_start(
     id: Option<RpcId>,
     params: Option<&RawValue>,
-    runtime: &SessionRuntime,
+    runtime: Arc<SessionRuntime>,
     notification_sink: &NotificationSink,
+    runtime_adapter: &meerkat_runtime::RuntimeSessionAdapter,
 ) -> RpcResponse {
     let params: StartTurnParams = match parse_params(params) {
         Ok(p) => p,
         Err(resp) => return resp.with_id(id),
     };
 
-    let session_id = match parse_session_id_for_runtime(id.clone(), &params.session_id, runtime) {
+    let session_id = match parse_session_id_for_runtime(id.clone(), &params.session_id, &runtime) {
         Ok(sid) => sid,
         Err(resp) => return resp,
     };
@@ -151,7 +155,7 @@ pub async fn handle_start(
         }
     });
 
-    let skill_refs = match canonical_skill_ids(runtime, params.skill_refs, params.skill_references)
+    let skill_refs = match canonical_skill_ids(&runtime, params.skill_refs, params.skill_references)
     {
         Ok(r) => r,
         Err(e) => {
@@ -174,8 +178,24 @@ pub async fn handle_start(
         provider_params: params.provider_params,
     };
 
+    // Lazy-register executor if not already registered.
+    // This handles cases where session/create used deferred mode or
+    // the session was created before the runtime adapter was active.
+    if runtime_adapter.runtime_mode() == meerkat_runtime::RuntimeMode::V9Compliant
+        && !runtime_adapter.contains_session(&session_id).await
+    {
+        let executor = Box::new(crate::session_executor::SessionRuntimeExecutor::new(
+            runtime.clone(),
+            session_id.clone(),
+            notification_sink.clone(),
+        ));
+        runtime_adapter
+            .ensure_session_with_executor(session_id.clone(), executor)
+            .await;
+    }
+
     let result = match runtime
-        .start_turn(
+        .start_turn_via_runtime(
             &session_id,
             params.prompt,
             event_tx,

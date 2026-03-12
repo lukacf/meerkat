@@ -302,6 +302,8 @@ pub struct AgentBuildConfig {
     pub wait_for_mcp: bool,
     /// Per-agent environment variables injected into shell tool subprocesses.
     pub shell_env: Option<std::collections::HashMap<String, String>>,
+    /// Optional runtime input sink for routing host-mode new-run work through the runtime.
+    pub runtime_input_sink: Option<std::sync::Arc<dyn meerkat_core::agent::RuntimeInputSink>>,
 }
 
 impl std::fmt::Debug for AgentBuildConfig {
@@ -406,6 +408,7 @@ impl AgentBuildConfig {
             additional_instructions: None,
             wait_for_mcp: false,
             shell_env: None,
+            runtime_input_sink: None,
         }
     }
 
@@ -460,6 +463,9 @@ impl AgentBuildConfig {
         self.app_context = build.app_context.clone();
         self.additional_instructions = build.additional_instructions.clone();
         self.shell_env = build.shell_env.clone();
+        if build.runtime_input_sink.is_some() {
+            self.runtime_input_sink = build.runtime_input_sink.clone();
+        }
     }
 
     /// Convert build options to the service transport representation.
@@ -497,6 +503,7 @@ impl AgentBuildConfig {
             app_context: self.app_context.clone(),
             additional_instructions: self.additional_instructions.clone(),
             shell_env: self.shell_env.clone(),
+            runtime_input_sink: self.runtime_input_sink.clone(),
         }
     }
 }
@@ -1748,6 +1755,11 @@ impl AgentFactory {
         }
         builder =
             builder.with_max_inline_peer_notifications(build_config.max_inline_peer_notifications);
+
+        // 12h. Wire runtime input sink
+        if let Some(sink) = build_config.runtime_input_sink {
+            builder = builder.with_runtime_input_sink(sink);
+        }
 
         // 13. Build agent
         let mut agent = builder.build(llm_adapter, tools, store_adapter).await;

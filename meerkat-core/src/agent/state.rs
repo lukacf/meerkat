@@ -410,6 +410,29 @@ where
                         }
                     }
 
+                    // In extraction mode, override tools/temperature/params
+                    if self.extraction_mode {
+                        // Force temperature 0.0 for deterministic output
+                        effective_temperature = Some(0.0_f32);
+                        // Inject structured_output into provider params
+                        let mut params =
+                            effective_provider_params.unwrap_or_else(|| serde_json::json!({}));
+                        if let Some(output_schema) = &self.config.output_schema
+                            && let Some(obj) = params.as_object_mut()
+                        {
+                            obj.insert("structured_output".to_string(), output_schema.to_value());
+                        }
+                        effective_provider_params = Some(params);
+                    }
+
+                    // No tools for extraction turn (empty slice)
+                    let empty_tools: Arc<[Arc<crate::types::ToolDef>]> = Arc::from([]);
+                    let call_tool_defs = if self.extraction_mode {
+                        &empty_tools
+                    } else {
+                        &tool_defs
+                    };
+
                     // Call LLM with retry
                     let boundary_system_context = self.take_pending_system_context_boundary();
                     let request_messages =
@@ -417,7 +440,7 @@ where
                     let result = self
                         .call_llm_with_retry(
                             &request_messages,
-                            &tool_defs,
+                            call_tool_defs,
                             effective_max_tokens,
                             effective_temperature,
                             effective_provider_params.as_ref(),
@@ -769,6 +792,150 @@ where
                             .await?;
                         self.state.transition(LoopState::CallingLlm)?;
                         turn_count += 1;
+                    } else if self.extraction_mode {
+                        // Extraction turn response — validate against schema
+                        self.session.push(Message::BlockAssistant(assistant_msg));
+
+                        // Drain turn boundary (fires TurnBoundary hooks, drains comms)
+                        self.state.transition(LoopState::DrainingEvents)?;
+                        self.drain_turn_boundary(turn_count, event_tx.as_ref())
+                            .await?;
+                        emit_event!(AgentEvent::TurnCompleted { stop_reason, usage });
+
+                        // Validate extraction response
+                        let content = assistant_text.trim();
+                        let json_content = super::extraction::strip_code_fences(content);
+
+                        match serde_json::from_str::<serde_json::Value>(json_content) {
+                            Ok(parsed) => {
+                                let output_schema =
+                                    self.config.output_schema.as_ref().ok_or_else(|| {
+                                        AgentError::InternalError(
+                                            "extraction_mode without output_schema".into(),
+                                        )
+                                    })?;
+                                let normalized = super::extraction::unwrap_named_object_wrapper(
+                                    parsed,
+                                    output_schema,
+                                );
+
+                                // Validate against schema (when jsonschema feature is available)
+                                let validation_error: Option<String>;
+                                #[cfg(feature = "jsonschema")]
+                                {
+                                    let compiled =
+                                        self.client.compile_schema(output_schema).map_err(|e| {
+                                            AgentError::InvalidOutputSchema(e.to_string())
+                                        })?;
+                                    let validator = jsonschema::Validator::new(&compiled.schema)
+                                        .map_err(|e| {
+                                            AgentError::InvalidOutputSchema(e.to_string())
+                                        })?;
+                                    validation_error =
+                                        if let Err(error) = validator.validate(&normalized) {
+                                            Some(format!("Schema validation failed: {error}"))
+                                        } else {
+                                            None
+                                        };
+                                }
+                                #[cfg(not(feature = "jsonschema"))]
+                                {
+                                    tracing::warn!(
+                                        "Structured output schema validation unavailable \
+                                        (jsonschema feature disabled). Accepting parsed \
+                                        JSON without schema validation."
+                                    );
+                                    validation_error = None;
+                                }
+
+                                if let Some(error) = validation_error {
+                                    // Validation failed — retry if attempts remain
+                                    self.extraction_attempts += 1;
+                                    if self.extraction_attempts
+                                        < self.config.structured_output_retries + 1
+                                    {
+                                        self.extraction_last_error = Some(error.clone());
+                                        let retry_prompt = format!(
+                                            "The previous output was invalid: {error}. \
+                                            Please provide valid JSON matching the schema. \
+                                            Output ONLY the JSON, no additional text."
+                                        );
+                                        self.session.push(Message::User(UserMessage {
+                                            content: retry_prompt,
+                                        }));
+                                        self.state.transition(LoopState::CallingLlm)?;
+                                        turn_count += 1;
+                                        continue;
+                                    }
+
+                                    // Retries exhausted
+                                    self.state.transition(LoopState::Completed)?;
+                                    if let Err(e) = self.store.save(&self.session).await {
+                                        tracing::warn!("Failed to save session: {}", e);
+                                    }
+                                    return Err(AgentError::StructuredOutputValidationFailed {
+                                        attempts: self.config.structured_output_retries + 1,
+                                        reason: error,
+                                        last_output: self
+                                            .session
+                                            .last_assistant_text()
+                                            .unwrap_or_default(),
+                                    });
+                                }
+
+                                // Validation passed — store result for RunResult assembly
+                                self.extraction_result = Some(normalized);
+                                self.state.transition(LoopState::Completed)?;
+                                if let Err(e) = self.store.save(&self.session).await {
+                                    tracing::warn!("Failed to save session: {}", e);
+                                }
+                                return Ok(RunResult {
+                                    text: self.session.last_assistant_text().unwrap_or_default(),
+                                    session_id: self.session.id().clone(),
+                                    usage: self.session.total_usage(),
+                                    turns: turn_count + 1,
+                                    tool_calls: tool_call_count,
+                                    structured_output: self.extraction_result.take(),
+                                    schema_warnings: self.extraction_schema_warnings.take(),
+                                    skill_diagnostics: None,
+                                });
+                            }
+                            Err(e) => {
+                                // JSON parse failed — retry if attempts remain
+                                let error = format!("Invalid JSON: {e}");
+                                self.extraction_attempts += 1;
+                                if self.extraction_attempts
+                                    < self.config.structured_output_retries + 1
+                                {
+                                    self.extraction_last_error = Some(error);
+                                    let retry_prompt = format!(
+                                        "The previous output was invalid: Invalid JSON: {e}. \
+                                        Please provide valid JSON matching the schema. \
+                                        Output ONLY the JSON, no additional text."
+                                    );
+                                    self.session.push(Message::User(UserMessage {
+                                        content: retry_prompt,
+                                    }));
+                                    self.state.transition(LoopState::CallingLlm)?;
+                                    turn_count += 1;
+                                    continue;
+                                }
+
+                                // Retries exhausted
+                                self.state.transition(LoopState::Completed)?;
+                                if let Err(e) = self.store.save(&self.session).await {
+                                    tracing::warn!("Failed to save session: {}", e);
+                                }
+                                return Err(AgentError::StructuredOutputValidationFailed {
+                                    attempts: self.config.structured_output_retries + 1,
+                                    reason: error,
+                                    last_output: self
+                                        .session
+                                        .last_assistant_text()
+                                        .unwrap_or_default(),
+                                });
+                            }
+                        }
                     } else {
                         // No tool calls - we're done with the agentic loop
                         let final_text = assistant_text.clone();
@@ -783,21 +950,39 @@ where
                         emit_event!(AgentEvent::TurnCompleted { stop_reason, usage });
 
                         // Check if we need to perform extraction turn for structured output
-                        if self.config.output_schema.is_some() {
-                            // Perform extraction turn to get validated JSON
-                            let extraction_result = self
-                                .perform_extraction_turn(turn_count, tool_call_count)
-                                .await;
+                        if let Some(output_schema) = self.config.output_schema.as_ref()
+                            && !self.extraction_mode
+                        {
+                            // Enter extraction mode: re-enter the main loop
+                            // through the normal CallingLlm path
+                            self.extraction_mode = true;
+                            self.extraction_attempts = 0;
+                            self.extraction_result = None;
+                            self.extraction_last_error = None;
 
-                            // Transition to completed regardless of extraction result
-                            self.state.transition(LoopState::Completed)?;
+                            // Compile schema and capture warnings
+                            let compiled = self
+                                .client
+                                .compile_schema(output_schema)
+                                .map_err(|e| AgentError::InvalidOutputSchema(e.to_string()))?;
+                            self.extraction_schema_warnings = if compiled.warnings.is_empty() {
+                                None
+                            } else {
+                                Some(compiled.warnings.clone())
+                            };
 
-                            // Save session
-                            if let Err(e) = self.store.save(&self.session).await {
-                                tracing::warn!("Failed to save session: {}", e);
-                            }
+                            // Push extraction prompt as user message
+                            let prompt =
+                                self.config.extraction_prompt.clone().unwrap_or_else(|| {
+                                    super::extraction::DEFAULT_EXTRACTION_PROMPT.to_string()
+                                });
+                            self.session
+                                .push(Message::User(UserMessage { content: prompt }));
 
-                            return extraction_result;
+                            // Re-enter main loop via CallingLlm
+                            self.state.transition(LoopState::CallingLlm)?;
+                            turn_count += 1;
+                            continue;
                         }
 
                         // No extraction needed - complete normally

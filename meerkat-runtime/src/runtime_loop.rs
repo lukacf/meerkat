@@ -215,12 +215,17 @@ async fn process_queue(
                             break;
                         }
 
-                        // Resolve completion waiter if present
-                        if let Some(completions) = completions.as_ref()
-                            && let Some(result) = run_result
-                        {
+                        // Resolve completion waiters unconditionally
+                        if let Some(completions) = completions.as_ref() {
                             let mut reg = completions.lock().await;
-                            reg.resolve_completed(&input_id, result);
+                            match run_result {
+                                Some(result) => {
+                                    reg.resolve_completed(&input_id, result);
+                                }
+                                None => {
+                                    reg.resolve_without_result(&input_id);
+                                }
+                            }
                         }
                     }
                     Err(e) => {

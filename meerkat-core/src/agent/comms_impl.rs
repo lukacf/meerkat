@@ -296,7 +296,12 @@ where
                         CommsInteractionClass::Passthrough => {
                             let subscriber = comms.interaction_subscriber(&interaction.id);
 
-                            if event_tx.is_some() && subscriber.is_some() {
+                            if self.runtime_input_sink.is_some() {
+                                // Runtime sink mode: all passthrough interactions go
+                                // individual so they route through the sink one by one.
+                                drop(subscriber);
+                                individual.push((interaction, None));
+                            } else if event_tx.is_some() && subscriber.is_some() {
                                 // Events mode: subscriber-bound interactions get individual
                                 // tap-scoped processing with terminal events.
                                 individual.push((interaction, subscriber));
@@ -340,6 +345,20 @@ where
 
                 // Process individual interactions (requests, or subscriber-bound)
                 for (interaction, subscriber) in individual {
+                    // When runtime_input_sink is set, route through the runtime
+                    // instead of calling self.run() directly. The sink awaits
+                    // only admission, not completion — the host loop continues
+                    // immediately.
+                    if let Some(ref sink) = self.runtime_input_sink {
+                        if let Err(err) = sink.accept_peer_input(interaction).await {
+                            tracing::warn!(
+                                error = %err,
+                                "runtime sink rejected peer input"
+                            );
+                        }
+                        continue;
+                    }
+
                     let has_tap = match subscriber {
                         Some(tx) => {
                             self.event_tap
@@ -423,26 +442,40 @@ where
                     tracing::debug!(
                         "Host mode: continuation run after terminal response injection"
                     );
-                    let cont_result = self.run_pending_inner(event_tx.clone()).await;
-                    match cont_result {
-                        Ok(result) => {
-                            last_result = result;
-                            self.checkpoint_current_session().await;
+
+                    // When runtime_input_sink is set, route continuation through runtime
+                    if let Some(ref sink) = self.runtime_input_sink {
+                        if let Err(err) = sink.accept_continuation().await {
+                            tracing::warn!(
+                                error = %err,
+                                "runtime sink rejected continuation"
+                            );
                         }
-                        Err(e) => {
-                            if e.is_graceful() {
-                                tracing::info!("Host mode: graceful exit - {}", e);
-                                self.host_drain_active = false;
-                                return Ok(last_result);
+                        // Don't block — runtime loop will process the continuation
+                    } else {
+                        let cont_result = self.run_pending_inner(event_tx.clone()).await;
+                        match cont_result {
+                            Ok(result) => {
+                                last_result = result;
+                                self.checkpoint_current_session().await;
                             }
-                            self.host_drain_active = false;
-                            return Err(e);
+                            Err(e) => {
+                                if e.is_graceful() {
+                                    tracing::info!("Host mode: graceful exit - {}", e);
+                                    self.host_drain_active = false;
+                                    return Ok(last_result);
+                                }
+                                self.host_drain_active = false;
+                                return Err(e);
+                            }
                         }
                     }
                 }
 
-                // Process batched messages as one run (no tap)
-                if !batched_texts.is_empty() {
+                // Process batched messages as one run (no tap).
+                // When runtime_input_sink is set, batched messages are skipped —
+                // individual interactions were already admitted to the runtime queue.
+                if !batched_texts.is_empty() && self.runtime_input_sink.is_none() {
                     let combined = batched_texts.join("\n\n");
                     tracing::debug!(
                         "Host mode: processing {} batched message(s)",

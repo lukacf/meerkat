@@ -401,6 +401,7 @@ impl MobBuilder {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn reconcile_resume(
         definition: &Arc<MobDefinition>,
         roster: &mut Roster,
@@ -639,6 +640,7 @@ impl MobBuilder {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn start_runtime_with_components(
         definition: Arc<MobDefinition>,
         wiring: RuntimeWiring,

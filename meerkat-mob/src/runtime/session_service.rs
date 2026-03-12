@@ -175,12 +175,8 @@ where
     }
 
     fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::RuntimeSessionAdapter>> {
-        match self.runtime_store() {
-            Some(store) => Some(Arc::new(
-                meerkat_runtime::RuntimeSessionAdapter::persistent(store),
-            )),
-            None => None,
-        }
+        self.runtime_store()
+            .map(|store| Arc::new(meerkat_runtime::RuntimeSessionAdapter::persistent(store)))
     }
 
     async fn subscribe_session_events(
@@ -199,7 +195,7 @@ where
             .and_then(|session| {
                 session
                     .session_metadata()
-                    .and_then(|metadata| metadata.comms_name.clone())
+                    .and_then(|metadata| metadata.comms_name)
             })
             .is_some_and(|name| name.starts_with(&format!("{_mob_id}/")))
     }

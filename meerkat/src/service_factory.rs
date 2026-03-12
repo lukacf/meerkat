@@ -292,11 +292,13 @@ pub fn build_persistent_service(
     store: Arc<dyn meerkat_store::SessionStore>,
 ) -> meerkat_session::PersistentSessionService<FactoryAgentBuilder> {
     let builder = FactoryAgentBuilder::new(factory, config);
-    let bundle = match PersistenceBundle::from_session_store(store) {
-        Ok(bundle) => bundle,
-        Err(err) => panic!("persistent service bundle construction must succeed: {err}"),
+    let (store, runtime_store) = match PersistenceBundle::from_session_store(store.clone()) {
+        Ok(bundle) => bundle.into_parts(),
+        Err(err) => {
+            tracing::warn!("failed to construct persistence bundle: {err}");
+            (store, None)
+        }
     };
-    let (store, runtime_store) = bundle.into_parts();
     meerkat_session::PersistentSessionService::new(builder, max_sessions, store, runtime_store)
 }
 

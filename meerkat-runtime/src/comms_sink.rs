@@ -38,7 +38,8 @@ impl RuntimeCommsInputSink {
     }
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl RuntimeInputSink for RuntimeCommsInputSink {
     async fn accept_peer_input(&self, interaction: InboxInteraction) -> Result<(), String> {
         let input = interaction_to_peer_input(&interaction, &self.runtime_id);

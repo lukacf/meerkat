@@ -1106,12 +1106,7 @@ impl MethodRouter {
             #[cfg(feature = "mob")]
             Some(SessionOwner::Mob) => {
                 let session_service = self.mob_state.session_service();
-                match meerkat_mob::MobSessionService::subscribe_session_events(
-                    &session_service,
-                    &session_id,
-                )
-                .await
-                {
+                match session_service.subscribe_session_events(&session_id).await {
                     Ok(stream) => stream,
                     Err(err) => {
                         return RpcResponse::error(

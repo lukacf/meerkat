@@ -3307,40 +3307,45 @@ mod tests {
     #[tokio::test]
     async fn test_mcp_history_returns_messages_for_live_and_archived_sessions() {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
-        let state = MeerkatMcpState::new_with_store(store).await;
-        let created = state
-            .service
-            .create_session(meerkat_core::service::CreateSessionRequest {
-                model: "claude-sonnet-4-5".to_string(),
-                prompt: "Hello".to_string(),
-                system_prompt: None,
-                max_tokens: None,
-                event_tx: None,
-                host_mode: false,
-                skill_references: None,
-                initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
-                build: None,
-                labels: None,
-            })
-            .await
-            .expect("create should succeed");
-        let session_id = created.session_id.to_string();
+        let state = MeerkatMcpState::new_with_store(Arc::clone(&store)).await;
+        let mut session = meerkat::Session::new();
+        let session_id = session.id().to_string();
 
-        state
-            .service
-            .start_turn(
-                &created.session_id,
-                meerkat_core::service::StartTurnRequest {
-                    prompt: "Follow up".to_string(),
-                    event_tx: None,
-                    host_mode: false,
-                    skill_references: None,
-                    flow_tool_overlay: None,
-                    additional_instructions: None,
-                },
-            )
+        session.push(meerkat_core::types::Message::System(
+            meerkat_core::types::SystemMessage {
+                content: "system rules".to_string(),
+            },
+        ));
+        session.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage {
+                content: "Hello".to_string(),
+            },
+        ));
+        session.push(meerkat_core::types::Message::Assistant(
+            meerkat_core::types::AssistantMessage {
+                content: "Hi there".to_string(),
+                tool_calls: vec![],
+                stop_reason: meerkat_core::types::StopReason::EndTurn,
+                usage: meerkat_core::types::Usage::default(),
+            },
+        ));
+        session.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage {
+                content: "Follow up".to_string(),
+            },
+        ));
+        session.push(meerkat_core::types::Message::Assistant(
+            meerkat_core::types::AssistantMessage {
+                content: "Second answer".to_string(),
+                tool_calls: vec![],
+                stop_reason: meerkat_core::types::StopReason::EndTurn,
+                usage: meerkat_core::types::Usage::default(),
+            },
+        ));
+        store
+            .save(&session)
             .await
-            .expect("second turn should succeed");
+            .expect("persisted history session");
 
         let history = handle_tools_call(
             &state,
@@ -3361,7 +3366,7 @@ mod tests {
 
         state
             .service
-            .archive(&created.session_id)
+            .archive(session.id())
             .await
             .expect("archive should succeed");
 

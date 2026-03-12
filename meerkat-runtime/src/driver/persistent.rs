@@ -207,6 +207,7 @@ impl RuntimeDriver for PersistentRuntimeDriver {
                         }),
                         receipt.clone(),
                         input_updates,
+                        None, // session_store_key — caller provides if dual-store needed
                     )
                     .await
                     .map_err(|e| {
@@ -720,6 +721,7 @@ mod tests {
                     sequence: 0,
                 },
                 vec![state.clone()],
+                None,
             )
             .await
             .unwrap();

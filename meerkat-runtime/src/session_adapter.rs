@@ -879,6 +879,7 @@ mod tests {
             session_delta: Option<SessionDelta>,
             receipt: meerkat_core::lifecycle::RunBoundaryReceipt,
             input_updates: Vec<InputState>,
+            session_store_key: Option<meerkat_core::types::SessionId>,
         ) -> Result<(), RuntimeStoreError> {
             if self.fail_atomic_apply {
                 return Err(RuntimeStoreError::WriteFailed(
@@ -886,7 +887,13 @@ mod tests {
                 ));
             }
             self.inner
-                .atomic_apply(runtime_id, session_delta, receipt, input_updates)
+                .atomic_apply(
+                    runtime_id,
+                    session_delta,
+                    receipt,
+                    input_updates,
+                    session_store_key,
+                )
                 .await
         }
 

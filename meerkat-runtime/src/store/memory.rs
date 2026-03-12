@@ -119,7 +119,11 @@ impl RuntimeStore for InMemoryRuntimeStore {
         session_delta: Option<SessionDelta>,
         receipt: RunBoundaryReceipt,
         input_updates: Vec<InputState>,
+        _session_store_key: Option<meerkat_core::types::SessionId>,
     ) -> Result<(), RuntimeStoreError> {
+        // InMemoryRuntimeStore ignores session_store_key — there's no shared
+        // sessions table in memory. The session snapshot is stored in the
+        // runtime's own snapshot map.
         let mut inner = self.inner.lock().await;
 
         // All writes in one lock acquisition (atomic for in-memory)
@@ -280,6 +284,7 @@ mod tests {
                 }),
                 receipt.clone(),
                 vec![state],
+                None,
             )
             .await
             .unwrap();
@@ -335,7 +340,13 @@ mod tests {
         // First write
         let state1 = InputState::new_accepted(input_id.clone());
         store
-            .atomic_apply(&rid, None, make_receipt(RunId::new(), 0), vec![state1])
+            .atomic_apply(
+                &rid,
+                None,
+                make_receipt(RunId::new(), 0),
+                vec![state1],
+                None,
+            )
             .await
             .unwrap();
 
@@ -343,7 +354,13 @@ mod tests {
         let mut state2 = InputState::new_accepted(input_id.clone());
         state2.current_state = crate::input_state::InputLifecycleState::Queued;
         store
-            .atomic_apply(&rid, None, make_receipt(RunId::new(), 1), vec![state2])
+            .atomic_apply(
+                &rid,
+                None,
+                make_receipt(RunId::new(), 1),
+                vec![state2],
+                None,
+            )
             .await
             .unwrap();
 
@@ -431,6 +448,7 @@ mod tests {
                 }),
                 make_receipt(RunId::new(), 0),
                 vec![],
+                None,
             )
             .await
             .unwrap();

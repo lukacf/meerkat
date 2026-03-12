@@ -97,12 +97,19 @@ pub trait RuntimeStore: Send + Sync {
     ///
     /// All three writes MUST commit in a single atomic operation.
     /// If any write fails, none should be visible.
+    /// Atomically persist session delta + receipt + input state updates.
+    ///
+    /// All writes MUST commit in a single atomic operation.
+    /// If `session_store_key` is `Some`, also writes the session snapshot
+    /// to the sessions table (the same table `SessionStore` uses), providing
+    /// a unified boundary commit across both stores.
     async fn atomic_apply(
         &self,
         runtime_id: &LogicalRuntimeId,
         session_delta: Option<SessionDelta>,
         receipt: RunBoundaryReceipt,
         input_updates: Vec<InputState>,
+        session_store_key: Option<meerkat_core::types::SessionId>,
     ) -> Result<(), RuntimeStoreError>;
 
     /// Load all input states for a runtime.

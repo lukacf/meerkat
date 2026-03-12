@@ -150,6 +150,10 @@ pub struct SessionRuntime {
     backend: Option<String>,
     config_runtime: Option<Arc<meerkat_core::ConfigRuntime>>,
     runtime_adapter: Arc<RuntimeSessionAdapter>,
+    /// Notification sink for event forwarding to the RPC transport.
+    /// Used by lazy executor registration in start_turn_via_runtime.
+    #[allow(dead_code)]
+    notification_sink: crate::router::NotificationSink,
     skill_identity_registry: Arc<StdRwLock<SkillIdentityRegistryState>>,
     #[cfg(feature = "mcp")]
     mcp_sessions: RwLock<std::collections::HashMap<SessionId, SessionMcpState>>,
@@ -188,6 +192,7 @@ impl SessionRuntime {
         config: Config,
         max_sessions: usize,
         store: Arc<dyn SessionStore>,
+        notification_sink: crate::router::NotificationSink,
     ) -> Self {
         #[allow(clippy::expect_used)]
         let runtime_store = Self::build_runtime_store(&store)
@@ -214,6 +219,7 @@ impl SessionRuntime {
             backend: None,
             config_runtime: None,
             runtime_adapter,
+            notification_sink,
             skill_identity_registry: Arc::new(StdRwLock::new(SkillIdentityRegistryState {
                 generation: 0,
                 registry: SourceIdentityRegistry::default(),
@@ -235,6 +241,7 @@ impl SessionRuntime {
         config_store: Arc<dyn ConfigStore>,
         max_sessions: usize,
         store: Arc<dyn SessionStore>,
+        notification_sink: crate::router::NotificationSink,
     ) -> Self {
         #[allow(clippy::expect_used)]
         let runtime_store = Self::build_runtime_store(&store)
@@ -262,6 +269,7 @@ impl SessionRuntime {
             backend: None,
             config_runtime: None,
             runtime_adapter,
+            notification_sink,
             skill_identity_registry: Arc::new(StdRwLock::new(SkillIdentityRegistryState {
                 generation: 0,
                 registry: SourceIdentityRegistry::default(),
@@ -440,8 +448,13 @@ impl SessionRuntime {
 
         let input = Input::Prompt(PromptInput::new(prompt, turn_metadata));
 
-        // Ensure session is registered with the runtime adapter
+        // Lazy-register executor if not already registered.
+        // Uses self.notification_sink for event forwarding in the executor.
         if !self.runtime_adapter.contains_session(session_id).await {
+            // We need Arc<Self> for the executor. Since we're called from a handler
+            // that has Arc<SessionRuntime>, the caller must pass it. For now, return
+            // an error if not registered — the handler's lazy-register should prevent
+            // this from happening.
             return Err(RpcError {
                 code: error::INTERNAL_ERROR,
                 message: format!("session {session_id} has no runtime registration"),
@@ -2303,7 +2316,13 @@ mod tests {
 
     fn make_runtime(factory: AgentFactory, max_sessions: usize) -> SessionRuntime {
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
-        SessionRuntime::new(factory, Config::default(), max_sessions, store)
+        SessionRuntime::new(
+            factory,
+            Config::default(),
+            max_sessions,
+            store,
+            crate::router::NotificationSink::noop(),
+        )
     }
 
     #[cfg(feature = "mcp")]

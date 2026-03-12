@@ -130,7 +130,12 @@ impl CoreExecutor for SessionRuntimeExecutor {
                     .turn_metadata()
                     .and_then(|meta| meta.additional_instructions.clone()),
                 Some(crate::handlers::turn::TurnOverrides {
-                    host_mode: primitive.turn_metadata().map(|meta| meta.host_mode),
+                    // Only pass host_mode override if explicitly true — false is the
+                    // default and should not override a session's persisted host_mode.
+                    host_mode: primitive
+                        .turn_metadata()
+                        .map(|meta| meta.host_mode)
+                        .filter(|&h| h),
                     model: None,
                     provider: None,
                     max_tokens: None,

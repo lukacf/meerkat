@@ -155,7 +155,7 @@ impl SubagentBackend {
         &self,
         session_id: &SessionId,
         input: Input,
-        _event_tx: Option<
+        event_tx: Option<
             tokio::sync::mpsc::Sender<meerkat_core::EventEnvelope<meerkat_core::AgentEvent>>,
         >,
     ) -> Result<(), MobError> {
@@ -164,8 +164,45 @@ impl SubagentBackend {
                 "runtime-backed turn requested without runtime adapter: {session_id}"
             ))
         })?;
-        let _ = self.runtime_session_state(session_id).await;
+        let state = self.runtime_session_state(session_id).await;
         let adapter_session_id = session_id.clone();
+
+        // Queue a StartTurnRequest with event_tx so the executor can forward
+        // events to the caller. Without this, the executor falls back to
+        // event_tx: None and ActorFlowTurnExecutor sees stream closure
+        // before the terminal outcome.
+        if let Some(ref state) = state {
+            let prompt = extract_prompt_from_input(&input);
+            state.queued_turns.lock().await.push_back(StartTurnRequest {
+                prompt,
+                event_tx,
+                host_mode: match &input {
+                    Input::Prompt(p) => p.turn_metadata.as_ref().is_some_and(|meta| meta.host_mode),
+                    _ => false,
+                },
+                skill_references: match &input {
+                    Input::Prompt(p) => p
+                        .turn_metadata
+                        .as_ref()
+                        .and_then(|meta| meta.skill_references.clone()),
+                    _ => None,
+                },
+                flow_tool_overlay: match &input {
+                    Input::Prompt(p) => p
+                        .turn_metadata
+                        .as_ref()
+                        .and_then(|meta| meta.flow_tool_overlay.clone()),
+                    _ => None,
+                },
+                additional_instructions: match &input {
+                    Input::Prompt(p) => p
+                        .turn_metadata
+                        .as_ref()
+                        .and_then(|meta| meta.additional_instructions.clone()),
+                    _ => None,
+                },
+            });
+        }
 
         let (_outcome, handle) = adapter
             .accept_input_with_completion(&adapter_session_id, input)
@@ -220,6 +257,18 @@ impl MobSessionRuntimeExecutor {
             session_id,
             state,
         }
+    }
+}
+
+fn extract_prompt_from_input(input: &Input) -> String {
+    match input {
+        Input::Prompt(p) => p.text.clone(),
+        Input::Peer(p) => p.body.clone(),
+        Input::FlowStep(f) => f.instructions.clone(),
+        Input::ExternalEvent(e) => format!("[External Event: {}] {}", e.event_type, e.payload),
+        Input::SystemGenerated(s) => s.content.clone(),
+        Input::Projected(p) => p.content.clone(),
+        _ => String::new(),
     }
 }
 

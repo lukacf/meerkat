@@ -25,6 +25,7 @@ pub use ::tokio;
 pub mod accept;
 pub mod coalescing;
 pub mod comms_bridge;
+pub mod comms_sink;
 pub mod completion;
 pub mod driver;
 pub mod durability;

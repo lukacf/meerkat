@@ -35,7 +35,13 @@ fn spawn_test_server(
     let config = Config::default();
     let store: Arc<dyn meerkat::SessionStore> =
         Arc::new(meerkat::RedbSessionStore::open(temp.path().join("sessions.redb")).unwrap());
-    let mut runtime = SessionRuntime::new(factory, config, 10, store);
+    let mut runtime = SessionRuntime::new(
+        factory,
+        config,
+        10,
+        store,
+        meerkat_rpc::router::NotificationSink::noop(),
+    );
     let config_store: Arc<dyn meerkat_core::ConfigStore> =
         Arc::new(MemoryConfigStore::new(Config::default()));
     runtime.default_llm_client = Some(client);

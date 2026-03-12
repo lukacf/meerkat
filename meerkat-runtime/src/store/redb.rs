@@ -220,6 +220,7 @@ mod inner {
             session_delta: Option<SessionDelta>,
             receipt: RunBoundaryReceipt,
             input_updates: Vec<InputState>,
+            _session_store_key: Option<meerkat_core::types::SessionId>,
         ) -> Result<(), RuntimeStoreError> {
             let db = self.db.clone();
             let rid = runtime_id.clone();
@@ -626,6 +627,7 @@ mod inner {
                     Some(SessionDelta { session_snapshot }),
                     receipt,
                     vec![state],
+                    None,
                 )
                 .await
                 .unwrap();
@@ -716,6 +718,7 @@ mod inner {
                         InputState::new_accepted(id1.clone()),
                         InputState::new_accepted(id2.clone()),
                     ],
+                    None,
                 )
                 .await
                 .unwrap();
@@ -779,6 +782,7 @@ mod inner {
                     }),
                     make_receipt(RunId::new(), 0),
                     vec![],
+                    None,
                 )
                 .await
                 .unwrap();

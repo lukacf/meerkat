@@ -865,6 +865,11 @@ where
 
         // Reset state for new run (allows multi-turn on same agent)
         self.state = LoopState::CallingLlm;
+        self.extraction_mode = false;
+        self.extraction_attempts = 0;
+        self.extraction_result = None;
+        self.extraction_last_error = None;
+        self.extraction_schema_warnings = None;
 
         // Apply canonical per-turn skill references staged by the surface.
         let user_input = self.apply_skill_ref(user_input).await;
@@ -929,6 +934,11 @@ where
 
         // Reset state for new run (allows multi-turn on same agent)
         self.state = LoopState::CallingLlm;
+        self.extraction_mode = false;
+        self.extraction_attempts = 0;
+        self.extraction_result = None;
+        self.extraction_last_error = None;
+        self.extraction_schema_warnings = None;
 
         self.emit_run_started_event(&prompt, event_tx.as_ref())
             .await;

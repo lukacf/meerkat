@@ -2623,7 +2623,8 @@ async fn resolve_flexible_session_id(
     };
 
     if let Some(offset) = offset {
-        let service = build_cli_persistent_service(scope, config.clone()).await?;
+        let (service, _runtime_adapter) =
+            build_cli_persistent_service(scope, config.clone()).await?;
         let sessions = service
             .list(SessionQuery {
                 limit: Some(offset + 1),
@@ -2662,7 +2663,7 @@ async fn resolve_flexible_session_id(
     }
 
     // Try short prefix match against all sessions (no limit).
-    let service = build_cli_persistent_service(scope, config.clone()).await?;
+    let (service, _runtime_adapter) = build_cli_persistent_service(scope, config.clone()).await?;
     let sessions = service
         .list(SessionQuery {
             limit: None,
@@ -3514,11 +3515,8 @@ async fn resume_session_with_llm_override(
             } else {
                 None
             },
-            initial_turn: if run_initial_turn_during_create {
-                meerkat_core::service::InitialTurnPolicy::RunImmediately
-            } else {
-                meerkat_core::service::InitialTurnPolicy::Defer
-            },
+            // Always defer — runtime adapter handles execution.
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             build: Some(build),
             labels: None,
         })
@@ -3529,23 +3527,50 @@ async fn resume_session_with_llm_override(
     } else {
         Some(instructions)
     };
-    let result = if run_initial_turn_during_create {
-        create_result
-    } else {
-        service
-            .start_turn(
-                &create_result.session_id,
-                StartTurnRequest {
-                    prompt: prompt.to_string(),
-                    event_tx,
-                    host_mode,
-                    skill_references: canonical_skill_refs,
-                    flow_tool_overlay,
-                    additional_instructions,
-                },
-            )
-            .await
-            .map_err(session_err_to_anyhow)?
+
+    // Route through runtime adapter (same pattern as run command)
+    let resume_adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
+    let session_id = create_result.session_id.clone();
+    let executor = Box::new(CliRuntimeExecutor {
+        service: service.clone(),
+        session_id: session_id.clone(),
+    });
+    resume_adapter
+        .register_session_with_executor(session_id.clone(), executor)
+        .await;
+
+    let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+        prompt.to_string(),
+        Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                host_mode,
+                skill_references: canonical_skill_refs,
+                flow_tool_overlay,
+                additional_instructions,
+            },
+        ),
+    ));
+    let (_outcome, handle) = resume_adapter
+        .accept_input_with_completion(&session_id, input)
+        .await
+        .map_err(|err| anyhow::anyhow!("runtime accept failed: {err}"))?;
+    let result = match handle {
+        Some(handle) => match handle.wait().await {
+            meerkat_runtime::completion::CompletionOutcome::Completed(r) => r,
+            meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => {
+                anyhow::bail!("turn completed without result")
+            }
+            meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
+                anyhow::bail!("turn abandoned: {reason}")
+            }
+            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
+                anyhow::bail!("runtime terminated: {reason}")
+            }
+        },
+        None => {
+            eprintln!("Warning: duplicate input — already processed");
+            create_result
+        }
     };
     log_stage("service.create_session(done)");
 
@@ -3590,7 +3615,10 @@ async fn resume_session_with_llm_override(
 async fn build_cli_persistent_service(
     scope: &RuntimeScope,
     config: Config,
-) -> anyhow::Result<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
+) -> anyhow::Result<(
+    meerkat::PersistentSessionService<FactoryAgentBuilder>,
+    Arc<meerkat_runtime::RuntimeSessionAdapter>,
+)> {
     let (manifest, store) = create_session_store(scope).await?;
     let project_root = scope.context_root.clone().unwrap_or_else(|| {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -3618,12 +3646,16 @@ async fn build_cli_persistent_service(
             .ok()
             .map(|store| Arc::new(store) as Arc<dyn meerkat_runtime::RuntimeStore>)
     });
+    let runtime_adapter = match &runtime_store {
+        Some(store) => Arc::new(meerkat_runtime::RuntimeSessionAdapter::persistent(
+            store.clone(),
+        )),
+        None => Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
+    };
     let builder = FactoryAgentBuilder::new(factory, config);
-    Ok(meerkat::PersistentSessionService::new(
-        builder,
-        64,
-        store,
-        runtime_store,
+    Ok((
+        meerkat::PersistentSessionService::new(builder, 64, store, runtime_store),
+        runtime_adapter,
     ))
 }
 
@@ -3658,7 +3690,9 @@ async fn get_or_create_mob_persistent_service(
         return Ok(existing);
     }
 
-    let created = Arc::new(build_cli_persistent_service(scope, config).await?);
+    let (persistent_service, _runtime_adapter) =
+        build_cli_persistent_service(scope, config).await?;
+    let created = Arc::new(persistent_service);
     let mut cache = mob_persistent_service_cache()
         .lock()
         .map_err(|_| anyhow::anyhow!("mob persistent service cache poisoned"))?;
@@ -3817,7 +3851,7 @@ async fn list_sessions(
     scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
     let (config, _) = load_config(scope).await?;
-    let service = build_cli_persistent_service(scope, config).await?;
+    let (service, _runtime_adapter) = build_cli_persistent_service(scope, config).await?;
     let query = SessionQuery {
         limit: Some(limit),
         offset,
@@ -3900,7 +3934,7 @@ async fn show_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
     let session_id = resolve_scoped_session_id(id, scope)?;
 
     let (config, _) = load_config(scope).await?;
-    let service = build_cli_persistent_service(scope, config).await?;
+    let (service, _runtime_adapter) = build_cli_persistent_service(scope, config).await?;
     let session = service
         .load_persisted(&session_id)
         .await
@@ -3999,7 +4033,7 @@ async fn delete_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
     let session_id = resolve_scoped_session_id(id, scope)?;
 
     let (config, _) = load_config(scope).await?;
-    let service = build_cli_persistent_service(scope, config).await?;
+    let (service, _runtime_adapter) = build_cli_persistent_service(scope, config).await?;
 
     service
         .archive(&session_id)
@@ -4019,7 +4053,7 @@ async fn interrupt_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()>
     let session_id = resolve_scoped_session_id(id, scope)?;
 
     let (config, _) = load_config(scope).await?;
-    let service = build_cli_persistent_service(scope, config).await?;
+    let (service, _runtime_adapter) = build_cli_persistent_service(scope, config).await?;
 
     match service.interrupt(&session_id).await {
         Ok(()) | Err(SessionError::NotRunning { .. }) => {
@@ -5753,6 +5787,7 @@ where
         Arc::clone(&config_store),
         64,
         session_store,
+        meerkat_rpc::router::NotificationSink::noop(),
     );
     let session_service = runtime.session_service();
     let runtime_adapter = runtime.runtime_adapter();

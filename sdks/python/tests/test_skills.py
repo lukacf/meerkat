@@ -5,8 +5,8 @@ import warnings
 import pytest
 
 from meerkat import MeerkatClient, SkillKey
-from meerkat.session import Session, _normalize_skill_ref
-from meerkat.types import RunResult, Usage
+from meerkat.session import DeferredSession, Session, _normalize_skill_ref
+from meerkat.types import RunResult, SessionHistory, SessionMessage, Usage
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +61,7 @@ class _MockClient:
         self._calls: list[dict] = []
         self._send_calls: list[dict] = []
         self._peers_calls: list[str] = []
+        self._history_calls: list[dict] = []
 
     def has_capability(self, cap: str) -> bool:
         return cap == "skills"
@@ -103,6 +104,25 @@ class _MockClient:
                 {"id": "peer-b", "name": "beta"},
             ]
         }
+
+    async def read_session_history(self, session_id, *, offset=0, limit=None):
+        self._history_calls.append({
+            "session_id": session_id,
+            "offset": offset,
+            "limit": limit,
+        })
+        return SessionHistory(
+            session_id=session_id,
+            session_ref="ref-1",
+            message_count=2,
+            offset=offset,
+            limit=limit,
+            has_more=False,
+            messages=[
+                SessionMessage(role="user", content="hello"),
+                SessionMessage(role="assistant", content="ok", stop_reason="end_turn"),
+            ],
+        )
 
 def _make_session() -> tuple[Session, _MockClient]:
     client = _MockClient()
@@ -163,6 +183,32 @@ async def test_session_peers_returns_peer_list():
     assert peers == [
         {"id": "peer-a", "name": "alpha"},
         {"id": "peer-b", "name": "beta"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_session_history_routes_to_client_history_reader():
+    session, client = _make_session()
+    history = await session.history(offset=1, limit=5)
+
+    assert history.session_id == "s-1"
+    assert history.messages[1].role == "assistant"
+    assert client._history_calls == [
+        {"session_id": "s-1", "offset": 1, "limit": 5},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_deferred_session_history_routes_to_client_history_reader():
+    client = _MockClient()
+    session = DeferredSession(client, "s-2", "ref-2")
+
+    history = await session.history(offset=2, limit=3)
+
+    assert history.session_id == "s-2"
+    assert history.session_ref == "ref-1"
+    assert client._history_calls == [
+        {"session_id": "s-2", "offset": 2, "limit": 3},
     ]
 
 

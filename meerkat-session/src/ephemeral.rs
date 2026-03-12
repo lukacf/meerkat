@@ -9,9 +9,10 @@ use indexmap::IndexMap;
 use meerkat_core::event::{AgentEvent, EventEnvelope};
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
-    SessionControlError, SessionError, SessionInfo, SessionQuery, SessionService,
-    SessionServiceCommsExt, SessionServiceControlExt, SessionSummary, SessionUsage, SessionView,
-    StartTurnRequest, TurnToolOverlay,
+    SessionControlError, SessionError, SessionHistoryPage, SessionHistoryQuery, SessionInfo,
+    SessionQuery, SessionService, SessionServiceCommsExt, SessionServiceControlExt,
+    SessionServiceHistoryExt, SessionSummary, SessionUsage, SessionView, StartTurnRequest,
+    TurnToolOverlay,
 };
 use meerkat_core::time_compat::SystemTime;
 use meerkat_core::types::{RunResult, SessionId, Usage};
@@ -896,6 +897,32 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceCommsExt for EphemeralSessi
         session_id: &SessionId,
     ) -> Option<Arc<dyn meerkat_core::event_injector::SubscribableInjector>> {
         EphemeralSessionService::<B>::interaction_event_injector(self, session_id).await
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl<B: SessionAgentBuilder + 'static> SessionServiceHistoryExt for EphemeralSessionService<B> {
+    async fn read_history(
+        &self,
+        id: &SessionId,
+        query: SessionHistoryQuery,
+    ) -> Result<SessionHistoryPage, SessionError> {
+        match self.export_session(id).await {
+            Ok(session) => Ok(SessionHistoryPage::from_messages(
+                session.id().clone(),
+                session.messages(),
+                query,
+            )),
+            Err(SessionError::NotFound { .. }) => {
+                if self.archived_views.read().await.contains_key(id) {
+                    Err(SessionError::PersistenceDisabled)
+                } else {
+                    Err(SessionError::NotFound { id: id.clone() })
+                }
+            }
+            Err(err) => Err(err),
+        }
     }
 }
 

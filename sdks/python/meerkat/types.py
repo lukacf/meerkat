@@ -122,6 +122,61 @@ class SessionInfo:
 
 
 @dataclass(frozen=True, slots=True)
+class SessionToolCall:
+    """Legacy assistant tool call captured in transcript history."""
+
+    id: str = ""
+    name: str = ""
+    args: Any = None
+
+
+@dataclass(frozen=True, slots=True)
+class SessionToolResult:
+    """Tool result captured in transcript history."""
+
+    tool_use_id: str = ""
+    content: str = ""
+    is_error: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class SessionAssistantBlock:
+    """Ordered block inside a block-assistant transcript message."""
+
+    block_type: str = ""
+    text: str | None = None
+    id: str | None = None
+    name: str | None = None
+    args: Any = None
+    meta: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SessionMessage:
+    """Canonical transcript message returned by session history APIs."""
+
+    role: str = ""
+    content: str | None = None
+    tool_calls: list[SessionToolCall] = field(default_factory=list)
+    stop_reason: str | None = None
+    blocks: list[SessionAssistantBlock] = field(default_factory=list)
+    results: list[SessionToolResult] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class SessionHistory:
+    """Paginated transcript page for a session."""
+
+    session_id: str = ""
+    session_ref: str | None = None
+    message_count: int = 0
+    offset: int = 0
+    limit: int | None = None
+    has_more: bool = False
+    messages: list[SessionMessage] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
 class EventEnvelope:
     """Session or agent event with delivery metadata."""
 

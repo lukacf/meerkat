@@ -105,10 +105,20 @@ if include_scenario(37):
             assert details["is_active"] is False
             assert details["message_count"] >= 4
 
+            history = await client.read_session_history(session.id)
+            assert history.session_id == session.id
+            assert history.message_count >= 4
+            assert len(history.messages) >= 4
+
             sessions = await client.list_sessions()
             assert session.id in {entry.session_id for entry in sessions}
 
             await session.archive()
+
+            archived_history = await session.history()
+            assert archived_history.session_id == session.id
+            assert archived_history.message_count >= 4
+            assert len(archived_history.messages) >= 4
 
             sessions_after_archive = await client.list_sessions()
             assert session.id not in {entry.session_id for entry in sessions_after_archive}

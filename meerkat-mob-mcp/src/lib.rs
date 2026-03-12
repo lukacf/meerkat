@@ -14,9 +14,9 @@ use meerkat_core::error::ToolError;
 use meerkat_core::interaction::InteractionId;
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
-    SessionControlError, SessionError, SessionInfo, SessionQuery, SessionService,
-    SessionServiceCommsExt, SessionServiceControlExt, SessionSummary, SessionUsage, SessionView,
-    StartTurnRequest,
+    SessionControlError, SessionError, SessionHistoryPage, SessionHistoryQuery, SessionInfo,
+    SessionQuery, SessionService, SessionServiceCommsExt, SessionServiceControlExt,
+    SessionServiceHistoryExt, SessionSummary, SessionUsage, SessionView, StartTurnRequest,
 };
 use meerkat_core::time_compat::{Instant, SystemTime};
 use meerkat_core::types::{RunResult, SessionId, ToolCallView, ToolDef, ToolResult, Usage};
@@ -850,6 +850,23 @@ impl SessionServiceControlExt for LocalSessionService {
         Ok(AppendSystemContextResult {
             status: AppendSystemContextStatus::Staged,
         })
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl SessionServiceHistoryExt for LocalSessionService {
+    async fn read_history(
+        &self,
+        id: &SessionId,
+        query: SessionHistoryQuery,
+    ) -> Result<SessionHistoryPage, SessionError> {
+        if self.sessions.read().await.contains_key(id)
+            || self.archived_views.read().await.contains_key(id)
+        {
+            return Ok(SessionHistoryPage::from_messages(id.clone(), &[], query));
+        }
+        Err(SessionError::NotFound { id: id.clone() })
     }
 }
 
@@ -1865,6 +1882,22 @@ mod tests {
             Ok(AppendSystemContextResult {
                 status: AppendSystemContextStatus::Staged,
             })
+        }
+    }
+
+    #[async_trait]
+    impl SessionServiceHistoryExt for MockSessionSvc {
+        async fn read_history(
+            &self,
+            id: &SessionId,
+            query: SessionHistoryQuery,
+        ) -> Result<SessionHistoryPage, SessionError> {
+            if self.sessions.read().await.contains_key(id)
+                || self.persisted_sessions.read().await.contains_key(id)
+            {
+                return Ok(SessionHistoryPage::from_messages(id.clone(), &[], query));
+            }
+            Err(SessionError::NotFound { id: id.clone() })
         }
     }
 

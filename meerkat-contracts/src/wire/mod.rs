@@ -15,6 +15,9 @@ pub use mcp_live::{
 };
 pub use params::{CommsParams, CoreCreateParams, HookParams, SkillsParams, StructuredOutputParams};
 pub use result::WireRunResult;
-pub use session::{WireSessionInfo, WireSessionSummary};
+pub use session::{
+    WireAssistantBlock, WireProviderMeta, WireSessionHistory, WireSessionInfo, WireSessionMessage,
+    WireSessionSummary, WireStopReason, WireToolCall, WireToolResult,
+};
 pub use skills::{SkillEntry, SkillInspectResponse, SkillListResponse};
 pub use usage::WireUsage;

@@ -83,6 +83,46 @@ export interface SessionInfo {
   readonly isActive: boolean;
 }
 
+export interface SessionToolCall {
+  readonly id: string;
+  readonly name: string;
+  readonly args: unknown;
+}
+
+export interface SessionToolResult {
+  readonly toolUseId: string;
+  readonly content: string;
+  readonly isError: boolean;
+}
+
+export interface SessionAssistantBlock {
+  readonly blockType: string;
+  readonly text?: string;
+  readonly id?: string;
+  readonly name?: string;
+  readonly args?: unknown;
+  readonly meta?: Record<string, unknown>;
+}
+
+export interface SessionMessage {
+  readonly role: string;
+  readonly content?: string;
+  readonly toolCalls: readonly SessionToolCall[];
+  readonly stopReason?: string;
+  readonly blocks: readonly SessionAssistantBlock[];
+  readonly results: readonly SessionToolResult[];
+}
+
+export interface SessionHistory {
+  readonly sessionId: string;
+  readonly sessionRef?: string;
+  readonly messageCount: number;
+  readonly offset: number;
+  readonly limit?: number;
+  readonly hasMore: boolean;
+  readonly messages: readonly SessionMessage[];
+}
+
 /** A runtime capability and its availability status. */
 
 

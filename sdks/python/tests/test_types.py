@@ -11,11 +11,18 @@ from meerkat import (
     MeerkatClient,
     RunResult,
     SchemaWarning,
+    SessionAssistantBlock,
+    SessionHistory,
     SessionInfo,
+    SessionMessage,
+    SessionToolCall,
+    SessionToolResult,
     SkillKey,
     SkillQuarantineDiagnostic,
     SkillRuntimeDiagnostics,
     SourceHealthSnapshot,
+    Session,
+    DeferredSession,
     Usage,
 )
 from meerkat.errors import (
@@ -150,6 +157,36 @@ def test_parse_run_result_skill_diagnostics():
     assert result.skill_diagnostics.quarantined[0].skill_id == "extract/email"
 
 
+def test_parse_session_history():
+    raw = {
+        "session_id": "s1",
+        "session_ref": "ref-1",
+        "message_count": 3,
+        "offset": 1,
+        "limit": 2,
+        "has_more": True,
+        "messages": [
+            {"role": "system", "content": "rules"},
+            {
+                "role": "assistant",
+                "content": "working",
+                "tool_calls": [{"id": "tc_1", "name": "search", "args": {"q": "rust"}}],
+                "stop_reason": "tool_use",
+            },
+            {
+                "role": "tool_results",
+                "results": [{"tool_use_id": "tc_1", "content": "done", "is_error": False}],
+            },
+        ],
+    }
+    history = MeerkatClient._parse_session_history(raw)
+    assert history.session_id == "s1"
+    assert history.limit == 2
+    assert history.has_more is True
+    assert history.messages[1].tool_calls[0].name == "search"
+    assert history.messages[2].results[0].tool_use_id == "tc_1"
+
+
 def test_skill_key_export():
     key = SkillKey(source_uuid="abc-123", skill_name="my-skill")
     assert key.source_uuid == "abc-123"
@@ -161,6 +198,87 @@ def test_session_info():
     assert info.session_id == "abc"
     assert info.is_active is True
     assert info.message_count == 5
+
+
+def test_session_history_types():
+    history = SessionHistory(
+        session_id="abc",
+        session_ref="ref-1",
+        message_count=3,
+        offset=1,
+        limit=2,
+        has_more=True,
+        messages=[
+            SessionMessage(role="system", content="rules"),
+            SessionMessage(
+                role="assistant",
+                blocks=[
+                    SessionAssistantBlock(
+                        block_type="tool_use",
+                        id="tool-1",
+                        name="search",
+                        args={"q": "meerkat"},
+                    )
+                ],
+                tool_calls=[SessionToolCall(id="tool-1", name="search", args={"q": "meerkat"})],
+                results=[SessionToolResult(tool_use_id="tool-1", content="done")],
+            ),
+        ],
+    )
+    assert history.session_ref == "ref-1"
+    assert history.has_more is True
+    assert history.messages[1].blocks[0].name == "search"
+
+
+@pytest.mark.asyncio
+async def test_session_history_convenience_method_uses_client() -> None:
+    expected = SessionHistory(
+        session_id="abc",
+        session_ref=None,
+        message_count=0,
+        offset=0,
+        limit=None,
+        has_more=False,
+        messages=[],
+    )
+
+    class StubClient:
+        async def read_session_history(self, session_id: str, *, offset: int = 0, limit: int | None = None) -> SessionHistory:
+            assert session_id == "abc"
+            assert offset == 2
+            assert limit == 5
+            return expected
+
+    session = Session(
+        StubClient(),  # type: ignore[arg-type]
+        RunResult(session_id="abc", text="ok", usage=Usage()),
+    )
+    history = await session.history(offset=2, limit=5)
+    assert history is expected
+
+
+@pytest.mark.asyncio
+async def test_deferred_session_history_convenience_method_uses_client() -> None:
+    expected = SessionHistory(
+        session_id="def",
+        session_ref=None,
+        message_count=0,
+        offset=0,
+        limit=None,
+        has_more=False,
+        messages=[],
+    )
+
+    class StubClient:
+        async def read_session_history(self, session_id: str, *, offset: int = 0, limit: int | None = None) -> SessionHistory:
+            assert session_id == "def"
+            assert offset == 1
+            assert limit is None
+            return expected
+
+    session = DeferredSession(StubClient(), "def")  # type: ignore[arg-type]
+    history = await session.history(offset=1)
+    assert history is expected
 
 
 def test_live_mcp_contract_types_exported():
@@ -432,6 +550,39 @@ async def test_client_comms_send_and_peers_call_expected_rpc_methods():
     assert send_receipt["kind"] == "peer_message_sent"
     assert peers["peers"] == [{"name": "agent-a"}]
     assert [m for m, _ in calls] == ["comms/send", "comms/peers"]
+
+
+@pytest.mark.asyncio
+async def test_client_read_session_history_calls_expected_rpc_method():
+    client = MeerkatClient()
+    calls = []
+
+    async def fake_request(method, params):
+        calls.append((method, params))
+        return {
+            "session_id": params["session_id"],
+            "session_ref": "history-ref",
+            "message_count": 3,
+            "offset": params["offset"],
+            "limit": params.get("limit"),
+            "has_more": False,
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "ok", "stop_reason": "end_turn"},
+            ],
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    history = await client.read_session_history("s1", offset=1, limit=2)
+
+    assert history.session_id == "s1"
+    assert history.session_ref == "history-ref"
+    assert history.offset == 1
+    assert history.limit == 2
+    assert [m for m, _ in calls] == ["session/history"]
+    assert calls[0][1] == {"session_id": "s1", "offset": 1, "limit": 2}
+    assert history.messages[1].role == "assistant"
 
 
 @pytest.mark.asyncio

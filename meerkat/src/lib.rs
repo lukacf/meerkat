@@ -158,6 +158,7 @@ pub use meerkat_comms::{CommsRuntime, CommsRuntimeError, CoreCommsConfig};
 #[cfg(feature = "comms")]
 pub use meerkat_core::SessionServiceCommsExt;
 pub use meerkat_core::SessionServiceControlExt;
+pub use meerkat_core::SessionServiceHistoryExt;
 #[cfg(feature = "comms")]
 pub use meerkat_core::{
     CommsCommand, EventStream, InputSource, InputStreamMode, PeerDirectoryEntry,
@@ -192,8 +193,9 @@ pub use service_factory::{FactoryAgent, FactoryAgentBuilder, build_ephemeral_ser
 // Session service
 pub use meerkat_core::{
     AppendSystemContextRequest, AppendSystemContextResult, AppendSystemContextStatus,
-    CreateSessionRequest, SessionControlError, SessionError, SessionInfo, SessionQuery,
-    SessionService, SessionSummary, SessionUsage, SessionView, StartTurnRequest,
+    CreateSessionRequest, SessionControlError, SessionError, SessionHistoryPage,
+    SessionHistoryQuery, SessionInfo, SessionQuery, SessionService, SessionSummary, SessionUsage,
+    SessionView, StartTurnRequest,
 };
 #[cfg(feature = "session-compaction")]
 pub use meerkat_session::DefaultCompactor;

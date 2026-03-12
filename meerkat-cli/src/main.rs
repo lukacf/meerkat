@@ -2465,6 +2465,18 @@ impl meerkat_core::service::SessionServiceControlExt for RunMobSessionService {
 }
 
 #[async_trait::async_trait]
+impl meerkat_core::service::SessionServiceHistoryExt for RunMobSessionService {
+    async fn read_history(
+        &self,
+        id: &SessionId,
+        query: meerkat_core::service::SessionHistoryQuery,
+    ) -> Result<meerkat_core::service::SessionHistoryPage, meerkat_core::service::SessionError>
+    {
+        self.inner.read_history(id, query).await
+    }
+}
+
+#[async_trait::async_trait]
 impl meerkat_mob::MobSessionService for RunMobSessionService {
     async fn subscribe_session_events(
         &self,
@@ -3880,6 +3892,18 @@ impl meerkat_core::service::SessionServiceControlExt for MobCliSessionService {
         meerkat_core::service::SessionControlError,
     > {
         self.inner.append_system_context(id, req).await
+    }
+}
+
+#[async_trait::async_trait]
+impl meerkat_core::service::SessionServiceHistoryExt for MobCliSessionService {
+    async fn read_history(
+        &self,
+        id: &SessionId,
+        query: meerkat_core::service::SessionHistoryQuery,
+    ) -> Result<meerkat_core::service::SessionHistoryPage, meerkat_core::service::SessionError>
+    {
+        self.inner.read_history(id, query).await
     }
 }
 
@@ -6399,6 +6423,25 @@ mod tests {
             Ok(meerkat_core::service::AppendSystemContextResult {
                 status: meerkat_core::service::AppendSystemContextStatus::Staged,
             })
+        }
+    }
+
+    #[async_trait]
+    impl meerkat_core::service::SessionServiceHistoryExt for TestMobSessionService {
+        async fn read_history(
+            &self,
+            id: &SessionId,
+            query: meerkat_core::service::SessionHistoryQuery,
+        ) -> Result<meerkat_core::service::SessionHistoryPage, meerkat_core::service::SessionError>
+        {
+            if !self.sessions.read().await.contains_key(id) {
+                return Err(SessionError::NotFound { id: id.clone() });
+            }
+            Ok(meerkat_core::service::SessionHistoryPage::from_messages(
+                id.clone(),
+                &[],
+                query,
+            ))
         }
     }
 

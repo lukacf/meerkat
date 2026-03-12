@@ -19,7 +19,13 @@
  * ```
  */
 
-import type { AgentEventEnvelope, RunResult, SkillRef, TurnToolOverlay } from "./types.js";
+import type {
+  AgentEventEnvelope,
+  RunResult,
+  SessionHistory,
+  SkillRef,
+  TurnToolOverlay,
+} from "./types.js";
 import type { MeerkatClient } from "./client.js";
 import type { EventStream } from "./streaming.js";
 import type { EventSubscription } from "./subscription.js";
@@ -102,6 +108,12 @@ export class Session {
 
   async archive(): Promise<void> {
     await this._client._archive(this._id);
+  }
+
+  async history(
+    options?: { offset?: number; limit?: number },
+  ): Promise<SessionHistory> {
+    return this._client.readSessionHistory(this._id, options);
   }
 
   async subscribeEvents(): Promise<EventSubscription<AgentEventEnvelope>> {
@@ -193,6 +205,12 @@ export class DeferredSession {
 
   async archive(): Promise<void> {
     await this._client._archive(this._id);
+  }
+
+  async history(
+    options?: { offset?: number; limit?: number },
+  ): Promise<SessionHistory> {
+    return this._client.readSessionHistory(this._id, options);
   }
 
   toString(): string {

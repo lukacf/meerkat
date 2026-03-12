@@ -13,7 +13,7 @@ use meerkat_contracts::SkillsParams;
 use meerkat_core::error::invalid_session_id_message;
 use meerkat_core::service::{
     CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, SessionError, SessionService,
-    StartTurnRequest,
+    SessionServiceHistoryExt, StartTurnRequest,
 };
 use meerkat_core::{
     AgentEvent, Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigRuntimeError,
@@ -712,6 +712,15 @@ pub struct MeerkatSessionListInput {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct MeerkatSessionHistoryInput {
+    pub session_id: String,
+    #[serde(default)]
+    pub offset: Option<usize>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct MeerkatMcpAddInput {
     pub session_id: String,
     pub server_name: String,
@@ -1009,6 +1018,11 @@ fn base_tools_list() -> Vec<Value> {
             "inputSchema": meerkat_tools::schema_for::<MeerkatSessionListInput>()
         }),
         json!({
+            "name": "meerkat_history",
+            "description": "Read a session's full history.",
+            "inputSchema": meerkat_tools::schema_for::<MeerkatSessionHistoryInput>()
+        }),
+        json!({
             "name": "meerkat_interrupt",
             "description": "Interrupt an in-flight turn for a session.",
             "inputSchema": meerkat_tools::schema_for::<MeerkatSessionIdInput>()
@@ -1193,6 +1207,13 @@ pub async fn handle_tools_call_with_notifier(
             let input: MeerkatSessionListInput = serde_json::from_value(arguments.clone())
                 .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
             handle_meerkat_sessions(state, input)
+                .await
+                .map_err(ToolCallError::internal)
+        }
+        "meerkat_history" => {
+            let input: MeerkatSessionHistoryInput = serde_json::from_value(arguments.clone())
+                .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
+            handle_meerkat_history(state, input)
                 .await
                 .map_err(ToolCallError::internal)
         }
@@ -1584,6 +1605,33 @@ async fn handle_meerkat_sessions(
         .collect();
     let payload = json!({ "sessions": wire_sessions });
     Ok(wrap_tool_payload(payload))
+}
+
+async fn handle_meerkat_history(
+    state: &MeerkatMcpState,
+    input: MeerkatSessionHistoryInput,
+) -> Result<Value, String> {
+    let session_id =
+        meerkat::SessionId::parse(&input.session_id).map_err(invalid_session_id_message)?;
+    let history = state
+        .service
+        .read_history(
+            &session_id,
+            meerkat_core::service::SessionHistoryQuery {
+                offset: input.offset.unwrap_or(0),
+                limit: input.limit,
+            },
+        )
+        .await
+        .map_err(|e| format!("Failed to read session history: {e}"))?;
+    let mut payload: meerkat_contracts::WireSessionHistory = history.into();
+    payload.session_ref = Some(meerkat_contracts::format_session_ref(
+        &state.realm_id,
+        &session_id,
+    ));
+    Ok(wrap_tool_payload(
+        serde_json::to_value(payload).unwrap_or(Value::Null),
+    ))
 }
 
 async fn handle_meerkat_archive(
@@ -2688,9 +2736,9 @@ mod tests {
         #[cfg(all(not(feature = "comms"), feature = "mob"))]
         assert_eq!(tools.len(), 19 + meerkat_mob_mcp::tools_list().len());
         #[cfg(all(feature = "comms", not(feature = "mob")))]
-        assert_eq!(tools.len(), 17);
+        assert_eq!(tools.len(), 18);
         #[cfg(all(not(feature = "comms"), not(feature = "mob")))]
-        assert_eq!(tools.len(), 15);
+        assert_eq!(tools.len(), 16);
 
         let tool_names: Vec<&str> = tools
             .iter()
@@ -2728,6 +2776,8 @@ mod tests {
         assert_eq!(capabilities_tool["name"], "meerkat_capabilities");
         let read_tool = find_tool("meerkat_read");
         assert_eq!(read_tool["name"], "meerkat_read");
+        let history_tool = find_tool("meerkat_history");
+        assert_eq!(history_tool["name"], "meerkat_history");
         let sessions_tool = find_tool("meerkat_sessions");
         assert_eq!(sessions_tool["name"], "meerkat_sessions");
         let interrupt_tool = find_tool("meerkat_interrupt");
@@ -3252,6 +3302,164 @@ mod tests {
         .expect("archive call should succeed");
         let archived_payload = unwrap_payload(archived);
         assert_eq!(archived_payload["archived"], true);
+    }
+
+    #[tokio::test]
+    async fn test_mcp_history_returns_messages_for_live_and_archived_sessions() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        let created = state
+            .service
+            .create_session(meerkat_core::service::CreateSessionRequest {
+                model: "claude-sonnet-4-5".to_string(),
+                prompt: "Hello".to_string(),
+                system_prompt: None,
+                max_tokens: None,
+                event_tx: None,
+                host_mode: false,
+                skill_references: None,
+                initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
+                build: None,
+                labels: None,
+            })
+            .await
+            .expect("create should succeed");
+        let session_id = created.session_id.to_string();
+
+        state
+            .service
+            .start_turn(
+                &created.session_id,
+                meerkat_core::service::StartTurnRequest {
+                    prompt: "Follow up".to_string(),
+                    event_tx: None,
+                    host_mode: false,
+                    skill_references: None,
+                    flow_tool_overlay: None,
+                    additional_instructions: None,
+                },
+            )
+            .await
+            .expect("second turn should succeed");
+
+        let history = handle_tools_call(
+            &state,
+            "meerkat_history",
+            &json!({ "session_id": session_id, "offset": 1, "limit": 2 }),
+        )
+        .await
+        .expect("history should succeed");
+        let history_payload = unwrap_payload(history);
+        assert!(
+            history_payload["message_count"].as_u64().unwrap_or(0) >= 4,
+            "history should expose the full transcript: {history_payload}"
+        );
+        assert_eq!(history_payload["offset"], 1);
+        assert_eq!(history_payload["limit"], 2);
+        assert_eq!(history_payload["has_more"], true);
+        assert_eq!(history_payload["messages"].as_array().unwrap().len(), 2);
+
+        state
+            .service
+            .archive(&created.session_id)
+            .await
+            .expect("archive should succeed");
+
+        let archived_history = handle_tools_call(
+            &state,
+            "meerkat_history",
+            &json!({ "session_id": session_id }),
+        )
+        .await
+        .expect("archived history should succeed");
+        let archived_payload = unwrap_payload(archived_history);
+        assert!(
+            archived_payload["message_count"].as_u64().unwrap_or(0) >= 4,
+            "archived history should preserve the transcript: {archived_payload}"
+        );
+        assert!(
+            archived_payload["messages"].as_array().unwrap().len() >= 4,
+            "archived history should return the full transcript"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mcp_history_serializes_mixed_message_kinds() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(Arc::clone(&store)).await;
+        let mut session = meerkat::Session::new();
+        let session_id = session.id().to_string();
+
+        session.push(meerkat_core::types::Message::System(
+            meerkat_core::types::SystemMessage {
+                content: "system rules".to_string(),
+            },
+        ));
+        session.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage {
+                content: "hello".to_string(),
+            },
+        ));
+        session.push(meerkat_core::types::Message::Assistant(
+            meerkat_core::types::AssistantMessage {
+                content: "legacy ok".to_string(),
+                tool_calls: vec![meerkat_core::types::ToolCall {
+                    id: "tool-1".to_string(),
+                    name: "search".to_string(),
+                    args: serde_json::json!({ "query": "history" }),
+                }],
+                stop_reason: meerkat_core::types::StopReason::ToolUse,
+                usage: meerkat_core::types::Usage::default(),
+            },
+        ));
+        session.push(meerkat_core::types::Message::BlockAssistant(
+            meerkat_core::types::BlockAssistantMessage {
+                blocks: vec![meerkat_core::types::AssistantBlock::ToolUse {
+                    id: "tool-2".to_string(),
+                    name: "lookup".to_string(),
+                    args: serde_json::value::RawValue::from_string(
+                        serde_json::json!({ "item": "transcript" }).to_string(),
+                    )
+                    .expect("raw tool args"),
+                    meta: None,
+                }],
+                stop_reason: meerkat_core::types::StopReason::ToolUse,
+            },
+        ));
+        session.push(meerkat_core::types::Message::ToolResults {
+            results: vec![meerkat_core::types::ToolResult {
+                tool_use_id: "tool-2".to_string(),
+                content: "done".to_string(),
+                is_error: false,
+            }],
+        });
+        store.save(&session).await.expect("persisted mixed session");
+
+        let history = handle_tools_call(
+            &state,
+            "meerkat_history",
+            &json!({ "session_id": session_id }),
+        )
+        .await
+        .expect("mixed history should succeed");
+        let payload = unwrap_payload(history);
+        let messages = payload["messages"]
+            .as_array()
+            .expect("history messages should be an array");
+
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[2]["role"], "assistant");
+        assert_eq!(messages[2]["tool_calls"][0]["name"], "search");
+        assert_eq!(messages[3]["role"], "block_assistant");
+        assert_eq!(messages[3]["blocks"][0]["block_type"], "tool_use");
+        assert_eq!(
+            messages[3]["blocks"][0]["data"]["args"]["item"],
+            "transcript"
+        );
+        assert_eq!(messages[4]["role"], "tool_results");
+        assert_eq!(messages[4]["results"][0]["tool_use_id"], "tool-2");
     }
 
     #[tokio::test]

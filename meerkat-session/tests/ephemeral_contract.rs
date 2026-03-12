@@ -10,8 +10,8 @@ use meerkat_core::error::ToolError;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextStatus, CreateSessionRequest, InitialTurnPolicy,
-    SessionError, SessionQuery, SessionService, SessionServiceControlExt, StartTurnRequest,
-    TurnToolOverlay,
+    SessionError, SessionHistoryQuery, SessionQuery, SessionService, SessionServiceControlExt,
+    SessionServiceHistoryExt, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::types::{
     AssistantBlock, RunResult, SessionId, StopReason, ToolCallView, ToolDef, ToolResult, Usage,
@@ -766,6 +766,29 @@ async fn test_turn_on_archived_session_returns_not_found() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert_eq!(err.code(), "SESSION_NOT_FOUND");
+}
+
+#[tokio::test]
+async fn test_read_history_on_archived_session_returns_persistence_disabled() {
+    let service = make_service(MockAgentBuilder::new());
+    let _ = service.create_session(create_req("Hello")).await.unwrap();
+
+    let sessions = service.list(SessionQuery::default()).await.unwrap();
+    let session_id = sessions[0].session_id.clone();
+
+    service.archive(&session_id).await.unwrap();
+
+    let err = service
+        .read_history(
+            &session_id,
+            SessionHistoryQuery {
+                offset: 0,
+                limit: None,
+            },
+        )
+        .await
+        .expect_err("ephemeral archived history should be unavailable");
+    assert_eq!(err.code(), "SESSION_PERSISTENCE_DISABLED");
 }
 
 #[tokio::test]

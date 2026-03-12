@@ -10,8 +10,9 @@ use meerkat_core::event_injector::{
     EventInjector, EventInjectorError, InteractionSubscription, SubscribableInjector,
 };
 use meerkat_core::service::{
-    CreateSessionRequest, SessionError, SessionInfo, SessionQuery, SessionService,
-    SessionServiceCommsExt, SessionSummary, SessionUsage, SessionView, StartTurnRequest,
+    CreateSessionRequest, SessionError, SessionHistoryPage, SessionHistoryQuery, SessionInfo,
+    SessionQuery, SessionService, SessionServiceCommsExt, SessionSummary, SessionUsage,
+    SessionView, StartTurnRequest,
 };
 use meerkat_core::types::{RunResult, SessionId, Usage};
 use meerkat_core::{InteractionId, PlainEventSource};
@@ -180,6 +181,20 @@ impl SessionServiceCommsExt for MockSessionService {
         Some(Arc::new(MockInjector {
             inject_calls: self.inject_calls.clone(),
         }))
+    }
+}
+
+#[async_trait]
+impl meerkat_core::service::SessionServiceHistoryExt for MockSessionService {
+    async fn read_history(
+        &self,
+        id: &SessionId,
+        query: SessionHistoryQuery,
+    ) -> Result<SessionHistoryPage, SessionError> {
+        if !self.sessions.read().await.contains_key(id) {
+            return Err(SessionError::NotFound { id: id.clone() });
+        }
+        Ok(SessionHistoryPage::from_messages(id.clone(), &[], query))
     }
 }
 

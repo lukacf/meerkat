@@ -1012,6 +1012,24 @@ impl SessionServiceCommsExt for MockSessionService {
 }
 
 #[async_trait]
+impl meerkat_core::service::SessionServiceHistoryExt for MockSessionService {
+    async fn read_history(
+        &self,
+        id: &SessionId,
+        query: meerkat_core::service::SessionHistoryQuery,
+    ) -> Result<meerkat_core::service::SessionHistoryPage, SessionError> {
+        if !self.sessions.read().await.contains_key(id) {
+            return Err(SessionError::NotFound { id: id.clone() });
+        }
+        Ok(meerkat_core::service::SessionHistoryPage::from_messages(
+            id.clone(),
+            &[],
+            query,
+        ))
+    }
+}
+
+#[async_trait]
 impl SessionServiceControlExt for MockSessionService {
     async fn append_system_context(
         &self,
@@ -9110,6 +9128,24 @@ impl SessionServiceCommsExt for RealCommsSessionService {
         sessions
             .get(session_id)
             .map(|c| Arc::clone(c) as Arc<dyn CoreCommsRuntime>)
+    }
+}
+
+#[async_trait]
+impl meerkat_core::service::SessionServiceHistoryExt for RealCommsSessionService {
+    async fn read_history(
+        &self,
+        id: &SessionId,
+        query: meerkat_core::service::SessionHistoryQuery,
+    ) -> Result<meerkat_core::service::SessionHistoryPage, SessionError> {
+        if !self.sessions.read().await.contains_key(id) {
+            return Err(SessionError::NotFound { id: id.clone() });
+        }
+        Ok(meerkat_core::service::SessionHistoryPage::from_messages(
+            id.clone(),
+            &[],
+            query,
+        ))
     }
 }
 

@@ -7,7 +7,7 @@
 //! sessions are merged with live (ephemeral) sessions.
 
 use async_trait::async_trait;
-use indexmap::IndexSet;
+use indexmap::{IndexMap, IndexSet};
 use meerkat_core::PendingSystemContextAppend;
 #[allow(unused_imports)] // Used in read() fallback path
 use meerkat_core::Session;
@@ -19,9 +19,10 @@ use meerkat_core::lifecycle::run_primitive::{
 use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
-    SessionBuildOptions, SessionControlError, SessionError, SessionInfo, SessionQuery,
-    SessionService, SessionServiceCommsExt, SessionServiceControlExt, SessionSummary, SessionUsage,
-    SessionView, StartTurnRequest,
+    SessionBuildOptions, SessionControlError, SessionError, SessionHistoryPage,
+    SessionHistoryQuery, SessionInfo, SessionQuery, SessionService, SessionServiceCommsExt,
+    SessionServiceControlExt, SessionServiceHistoryExt, SessionSummary, SessionUsage, SessionView,
+    StartTurnRequest,
 };
 use meerkat_core::types::{RunResult, SessionId};
 use meerkat_core::{InputId, RunId};
@@ -39,6 +40,8 @@ use tokio::sync::Mutex;
 
 use crate::SESSION_LABELS_KEY;
 use crate::ephemeral::{EphemeralSessionService, SessionAgentBuilder};
+
+const SESSION_ARCHIVED_KEY: &str = "session_archived";
 
 fn write_system_context_state(
     session: &mut Session,
@@ -114,10 +117,14 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     inner: EphemeralSessionService<B>,
     store: Arc<dyn SessionStore>,
     runtime_store: Option<Arc<dyn RuntimeStore>>,
+    /// Process-local bounded cache of archived full sessions to avoid
+    /// immediately reloading durable archived snapshots on hot history reads.
+    archived_sessions: Mutex<IndexMap<SessionId, Session>>,
+    archived_history_capacity: usize,
     /// Gates for active host-mode checkpointers, keyed by session ID.
-    /// Archive acquires the gate's lock, sets cancelled, then deletes —
-    /// mutual exclusion prevents a concurrent checkpoint from resurrecting
-    /// the row.
+    /// Archive acquires the gate's lock, sets cancelled, then saves the
+    /// archived snapshot — mutual exclusion prevents a concurrent checkpoint
+    /// from overwriting the archived row with a live one.
     checkpointer_gates: Mutex<HashMap<SessionId, Arc<CheckpointerGate>>>,
 }
 
@@ -143,6 +150,13 @@ fn extract_labels_from_metadata(
         },
         None => BTreeMap::new(),
     }
+}
+
+fn metadata_marks_archived(metadata: &serde_json::Map<String, serde_json::Value>) -> bool {
+    metadata
+        .get(SESSION_ARCHIVED_KEY)
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
 }
 
 impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
@@ -323,6 +337,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             inner: EphemeralSessionService::new(builder, max_sessions),
             store,
             runtime_store,
+            archived_sessions: Mutex::new(IndexMap::new()),
+            archived_history_capacity: max_sessions.max(1),
             checkpointer_gates: Mutex::new(HashMap::new()),
         }
     }
@@ -347,6 +363,21 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     async fn existing_gate_for_session(&self, id: &SessionId) -> Option<Arc<CheckpointerGate>> {
         let gates = self.checkpointer_gates.lock().await;
         gates.get(id).cloned()
+    }
+
+    async fn cached_archived_session(&self, id: &SessionId) -> Option<Session> {
+        let cached = self.archived_sessions.lock().await;
+        cached.get(id).cloned()
+    }
+
+    async fn remember_archived_session(&self, session: Session) {
+        let mut cached = self.archived_sessions.lock().await;
+        let session_id = session.id().clone();
+        cached.shift_remove(&session_id);
+        cached.insert(session_id, session);
+        while cached.len() > self.archived_history_capacity {
+            let _ = cached.shift_remove_index(0);
+        }
     }
 
     fn build_runtime_receipt(
@@ -654,7 +685,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
             .map_err(|e| SessionError::Store(Box::new(e)))?;
 
         for meta in stored {
-            if !live_ids.contains(&meta.id) {
+            if !live_ids.contains(&meta.id) && !metadata_marks_archived(&meta.metadata) {
                 let labels = extract_labels_from_metadata(&meta.metadata);
                 summaries.push(SessionSummary {
                     session_id: meta.id,
@@ -693,9 +724,15 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
     }
 
     async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
+        let archived_snapshot = match self.export_session_with_labels(id).await {
+            Ok(session) => Some(session),
+            Err(SessionError::NotFound { .. }) => self.load_authoritative_session_base(id).await?,
+            Err(err) => return Err(err),
+        };
+
         // Acquire the checkpointer gate (if any) and hold it across the
-        // delete. This prevents a concurrent checkpoint() from saving the
-        // session back after we delete it. Setting cancelled under the
+        // archival save. This prevents a concurrent checkpoint() from saving
+        // a live snapshot over the archived one. Setting cancelled under the
         // lock ensures all future checkpoints are no-ops.
         let gate = self.existing_gate_for_session(id).await;
         let mut gate_guard = if let Some(ref gate) = gate {
@@ -708,19 +745,18 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
 
         let live_result = self.inner.archive(id).await;
 
-        // Check whether the session exists in the persistent store before
-        // deleting — store.delete() is idempotent and always returns Ok,
-        // so we need exists() to know if the store actually had it.
         let in_store = self
             .store
             .exists(id)
             .await
             .map_err(|e| SessionError::Store(Box::new(e)))?;
-        if in_store {
+        if let Some(mut session) = archived_snapshot.clone() {
+            session.set_metadata(SESSION_ARCHIVED_KEY, serde_json::Value::Bool(true));
             self.store
-                .delete(id)
+                .save(&session)
                 .await
                 .map_err(|e| SessionError::Store(Box::new(e)))?;
+            self.remember_archived_session(session).await;
         }
 
         // Gate guard is dropped here — any in-flight checkpoint that was
@@ -741,6 +777,32 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         id: &SessionId,
     ) -> Result<meerkat_core::comms::EventStream, meerkat_core::comms::StreamError> {
         self.inner.subscribe_session_events(id).await
+    }
+}
+
+#[async_trait]
+impl<B: SessionAgentBuilder + 'static> SessionServiceHistoryExt for PersistentSessionService<B> {
+    async fn read_history(
+        &self,
+        id: &SessionId,
+        query: SessionHistoryQuery,
+    ) -> Result<SessionHistoryPage, SessionError> {
+        if let Some(session) = self.cached_archived_session(id).await {
+            return Ok(SessionHistoryPage::from_messages(
+                session.id().clone(),
+                session.messages(),
+                query,
+            ));
+        }
+        let session = self
+            .load_authoritative_session_base(id)
+            .await?
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        Ok(SessionHistoryPage::from_messages(
+            session.id().clone(),
+            session.messages(),
+            query,
+        ))
     }
 }
 
@@ -1030,6 +1092,7 @@ mod tests {
     use super::*;
     use crate::ephemeral::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
     use meerkat_core::checkpoint::SessionCheckpointer;
+    use meerkat_core::service::{InitialTurnPolicy, SessionService, SessionServiceControlExt};
     use meerkat_runtime::InMemoryRuntimeStore;
     use meerkat_store::MemoryStore;
     use meerkat_store::StoreError;
@@ -1518,6 +1581,148 @@ mod tests {
         assert!(
             store.load(&id).await.unwrap().is_none(),
             "append after archive must not recreate the store row"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_persistent_read_history_returns_messages_for_live_and_archived_sessions() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let service = PersistentSessionService::new(DummyBuilder, 4, Arc::clone(&store), None);
+
+        let created = service
+            .create_session(CreateSessionRequest {
+                model: "test".to_string(),
+                prompt: "hello".to_string(),
+                system_prompt: None,
+                max_tokens: None,
+                event_tx: None,
+                host_mode: false,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::RunImmediately,
+                build: None,
+                labels: None,
+            })
+            .await
+            .expect("create_session should succeed");
+        let id = created.session_id;
+
+        service
+            .start_turn(
+                &id,
+                StartTurnRequest {
+                    host_mode: false,
+                    skill_references: None,
+                    flow_tool_overlay: None,
+                    prompt: "follow up".to_string(),
+                    event_tx: None,
+                    additional_instructions: None,
+                },
+            )
+            .await
+            .expect("second turn should succeed");
+
+        let page = service
+            .read_history(
+                &id,
+                SessionHistoryQuery {
+                    offset: 1,
+                    limit: Some(2),
+                },
+            )
+            .await
+            .expect("live history should be readable");
+        assert_eq!(page.session_id, id);
+        assert_eq!(page.message_count, 4);
+        assert_eq!(page.offset, 1);
+        assert_eq!(page.limit, Some(2));
+        assert!(page.has_more);
+        assert_eq!(page.messages.len(), 2);
+
+        service.archive(&id).await.expect("archive should succeed");
+
+        let archived = service
+            .read_history(
+                &id,
+                SessionHistoryQuery {
+                    offset: 0,
+                    limit: None,
+                },
+            )
+            .await
+            .expect("archived history should remain readable");
+        assert_eq!(archived.session_id, id);
+        assert_eq!(archived.message_count, 4);
+        assert!(!archived.has_more);
+        assert_eq!(archived.messages.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_persistent_archived_history_survives_restart_and_cache_eviction() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let service = PersistentSessionService::new(DummyBuilder, 1, Arc::clone(&store), None);
+
+        let first = service
+            .create_session(CreateSessionRequest {
+                model: "test".to_string(),
+                prompt: "first".to_string(),
+                system_prompt: None,
+                max_tokens: None,
+                event_tx: None,
+                host_mode: false,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::RunImmediately,
+                build: None,
+                labels: None,
+            })
+            .await
+            .expect("create first session");
+        service
+            .archive(&first.session_id)
+            .await
+            .expect("archive first session");
+
+        let second = service
+            .create_session(CreateSessionRequest {
+                model: "test".to_string(),
+                prompt: "second".to_string(),
+                system_prompt: None,
+                max_tokens: None,
+                event_tx: None,
+                host_mode: false,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::RunImmediately,
+                build: None,
+                labels: None,
+            })
+            .await
+            .expect("create second session");
+        service
+            .archive(&second.session_id)
+            .await
+            .expect("archive second session");
+
+        let restarted = PersistentSessionService::new(DummyBuilder, 1, Arc::clone(&store), None);
+        let archived = restarted
+            .read_history(
+                &first.session_id,
+                SessionHistoryQuery {
+                    offset: 0,
+                    limit: None,
+                },
+            )
+            .await
+            .expect("archived history should survive restart and cache eviction");
+        assert_eq!(archived.session_id, first.session_id);
+        assert_eq!(archived.message_count, 2);
+        assert_eq!(archived.messages.len(), 2);
+
+        let listed = restarted
+            .list(SessionQuery::default())
+            .await
+            .expect("list sessions");
+        assert!(
+            listed.is_empty(),
+            "archived sessions should remain hidden from list even when stored durably"
         );
     }
 

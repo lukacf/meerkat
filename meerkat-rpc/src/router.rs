@@ -14,6 +14,7 @@ use uuid::Uuid;
 use meerkat_core::ConfigStore;
 use meerkat_core::EventEnvelope;
 use meerkat_core::event::AgentEvent;
+use meerkat_core::service::SessionHistoryQuery;
 use meerkat_core::types::SessionId;
 use meerkat_runtime::SessionServiceRuntimeExt as _;
 use serde_json::json;
@@ -465,6 +466,36 @@ impl MethodRouter {
         None
     }
 
+    #[cfg(feature = "mob")]
+    async fn try_read_mob_session_history(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        session_id: &SessionId,
+        query: SessionHistoryQuery,
+    ) -> Option<RpcResponse> {
+        match self
+            .mob_state
+            .session_service()
+            .read_history(session_id, query)
+            .await
+        {
+            Ok(page) => {
+                let mut history: meerkat_contracts::WireSessionHistory = page.into();
+                history.session_ref = self
+                    .runtime
+                    .realm_id()
+                    .map(|realm| meerkat_contracts::format_session_ref(realm, session_id));
+                Some(RpcResponse::success(id, history))
+            }
+            Err(meerkat_core::service::SessionError::NotFound { .. }) => None,
+            Err(err) => Some(RpcResponse::error(
+                id,
+                error::SESSION_NOT_FOUND,
+                err.to_string(),
+            )),
+        }
+    }
+
     /// Dispatch a request to the appropriate handler.
     ///
     /// Returns `None` for notifications (requests without an id) that do not
@@ -503,6 +534,7 @@ impl MethodRouter {
             }
             "session/list" => handlers::session::handle_list(id, params, &self.runtime).await,
             "session/read" => self.handle_session_read(id, params).await,
+            "session/history" => self.handle_session_history(id, params).await,
             "session/archive" => self.handle_session_archive(id, params).await,
             "session/inject_context" => self.handle_session_inject_context(id, params).await,
             "session/stream_open" => self.handle_session_stream_open(id, params).await,
@@ -830,6 +862,80 @@ impl MethodRouter {
                 error::SESSION_NOT_FOUND,
                 format!("Session not found: {session_id}"),
             ),
+        }
+    }
+
+    async fn handle_session_history(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        let params: handlers::session::ReadSessionHistoryParams =
+            match handlers::parse_params(params) {
+                Ok(p) => p,
+                Err(resp) => return resp.with_id(id),
+            };
+
+        let session_id = match handlers::parse_session_id_for_runtime(
+            id.clone(),
+            &params.session_id,
+            &self.runtime,
+        ) {
+            Ok(sid) => sid,
+            Err(resp) => return resp,
+        };
+
+        let query = SessionHistoryQuery {
+            offset: params.offset.unwrap_or(0),
+            limit: params.limit,
+        };
+
+        match self.resolve_session_owner(&session_id).await {
+            Some(SessionOwner::Runtime) => {
+                if let Some(mut history) = self
+                    .runtime
+                    .read_session_history_rich(&session_id, query)
+                    .await
+                {
+                    history.session_ref = self
+                        .runtime
+                        .realm_id()
+                        .map(|realm| meerkat_contracts::format_session_ref(realm, &session_id));
+                    RpcResponse::success(id, history)
+                } else {
+                    RpcResponse::error(
+                        id,
+                        error::SESSION_NOT_FOUND,
+                        format!("Session not found: {session_id}"),
+                    )
+                }
+            }
+            #[cfg(feature = "mob")]
+            Some(SessionOwner::Mob) => match self
+                .try_read_mob_session_history(id.clone(), &session_id, query)
+                .await
+            {
+                Some(resp) => resp,
+                None => RpcResponse::error(
+                    id,
+                    error::SESSION_NOT_FOUND,
+                    format!("Session not found: {session_id}"),
+                ),
+            },
+            None => {
+                #[cfg(feature = "mob")]
+                if let Some(resp) = self
+                    .try_read_mob_session_history(id.clone(), &session_id, query)
+                    .await
+                {
+                    return resp;
+                }
+                RpcResponse::error(
+                    id,
+                    error::SESSION_NOT_FOUND,
+                    format!("Session not found: {session_id}"),
+                )
+            }
         }
     }
 
@@ -2082,6 +2188,7 @@ mod tests {
         let method_names: Vec<&str> = methods.iter().map(|m| m.as_str().unwrap()).collect();
         assert!(method_names.contains(&"initialize"));
         assert!(method_names.contains(&"session/create"));
+        assert!(method_names.contains(&"session/history"));
         assert!(method_names.contains(&"session/inject_context"));
         assert!(method_names.contains(&"turn/start"));
         assert!(
@@ -2413,6 +2520,75 @@ mod tests {
 
     #[cfg(feature = "mob")]
     #[tokio::test]
+    async fn mob_archived_session_history_remains_routable() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": "mob-archived-history",
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-5",
+                                "tools": { "comms": true }
+                            }
+                        }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let mob_id = result_value(&create_resp)["mob_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let spawn_resp = router
+            .dispatch(make_request(
+                "mob/spawn",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "profile": "worker",
+                    "meerkat_id": "worker-1",
+                    "runtime_mode": "turn_driven"
+                }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&spawn_resp)["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let archive_resp = router
+            .dispatch(make_request(
+                "session/archive",
+                serde_json::json!({ "session_id": &session_id }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result_value(&archive_resp)["archived"], true);
+
+        let history_resp = router
+            .dispatch(make_request(
+                "session/history",
+                serde_json::json!({ "session_id": &session_id }),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            history_resp.error.is_none(),
+            "archived mob-owned sessions should still route to session/history"
+        );
+        let history = result_value(&history_resp);
+        assert_eq!(history["session_id"], session_id);
+        assert!(history["messages"].is_array());
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
     async fn mob_spawned_session_id_supports_session_stream_open() {
         let (router, _notif_rx) = test_router().await;
 
@@ -2668,6 +2844,74 @@ mod tests {
         assert!(
             read_value.get("labels").is_none() || read_value["labels"].is_object(),
             "labels should be object or absent, got: {read_value}"
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_spawned_session_id_supports_session_history() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": "mob-session-history",
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-5",
+                                "tools": { "comms": true }
+                            }
+                        }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let mob_id = result_value(&create_resp)["mob_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let spawn_resp = router
+            .dispatch(make_request(
+                "mob/spawn",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "profile": "worker",
+                    "meerkat_id": "worker-1",
+                    "runtime_mode": "turn_driven"
+                }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&spawn_resp)["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let history_resp = router
+            .dispatch(make_request(
+                "session/history",
+                serde_json::json!({ "session_id": session_id }),
+            ))
+            .await
+            .unwrap();
+        let history_value = result_value(&history_resp);
+
+        assert_eq!(
+            history_value["session_id"].as_str().unwrap(),
+            session_id,
+            "history response: {history_value}"
+        );
+        assert!(
+            history_value["messages"].is_array(),
+            "history should expose a message array, got: {history_value}"
+        );
+        assert!(
+            history_value["message_count"].is_u64(),
+            "history should expose a message_count, got: {history_value}"
         );
     }
 
@@ -4008,6 +4252,84 @@ mod tests {
             .iter()
             .any(|s| s["session_id"].as_str() == Some(&session_id));
         assert!(!found, "Archived session should not appear in list");
+    }
+
+    #[tokio::test]
+    async fn session_history_returns_messages_for_live_and_archived_sessions() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({ "prompt": "Hello" }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&create_resp)["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let turn_resp = router
+            .dispatch(make_request(
+                "turn/start",
+                serde_json::json!({
+                    "session_id": &session_id,
+                    "prompt": "Follow up",
+                }),
+            ))
+            .await
+            .unwrap();
+        assert!(turn_resp.error.is_none(), "second turn should succeed");
+
+        let history_resp = router
+            .dispatch(make_request(
+                "session/history",
+                serde_json::json!({
+                    "session_id": &session_id,
+                    "offset": 1,
+                    "limit": 2,
+                }),
+            ))
+            .await
+            .unwrap();
+        let history = result_value(&history_resp);
+        assert_eq!(history["session_id"], session_id);
+        assert!(
+            history["message_count"].as_u64().unwrap_or(0) >= 4,
+            "history should expose the multi-turn transcript: {history}"
+        );
+        assert_eq!(history["offset"], 1);
+        assert_eq!(history["limit"], 2);
+        assert_eq!(history["has_more"], true);
+        assert_eq!(history["messages"].as_array().unwrap().len(), 2);
+
+        let archive_resp = router
+            .dispatch(make_request(
+                "session/archive",
+                serde_json::json!({ "session_id": &session_id }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result_value(&archive_resp)["archived"], true);
+
+        let archived_history_resp = router
+            .dispatch(make_request(
+                "session/history",
+                serde_json::json!({ "session_id": &session_id }),
+            ))
+            .await
+            .unwrap();
+        let archived_history = result_value(&archived_history_resp);
+        assert_eq!(archived_history["session_id"], session_id);
+        assert!(
+            archived_history["message_count"].as_u64().unwrap_or(0) >= 4,
+            "archived history should preserve the transcript: {archived_history}"
+        );
+        assert!(
+            archived_history["messages"].as_array().unwrap().len() >= 4,
+            "archived history should return the full transcript"
+        );
     }
 
     #[tokio::test]

@@ -137,10 +137,19 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
       assert.ok(Number(details.message_count) >= 4);
       assert.equal(details.is_active, false);
 
+      const history = await client.readSessionHistory(session.id);
+      assert.equal(history.sessionId, session.id);
+      assert.ok(history.messageCount >= 4);
+      assert.ok(history.messages.length >= 4);
+
       const sessions = await client.listSessions();
       assert.ok(sessions.some((entry) => entry.sessionId === session.id));
 
       await session.archive();
+      const archivedHistory = await session.history();
+      assert.equal(archivedHistory.sessionId, session.id);
+      assert.ok(archivedHistory.messageCount >= 4);
+      assert.ok(archivedHistory.messages.length >= 4);
       const sessionsAfter = await client.listSessions();
       assert.ok(!sessionsAfter.some((entry) => entry.sessionId === session.id));
       },

@@ -4,7 +4,9 @@ use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
 use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
 use meerkat_core::service::StartTurnRequest;
-use meerkat_core::service::{SessionError, SessionServiceCommsExt, SessionServiceControlExt};
+use meerkat_core::service::{
+    SessionError, SessionServiceCommsExt, SessionServiceControlExt, SessionServiceHistoryExt,
+};
 use meerkat_core::{InputId, RunId};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -110,7 +112,9 @@ fn cached_runtime_adapter(
 /// comms/injector access without per-crate bridge traits.
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-pub trait MobSessionService: SessionServiceCommsExt + SessionServiceControlExt {
+pub trait MobSessionService:
+    SessionServiceCommsExt + SessionServiceControlExt + SessionServiceHistoryExt
+{
     /// Subscribe to session-wide events regardless of triggering interaction.
     async fn subscribe_session_events(
         &self,

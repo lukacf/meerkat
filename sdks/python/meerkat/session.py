@@ -27,7 +27,7 @@ from __future__ import annotations
 import warnings
 from typing import TYPE_CHECKING, Any
 
-from .types import RunResult, SkillKey, SkillRef
+from .types import RunResult, SessionHistory, SkillKey, SkillRef
 
 if TYPE_CHECKING:
     from .client import MeerkatClient
@@ -190,6 +190,19 @@ class Session:
         """Archive (remove) this session from the server."""
         await self._client._archive(self._id)  # noqa: SLF001
 
+    async def history(
+        self,
+        *,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> SessionHistory:
+        """Read paginated transcript history for this session."""
+        return await self._client.read_session_history(  # noqa: SLF001
+            self._id,
+            offset=offset,
+            limit=limit,
+        )
+
     async def subscribe_events(self) -> EventSubscription:
         """Open a standalone session-wide event subscription."""
         return await self._client.subscribe_session_events(self._id)  # noqa: SLF001
@@ -314,6 +327,19 @@ class DeferredSession:
     async def archive(self) -> None:
         """Archive (remove) this session from the server."""
         await self._client._archive(self._id)  # noqa: SLF001
+
+    async def history(
+        self,
+        *,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> SessionHistory:
+        """Read paginated transcript history for this deferred session."""
+        return await self._client.read_session_history(  # noqa: SLF001
+            self._id,
+            offset=offset,
+            limit=limit,
+        )
 
     def __repr__(self) -> str:
         ref = f" ref={self._ref!r}" if self._ref else ""

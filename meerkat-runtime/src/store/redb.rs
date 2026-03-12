@@ -24,6 +24,9 @@ mod inner {
     /// Table: (runtime_id + run_id + sequence bytes) → Receipt JSON
     const BOUNDARY_RECEIPTS: TableDefinition<&[u8], &[u8]> =
         TableDefinition::new("runtime_boundary_receipts");
+    /// Table: runtime_id → serialized session snapshot JSON.
+    const SESSION_SNAPSHOTS: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("runtime_session_snapshots");
     /// Table: runtime_id → RuntimeState JSON
     const RUNTIME_STATES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("runtime_states");
 
@@ -68,6 +71,9 @@ mod inner {
                 let _ = write_txn.open_table(BOUNDARY_RECEIPTS).map_err(|e| {
                     RuntimeStoreError::WriteFailed(format!("Failed to create table: {e}"))
                 })?;
+                let _ = write_txn.open_table(SESSION_SNAPSHOTS).map_err(|e| {
+                    RuntimeStoreError::WriteFailed(format!("Failed to create table: {e}"))
+                })?;
                 let _ = write_txn.open_table(RUNTIME_STATES).map_err(|e| {
                     RuntimeStoreError::WriteFailed(format!("Failed to create table: {e}"))
                 })?;
@@ -98,6 +104,7 @@ mod inner {
         ) -> Result<RunBoundaryReceipt, RuntimeStoreError> {
             let db = self.db.clone();
             let rid = runtime_id.clone();
+            let snapshot_bytes = session_delta.session_snapshot.clone();
             let session_snapshot =
                 serde_json::from_slice::<meerkat_core::Session>(&session_delta.session_snapshot)
                     .map_err(|e| RuntimeStoreError::WriteFailed(e.to_string()))?;
@@ -162,6 +169,16 @@ mod inner {
                 {
                     write_session_snapshot_in_txn(&write_txn, &session_snapshot)
                         .map_err(|e| RuntimeStoreError::WriteFailed(e.to_string()))?;
+                    let mut snapshots_table =
+                        write_txn.open_table(SESSION_SNAPSHOTS).map_err(|e| {
+                            RuntimeStoreError::WriteFailed(format!("Failed to open table: {e}"))
+                        })?;
+                    let snapshot_key = runtime_prefix(&rid);
+                    snapshots_table
+                        .insert(snapshot_key.as_slice(), snapshot_bytes.as_slice())
+                        .map_err(|e| {
+                            RuntimeStoreError::WriteFailed(format!("Failed to insert: {e}"))
+                        })?;
 
                     let receipt_json = serde_json::to_vec(&receipt)
                         .map_err(|e| RuntimeStoreError::WriteFailed(e.to_string()))?;
@@ -208,6 +225,7 @@ mod inner {
             let rid = runtime_id.clone();
             let receipt_json = serde_json::to_vec(&receipt)
                 .map_err(|e| RuntimeStoreError::WriteFailed(e.to_string()))?;
+            let session_snapshot_bytes = session_delta.as_ref().map(|d| d.session_snapshot.clone());
             let input_jsons: Vec<(Vec<u8>, Vec<u8>)> = input_updates
                 .iter()
                 .map(|s| {
@@ -233,6 +251,20 @@ mod inner {
                     if let Some(session) = session_snapshot.as_ref() {
                         write_session_snapshot_in_txn(&write_txn, session)
                             .map_err(|e| RuntimeStoreError::WriteFailed(e.to_string()))?;
+                        if let Some(snapshot_bytes) = session_snapshot_bytes.as_ref() {
+                            let mut snapshots_table =
+                                write_txn.open_table(SESSION_SNAPSHOTS).map_err(|e| {
+                                    RuntimeStoreError::WriteFailed(format!(
+                                        "Failed to open table: {e}"
+                                    ))
+                                })?;
+                            let snapshot_key = runtime_prefix(&rid);
+                            snapshots_table
+                                .insert(snapshot_key.as_slice(), snapshot_bytes.as_slice())
+                                .map_err(|e| {
+                                    RuntimeStoreError::WriteFailed(format!("Failed to insert: {e}"))
+                                })?;
+                        }
                     }
 
                     // Receipt
@@ -331,6 +363,32 @@ mod inner {
                     Ok(None) => Ok(None),
                     Err(e) => Err(RuntimeStoreError::ReadFailed(format!(
                         "Failed to read: {e}"
+                    ))),
+                }
+            })
+            .await
+            .map_err(|e| RuntimeStoreError::Internal(format!("Task join failed: {e}")))?
+        }
+
+        async fn load_session_snapshot(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
+            let db = self.db.clone();
+            let key = runtime_prefix(runtime_id);
+
+            tokio::task::spawn_blocking(move || {
+                let read_txn = db.begin_read().map_err(|e| {
+                    RuntimeStoreError::ReadFailed(format!("Failed to begin read: {e}"))
+                })?;
+                let table = read_txn.open_table(SESSION_SNAPSHOTS).map_err(|e| {
+                    RuntimeStoreError::ReadFailed(format!("Failed to open table: {e}"))
+                })?;
+                match table.get(key.as_slice()) {
+                    Ok(Some(data)) => Ok(Some(data.value().to_vec())),
+                    Ok(None) => Ok(None),
+                    Err(e) => Err(RuntimeStoreError::ReadFailed(format!(
+                        "Failed to read session snapshot: {e}"
                     ))),
                 }
             })
@@ -646,6 +704,29 @@ mod inner {
                 unreachable!("asserted above");
             };
             assert_eq!(loaded, receipt);
+        }
+
+        #[tokio::test]
+        async fn load_session_snapshot_roundtrip() {
+            let db = temp_db();
+            let store = RedbRuntimeStore::new(db).unwrap();
+            let rid = LogicalRuntimeId::new("test");
+            let snapshot = serde_json::to_vec(&meerkat_core::Session::new()).unwrap();
+
+            store
+                .atomic_apply(
+                    &rid,
+                    Some(SessionDelta {
+                        session_snapshot: snapshot.clone(),
+                    }),
+                    make_receipt(RunId::new(), 0),
+                    vec![],
+                )
+                .await
+                .unwrap();
+
+            let loaded = store.load_session_snapshot(&rid).await.unwrap();
+            assert_eq!(loaded, Some(snapshot));
         }
     }
 }

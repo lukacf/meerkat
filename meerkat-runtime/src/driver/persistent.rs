@@ -12,7 +12,9 @@ use meerkat_core::lifecycle::{InputId, RunEvent};
 use crate::accept::AcceptOutcome;
 use crate::identifiers::LogicalRuntimeId;
 use crate::input::Input;
-use crate::input_state::InputState;
+use crate::input_state::{
+    InputLifecycleState, InputState, InputStateHistoryEntry, InputTerminalOutcome,
+};
 use crate::runtime_event::RuntimeEventEnvelope;
 use crate::runtime_state::RuntimeState;
 use crate::store::RuntimeStore;
@@ -216,8 +218,12 @@ impl RuntimeDriver for PersistentRuntimeDriver {
             RunEvent::RunCompleted { .. }
             | RunEvent::RunFailed { .. }
             | RunEvent::RunCancelled { .. } => {
+                let checkpoint = self.inner.clone();
                 self.inner.on_run_event(event).await?;
-                self.persist_snapshot().await?;
+                if let Err(err) = self.persist_snapshot().await {
+                    self.inner = checkpoint;
+                    return Err(err);
+                }
             }
             _ => {
                 self.inner.on_run_event(event).await?;
@@ -252,44 +258,48 @@ impl RuntimeDriver for PersistentRuntimeDriver {
         // Uses recover() which also rebuilds the idempotency index for
         // dedup correctness and filters out Ephemeral inputs.
         for mut state in stored_states {
-            // Only inject non-terminal states (terminal ones are already resolved)
-            if !state.is_terminal() {
-                if matches!(
-                    state.current_state,
-                    crate::input_state::InputLifecycleState::Applied
-                        | crate::input_state::InputLifecycleState::AppliedPendingConsumption
-                ) {
-                    let has_receipt =
-                        match (state.last_run_id.clone(), state.last_boundary_sequence) {
-                            (Some(run_id), Some(sequence)) => self
-                                .store
-                                .load_boundary_receipt(&self.runtime_id, &run_id, sequence)
-                                .await
-                                .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?
-                                .is_some(),
-                            _ => false,
-                        };
-                    if !has_receipt {
-                        let now = Utc::now();
-                        state
-                            .history
-                            .push(crate::input_state::InputStateHistoryEntry {
-                                timestamp: now,
-                                from: state.current_state,
-                                to: crate::input_state::InputLifecycleState::Queued,
-                                reason: Some("recovery: missing boundary receipt".into()),
-                            });
-                        state.current_state = crate::input_state::InputLifecycleState::Queued;
-                        state.updated_at = now;
-                    }
+            if matches!(
+                state.current_state,
+                InputLifecycleState::Applied | InputLifecycleState::AppliedPendingConsumption
+            ) {
+                let has_receipt = match (state.last_run_id.clone(), state.last_boundary_sequence) {
+                    (Some(run_id), Some(sequence)) => self
+                        .store
+                        .load_boundary_receipt(&self.runtime_id, &run_id, sequence)
+                        .await
+                        .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?
+                        .is_some(),
+                    _ => false,
+                };
+                let now = Utc::now();
+                if has_receipt {
+                    state.history.push(InputStateHistoryEntry {
+                        timestamp: now,
+                        from: state.current_state,
+                        to: InputLifecycleState::Consumed,
+                        reason: Some("recovery: boundary receipt already committed".into()),
+                    });
+                    state.current_state = InputLifecycleState::Consumed;
+                    state.terminal_outcome = Some(InputTerminalOutcome::Consumed);
+                    state.updated_at = now;
+                } else {
+                    state.history.push(InputStateHistoryEntry {
+                        timestamp: now,
+                        from: state.current_state,
+                        to: InputLifecycleState::Queued,
+                        reason: Some("recovery: missing boundary receipt".into()),
+                    });
+                    state.current_state = InputLifecycleState::Queued;
+                    state.updated_at = now;
                 }
-                if let Some(input) = state.persisted_input.clone() {
-                    recovered_payloads.push((state.input_id.clone(), input));
-                }
-                let ledger = &mut self.inner;
-                if ledger.input_state(&state.input_id).is_none() {
-                    ledger.ledger_mut().recover(state);
-                }
+            }
+
+            if let Some(input) = state.persisted_input.clone() {
+                recovered_payloads.push((state.input_id.clone(), input));
+            }
+            let ledger = &mut self.inner;
+            if ledger.input_state(&state.input_id).is_none() {
+                ledger.ledger_mut().recover(state);
             }
         }
 
@@ -315,10 +325,15 @@ impl RuntimeDriver for PersistentRuntimeDriver {
                 RuntimeState::Retired if self.inner.runtime_state() != RuntimeState::Retired => {
                     EphemeralRuntimeDriver::retire(&mut self.inner)?;
                 }
-                RuntimeState::Stopped | RuntimeState::Destroyed => {
+                RuntimeState::Stopped => {
                     self.inner
                         .on_runtime_control(RuntimeControlCommand::Stop)
                         .await?;
+                }
+                RuntimeState::Destroyed
+                    if self.inner.runtime_state() != RuntimeState::Destroyed =>
+                {
+                    self.inner.destroy()?;
                 }
                 _ => {}
             }
@@ -602,6 +617,64 @@ mod tests {
         assert_eq!(
             stored.current_state,
             crate::input_state::InputLifecycleState::Abandoned
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_consumes_committed_applied_pending_inputs() {
+        use meerkat_core::lifecycle::RunId;
+        use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
+        use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+
+        let store = Arc::new(InMemoryRuntimeStore::new());
+        let rid = LogicalRuntimeId::new("test");
+        let input = make_prompt("already committed");
+        let input_id = input.id().clone();
+        let run_id = RunId::new();
+
+        let mut state = InputState::new_accepted(input_id.clone());
+        state.persisted_input = Some(input);
+        state.durability = Some(InputDurability::Durable);
+        state.current_state = InputLifecycleState::AppliedPendingConsumption;
+        state.last_run_id = Some(run_id.clone());
+        state.last_boundary_sequence = Some(0);
+        store.persist_input_state(&rid, &state).await.unwrap();
+        store
+            .atomic_apply(
+                &rid,
+                None,
+                RunBoundaryReceipt {
+                    run_id: run_id.clone(),
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: vec![input_id.clone()],
+                    conversation_digest: None,
+                    message_count: 1,
+                    sequence: 0,
+                },
+                vec![state.clone()],
+            )
+            .await
+            .unwrap();
+
+        let mut driver = PersistentRuntimeDriver::new(rid, store);
+        driver.recover().await.unwrap();
+
+        let recovered = driver.input_state(&input_id);
+        assert!(
+            recovered.is_some(),
+            "committed input should remain queryable after recovery"
+        );
+        let Some(recovered) = recovered else {
+            unreachable!("asserted some recovery state above");
+        };
+        assert_eq!(recovered.current_state, InputLifecycleState::Consumed);
+        assert!(
+            driver.active_input_ids().is_empty(),
+            "committed applied inputs should not stay active after recovery"
+        );
+        assert!(
+            driver.dequeue_next().is_none(),
+            "committed applied inputs should not be replayed after recovery"
         );
     }
 }

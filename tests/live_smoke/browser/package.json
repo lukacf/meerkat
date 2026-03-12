@@ -1,0 +1,12 @@
+{
+  "name": "@meerkat/live-smoke-browser",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "smoke": "node ./harness/run-live-smoke.mjs",
+    "smoke:headed": "node ./harness/run-live-smoke.mjs --headed"
+  },
+  "devDependencies": {
+    "playwright": "^1.53.1"
+  }
+}

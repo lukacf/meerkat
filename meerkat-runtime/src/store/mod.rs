@@ -119,6 +119,12 @@ pub trait RuntimeStore: Send + Sync {
         sequence: u64,
     ) -> Result<Option<RunBoundaryReceipt>, RuntimeStoreError>;
 
+    /// Load the latest committed session snapshot for a runtime, if any.
+    async fn load_session_snapshot(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<Vec<u8>>, RuntimeStoreError>;
+
     /// Persist a single input state (for durable-before-ack).
     async fn persist_input_state(
         &self,

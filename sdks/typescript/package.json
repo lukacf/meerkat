@@ -18,7 +18,8 @@
   "scripts": {
     "build": "tsc",
     "test": "node --test tests/",
-    "test:e2e": "npm run build && node --test tests/e2e_sdk_smoke.test.mjs"
+    "test:e2e": "npm run build && node --test tests/e2e_smoke.test.mjs tests/e2e_sdk_smoke.test.mjs",
+    "test:live-smoke": "npm run build && node --test tests/e2e_smoke.test.mjs"
   },
   "license": "MIT OR Apache-2.0",
   "devDependencies": {

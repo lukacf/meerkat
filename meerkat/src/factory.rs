@@ -1486,10 +1486,41 @@ impl AgentFactory {
                 };
 
                 // Normalize preload_skills: Some([]) → None
-                let preload = build_config
+                let mut preload = build_config
                     .preload_skills
                     .take()
                     .and_then(|ids| if ids.is_empty() { None } else { Some(ids) });
+
+                // Resumed sessions may carry persisted skill IDs from an older
+                // surface or older metadata semantics. Filter to the skills
+                // currently available on this surface instead of failing the
+                // rebuild outright on an incompatible preload.
+                if build_config.resume_session.is_some()
+                    && let Some(ids) = preload.as_mut()
+                {
+                    let available: std::collections::HashSet<_> = engine
+                        .list_skills(&meerkat_core::skills::SkillFilter::default())
+                        .await
+                        .map(|descs| descs.into_iter().map(|desc| desc.id).collect())
+                        .unwrap_or_default();
+                    let mut dropped = Vec::new();
+                    ids.retain(|id| {
+                        let keep = available.contains(id);
+                        if !keep {
+                            dropped.push(id.0.clone());
+                        }
+                        keep
+                    });
+                    if !dropped.is_empty() {
+                        tracing::warn!(
+                            dropped_skills = ?dropped,
+                            "dropping persisted active skills that are unavailable on the current surface"
+                        );
+                    }
+                    if ids.is_empty() {
+                        preload = None;
+                    }
+                }
 
                 // Pre-load requested skills into system prompt (Level 2)
                 let mut preloaded_sections = Vec::new();
@@ -1508,16 +1539,10 @@ impl AgentFactory {
                     }
                 }
 
-                // Collect active skill IDs
-                let skill_ids: Vec<meerkat_core::skills::SkillId> = match engine
-                    .list_skills(&meerkat_core::skills::SkillFilter::default())
-                    .await
-                {
-                    Ok(descs) => descs.into_iter().map(|d| d.id).collect(),
-                    Err(_) => Vec::new(),
-                };
+                // Persist the skills explicitly activated for this session.
+                let skill_ids = preload.clone();
 
-                (inventory, preloaded_sections, Some(skill_ids))
+                (inventory, preloaded_sections, skill_ids)
             } else {
                 // Skills disabled or no source
                 (String::new(), Vec::new(), None)

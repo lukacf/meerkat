@@ -67,6 +67,61 @@ where
         }
     }
 
+    async fn drain_turn_boundary(
+        &mut self,
+        turn_count: u32,
+        event_tx: Option<&mpsc::Sender<AgentEvent>>,
+    ) -> Result<(), AgentError> {
+        let turn_boundary_report = self
+            .execute_hooks(
+                HookInvocation {
+                    point: HookPoint::TurnBoundary,
+                    session_id: self.session.id().clone(),
+                    turn_number: Some(turn_count),
+                    prompt: None,
+                    error: None,
+                    llm_request: None,
+                    llm_response: None,
+                    tool_call: None,
+                    tool_result: None,
+                },
+                event_tx,
+            )
+            .await?;
+        if let Some(HookDecision::Deny {
+            reason_code,
+            message,
+            payload,
+            ..
+        }) = turn_boundary_report.decision
+        {
+            return Err(AgentError::HookDenied {
+                point: HookPoint::TurnBoundary,
+                reason_code,
+                message,
+                payload,
+            });
+        }
+
+        // Only commit boundary side effects after hooks accept the transition.
+        self.drain_comms_inbox().await;
+
+        let sub_agent_results = self.collect_sub_agent_results().await;
+        if !sub_agent_results.is_empty() {
+            let results: Vec<ToolResult> = sub_agent_results
+                .into_iter()
+                .map(|r| ToolResult {
+                    tool_use_id: r.id.to_string(),
+                    content: r.content,
+                    is_error: r.is_error,
+                })
+                .collect();
+            self.session.push(Message::ToolResults { results });
+        }
+
+        Ok(())
+    }
+
     /// The main agent loop
     #[allow(unused_assignments)]
     pub(super) async fn run_loop(
@@ -710,60 +765,8 @@ where
 
                         // Go through DrainingEvents to CallingLlm (state machine requires this)
                         self.state.transition(LoopState::DrainingEvents)?;
-
-                        // === TURN BOUNDARY: drain comms, collect sub-agent results ===
-
-                        // Drain comms inbox and inject messages into session
-                        self.drain_comms_inbox().await;
-
-                        // Collect completed sub-agent results and inject into session
-                        let sub_agent_results = self.collect_sub_agent_results().await;
-                        if !sub_agent_results.is_empty() {
-                            // Inject sub-agent results as tool results
-                            let results: Vec<ToolResult> = sub_agent_results
-                                .into_iter()
-                                .map(|r| ToolResult {
-                                    tool_use_id: r.id.to_string(),
-                                    content: r.content,
-                                    is_error: r.is_error,
-                                })
-                                .collect();
-                            self.session.push(Message::ToolResults { results });
-                        }
-
-                        let turn_boundary_report = self
-                            .execute_hooks(
-                                HookInvocation {
-                                    point: HookPoint::TurnBoundary,
-                                    session_id: self.session.id().clone(),
-                                    turn_number: Some(turn_count),
-                                    prompt: None,
-                                    error: None,
-                                    llm_request: None,
-                                    llm_response: None,
-                                    tool_call: None,
-                                    tool_result: None,
-                                },
-                                event_tx.as_ref(),
-                            )
+                        self.drain_turn_boundary(turn_count, event_tx.as_ref())
                             .await?;
-                        if let Some(HookDecision::Deny {
-                            reason_code,
-                            message,
-                            payload,
-                            ..
-                        }) = turn_boundary_report.decision
-                        {
-                            return Err(AgentError::HookDenied {
-                                point: HookPoint::TurnBoundary,
-                                reason_code,
-                                message,
-                                payload,
-                            });
-                        }
-
-                        // === END TURN BOUNDARY ===
-
                         self.state.transition(LoopState::CallingLlm)?;
                         turn_count += 1;
                     } else {
@@ -771,7 +774,12 @@ where
                         let final_text = assistant_text.clone();
                         self.session.push(Message::BlockAssistant(assistant_msg));
 
-                        // Emit turn completed
+                        self.state.transition(LoopState::DrainingEvents)?;
+                        self.drain_turn_boundary(turn_count, event_tx.as_ref())
+                            .await?;
+
+                        // Emit turn completed only after turn-boundary hooks
+                        // accept and boundary side effects are committed.
                         emit_event!(AgentEvent::TurnCompleted { stop_reason, usage });
 
                         // Check if we need to perform extraction turn for structured output
@@ -782,7 +790,6 @@ where
                                 .await;
 
                             // Transition to completed regardless of extraction result
-                            self.state.transition(LoopState::DrainingEvents)?;
                             self.state.transition(LoopState::Completed)?;
 
                             // Save session
@@ -790,34 +797,17 @@ where
                                 tracing::warn!("Failed to save session: {}", e);
                             }
 
-                            // Emit run completed (use extraction result text if successful)
-                            if let Ok(ref result) = extraction_result {
-                                emit_event!(AgentEvent::RunCompleted {
-                                    session_id: self.session.id().clone(),
-                                    result: result.text.clone(),
-                                    usage: self.session.total_usage(),
-                                });
-                            }
-
                             return extraction_result;
                         }
 
                         // No extraction needed - complete normally
                         // Transition to completed
-                        self.state.transition(LoopState::DrainingEvents)?;
                         self.state.transition(LoopState::Completed)?;
 
                         // Save session
                         if let Err(e) = self.store.save(&self.session).await {
                             tracing::warn!("Failed to save session: {}", e);
                         }
-
-                        // Emit run completed
-                        emit_event!(AgentEvent::RunCompleted {
-                            session_id: self.session.id().clone(),
-                            result: final_text.clone(),
-                            usage: self.session.total_usage(),
-                        });
 
                         return Ok(RunResult {
                             text: final_text,
@@ -1408,6 +1398,37 @@ mod tests {
         }
     }
 
+    struct StagedDrainCommsRuntime {
+        batches: tokio::sync::Mutex<Vec<Vec<String>>>,
+        notify: Arc<Notify>,
+    }
+
+    impl StagedDrainCommsRuntime {
+        fn with_batches(batches: Vec<Vec<String>>) -> Self {
+            Self {
+                batches: tokio::sync::Mutex::new(batches),
+                notify: Arc::new(Notify::new()),
+            }
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl crate::agent::CommsRuntime for StagedDrainCommsRuntime {
+        async fn drain_messages(&self) -> Vec<String> {
+            let mut guard = self.batches.lock().await;
+            if guard.is_empty() {
+                Vec::new()
+            } else {
+                guard.remove(0)
+            }
+        }
+
+        fn inbox_notify(&self) -> Arc<Notify> {
+            self.notify.clone()
+        }
+    }
+
     async fn build_agent<C>(client: Arc<C>) -> crate::agent::Agent<C, NoTools, NoopStore>
     where
         C: AgentLlmClient + ?Sized + 'static,
@@ -1495,6 +1516,323 @@ mod tests {
             seen.iter().any(|m| m.contains("queued during recovery")),
             "expected queued comms message to be drained into LLM input, saw: {seen:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn no_tool_completion_drains_late_comms_before_returning() {
+        let comms = Arc::new(StagedDrainCommsRuntime::with_batches(vec![
+            Vec::new(),
+            vec!["late boundary message".to_string()],
+        ]));
+        let mut agent = AgentBuilder::new()
+            .with_comms_runtime(comms)
+            .build(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+
+        let result = agent.run("prompt".to_string()).await.unwrap();
+        assert_eq!(result.text, "ok");
+        assert!(
+            agent.session().messages().iter().any(|message| matches!(
+                message,
+                Message::User(user) if user.content.contains("late boundary message")
+            )),
+            "completion path should drain late comms messages into the final session transcript"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_with_events_emits_run_completed_for_max_turns_zero() {
+        let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
+        agent.config.max_turns = Some(0);
+
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
+        let result = agent
+            .run_with_events("prompt".to_string(), tx)
+            .await
+            .unwrap();
+        assert_eq!(result.turns, 0);
+
+        let mut saw_run_completed = false;
+        while let Ok(event) = rx.try_recv() {
+            if let crate::event::AgentEvent::RunCompleted { result, .. } = event {
+                saw_run_completed = true;
+                assert_eq!(result, "");
+            }
+        }
+        assert!(
+            saw_run_completed,
+            "successful early exits should still emit RunCompleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_completed_event_uses_hook_rewritten_text() {
+        use crate::hooks::{
+            HookEngine, HookEngineError, HookExecutionReport, HookInvocation, HookOutcome,
+            HookPatch, HookPoint,
+        };
+
+        struct RewriteRunCompletedHook;
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl HookEngine for RewriteRunCompletedHook {
+            async fn execute(
+                &self,
+                invocation: HookInvocation,
+                _overrides: Option<&crate::config::HookRunOverrides>,
+            ) -> Result<HookExecutionReport, HookEngineError> {
+                if invocation.point != HookPoint::RunCompleted {
+                    return Ok(HookExecutionReport::empty());
+                }
+                Ok(HookExecutionReport {
+                    outcomes: vec![HookOutcome {
+                        hook_id: crate::hooks::HookId::new("rewrite-run-completed"),
+                        point: HookPoint::RunCompleted,
+                        priority: 0,
+                        registration_index: 0,
+                        decision: None,
+                        patches: vec![HookPatch::RunResult {
+                            text: "patched-final-text".to_string(),
+                        }],
+                        published_patches: Vec::new(),
+                        error: None,
+                        duration_ms: None,
+                    }],
+                    decision: None,
+                    patches: Vec::new(),
+                    published_patches: Vec::new(),
+                })
+            }
+        }
+
+        let mut agent = AgentBuilder::new()
+            .with_hook_engine(Arc::new(RewriteRunCompletedHook))
+            .build(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
+        let result = agent
+            .run_with_events("prompt".to_string(), tx)
+            .await
+            .unwrap();
+        assert_eq!(result.text, "patched-final-text");
+
+        let mut run_completed_text = None;
+        while let Ok(event) = rx.try_recv() {
+            if let crate::event::AgentEvent::RunCompleted { result, .. } = event {
+                run_completed_text = Some(result);
+            }
+        }
+        assert_eq!(
+            run_completed_text.as_deref(),
+            Some("patched-final-text"),
+            "RunCompleted should reflect the hook-rewritten final result"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_completed_hook_failure_emits_run_failed_without_run_completed() {
+        use crate::hooks::{
+            HookDecision, HookEngine, HookEngineError, HookExecutionReport, HookInvocation,
+            HookPoint, HookReasonCode,
+        };
+
+        struct DenyRunCompletedHook;
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl HookEngine for DenyRunCompletedHook {
+            async fn execute(
+                &self,
+                invocation: HookInvocation,
+                _overrides: Option<&crate::config::HookRunOverrides>,
+            ) -> Result<HookExecutionReport, HookEngineError> {
+                if invocation.point != HookPoint::RunCompleted {
+                    return Ok(HookExecutionReport::empty());
+                }
+                Ok(HookExecutionReport {
+                    decision: Some(HookDecision::Deny {
+                        hook_id: crate::hooks::HookId::new("deny-run-completed"),
+                        reason_code: HookReasonCode::PolicyViolation,
+                        message: "deny completed".to_string(),
+                        payload: None,
+                    }),
+                    ..HookExecutionReport::empty()
+                })
+            }
+        }
+
+        let mut agent = AgentBuilder::new()
+            .with_hook_engine(Arc::new(DenyRunCompletedHook))
+            .build(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
+        let err = agent
+            .run_with_events("prompt".to_string(), tx)
+            .await
+            .expect_err("RunCompleted hook denial should fail the run");
+        assert!(matches!(
+            err,
+            AgentError::HookDenied {
+                point: HookPoint::RunCompleted,
+                ..
+            }
+        ));
+
+        let mut saw_run_failed = false;
+        let mut saw_run_completed = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                crate::event::AgentEvent::RunFailed { .. } => saw_run_failed = true,
+                crate::event::AgentEvent::RunCompleted { .. } => saw_run_completed = true,
+                _ => {}
+            }
+        }
+        assert!(
+            saw_run_failed,
+            "hook-denied completion should emit RunFailed"
+        );
+        assert!(
+            !saw_run_completed,
+            "hook-denied completion should not also emit RunCompleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_boundary_denial_blocks_boundary_side_effects_and_turn_completed() {
+        use crate::hooks::{
+            HookDecision, HookEngine, HookEngineError, HookExecutionReport, HookInvocation,
+            HookPoint, HookReasonCode,
+        };
+
+        struct DenyTurnBoundaryHook;
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl HookEngine for DenyTurnBoundaryHook {
+            async fn execute(
+                &self,
+                invocation: HookInvocation,
+                _overrides: Option<&crate::config::HookRunOverrides>,
+            ) -> Result<HookExecutionReport, HookEngineError> {
+                if invocation.point != HookPoint::TurnBoundary {
+                    return Ok(HookExecutionReport::empty());
+                }
+                Ok(HookExecutionReport {
+                    decision: Some(HookDecision::Deny {
+                        hook_id: crate::hooks::HookId::new("deny-turn-boundary"),
+                        reason_code: HookReasonCode::PolicyViolation,
+                        message: "deny boundary".to_string(),
+                        payload: None,
+                    }),
+                    ..HookExecutionReport::empty()
+                })
+            }
+        }
+
+        let comms = Arc::new(StagedDrainCommsRuntime::with_batches(vec![
+            Vec::new(),
+            vec!["late boundary message".to_string()],
+        ]));
+        let mut agent = AgentBuilder::new()
+            .with_hook_engine(Arc::new(DenyTurnBoundaryHook))
+            .with_comms_runtime(comms)
+            .build(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
+        let err = agent
+            .run_with_events("prompt".to_string(), tx)
+            .await
+            .expect_err("TurnBoundary denial should fail the run");
+        assert!(matches!(
+            err,
+            AgentError::HookDenied {
+                point: HookPoint::TurnBoundary,
+                ..
+            }
+        ));
+
+        assert!(
+            !agent.session().messages().iter().any(|message| matches!(
+                message,
+                Message::User(user) if user.content.contains("late boundary message")
+            )),
+            "boundary-denied turns should not commit late comms boundary side effects"
+        );
+
+        let mut saw_turn_completed = false;
+        let mut saw_run_failed = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                crate::event::AgentEvent::TurnCompleted { .. } => saw_turn_completed = true,
+                crate::event::AgentEvent::RunFailed { .. } => saw_run_failed = true,
+                _ => {}
+            }
+        }
+        assert!(
+            !saw_turn_completed,
+            "boundary denial should not emit TurnCompleted before failing the run"
+        );
+        assert!(saw_run_failed, "boundary denial should emit RunFailed");
+    }
+
+    #[tokio::test]
+    async fn run_without_primary_channel_still_emits_run_lifecycle_to_tap() {
+        use crate::event_tap::EventTapState;
+        use std::sync::atomic::AtomicBool;
+
+        let tap = crate::event_tap::new_event_tap();
+        let (tap_tx, mut tap_rx) = mpsc::channel(128);
+        {
+            let mut guard = tap.lock();
+            *guard = Some(EventTapState {
+                tx: tap_tx,
+                truncated: AtomicBool::new(false),
+            });
+        }
+
+        let mut agent = AgentBuilder::new()
+            .with_event_tap(tap)
+            .build(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+
+        let result = agent.run("tap-only prompt".to_string()).await.unwrap();
+        assert_eq!(result.text, "ok");
+
+        let mut saw_run_started = false;
+        let mut saw_run_completed = false;
+        while let Ok(event) = tap_rx.try_recv() {
+            match event {
+                crate::event::AgentEvent::RunStarted { .. } => saw_run_started = true,
+                crate::event::AgentEvent::RunCompleted { .. } => saw_run_completed = true,
+                _ => {}
+            }
+        }
+        assert!(saw_run_started, "tap should receive RunStarted");
+        assert!(saw_run_completed, "tap should receive RunCompleted");
     }
 
     #[tokio::test]

@@ -115,4 +115,21 @@ describe("E2E Smoke: TypeScript SDK package against scripted stream RPC", () => 
     assert.equal(sub.terminalOutcome?.outcome, "terminal_error");
     assert.equal(sub.terminalOutcome?.error?.code, "stream_queue_overflow");
   });
+
+  it("drains late tail turn events through the packaged streaming API", async () => {
+    const stream = client._startTurnStreaming(
+      "late-tail-stream-session",
+      "trigger late tail",
+    );
+
+    let text = "";
+    for await (const event of stream) {
+      if (event.type === "text_delta") {
+        text += event.delta;
+      }
+    }
+
+    assert.equal(text, "LATE_TAIL_PUBLIC");
+    assert.equal(stream.result.text, "late tail final result");
+  });
 });

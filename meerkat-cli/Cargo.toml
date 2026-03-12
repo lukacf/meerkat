@@ -47,7 +47,7 @@ meerkat-tools = { workspace = true }
 meerkat-mob = { workspace = true }
 meerkat-mob-pack = { workspace = true }
 meerkat-mob-mcp = { workspace = true }
-meerkat-rpc = { workspace = true }
+meerkat-rpc = { workspace = true, features = ["mob"] }
 meerkat-mcp = { workspace = true, optional = true }
 meerkat-comms = { workspace = true, optional = true }
 serde = { workspace = true }

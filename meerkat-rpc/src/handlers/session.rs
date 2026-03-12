@@ -222,6 +222,9 @@ pub async fn handle_create(
         Ok(p) => p,
         Err(resp) => return resp.with_id(id),
     };
+    if let Err(err) = meerkat::surface::validate_public_peer_meta(params.peer_meta.as_ref()) {
+        return RpcResponse::error(id, error::INVALID_PARAMS, err);
+    }
 
     let runtime_default_model = if let Some(config_runtime) = runtime.config_runtime() {
         config_runtime
@@ -597,6 +600,18 @@ mod tests {
         let json = serde_json::json!({"prompt": "hello"});
         let params: CreateSessionParams = serde_json::from_value(json).unwrap();
         assert_eq!(params.initial_turn, None);
+    }
+
+    #[test]
+    fn create_session_rejects_reserved_mob_peer_meta_labels() {
+        let result = meerkat::surface::validate_public_peer_meta(Some(
+            &meerkat_core::PeerMeta::default().with_label("mob_id", "team"),
+        ));
+        assert!(result.is_err(), "reserved mob peer labels must be rejected");
+        let Err(err) = result else {
+            unreachable!("asserted reserved mob peer labels are rejected above");
+        };
+        assert!(err.contains("mob_id"));
     }
 }
 

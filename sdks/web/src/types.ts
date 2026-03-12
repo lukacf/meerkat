@@ -96,9 +96,15 @@ export interface MobAppendSystemContextResult {
 
 /** Result of a turn execution. */
 export interface TurnResult {
+  /** Canonical text returned by the runtime. */
+  text: string;
+  /** Backward-compatible alias for {@link text}. */
   response: string;
   usage: Usage;
   tool_calls: number;
+  turns?: number;
+  session_id?: string;
+  status?: string;
 }
 
 export interface Usage {

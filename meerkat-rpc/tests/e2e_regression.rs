@@ -5,8 +5,10 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+#[path = "../../test-fixtures/live_smoke/support.rs"]
+mod live_smoke;
+
 use std::sync::Arc;
-use std::time::Duration;
 
 use meerkat::AgentFactory;
 use meerkat_client::LlmClient;
@@ -20,23 +22,6 @@ use tokio::time::timeout;
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Return the Anthropic API key if set, or `None`.
-fn anthropic_api_key() -> Option<String> {
-    for var in &["ANTHROPIC_API_KEY", "RKAT_ANTHROPIC_API_KEY"] {
-        if let Ok(val) = std::env::var(var)
-            && !val.is_empty()
-        {
-            return Some(val);
-        }
-    }
-    None
-}
-
-/// Model to use for live smoke tests (defaults to a cheaper model).
-fn smoke_model() -> String {
-    std::env::var("SMOKE_MODEL").unwrap_or_else(|_| "claude-sonnet-4-5".to_string())
-}
-
 /// Set up a server with duplex streams using the given LLM client.
 fn spawn_test_server(
     client: Arc<dyn LlmClient>,
@@ -48,7 +33,8 @@ fn spawn_test_server(
     let temp = tempfile::tempdir().unwrap();
     let factory = AgentFactory::new(temp.path().join("sessions"));
     let config = Config::default();
-    let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+    let store: Arc<dyn meerkat::SessionStore> =
+        Arc::new(meerkat::RedbSessionStore::open(temp.path().join("sessions.redb")).unwrap());
     let mut runtime = SessionRuntime::new(factory, config, 10, store);
     let config_store: Arc<dyn meerkat_core::ConfigStore> =
         Arc::new(MemoryConfigStore::new(Config::default()));
@@ -133,7 +119,7 @@ async fn read_response_with_notifications(
 #[tokio::test]
 #[ignore = "integration-real: live API"]
 async fn e2e_scenario_19_inject_context_recall() {
-    let api_key = match anthropic_api_key() {
+    let api_key = match live_smoke::anthropic_api_key() {
         Some(k) => k,
         None => {
             eprintln!("Skipping scenario 19: no ANTHROPIC_API_KEY set");
@@ -144,8 +130,8 @@ async fn e2e_scenario_19_inject_context_recall() {
     let client = Arc::new(meerkat_client::AnthropicClient::new(api_key).unwrap());
     let (mut writer, mut reader, server_handle) = spawn_test_server(client);
 
-    let t = Duration::from_secs(120);
-    let model = smoke_model();
+    let t = live_smoke::live_timeout();
+    let model = live_smoke::smoke_model();
     let mut req_id = 0u64;
     let mut next_id = || {
         req_id += 1;
@@ -296,7 +282,7 @@ async fn e2e_scenario_19_inject_context_recall() {
 #[tokio::test]
 #[ignore = "integration-real: live API"]
 async fn e2e_scenario_20_streaming_events() {
-    let api_key = match anthropic_api_key() {
+    let api_key = match live_smoke::anthropic_api_key() {
         Some(k) => k,
         None => {
             eprintln!("Skipping scenario 20: no ANTHROPIC_API_KEY set");
@@ -307,8 +293,8 @@ async fn e2e_scenario_20_streaming_events() {
     let client = Arc::new(meerkat_client::AnthropicClient::new(api_key).unwrap());
     let (mut writer, mut reader, server_handle) = spawn_test_server(client);
 
-    let t = Duration::from_secs(120);
-    let model = smoke_model();
+    let t = live_smoke::live_timeout();
+    let model = live_smoke::smoke_model();
     let mut req_id = 0u64;
     let mut next_id = || {
         req_id += 1;
@@ -466,10 +452,10 @@ async fn e2e_scenario_20_streaming_events() {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 21: config, capabilities, and error handling
+// Scenario 18: config, capabilities, and error handling
 // ---------------------------------------------------------------------------
 
-/// Scenario 21: Exercise capabilities/get, config roundtrip, and error paths.
+/// Scenario 18: Exercise capabilities/get, config roundtrip, and error paths.
 ///
 /// initialize ->
 /// capabilities/get (assert capabilities array, find "sessions") ->
@@ -482,11 +468,11 @@ async fn e2e_scenario_20_streaming_events() {
 /// session/archive -> clean up
 #[tokio::test]
 #[ignore = "integration-real: live API"]
-async fn e2e_scenario_21_config_capabilities_errors() {
-    let api_key = match anthropic_api_key() {
+async fn e2e_scenario_18_config_capabilities_errors() {
+    let api_key = match live_smoke::anthropic_api_key() {
         Some(k) => k,
         None => {
-            eprintln!("Skipping scenario 21: no ANTHROPIC_API_KEY set");
+            eprintln!("Skipping scenario 18: no ANTHROPIC_API_KEY set");
             return;
         }
     };
@@ -494,8 +480,8 @@ async fn e2e_scenario_21_config_capabilities_errors() {
     let client = Arc::new(meerkat_client::AnthropicClient::new(api_key).unwrap());
     let (mut writer, mut reader, server_handle) = spawn_test_server(client);
 
-    let t = Duration::from_secs(120);
-    let model = smoke_model();
+    let t = live_smoke::live_timeout();
+    let model = live_smoke::smoke_model();
     let mut req_id = 0u64;
     let mut next_id = || {
         req_id += 1;
@@ -511,7 +497,7 @@ async fn e2e_scenario_21_config_capabilities_errors() {
     .await;
     let resp = timeout(t, read_response(&mut reader)).await.unwrap();
     assert!(resp["error"].is_null(), "initialize failed: {resp}");
-    eprintln!("[scenario 21] initialized");
+    eprintln!("[scenario 18] initialized");
 
     // 2. capabilities/get
     let id = next_id();
@@ -537,7 +523,7 @@ async fn e2e_scenario_21_config_capabilities_errors() {
         cap_ids.iter().any(|id| id.contains("sessions")),
         "Should have a capability with id containing 'sessions'. Got: {cap_ids:?}"
     );
-    eprintln!("[scenario 21] capabilities: {cap_ids:?}");
+    eprintln!("[scenario 18] capabilities: {cap_ids:?}");
 
     // 3. config/get — capture original max_tokens
     let id = next_id();
@@ -553,7 +539,7 @@ async fn e2e_scenario_21_config_capabilities_errors() {
         .expect("config/get should include max_tokens");
     // Capture the full original config for later restoration
     let original_config = resp["result"]["config"].clone();
-    eprintln!("[scenario 21] original max_tokens={original_max}");
+    eprintln!("[scenario 18] original max_tokens={original_max}");
 
     // 4. config/patch — increase max_tokens by 100
     let id = next_id();
@@ -572,7 +558,7 @@ async fn e2e_scenario_21_config_capabilities_errors() {
         original_max + 100,
         "Patched max_tokens should be original + 100"
     );
-    eprintln!("[scenario 21] patched max_tokens={patched_max}");
+    eprintln!("[scenario 18] patched max_tokens={patched_max}");
 
     // 5. config/get — verify patched value persists
     let id = next_id();

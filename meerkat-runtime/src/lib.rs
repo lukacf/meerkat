@@ -14,6 +14,14 @@
 //! Core-facing types (RunPrimitive, RunEvent, CoreExecutor, etc.) live in
 //! `meerkat-core::lifecycle`. This crate contains everything else.
 
+#[cfg(target_arch = "wasm32")]
+pub mod tokio {
+    pub use tokio_with_wasm::alias::*;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use ::tokio;
+
 pub mod accept;
 pub mod coalescing;
 pub mod comms_bridge;
@@ -31,14 +39,10 @@ pub mod policy;
 pub mod policy_table;
 pub mod queue;
 pub mod runtime_event;
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod runtime_loop;
 pub mod runtime_state;
 pub mod service_ext;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod session_adapter;
-#[cfg(target_arch = "wasm32")]
-pub mod session_adapter_stub;
 pub mod state_machine;
 pub mod store;
 pub mod traits;
@@ -77,10 +81,7 @@ pub use runtime_event::{
 };
 pub use runtime_state::{RuntimeState, RuntimeStateTransitionError};
 pub use service_ext::{RuntimeMode, SessionServiceRuntimeExt};
-#[cfg(not(target_arch = "wasm32"))]
 pub use session_adapter::RuntimeSessionAdapter;
-#[cfg(target_arch = "wasm32")]
-pub use session_adapter_stub::RuntimeSessionAdapter;
 pub use state_machine::RuntimeStateMachine;
 pub use store::{InMemoryRuntimeStore, RuntimeStore, RuntimeStoreError, SessionDelta};
 pub use traits::{

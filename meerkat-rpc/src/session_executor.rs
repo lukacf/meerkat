@@ -12,6 +12,7 @@ use meerkat_core::event::AgentEvent;
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
 use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunPrimitive};
+use meerkat_core::service::SessionError;
 use meerkat_core::types::SessionId;
 use tokio::sync::mpsc;
 
@@ -159,13 +160,19 @@ impl CoreExecutor for SessionRuntimeExecutor {
                 .interrupt(&self.session_id)
                 .await
                 .map_err(|e| CoreExecutorError::ControlFailed { reason: e.message }),
-            RunControlCommand::StopRuntimeExecutor { .. } => self
-                .runtime
-                .discard_live_session(&self.session_id)
-                .await
-                .map_err(|err| CoreExecutorError::ControlFailed {
-                    reason: err.to_string(),
-                }),
+            RunControlCommand::StopRuntimeExecutor { .. } => {
+                let discard_result = self.runtime.discard_live_session(&self.session_id).await;
+                self.runtime
+                    .runtime_adapter()
+                    .unregister_session(&self.session_id)
+                    .await;
+                match discard_result {
+                    Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
+                    Err(err) => Err(CoreExecutorError::ControlFailed {
+                        reason: err.to_string(),
+                    }),
+                }
+            }
             _ => Ok(()),
         }
     }
@@ -233,13 +240,21 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                 .map_err(|e| CoreExecutorError::ControlFailed {
                     reason: e.to_string(),
                 }),
-            RunControlCommand::StopRuntimeExecutor { .. } => self
-                .session_service
-                .discard_live_session(&self.session_id)
-                .await
-                .map_err(|err| CoreExecutorError::ControlFailed {
-                    reason: err.to_string(),
-                }),
+            RunControlCommand::StopRuntimeExecutor { .. } => {
+                let discard_result = self
+                    .session_service
+                    .discard_live_session(&self.session_id)
+                    .await;
+                if let Some(adapter) = self.session_service.runtime_adapter() {
+                    adapter.unregister_session(&self.session_id).await;
+                }
+                match discard_result {
+                    Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
+                    Err(err) => Err(CoreExecutorError::ControlFailed {
+                        reason: err.to_string(),
+                    }),
+                }
+            }
             _ => Ok(()),
         }
     }

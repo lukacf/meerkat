@@ -106,6 +106,48 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> RpcServer<R, W> {
         }
     }
 
+    #[cfg(feature = "mob")]
+    /// Create a new RPC server with an optional skill runtime and explicit mob state.
+    pub fn new_with_skill_runtime_and_mob_state(
+        reader: R,
+        writer: W,
+        runtime: Arc<SessionRuntime>,
+        config_store: Arc<dyn ConfigStore>,
+        skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
+        mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
+    ) -> Self {
+        let (notification_tx, notification_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
+        let notification_sink = NotificationSink::new(notification_tx);
+        let transport = JsonlTransport::new(reader, writer);
+        let (response_tx, response_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
+        let (callback_request_tx, callback_request_rx) =
+            mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
+        let callback_id_counter = Arc::new(AtomicU64::new(0));
+        let registered_tools = Arc::new(std::sync::RwLock::new(Vec::new()));
+
+        runtime.set_callback_channel(
+            callback_request_tx.clone(),
+            callback_id_counter.clone(),
+            registered_tools.clone(),
+        );
+
+        let router =
+            MethodRouter::new_with_mob_state(runtime, config_store, notification_sink, mob_state)
+                .with_skill_runtime(skill_runtime);
+        Self {
+            transport,
+            router,
+            notification_rx,
+            response_rx,
+            response_tx,
+            callback_request_rx,
+            callback_request_tx,
+            pending_callbacks: HashMap::new(),
+            callback_id_counter,
+            registered_tools,
+        }
+    }
+
     /// Get the callback request sender for creating `CallbackToolDispatcher` instances.
     pub fn callback_request_tx(&self) -> mpsc::Sender<(RpcRequest, oneshot::Sender<RpcResponse>)> {
         self.callback_request_tx.clone()

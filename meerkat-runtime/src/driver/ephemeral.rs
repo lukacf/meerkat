@@ -117,6 +117,14 @@ impl EphemeralRuntimeDriver {
             .any(|queued_id| queued_id == input_id)
     }
 
+    /// Check whether the queue contains work outside a specific excluded set.
+    fn has_queued_input_outside(&self, excluded: &[InputId]) -> bool {
+        self.queue
+            .input_ids()
+            .iter()
+            .any(|queued_id| !excluded.iter().any(|excluded_id| excluded_id == queued_id))
+    }
+
     /// Remove an input entirely (used when durable persistence fails).
     pub fn remove_input(&mut self, input_id: &InputId) {
         let _ = self.queue.remove(input_id);
@@ -271,6 +279,19 @@ impl EphemeralRuntimeDriver {
 
         // Drain queue
         self.queue.drain();
+        self.wake_requested = false;
+        self.process_requested = false;
+
+        if let Some(from) = self
+            .state_machine
+            .reset_to_idle()
+            .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?
+        {
+            self.emit_event(RuntimeEvent::RuntimeStateChange(RuntimeStateChangeEvent {
+                from,
+                to: RuntimeState::Idle,
+            }));
+        }
 
         Ok(ResetReport {
             inputs_abandoned: abandoned,
@@ -574,6 +595,10 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                 self.rollback_staged(&staged_ids)
                     .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
 
+                if self.has_queued_input_outside(&staged_ids) {
+                    self.wake_requested = true;
+                }
+
                 // Return to idle
                 self.state_machine
                     .complete_run()
@@ -589,6 +614,10 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                     .collect();
                 self.rollback_staged(&staged_ids)
                     .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
+
+                if self.has_queued_input_outside(&staged_ids) {
+                    self.wake_requested = true;
+                }
 
                 self.state_machine
                     .complete_run()
@@ -972,6 +1001,58 @@ mod tests {
         let state = driver.input_state(&input_id).unwrap();
         assert_eq!(state.current_state, InputLifecycleState::Queued);
         assert!(driver.state_machine.is_idle());
+    }
+
+    #[tokio::test]
+    async fn on_run_failed_requests_wake_for_backlog() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
+
+        let input1 = make_prompt_input("first");
+        let input1_id = input1.id().clone();
+        let input2 = make_prompt_input("second");
+        driver.accept_input(input1).await.unwrap();
+        driver.accept_input(input2).await.unwrap();
+        let _ = driver.take_wake_requested();
+
+        let run_id = RunId::new();
+        let (dequeued_id, _) = driver.dequeue_next().unwrap();
+        assert_eq!(dequeued_id, input1_id);
+        driver.state_machine.start_run(run_id.clone()).unwrap();
+        driver.stage_input(&input1_id, &run_id).unwrap();
+
+        driver
+            .on_run_event(RunEvent::RunFailed {
+                run_id,
+                error: "LLM error".into(),
+                recoverable: true,
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            driver.take_wake_requested(),
+            "queued work behind a failed run should request another wake"
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_after_retire_returns_runtime_to_idle() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
+        driver.retire().unwrap();
+        assert_eq!(driver.runtime_state(), RuntimeState::Retired);
+
+        let report = driver.reset().unwrap();
+        assert_eq!(report.inputs_abandoned, 0);
+        assert_eq!(driver.runtime_state(), RuntimeState::Idle);
+
+        let accepted = driver
+            .accept_input(make_prompt_input("hello"))
+            .await
+            .unwrap();
+        assert!(
+            accepted.is_accepted(),
+            "reset runtime should accept new input"
+        );
     }
 
     #[tokio::test]

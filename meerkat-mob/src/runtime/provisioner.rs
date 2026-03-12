@@ -11,13 +11,13 @@ use meerkat_core::lifecycle::RunId as CoreRunId;
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
 use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunApplyBoundary, RunPrimitive};
-use meerkat_core::service::{CreateSessionRequest, StartTurnRequest};
+use meerkat_core::service::{CreateSessionRequest, SessionError, StartTurnRequest};
 use meerkat_core::types::SessionId;
 #[allow(unused_imports)]
 use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
 use meerkat_runtime::{
     Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PromptInput,
-    RuntimeSessionAdapter,
+    RuntimeDriverError, RuntimeSessionAdapter, RuntimeState,
 };
 use std::collections::{HashMap, VecDeque};
 use tokio::sync::{Mutex, RwLock};
@@ -117,23 +117,97 @@ impl SubagentBackend {
         session_id: &SessionId,
     ) -> Option<Arc<RuntimeSessionState>> {
         let adapter = self.runtime_adapter.as_ref()?;
-        let mut sessions = self.runtime_sessions.write().await;
-        if let Some(existing) = sessions.get(session_id) {
-            return Some(existing.clone());
+        if let Some(existing) = self.runtime_sessions.read().await.get(session_id).cloned() {
+            if adapter.contains_session(session_id).await {
+                return Some(existing);
+            }
+            let executor = Box::new(MobSessionRuntimeExecutor::new(
+                self.session_service.clone(),
+                Arc::clone(adapter),
+                session_id.clone(),
+                existing.clone(),
+            ));
+            adapter
+                .ensure_session_with_executor(session_id.clone(), executor)
+                .await;
+            return Some(existing);
         }
         let state = Arc::new(RuntimeSessionState {
             queued_turns: Mutex::new(VecDeque::new()),
         });
         let executor = Box::new(MobSessionRuntimeExecutor::new(
             self.session_service.clone(),
+            Arc::clone(adapter),
             session_id.clone(),
             state.clone(),
         ));
         adapter
             .ensure_session_with_executor(session_id.clone(), executor)
             .await;
-        sessions.insert(session_id.clone(), state.clone());
+        self.runtime_sessions
+            .write()
+            .await
+            .insert(session_id.clone(), state.clone());
         Some(state)
+    }
+
+    async fn execute_runtime_input(
+        &self,
+        session_id: &SessionId,
+        input: Input,
+        event_tx: Option<
+            tokio::sync::mpsc::Sender<meerkat_core::EventEnvelope<meerkat_core::AgentEvent>>,
+        >,
+    ) -> Result<(), MobError> {
+        let adapter = self.runtime_adapter.as_ref().ok_or_else(|| {
+            MobError::Internal(format!(
+                "runtime-backed turn requested without runtime adapter: {session_id}"
+            ))
+        })?;
+        let _ = self.runtime_session_state(session_id).await;
+        let session_service = self.session_service.clone();
+        let session_id = session_id.clone();
+        let adapter_session_id = session_id.clone();
+
+        adapter
+            .accept_input_and_run(&adapter_session_id, input, move |run_id, primitive| {
+                let session_service = session_service.clone();
+                let session_id = session_id.clone();
+                let event_tx = event_tx.clone();
+                async move {
+                    let output = session_service
+                        .apply_runtime_turn(
+                            &session_id,
+                            run_id,
+                            StartTurnRequest {
+                                prompt: extract_prompt(&primitive),
+                                event_tx,
+                                host_mode: primitive
+                                    .turn_metadata()
+                                    .is_some_and(|meta| meta.host_mode),
+                                skill_references: primitive
+                                    .turn_metadata()
+                                    .and_then(|meta| meta.skill_references.clone()),
+                                flow_tool_overlay: primitive
+                                    .turn_metadata()
+                                    .and_then(|meta| meta.flow_tool_overlay.clone()),
+                                additional_instructions: primitive
+                                    .turn_metadata()
+                                    .and_then(|meta| meta.additional_instructions.clone()),
+                            },
+                            match &primitive {
+                                RunPrimitive::StagedInput(staged) => staged.boundary,
+                                _ => RunApplyBoundary::Immediate,
+                            },
+                            primitive.contributing_input_ids().to_vec(),
+                        )
+                        .await
+                        .map_err(|err| RuntimeDriverError::Internal(err.to_string()))?;
+                    Ok(((), output))
+                }
+            })
+            .await
+            .map_err(|err| MobError::Internal(err.to_string()))
     }
 }
 
@@ -149,6 +223,7 @@ impl RuntimeSessionState {
 
 struct MobSessionRuntimeExecutor {
     session_service: Arc<dyn MobSessionService>,
+    runtime_adapter: Arc<RuntimeSessionAdapter>,
     session_id: SessionId,
     state: Arc<RuntimeSessionState>,
 }
@@ -156,11 +231,13 @@ struct MobSessionRuntimeExecutor {
 impl MobSessionRuntimeExecutor {
     fn new(
         session_service: Arc<dyn MobSessionService>,
+        runtime_adapter: Arc<RuntimeSessionAdapter>,
         session_id: SessionId,
         state: Arc<RuntimeSessionState>,
     ) -> Self {
         Self {
             session_service,
+            runtime_adapter,
             session_id,
             state,
         }
@@ -242,7 +319,22 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
                 .map_err(|err| CoreExecutorError::ControlFailed {
                     reason: err.to_string(),
                 }),
-            RunControlCommand::StopRuntimeExecutor { .. } => Ok(()),
+            RunControlCommand::StopRuntimeExecutor { .. } => {
+                let discard_result = self
+                    .session_service
+                    .discard_live_session(&self.session_id)
+                    .await;
+                self.state.clear_queued_turns().await;
+                self.runtime_adapter
+                    .unregister_session(&self.session_id)
+                    .await;
+                match discard_result {
+                    Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
+                    Err(err) => Err(CoreExecutorError::ControlFailed {
+                        reason: err.to_string(),
+                    }),
+                }
+            }
             _ => Ok(()),
         }
     }
@@ -305,13 +397,43 @@ impl MobProvisioner for SubagentBackend {
                 "session-backed provisioner cannot reset member without runtime adapter: {member_ref:?}"
             ))
         })?;
-        if let Some(state) = self.runtime_session_state(&session_id).await {
+        let runtime_state = self.runtime_session_state(&session_id).await;
+        match adapter.reset_runtime(&session_id).await {
+            Ok(_) => {}
+            Err(RuntimeDriverError::NotReady {
+                state: RuntimeState::Running,
+            }) => {
+                if adapter.interrupt_current_run(&session_id).await.is_err() {
+                    let _ = self.session_service.interrupt(&session_id).await;
+                }
+
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    let runtime_state = adapter
+                        .runtime_state(&session_id)
+                        .await
+                        .map_err(|err| MobError::Internal(err.to_string()))?;
+                    if !matches!(runtime_state, RuntimeState::Running) {
+                        break;
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(MobError::Internal(format!(
+                            "timed out waiting for member runtime to stop before reset: {session_id}"
+                        )));
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+
+                adapter
+                    .reset_runtime(&session_id)
+                    .await
+                    .map_err(|err| MobError::Internal(err.to_string()))?;
+            }
+            Err(err) => return Err(MobError::Internal(err.to_string())),
+        }
+        if let Some(state) = runtime_state {
             state.clear_queued_turns().await;
         }
-        adapter
-            .reset_runtime(&session_id)
-            .await
-            .map_err(|err| MobError::Internal(err.to_string()))?;
         Ok(())
     }
 
@@ -321,29 +443,13 @@ impl MobProvisioner for SubagentBackend {
         req: StartTurnRequest,
     ) -> Result<(), MobError> {
         let session_id = Self::require_session(member_ref, "start turn")?;
-        if let (Some(adapter), Some(state)) = (
-            self.runtime_adapter.as_ref(),
-            self.runtime_session_state(&session_id).await,
-        ) {
-            let prompt_text = req.prompt.clone();
-            let queued_req = StartTurnRequest {
-                prompt: req.prompt.clone(),
-                event_tx: req.event_tx.clone(),
-                host_mode: req.host_mode,
-                skill_references: req.skill_references.clone(),
-                flow_tool_overlay: req.flow_tool_overlay.clone(),
-                additional_instructions: req.additional_instructions.clone(),
-            };
+        if self.runtime_adapter.is_some() {
             let turn_metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                 host_mode: req.host_mode,
                 skill_references: req.skill_references.clone(),
                 flow_tool_overlay: req.flow_tool_overlay.clone(),
                 additional_instructions: req.additional_instructions.clone(),
             };
-            {
-                let mut queued_turns = state.queued_turns.lock().await;
-                queued_turns.push_back(queued_req);
-            }
             let input = Input::Prompt(PromptInput {
                 header: InputHeader {
                     id: meerkat_core::InputId::new(),
@@ -355,14 +461,12 @@ impl MobProvisioner for SubagentBackend {
                     supersession_key: None,
                     correlation_id: None,
                 },
-                text: prompt_text,
+                text: req.prompt,
                 turn_metadata: Some(turn_metadata),
             });
-            if let Err(err) = adapter.accept_input(&session_id, input).await {
-                state.queued_turns.lock().await.pop_back();
-                return Err(MobError::Internal(err.to_string()));
-            }
-            return Ok(());
+            return self
+                .execute_runtime_input(&session_id, input, req.event_tx)
+                .await;
         }
 
         self.session_service
@@ -380,41 +484,24 @@ impl MobProvisioner for SubagentBackend {
         req: StartTurnRequest,
     ) -> Result<(), MobError> {
         let session_id = Self::require_session(member_ref, "start flow step")?;
-        if let (Some(adapter), Some(state)) = (
-            self.runtime_adapter.as_ref(),
-            self.runtime_session_state(&session_id).await,
-        ) {
-            let prompt = req.prompt.clone();
-            let queued_req = StartTurnRequest {
-                prompt: req.prompt.clone(),
-                event_tx: req.event_tx.clone(),
-                host_mode: req.host_mode,
-                skill_references: req.skill_references.clone(),
-                flow_tool_overlay: req.flow_tool_overlay.clone(),
-                additional_instructions: req.additional_instructions.clone(),
-            };
-            let turn_metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                host_mode: req.host_mode,
-                skill_references: req.skill_references.clone(),
-                flow_tool_overlay: req.flow_tool_overlay.clone(),
-                additional_instructions: req.additional_instructions.clone(),
-            };
-            {
-                let mut queued_turns = state.queued_turns.lock().await;
-                queued_turns.push_back(queued_req);
-            }
+        if self.runtime_adapter.is_some() {
             let input = meerkat_runtime::mob_adapter::create_flow_step_input(
                 step_id.as_str(),
-                &prompt,
+                &req.prompt,
                 &run_id.to_string(),
                 0,
-                Some(turn_metadata),
+                Some(
+                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        host_mode: req.host_mode,
+                        skill_references: req.skill_references.clone(),
+                        flow_tool_overlay: req.flow_tool_overlay.clone(),
+                        additional_instructions: req.additional_instructions.clone(),
+                    },
+                ),
             );
-            if let Err(err) = adapter.accept_input(&session_id, input).await {
-                state.queued_turns.lock().await.pop_back();
-                return Err(MobError::Internal(err.to_string()));
-            }
-            return Ok(());
+            return self
+                .execute_runtime_input(&session_id, input, req.event_tx)
+                .await;
         }
 
         self.start_turn(member_ref, req).await

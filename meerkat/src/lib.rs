@@ -219,6 +219,26 @@ pub use meerkat_store::RedbSessionStore;
 #[cfg(not(target_arch = "wasm32"))]
 pub use meerkat_tools::{DispatchError, ToolDispatcher, ToolRegistry, ToolValidationError};
 
+// Embedded skill registration.
+//
+// `mob-communication` must be available across surfaces because sessions can be
+// created under one binary (for example CLI) and resumed under another (for
+// example RPC). Register it from the base crate so any skills-enabled surface
+// links the embedded skill inventory entry even when `meerkat-mob` itself is
+// not compiled into that binary.
+#[cfg(feature = "skills")]
+inventory::submit! {
+    meerkat_skills::SkillRegistration {
+        id: "mob-communication",
+        name: "Mob Communication",
+        description: "How to communicate with peers in a collaborative mob",
+        scope: meerkat_core::skills::SkillScope::Builtin,
+        requires_capabilities: &["comms"],
+        body: include_str!("../../meerkat-mob/skills/mob-communication/SKILL.md"),
+        extensions: &[],
+    }
+}
+
 // Re-export builtin tools infrastructure
 #[cfg(feature = "comms")]
 pub use meerkat_tools::CommsToolSurface;

@@ -274,6 +274,7 @@ struct MockSessionService {
     sessions: RwLock<HashMap<SessionId, Arc<MockCommsRuntime>>>,
     host_mode_notifiers: RwLock<HashMap<SessionId, Arc<tokio::sync::Notify>>>,
     session_comms_names: RwLock<HashMap<SessionId, String>>,
+    runtime_adapter: Mutex<Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>>,
     session_counter: AtomicU64,
     /// Records (session_id, prompt) for each create_session call.
     prompts: RwLock<Vec<(SessionId, String)>>,
@@ -317,6 +318,7 @@ impl MockSessionService {
             sessions: RwLock::new(HashMap::new()),
             host_mode_notifiers: RwLock::new(HashMap::new()),
             session_comms_names: RwLock::new(HashMap::new()),
+            runtime_adapter: Mutex::new(None),
             session_counter: AtomicU64::new(0),
             prompts: RwLock::new(Vec::new()),
             create_requests: RwLock::new(Vec::new()),
@@ -349,6 +351,16 @@ impl MockSessionService {
 
     async fn active_session_count(&self) -> usize {
         self.sessions.read().await.len()
+    }
+
+    fn enable_runtime_adapter(&self) -> Arc<meerkat_runtime::RuntimeSessionAdapter> {
+        let mut guard = self.runtime_adapter.lock().expect("runtime_adapter mutex");
+        if let Some(adapter) = guard.as_ref() {
+            return adapter.clone();
+        }
+        let adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
+        *guard = Some(adapter.clone());
+        adapter
     }
 
     /// Get recorded prompts for inspection in tests.
@@ -1035,11 +1047,40 @@ impl MobSessionService for MockSessionService {
         true
     }
 
+    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::RuntimeSessionAdapter>> {
+        self.runtime_adapter
+            .lock()
+            .expect("runtime_adapter mutex")
+            .clone()
+    }
+
     async fn session_belongs_to_mob(&self, session_id: &SessionId, mob_id: &MobId) -> bool {
         let names = self.session_comms_names.read().await;
         names
             .get(session_id)
             .is_some_and(|name| name.starts_with(&format!("{mob_id}/")))
+    }
+
+    async fn apply_runtime_turn(
+        &self,
+        session_id: &SessionId,
+        run_id: meerkat_core::RunId,
+        req: StartTurnRequest,
+        boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
+        contributing_input_ids: Vec<meerkat_core::InputId>,
+    ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, SessionError> {
+        <Self as SessionService>::start_turn(self, session_id, req).await?;
+        Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
+            receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
+                run_id,
+                boundary,
+                contributing_input_ids,
+                conversation_digest: None,
+                message_count: 0,
+                sequence: 0,
+            },
+            session_snapshot: None,
+        })
     }
 }
 
@@ -1849,6 +1890,21 @@ async fn wait_for_run_terminal(
 /// Create a MobHandle using the mock session service.
 async fn create_test_mob(definition: MobDefinition) -> (MobHandle, Arc<MockSessionService>) {
     let service = Arc::new(MockSessionService::new());
+    let storage = MobStorage::in_memory();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+
+    (handle, service)
+}
+
+async fn create_test_mob_with_runtime_adapter(
+    definition: MobDefinition,
+) -> (MobHandle, Arc<MockSessionService>) {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let handle = MobBuilder::new(definition, storage)
         .with_session_service(service.clone())
@@ -6284,6 +6340,38 @@ async fn test_external_turn_turn_driven_mode_uses_start_turn_dispatch() {
         service.start_turn_call_count(),
         baseline_start_turn_calls + 1,
         "turn-driven external dispatch should issue start_turn"
+    );
+}
+
+#[tokio::test]
+async fn test_runtime_backed_turn_driven_dispatch_surfaces_start_turn_failure() {
+    let (handle, service) = create_test_mob_with_runtime_adapter(sample_definition()).await;
+    handle
+        .spawn_with_options(
+            ProfileName::from("lead"),
+            MeerkatId::from("l-runtime-fail"),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven lead");
+    let baseline_start_turn_calls = service.start_turn_call_count();
+    service.set_fail_start_turn(true);
+
+    let result = handle
+        .send_message(MeerkatId::from("l-runtime-fail"), "turn should fail".into())
+        .await;
+    let debug = format!("{result:?}");
+
+    assert!(
+        matches!(&result, Err(MobError::Internal(message)) if message.contains("mock start_turn failure")),
+        "runtime-backed turn dispatch must surface the underlying turn failure, got: {debug}"
+    );
+    assert_eq!(
+        service.start_turn_call_count(),
+        baseline_start_turn_calls + 1,
+        "runtime-backed dispatch should still attempt exactly one turn"
     );
 }
 

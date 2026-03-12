@@ -91,12 +91,12 @@ async fn write_smoke_config(
 }
 
 // ===========================================================================
-// Scenario 11: CLI run + resume + verify persistence
+// Scenario 26: CLI run + resume + verify persistence
 // ===========================================================================
 
 #[tokio::test]
 #[ignore = "integration-real: live API"]
-async fn e2e_cli_run_resume_persistence() -> Result<(), Box<dyn std::error::Error>> {
+async fn e2e_scenario_26_cli_run_resume_persistence() -> Result<(), Box<dyn std::error::Error>> {
     if skip_if_no_api_prereqs() {
         return Ok(());
     }
@@ -114,7 +114,7 @@ async fn e2e_cli_run_resume_persistence() -> Result<(), Box<dyn std::error::Erro
     tokio::fs::create_dir_all(&data_dir).await?;
 
     let status = Command::new(std::env::current_exe()?)
-        .arg("e2e_cli_run_resume_persistence")
+        .arg("e2e_scenario_26_cli_run_resume_persistence")
         .arg("--ignored")
         .env("RUN_TEST_E2E_SMOKE_11_INNER", "1")
         .env("HOME", temp_dir.path())
@@ -145,9 +145,10 @@ async fn inner_e2e_cli_run_resume_persistence() -> Result<(), Box<dyn std::error
             .args([
                 "run",
                 "My name is RkatBot. Remember my name.",
+                "--tools",
+                "safe",
                 "--output",
                 "json",
-                "--enable-builtins",
             ])
             .output(),
     )
@@ -209,12 +210,13 @@ async fn inner_e2e_cli_run_resume_persistence() -> Result<(), Box<dyn std::error
 }
 
 // ===========================================================================
-// Scenario 12: CLI shell tool
+// Scenario 27: CLI shell + structured output
 // ===========================================================================
 
 #[tokio::test]
 #[ignore = "integration-real: live API"]
-async fn e2e_cli_shell_tool() -> Result<(), Box<dyn std::error::Error>> {
+async fn e2e_scenario_27_cli_shell_and_structured_output() -> Result<(), Box<dyn std::error::Error>>
+{
     if skip_if_no_api_prereqs() {
         return Ok(());
     }
@@ -232,7 +234,7 @@ async fn e2e_cli_shell_tool() -> Result<(), Box<dyn std::error::Error>> {
     tokio::fs::create_dir_all(&data_dir).await?;
 
     let status = Command::new(std::env::current_exe()?)
-        .arg("e2e_cli_shell_tool")
+        .arg("e2e_scenario_27_cli_shell_and_structured_output")
         .arg("--ignored")
         .env("RUN_TEST_E2E_SMOKE_12_INNER", "1")
         .env("HOME", temp_dir.path())
@@ -261,8 +263,8 @@ async fn inner_e2e_cli_shell_tool() -> Result<(), Box<dyn std::error::Error>> {
             .args([
                 "run",
                 "Use the shell to run 'echo SMOKE_OK_42' and tell me the output",
-                "--enable-builtins",
-                "--enable-shell",
+                "--tools",
+                "workspace",
                 "--output",
                 "json",
             ])
@@ -293,16 +295,51 @@ async fn inner_e2e_cli_shell_tool() -> Result<(), Box<dyn std::error::Error>> {
         "Response text should contain 'SMOKE_OK_42', got: {text}"
     );
 
+    let schema =
+        r#"{"type":"object","properties":{"answer":{"type":"integer"}},"required":["answer"]}"#;
+    let structured_output = timeout(
+        Duration::from_secs(120),
+        Command::new(&rkat)
+            .current_dir(&project_dir)
+            .args([
+                "run",
+                "What is 6 times 7? Give just the number.",
+                "--schema",
+                schema,
+                "--output",
+                "json",
+            ])
+            .output(),
+    )
+    .await??;
+
+    assert!(
+        structured_output.status.success(),
+        "rkat structured output run failed (exit {:?}): {}",
+        structured_output.status.code(),
+        String::from_utf8_lossy(&structured_output.stderr)
+    );
+
+    let structured_stdout = String::from_utf8_lossy(&structured_output.stdout);
+    let structured: serde_json::Value =
+        serde_json::from_str(structured_stdout.trim()).map_err(|e| {
+            format!("Failed to parse structured output JSON: {e}\nstdout: {structured_stdout}")
+        })?;
+    assert!(
+        structured["structured_output"]["answer"].is_number(),
+        "structured output should contain a numeric answer, got: {structured}"
+    );
+
     Ok(())
 }
 
 // ===========================================================================
-// Scenario 13: CLI capabilities + config (no API key needed)
+// Scenario 28: CLI capabilities + config
 // ===========================================================================
 
 #[tokio::test]
 #[ignore = "integration-real: spawns rkat binary"]
-async fn e2e_cli_capabilities_and_config() -> Result<(), Box<dyn std::error::Error>> {
+async fn e2e_scenario_28_cli_capabilities_and_config() -> Result<(), Box<dyn std::error::Error>> {
     if skip_if_no_prereqs() {
         return Ok(());
     }
@@ -320,7 +357,7 @@ async fn e2e_cli_capabilities_and_config() -> Result<(), Box<dyn std::error::Err
     tokio::fs::create_dir_all(&data_dir).await?;
 
     let status = Command::new(std::env::current_exe()?)
-        .arg("e2e_cli_capabilities_and_config")
+        .arg("e2e_scenario_28_cli_capabilities_and_config")
         .arg("--ignored")
         .env("RUN_TEST_E2E_SMOKE_13_INNER", "1")
         .env("HOME", temp_dir.path())
@@ -505,7 +542,7 @@ async fn inner_e2e_cli_capabilities_and_config() -> Result<(), Box<dyn std::erro
 }
 
 // ===========================================================================
-// Scenario 14: CLI structured output
+// Supplemental: CLI structured output only
 // ===========================================================================
 
 #[tokio::test]
@@ -560,7 +597,7 @@ async fn inner_e2e_cli_structured_output() -> Result<(), Box<dyn std::error::Err
             .args([
                 "run",
                 "What is 6 times 7? Give just the number.",
-                "--output-schema",
+                "--schema",
                 schema,
                 "--output",
                 "json",

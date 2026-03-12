@@ -5,7 +5,7 @@
 use meerkat_contracts::{
     CapabilitiesResponse, CapabilityEntry, CapabilityStatus, ContractVersion, build_capabilities,
 };
-use meerkat_core::{AgentEvent, Config};
+use meerkat_core::{AgentEvent, Config, PeerMeta};
 
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::mpsc;
@@ -73,6 +73,29 @@ pub fn resolve_host_mode(requested: bool) -> Result<bool, String> {
         }
         Ok(false)
     }
+}
+
+const RESERVED_MOB_PEER_META_LABELS: [&str; 3] = ["mob_id", "role", "meerkat_id"];
+
+/// Reject public `PeerMeta` labels that are reserved for mob-managed sessions.
+///
+/// Mob runtime code stamps these labels internally when provisioning members.
+/// Public protocol surfaces must reject caller-supplied values so ordinary
+/// sessions cannot spoof durable mob ownership markers.
+pub fn validate_public_peer_meta(peer_meta: Option<&PeerMeta>) -> Result<(), String> {
+    let Some(peer_meta) = peer_meta else {
+        return Ok(());
+    };
+
+    for label in RESERVED_MOB_PEER_META_LABELS {
+        if peer_meta.labels.contains_key(label) {
+            return Err(format!(
+                "peer_meta label '{label}' is reserved for mob-managed sessions"
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 /// List all skills with provenance and shadow information.
@@ -292,5 +315,35 @@ pub async fn emit_mcp_lifecycle_events(
                 "[system-notice] MCP server '{target}' removal forced after drain timeout."
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_public_peer_meta_rejects_reserved_labels() {
+        let peer_meta = PeerMeta::default().with_label("mob_id", "team");
+        let result = validate_public_peer_meta(Some(&peer_meta));
+        assert!(
+            result.is_err(),
+            "reserved mob labels must be rejected on public surfaces"
+        );
+        let Err(err) = result else {
+            unreachable!("asserted reserved labels are rejected above");
+        };
+        assert!(err.contains("mob-managed sessions"));
+        assert!(err.contains("mob_id"));
+    }
+
+    #[test]
+    fn validate_public_peer_meta_allows_unreserved_labels() {
+        let peer_meta = PeerMeta::default().with_label("team", "infra");
+        let result = validate_public_peer_meta(Some(&peer_meta));
+        assert!(
+            result.is_ok(),
+            "ordinary peer metadata should stay available"
+        );
     }
 }

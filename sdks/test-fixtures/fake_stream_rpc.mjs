@@ -132,6 +132,40 @@ rl.on("line", (line) => {
     return;
   }
 
+  if (method === "turn/start") {
+    const sessionId = String(params.session_id ?? "");
+    if (sessionId === "late-tail-stream-session") {
+      write({
+        jsonrpc: "2.0",
+        id,
+        result: {
+          session_id: sessionId,
+          text: "late tail final result",
+          turns: 1,
+          tool_calls: 0,
+          usage: {
+            input_tokens: 1,
+            output_tokens: 1,
+          },
+        },
+      });
+      setTimeout(() => {
+        write({
+          jsonrpc: "2.0",
+          method: "turn/event",
+          params: {
+            session_id: sessionId,
+            event: {
+              type: "text_delta",
+              delta: "LATE_TAIL_PUBLIC",
+            },
+          },
+        });
+      }, 20);
+      return;
+    }
+  }
+
   if (method === "session/stream_close") {
     write({
       jsonrpc: "2.0",

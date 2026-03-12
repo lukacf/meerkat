@@ -1,0 +1,445 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tomllib
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SCENARIO_FILE = REPO_ROOT / "tests" / "live_smoke" / "scenarios.toml"
+STATE_FILE = REPO_ROOT / "artifacts" / "live_smoke_last_failures.json"
+
+
+@dataclass
+class Scenario:
+    id: int
+    title: str
+    surface: str
+    kind: str
+    providers: list[str]
+    requires_browser: bool
+    uses_swarm: bool
+    timeout_secs: int
+    required_env: list[str]
+    required_bins: list[str]
+    raw: dict[str, Any]
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run the Meerkat live smoke matrix")
+    parser.add_argument("--list", action="store_true", help="List matching scenarios")
+    parser.add_argument("--dry-run", action="store_true", help="Print commands without running")
+    parser.add_argument(
+        "--surface",
+        action="append",
+        default=[],
+        help="Filter by surface (repeatable or comma-separated)",
+    )
+    parser.add_argument(
+        "--scenario",
+        action="append",
+        default=[],
+        help="Filter by scenario id (repeatable or comma-separated)",
+    )
+    parser.add_argument("--from", dest="from_id", type=int, help="Start scenario id")
+    parser.add_argument("--to", dest="to_id", type=int, help="End scenario id")
+    parser.add_argument(
+        "--providers",
+        default="",
+        help="Comma-separated provider filter (matches any overlap)",
+    )
+    parser.add_argument(
+        "--browser",
+        action="store_true",
+        help="Include browser-required scenarios",
+    )
+    parser.add_argument(
+        "--resume-failed",
+        action="store_true",
+        help="Run only the last failed scenario ids",
+    )
+    parser.add_argument(
+        "--strict-prereqs",
+        action="store_true",
+        help="Treat missing env vars / binaries as failures instead of skips",
+    )
+    return parser.parse_args()
+
+
+def split_csvish(values: list[str]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        for part in value.split(","):
+            part = part.strip()
+            if part:
+                result.append(part)
+    return result
+
+
+def load_registry() -> list[Scenario]:
+    if not SCENARIO_FILE.exists():
+        raise SystemExit(f"missing scenario registry: {SCENARIO_FILE}")
+
+    with SCENARIO_FILE.open("rb") as handle:
+        data = tomllib.load(handle)
+
+    scenarios: list[Scenario] = []
+    for item in data.get("scenario", []):
+        scenarios.append(
+            Scenario(
+                id=int(item["id"]),
+                title=str(item["title"]),
+                surface=str(item["surface"]),
+                kind=str(item["kind"]),
+                providers=[str(p) for p in item.get("providers", [])],
+                requires_browser=bool(item.get("requires_browser", False)),
+                uses_swarm=bool(item.get("uses_swarm", False)),
+                timeout_secs=int(item.get("timeout_secs", 600)),
+                required_env=[str(v) for v in item.get("required_env", [])],
+                required_bins=[str(v) for v in item.get("required_bins", [])],
+                raw=item,
+            )
+        )
+    return sorted(scenarios, key=lambda scenario: scenario.id)
+
+
+def cargo_target_dir() -> Path:
+    override = os.environ.get("CARGO_TARGET_DIR")
+    if override:
+        return Path(override)
+    return REPO_ROOT / "target"
+
+
+def platform_binary_name(bin_name: str) -> str:
+    if os.name == "nt" and not bin_name.endswith(".exe"):
+        return f"{bin_name}.exe"
+    return bin_name
+
+
+def scenario_env(scenario: Scenario) -> dict[str, str]:
+    env = os.environ.copy()
+
+    for key, value in scenario.raw.get("env", {}).items():
+        env[str(key)] = str(value).format(
+            repo_root=REPO_ROOT,
+            cargo_target_dir=cargo_target_dir(),
+        )
+
+    for bin_name in scenario.raw.get("cargo_bin_env", []):
+        env_key = f"CARGO_BIN_EXE_{bin_name}"
+        env[env_key] = str(cargo_target_dir() / "debug" / platform_binary_name(str(bin_name)))
+
+    return env
+
+
+def load_last_failures() -> set[int]:
+    if not STATE_FILE.exists():
+        return set()
+    try:
+        return {int(v) for v in json.loads(STATE_FILE.read_text()).get("failed_ids", [])}
+    except Exception:
+        return set()
+
+
+def save_last_failures(failed_ids: list[int]) -> None:
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    STATE_FILE.write_text(json.dumps({"failed_ids": failed_ids}, indent=2) + "\n")
+
+
+def selected_scenarios(args: argparse.Namespace, scenarios: list[Scenario]) -> list[Scenario]:
+    selected = scenarios
+
+    if args.resume_failed:
+        failed_ids = load_last_failures()
+        selected = [scenario for scenario in selected if scenario.id in failed_ids]
+
+    surfaces = set(split_csvish(args.surface))
+    if surfaces:
+        selected = [scenario for scenario in selected if scenario.surface in surfaces]
+
+    scenario_ids = {int(value) for value in split_csvish(args.scenario)}
+    if scenario_ids:
+        selected = [scenario for scenario in selected if scenario.id in scenario_ids]
+
+    if args.from_id is not None:
+        selected = [scenario for scenario in selected if scenario.id >= args.from_id]
+    if args.to_id is not None:
+        selected = [scenario for scenario in selected if scenario.id <= args.to_id]
+
+    provider_filter = {value.strip() for value in args.providers.split(",") if value.strip()}
+    if provider_filter:
+        selected = [
+            scenario
+            for scenario in selected
+            if provider_filter.intersection(scenario.providers)
+        ]
+
+    if not args.browser:
+        selected = [scenario for scenario in selected if not scenario.requires_browser]
+
+    return selected
+
+
+def scenario_commands(scenario: Scenario) -> tuple[list[list[str]], list[str], Path]:
+    runner = scenario.raw.get("runner")
+    cwd = REPO_ROOT / scenario.raw.get("cwd", ".")
+    pre_commands: list[list[str]] = []
+    if "pre_commands" in scenario.raw:
+        pre_commands = [
+            [str(part) for part in command]
+            for command in scenario.raw["pre_commands"]
+        ]
+    if "pre_command" in scenario.raw:
+        pre_commands.append([str(part) for part in scenario.raw["pre_command"]])
+
+    if "command" in scenario.raw:
+        command = [str(part) for part in scenario.raw["command"]]
+        return pre_commands, command, cwd
+
+    if runner == "cargo":
+        command = ["cargo", "test", "-p", scenario.raw["package"]]
+        if scenario.raw.get("all_features"):
+            command.append("--all-features")
+        features = scenario.raw.get("features", [])
+        if features:
+            command.extend(["--features", ",".join(features)])
+        if "test_target" in scenario.raw:
+            command.extend(["--test", scenario.raw["test_target"]])
+        if "test_name" in scenario.raw:
+            command.append(scenario.raw["test_name"])
+        command.extend(["--", "--ignored", "--nocapture"])
+        return pre_commands, command, cwd
+
+    if runner == "pytest":
+        command = ["python3", "-m", "pytest", scenario.raw["test_file"], "-v"]
+        test_name = scenario.raw.get("test_name")
+        if test_name:
+            command.extend(["-k", test_name])
+        return pre_commands, command, cwd
+
+    if runner == "node":
+        command = ["node", "--test"]
+        test_name = scenario.raw.get("test_name")
+        if test_name:
+            command.extend(["--test-name-pattern", test_name])
+        command.append(scenario.raw["test_file"])
+        return pre_commands, command, cwd
+
+    raise SystemExit(f"unsupported runner for scenario {scenario.id}: {runner}")
+
+
+def prereq_failures(scenario: Scenario) -> list[str]:
+    failures: list[str] = []
+    for env_name in scenario.required_env:
+        if not os.environ.get(env_name):
+            failures.append(f"missing env {env_name}")
+    for binary in scenario.required_bins:
+        if shutil.which(binary) is None:
+            failures.append(f"missing binary {binary}")
+    return failures
+
+
+def print_list(scenarios: list[Scenario]) -> None:
+    for scenario in scenarios:
+        browser = " browser" if scenario.requires_browser else ""
+        swarm = " swarm" if scenario.uses_swarm else ""
+        providers = ",".join(scenario.providers) if scenario.providers else "-"
+        print(
+            f"{scenario.id:02d}  {scenario.surface:14}  {providers:18}  "
+            f"{scenario.title}{browser}{swarm}"
+        )
+
+
+def run_process(
+    command: list[str],
+    cwd: Path,
+    env: dict[str, str],
+    timeout_secs: int,
+) -> tuple[int | None, str, bool]:
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=cwd,
+            env=env,
+            timeout=timeout_secs,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        return completed.returncode, completed.stdout or "", False
+    except subprocess.TimeoutExpired as exc:
+        output = exc.stdout or ""
+        if isinstance(output, bytes):
+            output = output.decode(errors="replace")
+        return None, output, True
+
+
+def analyze_success_output(scenario: Scenario, output: str) -> str | None:
+    runner = scenario.raw.get("runner")
+    lower = output.lower()
+    passed_match = re.search(r"(\d+)\s+passed", lower)
+    passed_count = int(passed_match.group(1)) if passed_match else 0
+
+    if re.search(r"\bskipping(?::| scenario)?\b", lower) and passed_count == 0:
+        return "scenario reported itself as skipped"
+
+    if runner == "cargo":
+        if "running 0 tests" in lower:
+            return "cargo executed 0 tests"
+        summary = re.search(
+            r"test result:\s+\w+\.\s+(\d+)\s+passed;\s+(\d+)\s+failed;\s+(\d+)\s+ignored;",
+            lower,
+        )
+        if not summary:
+            return "cargo output did not include a test summary"
+        if int(summary.group(1)) == 0:
+            return "cargo reported 0 passed tests"
+        return None
+
+    if runner == "pytest":
+        if "no tests ran" in lower:
+            return "pytest executed 0 tests"
+        if " skipped" in lower or " deselected" in lower:
+            return "pytest skipped or deselected the requested scenario"
+        passed = re.search(r"(\d+)\s+passed", lower)
+        if not passed:
+            return "pytest output did not report a passed test"
+        if int(passed.group(1)) == 0:
+            return "pytest reported 0 passed tests"
+        return None
+
+    if runner == "node":
+        if re.search(r"^# tests 0$", lower, re.MULTILINE):
+            return "node executed 0 tests"
+        skipped = re.search(r"^# skipped (\d+)$", lower, re.MULTILINE)
+        if skipped and int(skipped.group(1)) > 0:
+            return "node skipped the requested scenario"
+        passed = re.search(r"^# pass (\d+)$", lower, re.MULTILINE)
+        if not passed:
+            return "node output did not report a passed test"
+        if int(passed.group(1)) == 0:
+            return "node reported 0 passed tests"
+        return None
+
+    return None
+
+
+def main() -> int:
+    args = parse_args()
+    scenarios = selected_scenarios(args, load_registry())
+
+    if args.list or args.dry_run:
+        print_list(scenarios)
+        if args.list:
+            return 0
+
+    if not scenarios:
+        print("No scenarios matched the requested selection.")
+        return 1
+
+    failed_ids: list[int] = []
+    skipped_ids: list[int] = []
+    completed_pre_commands: set[tuple[str, tuple[str, ...]]] = set()
+
+    for scenario in scenarios:
+        prereq_errors = prereq_failures(scenario)
+        if prereq_errors:
+            message = "; ".join(prereq_errors)
+            if args.strict_prereqs:
+                print(f"[FAIL] {scenario.id:02d} {scenario.title}: {message}")
+                failed_ids.append(scenario.id)
+            else:
+                print(f"[SKIP] {scenario.id:02d} {scenario.title}: {message}")
+                skipped_ids.append(scenario.id)
+            continue
+
+        pre_commands, command, cwd = scenario_commands(scenario)
+        env = scenario_env(scenario)
+        print(f"[RUN ] {scenario.id:02d} {scenario.title}")
+        print(f"       cwd={cwd}")
+        for pre_command in pre_commands:
+            print(f"       pre={' '.join(pre_command)}")
+        print(f"       cmd={' '.join(command)}")
+
+        if args.dry_run:
+            continue
+
+        scenario_failed = False
+        for pre_command in pre_commands:
+            if scenario_failed:
+                break
+            pre_key = (str(cwd), tuple(pre_command))
+            if pre_key in completed_pre_commands:
+                continue
+            pre_returncode, pre_output, pre_timed_out = run_process(
+                pre_command,
+                cwd,
+                env,
+                scenario.timeout_secs,
+            )
+            if pre_output:
+                print(pre_output, end="" if pre_output.endswith("\n") else "\n")
+            if pre_timed_out:
+                print(f"[FAIL] {scenario.id:02d} {scenario.title} (pre-command timed out)")
+                failed_ids.append(scenario.id)
+                scenario_failed = True
+            elif pre_returncode != 0:
+                print(
+                    f"[FAIL] {scenario.id:02d} {scenario.title} "
+                    f"(pre-command exit {pre_returncode})"
+                )
+                failed_ids.append(scenario.id)
+                scenario_failed = True
+            else:
+                completed_pre_commands.add(pre_key)
+        if not scenario_failed:
+            returncode, output, timed_out = run_process(
+                command,
+                cwd,
+                env,
+                scenario.timeout_secs,
+            )
+            if output:
+                print(output, end="" if output.endswith("\n") else "\n")
+            if timed_out:
+                print(f"[FAIL] {scenario.id:02d} {scenario.title} (timed out)")
+                failed_ids.append(scenario.id)
+                scenario_failed = True
+            elif returncode != 0:
+                print(
+                    f"[FAIL] {scenario.id:02d} {scenario.title} "
+                    f"(exit {returncode})"
+                )
+                failed_ids.append(scenario.id)
+                scenario_failed = True
+            else:
+                output_problem = analyze_success_output(scenario, output)
+                if output_problem is not None:
+                    print(f"[FAIL] {scenario.id:02d} {scenario.title} ({output_problem})")
+                    failed_ids.append(scenario.id)
+                    scenario_failed = True
+        if not scenario_failed:
+            print(f"[ OK ] {scenario.id:02d} {scenario.title}")
+
+    save_last_failures(failed_ids)
+
+    print(
+        f"\nSummary: {len(scenarios) - len(failed_ids) - len(skipped_ids)} passed, "
+        f"{len(skipped_ids)} skipped, {len(failed_ids)} failed"
+    )
+    return 1 if failed_ids else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

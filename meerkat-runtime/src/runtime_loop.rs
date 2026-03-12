@@ -13,6 +13,7 @@ use meerkat_core::lifecycle::run_primitive::{
 use meerkat_core::lifecycle::{InputId, RunEvent, RunId};
 
 use crate::input::Input;
+use crate::tokio;
 
 /// Extract a prompt string from an `Input`.
 pub(crate) fn input_to_prompt(input: &Input) -> String {
@@ -71,7 +72,6 @@ pub(crate) fn input_to_primitive(input: &Input, input_id: InputId) -> RunPrimiti
 /// Returns a `JoinHandle` that runs until the wake channel closes.
 /// The loop dequeues inputs from the driver, converts them to `RunPrimitive`,
 /// and applies them via the `CoreExecutor`.
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn spawn_runtime_loop(
     driver: crate::session_adapter::SharedDriver,
     mut executor: Box<dyn meerkat_core::lifecycle::CoreExecutor>,
@@ -103,7 +103,6 @@ pub(crate) fn spawn_runtime_loop(
 }
 
 /// Process all queued inputs until the queue is empty.
-#[cfg(not(target_arch = "wasm32"))]
 async fn process_queue(
     driver: &crate::session_adapter::SharedDriver,
     executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
@@ -165,6 +164,22 @@ async fn process_queue(
                             .await
                         {
                             tracing::error!(%run_id, error = %err, "failed to record boundary-applied event");
+                            if let Err(unwind_err) = d
+                                .as_driver_mut()
+                                .on_run_event(RunEvent::RunFailed {
+                                    run_id: run_id.clone(),
+                                    error: format!("boundary commit failed: {err}"),
+                                    recoverable: true,
+                                })
+                                .await
+                            {
+                                tracing::error!(
+                                    %run_id,
+                                    error = %unwind_err,
+                                    "failed to unwind runtime after boundary commit failure"
+                                );
+                            }
+                            drop(d);
                             let _ = executor
                                 .control(meerkat_core::lifecycle::run_control::RunControlCommand::StopRuntimeExecutor {
                                     reason: format!("runtime boundary commit failed for run {run_id}: {err}"),
@@ -183,6 +198,12 @@ async fn process_queue(
                             .await
                         {
                             tracing::error!(error = %err, "failed to record run-completed event");
+                            drop(d);
+                            let _ = executor
+                                .control(meerkat_core::lifecycle::run_control::RunControlCommand::StopRuntimeExecutor {
+                                    reason: format!("runtime terminal snapshot failed after completion: {err}"),
+                                })
+                                .await;
                             break;
                         }
                     }
@@ -198,10 +219,21 @@ async fn process_queue(
                             .await
                         {
                             tracing::error!(error = %err, "failed to record run-failed event");
+                            drop(d);
+                            let _ = executor
+                                .control(meerkat_core::lifecycle::run_control::RunControlCommand::StopRuntimeExecutor {
+                                    reason: format!("runtime failure snapshot failed: {err}"),
+                                })
+                                .await;
                             break;
                         }
-                        // Leave the input queued for a future wake instead of hot-looping
-                        // on the same failing payload indefinitely.
+                        let should_continue = d.take_wake_requested();
+                        drop(d);
+                        if should_continue {
+                            continue;
+                        }
+                        // Leave the failing input queued for a future wake instead of
+                        // hot-looping on the same payload indefinitely.
                         break;
                     }
                 }

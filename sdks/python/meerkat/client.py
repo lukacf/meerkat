@@ -94,6 +94,7 @@ class MeerkatClient:
         self._process: asyncio.subprocess.Process | None = None
         self._request_id = 0
         self._capabilities: list[Capability] | None = None
+        self._methods: set[str] = set()
         self._dispatcher: _StdoutDispatcher | None = None
         self._tool_registry = ToolRegistry()
 
@@ -207,6 +208,7 @@ class MeerkatClient:
                 "VERSION_MISMATCH",
                 f"Server version {server_version} incompatible with SDK {CONTRACT_VERSION}",
             )
+        self._methods = {str(method) for method in result.get("methods", [])}
 
         caps_result = await self._request("capabilities/get", {})
         self._capabilities = [
@@ -459,6 +461,10 @@ class MeerkatClient:
 
     def has_capability(self, capability_id: str) -> bool:
         """Check if a capability is available."""
+        if capability_id == "mob":
+            return bool(
+                {"mob/create", "mob/list", "mob/call"} & self._methods
+            )
         return any(
             c.id == capability_id and c.available
             for c in self.capabilities

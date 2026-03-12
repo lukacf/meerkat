@@ -133,6 +133,7 @@ export class MeerkatClient {
   private process: ChildProcess | null = null;
   private requestId = 0;
   private _capabilities: Capability[] = [];
+  private _methods = new Set<string>();
   private rkatPath: string;
   private pendingRequests = new Map<
     number,
@@ -221,6 +222,11 @@ export class MeerkatClient {
         `Server version ${serverVersion} incompatible with SDK ${CONTRACT_VERSION}`,
       );
     }
+    this._methods = new Set(
+      Array.isArray(initResult.methods)
+        ? initResult.methods.map((method) => String(method))
+        : [],
+    );
 
     // Fetch capabilities
     const capsResult = await this.request("capabilities/get", {});
@@ -406,6 +412,13 @@ export class MeerkatClient {
   }
 
   hasCapability(capabilityId: string): boolean {
+    if (capabilityId === "mob") {
+      return (
+        this._methods.has("mob/create")
+        || this._methods.has("mob/list")
+        || this._methods.has("mob/call")
+      );
+    }
     return this._capabilities.some(
       (c) => c.id === capabilityId && c.status === "Available",
     );

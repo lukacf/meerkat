@@ -88,6 +88,29 @@ impl RuntimeStateMachine {
     pub fn initialize(&mut self) -> Result<(), RuntimeStateTransitionError> {
         self.state.transition(RuntimeState::Idle)
     }
+
+    /// Reset the runtime back to Idle after lifecycle cleanup.
+    ///
+    /// `reset` is allowed to revive a retired runtime so callers can keep
+    /// using the same logical runtime instance after abandoning queued work.
+    pub fn reset_to_idle(&mut self) -> Result<Option<RuntimeState>, RuntimeStateTransitionError> {
+        let from = self.state;
+        match from {
+            RuntimeState::Idle => Ok(None),
+            RuntimeState::Retired => {
+                self.state = RuntimeState::Idle;
+                self.current_run_id = None;
+                Ok(Some(from))
+            }
+            _ => {
+                self.state.transition(RuntimeState::Idle)?;
+                if from == RuntimeState::Running {
+                    self.current_run_id = None;
+                }
+                Ok(Some(from))
+            }
+        }
+    }
 }
 
 impl Default for RuntimeStateMachine {
@@ -187,6 +210,17 @@ mod tests {
         sm.transition(RuntimeState::Retired).unwrap();
         sm.transition(RuntimeState::Stopped).unwrap();
         assert!(sm.state().is_terminal());
+    }
+
+    #[test]
+    fn reset_from_retired_returns_to_idle() {
+        let mut sm = RuntimeStateMachine::new();
+        sm.initialize().unwrap();
+        sm.transition(RuntimeState::Retired).unwrap();
+        let from = sm.reset_to_idle().unwrap();
+        assert_eq!(from, Some(RuntimeState::Retired));
+        assert_eq!(sm.state(), RuntimeState::Idle);
+        assert!(sm.current_run_id().is_none());
     }
 
     #[test]

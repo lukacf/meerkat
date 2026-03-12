@@ -7,9 +7,7 @@ use meerkat_core::service::StartTurnRequest;
 use meerkat_core::service::{SessionError, SessionServiceCommsExt, SessionServiceControlExt};
 use meerkat_core::{InputId, RunId};
 use sha2::{Digest, Sha256};
-#[cfg(not(target_arch = "wasm32"))]
 use std::collections::HashMap;
-#[cfg(not(target_arch = "wasm32"))]
 use std::sync::{Mutex, OnceLock, Weak};
 
 fn build_runtime_receipt(
@@ -33,7 +31,42 @@ fn build_runtime_receipt(
     })
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+fn session_has_persisted_mob_binding(session: &Session, mob_id: &MobId) -> bool {
+    let Some(metadata) = session.session_metadata() else {
+        return false;
+    };
+
+    let Some(comms_name) = metadata.comms_name.as_deref() else {
+        return false;
+    };
+    let mut parts = comms_name.split('/');
+    let Some(name_mob_id) = parts.next().filter(|part| !part.is_empty()) else {
+        return false;
+    };
+    let Some(profile) = parts.next().filter(|part| !part.is_empty()) else {
+        return false;
+    };
+    let Some(meerkat_id) = parts.next().filter(|part| !part.is_empty()) else {
+        return false;
+    };
+    if parts.next().is_some() {
+        return false;
+    }
+    if name_mob_id != mob_id.as_str() {
+        return false;
+    }
+    if metadata.realm_id.as_deref() != Some(&format!("mob:{mob_id}")) {
+        return false;
+    }
+
+    let Some(peer_meta) = metadata.peer_meta.as_ref() else {
+        return false;
+    };
+    peer_meta.labels.get("mob_id").map(String::as_str) == Some(mob_id.as_str())
+        && peer_meta.labels.get("role").map(String::as_str) == Some(profile)
+        && peer_meta.labels.get("meerkat_id").map(String::as_str) == Some(meerkat_id)
+}
+
 fn ephemeral_runtime_adapter_cache()
 -> &'static Mutex<HashMap<usize, Weak<meerkat_runtime::RuntimeSessionAdapter>>> {
     static CACHE: OnceLock<Mutex<HashMap<usize, Weak<meerkat_runtime::RuntimeSessionAdapter>>>> =
@@ -41,7 +74,6 @@ fn ephemeral_runtime_adapter_cache()
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn persistent_runtime_adapter_cache()
 -> &'static Mutex<HashMap<usize, Weak<meerkat_runtime::RuntimeSessionAdapter>>> {
     static CACHE: OnceLock<Mutex<HashMap<usize, Weak<meerkat_runtime::RuntimeSessionAdapter>>>> =
@@ -49,7 +81,6 @@ fn persistent_runtime_adapter_cache()
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn cached_runtime_adapter(
     cache: &'static Mutex<HashMap<usize, Weak<meerkat_runtime::RuntimeSessionAdapter>>>,
     key: usize,
@@ -152,19 +183,12 @@ where
     }
 
     fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::RuntimeSessionAdapter>> {
-        #[cfg(target_arch = "wasm32")]
-        {
-            None
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let key = std::ptr::from_ref(self) as usize;
-            Some(cached_runtime_adapter(
-                ephemeral_runtime_adapter_cache(),
-                key,
-                || Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
-            ))
-        }
+        let key = std::ptr::from_ref(self) as usize;
+        Some(cached_runtime_adapter(
+            ephemeral_runtime_adapter_cache(),
+            key,
+            || Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
+        ))
     }
 
     async fn subscribe_session_events(
@@ -253,12 +277,7 @@ where
             .await
             .ok()
             .flatten()
-            .and_then(|session| {
-                session
-                    .session_metadata()
-                    .and_then(|metadata| metadata.comms_name)
-            })
-            .is_some_and(|name| name.starts_with(&format!("{_mob_id}/")))
+            .is_some_and(|session| session_has_persisted_mob_binding(&session, _mob_id))
     }
 
     async fn load_persisted_session(

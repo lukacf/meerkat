@@ -38,7 +38,7 @@ uuid = { workspace = true }
 clap = { workspace = true }
 
 [features]
-default = []
+default = ["comms", "mcp", "mob", "sub-agents"]
 comms = ["meerkat/comms"]
 mcp = ["meerkat/mcp"]
 mob = ["dep:meerkat-mob", "dep:meerkat-mob-mcp"]

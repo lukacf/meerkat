@@ -383,8 +383,8 @@ impl MethodRouter {
         Ok(())
     }
 
-    #[cfg(all(test, feature = "mob"))]
-    fn new_with_mob_state(
+    #[cfg(feature = "mob")]
+    pub fn new_with_mob_state(
         runtime: Arc<SessionRuntime>,
         config_store: Arc<dyn ConfigStore>,
         notification_sink: NotificationSink,
@@ -438,7 +438,8 @@ impl MethodRouter {
             return Some(SessionOwner::Mob);
         }
 
-        if self.runtime.session_state(session_id).await.is_some()
+        if self.runtime.pending_session_exists(session_id).await
+            || self.runtime.session_state(session_id).await.is_some()
             || self.runtime.read_session(session_id).await.is_ok()
             || self
                 .runtime
@@ -1789,6 +1790,14 @@ mod tests {
         (router, notif_rx)
     }
 
+    async fn test_router_with_v9_runtime() -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
+        let (router, notif_rx) = test_router().await;
+        let runtime_adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::persistent(
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+        ));
+        (router.with_runtime_adapter(runtime_adapter), notif_rx)
+    }
+
     async fn test_router_with_llm(
         llm_client: Arc<dyn LlmClient>,
     ) -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
@@ -1980,6 +1989,14 @@ mod tests {
     /// Extract the error code from an error response.
     fn error_code(resp: &RpcResponse) -> i32 {
         resp.error.as_ref().expect("Expected error response").code
+    }
+
+    fn error_message(resp: &RpcResponse) -> String {
+        resp.error
+            .as_ref()
+            .expect("Expected error response")
+            .message
+            .clone()
     }
 
     async fn drain_notifications(notif_rx: &mut mpsc::Receiver<RpcNotification>) {
@@ -3492,6 +3509,93 @@ mod tests {
 
         let resp = router.dispatch(req).await.unwrap();
         assert_eq!(error_code(&resp), error::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn session_create_rejects_reserved_mob_peer_meta_labels() {
+        let (router, _notif_rx) = test_router().await;
+        let req = make_request(
+            "session/create",
+            serde_json::json!({
+                "prompt": "hello",
+                "peer_meta": {
+                    "labels": {
+                        "mob_id": "team"
+                    }
+                }
+            }),
+        );
+
+        let resp = router.dispatch(req).await.unwrap();
+        assert_eq!(error_code(&resp), error::INVALID_PARAMS);
+        assert!(
+            error_message(&resp).contains("mob-managed sessions"),
+            "reserved mob label rejection should explain the trust boundary"
+        );
+    }
+
+    #[tokio::test]
+    async fn deferred_session_runtime_endpoints_register_pending_session() {
+        let (router, _notif_rx) = test_router_with_v9_runtime().await;
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "deferred",
+                    "initial_turn": "deferred"
+                }),
+            ))
+            .await
+            .unwrap();
+        let created = result_value(&create_resp);
+        let session_id = created["session_id"]
+            .as_str()
+            .expect("session_id")
+            .to_string();
+
+        let state_resp = router
+            .dispatch(make_request(
+                "runtime/state",
+                serde_json::json!({ "session_id": session_id }),
+            ))
+            .await
+            .unwrap();
+        let state = result_value(&state_resp);
+        assert_eq!(
+            state["state"].as_str(),
+            Some("idle"),
+            "deferred sessions should be routable through runtime/state before their first turn"
+        );
+
+        let accept_resp = router
+            .dispatch(make_request(
+                "runtime/accept",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "input": {
+                        "input_type": "prompt",
+                        "header": {
+                            "id": meerkat_core::InputId::new(),
+                            "timestamp": "2026-03-12T00:00:00Z",
+                            "source": { "type": "operator" },
+                            "durability": "durable",
+                            "visibility": {
+                                "transcript_eligible": true,
+                                "operator_eligible": true
+                            }
+                        },
+                        "text": "drive via runtime"
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let accepted = result_value(&accept_resp);
+        assert_eq!(
+            accepted["outcome_type"].as_str(),
+            Some("accepted"),
+            "deferred sessions should also be routable through runtime/accept before their first turn"
+        );
     }
 
     /// 5. `session/list` returns the list of sessions after creating one.

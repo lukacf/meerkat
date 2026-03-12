@@ -29,7 +29,8 @@
     "build": "npm run build:wasm && npm run build:ts",
     "prepublishOnly": "npm run build",
     "test": "tsc --noEmit -p tests/tsconfig.json",
-    "test:e2e": "npm run build && node --test tests/e2e_wasm_runtime.test.mjs"
+    "test:e2e": "npm run build && node --test tests/e2e_wasm_runtime.test.mjs",
+    "test:live-smoke": "npm run build && node --test tests/live_smoke.test.mjs"
   },
   "license": "MIT OR Apache-2.0",
   "devDependencies": {

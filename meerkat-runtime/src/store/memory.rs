@@ -175,6 +175,14 @@ impl RuntimeStore for InMemoryRuntimeStore {
         Ok(inner.receipts.get(&key).cloned())
     }
 
+    async fn load_session_snapshot(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
+        let inner = self.inner.lock().await;
+        Ok(inner.sessions.get(&runtime_id.0).cloned())
+    }
+
     async fn persist_input_state(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -388,5 +396,27 @@ mod tests {
         let s2 = store.load_input_states(&rid2).await.unwrap();
         assert_eq!(s1.len(), 1);
         assert_eq!(s2.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn load_session_snapshot_roundtrip() {
+        let store = InMemoryRuntimeStore::new();
+        let rid = LogicalRuntimeId::new("runtime");
+        let snapshot = serde_json::to_vec(&meerkat_core::Session::new()).unwrap();
+
+        store
+            .atomic_apply(
+                &rid,
+                Some(SessionDelta {
+                    session_snapshot: snapshot.clone(),
+                }),
+                make_receipt(RunId::new(), 0),
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        let loaded = store.load_session_snapshot(&rid).await.unwrap();
+        assert_eq!(loaded, Some(snapshot));
     }
 }

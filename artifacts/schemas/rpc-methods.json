@@ -17,6 +17,10 @@
       "name": "session/read"
     },
     {
+      "description": "Get full session history",
+      "name": "session/history"
+    },
+    {
       "description": "Remove session",
       "name": "session/archive"
     },

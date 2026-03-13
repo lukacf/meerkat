@@ -109,6 +109,775 @@
     "title": "McpLiveOperation",
     "type": "string"
   },
+  "WireAssistantBlock": {
+    "$defs": {
+      "WireProviderMeta": {
+        "description": "Provider continuity metadata for transcript blocks.",
+        "oneOf": [
+          {
+            "properties": {
+              "provider": {
+                "const": "anthropic",
+                "type": "string"
+              },
+              "signature": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "signature"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "type": "string"
+              },
+              "provider": {
+                "const": "anthropic_redacted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "provider": {
+                "const": "anthropic_compaction",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "content"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "provider": {
+                "const": "gemini",
+                "type": "string"
+              },
+              "thoughtSignature": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "thoughtSignature"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "encrypted_content": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "provider": {
+                "const": "open_ai",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "provider": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Transcript block inside a block-assistant message.",
+    "oneOf": [
+      {
+        "properties": {
+          "block_type": {
+            "const": "text",
+            "type": "string"
+          },
+          "data": {
+            "properties": {
+              "meta": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireProviderMeta"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "text"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "block_type",
+          "data"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "block_type": {
+            "const": "reasoning",
+            "type": "string"
+          },
+          "data": {
+            "properties": {
+              "meta": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireProviderMeta"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "text": {
+                "default": "",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "block_type",
+          "data"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "block_type": {
+            "const": "tool_use",
+            "type": "string"
+          },
+          "data": {
+            "properties": {
+              "args": true,
+              "id": {
+                "type": "string"
+              },
+              "meta": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireProviderMeta"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "args"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "block_type",
+          "data"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "block_type": {
+            "const": "unknown",
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_type"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireAssistantBlock"
+  },
+  "WireProviderMeta": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Provider continuity metadata for transcript blocks.",
+    "oneOf": [
+      {
+        "properties": {
+          "provider": {
+            "const": "anthropic",
+            "type": "string"
+          },
+          "signature": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "signature"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "data": {
+            "type": "string"
+          },
+          "provider": {
+            "const": "anthropic_redacted",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "data"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "provider": {
+            "const": "anthropic_compaction",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "content"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "provider": {
+            "const": "gemini",
+            "type": "string"
+          },
+          "thoughtSignature": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "thoughtSignature"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "encrypted_content": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "provider": {
+            "const": "open_ai",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "id"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "provider": {
+            "const": "unknown",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireProviderMeta"
+  },
+  "WireSessionHistory": {
+    "$defs": {
+      "WireAssistantBlock": {
+        "description": "Transcript block inside a block-assistant message.",
+        "oneOf": [
+          {
+            "properties": {
+              "block_type": {
+                "const": "text",
+                "type": "string"
+              },
+              "data": {
+                "properties": {
+                  "meta": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/WireProviderMeta"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "text"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "block_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "block_type": {
+                "const": "reasoning",
+                "type": "string"
+              },
+              "data": {
+                "properties": {
+                  "meta": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/WireProviderMeta"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "text": {
+                    "default": "",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "block_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "block_type": {
+                "const": "tool_use",
+                "type": "string"
+              },
+              "data": {
+                "properties": {
+                  "args": true,
+                  "id": {
+                    "type": "string"
+                  },
+                  "meta": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/WireProviderMeta"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "name",
+                  "args"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "block_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "block_type": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "block_type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireProviderMeta": {
+        "description": "Provider continuity metadata for transcript blocks.",
+        "oneOf": [
+          {
+            "properties": {
+              "provider": {
+                "const": "anthropic",
+                "type": "string"
+              },
+              "signature": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "signature"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "type": "string"
+              },
+              "provider": {
+                "const": "anthropic_redacted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "provider": {
+                "const": "anthropic_compaction",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "content"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "provider": {
+                "const": "gemini",
+                "type": "string"
+              },
+              "thoughtSignature": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "thoughtSignature"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "encrypted_content": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "provider": {
+                "const": "open_ai",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "provider": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireSessionMessage": {
+        "description": "Canonical transcript message for public wire surfaces.",
+        "oneOf": [
+          {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "role": {
+                "const": "system",
+                "type": "string"
+              }
+            },
+            "required": [
+              "role",
+              "content"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "role": {
+                "const": "user",
+                "type": "string"
+              }
+            },
+            "required": [
+              "role",
+              "content"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "role": {
+                "const": "assistant",
+                "type": "string"
+              },
+              "stop_reason": {
+                "$ref": "#/$defs/WireStopReason"
+              },
+              "tool_calls": {
+                "items": {
+                  "$ref": "#/$defs/WireToolCall"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "role",
+              "content",
+              "stop_reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "blocks": {
+                "items": {
+                  "$ref": "#/$defs/WireAssistantBlock"
+                },
+                "type": "array"
+              },
+              "role": {
+                "const": "block_assistant",
+                "type": "string"
+              },
+              "stop_reason": {
+                "$ref": "#/$defs/WireStopReason"
+              }
+            },
+            "required": [
+              "role",
+              "blocks",
+              "stop_reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "results": {
+                "items": {
+                  "$ref": "#/$defs/WireToolResult"
+                },
+                "type": "array"
+              },
+              "role": {
+                "const": "tool_results",
+                "type": "string"
+              }
+            },
+            "required": [
+              "role",
+              "results"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireStopReason": {
+        "description": "Canonical stop reason for transcript messages.",
+        "enum": [
+          "end_turn",
+          "tool_use",
+          "max_tokens",
+          "stop_sequence",
+          "content_filter",
+          "cancelled"
+        ],
+        "type": "string"
+      },
+      "WireToolCall": {
+        "description": "Legacy assistant tool call payload.",
+        "properties": {
+          "args": true,
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "args"
+        ],
+        "type": "object"
+      },
+      "WireToolResult": {
+        "description": "Tool result payload in a transcript.",
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "is_error": {
+            "default": false,
+            "type": "boolean"
+          },
+          "tool_use_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool_use_id",
+          "content"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Full session history in canonical wire format.",
+    "properties": {
+      "has_more": {
+        "type": "boolean"
+      },
+      "limit": {
+        "format": "uint",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "message_count": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "messages": {
+        "items": {
+          "$ref": "#/$defs/WireSessionMessage"
+        },
+        "type": "array"
+      },
+      "offset": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "session_id": {
+        "type": "string"
+      },
+      "session_ref": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "session_id",
+      "message_count",
+      "offset",
+      "has_more",
+      "messages"
+    ],
+    "title": "WireSessionHistory",
+    "type": "object"
+  },
   "WireSessionInfo": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Canonical session info for wire protocol.",
@@ -163,6 +932,391 @@
     "title": "WireSessionInfo",
     "type": "object"
   },
+  "WireSessionMessage": {
+    "$defs": {
+      "WireAssistantBlock": {
+        "description": "Transcript block inside a block-assistant message.",
+        "oneOf": [
+          {
+            "properties": {
+              "block_type": {
+                "const": "text",
+                "type": "string"
+              },
+              "data": {
+                "properties": {
+                  "meta": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/WireProviderMeta"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "text"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "block_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "block_type": {
+                "const": "reasoning",
+                "type": "string"
+              },
+              "data": {
+                "properties": {
+                  "meta": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/WireProviderMeta"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "text": {
+                    "default": "",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "block_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "block_type": {
+                "const": "tool_use",
+                "type": "string"
+              },
+              "data": {
+                "properties": {
+                  "args": true,
+                  "id": {
+                    "type": "string"
+                  },
+                  "meta": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/WireProviderMeta"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "name",
+                  "args"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "block_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "block_type": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "block_type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireProviderMeta": {
+        "description": "Provider continuity metadata for transcript blocks.",
+        "oneOf": [
+          {
+            "properties": {
+              "provider": {
+                "const": "anthropic",
+                "type": "string"
+              },
+              "signature": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "signature"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "type": "string"
+              },
+              "provider": {
+                "const": "anthropic_redacted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "provider": {
+                "const": "anthropic_compaction",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "content"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "provider": {
+                "const": "gemini",
+                "type": "string"
+              },
+              "thoughtSignature": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "thoughtSignature"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "encrypted_content": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "provider": {
+                "const": "open_ai",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "provider": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireStopReason": {
+        "description": "Canonical stop reason for transcript messages.",
+        "enum": [
+          "end_turn",
+          "tool_use",
+          "max_tokens",
+          "stop_sequence",
+          "content_filter",
+          "cancelled"
+        ],
+        "type": "string"
+      },
+      "WireToolCall": {
+        "description": "Legacy assistant tool call payload.",
+        "properties": {
+          "args": true,
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "args"
+        ],
+        "type": "object"
+      },
+      "WireToolResult": {
+        "description": "Tool result payload in a transcript.",
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "is_error": {
+            "default": false,
+            "type": "boolean"
+          },
+          "tool_use_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool_use_id",
+          "content"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Canonical transcript message for public wire surfaces.",
+    "oneOf": [
+      {
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "role": {
+            "const": "system",
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "content"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "role": {
+            "const": "user",
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "content"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "role": {
+            "const": "assistant",
+            "type": "string"
+          },
+          "stop_reason": {
+            "$ref": "#/$defs/WireStopReason"
+          },
+          "tool_calls": {
+            "items": {
+              "$ref": "#/$defs/WireToolCall"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "role",
+          "content",
+          "stop_reason"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "blocks": {
+            "items": {
+              "$ref": "#/$defs/WireAssistantBlock"
+            },
+            "type": "array"
+          },
+          "role": {
+            "const": "block_assistant",
+            "type": "string"
+          },
+          "stop_reason": {
+            "$ref": "#/$defs/WireStopReason"
+          }
+        },
+        "required": [
+          "role",
+          "blocks",
+          "stop_reason"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "results": {
+            "items": {
+              "$ref": "#/$defs/WireToolResult"
+            },
+            "type": "array"
+          },
+          "role": {
+            "const": "tool_results",
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "results"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireSessionMessage"
+  },
   "WireSessionSummary": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Canonical session summary for wire protocol.",
@@ -215,6 +1369,62 @@
       "is_active"
     ],
     "title": "WireSessionSummary",
+    "type": "object"
+  },
+  "WireStopReason": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Canonical stop reason for transcript messages.",
+    "enum": [
+      "end_turn",
+      "tool_use",
+      "max_tokens",
+      "stop_sequence",
+      "content_filter",
+      "cancelled"
+    ],
+    "title": "WireStopReason",
+    "type": "string"
+  },
+  "WireToolCall": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Legacy assistant tool call payload.",
+    "properties": {
+      "args": true,
+      "id": {
+        "type": "string"
+      },
+      "name": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "id",
+      "name",
+      "args"
+    ],
+    "title": "WireToolCall",
+    "type": "object"
+  },
+  "WireToolResult": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Tool result payload in a transcript.",
+    "properties": {
+      "content": {
+        "type": "string"
+      },
+      "is_error": {
+        "default": false,
+        "type": "boolean"
+      },
+      "tool_use_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "tool_use_id",
+      "content"
+    ],
+    "title": "WireToolResult",
     "type": "object"
   },
   "WireUsage": {

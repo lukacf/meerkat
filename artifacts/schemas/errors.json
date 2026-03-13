@@ -70,7 +70,8 @@
       "SKILL_NOT_FOUND",
       "SKILL_RESOLUTION_FAILED",
       "INVALID_PARAMS",
-      "INTERNAL_ERROR"
+      "INTERNAL_ERROR",
+      "DUPLICATE_INPUT"
     ],
     "title": "ErrorCode",
     "type": "string"
@@ -141,7 +142,8 @@
           "SKILL_NOT_FOUND",
           "SKILL_RESOLUTION_FAILED",
           "INVALID_PARAMS",
-          "INTERNAL_ERROR"
+          "INTERNAL_ERROR",
+          "DUPLICATE_INPUT"
         ],
         "type": "string"
       }

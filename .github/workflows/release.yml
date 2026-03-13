@@ -226,7 +226,7 @@ jobs:
     if: >-
       startsWith(github.ref, 'refs/tags/v') ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release_packages == 'true')
-    needs: [release_validate, build_binaries]
+    needs: [release_validate]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -267,6 +267,7 @@ jobs:
             meerkat-client
             meerkat-store
             meerkat-tools
+            meerkat-runtime
             meerkat-session
             meerkat-memory
             meerkat-mcp

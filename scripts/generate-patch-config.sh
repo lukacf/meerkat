@@ -18,6 +18,7 @@ ENTRIES=(
   "meerkat-client=${ROOT}/meerkat-client"
   "meerkat-store=${ROOT}/meerkat-store"
   "meerkat-tools=${ROOT}/meerkat-tools"
+  "meerkat-runtime=${ROOT}/meerkat-runtime"
   "meerkat-session=${ROOT}/meerkat-session"
   "meerkat-memory=${ROOT}/meerkat-memory"
   "meerkat-mcp=${ROOT}/meerkat-mcp"

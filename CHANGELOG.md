@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+#### `meerkat-runtime` — Canonical Lifecycle Runtime (#140)
+- New `meerkat-runtime` crate implementing the v9 Canonical Lifecycle and Execution Specification with a strict 3-layer model: Core (run primitives), Runtime (input lifecycle), and Surfaces (protocol adapters).
+- 6 input type variants with `InputHeader`, `InputOrigin`, `PeerConvention`.
+- `InputState` lifecycle: 9 states with validated transition table (`AppliedPendingConsumption` → `Queued` explicitly rejected).
+- Policy engine: `DefaultPolicyTable` with `ApplyMode`, `WakeMode`, `QueueMode`, `ConsumePoint`, and `record_transcript`.
+- `RuntimeState`: 7 states with strict transition table.
+- Durability validation: derived forbidden for required input types.
+- Coalescing/supersession: scope-based, cross-kind forbidden.
+- `EphemeralRuntimeDriver` and `PersistentRuntimeDriver` (durable-before-ack via `RuntimeStore`).
+- `InMemoryRuntimeStore` and `RedbRuntimeStore` backends.
+- `SqliteRuntimeStore` — SQLite backend for runtime state persistence.
+- `CommsInputBridge`: `InboxInteraction` → `PeerInput` conversion.
+- `SessionServiceRuntimeExt` + `RuntimeSessionAdapter`: per-session driver registry.
+- `MobRuntimeAdapter`: flow step delivery, member registration.
+- Core lifecycle primitives in `meerkat-core/src/lifecycle/`: `RunPrimitive`, `RunEvent`, `RunBoundaryReceipt`, `RunControlCommand`, `CoreExecutor` trait, `RunId`/`InputId` newtypes.
+- 222+ tests across the crate.
+
+#### JSON-RPC Parity — 9 Wire-Feasible Gaps Closed (#138)
+- **Deferred session creation**: `session/create` with `initial_turn: false` returns session ID without running a turn. `DeferredSession` class in Python and TypeScript SDKs.
+- **Per-turn overrides**: `model`, `provider`, `max_tokens` overrides on `turn/start` for pending sessions.
+- **Rich session responses**: `session/list` returns `WireSessionSummary` (timestamps, message counts, token totals) with pagination (`limit`/`offset`). `session/read` returns `WireSessionInfo` (timestamps, message counts, last assistant text).
+- **Batch mob spawning**: `mob/spawn_many` with per-spec error reporting.
+- **Scoped event streaming**: `scope_id`/`scope_path` preserved on `session/stream_event` notifications for sub-agent/flow scope forwarding.
+- **Persistent session recovery**: `turn/start` recovers persisted sessions after runtime restart, mirroring the REST recovery path. Archived sessions are rejected.
+- **Callback tool protocol**: bidirectional JSON-RPC request/response for SDK-provided tool implementations. `ToolCallbackHandler` helpers in Python and TypeScript SDKs.
+- 6 new RPC handler methods with legacy-mode guard.
+
+#### Session History Across Surfaces (#142)
+- Public session history (message listing) exposed on all surfaces: CLI `session history`, REST `GET /sessions/{id}/history`, RPC `session/history`, MCP `meerkat_session_history`.
+- `SessionService` trait extended with history read capability.
+- Wire types (`WireSessionHistory`, `WireSessionMessage`) added to `meerkat-contracts`.
+- SDK codegen updated for Python and TypeScript.
+
+#### SQLite Persistent Realm Backend (#143)
+- `SqliteSessionStore` in `meerkat-store` — SQLite-backed session persistence for realm backends.
+- SQLite is now the default persistent realm backend.
+- Backend-owned persistence bundle pattern: realm backends own their persistence infrastructure rather than having it constructed externally.
+
+### Changed
+
+- **Persistence architecture** — persistence bundles are now opened from realm backends rather than assembled externally. Surfaces (CLI, REST, RPC) use the new bundle pattern for cleaner resource lifecycle.
+- **Documentation** — refreshed persistence and session history docs across API reference, concepts, SDK guides, and architecture pages.
+
+### Fixed
+
+- **Host loop comms continuation** — idle host loop now triggers a continuation run when terminal comms responses (`Completed`/`Failed`) are delivered, instead of leaving agents unresponsive until the next external message. Scoped narrowly to terminal responses only; `Accepted` does not wake the host. Emits `RunStarted` before the continuation for correct stream lifecycle (#139).
+- **Archived session recovery** — RPC and REST runtime recovery now rejects archived sessions instead of attempting to reconstruct them, preventing stale session resurrection.
+- **Persistence helper panic** — avoided panic in persistence helper on unexpected backend state.
+- **MCP tools schema test counts** — corrected test assertions after schema changes.
+- **SQLite store clippy** — fixed clippy style issues in new sqlite stores.
+
+## [0.4.6] - 2026-03-10
+
 ### Changed
 
 - **Clean-cut comms/observability split** — removed mixed public interaction-stream APIs across Rust SDK, CLI, REST, RPC, MCP, WASM, and both Python/TypeScript SDKs. Public comms now exposes delivery (`inject`, `send_message`, `comms/send`) and explicit observation surfaces separately; interaction-scoped comms stream helpers remain runtime-internal only.
@@ -527,7 +582,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.4.6...HEAD
+[0.4.6]: https://github.com/lukacf/meerkat/compare/v0.4.5...v0.4.6
+[0.4.5]: https://github.com/lukacf/meerkat/compare/v0.4.4...v0.4.5
+[0.4.4]: https://github.com/lukacf/meerkat/compare/v0.4.2...v0.4.4
+[0.4.2]: https://github.com/lukacf/meerkat/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/lukacf/meerkat/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/lukacf/meerkat/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/lukacf/meerkat/compare/v0.2.0...v0.3.0

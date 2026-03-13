@@ -2,7 +2,7 @@
 # Pin the Rust version for consistent builds across machines and CI
 
 [toolchain]
-channel = "1.93.1"
+channel = "1.94.0"
 
 components = [
     "rustfmt",

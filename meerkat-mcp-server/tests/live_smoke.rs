@@ -37,7 +37,7 @@ fn mcp_bootstrap(root: &Path, instance_id: &str) -> RuntimeBootstrap {
                 realm_id: MCP_REALM_ID.to_string(),
             },
             instance_id: Some(instance_id.to_string()),
-            backend_hint: Some("redb".to_string()),
+            backend_hint: None,
             state_root: Some(root.join("realms")),
         },
         context: ContextConfig {
@@ -62,8 +62,6 @@ fn stdio_server_config(root: &Path, instance_id: &str) -> McpServerConfig {
             MCP_REALM_ID.to_string(),
             "--instance".to_string(),
             instance_id.to_string(),
-            "--realm-backend".to_string(),
-            "redb".to_string(),
             "--state-root".to_string(),
             root.join("realms").display().to_string(),
             "--context-root".to_string(),

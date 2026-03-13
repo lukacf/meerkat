@@ -46,7 +46,7 @@ fn rest_bootstrap(root: &std::path::Path, instance_id: &str) -> RuntimeBootstrap
                 realm_id: REST_REALM_ID.to_string(),
             },
             instance_id: Some(instance_id.to_string()),
-            backend_hint: Some("redb".to_string()),
+            backend_hint: None,
             state_root: Some(root.join("realms")),
         },
         context: ContextConfig {
@@ -341,7 +341,7 @@ async fn e2e_scenario_21_rest_runtime_accept_input_roundtrip() {
 
 #[tokio::test]
 #[ignore = "integration-real: runtime control plane"]
-async fn e2e_scenario_22_rest_runtime_reset_and_retire_abandon_staged_inputs() {
+async fn e2e_scenario_22_rest_runtime_reset_and_retire_drain_staged_inputs() {
     let Some(client) = live_client() else {
         eprintln!("Skipping scenario 22: missing ANTHROPIC_API_KEY");
         return;
@@ -405,7 +405,9 @@ async fn e2e_scenario_22_rest_runtime_reset_and_retire_abandon_staged_inputs() {
         &app,
         Method::POST,
         format!("/runtime/{retire_session_id}/accept"),
-        Some(durable_peer_progress_input("rest-retire-22")),
+        Some(durable_prompt_input(
+            "Remember rest-retire-22 and apply it before retirement completes.",
+        )),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -419,17 +421,17 @@ async fn e2e_scenario_22_rest_runtime_reset_and_retire_abandon_staged_inputs() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(
+    assert_eq!(
         retire_payload["inputs_abandoned"]
             .as_u64()
-            .unwrap_or_default()
-            >= 1,
-        "retire should abandon staged runtime work"
+            .unwrap_or_default(),
+        0,
+        "retire should stop new accepts but drain already-accepted work"
     );
 
-    let abandoned =
-        wait_for_input_state(&app, &retire_session_id, retire_input_id, &["abandoned"]).await;
-    assert_eq!(abandoned["current_state"], "abandoned");
+    let consumed =
+        wait_for_input_state(&app, &retire_session_id, retire_input_id, &["consumed"]).await;
+    assert_eq!(consumed["current_state"], "consumed");
 
     let (status, runtime_state) = request_json(
         &app,
@@ -441,6 +443,22 @@ async fn e2e_scenario_22_rest_runtime_reset_and_retire_abandon_staged_inputs() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(runtime_state["state"], "retired");
 
+    let (status, rejected) = request_json(
+        &app,
+        Method::POST,
+        format!("/runtime/{retire_session_id}/accept"),
+        Some(durable_prompt_input(
+            "This should be rejected while retired.",
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        rejected["outcome_type"].as_str(),
+        Some("rejected"),
+        "retired runtimes should reject fresh work"
+    );
+
     let (status, reset_payload) = request_json(
         &app,
         Method::POST,
@@ -449,12 +467,12 @@ async fn e2e_scenario_22_rest_runtime_reset_and_retire_abandon_staged_inputs() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(
+    assert_eq!(
         reset_payload["inputs_abandoned"]
             .as_u64()
-            .unwrap_or_default()
-            <= 1,
-        "reset after retire should be idempotent over already-abandoned work"
+            .unwrap_or_default(),
+        0,
+        "reset after a drained retire should not need to abandon already-finished work"
     );
 
     let (status, runtime_state) = request_json(

@@ -132,7 +132,7 @@ runner = "cargo"
 package = "meerkat-rest"
 features = ["integration-real-tests"]
 test_target = "live_smoke_matrix"
-test_name = "e2e_scenario_22_rest_runtime_reset_and_retire_abandon_staged_inputs"
+test_name = "e2e_scenario_22_rest_runtime_reset_and_retire_drain_staged_inputs"
 
 [[scenario]]
 id = 23

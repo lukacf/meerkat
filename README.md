@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Rust-1.89+-orange?logo=rust" alt="Rust 1.89+">
+  <img src="https://img.shields.io/badge/Rust-1.94+-orange?logo=rust" alt="Rust 1.89+">
   <img src="https://img.shields.io/badge/License-MIT%2FApache--2.0-blue" alt="License">
 </p>
 

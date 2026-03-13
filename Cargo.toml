@@ -27,7 +27,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.7"
+version = "0.4.8"
 edition = "2024"
 rust-version = "1.94.0"
 license = "MIT OR Apache-2.0"
@@ -107,26 +107,26 @@ subtle = "2.6"
 tempfile = "3.14"
 
 # Internal crates
-meerkat-core = { version = "0.4.7", path = "meerkat-core" }
-meerkat-client = { version = "0.4.7", path = "meerkat-client", default-features = false }
-meerkat-store = { version = "0.4.7", path = "meerkat-store", default-features = false }
-meerkat-tools = { version = "0.4.7", path = "meerkat-tools", default-features = false }
-meerkat-mcp = { version = "0.4.7", path = "meerkat-mcp" }
-meerkat-mcp-server = { version = "0.4.7", path = "meerkat-mcp-server" }
-meerkat-cli = { version = "0.4.7", path = "meerkat-cli" }
-meerkat-rest = { version = "0.4.7", path = "meerkat-rest" }
-meerkat = { version = "0.4.7", path = "meerkat", default-features = false }
-meerkat-comms = { version = "0.4.7", path = "meerkat-comms" }
-meerkat-hooks = { version = "0.4.7", path = "meerkat-hooks" }
-meerkat-rpc = { version = "0.4.7", path = "meerkat-rpc" }
-meerkat-runtime = { version = "0.4.7", path = "meerkat-runtime", default-features = false }
-meerkat-session = { version = "0.4.7", path = "meerkat-session", default-features = false }
-meerkat-memory = { version = "0.4.7", path = "meerkat-memory", default-features = false }
-meerkat-contracts = { version = "0.4.7", path = "meerkat-contracts", default-features = false }
-meerkat-skills = { version = "0.4.7", path = "meerkat-skills" }
-meerkat-mob = { version = "0.4.7", path = "meerkat-mob" }
-meerkat-mob-pack = { version = "0.4.7", path = "meerkat-mob-pack" }
-meerkat-mob-mcp = { version = "0.4.7", path = "meerkat-mob-mcp" }
+meerkat-core = { version = "0.4.8", path = "meerkat-core" }
+meerkat-client = { version = "0.4.8", path = "meerkat-client", default-features = false }
+meerkat-store = { version = "0.4.8", path = "meerkat-store", default-features = false }
+meerkat-tools = { version = "0.4.8", path = "meerkat-tools", default-features = false }
+meerkat-mcp = { version = "0.4.8", path = "meerkat-mcp" }
+meerkat-mcp-server = { version = "0.4.8", path = "meerkat-mcp-server" }
+meerkat-cli = { version = "0.4.8", path = "meerkat-cli" }
+meerkat-rest = { version = "0.4.8", path = "meerkat-rest" }
+meerkat = { version = "0.4.8", path = "meerkat", default-features = false }
+meerkat-comms = { version = "0.4.8", path = "meerkat-comms" }
+meerkat-hooks = { version = "0.4.8", path = "meerkat-hooks" }
+meerkat-rpc = { version = "0.4.8", path = "meerkat-rpc" }
+meerkat-runtime = { version = "0.4.8", path = "meerkat-runtime", default-features = false }
+meerkat-session = { version = "0.4.8", path = "meerkat-session", default-features = false }
+meerkat-memory = { version = "0.4.8", path = "meerkat-memory", default-features = false }
+meerkat-contracts = { version = "0.4.8", path = "meerkat-contracts", default-features = false }
+meerkat-skills = { version = "0.4.8", path = "meerkat-skills" }
+meerkat-mob = { version = "0.4.8", path = "meerkat-mob" }
+meerkat-mob-pack = { version = "0.4.8", path = "meerkat-mob-pack" }
+meerkat-mob-mcp = { version = "0.4.8", path = "meerkat-mob-mcp" }
 
 
 [workspace.lints.rust]

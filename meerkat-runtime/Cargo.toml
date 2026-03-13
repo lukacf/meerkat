@@ -13,7 +13,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-meerkat-core = { path = "../meerkat-core", default-features = false }
+meerkat-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
@@ -24,7 +24,7 @@ indexmap = { version = "2", features = ["serde"] }
 redb = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
 tracing = { workspace = true }
-meerkat-store = { path = "../meerkat-store", default-features = false, optional = true }
+meerkat-store = { workspace = true, optional = true }
 sha2 = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

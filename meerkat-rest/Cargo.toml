@@ -43,7 +43,7 @@ meerkat-contracts = { workspace = true }
 meerkat-client = { workspace = true }
 meerkat-store = { workspace = true }
 meerkat-tools = { workspace = true }
-meerkat-runtime = { path = "../meerkat-runtime", features = ["redb-store"] }
+meerkat-runtime = { workspace = true, features = ["redb-store"] }
 meerkat-mob = { workspace = true, optional = true }
 meerkat-mob-mcp = { workspace = true, optional = true }
 meerkat-comms = { workspace = true, optional = true }

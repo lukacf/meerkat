@@ -19,7 +19,7 @@ meerkat-comms = { workspace = true }
 meerkat = { workspace = true, features = ["comms", "skills", "session-compaction", "memory-store", "anthropic", "openai", "gemini"] }
 meerkat-session = { workspace = true, features = ["session-compaction"] }
 meerkat-client = { workspace = true }
-meerkat-runtime = { path = "../meerkat-runtime" }
+meerkat-runtime = { workspace = true }
 
 # Async runtime
 async-trait = { workspace = true }

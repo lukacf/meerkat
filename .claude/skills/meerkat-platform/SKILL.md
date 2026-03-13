@@ -13,7 +13,14 @@ Meerkat (`rkat`) is a library-first agent runtime exposed through multiple surfa
 
 - Same `realm_id` => shared sessions/config/backend.
 - Different `realm_id` => strict isolation.
-- Backend (`redb` or `jsonl`) is pinned per realm in `realm_manifest.json`.
+- Backend (`sqlite`, `redb`, or `jsonl`) is pinned per realm in `realm_manifest.json`.
+
+Default persistent backend:
+
+- New persistent realms default to `sqlite` when sqlite support is compiled.
+- `sqlite` is the normal same-realm multi-process backend.
+- `redb` remains explicit for single-owner embedded workflows.
+- `jsonl` remains explicit for inspectable file-backed persistence.
 
 Default realm behavior:
 
@@ -191,7 +198,7 @@ Operational notes:
 Terminology:
 
 - **Mob runtime contract**: where `mob_*` tools and `rkat mob` lifecycle are exposed.
-- **Backend selection**: realm-level storage backend (`redb`/`jsonl`) pinned in `realm_manifest.json`.
+- **Backend selection**: realm-level storage backend (`sqlite`/`redb`/`jsonl`) pinned in `realm_manifest.json`.
 
 Do not conflate the two: mob tool availability is a surface behavior, backend is a realm storage choice.
 

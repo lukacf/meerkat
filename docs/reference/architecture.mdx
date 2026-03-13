@@ -23,7 +23,7 @@ graph TD
     CLI["meerkat-cli"]
     CLIENT["meerkat-client<br/>Anthropic / OpenAI / Gemini"]
     SESSION["meerkat-session<br/>Ephemeral / Persistent / Compactor"]
-    STORE["meerkat-store<br/>JSONL / redb / Memory"]
+    STORE["meerkat-store<br/>SQLite / JSONL / redb / Memory"]
     MCP["meerkat-mcp<br/>McpRouter / Stdio / HTTP+SSE"]
     TOOLS["meerkat-tools<br/>Registry / Validation"]
     MEMORY["meerkat-memory<br/>HNSW / Simple"]
@@ -107,7 +107,7 @@ graph TD
 
     CLIENT["meerkat-client<br/>Anthropic / OpenAI / Gemini"]
     TOOLS["meerkat-tools<br/>Registry / Dispatch / Validation"]
-    STORE["meerkat-store<br/>JSONL / redb / Memory"]
+    STORE["meerkat-store<br/>SQLite / JSONL / redb / Memory"]
     SESSION["meerkat-session<br/>Ephemeral / Persistent / Compactor"]
     MEMORY["meerkat-memory<br/>HNSW / Simple"]
     MCP["meerkat-mcp<br/>McpRouter / Stdio / HTTP"]
@@ -191,7 +191,8 @@ pub enum LlmEvent {
 Session persistence:
 
 - **JsonlStore**: production storage using append-only JSONL files
-- **RedbSessionStore**: redb-backed storage (feature-gated by `session-store`)
+- **SqliteSessionStore**: sqlite-backed storage for the default persistent same-realm workflow
+- **RedbSessionStore**: redb-backed storage for explicit single-owner embedded workflows
 - **MemoryStore**: in-memory storage for testing
 - **SessionStore trait**: implement for custom backends
 </Accordion>
@@ -562,7 +563,7 @@ Meerkat is extended by implementing three core traits. See the [Rust SDK](/rust/
 | Owner | Owns |
 |-------|------|
 | `meerkat-core` | Trait contracts, `SessionError`, agent loop, types |
-| `meerkat-store` | `SessionStore` implementations (JSONL, redb, in-memory) |
+| `meerkat-store` | `SessionStore` implementations (SQLite, JSONL, redb, in-memory) |
 | `meerkat-session` | Session orchestration, `EventStore`, compactor |
 | `meerkat-memory` | `HnswMemoryStore`, `SimpleMemoryStore` |
 | `meerkat` (facade) | Feature wiring, re-exports, `AgentFactory`, `build_ephemeral_service` |

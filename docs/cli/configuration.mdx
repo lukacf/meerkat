@@ -10,7 +10,7 @@ All CLI commands accept realm scope flags:
 
 - `--realm <id>`
 - `--instance <id>`
-- `--realm-backend <redb|jsonl>` (creation hint only)
+- `--realm-backend <sqlite|redb|jsonl>` (creation hint only)
 
 These flags decide which realm config/session state is used.
 
@@ -61,6 +61,7 @@ Important files:
 
 - `realm_manifest.json` (backend pinning)
 - `config.toml` (realm config)
+- `sessions.sqlite3` (when backend is sqlite)
 - `sessions.redb` (when backend is redb)
 - `sessions_jsonl/` (when backend is jsonl)
 - `mob_registry.json` (CLI mob registry)
@@ -68,6 +69,8 @@ Important files:
 
 `--realm-backend` is a creation hint. After first realm creation, backend selection is pinned by `realm_manifest.json`.
 This applies to both session storage and `rkat mob` command behavior in that realm.
+
+When SQLite support is compiled in, new persistent realms default to `sqlite`.
 
 ## MCP configuration
 

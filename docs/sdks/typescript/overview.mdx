@@ -70,6 +70,7 @@ The TypeScript SDK (`@rkat/sdk`) lets you create sessions, run agent turns, stre
 | `createSessionStreaming(prompt, options?)` | Create a session and stream typed events from the first turn |
 | `listSessions()` | List active sessions |
 | `readSession(sessionId)` | Read raw session state |
+| `readSessionHistory(sessionId, options?)` | Read committed session transcript history |
 | `createMob(definition, options?)` | Create a mob, return a `Mob` |
 | `listMobs()` | List mobs |
 | `getConfig()` | Read runtime configuration |
@@ -90,6 +91,7 @@ The TypeScript SDK (`@rkat/sdk`) lets you create sessions, run agent turns, stre
 |--------|-------------|
 | `session.turn(prompt, options?)` | Run another turn (non-streaming), returns `RunResult` |
 | `session.stream(prompt, options?)` | Run another turn with streaming, returns `EventStream` |
+| `session.history(options?)` | Read committed transcript history for this session |
 | `session.interrupt()` | Cancel the currently running turn |
 | `session.archive()` | Remove the session from the server |
 | `session.invokeSkill(skillRef, prompt)` | Invoke a skill in this session |
@@ -142,7 +144,7 @@ Spawns `rkat-rpc`, performs `initialize` handshake, checks contract version comp
 export interface ConnectOptions {
   realmId?: string;
   instanceId?: string;
-  realmBackend?: "jsonl" | "redb";
+  realmBackend?: "sqlite" | "jsonl" | "redb";
   isolated?: boolean;
   stateRoot?: string;
   contextRoot?: string;

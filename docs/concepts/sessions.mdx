@@ -14,6 +14,7 @@ Sessions are realm-scoped. A session is visible across surfaces only when they u
 | `start_turn` | Continue existing session; returns `SESSION_BUSY` if a turn is already running |
 | `interrupt` | Cancel in-flight turn |
 | `read` | Return session state + usage |
+| `read_history` | Return committed transcript messages with optional pagination |
 | `list` | List sessions in the active realm |
 | `archive` | Remove from runtime (and persistent store when supported) |
 
@@ -39,16 +40,29 @@ Session metadata now carries realm context:
 
 This allows deterministic resume behavior and cross-surface observability.
 
+## Session history
+
+Public surfaces now expose full transcript history separately from lightweight metadata reads.
+
+- REST: `GET /sessions/{id}/history`
+- RPC: `session/history`
+- MCP: `meerkat_history`
+- Python SDK: `read_session_history()`, `Session.history()`, `DeferredSession.history()`
+- TypeScript SDK: `readSessionHistory()`, `Session.history()`, `DeferredSession.history()`
+
+History responses return committed messages oldest-to-newest and support `offset` / `limit` pagination. They do not expose in-flight partial output.
+
 ## Persistence and backend pinning
 
 Backends are selected once per realm and pinned in `realm_manifest.json`.
 
 | Backend | Notes |
 |---------|-------|
+| `sqlite` | Durable embedded database; default for new persistent realms when compiled |
 | `redb` | Durable embedded database |
 | `jsonl` | File-based, inspectable, useful for debugging |
 
-A realm created as `jsonl` stays `jsonl`; a realm created as `redb` stays `redb`.
+A realm created as `sqlite` stays `sqlite`; a realm created as `jsonl` stays `jsonl`; a realm created as `redb` stays `redb`.
 
 ## Concurrency guarantees
 
@@ -56,6 +70,7 @@ A realm created as `jsonl` stays `jsonl`; a realm created as `redb` stays `redb`
 - No implicit queueing for concurrent turns.
 - `interrupt()` is explicit cancellation.
 - Config writes can be synchronized with generation CAS (`expected_generation`) to avoid lost updates during concurrent operations.
+- SQLite-backed realms support the standard same-realm multi-process workflow across CLI, REST, RPC, MCP, and SDK surfaces.
 
 ## See also
 

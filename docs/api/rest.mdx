@@ -44,7 +44,7 @@ Meerkat ships a REST server for running and managing agent sessions over HTTP. T
 
 - `--realm <id>`
 - `--instance <id>`
-- `--realm-backend <redb|jsonl>`
+- `--realm-backend <sqlite|redb|jsonl>`
 
 If `--realm` is omitted, the server creates a new isolated opaque realm (`realm-...`).
 
@@ -55,6 +55,7 @@ If `--realm` is omitted, the server creates a new isolated opaque realm (`realm-
 | `POST` | `/sessions` | Create and run a new session |
 | `GET` | `/sessions` | List sessions |
 | `GET` | `/sessions/{id}` | Fetch session metadata and usage |
+| `GET` | `/sessions/{id}/history` | Fetch committed session transcript messages |
 | `POST` | `/sessions/{id}/messages` | Continue an existing session |
 | `POST` | `/sessions/{id}/interrupt` | Interrupt an in-flight turn |
 | `DELETE` | `/sessions/{id}` | Archive (remove) a session |
@@ -219,6 +220,32 @@ Create and run a new session.
 <ParamField body="peer_meta" type="object | null" default="null">
   Friendly metadata for peer discovery (name, description, labels).
 </ParamField>
+
+### GET /sessions/{id}/history
+
+Read committed transcript history for a session without changing the lightweight metadata shape of `GET /sessions/{id}`.
+
+Query parameters:
+
+- `offset` — skip this many messages from the start of the transcript
+- `limit` — cap the number of returned messages
+
+```json
+{
+  "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+  "message_count": 8,
+  "offset": 0,
+  "limit": 50,
+  "has_more": false,
+  "messages": [
+    { "role": "system", "content": "You are a helpful assistant." },
+    { "role": "user", "content": "Hello" },
+    { "role": "assistant", "content": "Hi there." }
+  ]
+}
+```
+
+History is returned oldest-to-newest and reflects the last committed session snapshot only.
 
 <ParamField body="hooks_override" type="HookRunOverrides | null" default="null">
   Run-scoped hook overrides (see [Hooks](/guides/hooks)).

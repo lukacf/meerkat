@@ -33,6 +33,7 @@ The `meerkat-mcp-server` crate exposes Meerkat as MCP tools that other clients c
 | `meerkat_run` | Start a new agent session |
 | `meerkat_resume` | Continue a session or provide tool results |
 | `meerkat_read` | Read a session's state |
+| `meerkat_history` | Read a session's committed transcript history |
 | `meerkat_sessions` | List sessions in the active realm |
 | `meerkat_interrupt` | Interrupt an in-flight turn |
 | `meerkat_archive` | Archive (remove) a session |
@@ -178,10 +179,11 @@ You can connect any MCP-capable client to a Meerkat MCP server. Run a server pro
 The bundled `rkat-mcp` binary supports realm scope flags:
 
 ```bash
-rkat-mcp --realm team-alpha --instance worker-1 --realm-backend redb
+rkat-mcp --realm team-alpha --instance worker-1 --realm-backend sqlite
 ```
 
 If `--realm` is omitted, the server creates a new isolated realm by default.
+`--realm-backend` is a creation hint only; after the first open, the manifest-pinned backend is authoritative.
 
 ## Tool reference
 

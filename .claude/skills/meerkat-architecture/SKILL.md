@@ -21,7 +21,7 @@ Meerkat is a library-first agent runtime. The execution pipeline is shared acros
 |-------|------|-----------|
 | `meerkat-core` | Agent loop, types, budget, retry, state machine, ALL trait contracts | `AgentLlmClient`, `AgentToolDispatcher`, `AgentSessionStore`, `SessionService`, `CommsRuntime`, `HookEngine` |
 | `meerkat-client` | LLM providers (Anthropic, OpenAI, Gemini) | Implements `AgentLlmClient` (via `LlmClientAdapter`) |
-| `meerkat-store` | Session persistence (Jsonl, Memory, Redb) | Implements `SessionStore` |
+| `meerkat-store` | Session persistence (SQLite, Jsonl, Memory, Redb) | Implements `SessionStore` |
 | `meerkat-tools` | Tool registry, dispatch, builtins (task tools, utility helpers like `apply_patch`, shell/comms/sub-agent surfaces) | Implements `AgentToolDispatcher` |
 | `meerkat-session` | Session orchestration (Ephemeral, Persistent) | Implements `SessionService` |
 | `meerkat-comms` | Inter-agent messaging (inproc, TCP, UDS) | Implements `CommsRuntime` |
@@ -68,9 +68,18 @@ CreateSessionRequest → SessionService::create_session() → RunResult
 
 Two implementations:
 - `EphemeralSessionService<B>` — in-memory, no persistence (WASM, testing)
-- `PersistentSessionService<B>` — event-sourced (CLI, RPC, REST with redb)
+- `PersistentSessionService<B>` — event-sourced persistent orchestration (CLI, RPC, REST, MCP; typically backed by sqlite or redb through `PersistenceBundle`)
 
 `FactoryAgentBuilder` bridges `AgentFactory` into `SessionAgentBuilder`.
+
+## Persistence pairing
+
+Persistent realm opening is backend-owned in the `meerkat` facade through `PersistenceBundle`.
+
+- Surfaces open a realm bundle, not a raw session store plus ad hoc runtime companion.
+- The bundle carries the paired `SessionStore`, optional `RuntimeStore`, and matching `RuntimeSessionAdapter`.
+- SQLite is now the default persistent realm backend when compiled; redb remains explicit.
+- Backend-specific pairing logic should stay in the persistence seam, not in `SessionStore` and not in `meerkat-runtime`.
 
 ## Mob Orchestration
 

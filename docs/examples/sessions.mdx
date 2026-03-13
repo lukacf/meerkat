@@ -677,25 +677,25 @@ Realms scope sessions and config. Surfaces that share a `realm_id` see the same 
     ```bash
     rkat --realm team-alpha run "Plan release"
     rkat --realm team-alpha --instance worker-1 sessions list
-    rkat --realm team-alpha --realm-backend redb resume last "Continue"
+    rkat --realm team-alpha --realm-backend sqlite resume last "Continue"
     ```
   </Tab>
   <Tab title="JSON-RPC server">
     ```bash
     rkat-rpc --realm team-alpha --instance worker-1
-    rkat-rpc --realm team-alpha --realm-backend redb --state-root /data/meerkat
+    rkat-rpc --realm team-alpha --realm-backend sqlite --state-root /data/meerkat
     ```
   </Tab>
   <Tab title="REST server">
     ```bash
     rkat-rest --realm team-alpha --instance api-1
-    rkat-rest --realm team-alpha --realm-backend redb --state-root /data/meerkat
+    rkat-rest --realm team-alpha --realm-backend sqlite --state-root /data/meerkat
     ```
   </Tab>
   <Tab title="MCP server">
     ```bash
     rkat-mcp --realm team-alpha --instance mcp-1
-    rkat-mcp --realm team-alpha --realm-backend redb --state-root /data/meerkat
+    rkat-mcp --realm team-alpha --realm-backend sqlite --state-root /data/meerkat
     ```
   </Tab>
   <Tab title="Python">

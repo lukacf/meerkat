@@ -10,7 +10,7 @@ Meerkat is realm-first. A `realm_id` is the only identity key for sharing or iso
 
 1. Same `realm_id` means shared sessions, config, and runtime metadata.
 2. Different `realm_id` means strict isolation, even from the same folder.
-3. Backend (`redb` or `jsonl`) is pinned once per realm via `realm_manifest.json`.
+3. Backend (`sqlite`, `redb`, or `jsonl`) is pinned once per realm via `realm_manifest.json`.
 4. Realms are opaque strings. Reuse the same value to collaborate across surfaces.
 
 ## Surface defaults
@@ -53,11 +53,22 @@ On first use, a realm writes a manifest with backend choice. Later opens must ho
 
 | First open | Manifest pins |
 |------------|----------------|
+| `--realm-backend sqlite` | `sqlite` |
 | `--realm-backend redb` | `redb` |
 | `--realm-backend jsonl` | `jsonl` |
-| No hint | Surface default backend for first creation |
+| No hint | `sqlite` when compiled, otherwise the current build default |
 
 After pinning, all surfaces use the manifest backend for that realm.
+
+## Default backend and same-realm sharing
+
+When SQLite support is compiled in, new persistent realms default to `sqlite`.
+
+- `sqlite` is the recommended backend for the normal Meerkat operating mode where multiple processes share one realm.
+- `redb` remains explicitly selectable for single-owner embedded workflows.
+- `jsonl` remains explicitly selectable for inspectable file-based persistence.
+
+Existing realms stay pinned to the backend recorded in their manifest. Changing the default does not migrate old realms.
 
 ## Config and CAS
 

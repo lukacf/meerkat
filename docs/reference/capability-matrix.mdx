@@ -11,7 +11,7 @@ Meerkat is modular. Every feature is opt-in. This matrix shows what works in eac
 | Profile | Cargo Features | Use Case |
 |---------|---------------|----------|
 | **Minimal** | `--no-default-features` | Ephemeral agent, no persistence, no compaction |
-| **Persistent** | `session-store` | Sessions survive restart, redb-backed storage |
+| **Persistent** | `session-store` | Sessions survive restart with the realm-pinned backend (`sqlite` by default when compiled) |
 | **Compacting** | `session-compaction` | Auto-compact long conversations |
 | **Full** | `session-store,session-compaction` | Persistent + compacting |
 
@@ -101,6 +101,7 @@ Events emitted: `CompactionStarted`, `CompactionCompleted`, `CompactionFailed`.
 - **Ephemeral**: Process death loses all state.
 - **Persistent**: Snapshot saved after turn completion according to the pinned realm backend.
 - Backends are pinned per realm (`realm_manifest.json`) and shared across surfaces only when `realm_id` matches.
+- SQLite-backed realms are the standard same-realm multi-process mode.
 
 ## See also
 

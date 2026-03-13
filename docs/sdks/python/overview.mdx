@@ -77,6 +77,7 @@ client = MeerkatClient(rkat_path="/path/to/rkat-rpc")
 | `client.create_session_streaming(prompt, ...)` | Create a session and stream typed events; returns `EventStream` |
 | `await client.list_sessions()` | List active sessions; returns `list[SessionInfo]` |
 | `await client.read_session(session_id)` | Read raw session state |
+| `await client.read_session_history(session_id, offset=0, limit=None)` | Read committed session transcript history |
 | `await client.create_mob(definition, ...)` | Create a mob; returns `Mob` |
 | `await client.list_mobs()` | List mobs; returns `list[MobSummary]` |
 | `client.capabilities` | `list[Capability]` — capabilities fetched during handshake |
@@ -102,6 +103,7 @@ client = MeerkatClient(rkat_path="/path/to/rkat-rpc")
 | `session.last_result` | Full `RunResult` from the last turn |
 | `await session.turn(prompt, ...)` | Run another turn; returns `RunResult` |
 | `session.stream(prompt, ...)` | Run another turn with streaming; returns `EventStream` |
+| `await session.history(offset=0, limit=None)` | Read committed transcript history for this session |
 | `await session.archive()` | Archive (remove) the session |
 | `await session.interrupt()` | Cancel the currently running turn |
 | `await session.invoke_skill(skill_ref, prompt)` | Invoke a skill in this session |

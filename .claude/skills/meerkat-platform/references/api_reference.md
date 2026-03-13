@@ -7,6 +7,7 @@ Use explicit realm to control sharing/isolation.
 - Same `realm_id` => shared sessions/config/backend.
 - Different `realm_id` => isolated state.
 - Backend is pinned per realm via `realm_manifest.json`.
+- New persistent realms default to `sqlite` when sqlite support is compiled.
 
 Surface defaults when no realm is provided:
 
@@ -34,7 +35,7 @@ Global flags (available on all commands):
 --realm <id>              # explicit realm ID
 --isolated                # start in isolated mode (new generated realm)
 --instance <id>           # optional instance ID inside a realm
---realm-backend <redb|jsonl>
+--realm-backend <sqlite|redb|jsonl>
 --state-root <path>       # override state root directory
 --context-root <path>     # convention context root for skills/hooks/AGENTS/MCP config
 --user-config-root <path> # optional user-global convention root
@@ -112,7 +113,7 @@ Artifact/deployment commands:
 Server boot:
 
 ```bash
-rkat-rest --realm team-alpha --instance rest-1 --realm-backend redb
+rkat-rest --realm team-alpha --instance rest-1 --realm-backend sqlite
 ```
 
 Core endpoints:
@@ -120,6 +121,7 @@ Core endpoints:
 - `GET /sessions` — list sessions
 - `POST /sessions` — create and run a new session
 - `GET /sessions/{id}` — get session details
+- `GET /sessions/{id}/history` — get committed transcript history
 - `DELETE /sessions/{id}` — archive (remove) a session
 - `POST /sessions/{id}/interrupt` — interrupt an in-flight turn
 - `POST /sessions/{id}/messages` — continue an existing session
@@ -148,11 +150,12 @@ Config envelope shape (`GET/PUT/PATCH /config`):
   "generation": 4,
   "realm_id": "team-alpha",
   "instance_id": "rest-1",
-  "backend": "redb",
+  "backend": "sqlite",
   "resolved_paths": {
     "root": "...",
     "manifest_path": "...",
     "config_path": "...",
+    "sessions_sqlite_path": "...",
     "sessions_redb_path": "...",
     "sessions_jsonl_dir": "..."
   }
@@ -182,6 +185,7 @@ Core methods:
 - `session/create`
 - `session/list`
 - `session/read`
+- `session/history`
 - `session/archive`
 - `turn/start`
 - `turn/interrupt`
@@ -221,7 +225,7 @@ rkat config patch --json '{"agent":{"model":"gpt-5.2"}}' --expected-generation 4
 Start scoped server:
 
 ```bash
-rkat-mcp --realm team-alpha --instance mcp-1 --realm-backend redb
+rkat-mcp --realm team-alpha --instance mcp-1 --realm-backend sqlite
 ```
 
 Core tools:
@@ -229,6 +233,7 @@ Core tools:
 - `meerkat_run` — create and run a new session
 - `meerkat_resume` — continue an existing session
 - `meerkat_read` — get session details
+- `meerkat_history` — get committed transcript history
 - `meerkat_sessions` — list sessions
 - `meerkat_interrupt` — cancel in-flight turn
 - `meerkat_archive` — archive (remove) a session
@@ -270,7 +275,7 @@ Connect options:
 await client.connect(
   realm_id="team-alpha",      # optional
   instance_id="py-worker-1",  # optional
-  realm_backend="redb",       # optional creation hint
+  realm_backend="sqlite",     # optional creation hint
   isolated=False,             # optional — new generated realm
   state_root="/path",         # optional
   context_root="/path",       # optional
@@ -284,6 +289,7 @@ Client methods:
 - `create_session_streaming(prompt, ...)` → `EventStream`
 - `list_sessions()` → `list[SessionInfo]`
 - `read_session(session_id)` → dict
+- `read_session_history(session_id, offset=0, limit=None)` → `SessionHistory`
 - `create_mob(definition, ...)` → `Mob`
 - `list_mobs()` → `list[MobSummary]`
 - `get_config()` / `set_config(...)` / `patch_config(...)`
@@ -295,6 +301,7 @@ Session methods:
 
 - `Session.turn(prompt, ...)` → `RunResult`
 - `Session.stream(prompt, ...)` → `EventStream`
+- `Session.history(offset=0, limit=None)` → `SessionHistory`
 - `Session.invoke_skill(skill_ref, prompt)` → `RunResult`
 - `Session.interrupt()`
 - `Session.archive()`
@@ -331,7 +338,7 @@ Connect options:
 await client.connect({
   realmId: "team-alpha",      // optional
   instanceId: "ts-worker-1",  // optional
-  realmBackend: "redb",       // optional creation hint
+  realmBackend: "sqlite",     // optional creation hint
   isolated: true,             // optional — new generated realm
   stateRoot: "/path",         // optional
   contextRoot: "/path",       // optional
@@ -345,6 +352,7 @@ Client methods:
 - `createSessionStreaming(prompt, options?)` → `EventStream`
 - `listSessions()` → `SessionInfo[]`
 - `readSession(sessionId)` → object
+- `readSessionHistory(sessionId, { offset, limit }?)` → `SessionHistory`
 - `createMob(definition, options?)` → `Mob`
 - `listMobs()` → `MobSummary[]`
 - `getConfig()` / `setConfig(...)` / `patchConfig(...)`
@@ -356,6 +364,7 @@ Session methods:
 
 - `Session.turn(prompt, options?)` → `RunResult`
 - `Session.stream(prompt, options?)` → `EventStream`
+- `Session.history({ offset, limit }?)` → `SessionHistory`
 - `Session.invokeSkill(skillRef, prompt)` → `RunResult`
 - `Session.interrupt()`
 - `Session.archive()`

@@ -53,6 +53,15 @@ Agent construction is centralized in `AgentFactory::build_agent()`.
 - `read(id)` and `list(query)` are non-blocking with respect to in-flight turns.
 - Persistent services can include durable sessions from the realm backend.
 
+### read_history
+
+`read_history(id, query)` returns the last committed transcript snapshot for a session.
+
+- Messages are returned oldest-to-newest.
+- `offset` and `limit` apply from the start of the full transcript.
+- Active sessions do not expose in-flight partial output through history reads.
+- Archived sessions remain readable when the underlying service/backend supports archived snapshots.
+
 ### archive
 
 - Removes session from live runtime.
@@ -82,10 +91,11 @@ No durability across process restart.
 
 ### Persistent mode
 
-Durability follows the active realm backend (`redb` or `jsonl`).
+Durability follows the active realm backend (`sqlite`, `redb`, or `jsonl`).
 
 - Completed turns are persisted.
 - Crash during in-flight turn may lose only that turn.
+- SQLite-backed realms are the default persistent mode and support normal same-realm multi-process workflows.
 
 ## Config concurrency contract
 

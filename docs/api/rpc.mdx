@@ -37,7 +37,7 @@ Meerkat exposes a JSON-RPC 2.0 stdio interface for IDE integration, desktop apps
 `rkat-rpc` accepts global scope flags:
 
 ```bash
-rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <redb|jsonl>] [--state-root <path>] [--context-root <path>] [--user-config-root <path>]
+rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|redb|jsonl>] [--state-root <path>] [--context-root <path>] [--user-config-root <path>]
 ```
 
 - `--realm`: explicit sharing/isolation key
@@ -52,6 +52,7 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <redb|js
 | `session/create` | Session | Create session and run first turn |
 | `session/list` | Session | List active sessions |
 | `session/read` | Session | Get session state |
+| `session/history` | Session | Get committed session transcript messages |
 | `session/archive` | Session | Remove session from runtime |
 | `turn/start` | Turn | Start a new turn on existing session |
 | `turn/interrupt` | Turn | Cancel in-flight turn |
@@ -151,7 +152,7 @@ Handshake. Returns server capabilities.
     "contract_version": "0.4.1",
     "methods": [
       "initialize", "initialized",
-      "session/create", "session/list", "session/read",
+      "session/create", "session/list", "session/read", "session/history",
       "session/archive", "turn/start", "turn/interrupt",
       "config/get", "config/set", "config/patch",
       "capabilities/get",
@@ -253,6 +254,25 @@ Create a new session and run the first turn.
 }
 ```
 </CodeGroup>
+
+### session/history
+
+Read committed transcript history for an existing session.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "method": "session/history",
+  "params": {
+    "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+    "offset": 0,
+    "limit": 50
+  }
+}
+```
+
+Returns oldest-to-newest committed messages plus pagination metadata. This method follows the same owner-resolution rules as `session/read`, including mob-owned session IDs when mob support is enabled.
 
 Only `prompt` is required. All other fields are optional and fall back to config defaults. During execution, `session/event` notifications are emitted (see [Notifications](#notifications)).
 

@@ -42,13 +42,13 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
 
     ```toml Add persistence
     [dependencies]
-    meerkat = { version = "0.4", features = ["jsonl-store", "session-store"] }
+    meerkat = { version = "0.4", features = ["sqlite-store", "session-store"] }
     ```
 
     ```toml Full harness
     [dependencies]
     meerkat = { version = "0.4", features = [
-        "jsonl-store", "session-store", "session-compaction",
+        "sqlite-store", "session-store", "session-compaction",
         "memory-store-session", "comms", "mcp", "sub-agents", "skills"
     ] }
     ```
@@ -68,9 +68,10 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
 | `openai` | OpenAI API client | Yes |
 | `gemini` | Google Gemini API client | Yes |
 | `all-providers` | Shorthand for all three providers | No |
+| `sqlite-store` | SQLite-backed persistent realms | No |
 | `jsonl-store` | File-based session persistence | No |
 | `memory-store` | In-memory session storage (testing) | No |
-| `session-store` | Persistent sessions (redb-backed) | No |
+| `session-store` | Persistent session lifecycle support | No |
 | `session-compaction` | Auto-compact long conversations | No |
 | `memory-store-session` | Semantic memory indexing | No |
 | `comms` | Ed25519 inter-agent messaging | No |

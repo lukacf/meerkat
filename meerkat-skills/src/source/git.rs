@@ -278,6 +278,8 @@ fn gix_clone_blocking(
         let token = token.clone();
         prepare = prepare.configure_connection(move |conn| {
             let t = token.clone();
+            #[allow(clippy::result_large_err)]
+            // gix::credentials::protocol::Error is 192 bytes; not our type
             conn.set_credentials(move |action| match action {
                 gix::credentials::helper::Action::Get(ctx) => {
                     Ok(Some(gix::credentials::protocol::Outcome {

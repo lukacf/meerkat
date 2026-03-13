@@ -1025,13 +1025,21 @@ async fn runtime_accept(
         )
             .into_response()
     })?;
-    let outcome = adapter.accept_input(&sid, input).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e.to_string()})),
-        )
-            .into_response()
-    })?;
+    let outcome = match adapter.accept_input(&sid, input).await {
+        Ok(outcome) => outcome,
+        Err(meerkat_runtime::RuntimeDriverError::NotReady { state }) => {
+            meerkat_runtime::AcceptOutcome::Rejected {
+                reason: format!("runtime not accepting input while in state: {state}"),
+            }
+        }
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response());
+        }
+    };
     Ok(Json(serde_json::to_value(outcome).unwrap_or_default()))
 }
 

@@ -245,7 +245,7 @@ inventory::submit! {
         description: "How to communicate with peers in a collaborative mob",
         scope: meerkat_core::skills::SkillScope::Builtin,
         requires_capabilities: &["comms"],
-        body: include_str!("../../meerkat-mob/skills/mob-communication/SKILL.md"),
+        body: include_str!("../skills/mob-communication/SKILL.md"),
         extensions: &[],
     }
 }

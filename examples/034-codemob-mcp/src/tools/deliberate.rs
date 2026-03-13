@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use tokio::io::AsyncWriteExt;
 
-use meerkat_mob::ids::{FlowId, MeerkatId, MobId, ProfileName};
+use meerkat_mob::ids::{FlowId, MeerkatId, MobId};
 use meerkat_mob::{MobRunStatus, SpawnMemberSpec, StepRunStatus};
 
 use crate::state::ForceState;

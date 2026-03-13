@@ -1,86 +1,101 @@
 #!/usr/bin/env bash
 # 010 — MCP Tool Server Integration
 #
-# This script shows how to register external tool servers with Meerkat
-# using the MCP (Model Context Protocol).
+# End-to-end demo:
+# - starts from an isolated temp CLI/project config root
+# - registers a real stdio MCP server
+# - shows the generated project-scoped mcp.toml
+# - verifies registration with rkat mcp list/get
+# - runs a live agent prompt that must use the MCP tools
 #
 # Prerequisites:
 #   export ANTHROPIC_API_KEY=sk-...
-#   cargo build -p meerkat-cli  # produces rkat
-#   pip install mcp-server-fetch  # example MCP server (optional)
+#   cargo build -p meerkat-cli   # or install rkat globally
 
 set -euo pipefail
 
-RKAT="${RKAT:-rkat}"
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+WORK="$ROOT/.work"
+STATE_ROOT="$WORK/state"
+CONTEXT_ROOT="$WORK/project"
+USER_CONFIG_ROOT="$WORK/user"
+SERVER_NAME="incident-kit"
+SERVER_SCRIPT="$ROOT/demo_mcp_server.py"
 
-echo "=== MCP Tool Server Management ==="
-echo ""
+if [[ -x "$ROOT/../../target/debug/rkat" ]]; then
+  RKAT="${RKAT:-$ROOT/../../target/debug/rkat}"
+elif [[ -x "$ROOT/../../target/release/rkat" ]]; then
+  RKAT="${RKAT:-$ROOT/../../target/release/rkat}"
+else
+  RKAT="${RKAT:-rkat}"
+fi
 
-# ── 1. Register a stdio-based MCP server ──
-echo "--- 1. Adding a stdio MCP server ---"
-echo "Command: rkat mcp add fetch -- python -m mcp_server_fetch"
-# Uncomment to actually run:
-# $RKAT mcp add fetch -- python -m mcp_server_fetch
-echo "(Skipped — uncomment if mcp-server-fetch is installed)"
+if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
+  echo "Set ANTHROPIC_API_KEY to run the live agent step."
+  exit 1
+fi
 
-# ── 2. Register an HTTP MCP server ──
-echo ""
-echo "--- 2. Adding an HTTP MCP server ---"
-echo "Command: rkat mcp add my-api --url http://localhost:8080/mcp"
-# Uncomment to actually run:
-# $RKAT mcp add my-api --url http://localhost:8080/mcp
-echo "(Skipped — uncomment if you have a local MCP server)"
+mkdir -p "$STATE_ROOT" "$CONTEXT_ROOT" "$USER_CONFIG_ROOT"
 
-# ── 3. List registered servers ──
-echo ""
-echo "--- 3. Listing MCP servers ---"
-$RKAT mcp list 2>/dev/null || echo "(No servers registered yet)"
+BASE_ARGS=(
+  --state-root "$STATE_ROOT"
+  --context-root "$CONTEXT_ROOT"
+  --user-config-root "$USER_CONFIG_ROOT"
+)
 
-# ── 4. Show the config file format ──
-echo ""
-echo "--- 4. MCP config file format (.rkat/mcp.toml) ---"
-cat << 'TOML'
-# Project-level MCP configuration
-# File: .rkat/mcp.toml
+run_in_project() {
+  (
+    cd "$CONTEXT_ROOT"
+    "$RKAT" "${BASE_ARGS[@]}" "$@"
+  )
+}
 
-[[servers]]
-name = "filesystem"
-command = "mcp-server-filesystem"
-args = ["--root", "/home/user/projects"]
+echo "=== 010 — MCP Tool Server Integration ==="
+echo
+echo "Workspace roots:"
+echo "  state:   $STATE_ROOT"
+echo "  context: $CONTEXT_ROOT"
+echo "  user:    $USER_CONFIG_ROOT"
+echo
 
-[[servers]]
-name = "database"
-command = "mcp-server-sqlite"
-args = ["--db", "./data/app.db"]
+echo "--- 1. Register a real stdio MCP server ---"
+run_in_project mcp add "$SERVER_NAME" --scope project -- \
+  python3 "$SERVER_SCRIPT"
+echo
 
-[[servers]]
-name = "web-search"
-url = "http://localhost:9000/mcp"
+echo "--- 2. Show registered MCP servers ---"
+run_in_project mcp list --scope project
+echo
 
-[[servers]]
-name = "custom-api"
-command = "python"
-args = ["tools/my_mcp_server.py"]
-env = { API_KEY = "your-key" }
-TOML
+echo "--- 3. Show the generated project MCP config ---"
+PROJECT_MCP_FILE="$CONTEXT_ROOT/.rkat/mcp.toml"
+cat "$PROJECT_MCP_FILE"
+echo
 
-# ── 5. Run an agent with MCP tools ──
-echo ""
-echo "--- 5. Using MCP tools with an agent ---"
-echo "Once servers are registered, tools are automatically available:"
-echo ""
-echo "  rkat run 'List the files in my home directory'"
-echo "  rkat run 'Query the database for recent orders'"
-echo "  rkat run 'Search the web for Meerkat documentation'"
-echo ""
-echo "The agent sees MCP tools alongside built-in tools and can call them naturally."
+echo "--- 4. Inspect the configured server ---"
+run_in_project mcp get "$SERVER_NAME" --scope project
+echo
 
-# ── 6. Remove a server ──
-echo ""
-echo "--- 6. Removing an MCP server ---"
-echo "Command: rkat mcp remove fetch"
-# $RKAT mcp remove fetch
-echo "(Skipped)"
+echo "--- 5. Run a live prompt that should use MCP tools ---"
+echo "Prompt asks the agent to call incident tools and quote exact fields."
+echo
+run_in_project run \
+  --wait-for-mcp \
+  --verbose \
+  "You are the on-call incident coordinator.
+First call the incident_digest tool for service 'checkout-api'.
+Then call the release_readiness tool for service 'checkout-api'.
+Return:
+1. severity
+2. service owner
+3. immediate rollback command
+4. whether the release should continue
+5. one precise next action
+Do not answer from prior knowledge; use the MCP tool outputs."
+echo
 
-echo ""
-echo "Done! MCP servers give agents access to external tools without writing Rust code."
+echo "--- 6. Cleanup command ---"
+echo "(cd \"$CONTEXT_ROOT\" && \"$RKAT\" ${BASE_ARGS[*]} mcp remove $SERVER_NAME --scope project)"
+echo
+echo "Done. The example kept all state under:"
+echo "  $WORK"

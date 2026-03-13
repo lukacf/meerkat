@@ -13,13 +13,13 @@ export ANTHROPIC_API_KEY=sk-...
 cd examples && npm install
 
 # Run a Python example
-cd 002-hello-meerkat-py && python main.py
+(cd 002-hello-meerkat-py && python main.py)
 
 # Run a TypeScript example
-cd ../examples/003-hello-meerkat-ts && npx tsx main.ts
+(cd 003-hello-meerkat-ts && npx tsx main.ts)
 
 # Run a shell example
-cd ../examples/010-mcp-tool-server-sh && ./setup.sh
+(cd 010-mcp-tool-server-sh && ./setup.sh)
 ```
 
 Rust examples in this folder are wired into `meerkat/Cargo.toml` and can be run
@@ -81,7 +81,7 @@ branch.
 | 012 | [skills-loading-rs](012-skills-loading-rs/) | Rust | Inject domain-specific knowledge from files, git, HTTP |
 | 013 | [context-compaction-rs](013-context-compaction-rs/) | Rust | Automatic context summarization for infinite conversations |
 | 014 | [semantic-memory-rs](014-semantic-memory-rs/) | Rust | Persistent, searchable memory across sessions |
-| 015 | [session-persistence-rs](015-session-persistence-rs/) | Rust | Storage backends: JsonlStore, MemoryStore, RedbSessionStore |
+| 015 | [session-persistence-rs](015-session-persistence-rs/) | Rust | Session persistence patterns and store implementations, including JSONL, in-memory, and redb-backed stores |
 
 ### Multi-Agent — Sub-Agents, Comms & Mobs
 
@@ -196,7 +196,7 @@ export GEMINI_API_KEY=...           # Optional (examples 021, 034)
 │                                                                 │
 │  Providers: Anthropic  │  OpenAI  │  Gemini                     │
 │                                                                 │
-│  Storage:   JsonlStore  │  MemoryStore  │  RedbSessionStore     │
+│  Storage:   SQLite realms (default)  │  JsonlStore  │  MemoryStore  │  redb-backed stores │
 └─────────────────────────────────────────────────────────────────┘
 ```
 

@@ -1,0 +1,7 @@
+[mobpack]
+name = "incident-war-room"
+version = "1.0.0"
+description = "Browser-deployable incident coordination room for high-severity production outages"
+
+[requires]
+capabilities = ["comms"]

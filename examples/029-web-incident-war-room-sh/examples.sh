@@ -3,52 +3,66 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 WORK="$ROOT/.work"
+SRC="$ROOT/mobpack"
+PROMPTS="$ROOT/prompts"
 MOB_DIR="$WORK/incident-war-room"
 PACK="$WORK/incident-war-room.mobpack"
 WEB_OUT="$WORK/incident-war-room-web"
 
-mkdir -p "$MOB_DIR/skills" "$WORK"
+if [[ -x "$ROOT/../../target/debug/rkat" ]]; then
+  RKAT="$ROOT/../../target/debug/rkat"
+elif [[ -x "$ROOT/../../target/release/rkat" ]]; then
+  RKAT="$ROOT/../../target/release/rkat"
+else
+  RKAT="${RKAT:-rkat}"
+fi
 
-cat > "$MOB_DIR/manifest.toml" <<'TOML'
-[mobpack]
-name = "incident-war-room"
-version = "1.0.0"
-description = "Browser deployable incident command mob"
+if [[ "${1:-}" == "--clean" ]]; then
+  rm -rf "$WORK"
+fi
 
-[requires]
-capabilities = ["comms"]
-TOML
+rm -rf "$MOB_DIR" "$WEB_OUT"
+mkdir -p "$WORK"
+cp -R "$SRC" "$MOB_DIR"
 
-cat > "$MOB_DIR/definition.json" <<'JSON'
-{
-  "id":"incident-war-room",
-  "orchestrator":{"profile":"commander"},
-  "profiles":{
-    "commander":{
-      "model":"claude-sonnet-4-5",
-      "skills":[],
-      "tools":{"comms":true},
-      "peer_description":"Incident commander",
-      "external_addressable":true
-    }
-  },
-  "skills":{}
-}
-JSON
+echo "=== 029 — Web Incident War Room ==="
+echo ""
+echo "Source mobpack: $SRC"
+echo "Working copy:   $MOB_DIR"
+echo "Output bundle:  $WEB_OUT"
+echo ""
 
-cat > "$MOB_DIR/skills/incident.md" <<'MD'
-# Incident Playbook
+echo "--- 1. Packing browser-safe incident war room mob ---"
+"$RKAT" mob pack "$MOB_DIR" -o "$PACK"
 
-- Establish impact and scope
-- Prioritize mitigation path
-- Maintain a running status summary
-MD
+echo ""
+echo "--- 2. Inspecting artifact ---"
+"$RKAT" mob inspect "$PACK"
 
-rkat mob pack "$MOB_DIR" -o "$PACK"
-rkat mob web build "$PACK" -o "$WEB_OUT"
+echo ""
+echo "--- 3. Building browser bundle ---"
+"$RKAT" mob web build "$PACK" -o "$WEB_OUT"
 
-echo "Built web bundle: $WEB_OUT"
+echo ""
+echo "--- 4. Generated bundle contents ---"
 ls -1 "$WEB_OUT"
 
+echo ""
+echo "--- 5. Derived web manifest ---"
+cat "$WEB_OUT/manifest.web.toml"
+
+echo ""
+echo "--- 6. Suggested kickoff prompt ---"
+cat "$PROMPTS/incident-kickoff.md"
+
+echo ""
 echo "Serve locally:"
 echo "  cd '$WEB_OUT' && python3 -m http.server 4173"
+echo ""
+echo "Then open:"
+echo "  http://127.0.0.1:4173"
+echo ""
+echo "Suggested user flow:"
+echo "  1. Bring your own API key in the browser UI."
+echo "  2. Paste the kickoff prompt above."
+echo "  3. Ask the commander for a 15-minute incident plan, then request status updates each turn."

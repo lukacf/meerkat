@@ -1,0 +1,84 @@
+{
+  "id": "incident-war-room",
+  "orchestrator": {
+    "profile": "commander"
+  },
+  "profiles": {
+    "commander": {
+      "model": "claude-sonnet-4-5",
+      "skills": [
+        "incident-commander"
+      ],
+      "tools": {
+        "builtins": true,
+        "comms": true,
+        "mob": true,
+        "mob_tasks": true
+      },
+      "peer_description": "Incident commander who owns the room, assigns work, and keeps the team focused on business impact.",
+      "external_addressable": true
+    },
+    "sre-lead": {
+      "model": "claude-sonnet-4-5",
+      "skills": [
+        "sre-lead"
+      ],
+      "tools": {
+        "builtins": true,
+        "comms": true,
+        "mob_tasks": true
+      },
+      "peer_description": "Infrastructure lead who isolates blast radius, rollback options, and service recovery tactics.",
+      "external_addressable": false
+    },
+    "app-investigator": {
+      "model": "claude-sonnet-4-5",
+      "skills": [
+        "application-triage"
+      ],
+      "tools": {
+        "builtins": true,
+        "comms": true,
+        "mob_tasks": true
+      },
+      "peer_description": "Application investigator focused on recent deploys, feature flags, dependencies, and failure signatures.",
+      "external_addressable": false
+    },
+    "customer-comms": {
+      "model": "claude-sonnet-4-5",
+      "skills": [
+        "customer-comms"
+      ],
+      "tools": {
+        "builtins": true,
+        "comms": true,
+        "mob_tasks": true
+      },
+      "peer_description": "Customer communications lead who drafts stakeholder updates and clarifies customer-facing risk.",
+      "external_addressable": false
+    },
+    "scribe": {
+      "model": "claude-sonnet-4-5",
+      "skills": [
+        "incident-scribe"
+      ],
+      "tools": {
+        "builtins": true,
+        "comms": true,
+        "mob_tasks": true
+      },
+      "peer_description": "Scribe who maintains the incident timeline, open questions, and next-update commitments.",
+      "external_addressable": false
+    }
+  },
+  "wiring": {
+    "auto_wire_orchestrator": true
+  },
+  "skills": {
+    "incident-commander": { "source": "path", "path": "skills/incident-commander.md" },
+    "sre-lead": { "source": "path", "path": "skills/sre-lead.md" },
+    "application-triage": { "source": "path", "path": "skills/application-triage.md" },
+    "customer-comms": { "source": "path", "path": "skills/customer-comms.md" },
+    "incident-scribe": { "source": "path", "path": "skills/incident-scribe.md" }
+  }
+}

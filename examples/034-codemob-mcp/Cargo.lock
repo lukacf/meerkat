@@ -2028,10 +2028,11 @@ dependencies = [
 
 [[package]]
 name = "meerkat"
-version = "0.4.5"
+version = "0.4.8"
 dependencies = [
  "async-trait",
  "futures",
+ "inventory",
  "meerkat-client",
  "meerkat-comms",
  "meerkat-contracts",
@@ -2050,7 +2051,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-client"
-version = "0.4.5"
+version = "0.4.8"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2070,7 +2071,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-comms"
-version = "0.4.5"
+version = "0.4.8"
 dependencies = [
  "async-trait",
  "base64",
@@ -2102,7 +2103,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-contracts"
-version = "0.4.5"
+version = "0.4.8"
 dependencies = [
  "inventory",
  "meerkat-core",
@@ -2114,7 +2115,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-core"
-version = "0.4.5"
+version = "0.4.8"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2141,7 +2142,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-hooks"
-version = "0.4.5"
+version = "0.4.8"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2160,23 +2161,23 @@ dependencies = [
 
 [[package]]
 name = "meerkat-mob"
-version = "0.4.5"
+version = "0.4.8"
 dependencies = [
  "async-trait",
  "chrono",
  "futures",
  "indexmap",
- "inventory",
  "jsonschema",
  "meerkat",
  "meerkat-client",
  "meerkat-comms",
  "meerkat-core",
+ "meerkat-runtime",
  "meerkat-session",
- "meerkat-skills",
  "redb",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
@@ -2188,12 +2189,14 @@ dependencies = [
 
 [[package]]
 name = "meerkat-mob-mcp"
-version = "0.4.5"
+version = "0.4.8"
 dependencies = [
  "async-trait",
+ "futures",
  "meerkat-client",
  "meerkat-core",
  "meerkat-mob",
+ "meerkat-runtime",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -2204,8 +2207,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "meerkat-runtime"
+version = "0.4.8"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "indexmap",
+ "meerkat-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio_with_wasm",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "meerkat-session"
-version = "0.4.5"
+version = "0.4.8"
 dependencies = [
  "async-trait",
  "futures",
@@ -2213,11 +2234,13 @@ dependencies = [
  "inventory",
  "meerkat-contracts",
  "meerkat-core",
+ "meerkat-runtime",
  "meerkat-skills",
  "meerkat-store",
  "redb",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
  "tokio",
  "tokio_with_wasm",
@@ -2226,7 +2249,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-skills"
-version = "0.4.5"
+version = "0.4.8"
 dependencies = [
  "async-trait",
  "gix",
@@ -2248,7 +2271,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-store"
-version = "0.4.5"
+version = "0.4.8"
 dependencies = [
  "async-trait",
  "dirs",
@@ -2265,7 +2288,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-tools"
-version = "0.4.5"
+version = "0.4.8"
 dependencies = [
  "async-trait",
  "chrono",

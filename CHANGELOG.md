@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-03-13
+
 ### Added
 
 #### `meerkat-runtime` — Canonical Lifecycle Runtime (#140)
@@ -582,7 +584,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.4.6...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.4.7...HEAD
+[0.4.7]: https://github.com/lukacf/meerkat/compare/v0.4.6...v0.4.7
 [0.4.6]: https://github.com/lukacf/meerkat/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/lukacf/meerkat/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/lukacf/meerkat/compare/v0.4.2...v0.4.4

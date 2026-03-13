@@ -58,3 +58,4 @@ sdks/web/package-lock.json
 examples/*/web/dist/
 examples/*/web/public/meerkat-pkg/
 *.png
+artifacts/live_smoke_last_failures.json

@@ -62,13 +62,13 @@ repos:
         pass_filenames: false
         stages: [pre-push]
 
-  # On push: full workspace clippy (compile check + lint)
+  # On push: clippy on changed crates only (falls back to workspace for root manifest changes)
   - repo: local
     hooks:
       - id: cargo-clippy
-        name: cargo clippy (workspace)
-        entry: cargo clippy --workspace --all-targets --all-features -- -D warnings
-        language: system
+        name: cargo clippy (changed crates)
+        entry: scripts/pre-push-clippy.sh
+        language: script
         types: [rust]
         pass_filenames: false
         stages: [pre-push]

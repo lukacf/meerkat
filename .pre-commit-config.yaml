@@ -73,17 +73,6 @@ repos:
         pass_filenames: false
         stages: [pre-push]
 
-  # On push: workspace build check
-  - repo: local
-    hooks:
-      - id: cargo-build
-        name: cargo build (workspace)
-        entry: cargo build --workspace
-        language: system
-        types: [rust]
-        pass_filenames: false
-        stages: [pre-push]
-
   # On push: unit tests workspace-wide
   - repo: local
     hooks:

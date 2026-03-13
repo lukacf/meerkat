@@ -251,7 +251,6 @@ Installed via `make install-hooks`. Two stages:
 - Trailing whitespace, YAML/TOML validation, merge conflict check, large file check
 - `cargo fmt --all -- --check`
 - `scripts/pre-push-clippy.sh` (clippy on changed crates only with `--all-targets`; falls back to full workspace when root `Cargo.toml`/`Cargo.lock` changes)
-- `cargo build --workspace`
 - `scripts/pre-push-unit.sh` (`cargo unit` with per-tree cache, serialized runs, and one retry if `nextest` discovery hangs)
 
 **Manual local preflight**:

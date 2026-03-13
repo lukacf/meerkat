@@ -103,6 +103,12 @@ pub async fn handle_runtime_accept(
 
     match adapter.accept_input(&session_id, params.input).await {
         Ok(outcome) => RpcResponse::success(id, outcome),
+        Err(meerkat_runtime::RuntimeDriverError::NotReady { state }) => RpcResponse::success(
+            id,
+            meerkat_runtime::AcceptOutcome::Rejected {
+                reason: format!("runtime not accepting input while in state: {state}"),
+            },
+        ),
         Err(e) => RpcResponse::error(id, crate::error::INVALID_PARAMS, e.to_string()),
     }
 }
@@ -205,5 +211,120 @@ pub async fn handle_input_list(
     match adapter.list_active_inputs(&session_id).await {
         Ok(input_ids) => RpcResponse::success(id, InputListResult { input_ids }),
         Err(e) => RpcResponse::error(id, crate::error::INVALID_PARAMS, e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use meerkat_runtime::{
+        AcceptOutcome, Input, InputState, PromptInput, ResetReport, RetireReport,
+        RuntimeDriverError, RuntimeMode, RuntimeState,
+    };
+    use serde_json::{json, value::to_raw_value};
+
+    struct RetiredRejectingAdapter;
+
+    #[async_trait]
+    impl SessionServiceRuntimeExt for RetiredRejectingAdapter {
+        fn runtime_mode(&self) -> RuntimeMode {
+            RuntimeMode::V9Compliant
+        }
+
+        async fn accept_input(
+            &self,
+            _session_id: &SessionId,
+            _input: Input,
+        ) -> Result<AcceptOutcome, RuntimeDriverError> {
+            Err(RuntimeDriverError::NotReady {
+                state: RuntimeState::Retired,
+            })
+        }
+
+        async fn runtime_state(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<RuntimeState, RuntimeDriverError> {
+            Ok(RuntimeState::Retired)
+        }
+
+        async fn retire_runtime(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<RetireReport, RuntimeDriverError> {
+            Ok(RetireReport {
+                inputs_abandoned: 0,
+                inputs_pending_drain: 0,
+            })
+        }
+
+        async fn reset_runtime(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<ResetReport, RuntimeDriverError> {
+            Ok(ResetReport {
+                inputs_abandoned: 0,
+            })
+        }
+
+        async fn input_state(
+            &self,
+            _session_id: &SessionId,
+            _input_id: &InputId,
+        ) -> Result<Option<InputState>, RuntimeDriverError> {
+            Ok(None)
+        }
+
+        async fn list_active_inputs(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<Vec<InputId>, RuntimeDriverError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_accept_returns_rejected_result_when_runtime_is_retired() {
+        let params_result = to_raw_value(&json!({
+            "session_id": uuid::Uuid::new_v4().to_string(),
+            "input": Input::Prompt(PromptInput::new("hello", None)),
+        }));
+        assert!(params_result.is_ok(), "serialize params should succeed");
+        let Some(params) = params_result.ok() else {
+            return;
+        };
+
+        let response = handle_runtime_accept(
+            Some(RpcId::Num(1)),
+            Some(params.as_ref()),
+            &RetiredRejectingAdapter,
+        )
+        .await;
+
+        assert!(
+            response.error.is_none(),
+            "retired accept should not surface as RPC error"
+        );
+        assert!(
+            response.result.is_some(),
+            "result payload should be present"
+        );
+        let Some(result) = response.result else {
+            return;
+        };
+        let value_result: Result<serde_json::Value, _> = serde_json::from_str(result.get());
+        assert!(value_result.is_ok(), "json result parse should succeed");
+        let Some(value) = value_result.ok() else {
+            return;
+        };
+        assert_eq!(value["outcome_type"], "rejected");
+        assert!(
+            value["reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("retired"),
+            "rejection reason should mention retired state"
+        );
     }
 }

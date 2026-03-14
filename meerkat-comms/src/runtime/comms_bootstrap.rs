@@ -90,13 +90,9 @@ impl CommsBootstrap {
                     addr: parent.parent_addr,
                     meta: crate::PeerMeta::default(),
                 };
-                // Write to shared trusted_peers. The classification sidecar
-                // is synced on drain_classified_inbox_interactions().
-                runtime
-                    .trusted_peers_shared()
-                    .write()
-                    .await
-                    .upsert(parent_peer);
+                // Update both the async store and the sync classification
+                // sidecar so the parent is trusted at ingress immediately.
+                runtime.upsert_trusted_peer(parent_peer).await;
 
                 let advertise = CommsAdvertise {
                     name: self.config.name,

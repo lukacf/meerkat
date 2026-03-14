@@ -316,10 +316,9 @@ where
                         }
                     }
 
-                    tokio::select! {
-                        () = notified => {}
-                        () = tokio::time::sleep(timeout) => {}
-                    }
+                    // Re-drain immediately — legacy runtimes may have
+                    // staged batches or dismiss state that only appears
+                    // on the next drain.
                     continue;
                 }
             };

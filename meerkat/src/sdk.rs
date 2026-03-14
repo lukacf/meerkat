@@ -242,6 +242,13 @@ pub async fn build_comms_runtime_from_config(
 
 /// Build a comms runtime from config with optional inproc namespace isolation.
 #[cfg(feature = "comms")]
+/// Build a comms runtime from config without silent intents.
+///
+/// **Note (0.4.10+):** Silent-intent classification now happens at ingress.
+/// If you need silent intents, use
+/// [`build_comms_runtime_from_config_scoped_with_silent_intents`] instead
+/// and pass the intents explicitly. The `AgentBuilder::with_silent_comms_intents`
+/// field is no longer consulted after drain.
 pub async fn build_comms_runtime_from_config_scoped(
     config: &Config,
     base_dir: impl AsRef<Path>,

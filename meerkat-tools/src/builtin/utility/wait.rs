@@ -12,12 +12,14 @@ use crate::tokio::sync::watch;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::watch;
 
-/// Maximum wait time in seconds (1 hour).
+/// Maximum wait time in seconds (30 minutes).
 ///
 /// With comms interrupt wired in, waits are interrupted early when peer
-/// messages arrive, so a high cap is safe. The budget system (token/duration/
-/// tool-call limits) handles runaway agents — sleep costs zero budget.
-const MAX_WAIT_SECONDS: f64 = 3600.0;
+/// messages arrive. Note: budget checks happen at loop boundaries (CallingLlm),
+/// not during tool dispatch, so a long wait can overshoot max_duration by the
+/// full requested delay in non-comms sessions or when no interrupt arrives.
+/// 1800s balances responsiveness against budget overshoot risk.
+const MAX_WAIT_SECONDS: f64 = 1800.0;
 
 /// Interrupt signal for the wait tool
 #[derive(Debug, Clone)]
@@ -65,10 +67,10 @@ impl Default for WaitTool {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct WaitArgs {
-    /// Duration to wait in seconds (max 3600)
+    /// Duration to wait in seconds (max 1800)
     #[schemars(
-        description = "Number of seconds to wait (0.1 to 3600)",
-        range(min = 0.1, max = 3600.0)
+        description = "Number of seconds to wait (0.1 to 1800)",
+        range(min = 0.1, max = 1800.0)
     )]
     seconds: f64,
 }
@@ -83,7 +85,7 @@ impl BuiltinTool for WaitTool {
     fn def(&self) -> ToolDef {
         ToolDef {
             name: "wait".into(),
-            description: "Pause execution for the specified number of seconds. Use this to wait between status checks on async operations like sub-agents. Wait is interrupted early when peer messages arrive. Maximum wait time is 3600 seconds (1 hour).".into(),
+            description: "Pause execution for the specified number of seconds. Use this to wait between status checks on async operations like sub-agents. Wait is interrupted early when peer messages arrive. Maximum wait time is 1800 seconds (30 minutes).".into(),
             input_schema: crate::schema::schema_for::<WaitArgs>(),
         }
     }

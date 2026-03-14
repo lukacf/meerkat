@@ -1413,7 +1413,14 @@ impl AgentFactory {
             tx
         });
         #[cfg(feature = "comms")]
-        let wait_interrupt_rx = wait_interrupt_tx.as_ref().map(|tx| tx.subscribe());
+        #[cfg(not(target_arch = "wasm32"))]
+        let wait_interrupt_rx = wait_interrupt_tx
+            .as_ref()
+            .map(tokio::sync::watch::Sender::subscribe);
+        #[cfg(target_arch = "wasm32")]
+        let wait_interrupt_rx = wait_interrupt_tx
+            .as_ref()
+            .map(tokio_with_wasm::alias::sync::watch::Sender::subscribe);
         // When comms is disabled, no wait interrupt channel is created.
         // The type must match the signature expected by build_tool_dispatcher_for_agent_with_overrides.
         #[cfg(all(not(feature = "comms"), not(target_arch = "wasm32")))]

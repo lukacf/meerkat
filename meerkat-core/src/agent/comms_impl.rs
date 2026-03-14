@@ -313,17 +313,17 @@ where
                         }
                         PeerInputClass::Response | PeerInputClass::SilentRequest => {
                             // Inline-only: inject into session as context but don't trigger a turn.
-                            if matches!(ci.class, PeerInputClass::Response) {
-                                if matches!(
+                            if matches!(ci.class, PeerInputClass::Response)
+                                && matches!(
                                     &ci.interaction.content,
                                     InteractionContent::Response {
                                         status: crate::interaction::ResponseStatus::Completed
                                             | crate::interaction::ResponseStatus::Failed,
                                         ..
                                     }
-                                ) {
-                                    had_response_injections = true;
-                                }
+                                )
+                            {
+                                had_response_injections = true;
                             }
                             inject_response_into_session(&mut self.session, &ci.interaction);
                             had_session_injections = true;

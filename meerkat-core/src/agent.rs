@@ -514,6 +514,7 @@ where
     pub(crate) default_scope_path: Vec<crate::event::StreamScopeFrame>,
     /// Comms intents that should be silently injected into the session
     /// without triggering an LLM turn. Matched against `InteractionContent::Request.intent`.
+    #[allow(dead_code)] // Used by comms_impl when comms feature is enabled
     pub(crate) silent_comms_intents: Vec<String>,
     /// Runtime policy for inline peer lifecycle context injection.
     pub(crate) inline_peer_notification_policy: InlinePeerNotificationPolicy,
@@ -659,6 +660,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::panic)]
     fn test_filtered_dispatcher_bind_wait_interrupt_shared_ownership() {
         use super::{AgentToolDispatcher, FilteredToolDispatcher};
         use crate::error::ToolError;

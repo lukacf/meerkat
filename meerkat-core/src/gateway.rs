@@ -824,6 +824,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::panic)]
     fn test_gateway_bind_wait_interrupt_propagates_unsupported() {
         // When entries return Unsupported (default), the gateway propagates
         // the error. The factory binds BEFORE gateway composition, so this
@@ -850,6 +851,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::panic)]
     fn test_gateway_bind_wait_interrupt_shared_ownership() {
         let base: Arc<dyn AgentToolDispatcher> =
             Arc::new(MockDispatcher::new("base", &["task_create"]));

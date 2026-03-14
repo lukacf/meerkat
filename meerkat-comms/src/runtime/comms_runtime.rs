@@ -580,18 +580,16 @@ impl CoreCommsRuntime for CommsRuntime {
                 match entry.item {
                     crate::types::InboxItem::External { envelope } => {
                         // Check for DISMISS
-                        if let MessageKind::Message { ref body } = envelope.kind {
-                            if body.trim().eq_ignore_ascii_case("DISMISS") {
+                        if let MessageKind::Message { ref body } = envelope.kind
+                            && body.trim().eq_ignore_ascii_case("DISMISS") {
                                 self.dismiss_flag.store(true, Ordering::SeqCst);
                                 return None;
                             }
-                        }
 
                         let (content, rendered_text) = match envelope.kind {
                             MessageKind::Message { body } => {
                                 let rendered = format!(
-                                    "[COMMS MESSAGE from {}]\n{}",
-                                    from_peer, body
+                                    "[COMMS MESSAGE from {from_peer}]\n{body}"
                                 );
                                 (
                                     meerkat_core::InteractionContent::Message { body },
@@ -658,9 +656,8 @@ impl CoreCommsRuntime for CommsRuntime {
                                     )
                                 };
                                 let rendered = format!(
-                                    "[COMMS RESPONSE from {} (to request: {})]\n\
-                                     Status: {}{}",
-                                    from_peer, in_reply_to, status_str, result_str
+                                    "[COMMS RESPONSE from {from_peer} (to request: {in_reply_to})]\n\
+                                     Status: {status_str}{result_str}"
                                 );
                                 (
                                     meerkat_core::InteractionContent::Response {
@@ -693,7 +690,7 @@ impl CoreCommsRuntime for CommsRuntime {
                         source,
                         interaction_id,
                     } => {
-                        let rendered = format!("[EVENT via {}] {}", source, body);
+                        let rendered = format!("[EVENT via {source}] {body}");
                         Some(meerkat_core::ClassifiedInboxInteraction {
                             interaction: meerkat_core::InboxInteraction {
                                 id: meerkat_core::InteractionId(
@@ -784,6 +781,7 @@ pub struct CommsRuntime {
     dismiss_flag: AtomicBool,
     subscriber_registry: crate::event_injector::SubscriberRegistry,
     interaction_stream_registry: InteractionStreamRegistry,
+    #[allow(dead_code)] // Kept alive — shared with IngressClassificationContext via Arc
     silent_intents: Arc<HashSet<String>>,
     /// Narrow notify that fires only for actionable peer input (messages/requests).
     /// Set during construction when classified inbox is used.

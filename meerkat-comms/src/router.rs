@@ -188,6 +188,7 @@ impl Router {
     }
 
     /// Get the sync classification peers sidecar.
+    #[allow(dead_code)] // Available for future use; sidecar is updated via add/remove_trusted_peer
     pub(crate) fn classification_peers(&self) -> Arc<parking_lot::RwLock<TrustedPeers>> {
         self.classification_peers.clone()
     }

@@ -197,10 +197,8 @@ impl InboxSender {
                 mpsc::error::TrySendError::Full(_) => InboxError::Full,
             })?;
             // Fire actionable notify only for actionable classes
-            if is_actionable {
-                if let Some(ref actionable) = self.actionable_notify {
-                    actionable.notify_waiters();
-                }
+            if is_actionable && let Some(ref actionable) = self.actionable_notify {
+                actionable.notify_waiters();
             }
             // Always fire broad notify
             self.notify.notify_waiters();

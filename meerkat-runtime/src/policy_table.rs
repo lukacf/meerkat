@@ -57,7 +57,9 @@ impl DefaultPolicyTable {
                 true,
             ),
 
-            // PeerInput(Message) — StageRunStart, WakeIfIdle/None
+            // PeerInput(Message) — StageRunStart, WakeIfIdle (idle) /
+            // InterruptYielding (running) so cooperative yielding points
+            // (e.g., `wait` tool) are interrupted when a peer message arrives.
             ("peer_message", true) => pd(
                 ApplyMode::StageRunStart,
                 WakeMode::WakeIfIdle,
@@ -67,7 +69,7 @@ impl DefaultPolicyTable {
             ),
             ("peer_message", false) => pd(
                 ApplyMode::StageRunStart,
-                WakeMode::None,
+                WakeMode::InterruptYielding,
                 QueueMode::Fifo,
                 ConsumePoint::OnRunComplete,
                 true,
@@ -83,7 +85,7 @@ impl DefaultPolicyTable {
             ),
             ("peer_request", false) => pd(
                 ApplyMode::StageRunStart,
-                WakeMode::None,
+                WakeMode::InterruptYielding,
                 QueueMode::Fifo,
                 ConsumePoint::OnRunComplete,
                 true,
@@ -269,7 +271,7 @@ mod tests {
             "peer_message",
             false,
             ApplyMode::StageRunStart,
-            WakeMode::None,
+            WakeMode::InterruptYielding,
             QueueMode::Fifo,
             ConsumePoint::OnRunComplete,
             true,
@@ -293,7 +295,7 @@ mod tests {
             "peer_request",
             false,
             ApplyMode::StageRunStart,
-            WakeMode::None,
+            WakeMode::InterruptYielding,
             QueueMode::Fifo,
             ConsumePoint::OnRunComplete,
             true,
@@ -468,5 +470,56 @@ mod tests {
         let decision = DefaultPolicyTable::resolve(&input, true);
         assert_eq!(decision.apply_mode, ApplyMode::StageRunStart);
         assert_eq!(decision.wake_mode, WakeMode::WakeIfIdle);
+    }
+
+    #[test]
+    fn peer_message_running_interrupts_yielding() {
+        // Peer messages arriving while running should use InterruptYielding
+        // so cooperative yielding points (e.g., wait tool) are interrupted.
+        let decision = DefaultPolicyTable::resolve_by_kind(&KindId::new("peer_message"), false);
+        assert_eq!(
+            decision.wake_mode,
+            WakeMode::InterruptYielding,
+            "peer_message while running must use InterruptYielding"
+        );
+        // Must not set wake (only interrupt yielding points)
+        assert_ne!(
+            decision.wake_mode,
+            WakeMode::WakeIfIdle,
+            "peer_message while running must not use WakeIfIdle"
+        );
+    }
+
+    #[test]
+    fn peer_request_running_interrupts_yielding() {
+        // Peer requests arriving while running should use InterruptYielding.
+        let decision = DefaultPolicyTable::resolve_by_kind(&KindId::new("peer_request"), false);
+        assert_eq!(
+            decision.wake_mode,
+            WakeMode::InterruptYielding,
+            "peer_request while running must use InterruptYielding"
+        );
+    }
+
+    #[test]
+    fn peer_message_idle_still_wakes() {
+        // Peer messages while idle should still wake normally.
+        let decision = DefaultPolicyTable::resolve_by_kind(&KindId::new("peer_message"), true);
+        assert_eq!(
+            decision.wake_mode,
+            WakeMode::WakeIfIdle,
+            "peer_message while idle must use WakeIfIdle"
+        );
+    }
+
+    #[test]
+    fn peer_request_idle_still_wakes() {
+        // Peer requests while idle should still wake normally.
+        let decision = DefaultPolicyTable::resolve_by_kind(&KindId::new("peer_request"), true);
+        assert_eq!(
+            decision.wake_mode,
+            WakeMode::WakeIfIdle,
+            "peer_request while idle must use WakeIfIdle"
+        );
     }
 }

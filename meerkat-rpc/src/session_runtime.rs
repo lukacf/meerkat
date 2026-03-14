@@ -419,12 +419,12 @@ impl SessionRuntime {
     ///
     /// This ensures all session-driving work flows through the single runtime
     /// authority (the RuntimeLoop → CoreExecutor pipeline).
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, unused_variables)]
     pub async fn start_turn_via_runtime(
         self: &Arc<Self>,
         session_id: &SessionId,
         prompt: String,
-        _event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
+        event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
         flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
         additional_instructions: Option<Vec<String>>,
@@ -433,6 +433,21 @@ impl SessionRuntime {
         use meerkat_runtime::accept::AcceptOutcome;
         use meerkat_runtime::completion::CompletionOutcome;
         use meerkat_runtime::input::{Input, PromptInput};
+
+        #[allow(unused_mut)]
+        let mut prompt = prompt;
+
+        if self.live_session_is_stale(session_id).await? {
+            let _ = self.service.discard_live_session(session_id).await;
+            self.runtime_adapter.unregister_session(session_id).await;
+        }
+
+        // Apply MCP boundary before building the input — staged MCP ops
+        // (from mcp/add, mcp/remove, mcp/reload) must be connected and made
+        // visible to the agent before the turn starts.
+        #[cfg(feature = "mcp")]
+        self.apply_mcp_boundary(session_id, &event_tx, &mut prompt)
+            .await?;
 
         // Build turn metadata from overrides
         let turn_metadata = Some(
@@ -445,11 +460,6 @@ impl SessionRuntime {
         );
 
         let input = Input::Prompt(PromptInput::new(prompt, turn_metadata));
-
-        if self.live_session_is_stale(session_id).await? {
-            let _ = self.service.discard_live_session(session_id).await;
-            self.runtime_adapter.unregister_session(session_id).await;
-        }
 
         // Lazy-register executor if not already registered.
         if !self.runtime_adapter.contains_session(session_id).await {

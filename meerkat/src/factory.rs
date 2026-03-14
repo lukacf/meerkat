@@ -1010,8 +1010,11 @@ impl AgentFactory {
         #[cfg(all(feature = "sub-agents", feature = "comms"))] sub_agent_comms: Option<
             SubAgentCommsWiring,
         >,
-        wait_interrupt_rx: Option<
+        #[cfg(not(target_arch = "wasm32"))] wait_interrupt_rx: Option<
             tokio::sync::watch::Receiver<Option<meerkat_tools::WaitInterrupt>>,
+        >,
+        #[cfg(target_arch = "wasm32")] wait_interrupt_rx: Option<
+            tokio_with_wasm::alias::sync::watch::Receiver<Option<meerkat_tools::WaitInterrupt>>,
         >,
     ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
         let builder = BuiltinDispatcherConfig {
@@ -1398,18 +1401,28 @@ impl AgentFactory {
         // is wired into the WaitTool so incoming peer messages interrupt
         // cooperative yielding points. The sender is connected to
         // `CommsRuntime::inbox_notify()` via a bridge task below.
-        #[cfg(feature = "comms")]
+        #[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
         let wait_interrupt_tx = comms_runtime.as_ref().map(|_| {
             let (tx, _rx) = tokio::sync::watch::channel(None::<meerkat_tools::WaitInterrupt>);
             tx
         });
+        #[cfg(all(feature = "comms", target_arch = "wasm32"))]
+        let wait_interrupt_tx = comms_runtime.as_ref().map(|_| {
+            let (tx, _rx) =
+                tokio_with_wasm::alias::sync::watch::channel(None::<meerkat_tools::WaitInterrupt>);
+            tx
+        });
         #[cfg(feature = "comms")]
-        let wait_interrupt_rx = wait_interrupt_tx
-            .as_ref()
-            .map(tokio::sync::watch::Sender::subscribe);
-        #[cfg(not(feature = "comms"))]
+        let wait_interrupt_rx = wait_interrupt_tx.as_ref().map(|tx| tx.subscribe());
+        // When comms is disabled, no wait interrupt channel is created.
+        // The type must match the signature expected by build_tool_dispatcher_for_agent_with_overrides.
+        #[cfg(all(not(feature = "comms"), not(target_arch = "wasm32")))]
         let wait_interrupt_rx: Option<
             tokio::sync::watch::Receiver<Option<meerkat_tools::WaitInterrupt>>,
+        > = None;
+        #[cfg(all(not(feature = "comms"), target_arch = "wasm32"))]
+        let wait_interrupt_rx: Option<
+            tokio_with_wasm::alias::sync::watch::Receiver<Option<meerkat_tools::WaitInterrupt>>,
         > = None;
 
         #[allow(unused_mut)]
@@ -1494,6 +1507,7 @@ impl AgentFactory {
         #[cfg(feature = "comms")]
         if let (Some(runtime), Some(tx)) = (&comms_runtime, wait_interrupt_tx) {
             let inbox_notify = runtime.inbox_notify();
+            #[cfg(not(target_arch = "wasm32"))]
             tokio::spawn(async move {
                 loop {
                     inbox_notify.notified().await;
@@ -1503,7 +1517,20 @@ impl AgentFactory {
                         }))
                         .is_err()
                     {
-                        // All receivers dropped — agent shut down.
+                        break;
+                    }
+                }
+            });
+            #[cfg(target_arch = "wasm32")]
+            tokio_with_wasm::alias::task::spawn(async move {
+                loop {
+                    inbox_notify.notified().await;
+                    if tx
+                        .send(Some(meerkat_tools::WaitInterrupt {
+                            reason: "Incoming peer message".to_string(),
+                        }))
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -1885,8 +1912,11 @@ impl AgentFactory {
             SubAgentCommsWiring,
         >,
         shell_env: Option<std::collections::HashMap<String, String>>,
-        wait_interrupt_rx: Option<
+        #[cfg(not(target_arch = "wasm32"))] wait_interrupt_rx: Option<
             tokio::sync::watch::Receiver<Option<meerkat_tools::WaitInterrupt>>,
+        >,
+        #[cfg(target_arch = "wasm32")] wait_interrupt_rx: Option<
+            tokio_with_wasm::alias::sync::watch::Receiver<Option<meerkat_tools::WaitInterrupt>>,
         >,
     ) -> Result<(Arc<dyn AgentToolDispatcher>, String), BuildAgentError> {
         if !effective_builtins {

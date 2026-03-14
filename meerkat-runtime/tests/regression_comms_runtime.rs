@@ -366,10 +366,13 @@ async fn message_while_running_checkpoint_no_wake() {
     let interaction = make_message("peer-1", "hello");
     let input = interaction_to_peer_input(&interaction, &rid());
 
-    // peer_message + running → StageRunStart + NoWake (per §17)
+    // peer_message + running → StageRunStart + InterruptYielding (per §17)
     let policy = DefaultPolicyTable::resolve(&input, false);
     assert_eq!(policy.apply_mode, meerkat_runtime::ApplyMode::StageRunStart);
-    assert_eq!(policy.wake_mode, meerkat_runtime::WakeMode::None);
+    assert_eq!(
+        policy.wake_mode,
+        meerkat_runtime::WakeMode::InterruptYielding
+    );
 
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());

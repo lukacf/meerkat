@@ -1404,12 +1404,9 @@ impl AgentFactory {
             tx
         });
         #[cfg(feature = "comms")]
-        let wait_interrupt_rx = comms_runtime.as_ref().map(|_| {
-            wait_interrupt_tx
-                .as_ref()
-                .map(|tx| tx.subscribe())
-                .expect("tx exists when comms_runtime exists")
-        });
+        let wait_interrupt_rx = wait_interrupt_tx
+            .as_ref()
+            .map(tokio::sync::watch::Sender::subscribe);
         #[cfg(not(feature = "comms"))]
         let wait_interrupt_rx: Option<
             tokio::sync::watch::Receiver<Option<meerkat_tools::WaitInterrupt>>,

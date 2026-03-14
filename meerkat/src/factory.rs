@@ -1493,15 +1493,9 @@ impl AgentFactory {
                     ))
                 })?;
 
-            // Probe drain_classified_inbox_interactions to verify it's implemented.
-            // The default trait impl returns Err(Unsupported).
-            let _ = CoreCommsRuntimeTrait::drain_classified_inbox_interactions(runtime)
-                .await
-                .map_err(|e| {
-                    BuildAgentError::Config(format!(
-                        "Comms enabled but runtime does not support classified drain: {e}"
-                    ))
-                })?;
+            // actionable_input_notify success implies classified drain is also
+            // available — they are co-constructed in the same inbox path.
+            // No probe drain: that would consume queued traffic during startup.
             {
                 // Create the watch channel for wait interrupt signaling
                 #[cfg(not(target_arch = "wasm32"))]
@@ -1513,42 +1507,61 @@ impl AgentFactory {
                     None::<meerkat_core::wait_interrupt::WaitInterrupt>,
                 );
 
-                // Bind the interrupt receiver into the dispatcher (consuming the Arc)
-                tools = tools.bind_wait_interrupt(rx).map_err(|e| {
-                    BuildAgentError::Config(format!(
-                        "Comms enabled but dispatcher does not support wait interrupt binding: {e}"
-                    ))
-                })?;
+                // Bind the interrupt receiver into the dispatcher.
+                // Only attempt when builtins are enabled (dispatcher has a wait
+                // tool). Comms-only agents with enable_builtins=false skip binding
+                // — they work fine, wait just isn't interruptible.
+                let bind_succeeded = if effective_builtins {
+                    match tools.bind_wait_interrupt(rx) {
+                        Ok(rebound) => {
+                            tools = rebound;
+                            true
+                        }
+                        Err(e) => {
+                            return Err(BuildAgentError::Config(format!(
+                                "Wait interrupt binding failed: {e}"
+                            )));
+                        }
+                    }
+                } else {
+                    tracing::debug!(
+                        "Builtins disabled — skipping wait interrupt binding; \
+                         comms will work but wait is not interruptible"
+                    );
+                    false
+                };
 
-                // Bridge actionable_input_notify → watch channel
-                #[cfg(not(target_arch = "wasm32"))]
-                tokio::spawn(async move {
-                    loop {
-                        actionable_notify.notified().await;
-                        if tx
-                            .send(Some(meerkat_core::wait_interrupt::WaitInterrupt {
-                                reason: "Incoming actionable peer message".to_string(),
-                            }))
-                            .is_err()
-                        {
-                            break;
+                // Bridge actionable_input_notify → watch channel (only if bind succeeded)
+                if bind_succeeded {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    tokio::spawn(async move {
+                        loop {
+                            actionable_notify.notified().await;
+                            if tx
+                                .send(Some(meerkat_core::wait_interrupt::WaitInterrupt {
+                                    reason: "Incoming actionable peer message".to_string(),
+                                }))
+                                .is_err()
+                            {
+                                break;
+                            }
                         }
-                    }
-                });
-                #[cfg(target_arch = "wasm32")]
-                tokio_with_wasm::alias::task::spawn(async move {
-                    loop {
-                        actionable_notify.notified().await;
-                        if tx
-                            .send(Some(meerkat_core::wait_interrupt::WaitInterrupt {
-                                reason: "Incoming actionable peer message".to_string(),
-                            }))
-                            .is_err()
-                        {
-                            break;
+                    });
+                    #[cfg(target_arch = "wasm32")]
+                    tokio_with_wasm::alias::task::spawn(async move {
+                        loop {
+                            actionable_notify.notified().await;
+                            if tx
+                                .send(Some(meerkat_core::wait_interrupt::WaitInterrupt {
+                                    reason: "Incoming actionable peer message".to_string(),
+                                }))
+                                .is_err()
+                            {
+                                break;
+                            }
                         }
-                    }
-                });
+                    });
+                }
             }
         }
 

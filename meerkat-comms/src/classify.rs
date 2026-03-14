@@ -86,7 +86,11 @@ impl IngressClassificationContext {
                                     lifecycle_peer: Some(peer),
                                 }
                             }
-                            MessageIntent::Custom(ref s) if self.silent_intents.contains(s) => {
+                            // Check silent intents against the wire string, not
+                            // just the Custom variant. This preserves the pre-0.4.10
+                            // behavior where silent_comms_intents matched built-in
+                            // intent names like "review", "status", etc.
+                            _ if self.silent_intents.contains(intent.as_str()) => {
                                 ClassificationResult {
                                     class: PeerInputClass::SilentRequest,
                                     from_peer: Some(from_name),
@@ -287,6 +291,25 @@ mod tests {
             &sender,
             MessageKind::Request {
                 intent: "my-silent-intent".to_string(),
+                params: serde_json::json!({}),
+            },
+        );
+        let item = InboxItem::External { envelope };
+        let result = ctx.classify(&item).expect("should classify");
+        assert_eq!(result.class, PeerInputClass::SilentRequest);
+    }
+
+    #[test]
+    fn classify_builtin_intent_in_silent_list() {
+        // Silent matching must work for built-in intent names (e.g. "review"),
+        // not just Custom variants. Regression test for P2 fix.
+        let sender = make_keypair();
+        let trusted = make_trusted_peers("sender-agent", &sender.public_key());
+        let ctx = make_context(true, trusted, vec!["review"]);
+        let envelope = make_envelope(
+            &sender,
+            MessageKind::Request {
+                intent: "review".to_string(),
                 params: serde_json::json!({}),
             },
         );

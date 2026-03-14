@@ -351,7 +351,10 @@ where
                                     }
                                     InteractionContent::Response { .. } => {
                                         // Responses are routed to inline-only above
-                                        unreachable!("actionable class excludes responses")
+                                        // Responses are routed to the inline-only arm above;
+                                        // this arm handles only actionable classes.
+                                        tracing::warn!("unexpected Response in actionable arm");
+                                        batched_texts.push(interaction.rendered_text);
                                     }
                                 }
                             }

@@ -1303,14 +1303,14 @@ impl CommsRuntime {
             StreamRegistryEntry::reserved(sender, receiver),
         );
 
-        if let Err(error) = self
-            .router
-            .inbox_sender()
-            .send(crate::types::InboxItem::PlainEvent {
-                body,
-                source: PlainEventSource::from(source),
-                interaction_id: Some(interaction_id),
-            })
+        if let Err(error) =
+            self.router
+                .inbox_sender()
+                .send_classified(crate::types::InboxItem::PlainEvent {
+                    body,
+                    source: PlainEventSource::from(source),
+                    interaction_id: Some(interaction_id),
+                })
         {
             self.interaction_stream_registry
                 .lock()

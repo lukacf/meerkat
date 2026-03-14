@@ -171,7 +171,7 @@ impl InboxSender {
     ///
     /// Classified items are enqueued on both the raw channel (backward compat)
     /// and the classified channel, then the appropriate notify is fired.
-    pub fn send_classified(&self, item: InboxItem) -> Result<(), InboxError> {
+    pub(crate) fn send_classified(&self, item: InboxItem) -> Result<(), InboxError> {
         if let (Some(ctx), Some(classified_tx)) =
             (&self.classification_context, &self.classified_tx)
         {

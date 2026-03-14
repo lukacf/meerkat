@@ -38,8 +38,6 @@ use tokio::sync::mpsc::Receiver;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::agent::types::{DrainedMessage, drain_inbox_item};
-
 /// Reservation lifecycle state machine.
 ///
 /// State transitions:
@@ -165,10 +163,6 @@ impl Drop for InteractionStream {
     fn drop(&mut self) {
         self.finish();
     }
-}
-
-fn is_dismiss(msg: &CommsMessage) -> bool {
-    matches!(&msg.content, CommsContent::Message { body } if body.trim().eq_ignore_ascii_case("DISMISS"))
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]

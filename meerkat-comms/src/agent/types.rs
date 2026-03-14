@@ -92,6 +92,10 @@ pub enum MessageIntent {
     Calculate,
     /// Request information or query
     Query,
+    /// Peer added lifecycle event (mob.peer_added)
+    PeerAdded,
+    /// Peer retired lifecycle event (mob.peer_retired)
+    PeerRetired,
     /// Custom intent for user-defined operations
     #[serde(untagged)]
     Custom(String),
@@ -113,6 +117,8 @@ impl MessageIntent {
             Self::Review => "review",
             Self::Calculate => "calculate",
             Self::Query => "query",
+            Self::PeerAdded => "mob.peer_added",
+            Self::PeerRetired => "mob.peer_retired",
             Self::Custom(s) => s.as_str(),
         }
     }
@@ -128,6 +134,8 @@ impl From<String> for MessageIntent {
             "review" => Self::Review,
             "calculate" => Self::Calculate,
             "query" => Self::Query,
+            "mob.peer_added" => Self::PeerAdded,
+            "mob.peer_retired" => Self::PeerRetired,
             _ => Self::Custom(s),
         }
     }

@@ -4,29 +4,21 @@ use crate::builtin::{BuiltinTool, BuiltinToolError};
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
 use meerkat_core::time_compat::{Duration, Instant};
+use meerkat_core::wait_interrupt::WaitInterruptReceiver;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-#[cfg(target_arch = "wasm32")]
-use crate::tokio::sync::watch;
-#[cfg(not(target_arch = "wasm32"))]
-use tokio::sync::watch;
+// Re-export for backward compatibility
+pub use meerkat_core::wait_interrupt::WaitInterrupt;
 
-/// Maximum wait time in seconds (30 minutes).
+/// Maximum wait time in seconds (1 minute).
 ///
 /// With comms interrupt wired in, waits are interrupted early when peer
 /// messages arrive. Note: budget checks happen at loop boundaries (CallingLlm),
 /// not during tool dispatch, so a long wait can overshoot max_duration by the
 /// full requested delay in non-comms sessions or when no interrupt arrives.
-/// 1800s balances responsiveness against budget overshoot risk.
-const MAX_WAIT_SECONDS: f64 = 1800.0;
-
-/// Interrupt signal for the wait tool
-#[derive(Debug, Clone)]
-pub struct WaitInterrupt {
-    /// Human-readable reason for the interrupt
-    pub reason: String,
-}
+/// 60s keeps budget overshoot bounded to a single minute.
+const MAX_WAIT_SECONDS: f64 = 60.0;
 
 /// Tool for pausing execution for a specified duration
 ///
@@ -39,7 +31,7 @@ pub struct WaitInterrupt {
 #[derive(Debug, Clone)]
 pub struct WaitTool {
     /// Optional interrupt receiver - when a message arrives, wait is interrupted
-    interrupt_rx: Option<watch::Receiver<Option<WaitInterrupt>>>,
+    interrupt_rx: Option<WaitInterruptReceiver>,
 }
 
 impl WaitTool {
@@ -52,7 +44,7 @@ impl WaitTool {
     ///
     /// When a message is sent on the channel, the wait will be interrupted early
     /// and return with status "interrupted" along with the reason.
-    pub fn with_interrupt(rx: watch::Receiver<Option<WaitInterrupt>>) -> Self {
+    pub fn with_interrupt(rx: WaitInterruptReceiver) -> Self {
         Self {
             interrupt_rx: Some(rx),
         }
@@ -67,10 +59,10 @@ impl Default for WaitTool {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct WaitArgs {
-    /// Duration to wait in seconds (max 1800)
+    /// Duration to wait in seconds (max 60)
     #[schemars(
-        description = "Number of seconds to wait (0.1 to 1800)",
-        range(min = 0.1, max = 1800.0)
+        description = "Number of seconds to wait (0.1 to 60)",
+        range(min = 0.1, max = 60.0)
     )]
     seconds: f64,
 }
@@ -85,7 +77,7 @@ impl BuiltinTool for WaitTool {
     fn def(&self) -> ToolDef {
         ToolDef {
             name: "wait".into(),
-            description: "Pause execution for the specified number of seconds. Use this to wait between status checks on async operations like sub-agents. Wait is interrupted early when peer messages arrive. Maximum wait time is 1800 seconds (30 minutes).".into(),
+            description: "Pause execution for the specified number of seconds. Use this to wait between status checks on async operations like sub-agents. Wait is interrupted early when peer messages arrive. Maximum wait time is 60 seconds (1 minute).".into(),
             input_schema: crate::schema::schema_for::<WaitArgs>(),
         }
     }
@@ -374,5 +366,14 @@ mod tests {
                 .unwrap()
                 .contains("Second interrupt")
         );
+    }
+
+    #[test]
+    fn test_max_wait_seconds_is_60() {
+        assert_eq!(MAX_WAIT_SECONDS, 60.0);
+        // Verify clamping at the new cap
+        let seconds = 120.0_f64;
+        let clamped = seconds.clamp(0.0, MAX_WAIT_SECONDS);
+        assert_eq!(clamped, 60.0);
     }
 }

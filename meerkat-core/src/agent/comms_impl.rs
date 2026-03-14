@@ -19,23 +19,11 @@ use crate::session::Session;
 
 /// Presentation cap for explicit peer names in one inline summary.
 const PEER_INLINE_NAME_LIMIT: usize = 10;
-const PEER_ADDED_INTENT: &str = "mob.peer_added";
-const PEER_RETIRED_INTENT: &str = "mob.peer_retired";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PeerLifecycleState {
     Added,
     Retired,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum CommsInteractionClass {
-    PeerLifecycle {
-        peer: String,
-        state: PeerLifecycleState,
-    },
-    InlineSessionOnly,
-    Passthrough,
 }
 
 #[derive(Debug, Default)]
@@ -94,9 +82,14 @@ where
     /// Returns true if any messages were injected.
     ///
     /// No-op when `host_drain_active` is set — in host mode, the host loop
-    /// owns the inbox drain cycle via `drain_inbox_interactions()` to preserve
-    /// interaction-scoped subscriber correlation.
+    /// owns the inbox drain cycle via `drain_classified_inbox_interactions()`
+    /// to preserve interaction-scoped subscriber correlation.
+    ///
+    /// Routes on the stored `PeerInputClass` from ingress classification —
+    /// no downstream re-classification.
     pub(super) async fn drain_comms_inbox(&mut self) -> bool {
+        use crate::interaction::PeerInputClass;
+
         if self.host_drain_active {
             return false;
         }
@@ -106,23 +99,44 @@ where
             None => return false,
         };
 
-        let interactions = comms.drain_inbox_interactions().await;
-        if interactions.is_empty() {
-            return false;
-        }
+        let classified = match comms.drain_classified_inbox_interactions().await {
+            Ok(v) if v.is_empty() => return false,
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!(
+                    "CommsRuntime does not support classified drain \
+                     (factory should have rejected this at build time): {e}"
+                );
+                return false;
+            }
+        };
 
         let mut messages = Vec::new();
         let mut peer_lifecycle_batch = PeerLifecycleBatch::default();
 
-        for interaction in interactions {
-            match classify_comms_interaction(&interaction, &self.silent_comms_intents) {
-                CommsInteractionClass::PeerLifecycle { peer, state } => {
-                    peer_lifecycle_batch.observe(peer, state);
+        for ci in classified {
+            match ci.class {
+                PeerInputClass::PeerLifecycleAdded => {
+                    if let Some(peer) = ci.lifecycle_peer {
+                        peer_lifecycle_batch.observe(peer, PeerLifecycleState::Added);
+                    }
                 }
-                CommsInteractionClass::InlineSessionOnly | CommsInteractionClass::Passthrough => {
-                    // Turn-boundary drain injects both inline-only and passthrough
+                PeerInputClass::PeerLifecycleRetired => {
+                    if let Some(peer) = ci.lifecycle_peer {
+                        peer_lifecycle_batch.observe(peer, PeerLifecycleState::Retired);
+                    }
+                }
+                PeerInputClass::Ack | PeerInputClass::SubagentResult => {
+                    // Filtered at ingress or handled separately
+                }
+                PeerInputClass::Response
+                | PeerInputClass::SilentRequest
+                | PeerInputClass::ActionableMessage
+                | PeerInputClass::ActionableRequest
+                | PeerInputClass::PlainEvent => {
+                    // Turn-boundary drain injects all non-lifecycle, non-ack
                     // interactions as context for the next LLM call.
-                    messages.push(interaction.rendered_text);
+                    messages.push(ci.interaction.rendered_text);
                 }
             }
         }
@@ -249,7 +263,16 @@ where
             let timeout = self.budget.remaining_duration().unwrap_or(POLL_INTERVAL);
             let notified = inbox_notify.notified();
 
-            let interactions = comms.drain_inbox_interactions().await;
+            let classified = match comms.drain_classified_inbox_interactions().await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!(
+                        "CommsRuntime does not support classified drain \
+                         (factory should have rejected this at build time): {e}"
+                    );
+                    Vec::new()
+                }
+            };
 
             if comms.dismiss_received() {
                 tracing::info!("Host mode: DISMISS received, exiting");
@@ -257,16 +280,18 @@ where
                 return Ok(last_result);
             }
 
-            if !interactions.is_empty() {
-                // --- Classification phase ---
+            if !classified.is_empty() {
+                // --- Routing phase (uses pre-computed PeerInputClass) ---
                 //
-                // Interactions are classified into individual vs batched processing.
-                // This intentionally reorders relative to inbox arrival: individual
-                // interactions (requests and subscriber-bound) are processed first,
-                // then batched messages. Requests need individual processing for
-                // subscriber correlation and isolated error handling; messages are
-                // batched for efficiency. The LLM sees all context regardless of
-                // processing order.
+                // Interactions are routed based on their stored classification
+                // from ingress — no downstream re-classification.
+                //
+                // Individual interactions (requests and subscriber-bound) are
+                // processed first, then batched messages. Requests need individual
+                // processing for subscriber correlation and isolated error handling;
+                // messages are batched for efficiency.
+                use crate::interaction::PeerInputClass;
+
                 let mut batched_texts = Vec::new();
                 let mut individual: Vec<(InboxInteraction, Option<mpsc::Sender<AgentEvent>>)> =
                     Vec::new();
@@ -274,42 +299,49 @@ where
                 let mut had_session_injections = false;
                 let mut had_response_injections = false;
 
-                for interaction in interactions {
-                    match classify_comms_interaction(&interaction, &self.silent_comms_intents) {
-                        CommsInteractionClass::PeerLifecycle { peer, state } => {
-                            peer_lifecycle_batch.observe(peer, state);
-                        }
-                        CommsInteractionClass::InlineSessionOnly => {
-                            if matches!(
-                                &interaction.content,
-                                InteractionContent::Response {
-                                    status: crate::interaction::ResponseStatus::Completed
-                                        | crate::interaction::ResponseStatus::Failed,
-                                    ..
-                                }
-                            ) {
-                                had_response_injections = true;
+                for ci in classified {
+                    match ci.class {
+                        PeerInputClass::PeerLifecycleAdded => {
+                            if let Some(peer) = ci.lifecycle_peer {
+                                peer_lifecycle_batch.observe(peer, PeerLifecycleState::Added);
                             }
-                            inject_response_into_session(&mut self.session, &interaction);
+                        }
+                        PeerInputClass::PeerLifecycleRetired => {
+                            if let Some(peer) = ci.lifecycle_peer {
+                                peer_lifecycle_batch.observe(peer, PeerLifecycleState::Retired);
+                            }
+                        }
+                        PeerInputClass::Response | PeerInputClass::SilentRequest => {
+                            // Inline-only: inject into session as context but don't trigger a turn.
+                            if matches!(ci.class, PeerInputClass::Response) {
+                                if matches!(
+                                    &ci.interaction.content,
+                                    InteractionContent::Response {
+                                        status: crate::interaction::ResponseStatus::Completed
+                                            | crate::interaction::ResponseStatus::Failed,
+                                        ..
+                                    }
+                                ) {
+                                    had_response_injections = true;
+                                }
+                            }
+                            inject_response_into_session(&mut self.session, &ci.interaction);
                             had_session_injections = true;
                         }
-                        CommsInteractionClass::Passthrough => {
+                        PeerInputClass::ActionableMessage
+                        | PeerInputClass::ActionableRequest
+                        | PeerInputClass::PlainEvent => {
+                            // Passthrough: these trigger LLM turns.
+                            let interaction = ci.interaction;
                             let subscriber = comms.interaction_subscriber(&interaction.id);
 
                             if self.runtime_input_sink.is_some() {
-                                // Runtime sink mode: all passthrough interactions go
-                                // individual so they route through the sink one by one.
                                 drop(subscriber);
                                 individual.push((interaction, None));
                             } else if event_tx.is_some() && subscriber.is_some() {
-                                // Events mode: subscriber-bound interactions get individual
-                                // tap-scoped processing with terminal events.
                                 individual.push((interaction, subscriber));
                             } else {
-                                // No events or no subscriber — consume subscriber to avoid
-                                // leaks, then classify by content type.
                                 drop(subscriber);
-
                                 match &interaction.content {
                                     InteractionContent::Message { .. } => {
                                         batched_texts.push(interaction.rendered_text);
@@ -318,10 +350,14 @@ where
                                         individual.push((interaction, None));
                                     }
                                     InteractionContent::Response { .. } => {
-                                        unreachable!("passthrough excludes responses")
+                                        // Responses are routed to inline-only above
+                                        unreachable!("actionable class excludes responses")
                                     }
                                 }
                             }
+                        }
+                        PeerInputClass::Ack | PeerInputClass::SubagentResult => {
+                            // Filtered at ingress or handled separately
                         }
                     }
                 }
@@ -524,52 +560,6 @@ fn inject_response_into_session(session: &mut Session, interaction: &InboxIntera
     session.push(Message::User(UserMessage {
         content: interaction.rendered_text.clone(),
     }));
-}
-
-fn extract_peer_lifecycle_update(
-    interaction: &InboxInteraction,
-) -> Option<(String, PeerLifecycleState)> {
-    let (intent, params) = match &interaction.content {
-        InteractionContent::Request { intent, params } => (intent.as_str(), params),
-        _ => return None,
-    };
-
-    let state = match intent {
-        PEER_ADDED_INTENT => PeerLifecycleState::Added,
-        PEER_RETIRED_INTENT => PeerLifecycleState::Retired,
-        _ => return None,
-    };
-
-    let peer = params
-        .get("peer")
-        .and_then(|value| value.as_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or(interaction.from.as_str())
-        .to_string();
-
-    Some((peer, state))
-}
-
-fn is_silent_request_intent(interaction: &InboxInteraction, silent_intents: &[String]) -> bool {
-    match &interaction.content {
-        InteractionContent::Request { intent, .. } => silent_intents.iter().any(|s| s == intent),
-        _ => false,
-    }
-}
-
-fn classify_comms_interaction(
-    interaction: &InboxInteraction,
-    silent_intents: &[String],
-) -> CommsInteractionClass {
-    if let Some((peer, state)) = extract_peer_lifecycle_update(interaction) {
-        return CommsInteractionClass::PeerLifecycle { peer, state };
-    }
-    if matches!(&interaction.content, InteractionContent::Response { .. })
-        || is_silent_request_intent(interaction, silent_intents)
-    {
-        return CommsInteractionClass::InlineSessionOnly;
-    }
-    CommsInteractionClass::Passthrough
 }
 
 fn render_named_list(mut names: Vec<String>) -> String {
@@ -1171,50 +1161,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_classify_comms_interaction_peer_lifecycle() {
-        let interaction = make_interaction(
-            InteractionContent::Request {
-                intent: "mob.peer_added".into(),
-                params: serde_json::json!({"peer": "worker-1"}),
-            },
-            "peer add",
-        );
-        assert!(matches!(
-            classify_comms_interaction(&interaction, &[]),
-            CommsInteractionClass::PeerLifecycle { .. }
-        ));
-    }
-
-    #[test]
-    fn test_classify_comms_interaction_silent_request_is_inline_only() {
-        let interaction = make_interaction(
-            InteractionContent::Request {
-                intent: "mob.status.ping".into(),
-                params: serde_json::json!({}),
-            },
-            "status ping",
-        );
-        assert_eq!(
-            classify_comms_interaction(&interaction, &["mob.status.ping".to_string()]),
-            CommsInteractionClass::InlineSessionOnly
-        );
-    }
-
-    #[test]
-    fn test_classify_comms_interaction_non_silent_request_passthrough() {
-        let interaction = make_interaction(
-            InteractionContent::Request {
-                intent: "review.code".into(),
-                params: serde_json::json!({}),
-            },
-            "review request",
-        );
-        assert_eq!(
-            classify_comms_interaction(&interaction, &["mob.peer_added".to_string()]),
-            CommsInteractionClass::Passthrough
-        );
-    }
+    // Legacy classify_comms_interaction tests removed — classification is now
+    // single-pass at ingress (meerkat-comms/src/classify.rs).
 
     #[tokio::test]
     async fn test_response_interaction_triggers_continuation_run_in_host_mode() {

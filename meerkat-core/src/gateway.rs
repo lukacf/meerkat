@@ -367,6 +367,29 @@ impl AgentToolDispatcher for ToolGateway {
         entry.dispatcher.dispatch(call).await
     }
 
+    fn bind_wait_interrupt(
+        self: Arc<Self>,
+        rx: crate::wait_interrupt::WaitInterruptReceiver,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, crate::wait_interrupt::WaitInterruptBindError> {
+        let owned = Arc::try_unwrap(self)
+            .map_err(|_| crate::wait_interrupt::WaitInterruptBindError::SharedOwnership)?;
+
+        let mut builder = ToolGatewayBuilder::new();
+        for entry in owned.entries {
+            // Forward bind to each entry. The factory binds before gateway
+            // composition, so this path is only used if bind_wait_interrupt
+            // is called directly on a gateway. Entries that don't support
+            // binding return Unsupported — propagated as error.
+            let rebound = entry.dispatcher.bind_wait_interrupt(rx.clone())?;
+            builder = builder.add_dispatcher_with_availability(rebound, entry.availability);
+        }
+
+        let gateway = builder
+            .build()
+            .map_err(|_| crate::wait_interrupt::WaitInterruptBindError::Unsupported)?;
+        Ok(Arc::new(gateway))
+    }
+
     /// Aggregate external updates across all dispatcher entries.
     ///
     /// Deduplicates by server name for pending, by `(server, operation, status)`
@@ -784,5 +807,66 @@ mod tests {
         let tools = gateway.tools();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "task_create");
+    }
+
+    #[test]
+    fn test_unsupported_dispatcher_returns_unsupported() {
+        // MockDispatcher doesn't override bind_wait_interrupt, so the
+        // default returns Unsupported.
+        let dispatcher: Arc<dyn AgentToolDispatcher> =
+            Arc::new(MockDispatcher::new("base", &["task_create"]));
+        let (_tx, rx) = tokio::sync::watch::channel(None::<crate::wait_interrupt::WaitInterrupt>);
+        let result = dispatcher.bind_wait_interrupt(rx);
+        assert!(matches!(
+            result,
+            Err(crate::wait_interrupt::WaitInterruptBindError::Unsupported)
+        ));
+    }
+
+    #[test]
+    fn test_gateway_bind_wait_interrupt_propagates_unsupported() {
+        // When entries return Unsupported (default), the gateway propagates
+        // the error. The factory binds BEFORE gateway composition, so this
+        // path is only hit if bind is called directly on a gateway.
+        let base: Arc<dyn AgentToolDispatcher> =
+            Arc::new(MockDispatcher::new("base", &["task_create"]));
+        let overlay: Arc<dyn AgentToolDispatcher> =
+            Arc::new(MockDispatcher::new("comms", &["send"]));
+
+        let gateway = Arc::new(
+            ToolGatewayBuilder::new()
+                .add_dispatcher(base)
+                .add_dispatcher(overlay)
+                .build()
+                .unwrap(),
+        );
+
+        let (_tx, rx) = tokio::sync::watch::channel(None::<crate::wait_interrupt::WaitInterrupt>);
+        match gateway.bind_wait_interrupt(rx) {
+            Err(crate::wait_interrupt::WaitInterruptBindError::Unsupported) => {}
+            Ok(_) => panic!("expected Unsupported error, got Ok"),
+            Err(e) => panic!("expected Unsupported, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_gateway_bind_wait_interrupt_shared_ownership() {
+        let base: Arc<dyn AgentToolDispatcher> =
+            Arc::new(MockDispatcher::new("base", &["task_create"]));
+
+        let gateway = Arc::new(
+            ToolGatewayBuilder::new()
+                .add_dispatcher(base)
+                .build()
+                .unwrap(),
+        );
+        let _clone = Arc::clone(&gateway);
+
+        let (_tx, rx) = tokio::sync::watch::channel(None::<crate::wait_interrupt::WaitInterrupt>);
+        match gateway.bind_wait_interrupt(rx) {
+            Err(crate::wait_interrupt::WaitInterruptBindError::SharedOwnership) => {}
+            Ok(_) => panic!("expected SharedOwnership error, got Ok"),
+            Err(e) => panic!("expected SharedOwnership, got {e:?}"),
+        }
     }
 }

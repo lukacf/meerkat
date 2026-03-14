@@ -687,10 +687,10 @@ Pause execution for the specified number of seconds. Supports fractional seconds
 **Default enabled:** Yes
 
 <ParamField body="seconds" type="f64" required>
-  Duration to wait in seconds (clamped to 0.0 to 300.0).
+  Duration to wait in seconds (clamped to 0.0 to 60.0).
 </ParamField>
 
-Maximum wait time is 300 seconds (5 minutes). Values are clamped to the range 0.0 to 300.0.
+Maximum wait time is 60 seconds (1 minute). Values are clamped to the range 0.0 to 60.0.
 
 <CodeGroup>
 ```json Returns (completed)

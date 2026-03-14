@@ -52,11 +52,13 @@ pub mod time_compat;
 pub mod tool_scope;
 pub mod turn_boundary;
 pub mod types;
+pub mod wait_interrupt;
 
 // Re-export main types at crate root
 pub use agent::{
     Agent, AgentBuilder, AgentLlmClient, AgentRunner, AgentSessionStore, AgentToolDispatcher,
-    CommsRuntime, ExternalToolNotice, ExternalToolUpdate, FilteredToolDispatcher, LlmStreamResult,
+    CommsCapabilityError, CommsRuntime, ExternalToolNotice, ExternalToolUpdate,
+    FilteredToolDispatcher, LlmStreamResult,
 };
 pub use budget::{Budget, BudgetLimits, BudgetPool};
 pub use checkpoint::SessionCheckpointer;
@@ -102,7 +104,10 @@ pub use hooks::{
     HookLlmResponse, HookOutcome, HookPatch, HookPatchEnvelope, HookPoint, HookReasonCode,
     HookRevision, HookToolCall, HookToolResult, default_failure_policy,
 };
-pub use interaction::{InboxInteraction, InteractionContent, InteractionId, ResponseStatus};
+pub use interaction::{
+    ClassifiedInboxInteraction, InboxInteraction, InteractionContent, InteractionId,
+    PeerInputClass, ResponseStatus,
+};
 pub use lifecycle::{
     ConversationAppend, ConversationAppendRole, ConversationContextAppend, CoreExecutor,
     CoreExecutorError, CoreRenderable, InputId, RunApplyBoundary, RunBoundaryReceipt,
@@ -149,3 +154,4 @@ pub use types::{
     ProviderMeta, RunResult, SecurityMode, SessionId, StopReason, SystemMessage, ToolCall,
     ToolCallIter, ToolCallView, ToolDef, ToolResult, Usage, UserMessage,
 };
+pub use wait_interrupt::{WaitInterrupt, WaitInterruptBindError, WaitInterruptReceiver};

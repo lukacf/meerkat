@@ -72,6 +72,9 @@ fn map_inproc_send_error(err: InprocSendError) -> SendError {
 pub struct Router {
     keypair: Arc<Keypair>,
     trusted_peers: Arc<RwLock<TrustedPeers>>,
+    /// Sync sidecar for classification — mirrors `trusted_peers` under a
+    /// `parking_lot::RwLock` so ingress classification can run synchronously.
+    classification_peers: Arc<parking_lot::RwLock<TrustedPeers>>,
     config: CommsConfig,
     require_peer_auth: bool,
     inbox_sender: InboxSender,
@@ -86,9 +89,11 @@ impl Router {
         inbox_sender: InboxSender,
         require_peer_auth: bool,
     ) -> Self {
+        let classification_peers = Arc::new(parking_lot::RwLock::new(trusted_peers.clone()));
         Self {
             keypair: Arc::new(keypair),
             trusted_peers: Arc::new(RwLock::new(trusted_peers)),
+            classification_peers,
             config,
             require_peer_auth,
             inbox_sender,
@@ -103,9 +108,38 @@ impl Router {
         inbox_sender: InboxSender,
         require_peer_auth: bool,
     ) -> Self {
+        // Snapshot the async peers into the sync sidecar.
+        let classification_peers = Arc::new(parking_lot::RwLock::new(
+            trusted_peers
+                .try_read()
+                .map(|g| g.clone())
+                .unwrap_or_default(),
+        ));
         Self {
             keypair: Arc::new(keypair),
             trusted_peers,
+            classification_peers,
+            config,
+            require_peer_auth,
+            inbox_sender,
+            inproc_namespace: None,
+        }
+    }
+
+    /// Like `with_shared_peers` but accepts an externally-created classification
+    /// sidecar so the same `Arc` is shared with `IngressClassificationContext`.
+    pub fn with_shared_peers_and_classification(
+        keypair: Keypair,
+        trusted_peers: Arc<RwLock<TrustedPeers>>,
+        classification_peers: Arc<parking_lot::RwLock<TrustedPeers>>,
+        config: CommsConfig,
+        inbox_sender: InboxSender,
+        require_peer_auth: bool,
+    ) -> Self {
+        Self {
+            keypair: Arc::new(keypair),
+            trusted_peers,
+            classification_peers,
             config,
             require_peer_auth,
             inbox_sender,
@@ -138,12 +172,24 @@ impl Router {
 
     pub async fn add_trusted_peer(&self, peer: TrustedPeer) {
         let mut peers = self.trusted_peers.write().await;
-        peers.upsert(peer);
+        peers.upsert(peer.clone());
+        // Sync the classification sidecar
+        self.classification_peers.write().upsert(peer);
     }
 
     pub async fn remove_trusted_peer(&self, pubkey: &crate::identity::PubKey) -> bool {
         let mut peers = self.trusted_peers.write().await;
-        peers.remove(pubkey)
+        let removed = peers.remove(pubkey);
+        // Sync the classification sidecar
+        if removed {
+            self.classification_peers.write().remove(pubkey);
+        }
+        removed
+    }
+
+    /// Get the sync classification peers sidecar.
+    pub(crate) fn classification_peers(&self) -> Arc<parking_lot::RwLock<TrustedPeers>> {
+        self.classification_peers.clone()
     }
 
     pub async fn send(&self, peer_name: &str, kind: MessageKind) -> Result<Uuid, SendError> {

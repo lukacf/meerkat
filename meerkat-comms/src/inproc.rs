@@ -379,7 +379,7 @@ impl InprocRegistry {
 
         let envelope_id = envelope.id;
         sender
-            .send(InboxItem::External { envelope })
+            .send_classified(InboxItem::External { envelope })
             .map_err(|err| match err {
                 InboxError::Closed => InprocSendError::InboxClosed,
                 InboxError::Full => InprocSendError::InboxFull,
@@ -417,7 +417,7 @@ impl InprocRegistry {
         // Deliver directly to inbox
         let envelope_id = envelope.id;
         sender
-            .send(InboxItem::External { envelope })
+            .send_classified(InboxItem::External { envelope })
             .map_err(|err| match err {
                 InboxError::Closed => InprocSendError::InboxClosed,
                 InboxError::Full => InprocSendError::InboxFull,

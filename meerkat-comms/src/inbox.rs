@@ -149,11 +149,16 @@ impl Inbox {
 impl InboxSender {
     /// Send an item to the inbox.
     ///
-    /// This notifies any waiting tasks that a message has arrived,
-    /// enabling interrupt-based wait patterns.
+    /// On classified runtimes, delegates to `send_classified()` so the item
+    /// goes through the classified queue (the sole consumer). On non-classified
+    /// runtimes, enqueues on the raw channel directly.
     ///
     /// Returns an error if the inbox has been closed.
     pub fn send(&self, item: InboxItem) -> Result<(), InboxError> {
+        // If classification context is available, route through classified path
+        if self.classification_context.is_some() {
+            return self.send_classified(item);
+        }
         self.tx.try_send(item).map_err(|err| match err {
             mpsc::error::TrySendError::Closed(_) => InboxError::Closed,
             mpsc::error::TrySendError::Full(_) => InboxError::Full,

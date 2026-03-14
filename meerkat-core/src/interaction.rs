@@ -95,7 +95,7 @@ impl PeerInputClass {
     pub fn is_actionable(&self) -> bool {
         matches!(
             self,
-            Self::ActionableMessage | Self::ActionableRequest | Self::Response
+            Self::ActionableMessage | Self::ActionableRequest | Self::Response | Self::PlainEvent
         )
     }
 }

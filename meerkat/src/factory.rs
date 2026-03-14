@@ -1406,10 +1406,13 @@ impl AgentFactory {
         // Build the tool dispatcher WITHOUT wait interrupt wiring.
         // The interrupt is bound once after full composition (including comms gateway).
         // This ensures all dispatcher paths (builtin, override, WASM, composed) are covered.
+        #[allow(unused_mut, unused_assignments)]
+        let mut tools_from_override = false;
         #[allow(unused_mut)]
         let (mut tools, mut tool_usage_instructions) =
             if let Some(dispatcher) = build_config.tool_dispatcher_override.take() {
                 let usage = render_tool_usage_instructions(dispatcher.tools().as_ref());
+                tools_from_override = true;
                 (dispatcher, usage)
             } else {
                 #[cfg(not(target_arch = "wasm32"))]
@@ -1527,8 +1530,12 @@ impl AgentFactory {
                 // because the shared dispatcher was built without this session's
                 // comms context, so it can't have session-specific interrupt
                 // wiring anyway.
-                let bind_succeeded = if !effective_builtins {
-                    tracing::debug!("Builtins disabled — skipping wait interrupt binding");
+                let bind_succeeded = if !effective_builtins || tools_from_override {
+                    // Builtins disabled or dispatcher is a caller-supplied override
+                    // that may not support binding. Skip gracefully.
+                    tracing::debug!(
+                        "Skipping wait interrupt binding (builtins={effective_builtins}, override={tools_from_override})"
+                    );
                     false
                 } else if Arc::strong_count(&tools) == 1 {
                     // Exclusive ownership — safe to consume and rebind.

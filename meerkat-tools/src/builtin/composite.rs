@@ -556,6 +556,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::panic)]
     fn bind_wait_interrupt_shared_ownership_error() {
         let store = Arc::new(MemoryTaskStore::new());
         let dispatcher = Arc::new(

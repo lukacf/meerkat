@@ -260,6 +260,7 @@ pub async fn build_comms_runtime_from_config_scoped(
     .await
 }
 
+#[allow(clippy::implicit_hasher)]
 pub async fn build_comms_runtime_from_config_scoped_with_silent_intents(
     config: &Config,
     base_dir: impl AsRef<Path>,

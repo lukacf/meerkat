@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.9] - 2026-03-14
+
+### Fixed
+
+- **MCP tools invisible via RPC** — `start_turn_via_runtime()` (the V9 runtime path used by all RPC sessions) bypassed `apply_mcp_boundary()`, so MCP servers staged via `mcp/add` were never connected or made visible to agents. MCP tools were completely broken on the RPC surface since 0.4.7.
+- **Wait tool not interruptible by peer comms** — `WaitTool` was created without interrupt support, so peer messages arriving during a `wait()` call queued silently until the wait completed. Added `WakeMode::InterruptYielding` policy for `peer_message`/`peer_request` while running, wired comms `inbox_notify` → `WaitTool` interrupt channel via factory bridge task. Agents now respond to peer messages during wait instead of blocking for up to the full requested duration.
+- **Wait tool cap raised** from 300s to 1800s — sleep costs zero budget; the old 300s cap forced unnecessary LLM round-trips. Note: budget checks happen at loop boundaries, not during tool dispatch, so the cap balances responsiveness against overshoot risk in non-comms sessions.
+
+### Changed
+
+- **`WakeMode::InterruptYielding`** — new policy variant for peer inputs while running. Interrupts cooperative yielding points (e.g., wait tool) without cancelling active work or waking idle runtimes. Applied to `peer_message` and `peer_request` in `DefaultPolicyTable`.
+
+## [0.4.8] - 2026-03-13
+
+### Fixed
+
+- **Cross-crate `include_str!` in facade** — `meerkat` crate referenced `../../meerkat-mob/skills/mob-communication/SKILL.md` which works in workspace builds but breaks when the crate is pulled from crates.io. Copied the skill file into the facade crate.
+- **`meerkat-runtime` missing from crate publish order** — `meerkat-session` depends on `meerkat-runtime` but it wasn't in the CI publish sequence, causing registry publish failures.
+- **Path-only dependencies break `cargo publish`** — 6 crates referenced `meerkat-runtime` via `path = "../meerkat-runtime"` without `workspace = true`, causing `cargo publish` to reject them. Fixed all to use workspace dependencies.
+- **Release workflow publish decoupled from binary builds** — `publish_registries` job no longer depends on `build_binaries`, enabling manual dispatch to re-run publishing without rebuilding all 5 platforms.
+
 ## [0.4.7] - 2026-03-13
 
 ### Added
@@ -584,7 +605,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.4.7...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.4.9...HEAD
+[0.4.9]: https://github.com/lukacf/meerkat/compare/v0.4.8...v0.4.9
+[0.4.8]: https://github.com/lukacf/meerkat/compare/v0.4.7...v0.4.8
 [0.4.7]: https://github.com/lukacf/meerkat/compare/v0.4.6...v0.4.7
 [0.4.6]: https://github.com/lukacf/meerkat/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/lukacf/meerkat/compare/v0.4.4...v0.4.5

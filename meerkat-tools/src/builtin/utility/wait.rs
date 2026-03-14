@@ -12,8 +12,12 @@ use crate::tokio::sync::watch;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::watch;
 
-/// Maximum wait time in seconds (5 minutes)
-const MAX_WAIT_SECONDS: f64 = 300.0;
+/// Maximum wait time in seconds (1 hour).
+///
+/// With comms interrupt wired in, waits are interrupted early when peer
+/// messages arrive, so a high cap is safe. The budget system (token/duration/
+/// tool-call limits) handles runaway agents — sleep costs zero budget.
+const MAX_WAIT_SECONDS: f64 = 3600.0;
 
 /// Interrupt signal for the wait tool
 #[derive(Debug, Clone)]
@@ -61,10 +65,10 @@ impl Default for WaitTool {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct WaitArgs {
-    /// Duration to wait in seconds (max 300)
+    /// Duration to wait in seconds (max 3600)
     #[schemars(
-        description = "Number of seconds to wait (0.1 to 300)",
-        range(min = 0.1, max = 300.0)
+        description = "Number of seconds to wait (0.1 to 3600)",
+        range(min = 0.1, max = 3600.0)
     )]
     seconds: f64,
 }
@@ -79,7 +83,7 @@ impl BuiltinTool for WaitTool {
     fn def(&self) -> ToolDef {
         ToolDef {
             name: "wait".into(),
-            description: "Pause execution for the specified number of seconds. Use this to wait between status checks on async operations like sub-agents. Maximum wait time is 300 seconds (5 minutes).".into(),
+            description: "Pause execution for the specified number of seconds. Use this to wait between status checks on async operations like sub-agents. Wait is interrupted early when peer messages arrive. Maximum wait time is 3600 seconds (1 hour).".into(),
             input_schema: crate::schema::schema_for::<WaitArgs>(),
         }
     }
@@ -242,9 +246,9 @@ mod tests {
     fn test_wait_tool_clamps_max_value() {
         // Test that values above MAX_WAIT_SECONDS get clamped
         // We can't test the actual wait easily, but we can verify the clamping logic
-        let seconds = 999.0_f64;
+        let seconds = 9999.0_f64;
         let clamped = seconds.clamp(0.0, MAX_WAIT_SECONDS);
-        assert_eq!(clamped, 300.0);
+        assert_eq!(clamped, MAX_WAIT_SECONDS);
     }
 
     #[test]
@@ -298,6 +302,75 @@ mod tests {
         assert!(
             elapsed >= Duration::from_millis(180),
             "Should wait full duration, got {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wait_tool_interrupt_returns_interrupted_status_with_reason() {
+        // Validates the exact contract for comms-driven interrupts:
+        // when an incoming peer message interrupts a wait, the result must
+        // contain status="interrupted" and a reason string.
+        let (tx, rx) = tokio::sync::watch::channel(None::<WaitInterrupt>);
+        let tool = WaitTool::with_interrupt(rx);
+
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let _ = tx.send(Some(WaitInterrupt {
+                reason: "Incoming peer message".to_string(),
+            }));
+        });
+
+        let result = tool.call(json!({"seconds": 30.0})).await.unwrap();
+
+        assert_eq!(result["status"], "interrupted");
+        assert!(
+            result["reason"]
+                .as_str()
+                .unwrap()
+                .contains("Incoming peer message"),
+            "reason must include the interrupt source"
+        );
+        assert!(
+            result["waited_seconds"].as_f64().unwrap() < 1.0,
+            "should have been interrupted well before the full wait"
+        );
+        assert_eq!(result["requested_seconds"], 30.0);
+    }
+
+    #[tokio::test]
+    async fn test_wait_tool_multiple_sequential_interrupts() {
+        // After one interrupt, subsequent waits should still work and be
+        // interruptible by new signals.
+        let (tx, rx) = tokio::sync::watch::channel(None::<WaitInterrupt>);
+        let tool = WaitTool::with_interrupt(rx);
+
+        // First wait + interrupt
+        let tx_clone = tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let _ = tx_clone.send(Some(WaitInterrupt {
+                reason: "First interrupt".to_string(),
+            }));
+        });
+
+        let result1 = tool.call(json!({"seconds": 10.0})).await.unwrap();
+        assert_eq!(result1["status"], "interrupted");
+
+        // Second wait + interrupt
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let _ = tx.send(Some(WaitInterrupt {
+                reason: "Second interrupt".to_string(),
+            }));
+        });
+
+        let result2 = tool.call(json!({"seconds": 10.0})).await.unwrap();
+        assert_eq!(result2["status"], "interrupted");
+        assert!(
+            result2["reason"]
+                .as_str()
+                .unwrap()
+                .contains("Second interrupt")
         );
     }
 }

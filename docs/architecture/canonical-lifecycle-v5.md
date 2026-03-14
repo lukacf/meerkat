@@ -688,7 +688,7 @@ These defaults are normative.
 |---|---|---|
 | `PromptInput` | `StageRunStart`, `WakeIfIdle`, `Fifo`, `OnRunComplete`, transcript=true | `StageRunStart`, `None`, `Fifo`, `OnRunComplete`, transcript=true |
 | `ExternalEventInput` | `StageRunStart`, `WakeIfIdle`, `Fifo`, `OnRunComplete`, transcript=true | `StageRunStart`, `None`, `Fifo`, `OnRunComplete`, transcript=true |
-| `PeerInput` with no convention, `Message`, or `Request` | `StageRunStart`, `WakeIfIdle`, `Fifo`, `OnRunComplete`, transcript=true | `StageRunStart`, `None`, `Fifo`, `OnRunComplete`, transcript=true |
+| `PeerInput` with no convention, `Message`, or `Request` | `StageRunStart`, `WakeIfIdle`, `Fifo`, `OnRunComplete`, transcript=true | `StageRunStart`, `InterruptYielding`, `Fifo`, `OnRunComplete`, transcript=true |
 | `PeerInput` with `ResponseProgress` | `StageRunBoundary`, `None`, `Coalesce`, `OnRunComplete`, transcript=true | `StageRunBoundary`, `None`, `Coalesce`, `OnRunComplete`, transcript=true |
 | `PeerInput` with `ResponseTerminal` | `StageRunStart`, `WakeIfIdle`, `Fifo`, `OnRunComplete`, transcript=true | `StageRunBoundary`, `None`, `Fifo`, `OnRunComplete`, transcript=true |
 | `FlowStepInput` | `StageRunStart`, `WakeIfIdle`, `Fifo`, `OnRunComplete`, transcript=true | `StageRunStart`, `None`, `Fifo`, `OnRunComplete`, transcript=true |
@@ -867,7 +867,8 @@ Required transitions:
 
 Driver/runtime rules:
 
-- while `Running`, newly accepted input MAY be queued or staged but MUST NOT interrupt
+- while `Running`, newly accepted input MAY be queued or staged but MUST NOT cancel active work
+- peer messages and requests arriving while `Running` use `InterruptYielding` — they interrupt cooperative yielding points (e.g., `wait` tool) but do not cancel active LLM calls or tool executions
 - terminal peer responses arriving while `Running` MUST stage at `RunBoundary`
 - terminal peer responses arriving while `Idle` MUST wake
 - progress peer responses MUST NOT wake by default

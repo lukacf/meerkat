@@ -30,6 +30,9 @@ pub enum ApplyMode {
 pub enum WakeMode {
     /// Wake the runtime if idle.
     WakeIfIdle,
+    /// Interrupt cooperative yielding points (e.g., wait tool) but don't
+    /// cancel active work or wake an idle runtime.
+    InterruptYielding,
     /// Do not wake (input will be processed at next natural run).
     None,
 }
@@ -114,7 +117,11 @@ mod tests {
 
     #[test]
     fn wake_mode_serde() {
-        for mode in [WakeMode::WakeIfIdle, WakeMode::None] {
+        for mode in [
+            WakeMode::WakeIfIdle,
+            WakeMode::InterruptYielding,
+            WakeMode::None,
+        ] {
             let json = serde_json::to_value(mode).unwrap();
             let parsed: WakeMode = serde_json::from_value(json).unwrap();
             assert_eq!(mode, parsed);

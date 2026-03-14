@@ -178,6 +178,32 @@ impl CompositeDispatcher {
         })
     }
 
+    /// Replace the default `WaitTool` with one wired to the given interrupt
+    /// receiver.
+    ///
+    /// When a value is sent on the channel, any in-progress `wait` call will
+    /// be interrupted early and return `status: "interrupted"`. This enables
+    /// peer messages to interrupt cooperative yielding points (e.g., an agent
+    /// waiting for a peer response via the `wait` tool).
+    pub fn set_wait_interrupt(
+        &mut self,
+        #[cfg(not(target_arch = "wasm32"))] interrupt_rx: tokio::sync::watch::Receiver<
+            Option<crate::builtin::utility::WaitInterrupt>,
+        >,
+        #[cfg(target_arch = "wasm32")] interrupt_rx: crate::tokio::sync::watch::Receiver<
+            Option<crate::builtin::utility::WaitInterrupt>,
+        >,
+    ) {
+        use crate::builtin::utility::WaitTool;
+        let new_wait = Arc::new(WaitTool::with_interrupt(interrupt_rx));
+        for tool in &mut self.builtin_tools {
+            if tool.name() == "wait" {
+                *tool = new_wait;
+                return;
+            }
+        }
+    }
+
     /// Register sub-agent tools.
     #[cfg(all(feature = "sub-agents", not(target_arch = "wasm32")))]
     pub fn register_sub_agent_tools(
@@ -485,5 +511,50 @@ mod tests {
         assert!(usage.contains("External tools"));
         assert!(usage.contains("mob_list"));
         assert!(usage.contains("List active mobs"));
+    }
+
+    #[tokio::test]
+    async fn set_wait_interrupt_wires_into_wait_tool() {
+        use crate::builtin::utility::WaitInterrupt;
+        use meerkat_core::time_compat::Duration;
+
+        let store = Arc::new(MemoryTaskStore::new());
+        let mut dispatcher =
+            CompositeDispatcher::new(store, &BuiltinToolConfig::default(), None, None, None, None)
+                .expect("composite dispatcher should build");
+
+        let (tx, rx) = tokio::sync::watch::channel(None::<WaitInterrupt>);
+        dispatcher.set_wait_interrupt(rx);
+
+        // Dispatch a wait call and interrupt it
+        let call_json =
+            serde_json::value::RawValue::from_string(r#"{"seconds": 30.0}"#.to_string()).unwrap();
+        let call = ToolCallView {
+            id: "test-id",
+            name: "wait",
+            args: &call_json,
+        };
+
+        // Send interrupt after a short delay
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let _ = tx.send(Some(WaitInterrupt {
+                reason: "Incoming peer message".to_string(),
+            }));
+        });
+
+        let start = std::time::Instant::now();
+        let result = dispatcher
+            .dispatch(call)
+            .await
+            .expect("dispatch should succeed");
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "wait should be interrupted quickly, took {elapsed:?}"
+        );
+        let content: serde_json::Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(content["status"], "interrupted");
     }
 }

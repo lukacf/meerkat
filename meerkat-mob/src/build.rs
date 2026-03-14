@@ -110,8 +110,9 @@ pub async fn build_agent_config(
     config.override_shell = Some(profile.tools.shell);
     config.override_memory = Some(profile.tools.memory);
 
-    // Sub-agents are disabled for mob meerkats (they use comms instead)
-    config.override_subagents = Some(false);
+    // Let orchestrator-style mob profiles opt into sub-agents through the
+    // factory-level flag. Worker-style profiles still keep them off by default.
+    config.override_subagents = Some(profile.tools.mob);
 
     // External tools (mob tools, task tools, rust bundles composed externally)
     config.external_tools = external_tools;
@@ -423,7 +424,7 @@ mod tests {
         assert_eq!(config.override_builtins, Some(true));
         assert_eq!(config.override_shell, Some(true));
         assert_eq!(config.override_memory, Some(false));
-        assert_eq!(config.override_subagents, Some(false));
+        assert_eq!(config.override_subagents, Some(true));
 
         // Worker profile has builtins=true, shell=false, memory=false
         let worker = &def.profiles[&ProfileName::from("worker")];
@@ -650,7 +651,7 @@ mod tests {
         assert_eq!(build.realm_id.as_deref(), Some("mob:test-mob"));
         assert_eq!(build.override_builtins, Some(true));
         assert_eq!(build.override_shell, Some(true));
-        assert_eq!(build.override_subagents, Some(false));
+        assert_eq!(build.override_subagents, Some(true));
     }
 
     #[tokio::test]

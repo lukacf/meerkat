@@ -44,6 +44,7 @@ pub use builder::McpDispatcherConfig;
 pub use builder::{BuiltinDispatcherConfig, ToolDispatcherBuilder, build_builtin_dispatcher};
 #[cfg(feature = "comms")]
 pub use builtin::CommsToolSurface;
+pub use builtin::utility::WaitInterrupt;
 pub use builtin::{
     BuiltinTool, BuiltinToolConfig, BuiltinToolEntry, BuiltinToolError, CompositeDispatcher,
     CompositeDispatcherError, EnforcedToolPolicy, MemoryTaskStore, ResolvedToolPolicy, TaskStore,

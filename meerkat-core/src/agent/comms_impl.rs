@@ -276,10 +276,53 @@ where
             let timeout = self.budget.remaining_duration().unwrap_or(POLL_INTERVAL);
             let notified = inbox_notify.notified();
 
-            let classified = comms
-                .drain_classified_inbox_interactions()
-                .await
-                .unwrap_or_default();
+            // Try classified drain; fall back to legacy for older runtimes.
+            let classified = match comms.drain_classified_inbox_interactions().await {
+                Ok(v) => v,
+                Err(_) => {
+                    // Legacy runtime — use unclassified drain and process as
+                    // batched text, mirroring the pre-0.4.10 host-mode path.
+                    let interactions = comms.drain_inbox_interactions().await;
+
+                    if comms.dismiss_received() {
+                        tracing::info!("Host mode: DISMISS received, exiting");
+                        self.host_drain_active = false;
+                        return Ok(last_result);
+                    }
+
+                    if !interactions.is_empty() {
+                        let combined = interactions
+                            .into_iter()
+                            .map(|i| i.rendered_text)
+                            .collect::<Vec<_>>()
+                            .join("\n\n");
+                        let batch_result = match &event_tx {
+                            Some(tx) => self.run_with_events(combined, tx.clone()).await,
+                            None => self.run(combined).await,
+                        };
+                        match batch_result {
+                            Ok(result) => {
+                                last_result = result;
+                                self.checkpoint_current_session().await;
+                            }
+                            Err(e) => {
+                                if e.is_graceful() {
+                                    self.host_drain_active = false;
+                                    return Ok(last_result);
+                                }
+                                self.host_drain_active = false;
+                                return Err(e);
+                            }
+                        }
+                    }
+
+                    tokio::select! {
+                        () = notified => {}
+                        () = tokio::time::sleep(timeout) => {}
+                    }
+                    continue;
+                }
+            };
 
             if comms.dismiss_received() {
                 tracing::info!("Host mode: DISMISS received, exiting");

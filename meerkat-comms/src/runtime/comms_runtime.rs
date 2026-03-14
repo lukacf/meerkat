@@ -4,7 +4,7 @@
 use super::comms_config::ResolvedCommsConfig;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::InboxSender;
-use crate::agent::types::{CommsContent, CommsMessage};
+use crate::agent::types::CommsMessage;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::handle_connection;
 #[cfg(target_arch = "wasm32")]

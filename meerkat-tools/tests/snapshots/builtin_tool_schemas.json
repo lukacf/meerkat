@@ -439,9 +439,9 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "properties": {
       "seconds": {
-        "description": "Number of seconds to wait (0.1 to 300)",
+        "description": "Number of seconds to wait (0.1 to 1800)",
         "format": "double",
-        "maximum": 300.0,
+        "maximum": 1800.0,
         "minimum": 0.1,
         "type": "number"
       }

@@ -1417,8 +1417,8 @@ impl AgentFactory {
         let wait_interrupt_rx = wait_interrupt_tx
             .as_ref()
             .map(tokio::sync::watch::Sender::subscribe);
-        #[cfg(target_arch = "wasm32")]
-        let wait_interrupt_rx = wait_interrupt_tx
+        #[cfg(all(feature = "comms", target_arch = "wasm32"))]
+        let _wait_interrupt_rx = wait_interrupt_tx
             .as_ref()
             .map(tokio_with_wasm::alias::sync::watch::Sender::subscribe);
         // When comms is disabled, no wait interrupt channel is created.

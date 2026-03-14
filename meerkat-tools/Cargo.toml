@@ -20,7 +20,7 @@ required-features = ["integration-real-tests"]
 [features]
 default = ["sub-agents", "comms", "mcp", "skills"]
 sub-agents = ["dep:meerkat-client"]
-comms = ["dep:meerkat-comms"]
+comms = ["dep:meerkat-comms", "dep:parking_lot"]
 mcp = ["dep:meerkat-mcp"]
 skills = []
 integration-real-tests = []
@@ -32,6 +32,7 @@ meerkat-skills = { workspace = true }
 inventory = { workspace = true }
 meerkat-client = { workspace = true, optional = true }
 meerkat-comms = { workspace = true, optional = true }
+parking_lot = { workspace = true, optional = true }
 meerkat-mcp = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

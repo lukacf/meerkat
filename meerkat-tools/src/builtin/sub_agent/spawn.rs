@@ -444,6 +444,8 @@ impl AgentSpawnTool {
             system_prompt: effective_system_prompt,
             comms_config,
             parent_trusted_peers: self.state.parent_trusted_peers.clone(),
+            #[cfg(feature = "comms")]
+            parent_classification_peers: self.state.parent_classification_peers.clone(),
             host_mode: params.host_mode,
             scoped_event_tx,
             parent_scope_path,

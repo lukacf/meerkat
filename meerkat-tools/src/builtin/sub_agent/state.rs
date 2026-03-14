@@ -47,6 +47,11 @@ pub struct SubAgentToolState {
     #[cfg(feature = "comms")]
     pub parent_trusted_peers: Option<Arc<RwLock<TrustedPeers>>>,
 
+    /// Parent's sync classification sidecar. Updated alongside parent_trusted_peers
+    /// so ingress classification sees newly trusted sub-agent peers immediately.
+    #[cfg(feature = "comms")]
+    pub parent_classification_peers: Option<Arc<parking_lot::RwLock<TrustedPeers>>>,
+
     /// Tool usage instructions from parent (for inheriting system prompt)
     /// These explain how to use shell, task, and other tools.
     pub tool_usage_instructions: RwLock<Option<String>>,
@@ -81,6 +86,8 @@ impl SubAgentToolState {
             parent_comms: None,
             #[cfg(feature = "comms")]
             parent_trusted_peers: None,
+            #[cfg(feature = "comms")]
+            parent_classification_peers: None,
             tool_usage_instructions: RwLock::new(None),
             scoped_event_tx: RwLock::new(None),
             scoped_event_path: RwLock::new(Vec::new()),
@@ -126,6 +133,7 @@ impl SubAgentToolState {
         current_depth: u32,
         parent_comms: ParentCommsContext,
         parent_trusted_peers: Arc<RwLock<TrustedPeers>>,
+        parent_classification_peers: Arc<parking_lot::RwLock<TrustedPeers>>,
     ) -> Self {
         Self {
             manager,
@@ -137,6 +145,7 @@ impl SubAgentToolState {
             current_depth,
             parent_comms: Some(parent_comms),
             parent_trusted_peers: Some(parent_trusted_peers),
+            parent_classification_peers: Some(parent_classification_peers),
             tool_usage_instructions: RwLock::new(None),
             scoped_event_tx: RwLock::new(None),
             scoped_event_path: RwLock::new(Vec::new()),
@@ -584,6 +593,7 @@ mod tests {
         };
 
         let parent_trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
+        let parent_classification_peers = Arc::new(parking_lot::RwLock::new(TrustedPeers::new()));
 
         let state = SubAgentToolState::with_comms(
             manager,
@@ -595,6 +605,7 @@ mod tests {
             0,
             parent_comms,
             parent_trusted_peers,
+            parent_classification_peers,
         );
 
         // Regression test: sub-agents MUST have parent_comms when created with with_comms()
@@ -639,6 +650,7 @@ mod tests {
         };
 
         let parent_trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
+        let parent_classification_peers = Arc::new(parking_lot::RwLock::new(TrustedPeers::new()));
 
         let state = SubAgentToolState::with_comms(
             manager,
@@ -650,6 +662,7 @@ mod tests {
             0,
             parent_comms,
             parent_trusted_peers,
+            parent_classification_peers,
         );
 
         // The spawn tool checks state.parent_comms.as_ref() to decide whether
@@ -737,6 +750,7 @@ mod tests {
             0,
             parent_comms,
             trusted_peers.clone(), // Same Arc as above
+            Arc::new(parking_lot::RwLock::new(TrustedPeers::new())),
         );
 
         // Verify the state holds the same Arc and sees the child

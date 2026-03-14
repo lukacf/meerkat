@@ -167,6 +167,7 @@ struct ErasedLlmClientOverride(Arc<dyn LlmClient>);
 struct SubAgentCommsWiring {
     parent_context: meerkat_comms::runtime::ParentCommsContext,
     parent_trusted_peers: Arc<RwLock<meerkat_comms::TrustedPeers>>,
+    parent_classification_peers: Arc<parking_lot::RwLock<meerkat_comms::TrustedPeers>>,
 }
 
 /// Encode an LLM client override for transport in `SessionBuildOptions`.
@@ -1139,6 +1140,7 @@ impl AgentFactory {
                     0,
                     comms.parent_context,
                     comms.parent_trusted_peers,
+                    comms.parent_classification_peers,
                 ),
                 None => SubAgentToolState::new(
                     manager,
@@ -1395,6 +1397,7 @@ impl AgentFactory {
                     inproc_namespace: runtime.inproc_namespace().map(ToOwned::to_owned),
                 },
                 parent_trusted_peers: runtime.trusted_peers_shared(),
+                parent_classification_peers: runtime.router().classification_peers_arc(),
             })
         } else {
             None
@@ -1507,77 +1510,42 @@ impl AgentFactory {
                     None::<meerkat_core::wait_interrupt::WaitInterrupt>,
                 );
 
-                // Bind the interrupt receiver into the dispatcher.
-                // Only attempt when builtins are enabled (dispatcher has a wait
-                // tool). Comms-only agents with enable_builtins=false skip binding.
-                let bind_succeeded = if effective_builtins {
-                    match tools.bind_wait_interrupt(rx) {
-                        Ok(rebound) => {
-                            tools = rebound;
-                            true
-                        }
-                        Err(meerkat_core::WaitInterruptBindError::SharedOwnership) => {
-                            // Shared dispatcher (e.g. FactoryAgentBuilder clones
-                            // default_tool_dispatcher). Arc consumed but we lost
-                            // ownership. Rebuild the dispatcher for this session.
-                            tracing::debug!("Shared dispatcher — rebuilding with wait interrupt");
-                            // tools was consumed by the failed bind. Rebuild from
-                            // scratch for this session so we get exclusive ownership.
-                            #[cfg(not(target_arch = "wasm32"))]
-                            {
-                                let (rebuilt, rebuilt_usage) = self
-                                    .build_tool_dispatcher_for_agent_with_overrides(
-                                        config,
-                                        None, // external_tools already consumed
-                                        effective_builtins,
-                                        effective_shell,
-                                        effective_subagents,
-                                        skill_engine.clone(),
-                                        build_config.scoped_event_tx.clone(),
-                                        build_config.scoped_event_path.clone(),
-                                        #[cfg(all(feature = "sub-agents", feature = "comms"))]
-                                        None, // sub_agent_comms already consumed
-                                        None, // shell_env already consumed
-                                    )
-                                    .await
-                                    .map_err(|e| {
-                                        BuildAgentError::Config(format!(
-                                            "Failed to rebuild dispatcher: {e}"
-                                        ))
-                                    })?;
-                                tool_usage_instructions = rebuilt_usage;
-
-                                // Now bind with exclusive ownership (refcount=1)
-                                let rx2 = tx.subscribe();
-                                match rebuilt.bind_wait_interrupt(rx2) {
-                                    Ok(rebound) => {
-                                        tools = rebound;
-                                        true
-                                    }
-                                    Err(e) => {
-                                        return Err(BuildAgentError::Config(format!(
-                                            "Wait interrupt binding failed on rebuilt dispatcher: {e}"
-                                        )));
-                                    }
-                                }
-                            }
-                            #[cfg(target_arch = "wasm32")]
-                            {
-                                // On WASM, can't rebuild — log and continue without interrupts
-                                tracing::warn!("Cannot rebuild shared dispatcher on WASM");
-                                false
-                            }
-                        }
-                        Err(meerkat_core::WaitInterruptBindError::Unsupported) => {
-                            return Err(BuildAgentError::Config(
-                                "Dispatcher does not support wait interrupt binding \
-                                 despite builtins being enabled"
-                                    .to_string(),
-                            ));
-                        }
-                    }
-                } else {
+                // Try to bind wait interrupts. Three strategies in order:
+                //
+                // 1. Arc::try_unwrap (exclusive ownership) — consumes Arc, swaps
+                //    wait tool, returns new Arc. Works when factory built the
+                //    dispatcher fresh for this session.
+                //
+                // 2. Skip gracefully — dispatcher has no wait tool (builtins
+                //    disabled) or is a custom override without binding support.
+                //    Comms works, wait just isn't interruptible.
+                //
+                // Strategy 1 fails with SharedOwnership when FactoryAgentBuilder
+                // clones default_tool_dispatcher (refcount > 1). In that case
+                // we skip — the shared dispatcher is preserved intact, comms
+                // works, but wait won't be interrupted. This is acceptable
+                // because the shared dispatcher was built without this session's
+                // comms context, so it can't have session-specific interrupt
+                // wiring anyway.
+                let bind_succeeded = if !effective_builtins {
                     tracing::debug!("Builtins disabled — skipping wait interrupt binding");
+                    false
+                } else if Arc::strong_count(&tools) == 1 {
+                    // Exclusive ownership — safe to consume and rebind.
+                    // bind_wait_interrupt consumes the Arc, so on success we
+                    // get a new Arc back. On failure, the Arc is dropped by the
+                    // default impl, so we must not continue (would use moved value).
+                    tools = tools.bind_wait_interrupt(rx).map_err(|e| {
+                        BuildAgentError::Config(format!("Wait interrupt binding failed: {e}"))
+                    })?;
+                    true
+                } else {
+                    // Shared dispatcher (FactoryAgentBuilder clone). Cannot
+                    // consume the Arc. Preserve the dispatcher as-is.
+                    tracing::debug!(
+                        "Shared dispatcher (refcount={}) — wait interrupt not bound",
+                        Arc::strong_count(&tools)
+                    );
                     false
                 };
 

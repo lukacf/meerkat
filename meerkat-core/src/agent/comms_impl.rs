@@ -99,17 +99,30 @@ where
             None => return false,
         };
 
+        // Try classified drain first; fall back to legacy drain for runtimes
+        // that only implement drain_inbox_interactions()/drain_messages().
         let classified = match comms.drain_classified_inbox_interactions().await {
-            Ok(v) if v.is_empty() => return false,
             Ok(v) => v,
-            Err(e) => {
-                tracing::error!(
-                    "CommsRuntime does not support classified drain \
-                     (factory should have rejected this at build time): {e}"
-                );
-                return false;
+            Err(_) => {
+                // Legacy runtime — use unclassified drain path
+                let interactions = comms.drain_inbox_interactions().await;
+                if interactions.is_empty() {
+                    return false;
+                }
+                let mut messages = Vec::new();
+                for interaction in interactions {
+                    messages.push(interaction.rendered_text);
+                }
+                let combined = messages.join("\n\n");
+                self.session
+                    .push(Message::User(UserMessage { content: combined }));
+                return true;
             }
         };
+
+        if classified.is_empty() {
+            return false;
+        }
 
         let mut messages = Vec::new();
         let mut peer_lifecycle_batch = PeerLifecycleBatch::default();
@@ -263,16 +276,10 @@ where
             let timeout = self.budget.remaining_duration().unwrap_or(POLL_INTERVAL);
             let notified = inbox_notify.notified();
 
-            let classified = match comms.drain_classified_inbox_interactions().await {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::error!(
-                        "CommsRuntime does not support classified drain \
-                         (factory should have rejected this at build time): {e}"
-                    );
-                    Vec::new()
-                }
-            };
+            let classified = comms
+                .drain_classified_inbox_interactions()
+                .await
+                .unwrap_or_default();
 
             if comms.dismiss_received() {
                 tracing::info!("Host mode: DISMISS received, exiting");

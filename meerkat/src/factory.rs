@@ -1512,22 +1512,33 @@ impl AgentFactory {
                 // tool). Comms-only agents with enable_builtins=false skip binding
                 // — they work fine, wait just isn't interruptible.
                 let bind_succeeded = if effective_builtins {
+                    // Clone before calling: bind_wait_interrupt consumes the Arc.
+                    // On error, fall back to the clone (comms works, wait just
+                    // won't be interruptible).
+                    let tools_fallback = Arc::clone(&tools);
                     match tools.bind_wait_interrupt(rx) {
                         Ok(rebound) => {
                             tools = rebound;
                             true
                         }
-                        Err(e) => {
-                            return Err(BuildAgentError::Config(format!(
-                                "Wait interrupt binding failed: {e}"
-                            )));
+                        Err(meerkat_core::WaitInterruptBindError::SharedOwnership) => {
+                            // Shared dispatcher override (e.g. FactoryAgentBuilder
+                            // clones default_tool_dispatcher). Can't unwrap Arc —
+                            // wait just won't be interruptible for this session.
+                            tools = tools_fallback;
+                            tracing::debug!(
+                                "Shared dispatcher ownership — skipping wait interrupt binding"
+                            );
+                            false
+                        }
+                        Err(meerkat_core::WaitInterruptBindError::Unsupported) => {
+                            tools = tools_fallback;
+                            tracing::debug!("Dispatcher does not support wait interrupt binding");
+                            false
                         }
                     }
                 } else {
-                    tracing::debug!(
-                        "Builtins disabled — skipping wait interrupt binding; \
-                         comms will work but wait is not interruptible"
-                    );
+                    tracing::debug!("Builtins disabled — skipping wait interrupt binding");
                     false
                 };
 

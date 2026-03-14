@@ -89,8 +89,14 @@ pub enum PeerInputClass {
 
 impl PeerInputClass {
     /// Returns true if this class should interrupt an in-flight `wait`.
+    ///
+    /// Includes responses: a `send_request` + `wait` workflow needs the
+    /// peer's response to interrupt the wait immediately, not after timeout.
     pub fn is_actionable(&self) -> bool {
-        matches!(self, Self::ActionableMessage | Self::ActionableRequest)
+        matches!(
+            self,
+            Self::ActionableMessage | Self::ActionableRequest | Self::Response
+        )
     }
 }
 

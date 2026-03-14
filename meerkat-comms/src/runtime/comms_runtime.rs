@@ -175,34 +175,12 @@ fn is_dismiss(msg: &CommsMessage) -> bool {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl CoreCommsRuntime for CommsRuntime {
     async fn drain_messages(&self) -> Vec<String> {
-        let mut inbox = self.inbox.lock().await;
-        let items = inbox.try_drain();
-        let trusted = self.trusted_peers.read().await;
-
-        let drained: Vec<DrainedMessage> = items
-            .iter()
-            .filter_map(|item| drain_inbox_item(item, &trusted, self.require_peer_auth))
-            .collect();
-
-        // Check for DISMISS in authenticated messages
-        for msg in &drained {
-            if let DrainedMessage::Authenticated(m) = msg
-                && is_dismiss(m)
-            {
-                self.dismiss_flag.store(true, Ordering::SeqCst);
-            }
-        }
-
-        drained
-            .iter()
-            .filter(|m| {
-                // Filter out DISMISS messages from output
-                !matches!(m, DrainedMessage::Authenticated(m) if is_dismiss(m))
-            })
-            .map(|m| match m {
-                DrainedMessage::Authenticated(msg) => msg.to_user_message_text(),
-                DrainedMessage::Plain(msg) => msg.to_user_message_text(),
-            })
+        // Delegate through classified drain so messages from the classified
+        // inbox (the sole consumer since 0.4.10) are returned.
+        self.drain_inbox_interactions()
+            .await
+            .into_iter()
+            .map(|i| i.rendered_text)
             .collect()
     }
     fn inbox_notify(&self) -> Arc<tokio::sync::Notify> {
@@ -1326,13 +1304,16 @@ impl CommsRuntime {
     }
 
     pub async fn drain_messages(&self) -> Vec<CommsMessage> {
+        // Drain from the classified queue (sole consumer since 0.4.10).
+        // Convert classified entries back to CommsMessage for callers
+        // that use the inherent API.
         let mut inbox = self.inbox.lock().await;
-        let items = inbox.try_drain();
+        let entries = inbox.try_drain_classified();
         let trusted = self.trusted_peers.read().await;
-        items
+        entries
             .into_iter()
-            .filter_map(|item| {
-                CommsMessage::from_inbox_item(&item, &trusted, self.require_peer_auth)
+            .filter_map(|entry| {
+                CommsMessage::from_inbox_item(&entry.item, &trusted, self.require_peer_auth)
             })
             .collect()
     }
@@ -1341,11 +1322,11 @@ impl CommsRuntime {
         loop {
             {
                 let mut inbox = self.inbox.lock().await;
-                let items = inbox.try_drain();
-                if !items.is_empty() {
+                let entries = inbox.try_drain_classified();
+                if !entries.is_empty() {
                     let trusted = self.trusted_peers.read().await;
-                    if let Some(msg) = items.into_iter().find_map(|item| {
-                        CommsMessage::from_inbox_item(&item, &trusted, self.require_peer_auth)
+                    if let Some(msg) = entries.into_iter().find_map(|entry| {
+                        CommsMessage::from_inbox_item(&entry.item, &trusted, self.require_peer_auth)
                     }) {
                         return Some(msg);
                     }

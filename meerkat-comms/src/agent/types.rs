@@ -93,8 +93,10 @@ pub enum MessageIntent {
     /// Request information or query
     Query,
     /// Peer added lifecycle event (mob.peer_added)
+    #[serde(rename = "mob.peer_added")]
     PeerAdded,
     /// Peer retired lifecycle event (mob.peer_retired)
+    #[serde(rename = "mob.peer_retired")]
     PeerRetired,
     /// Custom intent for user-defined operations
     #[serde(untagged)]

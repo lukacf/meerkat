@@ -535,6 +535,16 @@ impl CoreCommsRuntime for CommsRuntime {
         use crate::agent::types::MessageIntent;
         use crate::types::MessageKind;
 
+        // Sync the classification sidecar from the async store before draining.
+        // This catches trust mutations that bypassed the Router (e.g.,
+        // sub-agent runners writing to trusted_peers_shared() directly).
+        {
+            let async_peers = self.trusted_peers.read().await;
+            let sidecar = self.router.classification_peers_arc();
+            let mut sync_peers = sidecar.write();
+            *sync_peers = async_peers.clone();
+        }
+
         let mut inbox = self.inbox.lock().await;
         let classified_entries = inbox.try_drain_classified();
 
@@ -1039,6 +1049,13 @@ impl CommsRuntime {
     }
     pub fn router(&self) -> &Router {
         &self.router
+    }
+
+    /// Add a trusted peer, updating both the async store and the sync
+    /// classification sidecar. Prefer this over writing to
+    /// `trusted_peers_shared()` directly.
+    pub async fn upsert_trusted_peer(&self, peer: TrustedPeer) {
+        self.router.add_trusted_peer(peer).await;
     }
 
     /// Update the inproc registry entry with friendly metadata.

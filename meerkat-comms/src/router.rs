@@ -187,6 +187,14 @@ impl Router {
         removed
     }
 
+    /// Get the sync classification peers sidecar Arc.
+    ///
+    /// Used by the factory to thread the sidecar into sub-agent wiring so
+    /// sub-agent peer additions are visible to parent ingress classification.
+    pub fn classification_peers_arc(&self) -> Arc<parking_lot::RwLock<TrustedPeers>> {
+        self.classification_peers.clone()
+    }
+
     pub async fn send(&self, peer_name: &str, kind: MessageKind) -> Result<Uuid, SendError> {
         let inproc_namespace = self.inproc_namespace.as_deref().unwrap_or("");
         let peer = {

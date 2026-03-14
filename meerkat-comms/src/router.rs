@@ -187,12 +187,6 @@ impl Router {
         removed
     }
 
-    /// Get the sync classification peers sidecar.
-    #[allow(dead_code)] // Available for future use; sidecar is updated via add/remove_trusted_peer
-    pub(crate) fn classification_peers(&self) -> Arc<parking_lot::RwLock<TrustedPeers>> {
-        self.classification_peers.clone()
-    }
-
     pub async fn send(&self, peer_name: &str, kind: MessageKind) -> Result<Uuid, SendError> {
         let inproc_namespace = self.inproc_namespace.as_deref().unwrap_or("");
         let peer = {

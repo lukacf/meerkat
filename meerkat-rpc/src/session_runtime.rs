@@ -327,6 +327,51 @@ impl SessionRuntime {
         self.default_llm_client.clone()
     }
 
+    /// Hot-swap the LLM client on a materialized session.
+    ///
+    /// Builds a new client for the given model/provider override and replaces
+    /// the session's client via `set_session_client`. Falls back to
+    /// `default_llm_client` when available, otherwise creates a fresh client
+    /// from the factory (which resolves API keys from env vars).
+    async fn hot_swap_llm_client(
+        &self,
+        session_id: &SessionId,
+        ov: &crate::handlers::turn::TurnOverrides,
+    ) -> Result<(), RpcError> {
+        let catalog_default =
+            meerkat_models::default_model("anthropic").unwrap_or("claude-sonnet-4-5");
+        let model = ov.model.as_deref().unwrap_or(catalog_default);
+        let provider = ov
+            .provider
+            .as_ref()
+            .map(|p| meerkat_core::Provider::from_name(p))
+            .unwrap_or_else(|| {
+                meerkat_core::Provider::infer_from_model(model)
+                    .unwrap_or(meerkat_core::Provider::Other)
+            });
+
+        let raw_client = if let Some(ref default) = self.default_llm_client {
+            Arc::clone(default)
+        } else {
+            self.factory
+                .build_llm_client(provider, None, None)
+                .await
+                .map_err(|e| RpcError {
+                    code: error::INTERNAL_ERROR,
+                    message: format!("Failed to build LLM client for model override: {e}"),
+                    data: None,
+                })?
+        };
+
+        let adapter: Arc<dyn meerkat_core::AgentLlmClient> =
+            Arc::new(self.factory.build_llm_adapter(raw_client, model).await);
+        self.service
+            .set_session_client(session_id, adapter)
+            .await
+            .map_err(session_error_to_rpc)?;
+        Ok(())
+    }
+
     pub async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
         self.service.discard_live_session(session_id).await
     }
@@ -462,6 +507,9 @@ impl SessionRuntime {
                 skill_references,
                 flow_tool_overlay,
                 additional_instructions,
+                model: overrides.as_ref().and_then(|ov| ov.model.clone()),
+                provider: overrides.as_ref().and_then(|ov| ov.provider.clone()),
+                provider_params: overrides.as_ref().and_then(|ov| ov.provider_params.clone()),
             },
         );
 
@@ -634,6 +682,13 @@ impl SessionRuntime {
             .unwrap_or(false);
 
         if pending_session.is_none() && !self.live_session_is_stale(session_id).await? {
+            // Hot-swap LLM client if model/provider overrides are present.
+            if let Some(ref ov) = overrides {
+                if ov.model.is_some() || ov.provider.is_some() || ov.provider_params.is_some() {
+                    self.hot_swap_llm_client(session_id, ov).await?;
+                }
+            }
+
             let req = StartTurnRequest {
                 prompt: prompt.clone(),
                 event_tx: Some(event_tx.clone()),
@@ -1271,32 +1326,7 @@ impl SessionRuntime {
         if let Some(ref ov) = overrides
             && (ov.model.is_some() || ov.provider.is_some() || ov.provider_params.is_some())
         {
-            let catalog_default =
-                meerkat_models::default_model("anthropic").unwrap_or("claude-sonnet-4-5");
-            let model = ov.model.as_deref().unwrap_or(catalog_default);
-            let provider = ov
-                .provider
-                .as_ref()
-                .map(|p| meerkat_core::Provider::from_name(p))
-                .unwrap_or_else(|| {
-                    meerkat_core::Provider::infer_from_model(model)
-                        .unwrap_or(meerkat_core::Provider::Other)
-                });
-            let raw_client = self
-                .factory
-                .build_llm_client(provider, None, None)
-                .await
-                .map_err(|e| RpcError {
-                    code: error::INTERNAL_ERROR,
-                    message: format!("Failed to build LLM client for model override: {e}"),
-                    data: None,
-                })?;
-            let adapter: Arc<dyn meerkat_core::AgentLlmClient> =
-                Arc::new(self.factory.build_llm_adapter(raw_client, model).await);
-            self.service
-                .set_session_client(session_id, adapter)
-                .await
-                .map_err(session_error_to_rpc)?;
+            self.hot_swap_llm_client(session_id, ov).await?;
         }
 
         let host_mode = match overrides.as_ref().and_then(|ov| ov.host_mode) {
@@ -3079,6 +3109,12 @@ mod tests {
             .mcp_adapter_for_session(&session_id)
             .await
             .expect("mcp adapter");
+
+        // Wait for the background MCP connect to complete before setting
+        // inflight calls — otherwise `drain_pending` on the next boundary
+        // replaces the entry and resets active_calls to 0.
+        adapter.wait_until_ready(Duration::from_secs(5)).await;
+
         adapter
             .set_removal_timeout_for_testing(Duration::from_millis(20))
             .await

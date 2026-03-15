@@ -472,6 +472,7 @@ impl MobProvisioner for SubagentBackend {
                 skill_references: req.skill_references.clone(),
                 flow_tool_overlay: req.flow_tool_overlay.clone(),
                 additional_instructions: req.additional_instructions.clone(),
+                ..Default::default()
             };
             let input = Input::Prompt(PromptInput {
                 header: InputHeader {
@@ -519,6 +520,7 @@ impl MobProvisioner for SubagentBackend {
                         skill_references: req.skill_references.clone(),
                         flow_tool_overlay: req.flow_tool_overlay.clone(),
                         additional_instructions: req.additional_instructions.clone(),
+                        ..Default::default()
                     },
                 ),
             );

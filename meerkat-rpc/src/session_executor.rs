@@ -130,16 +130,20 @@ impl CoreExecutor for SessionRuntimeExecutor {
                     .turn_metadata()
                     .and_then(|meta| meta.additional_instructions.clone()),
                 Some(crate::handlers::turn::TurnOverrides {
-                    // Pass through explicit host_mode override (Some(true)/Some(false))
-                    // or None to use session default.
                     host_mode: primitive.turn_metadata().and_then(|meta| meta.host_mode),
-                    model: None,
-                    provider: None,
+                    model: primitive
+                        .turn_metadata()
+                        .and_then(|meta| meta.model.clone()),
+                    provider: primitive
+                        .turn_metadata()
+                        .and_then(|meta| meta.provider.clone()),
+                    provider_params: primitive
+                        .turn_metadata()
+                        .and_then(|meta| meta.provider_params.clone()),
                     max_tokens: None,
                     system_prompt: None,
                     output_schema: None,
                     structured_output_retries: None,
-                    provider_params: None,
                 }),
             )
             .await;

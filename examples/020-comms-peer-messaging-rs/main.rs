@@ -24,7 +24,7 @@ use meerkat_comms::agent::{
 };
 use meerkat_comms::{Keypair, TrustedPeer, TrustedPeers};
 use meerkat_store::{JsonlStore, StoreAdapter};
-use tokio::sync::RwLock;
+use parking_lot::RwLock;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

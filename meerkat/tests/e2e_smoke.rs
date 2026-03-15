@@ -1009,7 +1009,7 @@ mod scenario_08_comms {
         CommsAgent, CommsManager, CommsManagerConfig, CommsToolDispatcher, spawn_tcp_listener,
     };
     use meerkat_comms::{CommsConfig, Keypair, TrustedPeer, TrustedPeers};
-    use tokio::sync::RwLock;
+    use parking_lot::RwLock;
 
     /// Create a pair of agents that can communicate with each other.
     async fn create_agent_pair(

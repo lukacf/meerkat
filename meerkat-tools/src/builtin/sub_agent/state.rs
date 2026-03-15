@@ -749,7 +749,7 @@ mod tests {
             config,
             0,
             parent_comms,
-            trusted_peers.clone(), // Same Arc as above
+            trusted_peers,
             Arc::new(parking_lot::RwLock::new(TrustedPeers::new())),
         );
 

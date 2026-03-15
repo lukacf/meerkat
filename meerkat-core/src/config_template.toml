@@ -6,11 +6,8 @@ model = "claude-opus-4-6"
 max_tokens_per_turn = 16384
 budget_warning_threshold = 0.8
 
-[models]
-anthropic = "claude-opus-4-6"
-openai = "gpt-5.2"
-gemini = "gemini-3-flash-preview"
-
+# Model defaults are now sourced from meerkat-models catalog.
+# Per-provider overrides can still be set in user config.
 max_tokens = 8192
 
 [shell]

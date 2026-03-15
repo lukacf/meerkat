@@ -3113,8 +3113,8 @@ mod tests {
     #[test]
     fn test_tools_list_skills_schema_has_source_selector() {
         let tools = tools_list();
-        let skills_tool = &tools[5];
-        assert_eq!(skills_tool["name"], "meerkat_skills");
+        let skills_tool = tools.iter().find(|t| t["name"] == "meerkat_skills");
+        let skills_tool = skills_tool.expect("meerkat_skills tool must exist");
         assert!(
             skills_tool["inputSchema"]["properties"]["source"].is_object(),
             "skills inspect should expose optional source selector"

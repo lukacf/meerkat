@@ -60,6 +60,7 @@ rkat comms peers <SESSION-ID>                     # (comms feature)
 rkat realms current|list|show
 rkat skills list [--json]
 rkat skills inspect <ID> [--source <SOURCE>] [--json]
+rkat models catalog [--json]
 rkat mob prefabs|create|list|status|spawn|retire|respawn|wire|unwire|turn|stop|resume|complete|flows|run-flow|flow-status|events|destroy|pack|inspect|validate|deploy|web
 rkat config get|set|patch ...
 rkat capabilities
@@ -130,6 +131,7 @@ Core endpoints:
 - `GET /skills` — list skills with provenance
 - `GET /skills/{id}` — inspect a skill's full body
 - `GET /health`
+- `GET /models/catalog` — curated model catalog with provider profiles
 - `GET /capabilities`
 - `GET|PUT|PATCH /config`
 - `POST /sessions/{id}/mcp/add` — stage live MCP server add (feature-gated)
@@ -194,6 +196,7 @@ Core methods:
 - `config/patch`
 - `skills/list` — list skills with provenance (active + shadowed)
 - `skills/inspect` — inspect a skill's full body by ID
+- `models/catalog` — curated model catalog with provider profiles
 - `capabilities/get`
 - `mcp/add` — stage live MCP server add for a session
 - `mcp/remove` — stage live MCP server remove
@@ -239,6 +242,7 @@ Core tools:
 - `meerkat_archive` — archive (remove) a session
 - `meerkat_config` — get/set/patch config
 - `meerkat_capabilities` — list runtime capabilities
+- `meerkat_models_catalog` — curated model catalog with provider profiles
 - `meerkat_skills` — list (`action: "list"`) or inspect (`action: "inspect"`, `skill_id: "..."`) skills
 - `meerkat_mcp_add` — stage live MCP server add
 - `meerkat_mcp_remove` — stage live MCP server remove

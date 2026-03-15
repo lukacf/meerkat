@@ -152,13 +152,13 @@ pub fn default_model(provider: &str) -> Option<&'static str> {
     }
 }
 
-/// Return all model IDs in the catalog for a given provider.
-pub fn allowed_models(provider: &str) -> Vec<&'static str> {
+/// Return an iterator over model IDs in the catalog for a given provider.
+pub fn allowed_models(provider: &str) -> impl Iterator<Item = &'static str> + 'static {
+    let provider = provider.to_string();
     CATALOG_DATA
         .iter()
-        .filter(|e| e.provider == provider)
+        .filter(move |e| e.provider == provider.as_str())
         .map(|e| e.id)
-        .collect()
 }
 
 /// Look up a specific catalog entry by provider and model ID.
@@ -287,7 +287,7 @@ mod tests {
     #[test]
     fn allowed_models_matches_catalog() {
         for &provider in PROVIDER_NAMES {
-            let allowed = allowed_models(provider);
+            let allowed: Vec<&str> = allowed_models(provider).collect();
             let from_catalog: Vec<&str> = CATALOG_DATA
                 .iter()
                 .filter(|e| e.provider == provider)

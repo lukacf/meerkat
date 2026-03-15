@@ -536,7 +536,6 @@ fn default_allowed_models() -> BTreeMap<String, Vec<String>> {
     let mut map = BTreeMap::new();
     for &provider in meerkat_models::provider_names() {
         let models: Vec<String> = meerkat_models::allowed_models(provider)
-            .into_iter()
             .map(String::from)
             .collect();
         map.insert(provider.to_string(), models);

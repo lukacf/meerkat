@@ -39,6 +39,7 @@ The `meerkat-mcp-server` crate exposes Meerkat as MCP tools that other clients c
 | `meerkat_archive` | Archive (remove) a session |
 | `meerkat_config` | Get or update server config |
 | `meerkat_capabilities` | Query runtime capabilities |
+| `meerkat_models_catalog` | List available models with provider profiles and capabilities |
 | `meerkat_skills` | List or inspect available skills |
 | `meerkat_mcp_add` | Stage a live MCP server addition on an active session |
 | `meerkat_mcp_remove` | Stage a live MCP server removal on an active session |
@@ -606,6 +607,46 @@ Possible `status` values:
 | `DisabledByPolicy` | `{"DisabledByPolicy": {"description": "..."}}` | Compiled in but disabled |
 | `NotCompiled` | `{"NotCompiled": {"feature": "..."}}` | Feature flag absent |
 | `NotSupportedByProtocol` | `{"NotSupportedByProtocol": {"reason": "..."}}` | Protocol does not support it |
+
+### meerkat_models_catalog
+
+Return the curated model catalog with provider profiles, capability metadata, and parameter schemas.
+
+<CodeGroup>
+```json Request
+{}
+```
+
+```json Response
+{
+  "contract_version": "0.4.11",
+  "providers": [
+    {
+      "provider": "anthropic",
+      "default_model_id": "claude-sonnet-4-5",
+      "models": [
+        {
+          "id": "claude-sonnet-4-5",
+          "display_name": "Claude Sonnet 4.5",
+          "tier": "standard",
+          "context_window": 200000,
+          "max_output_tokens": 64000,
+          "profile": {
+            "model_family": "claude",
+            "supports_temperature": true,
+            "supports_thinking": true,
+            "supports_reasoning": false,
+            "params_schema": {}
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+</CodeGroup>
+
+No parameters required. The catalog is compiled from `meerkat-models` at build time.
 
 ### meerkat_skills
 

@@ -50,6 +50,7 @@ rkat [--realm <id>] [--isolated] [--instance <id>] \
 | `rkat mcp ...` | Manage local/project MCP server config |
 | `rkat mob ...` | Pack, inspect, validate, deploy, and build mob artifacts |
 | `rkat skills ...` | Inspect available skills |
+| `rkat models catalog` | List available models with provider profiles |
 | `rkat capabilities` | Show runtime capabilities |
 | `rkat doctor` | Check local setup and common prerequisites |
 | `rkat init` | Create project config from the global template |
@@ -283,6 +284,14 @@ Optional overrides:
 rkat skills list [--json]
 rkat skills inspect <ID> [--source <SOURCE>] [--json]
 ```
+
+## models
+
+```bash
+rkat models catalog [--json]
+```
+
+Lists all available models grouped by provider, including display name, tier, context window, max output tokens, and profile capabilities (temperature, thinking, reasoning support). Data is compiled from the `meerkat-models` catalog.
 
 ## capabilities
 

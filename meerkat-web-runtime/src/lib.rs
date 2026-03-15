@@ -236,7 +236,11 @@ struct Credentials {
 }
 
 fn default_model() -> Option<String> {
-    Some("claude-sonnet-4-5".to_string())
+    Some(
+        meerkat_models::default_model("anthropic")
+            .unwrap_or("claude-sonnet-4-5")
+            .to_string(),
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -1058,9 +1062,11 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
         creds.gemini_api_key.as_deref(),
     )?;
 
-    let model = creds
-        .model
-        .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
+    let model = creds.model.unwrap_or_else(|| {
+        meerkat_models::default_model("anthropic")
+            .unwrap_or("claude-sonnet-4-5")
+            .to_string()
+    });
 
     let providers: Vec<String> = api_keys.keys().cloned().collect();
     let mut config = Config::default();
@@ -1113,9 +1119,11 @@ pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
         rt_config.gemini_api_key.as_deref(),
     )?;
 
-    let model = rt_config
-        .model
-        .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
+    let model = rt_config.model.unwrap_or_else(|| {
+        meerkat_models::default_model("anthropic")
+            .unwrap_or("claude-sonnet-4-5")
+            .to_string()
+    });
     let max_sessions = rt_config.max_sessions;
 
     let providers: Vec<String> = api_keys.keys().cloned().collect();

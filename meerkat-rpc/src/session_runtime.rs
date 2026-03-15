@@ -1268,33 +1268,33 @@ impl SessionRuntime {
         }
 
         // Hot-swap LLM client if model/provider changed.
-        if let Some(ref ov) = overrides {
-            if ov.model.is_some() || ov.provider.is_some() || ov.provider_params.is_some() {
-                let model = ov.model.as_deref().unwrap_or("claude-sonnet-4-5");
-                let provider = ov
-                    .provider
-                    .as_ref()
-                    .map(|p| meerkat_core::Provider::from_name(p))
-                    .unwrap_or_else(|| {
-                        meerkat_core::Provider::infer_from_model(model)
-                            .unwrap_or(meerkat_core::Provider::Other)
-                    });
-                let raw_client = self
-                    .factory
-                    .build_llm_client(provider, None, None)
-                    .await
-                    .map_err(|e| RpcError {
-                        code: error::INTERNAL_ERROR,
-                        message: format!("Failed to build LLM client for model override: {e}"),
-                        data: None,
-                    })?;
-                let adapter: Arc<dyn meerkat_core::AgentLlmClient> =
-                    Arc::new(self.factory.build_llm_adapter(raw_client, model).await);
-                self.service
-                    .set_session_client(session_id, adapter)
-                    .await
-                    .map_err(session_error_to_rpc)?;
-            }
+        if let Some(ref ov) = overrides
+            && (ov.model.is_some() || ov.provider.is_some() || ov.provider_params.is_some())
+        {
+            let model = ov.model.as_deref().unwrap_or("claude-sonnet-4-5");
+            let provider = ov
+                .provider
+                .as_ref()
+                .map(|p| meerkat_core::Provider::from_name(p))
+                .unwrap_or_else(|| {
+                    meerkat_core::Provider::infer_from_model(model)
+                        .unwrap_or(meerkat_core::Provider::Other)
+                });
+            let raw_client = self
+                .factory
+                .build_llm_client(provider, None, None)
+                .await
+                .map_err(|e| RpcError {
+                    code: error::INTERNAL_ERROR,
+                    message: format!("Failed to build LLM client for model override: {e}"),
+                    data: None,
+                })?;
+            let adapter: Arc<dyn meerkat_core::AgentLlmClient> =
+                Arc::new(self.factory.build_llm_adapter(raw_client, model).await);
+            self.service
+                .set_session_client(session_id, adapter)
+                .await
+                .map_err(session_error_to_rpc)?;
         }
 
         let host_mode = match overrides.as_ref().and_then(|ov| ov.host_mode) {

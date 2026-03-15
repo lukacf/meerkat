@@ -489,6 +489,26 @@ Returns the same result shape as `session/create`. Fails with error code `-32001
   The follow-up prompt.
 </ParamField>
 
+<ParamField body="model" type="string | null" default="from session">
+  Model override for this turn. On pending (deferred) sessions this sets the model before materialization. On materialized sessions this hot-swaps the LLM client for the remainder of the session.
+</ParamField>
+
+<ParamField body="provider" type="string | null" default="from session">
+  Provider override (e.g. `"anthropic"`, `"openai"`, `"gemini"`). Typically inferred from `model`.
+</ParamField>
+
+<ParamField body="provider_params" type="object | null" default="from session">
+  Provider-specific parameters (e.g. `{"thinking_budget": 10000}`). Applied alongside model/provider override.
+</ParamField>
+
+<ParamField body="max_tokens" type="u32 | null" default="from session">
+  Max tokens override.
+</ParamField>
+
+<ParamField body="skill_references" type="string[] | null">
+  Skill IDs to resolve and inject for this turn.
+</ParamField>
+
 ### turn/interrupt
 
 Cancel an in-flight turn. No-op if the session is idle.

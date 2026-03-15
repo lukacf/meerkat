@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.10] - 2026-03-15
+
+### Added
+
+#### `meerkat-models` — Curated Model Catalog (#148)
+- New leaf crate `meerkat-models` as the single source of truth for model defaults, allowlists, capability detection, and parameter schemas. Consolidates model data previously scattered across `config.rs`, `config_template.toml`, and client adapters.
+- Catalog module with curated entries for all supported providers (Anthropic, OpenAI, Gemini) including default models, allowed model lists, and per-model parameter schemas.
+- Profile module with provider-specific rules: per-model param schemas that document exactly which `provider_params` keys each adapter reads and processes (e.g., opus-4-6 gets adaptive thinking + effort + compaction; non-gpt-5 models don't advertise `reasoning_effort`).
+- `models/catalog` endpoint on all surfaces: CLI (`rkat models catalog`), REST, RPC (`models/catalog`), and MCP Server.
+- Wire types in `meerkat-contracts` (`ModelsCatalogResponse`) with SDK codegen.
+
+#### Mid-Session Model/Provider Hot-Swap (#147)
+- `Agent::replace_client()` swaps the LLM client on a live agent without rebuilding.
+- `SessionAgent::replace_client()` trait method (default no-op) and `SessionService::set_session_client()` (default `Unsupported`).
+- RPC `turn/start` now accepts `model`/`provider`/`provider_params` on materialized sessions, builds a new client via factory and hot-swaps before the turn.
+
+### Fixed
+
+#### Comms Interrupt Regressions (#147)
+- **False wakes from non-actionable traffic** — raw `inbox_notify` woke `wait` on responses, acks, lifecycle traffic, and plain events. Added single-pass ingress classification in `meerkat-comms` with narrow `actionable_input_notify` that fires only for `ActionableMessage`/`ActionableRequest`. Untrusted items dropped at ingress with snapshot semantics.
+- **Wait tool not interruptible on some dispatcher paths** — override and WASM dispatcher paths never wired wait interruption. Added `bind_wait_interrupt()` and `supports_wait_interrupt()` on `AgentToolDispatcher` trait with implementations on `CompositeDispatcher`, `ToolGateway`, and `FilteredToolDispatcher`. Factory probes before consuming bind and falls back gracefully.
+- **Wait budget overshoot** — wait could overshoot `max_duration` by up to 1800s. `MAX_WAIT_SECONDS` reduced to 60s.
+- **Trust state split between async and sync locks** — collapsed `tokio::sync::RwLock` and `parking_lot::RwLock` sidecar into single `Arc<parking_lot::RwLock<TrustedPeers>>` shared by Router, `IngressClassificationContext`, and `trusted_peers_shared()` callers. Mutations through any handle are immediately visible to classification.
+- **ChildInproc trust not synced at construction** — `CommsBootstrap::prepare` now uses `upsert_trusted_peer()` so parent is trusted at ingress immediately.
+- **Lifecycle intent serialization** — `PeerAdded`/`PeerRetired` now serialize as `"mob.peer_added"`/`"mob.peer_retired"` via explicit `#[serde(rename)]`.
+- **Host-mode hot loop spin** — legacy fallback falls through to `tokio::select!` when no work performed instead of unconditional continue that spins until budget exhaustion.
+- **Legacy drain classification** — turn-boundary drain fallback now classifies by `InteractionContent` (peer lifecycle batching, response inline injection) instead of raw concat. Host-mode drain routes per-interaction with subscriber/tap/sink support.
+- **Shared dispatcher consumed during bind** — factory now checks `Arc::strong_count` before `bind_wait_interrupt` and skips binding for shared dispatchers instead of consuming the caller's dispatcher.
+
+### Changed
+
+- **`meerkat-core` reads model defaults from catalog** — `ModelDefaults` no longer reads from `config_template.toml`; all model defaults come from `meerkat-models` catalog.
+- **OpenAI adapter delegates detection to shared profiles** — capability detection logic moved from `meerkat-client` to `meerkat-models` profile rules.
+- **Sub-agent validation uses catalog for fallback resolution** — `meerkat-tools` sub-agent spawn now resolves fallback models via catalog instead of hardcoded strings.
+- **Stale template defaults updated** — `gpt-4.1` → `gpt-5.2`, `gemini-1.5-pro` → `gemini-3-flash-preview`.
+- **`SessionError::Unsupported` variant** — new error variant for capability negotiation across session service implementations.
+
 ## [0.4.9] - 2026-03-14
 
 ### Fixed

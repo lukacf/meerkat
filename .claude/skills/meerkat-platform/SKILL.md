@@ -320,6 +320,17 @@ The `meerkat-models` crate provides a curated model catalog queryable from all s
 
 Returns `ModelsCatalogResponse` with providers, default models, and per-model profiles (capabilities, parameter schemas).
 
+### Mid-session model hot-swap
+
+Model and provider can be changed on a live session without rebuilding the agent:
+
+- **RPC**: `turn/start` with `model`, `provider`, `provider_params` fields. Works on both pending (deferred) and materialized sessions.
+- **REST**: `POST /sessions/{id}/messages` with `model`, `provider` fields.
+- **MCP**: `meerkat_resume` with `model`, `provider` fields.
+- **Rust SDK**: `Agent::replace_client()` for direct library usage.
+
+On materialized sessions, the LLM client is hot-swapped for the remainder of the session. Ephemeral sessions return `SessionError::Unsupported`.
+
 ## Core features
 
 ### Sessions

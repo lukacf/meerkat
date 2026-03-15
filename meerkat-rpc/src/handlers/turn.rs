@@ -45,26 +45,27 @@ pub struct StartTurnParams {
     /// Override host mode for this turn. Only applies to pending (deferred) sessions.
     #[serde(default)]
     pub host_mode: Option<bool>,
-    // -- Resume-time overrides (pending/deferred sessions only) ---------------
-    /// Override model for this session. Rejected on materialized sessions.
+    // -- Per-turn overrides ---------------------------------------------------
+    /// Override model. On pending sessions, sets the model before materialization.
+    /// On materialized sessions, hot-swaps the LLM client for the remainder of the session.
     #[serde(default)]
     pub model: Option<String>,
-    /// Override provider for this session. Rejected on materialized sessions.
+    /// Override provider. Typically inferred from model.
     #[serde(default)]
     pub provider: Option<String>,
-    /// Override max_tokens for this session. Rejected on materialized sessions.
+    /// Override max_tokens. On pending sessions only.
     #[serde(default)]
     pub max_tokens: Option<u32>,
-    /// Override system prompt for this session. Rejected on materialized sessions.
+    /// Override system prompt. On pending sessions only.
     #[serde(default)]
     pub system_prompt: Option<String>,
-    /// Override output schema for this session. Rejected on materialized sessions.
+    /// Override output schema. On pending sessions only.
     #[serde(default)]
     pub output_schema: Option<serde_json::Value>,
-    /// Override structured output retries. Rejected on materialized sessions.
+    /// Override structured output retries. On pending sessions only.
     #[serde(default)]
     pub structured_output_retries: Option<u32>,
-    /// Override provider-specific parameters. Rejected on materialized sessions.
+    /// Override provider-specific parameters. Applied alongside model/provider override.
     #[serde(default)]
     pub provider_params: Option<serde_json::Value>,
 }

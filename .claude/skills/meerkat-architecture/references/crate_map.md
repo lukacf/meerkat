@@ -37,9 +37,9 @@ Surface binaries:
 | Trait | Purpose | Implementors |
 |-------|---------|-------------|
 | `AgentLlmClient` | LLM provider abstraction | `LlmClientAdapter` (meerkat-client) |
-| `AgentToolDispatcher` | Tool routing | `CompositeDispatcher` (meerkat-tools), `ToolGateway` (meerkat-core), `EmptyToolDispatcher` (meerkat-tools) |
+| `AgentToolDispatcher` | Tool routing (incl. `bind_wait_interrupt`, `supports_wait_interrupt`) | `CompositeDispatcher` (meerkat-tools), `ToolGateway` (meerkat-core), `EmptyToolDispatcher` (meerkat-tools) |
 | `AgentSessionStore` | Session persistence | `StoreAdapter<S>` (meerkat-store), no-op stores |
-| `SessionService` | Full session lifecycle | `EphemeralSessionService<B>` (meerkat-session), `PersistentSessionService<B>` (meerkat-session) |
+| `SessionService` | Full session lifecycle (incl. `set_session_client`) | `EphemeralSessionService<B>` (meerkat-session), `PersistentSessionService<B>` (meerkat-session) |
 | `CommsRuntime` | Inter-agent communication | `meerkat_comms::CommsRuntime` |
 | `HookEngine` | Hook execution | `DefaultHookEngine` (meerkat-hooks) |
 | `SkillEngine` | Skill resolution + rendering | `DefaultSkillEngine` (meerkat-skills) |
@@ -51,7 +51,7 @@ Surface binaries:
 | Trait | Purpose | Implementors |
 |-------|---------|-------------|
 | `SessionAgentBuilder` | Agent construction from request | `FactoryAgentBuilder` (meerkat facade) |
-| `SessionAgent` | Running agent with session access | `FactoryAgent` (meerkat facade) |
+| `SessionAgent` | Running agent with session access (incl. `replace_client`) | `FactoryAgent` (meerkat facade) |
 
 ### Mob traits (defined in meerkat-mob)
 

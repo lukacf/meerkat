@@ -20,7 +20,7 @@ Meerkat is a library-first agent runtime. The execution pipeline is shared acros
 | Crate | Owns | Key Trait |
 |-------|------|-----------|
 | `meerkat-models` | Model catalog, provider profiles, parameter schemas (leaf crate, no meerkat deps) | — |
-| `meerkat-core` | Agent loop, types, budget, retry, state machine, ALL trait contracts | `AgentLlmClient`, `AgentToolDispatcher`, `AgentSessionStore`, `SessionService`, `CommsRuntime`, `HookEngine` |
+| `meerkat-core` | Agent loop, types, budget, retry, state machine, ALL trait contracts | `AgentLlmClient`, `AgentToolDispatcher` (incl. `bind_wait_interrupt`, `supports_wait_interrupt`), `AgentSessionStore`, `SessionService` (incl. `set_session_client`), `SessionAgent` (incl. `replace_client`), `CommsRuntime`, `HookEngine` |
 | `meerkat-client` | LLM providers (Anthropic, OpenAI, Gemini) | Implements `AgentLlmClient` (via `LlmClientAdapter`) |
 | `meerkat-store` | Session persistence (SQLite, Jsonl, Memory, Redb) | Implements `SessionStore` |
 | `meerkat-tools` | Tool registry, dispatch, builtins (task tools, utility helpers like `apply_patch`, shell/comms/sub-agent surfaces) | Implements `AgentToolDispatcher` |
@@ -128,8 +128,18 @@ MCP servers connect in parallel via `stage_add()` + `apply_staged()` which spawn
 - **InprocRegistry** — process-global peer discovery. All sessions in the same process share it.
 - **CommsRuntime** — per-session. Created by `AgentFactory::build_agent()` when `comms_name` is set.
 - **Wiring** — bidirectional trust. Each peer has a `TrustedPeerSpec` with name, public key, address.
+- **Unified trust state** — single `Arc<parking_lot::RwLock<TrustedPeers>>` shared by Router, `IngressClassificationContext`, and `trusted_peers_shared()` callers. Mutations through any handle are immediately visible to classification.
+- **Ingress classification** — single-pass classification via `IngressClassificationContext`. Untrusted items dropped at ingress (snapshot semantics). `actionable_input_notify` fires only for `ActionableMessage`/`ActionableRequest`, preventing false wakes from acks, lifecycle traffic, and plain events.
 - **Not all mob members are peers.** Wiring rules control which members can communicate.
 - **Cross-mob communication** — agents with `external_addressable: true` are visible in InprocRegistry to agents in other mobs.
+
+## Mid-Session Model Hot-Swap
+
+- `Agent::replace_client(&mut self, client)` swaps the LLM client on a live agent without rebuilding.
+- `SessionAgent::replace_client()` trait method (default no-op) bridges into the session layer.
+- `SessionService::set_session_client(session_id, client)` routes through the session service (default returns `SessionError::Unsupported`).
+- `SessionError::Unsupported(String)` — new error variant for capability negotiation. Ephemeral sessions reject hot-swap; persistent sessions support it.
+- RPC `turn/start` accepts `model`/`provider`/`provider_params` on materialized sessions, builds a new client via `AgentFactory::build_llm_adapter()`, and hot-swaps before the turn.
 
 ## Key Architectural Invariants
 
@@ -138,7 +148,8 @@ MCP servers connect in parallel via `stage_add()` + `apply_staged()` which spawn
 3. **Errors separate mechanism from policy** — `ToolError → AgentError → SessionError`.
 4. **Wire types ≠ domain types** — `meerkat-contracts` owns wire format; `meerkat-core` owns domain types.
 5. **Sessions are first-class, persistence is optional** — Ephemeral and Persistent share the same trait.
-6. **Platform differences are overrides, not cfg-gates in business logic** — if you need `#[cfg(wasm32)]` inside `build_agent()`, the abstraction is wrong.
+6. **Capability negotiation via `Unsupported`** — optional service methods default to `Err(SessionError::Unsupported(...))`. Callers probe before committing.
+7. **Platform differences are overrides, not cfg-gates in business logic** — if you need `#[cfg(wasm32)]` inside `build_agent()`, the abstraction is wrong.
 
 ## Key Files
 

@@ -189,7 +189,7 @@ Core methods:
 - `session/read`
 - `session/history`
 - `session/archive`
-- `turn/start`
+- `turn/start` — accepts `model`, `provider`, `provider_params`, `max_tokens` for mid-session hot-swap
 - `turn/interrupt`
 - `config/get`
 - `config/set`

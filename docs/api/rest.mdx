@@ -436,11 +436,11 @@ Continue an existing session.
 </ParamField>
 
 <ParamField body="model" type="string | null" default="from session">
-  Model override for this turn.
+  Model override for this turn. On materialized sessions this hot-swaps the LLM client for the remainder of the session.
 </ParamField>
 
 <ParamField body="provider" type="string | null" default="from session">
-  Provider override for this turn.
+  Provider override for this turn. Typically inferred from `model`. Used with `model` for mid-session provider switching.
 </ParamField>
 
 <ParamField body="max_tokens" type="u32 | null" default="from session">

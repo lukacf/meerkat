@@ -442,7 +442,7 @@ Resume an existing session or provide tool results for pending tool calls.
 </ParamField>
 
 <ParamField body="model" type="string | null" default="from session">
-  Model override.
+  Model override. On materialized sessions this hot-swaps the LLM client for the remainder of the session.
 </ParamField>
 
 <ParamField body="max_tokens" type="u32 | null" default="from session">
@@ -450,7 +450,7 @@ Resume an existing session or provide tool results for pending tool calls.
 </ParamField>
 
 <ParamField body="provider" type="string | null" default="from session">
-  Provider override.
+  Provider override. Typically inferred from `model`. Used with `model` for mid-session provider switching.
 </ParamField>
 
 <ParamField body="hooks_override" type="HookRunOverrides | null" default="null">

@@ -37,6 +37,11 @@
       "name": "capabilities/get"
     },
     {
+      "description": "Get the compiled-in model catalog",
+      "name": "models/catalog",
+      "result_type": "ModelsCatalogResponse"
+    },
+    {
       "description": "Read config",
       "name": "config/get"
     },

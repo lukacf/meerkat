@@ -1,0 +1,461 @@
+{
+  "CatalogModelEntry": {
+    "$defs": {
+      "WireModelProfile": {
+        "description": "Runtime profile for a model — capabilities and parameter schema.",
+        "properties": {
+          "model_family": {
+            "description": "Model family identifier (e.g., `\"claude-opus-4\"`, `\"gpt-5\"`).",
+            "type": "string"
+          },
+          "params_schema": {
+            "description": "JSON Schema describing accepted provider-specific parameters."
+          },
+          "supports_reasoning": {
+            "description": "Whether the model supports explicit reasoning effort control.",
+            "type": "boolean"
+          },
+          "supports_temperature": {
+            "description": "Whether the model accepts a `temperature` parameter.",
+            "type": "boolean"
+          },
+          "supports_thinking": {
+            "description": "Whether the model supports extended thinking.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "model_family",
+          "supports_temperature",
+          "supports_thinking",
+          "supports_reasoning",
+          "params_schema"
+        ],
+        "type": "object"
+      },
+      "WireModelTier": {
+        "description": "Model recommendation tier.",
+        "oneOf": [
+          {
+            "const": "recommended",
+            "description": "Tested and recommended for production use.",
+            "type": "string"
+          },
+          {
+            "const": "supported",
+            "description": "Supported but not the primary recommendation.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "A single model entry in the catalog response.",
+    "properties": {
+      "context_window": {
+        "description": "Maximum input context window in tokens.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "display_name": {
+        "description": "Human-readable display name.",
+        "type": "string"
+      },
+      "id": {
+        "description": "Model identifier (e.g., `\"claude-sonnet-4-6\"`).",
+        "type": "string"
+      },
+      "max_output_tokens": {
+        "description": "Maximum output tokens per response.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "profile": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireModelProfile"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Model profile with capability flags and parameter schema."
+      },
+      "tier": {
+        "$ref": "#/$defs/WireModelTier",
+        "description": "Recommendation tier."
+      }
+    },
+    "required": [
+      "id",
+      "display_name",
+      "tier"
+    ],
+    "title": "CatalogModelEntry",
+    "type": "object"
+  },
+  "ModelsCatalogResponse": {
+    "$defs": {
+      "CatalogModelEntry": {
+        "description": "A single model entry in the catalog response.",
+        "properties": {
+          "context_window": {
+            "description": "Maximum input context window in tokens.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "display_name": {
+            "description": "Human-readable display name.",
+            "type": "string"
+          },
+          "id": {
+            "description": "Model identifier (e.g., `\"claude-sonnet-4-6\"`).",
+            "type": "string"
+          },
+          "max_output_tokens": {
+            "description": "Maximum output tokens per response.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireModelProfile"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Model profile with capability flags and parameter schema."
+          },
+          "tier": {
+            "$ref": "#/$defs/WireModelTier",
+            "description": "Recommendation tier."
+          }
+        },
+        "required": [
+          "id",
+          "display_name",
+          "tier"
+        ],
+        "type": "object"
+      },
+      "ContractVersion": {
+        "description": "Semantic version for the Meerkat wire contract.\n\nStart at 0.1.0 — allow breaking changes during Phase 1-3 development.\nBump to 1.0.0 when the SDK Builder ships (Phase 5) and external\nconsumers exist. Before 1.0.0, minor bumps can be breaking.",
+        "properties": {
+          "major": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "minor": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "patch": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "major",
+          "minor",
+          "patch"
+        ],
+        "type": "object"
+      },
+      "ProviderCatalog": {
+        "description": "Provider-level grouping in the catalog response.",
+        "properties": {
+          "default_model_id": {
+            "description": "Default model ID for this provider.",
+            "type": "string"
+          },
+          "models": {
+            "description": "All catalog models for this provider.",
+            "items": {
+              "$ref": "#/$defs/CatalogModelEntry"
+            },
+            "type": "array"
+          },
+          "provider": {
+            "description": "Canonical provider name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "default_model_id",
+          "models"
+        ],
+        "type": "object"
+      },
+      "WireModelProfile": {
+        "description": "Runtime profile for a model — capabilities and parameter schema.",
+        "properties": {
+          "model_family": {
+            "description": "Model family identifier (e.g., `\"claude-opus-4\"`, `\"gpt-5\"`).",
+            "type": "string"
+          },
+          "params_schema": {
+            "description": "JSON Schema describing accepted provider-specific parameters."
+          },
+          "supports_reasoning": {
+            "description": "Whether the model supports explicit reasoning effort control.",
+            "type": "boolean"
+          },
+          "supports_temperature": {
+            "description": "Whether the model accepts a `temperature` parameter.",
+            "type": "boolean"
+          },
+          "supports_thinking": {
+            "description": "Whether the model supports extended thinking.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "model_family",
+          "supports_temperature",
+          "supports_thinking",
+          "supports_reasoning",
+          "params_schema"
+        ],
+        "type": "object"
+      },
+      "WireModelTier": {
+        "description": "Model recommendation tier.",
+        "oneOf": [
+          {
+            "const": "recommended",
+            "description": "Tested and recommended for production use.",
+            "type": "string"
+          },
+          {
+            "const": "supported",
+            "description": "Supported but not the primary recommendation.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response for `models/catalog` — the compiled-in model catalog.",
+    "properties": {
+      "contract_version": {
+        "$ref": "#/$defs/ContractVersion",
+        "description": "Contract version."
+      },
+      "providers": {
+        "description": "Provider-grouped catalog data.",
+        "items": {
+          "$ref": "#/$defs/ProviderCatalog"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "contract_version",
+      "providers"
+    ],
+    "title": "ModelsCatalogResponse",
+    "type": "object"
+  },
+  "ProviderCatalog": {
+    "$defs": {
+      "CatalogModelEntry": {
+        "description": "A single model entry in the catalog response.",
+        "properties": {
+          "context_window": {
+            "description": "Maximum input context window in tokens.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "display_name": {
+            "description": "Human-readable display name.",
+            "type": "string"
+          },
+          "id": {
+            "description": "Model identifier (e.g., `\"claude-sonnet-4-6\"`).",
+            "type": "string"
+          },
+          "max_output_tokens": {
+            "description": "Maximum output tokens per response.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireModelProfile"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Model profile with capability flags and parameter schema."
+          },
+          "tier": {
+            "$ref": "#/$defs/WireModelTier",
+            "description": "Recommendation tier."
+          }
+        },
+        "required": [
+          "id",
+          "display_name",
+          "tier"
+        ],
+        "type": "object"
+      },
+      "WireModelProfile": {
+        "description": "Runtime profile for a model — capabilities and parameter schema.",
+        "properties": {
+          "model_family": {
+            "description": "Model family identifier (e.g., `\"claude-opus-4\"`, `\"gpt-5\"`).",
+            "type": "string"
+          },
+          "params_schema": {
+            "description": "JSON Schema describing accepted provider-specific parameters."
+          },
+          "supports_reasoning": {
+            "description": "Whether the model supports explicit reasoning effort control.",
+            "type": "boolean"
+          },
+          "supports_temperature": {
+            "description": "Whether the model accepts a `temperature` parameter.",
+            "type": "boolean"
+          },
+          "supports_thinking": {
+            "description": "Whether the model supports extended thinking.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "model_family",
+          "supports_temperature",
+          "supports_thinking",
+          "supports_reasoning",
+          "params_schema"
+        ],
+        "type": "object"
+      },
+      "WireModelTier": {
+        "description": "Model recommendation tier.",
+        "oneOf": [
+          {
+            "const": "recommended",
+            "description": "Tested and recommended for production use.",
+            "type": "string"
+          },
+          {
+            "const": "supported",
+            "description": "Supported but not the primary recommendation.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Provider-level grouping in the catalog response.",
+    "properties": {
+      "default_model_id": {
+        "description": "Default model ID for this provider.",
+        "type": "string"
+      },
+      "models": {
+        "description": "All catalog models for this provider.",
+        "items": {
+          "$ref": "#/$defs/CatalogModelEntry"
+        },
+        "type": "array"
+      },
+      "provider": {
+        "description": "Canonical provider name.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "provider",
+      "default_model_id",
+      "models"
+    ],
+    "title": "ProviderCatalog",
+    "type": "object"
+  },
+  "WireModelProfile": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Runtime profile for a model — capabilities and parameter schema.",
+    "properties": {
+      "model_family": {
+        "description": "Model family identifier (e.g., `\"claude-opus-4\"`, `\"gpt-5\"`).",
+        "type": "string"
+      },
+      "params_schema": {
+        "description": "JSON Schema describing accepted provider-specific parameters."
+      },
+      "supports_reasoning": {
+        "description": "Whether the model supports explicit reasoning effort control.",
+        "type": "boolean"
+      },
+      "supports_temperature": {
+        "description": "Whether the model accepts a `temperature` parameter.",
+        "type": "boolean"
+      },
+      "supports_thinking": {
+        "description": "Whether the model supports extended thinking.",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "model_family",
+      "supports_temperature",
+      "supports_thinking",
+      "supports_reasoning",
+      "params_schema"
+    ],
+    "title": "WireModelProfile",
+    "type": "object"
+  },
+  "WireModelTier": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Model recommendation tier.",
+    "oneOf": [
+      {
+        "const": "recommended",
+        "description": "Tested and recommended for production use.",
+        "type": "string"
+      },
+      {
+        "const": "supported",
+        "description": "Supported but not the primary recommendation.",
+        "type": "string"
+      }
+    ],
+    "title": "WireModelTier"
+  }
+}

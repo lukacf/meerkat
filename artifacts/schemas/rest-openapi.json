@@ -26,6 +26,11 @@
         "summary": "Health check"
       }
     },
+    "/models/catalog": {
+      "get": {
+        "summary": "Get the compiled-in model catalog"
+      }
+    },
     "/sessions": {
       "post": {
         "summary": "Create and run a new session"

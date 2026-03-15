@@ -262,6 +262,7 @@ jobs:
             echo "Publishing crates to crates.io"
           fi
           crates=(
+            meerkat-models
             meerkat-core
             meerkat-contracts
             meerkat-client

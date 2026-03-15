@@ -214,6 +214,7 @@ fn inject_default_run_subcommand(
         "mob",
         "config",
         "capabilities",
+        "models",
         "doctor",
         "help",
     ];
@@ -673,8 +674,20 @@ enum Commands {
     /// Show runtime capabilities
     Capabilities,
 
+    /// Show model catalog and provider information
+    Models {
+        #[command(subcommand)]
+        command: ModelsCommands,
+    },
+
     /// Check local setup and common prerequisites
     Doctor,
+}
+
+#[derive(Subcommand)]
+enum ModelsCommands {
+    /// Show the compiled-in model catalog with provider grouping and tiers
+    Catalog,
 }
 
 #[derive(Subcommand)]
@@ -1192,6 +1205,9 @@ async fn main() -> anyhow::Result<ExitCode> {
             ConfigCommands::Patch { value } => handle_config_patch_value(&value, &cli_scope).await,
         },
         Commands::Capabilities => handle_capabilities(&cli_scope).await,
+        Commands::Models { command } => match command {
+            ModelsCommands::Catalog => handle_models_catalog().await,
+        },
         Commands::Doctor => handle_doctor(&cli_scope).await,
     };
 
@@ -1654,6 +1670,15 @@ async fn handle_config_patch_value(value: &str, scope: &RuntimeScope) -> anyhow:
 async fn handle_capabilities(scope: &RuntimeScope) -> anyhow::Result<()> {
     let (config, _) = load_config(scope).await?;
     let response = meerkat::surface::build_capabilities_response(&config);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&response).unwrap_or_else(|_| "{}".to_string())
+    );
+    Ok(())
+}
+
+async fn handle_models_catalog() -> anyhow::Result<()> {
+    let response = meerkat::surface::build_models_catalog_response();
     println!(
         "{}",
         serde_json::to_string_pretty(&response).unwrap_or_else(|_| "{}".to_string())

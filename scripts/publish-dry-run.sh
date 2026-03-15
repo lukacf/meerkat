@@ -20,6 +20,7 @@ LOG_DIR="$tmp_dir/logs"
 mkdir -p "$LOG_DIR"
 
 PACKAGES=(
+  meerkat-models
   meerkat-core
   meerkat-contracts
   meerkat-client

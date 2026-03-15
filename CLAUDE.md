@@ -49,6 +49,9 @@ ANTHROPIC_API_KEY=... cargo run --example simple
 ## Architecture
 
 ```
+meerkat-models    → Curated model catalog and provider profile rules (leaf crate, no meerkat deps)
+                     Single source of truth for model defaults, allowlists, capability detection,
+                     and parameter schemas. Consumed by core, client, tools, and facade.
 meerkat-core      → Agent loop, types, budget, retry, state machine (no I/O deps)
                      Also: SessionService trait, Compactor trait, MemoryStore trait, SessionError
 meerkat-client    → LLM providers (Anthropic, OpenAI, Gemini) implementing AgentLlmClient
@@ -173,6 +176,8 @@ The RPC server speaks JSON-RPC 2.0 over newline-delimited JSON (JSONL) on stdin/
 - `meerkat-session/src/projector.rs` - SessionProjector (materializes .rkat/ files)
 - `meerkat-store/src/redb_store.rs` - RedbSessionStore implementation
 - `meerkat-memory/src/simple.rs` - SimpleMemoryStore implementation
+- `meerkat-models/src/catalog.rs` - Curated model catalog (single source of truth for defaults/allowlists)
+- `meerkat-models/src/profile/mod.rs` - Model profile rules (capability detection, param schemas)
 - `meerkat-mcp/src/router.rs` - MCP tool routing
 - `meerkat-cli/src/main.rs` - CLI entry point
 - `meerkat/src/factory.rs` - AgentFactory, DynAgent, AgentBuildConfig (consolidated agent construction)
@@ -338,8 +343,8 @@ Required GitHub Actions secrets for full release:
 
 ### Crate Publish Order
 
-The 18 crates are published in dependency order:
-`meerkat-core` → `meerkat-contracts` → `meerkat-client` → `meerkat-store` → `meerkat-tools` → `meerkat-session` → `meerkat-memory` → `meerkat-mcp` → `meerkat-mcp-server` → `meerkat-hooks` → `meerkat-skills` → `meerkat-comms` → `meerkat-rpc` → `meerkat-rest` → `meerkat` → `meerkat-mob` → `meerkat-mob-mcp` → `meerkat-mob-pack` → `rkat`
+The crates are published in dependency order:
+`meerkat-models` → `meerkat-core` → `meerkat-contracts` → `meerkat-client` → `meerkat-store` → `meerkat-tools` → `meerkat-session` → `meerkat-memory` → `meerkat-mcp` → `meerkat-mcp-server` → `meerkat-hooks` → `meerkat-skills` → `meerkat-comms` → `meerkat-rpc` → `meerkat-rest` → `meerkat` → `meerkat-mob` → `meerkat-mob-mcp` → `meerkat-mob-pack` → `rkat`
 
 ### Key Rules for AI Agents
 

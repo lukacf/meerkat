@@ -2462,6 +2462,7 @@ dependencies = [
  "meerkat-hooks",
  "meerkat-mcp",
  "meerkat-memory",
+ "meerkat-models",
  "meerkat-runtime",
  "meerkat-session",
  "meerkat-skills",
@@ -2492,6 +2493,7 @@ dependencies = [
  "getrandom 0.3.4",
  "indexmap",
  "meerkat-core",
+ "meerkat-models",
  "reqwest",
  "schemars",
  "serde",
@@ -2563,6 +2565,7 @@ dependencies = [
  "indexmap",
  "js-sys",
  "jsonschema",
+ "meerkat-models",
  "parking_lot",
  "schemars",
  "serde",
@@ -2752,6 +2755,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "meerkat-models"
+version = "0.4.9"
+dependencies = [
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "meerkat-rest"
 version = "0.4.9"
 dependencies = [
@@ -2923,6 +2935,7 @@ dependencies = [
  "meerkat-contracts",
  "meerkat-core",
  "meerkat-mcp",
+ "meerkat-models",
  "meerkat-skills",
  "nix 0.29.0",
  "parking_lot",

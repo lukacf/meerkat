@@ -534,25 +534,13 @@ impl Default for SubAgentsConfig {
 
 fn default_allowed_models() -> BTreeMap<String, Vec<String>> {
     let mut map = BTreeMap::new();
-    map.insert(
-        "anthropic".to_string(),
-        vec![
-            "claude-opus-4-6".to_string(),
-            "claude-sonnet-4-5".to_string(),
-            "claude-opus-4-5".to_string(),
-        ],
-    );
-    map.insert(
-        "openai".to_string(),
-        vec!["gpt-5.2".to_string(), "gpt-5.2-pro".to_string()],
-    );
-    map.insert(
-        "gemini".to_string(),
-        vec![
-            "gemini-3-flash-preview".to_string(),
-            "gemini-3-pro-preview".to_string(),
-        ],
-    );
+    for &provider in meerkat_models::provider_names() {
+        let models: Vec<String> = meerkat_models::allowed_models(provider)
+            .into_iter()
+            .map(String::from)
+            .collect();
+        map.insert(provider.to_string(), models);
+    }
     map
 }
 
@@ -895,18 +883,16 @@ pub struct ModelDefaults {
 
 impl Default for ModelDefaults {
     fn default() -> Self {
-        let defaults = template_defaults();
-        let models = defaults.models.as_ref();
         Self {
-            anthropic: models
-                .and_then(|cfg| cfg.anthropic.clone())
-                .unwrap_or_default(),
-            openai: models
-                .and_then(|cfg| cfg.openai.clone())
-                .unwrap_or_default(),
-            gemini: models
-                .and_then(|cfg| cfg.gemini.clone())
-                .unwrap_or_default(),
+            anthropic: meerkat_models::default_model("anthropic")
+                .unwrap_or_default()
+                .to_string(),
+            openai: meerkat_models::default_model("openai")
+                .unwrap_or_default()
+                .to_string(),
+            gemini: meerkat_models::default_model("gemini")
+                .unwrap_or_default()
+                .to_string(),
         }
     }
 }
@@ -1001,13 +987,6 @@ struct TemplateAgentDefaults {
 }
 
 #[derive(Debug, Deserialize)]
-struct TemplateModelDefaults {
-    anthropic: Option<String>,
-    openai: Option<String>,
-    gemini: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 struct TemplateShellDefaults {
     program: Option<String>,
     timeout_secs: Option<u64>,
@@ -1018,7 +997,6 @@ struct TemplateShellDefaults {
 #[derive(Debug, Deserialize)]
 struct TemplateDefaults {
     agent: Option<TemplateAgentDefaults>,
-    models: Option<TemplateModelDefaults>,
     shell: Option<TemplateShellDefaults>,
     max_tokens: Option<u32>,
 }
@@ -1027,7 +1005,6 @@ impl TemplateDefaults {
     fn empty() -> Self {
         Self {
             agent: None,
-            models: None,
             shell: None,
             max_tokens: None,
         }

@@ -1,8 +1,6 @@
 //! CommsToolSet - groups all comms tools together
 
 use super::tools::{CommsToolState, PeersTool, SendTool};
-#[cfg(target_arch = "wasm32")]
-use crate::tokio;
 use meerkat_comms::{Router, TrustedPeers};
 use parking_lot::RwLock;
 use std::sync::Arc;

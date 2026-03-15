@@ -1,7 +1,5 @@
 //! Comms tool surface - provides comms tools as a ToolDispatcher
 
-#[cfg(target_arch = "wasm32")]
-use crate::tokio;
 use async_trait::async_trait;
 use meerkat_comms::{
     PubKey, Router, ToolContext, TrustedPeers, comms_tool_defs, handle_tools_call,

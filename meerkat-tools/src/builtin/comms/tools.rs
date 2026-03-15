@@ -2,8 +2,6 @@
 
 use crate::builtin::{BuiltinTool, BuiltinToolError};
 use crate::schema::empty_object_schema;
-#[cfg(target_arch = "wasm32")]
-use crate::tokio;
 use async_trait::async_trait;
 use meerkat_comms::{Router, ToolContext, TrustedPeers, handle_tools_call, tools_list};
 use meerkat_core::ToolDef;

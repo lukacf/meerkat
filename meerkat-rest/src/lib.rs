@@ -895,6 +895,7 @@ pub fn router(state: AppState) -> Router {
         .route("/skills", get(list_skills))
         .route("/skills/{id}", get(inspect_skill))
         .route("/capabilities", get(get_capabilities))
+        .route("/models/catalog", get(get_models_catalog))
         // v9 runtime/input endpoints
         .route("/runtime/{id}/state", get(runtime_state))
         .route("/runtime/{id}/accept", post(runtime_accept))
@@ -1574,6 +1575,11 @@ async fn get_capabilities(
 ) -> Json<meerkat_contracts::CapabilitiesResponse> {
     let config = state.config_store.get().await.unwrap_or_default();
     Json(meerkat::surface::build_capabilities_response(&config))
+}
+
+/// Get the compiled-in model catalog.
+async fn get_models_catalog() -> Json<meerkat_contracts::ModelsCatalogResponse> {
+    Json(meerkat::surface::build_models_catalog_response())
 }
 
 /// Get the current config

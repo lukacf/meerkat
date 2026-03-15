@@ -254,7 +254,11 @@ pub async fn handle_create(
         .model
         .clone()
         .or(runtime_default_model)
-        .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
+        .unwrap_or_else(|| {
+            meerkat_models::default_model("anthropic")
+                .unwrap_or("claude-sonnet-4-5")
+                .to_string()
+        });
     let provider = params.provider.as_deref().map(Provider::from_name);
 
     // Parse output schema if provided

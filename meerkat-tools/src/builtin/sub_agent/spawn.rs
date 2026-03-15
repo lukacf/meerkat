@@ -240,19 +240,14 @@ impl AgentSpawnTool {
         if let Some(ref default) = self.state.config.default_model {
             return default.clone();
         }
-        // Fallback: first model in provider-specific default allowlist
         let core_provider = match provider {
             LlmProvider::Anthropic => meerkat_core::Provider::Anthropic,
             LlmProvider::OpenAi => meerkat_core::Provider::OpenAI,
             LlmProvider::Gemini => meerkat_core::Provider::Gemini,
         };
-        let defaults = meerkat_core::config::SubAgentsConfig::default();
-        defaults
-            .allowed_models
-            .get(core_provider.as_str())
-            .and_then(|v| v.first())
-            .cloned()
+        meerkat_models::catalog::default_model(core_provider.as_str())
             .unwrap_or_default()
+            .to_string()
     }
 
     /// Validate that a model is in the allowlist for the given provider

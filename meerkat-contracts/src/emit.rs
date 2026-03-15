@@ -80,6 +80,19 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         serde_json::to_string_pretty(&capabilities)?,
     )?;
 
+    // Models catalog
+    let models = serde_json::json!({
+        "WireModelTier": schema_for!(crate::wire::WireModelTier),
+        "WireModelProfile": schema_for!(crate::wire::WireModelProfile),
+        "CatalogModelEntry": schema_for!(crate::wire::CatalogModelEntry),
+        "ProviderCatalog": schema_for!(crate::wire::ProviderCatalog),
+        "ModelsCatalogResponse": schema_for!(crate::wire::ModelsCatalogResponse),
+    });
+    fs::write(
+        output_dir.join("models.json"),
+        serde_json::to_string_pretty(&models)?,
+    )?;
+
     // Events — WireEvent embeds AgentEvent which lacks JsonSchema.
     // Emit a structural description, NOT a consumable JSON Schema.
     // Codegen should not parse these for type generation.
@@ -126,6 +139,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
             {"name": "turn/start", "description": "Start a new turn on existing session"},
             {"name": "turn/interrupt", "description": "Cancel in-flight turn"},
             {"name": "capabilities/get", "description": "Get runtime capabilities"},
+            {"name": "models/catalog", "description": "Get the compiled-in model catalog", "result_type": "ModelsCatalogResponse"},
             {"name": "config/get", "description": "Read config"},
             {"name": "config/set", "description": "Replace config"},
             {"name": "config/patch", "description": "Merge-patch config"},
@@ -185,6 +199,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
                 "description": "Requires mcp_live capability. Check GET /capabilities.",
             }},
             "/capabilities": {"get": {"summary": "Get runtime capabilities"}},
+            "/models/catalog": {"get": {"summary": "Get the compiled-in model catalog"}},
             "/config": {
                 "get": {"summary": "Get config"},
                 "put": {"summary": "Replace config"},

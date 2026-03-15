@@ -53,6 +53,58 @@ pub fn build_capabilities_response(config: &Config) -> CapabilitiesResponse {
     }
 }
 
+/// Build a [`ModelsCatalogResponse`] from the compiled-in catalog.
+///
+/// This is a pure function with no config dependency — the catalog is static data
+/// compiled into the binary from `meerkat-models`.
+pub fn build_models_catalog_response() -> meerkat_contracts::ModelsCatalogResponse {
+    let providers = meerkat_models::provider_defaults()
+        .iter()
+        .map(|pd| {
+            let models = pd
+                .models
+                .iter()
+                .map(|entry| {
+                    let profile = meerkat_models::profile_for(entry.provider, entry.id).map(|p| {
+                        meerkat_contracts::WireModelProfile {
+                            model_family: p.model_family,
+                            supports_temperature: p.supports_temperature,
+                            supports_thinking: p.supports_thinking,
+                            supports_reasoning: p.supports_reasoning,
+                            params_schema: p.params_schema,
+                        }
+                    });
+                    meerkat_contracts::CatalogModelEntry {
+                        id: entry.id.to_string(),
+                        display_name: entry.display_name.to_string(),
+                        tier: match entry.tier {
+                            meerkat_models::ModelTier::Recommended => {
+                                meerkat_contracts::WireModelTier::Recommended
+                            }
+                            meerkat_models::ModelTier::Supported => {
+                                meerkat_contracts::WireModelTier::Supported
+                            }
+                        },
+                        context_window: entry.context_window,
+                        max_output_tokens: entry.max_output_tokens,
+                        profile,
+                    }
+                })
+                .collect();
+            meerkat_contracts::ProviderCatalog {
+                provider: pd.provider.to_string(),
+                default_model_id: pd.default_model_id.to_string(),
+                models,
+            }
+        })
+        .collect();
+
+    meerkat_contracts::ModelsCatalogResponse {
+        contract_version: ContractVersion::CURRENT,
+        providers,
+    }
+}
+
 /// Validate whether host mode can be enabled in the current build.
 ///
 /// Delegates to `meerkat_comms::validate_host_mode()` when the comms feature

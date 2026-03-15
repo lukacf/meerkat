@@ -992,6 +992,15 @@ fn base_tools_list() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "meerkat_models_catalog",
+            "description": "Get the catalog of supported LLM models with provider grouping, tiers, and parameter schemas.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }),
+        json!({
             "name": "meerkat_skills",
             "description": "List or inspect available skills. Use action 'list' to see all skills, or 'inspect' with a skill_id to see its full content.",
             "inputSchema": meerkat_tools::schema_for::<MeerkatSkillsInput>()
@@ -1179,6 +1188,9 @@ pub async fn handle_tools_call_with_notifier(
         }
         "meerkat_capabilities" => handle_meerkat_capabilities(state)
             .await
+            .map(wrap_tool_payload)
+            .map_err(ToolCallError::internal),
+        "meerkat_models_catalog" => handle_meerkat_models_catalog()
             .map(wrap_tool_payload)
             .map_err(ToolCallError::internal),
         "meerkat_skills" => {
@@ -1401,6 +1413,11 @@ async fn handle_meerkat_capabilities(state: &MeerkatMcpState) -> Result<Value, S
         .map(|snapshot| snapshot.config)
         .unwrap_or_default();
     let response = meerkat::surface::build_capabilities_response(&config);
+    serde_json::to_value(&response).map_err(|e| format!("Serialization failed: {e}"))
+}
+
+fn handle_meerkat_models_catalog() -> Result<Value, String> {
+    let response = meerkat::surface::build_models_catalog_response();
     serde_json::to_value(&response).map_err(|e| format!("Serialization failed: {e}"))
 }
 
@@ -2732,13 +2749,13 @@ mod tests {
     fn test_tools_list_schema() {
         let tools = tools_list();
         #[cfg(all(feature = "comms", feature = "mob"))]
-        assert_eq!(tools.len(), 22 + meerkat_mob_mcp::tools_list().len());
+        assert_eq!(tools.len(), 23 + meerkat_mob_mcp::tools_list().len());
         #[cfg(all(not(feature = "comms"), feature = "mob"))]
-        assert_eq!(tools.len(), 20 + meerkat_mob_mcp::tools_list().len());
+        assert_eq!(tools.len(), 21 + meerkat_mob_mcp::tools_list().len());
         #[cfg(all(feature = "comms", not(feature = "mob")))]
-        assert_eq!(tools.len(), 18);
+        assert_eq!(tools.len(), 19);
         #[cfg(all(not(feature = "comms"), not(feature = "mob")))]
-        assert_eq!(tools.len(), 16);
+        assert_eq!(tools.len(), 17);
 
         let tool_names: Vec<&str> = tools
             .iter()
@@ -2774,6 +2791,8 @@ mod tests {
 
         let capabilities_tool = find_tool("meerkat_capabilities");
         assert_eq!(capabilities_tool["name"], "meerkat_capabilities");
+        let models_catalog_tool = find_tool("meerkat_models_catalog");
+        assert_eq!(models_catalog_tool["name"], "meerkat_models_catalog");
         let read_tool = find_tool("meerkat_read");
         assert_eq!(read_tool["name"], "meerkat_read");
         let history_tool = find_tool("meerkat_history");
@@ -3094,8 +3113,8 @@ mod tests {
     #[test]
     fn test_tools_list_skills_schema_has_source_selector() {
         let tools = tools_list();
-        let skills_tool = &tools[4];
-        assert_eq!(skills_tool["name"], "meerkat_skills");
+        let skills_tool = tools.iter().find(|t| t["name"] == "meerkat_skills");
+        let skills_tool = skills_tool.expect("meerkat_skills tool must exist");
         assert!(
             skills_tool["inputSchema"]["properties"]["source"].is_object(),
             "skills inspect should expose optional source selector"

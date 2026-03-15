@@ -24,6 +24,7 @@ toml = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+meerkat-models = { workspace = true }
 meerkat-core = { workspace = true, features = ["jsonschema"] }
 meerkat-client = { workspace = true, features = ["anthropic", "openai", "gemini"] }
 meerkat-store = { workspace = true, features = ["memory"] }

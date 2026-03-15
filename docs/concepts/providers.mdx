@@ -134,6 +134,17 @@ Provider-specific options can be passed via the `--param` CLI flag or `provider_
   </Tab>
 </Tabs>
 
+## Model catalog
+
+The `meerkat-models` crate maintains a curated catalog of all supported models with their capabilities, context windows, output limits, and provider profile rules. This catalog is the single source of truth for model defaults, allowlists, and capability detection.
+
+Query the catalog programmatically from any surface:
+
+- **CLI**: `rkat models catalog`
+- **RPC**: `models/catalog`
+- **REST**: `GET /models/catalog`
+- **MCP**: `meerkat_models_catalog`
+
 ## Auto-detection
 
 The provider is automatically inferred from the model name:

@@ -6,11 +6,8 @@ model = "claude-opus-4-6"
 max_tokens_per_turn = 16384
 budget_warning_threshold = 0.8
 
-[models]
-anthropic = "claude-opus-4-6"
-openai = "gpt-4.1"
-gemini = "gemini-1.5-pro"
-
+# Model defaults are now sourced from meerkat-models catalog.
+# Per-provider overrides can still be set in user config.
 max_tokens = 8192
 
 [shell]
@@ -29,7 +26,7 @@ default_provider = "inherit"
 default_model = "inherit"
 
 [sub_agents.allowed_models]
-anthropic = ["claude-opus-4-6", "claude-sonnet-4-5", "claude-opus-4-5"]
+anthropic = ["claude-opus-4-6", "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-opus-4-5"]
 openai = ["gpt-5.2", "gpt-5.2-pro"]
 gemini = ["gemini-3-flash-preview", "gemini-3-pro-preview"]
 

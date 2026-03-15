@@ -1271,7 +1271,9 @@ impl SessionRuntime {
         if let Some(ref ov) = overrides
             && (ov.model.is_some() || ov.provider.is_some() || ov.provider_params.is_some())
         {
-            let model = ov.model.as_deref().unwrap_or("claude-sonnet-4-5");
+            let catalog_default =
+                meerkat_models::default_model("anthropic").unwrap_or("claude-sonnet-4-5");
+            let model = ov.model.as_deref().unwrap_or(catalog_default);
             let provider = ov
                 .provider
                 .as_ref()
@@ -1421,7 +1423,11 @@ impl SessionRuntime {
         let model = stored_metadata
             .as_ref()
             .map(|m| m.model.clone())
-            .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
+            .unwrap_or_else(|| {
+                meerkat_models::default_model("anthropic")
+                    .unwrap_or("claude-sonnet-4-5")
+                    .to_string()
+            });
         let mut build_config = AgentBuildConfig::new(model);
         build_config.resume_session = Some(session);
 

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "meerkat-models",
     "meerkat-core",
     "meerkat-client",
     "meerkat-store",
@@ -107,6 +108,7 @@ subtle = "2.6"
 tempfile = "3.14"
 
 # Internal crates
+meerkat-models = { version = "0.4.9", path = "meerkat-models" }
 meerkat-core = { version = "0.4.9", path = "meerkat-core" }
 meerkat-client = { version = "0.4.9", path = "meerkat-client", default-features = false }
 meerkat-store = { version = "0.4.9", path = "meerkat-store", default-features = false }

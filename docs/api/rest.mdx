@@ -73,6 +73,7 @@ If `--realm` is omitted, the server creates a new isolated opaque realm (`realm-
 | `GET` | `/skills` | List skills with provenance |
 | `GET` | `/skills/{id}` | Inspect a skill's full content |
 | `GET` | `/health` | Liveness check |
+| `GET` | `/models/catalog` | Curated model catalog with provider profiles |
 | `GET` | `/capabilities` | Runtime capabilities |
 | `GET` | `/config` | Read config |
 | `PUT` | `/config` | Replace config |
@@ -630,6 +631,40 @@ Returns `404` if the skill is not found or skills are not enabled.
 ### GET /health
 
 Returns `"ok"` (HTTP 200). Use for liveness checks.
+
+### GET /models/catalog
+
+Return the curated model catalog with provider profiles, capability metadata, and parameter schemas.
+
+```json Response (abbreviated)
+{
+  "contract_version": "0.4.11",
+  "providers": [
+    {
+      "provider": "anthropic",
+      "default_model_id": "claude-sonnet-4-5",
+      "models": [
+        {
+          "id": "claude-sonnet-4-5",
+          "display_name": "Claude Sonnet 4.5",
+          "tier": "standard",
+          "context_window": 200000,
+          "max_output_tokens": 64000,
+          "profile": {
+            "model_family": "claude",
+            "supports_temperature": true,
+            "supports_thinking": true,
+            "supports_reasoning": false,
+            "params_schema": {}
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+The catalog is compiled from `meerkat-models` at build time. Each provider entry includes the default model and a list of models with their capabilities and parameter schemas.
 
 ### GET /capabilities
 

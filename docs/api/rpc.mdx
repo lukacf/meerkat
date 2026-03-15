@@ -87,6 +87,7 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `mcp/add` | MCP | Stage live MCP server addition (mcp feature) |
 | `mcp/remove` | MCP | Stage live MCP server removal (mcp feature) |
 | `mcp/reload` | MCP | Reload one or all MCP servers (mcp feature) |
+| `models/catalog` | Models | List available models with capabilities and provider profiles |
 | `capabilities/get` | Capabilities | Runtime capability report |
 | `config/get` | Config | Read current config |
 | `config/set` | Config | Replace config |
@@ -155,6 +156,7 @@ Handshake. Returns server capabilities.
       "session/create", "session/list", "session/read", "session/history",
       "session/archive", "turn/start", "turn/interrupt",
       "config/get", "config/set", "config/patch",
+      "models/catalog",
       "capabilities/get",
       "skills/list", "skills/inspect",
       "session/stream_open", "session/stream_close",
@@ -818,6 +820,64 @@ Reload one or all MCP servers for a running session. Useful after config changes
 <ParamField body="server_name" type="string | null" default="null">
   Specific server to reload. If null, reloads all servers.
 </ParamField>
+
+## Models
+
+### models/catalog
+
+Return the curated model catalog with provider profiles, capability metadata, and parameter schemas.
+
+<CodeGroup>
+```json Request
+{"jsonrpc":"2.0","id":17,"method":"models/catalog"}
+```
+
+```json Response
+{
+  "jsonrpc": "2.0",
+  "id": 17,
+  "result": {
+    "contract_version": "0.4.11",
+    "providers": [
+      {
+        "provider": "anthropic",
+        "default_model_id": "claude-sonnet-4-5",
+        "models": [
+          {
+            "id": "claude-sonnet-4-5",
+            "display_name": "Claude Sonnet 4.5",
+            "tier": "standard",
+            "context_window": 200000,
+            "max_output_tokens": 64000,
+            "profile": {
+              "model_family": "claude",
+              "supports_temperature": true,
+              "supports_thinking": true,
+              "supports_reasoning": false,
+              "params_schema": {}
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+</CodeGroup>
+
+The catalog is compiled from `meerkat-models` at build time. No parameters are required.
+
+<ResponseField name="contract_version" type="string">
+  Contract version for the catalog response.
+</ResponseField>
+
+<ResponseField name="providers" type="array">
+  List of provider entries, each containing `provider`, `default_model_id`, and `models`.
+</ResponseField>
+
+<ResponseField name="providers[].models[].profile" type="object">
+  Model profile with capability flags (`supports_temperature`, `supports_thinking`, `supports_reasoning`) and `params_schema`.
+</ResponseField>
 
 ## Capabilities
 

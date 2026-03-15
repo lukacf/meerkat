@@ -28,13 +28,15 @@ graph TD
     TOOLS["meerkat-tools<br/>Registry / Validation"]
     MEMORY["meerkat-memory<br/>HNSW / Simple"]
     HOOKS["meerkat-hooks<br/>In-proc / Command / HTTP"]
-    MCPSERVER["meerkat-mcp-server<br/>24 tools: run / resume / config<br/>capabilities / skills / sessions / ..."]
+    MCPSERVER["meerkat-mcp-server<br/>25 tools: run / resume / config<br/>capabilities / models / skills / sessions / ..."]
     COMMS["meerkat-comms<br/>Ed25519 / Transports / Trust"]
     CONTRACTS["meerkat-contracts<br/>Wire types / Capabilities / Error codes"]
     SKILLS["meerkat-skills<br/>Filesystem / Git / HTTP / Embedded"]
     MOB["meerkat-mob<br/>Mob runtime / Flows / Tasks"]
     MOBPACK["meerkat-mob-pack<br/>Archive format / Signing / Trust"]
     MOBMCP["meerkat-mob-mcp<br/>MobMcpDispatcher / MobMcpState"]
+
+    MODELS["meerkat-models<br/>Model catalog / Provider profiles /<br/>Parameter schemas (leaf crate)"]
 
     CORE["meerkat-core<br/>Traits, agent loop, types<br/>SessionService trait, SessionError"]
 
@@ -48,6 +50,7 @@ graph TD
     FACADE --> COMMS
     FACADE --> CONTRACTS
     FACADE --> SKILLS
+    FACADE --> MODELS
 
     MCPSERVER --> FACADE
     MOBMCP --> MOB
@@ -55,11 +58,14 @@ graph TD
     MOBPACK --> MOB
     MOB --> CORE
 
+    CORE --> MODELS
     CLIENT --> CORE
+    CLIENT --> MODELS
     SESSION --> CORE
     STORE --> CORE
     MCP --> CORE
     TOOLS --> CORE
+    TOOLS --> MODELS
     MEMORY --> CORE
     HOOKS --> CORE
     COMMS --> CORE
@@ -125,6 +131,17 @@ graph TD
 ```
 
 ## Crate structure
+
+<Accordion title="meerkat-models">
+Curated model catalog and provider profile rules. A leaf crate with no meerkat dependencies:
+
+- **Model catalog**: single source of truth for model IDs, display names, tiers, context windows, and max output tokens
+- **Provider profiles**: capability detection rules (temperature, thinking, reasoning support) and parameter schemas per model family
+- **Provider defaults**: default model ID per provider
+- **Allowlists**: model ID validation and provider inference
+
+Consumed by `meerkat-core` (config defaults), `meerkat-client` (adapter rules), `meerkat-tools` (validation), and `meerkat` (facade).
+</Accordion>
 
 <Accordion title="meerkat-core">
 The heart of Meerkat. Contains:
@@ -232,9 +249,9 @@ MCP protocol client implementation:
 </Accordion>
 
 <Accordion title="meerkat-mcp-server">
-MCP server exposing Meerkat as tools for other MCP clients (24 tools total):
+MCP server exposing Meerkat as tools for other MCP clients (25 tools total):
 
-- **Core**: `meerkat_run`, `meerkat_resume`, `meerkat_config`, `meerkat_capabilities`
+- **Core**: `meerkat_run`, `meerkat_resume`, `meerkat_config`, `meerkat_capabilities`, `meerkat_models_catalog`
 - **Session lifecycle**: `meerkat_read`, `meerkat_sessions`, `meerkat_interrupt`, `meerkat_archive`
 - **Skills**: `meerkat_skills`
 - **MCP management**: `meerkat_mcp_add`, `meerkat_mcp_remove`, `meerkat_mcp_reload`
@@ -562,6 +579,7 @@ Meerkat is extended by implementing three core traits. See the [Rust SDK](/rust/
 
 | Owner | Owns |
 |-------|------|
+| `meerkat-models` | Model catalog, provider profiles, parameter schemas (leaf crate, no meerkat deps) |
 | `meerkat-core` | Trait contracts, `SessionError`, agent loop, types |
 | `meerkat-store` | `SessionStore` implementations (SQLite, JSONL, redb, in-memory) |
 | `meerkat-session` | Session orchestration, `EventStore`, compactor |
@@ -570,11 +588,12 @@ Meerkat is extended by implementing three core traits. See the [Rust SDK](/rust/
 
 ### Dependency rules
 
-1. `meerkat-core` depends on nothing in the workspace (only external crates)
-2. All other crates depend on `meerkat-core` for types and traits
-3. `meerkat-tools` depends on `meerkat-mcp` for MCP routing
-4. `meerkat` (facade) re-exports from all crates
-5. `meerkat-cli` is the top-level binary crate
+1. `meerkat-models` depends on nothing in the workspace (leaf crate)
+2. `meerkat-core` depends on `meerkat-models` for catalog data and defaults
+3. All other crates depend on `meerkat-core` for types and traits
+4. `meerkat-tools` depends on `meerkat-mcp` for MCP routing
+5. `meerkat` (facade) re-exports from all crates
+6. `meerkat-cli` is the top-level binary crate
 
 <Note>
 Canonical runtime state is realm-scoped (`realm_manifest.json`, realm config, and pinned session backend).

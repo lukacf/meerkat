@@ -24,16 +24,11 @@ pub struct OpenAiClient {
 
 impl OpenAiClient {
     fn model_supports_temperature(model: &str) -> bool {
-        let model = model.to_ascii_lowercase();
-        // OpenAI gpt-5/codex models reject temperature.
-        !(model.starts_with("gpt-5") || model.contains("codex"))
+        meerkat_models::profile::openai::supports_temperature(model)
     }
 
     fn model_supports_reasoning_payload(model: &str) -> bool {
-        let model = model.to_ascii_lowercase();
-        // We only enable explicit reasoning payload settings for gpt-5 family.
-        // Other models can reject encrypted reasoning include fields.
-        model.starts_with("gpt-5")
+        meerkat_models::profile::openai::supports_reasoning(model)
     }
 
     /// Create a new OpenAI client with the given API key

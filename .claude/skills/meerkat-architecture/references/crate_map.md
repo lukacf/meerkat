@@ -3,9 +3,11 @@
 ## Dependency Order (bottom to top)
 
 ```
-meerkat-core          (no I/O deps — pure types, traits, agent loop)
+meerkat-models        (leaf crate — model catalog, provider profiles, parameter schemas)
+
+meerkat-core          (depends on meerkat-models — pure types, traits, agent loop)
   ├── meerkat-contracts   (wire types, capability registry, error codes)
-  ├── meerkat-client      (LLM providers: Anthropic, OpenAI, Gemini)
+  ├── meerkat-client      (LLM providers: Anthropic, OpenAI, Gemini; depends on meerkat-models)
   ├── meerkat-store       (session persistence: Jsonl, Memory, Redb)
   ├── meerkat-tools       (tool registry, builtins, shell, comms tools)
   ├── meerkat-session     (session service: Ephemeral, Persistent)

@@ -18,6 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 meerkat = { workspace = true, features = ["anthropic", "openai", "gemini", "jsonl-store", "session-store", "memory-store", "skills"] }
+meerkat-models = { workspace = true }
 meerkat-core = { workspace = true }
 meerkat-contracts = { workspace = true }
 meerkat-client = { workspace = true }

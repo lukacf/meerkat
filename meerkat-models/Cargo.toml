@@ -1,0 +1,21 @@
+[package]
+name = "meerkat-models"
+description = "Curated model catalog and provider profile rules for the Meerkat agent platform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+
+[lints]
+workspace = true

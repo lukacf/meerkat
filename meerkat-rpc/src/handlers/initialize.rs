@@ -46,6 +46,7 @@ pub fn handle_initialize(id: Option<RpcId>, runtime_available: bool) -> RpcRespo
                 "config/set".to_string(),
                 "config/patch".to_string(),
                 "capabilities/get".to_string(),
+                "models/catalog".to_string(),
                 "skills/list".to_string(),
                 "skills/inspect".to_string(),
                 "tools/register".to_string(),

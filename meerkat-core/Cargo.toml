@@ -29,6 +29,7 @@ schemars = { workspace = true }
 strum = { workspace = true }
 indexmap = { version = "2", features = ["serde"] }
 parking_lot = { workspace = true }
+meerkat-models = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }

@@ -309,6 +309,17 @@ cargo install rkat --no-default-features --features "anthropic,openai,session-st
 
 Disabled features return typed errors (e.g. `SessionError::PersistenceDisabled`) — no panics.
 
+### Model catalog
+
+The `meerkat-models` crate provides a curated model catalog queryable from all surfaces:
+
+- CLI: `rkat models catalog`
+- RPC: `models/catalog`
+- REST: `GET /models/catalog`
+- MCP: `meerkat_models_catalog`
+
+Returns `ModelsCatalogResponse` with providers, default models, and per-model profiles (capabilities, parameter schemas).
+
 ## Core features
 
 ### Sessions

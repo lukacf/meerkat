@@ -19,6 +19,7 @@ Meerkat is a library-first agent runtime. The execution pipeline is shared acros
 
 | Crate | Owns | Key Trait |
 |-------|------|-----------|
+| `meerkat-models` | Model catalog, provider profiles, parameter schemas (leaf crate, no meerkat deps) | — |
 | `meerkat-core` | Agent loop, types, budget, retry, state machine, ALL trait contracts | `AgentLlmClient`, `AgentToolDispatcher`, `AgentSessionStore`, `SessionService`, `CommsRuntime`, `HookEngine` |
 | `meerkat-client` | LLM providers (Anthropic, OpenAI, Gemini) | Implements `AgentLlmClient` (via `LlmClientAdapter`) |
 | `meerkat-store` | Session persistence (SQLite, Jsonl, Memory, Redb) | Implements `SessionStore` |

@@ -23,6 +23,7 @@ pub mod io_task;
 pub mod plain_listener;
 
 pub mod agent;
+pub(crate) mod classify;
 pub mod event_injector;
 pub mod mcp;
 pub mod router;

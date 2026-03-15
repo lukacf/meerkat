@@ -39,7 +39,7 @@ pub async fn handle_plain_connection<S>(
                 if body.is_empty() {
                     continue;
                 }
-                match inbox_sender.send(InboxItem::PlainEvent {
+                match inbox_sender.send_classified(InboxItem::PlainEvent {
                     body,
                     source,
                     interaction_id: None,

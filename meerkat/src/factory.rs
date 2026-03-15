@@ -166,7 +166,8 @@ struct ErasedLlmClientOverride(Arc<dyn LlmClient>);
 #[derive(Clone)]
 struct SubAgentCommsWiring {
     parent_context: meerkat_comms::runtime::ParentCommsContext,
-    parent_trusted_peers: Arc<RwLock<meerkat_comms::TrustedPeers>>,
+    parent_trusted_peers: Arc<parking_lot::RwLock<meerkat_comms::TrustedPeers>>,
+    parent_classification_peers: Arc<parking_lot::RwLock<meerkat_comms::TrustedPeers>>,
 }
 
 /// Encode an LLM client override for transport in `SessionBuildOptions`.
@@ -983,7 +984,6 @@ impl AgentFactory {
             None,
             #[cfg(all(feature = "sub-agents", feature = "comms"))]
             None,
-            None,
         )
         .await
     }
@@ -1009,12 +1009,6 @@ impl AgentFactory {
         sub_agent_scope_path: Option<Vec<StreamScopeFrame>>,
         #[cfg(all(feature = "sub-agents", feature = "comms"))] sub_agent_comms: Option<
             SubAgentCommsWiring,
-        >,
-        #[cfg(not(target_arch = "wasm32"))] wait_interrupt_rx: Option<
-            tokio::sync::watch::Receiver<Option<meerkat_tools::WaitInterrupt>>,
-        >,
-        #[cfg(target_arch = "wasm32")] wait_interrupt_rx: Option<
-            tokio_with_wasm::alias::sync::watch::Receiver<Option<meerkat_tools::WaitInterrupt>>,
         >,
     ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
         let builder = BuiltinDispatcherConfig {
@@ -1042,9 +1036,7 @@ impl AgentFactory {
                     engine,
                 ));
             }
-            if let Some(rx) = wait_interrupt_rx {
-                composite.set_wait_interrupt(rx);
-            }
+            // (wait binding happens in build_agent via bind_wait_interrupt)
             Ok(Arc::new(composite))
         }
 
@@ -1064,9 +1056,7 @@ impl AgentFactory {
                     engine,
                 ));
             }
-            if let Some(rx) = wait_interrupt_rx {
-                composite.set_wait_interrupt(rx);
-            }
+            // (wait binding happens in build_agent via bind_wait_interrupt)
             return Ok(Arc::new(composite));
         }
 
@@ -1150,6 +1140,7 @@ impl AgentFactory {
                     0,
                     comms.parent_context,
                     comms.parent_trusted_peers,
+                    comms.parent_classification_peers,
                 ),
                 None => SubAgentToolState::new(
                     manager,
@@ -1189,9 +1180,7 @@ impl AgentFactory {
                 ));
             }
 
-            if let Some(rx) = wait_interrupt_rx {
-                composite.set_wait_interrupt(rx);
-            }
+            // (wait binding happens in build_agent via bind_wait_interrupt)
 
             Ok(Arc::new(composite))
         }
@@ -1342,13 +1331,21 @@ impl AgentFactory {
                 .comms_name
                 .as_ref()
                 .ok_or(BuildAgentError::HostModeRequiresCommsName)?;
-            let runtime = crate::build_comms_runtime_from_config_scoped(
+            let silent_intents = Arc::new(
+                build_config
+                    .silent_comms_intents
+                    .iter()
+                    .cloned()
+                    .collect::<std::collections::HashSet<String>>(),
+            );
+            let runtime = crate::build_comms_runtime_from_config_scoped_with_silent_intents(
                 config,
                 _realm_scope_root.as_path(),
                 comms_name,
                 build_config.peer_meta.clone(),
                 // Realm ID is the comms inproc namespace boundary.
                 build_config.realm_id.clone(),
+                silent_intents,
             )
             .await
             .map_err(BuildAgentError::Comms)?;
@@ -1362,9 +1359,17 @@ impl AgentFactory {
                 .comms_name
                 .as_ref()
                 .ok_or(BuildAgentError::HostModeRequiresCommsName)?;
-            let runtime = meerkat_comms::CommsRuntime::inproc_only_scoped(
+            let silent_intents = Arc::new(
+                build_config
+                    .silent_comms_intents
+                    .iter()
+                    .cloned()
+                    .collect::<std::collections::HashSet<String>>(),
+            );
+            let runtime = meerkat_comms::CommsRuntime::inproc_only_with_silent_intents(
                 comms_name,
                 build_config.realm_id.clone(),
+                silent_intents,
             )
             .map_err(|e| BuildAgentError::Comms(e.to_string()))?;
             if let Some(ref meta) = build_config.peer_meta {
@@ -1392,46 +1397,15 @@ impl AgentFactory {
                     inproc_namespace: runtime.inproc_namespace().map(ToOwned::to_owned),
                 },
                 parent_trusted_peers: runtime.trusted_peers_shared(),
+                parent_classification_peers: runtime.router().classification_peers_arc(),
             })
         } else {
             None
         };
 
-        // Create a wait interrupt channel when comms is enabled. The receiver
-        // is wired into the WaitTool so incoming peer messages interrupt
-        // cooperative yielding points. The sender is connected to
-        // `CommsRuntime::inbox_notify()` via a bridge task below.
-        #[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
-        let wait_interrupt_tx = comms_runtime.as_ref().map(|_| {
-            let (tx, _rx) = tokio::sync::watch::channel(None::<meerkat_tools::WaitInterrupt>);
-            tx
-        });
-        #[cfg(all(feature = "comms", target_arch = "wasm32"))]
-        let wait_interrupt_tx = comms_runtime.as_ref().map(|_| {
-            let (tx, _rx) =
-                tokio_with_wasm::alias::sync::watch::channel(None::<meerkat_tools::WaitInterrupt>);
-            tx
-        });
-        #[cfg(feature = "comms")]
-        #[cfg(not(target_arch = "wasm32"))]
-        let wait_interrupt_rx = wait_interrupt_tx
-            .as_ref()
-            .map(tokio::sync::watch::Sender::subscribe);
-        #[cfg(all(feature = "comms", target_arch = "wasm32"))]
-        let _wait_interrupt_rx = wait_interrupt_tx
-            .as_ref()
-            .map(tokio_with_wasm::alias::sync::watch::Sender::subscribe);
-        // When comms is disabled, no wait interrupt channel is created.
-        // The type must match the signature expected by build_tool_dispatcher_for_agent_with_overrides.
-        #[cfg(all(not(feature = "comms"), not(target_arch = "wasm32")))]
-        let wait_interrupt_rx: Option<
-            tokio::sync::watch::Receiver<Option<meerkat_tools::WaitInterrupt>>,
-        > = None;
-        #[cfg(all(not(feature = "comms"), target_arch = "wasm32"))]
-        let wait_interrupt_rx: Option<
-            tokio_with_wasm::alias::sync::watch::Receiver<Option<meerkat_tools::WaitInterrupt>>,
-        > = None;
-
+        // Build the tool dispatcher WITHOUT wait interrupt wiring.
+        // The interrupt is bound once after full composition (including comms gateway).
+        // This ensures all dispatcher paths (builtin, override, WASM, composed) are covered.
         #[allow(unused_mut)]
         let (mut tools, mut tool_usage_instructions) =
             if let Some(dispatcher) = build_config.tool_dispatcher_override.take() {
@@ -1452,7 +1426,6 @@ impl AgentFactory {
                         #[cfg(all(feature = "sub-agents", feature = "comms"))]
                         sub_agent_comms,
                         build_config.shell_env.take(),
-                        wait_interrupt_rx,
                     )
                     .await?
                 }
@@ -1496,7 +1469,126 @@ impl AgentFactory {
                 }
             };
 
-        // 9. Compose tools with comms
+        // 9. Bind wait interrupt BEFORE comms gateway composition.
+        //
+        // Spec deviation: the plan called for binding "after all composition."
+        // That requires either CommsToolSurface implementing bind_wait_interrupt()
+        // or the gateway tolerating Unsupported without consuming the Arc.
+        // Neither is clean for 0.4.10: CommsToolSurface has no wait tool, and
+        // the default trait impl consumes the Arc on Unsupported (dyn dispatch
+        // prevents returning self). Binding before gateway composition avoids
+        // both issues — the CompositeDispatcher has refcount=1 at bind time,
+        // and the gateway wraps the already-bound dispatcher afterward.
+        //
+        // The bridge task listens on actionable_input_notify() (not the broad
+        // inbox_notify()) so only actionable peer messages interrupt wait.
+        //
+        // Fail-closed: if comms is enabled but the runtime or dispatcher doesn't
+        // support the required capabilities, the build fails.
+        #[cfg(feature = "comms")]
+        if let Some(ref runtime) = comms_runtime {
+            use meerkat_core::agent::CommsRuntime as CoreCommsRuntimeTrait;
+
+            // Attempt wait interrupt binding when the dispatcher supports it.
+            // This covers both factory-built builtins and caller-supplied
+            // overrides that implement supports_wait_interrupt(). The
+            // actionable_input_notify probe is deferred into this block so
+            // comms-enabled agents that skip wait rebinding don't fail the
+            // build on older/custom runtimes that lack the capability.
+            if effective_builtins || tools.supports_wait_interrupt() {
+                // Probe actionable_input_notify, falling back to inbox_notify
+                // for legacy/custom runtimes that predate the classified path.
+                // inbox_notify fires on ALL inbox traffic (not just actionable),
+                // which may wake wait slightly more often, but preserves the
+                // interrupt contract for send_request/wait workflows.
+                let notify = CoreCommsRuntimeTrait::actionable_input_notify(runtime)
+                    .ok()
+                    .or_else(|| Some(runtime.inbox_notify()));
+
+                if let Some(actionable_notify) = notify {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let (tx, rx) = tokio::sync::watch::channel(
+                        None::<meerkat_core::wait_interrupt::WaitInterrupt>,
+                    );
+                    #[cfg(target_arch = "wasm32")]
+                    let (tx, rx) = tokio_with_wasm::alias::sync::watch::channel(
+                        None::<meerkat_core::wait_interrupt::WaitInterrupt>,
+                    );
+
+                    // Try to bind wait interrupts.
+                    //
+                    // Exclusive ownership (refcount == 1): consume Arc, swap wait
+                    // tool, get new Arc back. Works for factory-fresh dispatchers
+                    // AND unique per-session overrides that implement
+                    // bind_wait_interrupt().
+                    //
+                    // Shared ownership (refcount > 1): cannot consume the Arc.
+                    // Skip gracefully — comms works, wait just isn't interruptible.
+                    //
+                    // Unsupported: the dispatcher doesn't have a wait tool or
+                    // doesn't implement binding. Skip gracefully.
+                    // Probe before consuming: bind_wait_interrupt takes
+                    // `self: Arc<Self>` and is destructive on Unsupported.
+                    // The probe is non-consuming so it's safe to check first.
+                    let bind_succeeded = if !tools.supports_wait_interrupt() {
+                        tracing::debug!("Dispatcher does not support wait interrupt binding");
+                        false
+                    } else if Arc::strong_count(&tools) == 1 {
+                        // Exclusive ownership — safe to consume and rebind.
+                        tools = tools.bind_wait_interrupt(rx).map_err(|e| {
+                            BuildAgentError::Config(format!("Wait interrupt binding failed: {e}"))
+                        })?;
+                        true
+                    } else {
+                        tracing::debug!(
+                            "Shared dispatcher (refcount={}) — wait interrupt not bound",
+                            Arc::strong_count(&tools)
+                        );
+                        false
+                    };
+
+                    if bind_succeeded {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        tokio::spawn(async move {
+                            loop {
+                                actionable_notify.notified().await;
+                                if tx
+                                    .send(Some(meerkat_core::wait_interrupt::WaitInterrupt {
+                                        reason: "Incoming actionable peer message".to_string(),
+                                    }))
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        });
+                        #[cfg(target_arch = "wasm32")]
+                        tokio_with_wasm::alias::task::spawn(async move {
+                            loop {
+                                actionable_notify.notified().await;
+                                if tx
+                                    .send(Some(meerkat_core::wait_interrupt::WaitInterrupt {
+                                        reason: "Incoming actionable peer message".to_string(),
+                                    }))
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        });
+                    }
+                } else {
+                    tracing::debug!(
+                        "Comms runtime lacks actionable_input_notify — wait interrupt not bound"
+                    );
+                }
+            } else {
+                tracing::debug!("Builtins disabled — skipping wait interrupt binding");
+            }
+        }
+
+        // 9a. Compose tools with comms (after wait binding, so the gateway
+        // wraps the already-bound dispatcher).
         #[cfg(feature = "comms")]
         if let Some(ref runtime) = comms_runtime {
             let composed = compose_tools_with_comms(tools, tool_usage_instructions, runtime)
@@ -1505,43 +1597,6 @@ impl AgentFactory {
                 })?;
             tools = composed.0;
             tool_usage_instructions = composed.1;
-        }
-
-        // 9b. Bridge comms inbox_notify → WaitTool interrupt channel.
-        // When a peer message arrives in the inbox, the bridge task sends an
-        // interrupt signal that causes any in-progress `wait` tool call to
-        // return early with status "interrupted".
-        #[cfg(feature = "comms")]
-        if let (Some(runtime), Some(tx)) = (&comms_runtime, wait_interrupt_tx) {
-            let inbox_notify = runtime.inbox_notify();
-            #[cfg(not(target_arch = "wasm32"))]
-            tokio::spawn(async move {
-                loop {
-                    inbox_notify.notified().await;
-                    if tx
-                        .send(Some(meerkat_tools::WaitInterrupt {
-                            reason: "Incoming peer message".to_string(),
-                        }))
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            });
-            #[cfg(target_arch = "wasm32")]
-            tokio_with_wasm::alias::task::spawn(async move {
-                loop {
-                    inbox_notify.notified().await;
-                    if tx
-                        .send(Some(meerkat_tools::WaitInterrupt {
-                            reason: "Incoming peer message".to_string(),
-                        }))
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            });
         }
 
         // 10. Resolve hooks (override > filesystem layered config)
@@ -1919,12 +1974,6 @@ impl AgentFactory {
             SubAgentCommsWiring,
         >,
         shell_env: Option<std::collections::HashMap<String, String>>,
-        #[cfg(not(target_arch = "wasm32"))] wait_interrupt_rx: Option<
-            tokio::sync::watch::Receiver<Option<meerkat_tools::WaitInterrupt>>,
-        >,
-        #[cfg(target_arch = "wasm32")] wait_interrupt_rx: Option<
-            tokio_with_wasm::alias::sync::watch::Receiver<Option<meerkat_tools::WaitInterrupt>>,
-        >,
     ) -> Result<(Arc<dyn AgentToolDispatcher>, String), BuildAgentError> {
         if !effective_builtins {
             // No builtins — return the external tools if provided, otherwise empty.
@@ -1990,7 +2039,6 @@ impl AgentFactory {
                 sub_agent_scope_path,
                 #[cfg(all(feature = "sub-agents", feature = "comms"))]
                 sub_agent_comms,
-                wait_interrupt_rx,
             )
             .await?;
 

@@ -178,32 +178,6 @@ impl CompositeDispatcher {
         })
     }
 
-    /// Replace the default `WaitTool` with one wired to the given interrupt
-    /// receiver.
-    ///
-    /// When a value is sent on the channel, any in-progress `wait` call will
-    /// be interrupted early and return `status: "interrupted"`. This enables
-    /// peer messages to interrupt cooperative yielding points (e.g., an agent
-    /// waiting for a peer response via the `wait` tool).
-    pub fn set_wait_interrupt(
-        &mut self,
-        #[cfg(not(target_arch = "wasm32"))] interrupt_rx: tokio::sync::watch::Receiver<
-            Option<crate::builtin::utility::WaitInterrupt>,
-        >,
-        #[cfg(target_arch = "wasm32")] interrupt_rx: crate::tokio::sync::watch::Receiver<
-            Option<crate::builtin::utility::WaitInterrupt>,
-        >,
-    ) {
-        use crate::builtin::utility::WaitTool;
-        let new_wait = Arc::new(WaitTool::with_interrupt(interrupt_rx));
-        for tool in &mut self.builtin_tools {
-            if tool.name() == "wait" {
-                *tool = new_wait;
-                return;
-            }
-        }
-    }
-
     /// Register sub-agent tools.
     #[cfg(all(feature = "sub-agents", not(target_arch = "wasm32")))]
     pub fn register_sub_agent_tools(
@@ -445,6 +419,29 @@ impl AgentToolDispatcher for CompositeDispatcher {
             ExternalToolUpdate::default()
         }
     }
+
+    fn bind_wait_interrupt(
+        self: Arc<Self>,
+        rx: meerkat_core::wait_interrupt::WaitInterruptReceiver,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, meerkat_core::wait_interrupt::WaitInterruptBindError>
+    {
+        let mut owned = Arc::try_unwrap(self)
+            .map_err(|_| meerkat_core::wait_interrupt::WaitInterruptBindError::SharedOwnership)?;
+        // Swap the wait tool with an interrupt-aware version
+        use crate::builtin::utility::WaitTool;
+        let new_wait = Arc::new(WaitTool::with_interrupt(rx));
+        for tool in &mut owned.builtin_tools {
+            if tool.name() == "wait" {
+                *tool = new_wait;
+                break;
+            }
+        }
+        Ok(Arc::new(owned))
+    }
+
+    fn supports_wait_interrupt(&self) -> bool {
+        self.builtin_tools.iter().any(|t| t.name() == "wait")
+    }
 }
 
 #[cfg(test)]
@@ -513,18 +510,23 @@ mod tests {
         assert!(usage.contains("List active mobs"));
     }
 
+    // set_wait_interrupt test removed — legacy API replaced by bind_wait_interrupt()
+
     #[tokio::test]
-    async fn set_wait_interrupt_wires_into_wait_tool() {
+    async fn bind_wait_interrupt_swaps_in_interrupt_aware_wait_tool() {
         use crate::builtin::utility::WaitInterrupt;
         use meerkat_core::time_compat::Duration;
 
         let store = Arc::new(MemoryTaskStore::new());
-        let mut dispatcher =
+        let dispatcher = Arc::new(
             CompositeDispatcher::new(store, &BuiltinToolConfig::default(), None, None, None, None)
-                .expect("composite dispatcher should build");
+                .expect("composite dispatcher should build"),
+        );
 
         let (tx, rx) = tokio::sync::watch::channel(None::<WaitInterrupt>);
-        dispatcher.set_wait_interrupt(rx);
+        let rebound = dispatcher
+            .bind_wait_interrupt(rx)
+            .expect("bind_wait_interrupt should succeed");
 
         // Dispatch a wait call and interrupt it
         let call_json =
@@ -535,16 +537,15 @@ mod tests {
             args: &call_json,
         };
 
-        // Send interrupt after a short delay
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
             let _ = tx.send(Some(WaitInterrupt {
-                reason: "Incoming peer message".to_string(),
+                reason: "bind test interrupt".to_string(),
             }));
         });
 
         let start = std::time::Instant::now();
-        let result = dispatcher
+        let result = rebound
             .dispatch(call)
             .await
             .expect("dispatch should succeed");
@@ -556,5 +557,24 @@ mod tests {
         );
         let content: serde_json::Value = serde_json::from_str(&result.content).unwrap();
         assert_eq!(content["status"], "interrupted");
+    }
+
+    #[test]
+    #[allow(clippy::panic)]
+    fn bind_wait_interrupt_shared_ownership_error() {
+        let store = Arc::new(MemoryTaskStore::new());
+        let dispatcher = Arc::new(
+            CompositeDispatcher::new(store, &BuiltinToolConfig::default(), None, None, None, None)
+                .expect("composite dispatcher should build"),
+        );
+        let _clone = Arc::clone(&dispatcher);
+
+        let (_tx, rx) =
+            tokio::sync::watch::channel(None::<meerkat_core::wait_interrupt::WaitInterrupt>);
+        match dispatcher.bind_wait_interrupt(rx) {
+            Err(meerkat_core::wait_interrupt::WaitInterruptBindError::SharedOwnership) => {}
+            Ok(_) => panic!("expected SharedOwnership error, got Ok"),
+            Err(e) => panic!("expected SharedOwnership, got {e:?}"),
+        }
     }
 }

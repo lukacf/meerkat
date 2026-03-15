@@ -9,10 +9,10 @@ use meerkat_comms::agent::{
 };
 use meerkat_comms::{Keypair, TrustedPeer, TrustedPeers};
 use meerkat_core::{ToolCallView, ToolResult};
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tokio::sync::RwLock;
 
 static API_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
 static TOOL_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);

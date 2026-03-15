@@ -96,6 +96,10 @@ impl SessionAgent for FactoryAgent {
             .map_err(|error| meerkat_core::error::AgentError::ConfigError(error.to_string()))
     }
 
+    fn replace_client(&mut self, client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>) {
+        self.agent.replace_client(client);
+    }
+
     fn cancel(&mut self) {
         self.agent.cancel();
     }

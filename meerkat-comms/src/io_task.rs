@@ -99,9 +99,9 @@ where
         framed.send(frame).await?;
     }
 
-    // Enqueue to inbox
+    // Enqueue to inbox (with classification if context is available)
     inbox_sender
-        .send(InboxItem::External { envelope })
+        .send_classified(InboxItem::External { envelope })
         .map_err(|err| match err {
             InboxError::Closed => IoTaskError::InboxClosed,
             InboxError::Full => IoTaskError::InboxFull,

@@ -697,6 +697,14 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         self.inner.interrupt(id).await
     }
 
+    async fn set_session_client(
+        &self,
+        id: &SessionId,
+        client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
+    ) -> Result<(), SessionError> {
+        self.inner.set_session_client(id, client).await
+    }
+
     async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
         let _ = self.discard_stale_live_session_if_needed(id).await?;
         // Try live session first

@@ -164,6 +164,32 @@ pub trait AgentToolDispatcher: Send + Sync {
     async fn poll_external_updates(&self) -> ExternalToolUpdate {
         ExternalToolUpdate::default()
     }
+
+    /// Bind a wait-interrupt receiver into this dispatcher, returning a rebound dispatcher.
+    ///
+    /// The consuming `Arc<Self>` receiver is required because some dispatchers
+    /// (e.g. `CompositeDispatcher`) hold non-Clone state. The factory calls
+    /// this once before comms gateway composition, transferring ownership.
+    ///
+    /// Default returns `Err(Unsupported)`. Dispatchers that contain a `WaitTool`
+    /// (e.g. `CompositeDispatcher`) override this to swap in an interrupt-aware
+    /// instance. `ToolGateway` and `FilteredToolDispatcher` forward to their
+    /// inner dispatchers.
+    fn bind_wait_interrupt(
+        self: Arc<Self>,
+        _rx: crate::wait_interrupt::WaitInterruptReceiver,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, crate::wait_interrupt::WaitInterruptBindError> {
+        Err(crate::wait_interrupt::WaitInterruptBindError::Unsupported)
+    }
+
+    /// Whether this dispatcher supports wait interrupt binding.
+    ///
+    /// Non-consuming probe that callers check before calling the consuming
+    /// `bind_wait_interrupt()`. Default: `false`. Dispatchers that contain a
+    /// `WaitTool` (e.g. `CompositeDispatcher`) override this to return `true`.
+    fn supports_wait_interrupt(&self) -> bool {
+        false
+    }
 }
 
 /// A tool dispatcher that filters tools based on a policy
@@ -218,6 +244,24 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for Filtered
     async fn poll_external_updates(&self) -> ExternalToolUpdate {
         self.inner.poll_external_updates().await
     }
+
+    fn bind_wait_interrupt(
+        self: Arc<Self>,
+        rx: crate::wait_interrupt::WaitInterruptReceiver,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, crate::wait_interrupt::WaitInterruptBindError> {
+        let owned = Arc::try_unwrap(self)
+            .map_err(|_| crate::wait_interrupt::WaitInterruptBindError::SharedOwnership)?;
+        let rebound_inner = owned.inner.bind_wait_interrupt(rx)?;
+        Ok(Arc::new(FilteredToolDispatcher {
+            inner: rebound_inner,
+            allowed_tools: owned.allowed_tools,
+            filtered_tools: owned.filtered_tools,
+        }))
+    }
+
+    fn supports_wait_interrupt(&self) -> bool {
+        self.inner.supports_wait_interrupt()
+    }
 }
 
 /// Trait for session stores
@@ -253,6 +297,14 @@ impl InlinePeerNotificationPolicy {
             Some(v) => Err(v),
         }
     }
+}
+
+/// Error returned when a comms runtime capability is not available.
+#[derive(Debug, thiserror::Error)]
+pub enum CommsCapabilityError {
+    /// The runtime does not support this capability.
+    #[error("comms capability not supported: {0}")]
+    Unsupported(String),
 }
 
 /// Trait for comms runtime that can be used with the agent
@@ -396,6 +448,31 @@ pub trait CommsRuntime: Send + Sync {
     /// clean up registry entries. Called from the host-mode loop after sending
     /// terminal events to the tap.
     fn mark_interaction_complete(&self, _id: &crate::interaction::InteractionId) {}
+
+    /// Drain classified inbox interactions.
+    ///
+    /// Returns interactions with pre-computed classification from ingress.
+    /// The host loop routes on the stored `PeerInputClass` instead of
+    /// re-classifying after drain.
+    ///
+    /// Default returns `Unsupported`. Comms-enabled runtimes must override.
+    async fn drain_classified_inbox_interactions(
+        &self,
+    ) -> Result<Vec<crate::interaction::ClassifiedInboxInteraction>, CommsCapabilityError> {
+        Err(CommsCapabilityError::Unsupported(
+            "drain_classified_inbox_interactions".to_string(),
+        ))
+    }
+
+    /// Get a notification that fires only for actionable peer input.
+    ///
+    /// Default returns `Unsupported`. Comms-enabled runtimes must override.
+    /// Used by the factory to bridge into `WaitTool` interrupt.
+    fn actionable_input_notify(&self) -> Result<Arc<tokio::sync::Notify>, CommsCapabilityError> {
+        Err(CommsCapabilityError::Unsupported(
+            "actionable_input_notify".to_string(),
+        ))
+    }
 }
 
 /// The main Agent struct
@@ -450,6 +527,7 @@ where
     pub(crate) default_scope_path: Vec<crate::event::StreamScopeFrame>,
     /// Comms intents that should be silently injected into the session
     /// without triggering an LLM turn. Matched against `InteractionContent::Request.intent`.
+    #[allow(dead_code)] // Used by comms_impl when comms feature is enabled
     pub(crate) silent_comms_intents: Vec<String>,
     /// Runtime policy for inline peer lifecycle context injection.
     pub(crate) inline_peer_notification_policy: InlinePeerNotificationPolicy,
@@ -553,5 +631,82 @@ mod tests {
             InlinePeerNotificationPolicy::try_from_raw(Some(-42)),
             Err(-42)
         );
+    }
+
+    #[test]
+    fn test_filtered_dispatcher_bind_wait_interrupt_forwards() {
+        use super::{AgentToolDispatcher, FilteredToolDispatcher};
+        use crate::error::ToolError;
+        use crate::types::{ToolCallView, ToolDef, ToolResult};
+        use serde_json::json;
+
+        struct MockTool;
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl AgentToolDispatcher for MockTool {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                vec![Arc::new(ToolDef {
+                    name: "test".to_string(),
+                    description: "test tool".to_string(),
+                    input_schema: json!({"type": "object", "properties": {}, "required": []}),
+                })]
+                .into()
+            }
+            async fn dispatch(&self, _call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+                Err(ToolError::not_found("test"))
+            }
+        }
+
+        let inner: Arc<dyn AgentToolDispatcher> = Arc::new(MockTool);
+        let filtered = Arc::new(FilteredToolDispatcher::new(inner, vec!["test".to_string()]));
+
+        let (_tx, rx) = tokio::sync::watch::channel(None::<crate::wait_interrupt::WaitInterrupt>);
+
+        // MockTool returns Unsupported (default); FilteredToolDispatcher
+        // forwards to inner which also returns Unsupported.
+        let result = filtered.bind_wait_interrupt(rx);
+        assert!(matches!(
+            result,
+            Err(crate::wait_interrupt::WaitInterruptBindError::Unsupported)
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::panic)]
+    fn test_filtered_dispatcher_bind_wait_interrupt_shared_ownership() {
+        use super::{AgentToolDispatcher, FilteredToolDispatcher};
+        use crate::error::ToolError;
+        use crate::types::{ToolCallView, ToolDef, ToolResult};
+        use serde_json::json;
+
+        struct MockTool;
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl AgentToolDispatcher for MockTool {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                vec![Arc::new(ToolDef {
+                    name: "test".to_string(),
+                    description: "test tool".to_string(),
+                    input_schema: json!({"type": "object", "properties": {}, "required": []}),
+                })]
+                .into()
+            }
+            async fn dispatch(&self, _call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+                Err(ToolError::not_found("test"))
+            }
+        }
+
+        let inner: Arc<dyn AgentToolDispatcher> = Arc::new(MockTool);
+        let filtered = Arc::new(FilteredToolDispatcher::new(inner, vec!["test".to_string()]));
+        let _clone = Arc::clone(&filtered);
+
+        let (_tx, rx) = tokio::sync::watch::channel(None::<crate::wait_interrupt::WaitInterrupt>);
+        match filtered.bind_wait_interrupt(rx) {
+            Err(crate::wait_interrupt::WaitInterruptBindError::SharedOwnership) => {}
+            Ok(_) => panic!("expected SharedOwnership error, got Ok"),
+            Err(e) => panic!("expected SharedOwnership, got {e:?}"),
+        }
     }
 }

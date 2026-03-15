@@ -46,7 +46,7 @@ impl CommsEventInjector {
 impl EventInjector for CommsEventInjector {
     fn inject(&self, body: String, source: PlainEventSource) -> Result<(), EventInjectorError> {
         self.sender
-            .send(InboxItem::PlainEvent {
+            .send_classified(InboxItem::PlainEvent {
                 body,
                 source,
                 interaction_id: None,
@@ -71,7 +71,7 @@ impl meerkat_core::event_injector::SubscribableInjector for CommsEventInjector {
         self.subscriber_registry.lock().insert(id, tx);
 
         // Send to inbox with interaction_id
-        if let Err(e) = self.sender.send(InboxItem::PlainEvent {
+        if let Err(e) = self.sender.send_classified(InboxItem::PlainEvent {
             body,
             source,
             interaction_id: Some(id),

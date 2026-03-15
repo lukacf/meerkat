@@ -94,6 +94,7 @@ skills = ["meerkat/skills"]
 integration-real-tests = []
 
 [dev-dependencies]
+parking_lot = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 serde_json = { workspace = true }

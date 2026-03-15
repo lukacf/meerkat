@@ -3,14 +3,11 @@
 #[cfg(not(target_arch = "wasm32"))]
 use super::ApplyPatchTool;
 use super::datetime::DateTimeTool;
-use super::wait::{WaitInterrupt, WaitTool};
+use super::wait::WaitTool;
 use crate::builtin::BuiltinTool;
-#[cfg(target_arch = "wasm32")]
-use crate::tokio::sync::watch;
+use meerkat_core::wait_interrupt::WaitInterruptReceiver;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
-#[cfg(not(target_arch = "wasm32"))]
-use tokio::sync::watch;
 
 /// A set of utility tools for general-purpose operations
 ///
@@ -50,7 +47,7 @@ impl UtilityToolSet {
     ///
     /// The wait tool will be interrupted when a message is sent on the channel.
     #[cfg(target_arch = "wasm32")]
-    pub fn with_interrupt(interrupt_rx: watch::Receiver<Option<WaitInterrupt>>) -> Self {
+    pub fn with_interrupt(interrupt_rx: WaitInterruptReceiver) -> Self {
         Self {
             wait: WaitTool::with_interrupt(interrupt_rx),
             datetime: DateTimeTool::new(),
@@ -59,10 +56,7 @@ impl UtilityToolSet {
 
     /// Create a UtilityToolSet with interrupt support for the wait tool.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn with_interrupt(
-        interrupt_rx: watch::Receiver<Option<WaitInterrupt>>,
-        project_root: PathBuf,
-    ) -> Self {
+    pub fn with_interrupt(interrupt_rx: WaitInterruptReceiver, project_root: PathBuf) -> Self {
         Self {
             wait: WaitTool::with_interrupt(interrupt_rx),
             datetime: DateTimeTool::new(),
@@ -111,7 +105,7 @@ impl UtilityToolSet {
 You have access to utility tools for timing and coordination.
 
 ## Available Tools
-- `wait` - Pause execution for a specified number of seconds (max 300)
+- `wait` - Pause execution for a specified number of seconds (max 60)
 - `datetime` - Get the current date and time
 - `apply_patch` - Apply structured file edits inside the project root
 

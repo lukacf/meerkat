@@ -61,6 +61,56 @@ pub struct InboxInteraction {
     pub rendered_text: String,
 }
 
+/// Classification result for incoming peer/event traffic.
+///
+/// Stored with each inbox entry at ingress time. Downstream consumers
+/// (host loop, wait interrupt) switch on this enum instead of re-classifying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerInputClass {
+    /// A peer message that should wake `wait` and trigger an LLM turn.
+    ActionableMessage,
+    /// A peer request that should wake `wait` and trigger an LLM turn.
+    ActionableRequest,
+    /// A response to a previous outbound request (non-interrupting context).
+    Response,
+    /// Peer added lifecycle event.
+    PeerLifecycleAdded,
+    /// Peer retired lifecycle event.
+    PeerLifecycleRetired,
+    /// A request whose intent is in the silent-intents set (inline-only, no LLM turn).
+    SilentRequest,
+    /// An ack envelope (filtered at ingress, never reaches agent loop).
+    Ack,
+    /// A plain (unauthenticated) event from an external source.
+    PlainEvent,
+    /// A subagent result delivery.
+    SubagentResult,
+}
+
+impl PeerInputClass {
+    /// Returns true if this class should interrupt an in-flight `wait`.
+    ///
+    /// Includes responses: a `send_request` + `wait` workflow needs the
+    /// peer's response to interrupt the wait immediately, not after timeout.
+    pub fn is_actionable(&self) -> bool {
+        matches!(
+            self,
+            Self::ActionableMessage | Self::ActionableRequest | Self::Response | Self::PlainEvent
+        )
+    }
+}
+
+/// An inbox interaction with its pre-computed classification.
+#[derive(Debug, Clone)]
+pub struct ClassifiedInboxInteraction {
+    /// The original interaction data.
+    pub interaction: InboxInteraction,
+    /// Pre-computed classification from ingress.
+    pub class: PeerInputClass,
+    /// For lifecycle events, the peer name that was added/retired.
+    pub lifecycle_peer: Option<String>,
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {

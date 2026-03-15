@@ -22,6 +22,7 @@ meerkat-session = { workspace = true }
 meerkat-memory = { workspace = true, optional = true }
 meerkat-mcp = { workspace = true, optional = true }
 meerkat-comms = { workspace = true, optional = true }
+parking_lot = { workspace = true, optional = true }
 meerkat-hooks = { workspace = true }
 meerkat-contracts = { workspace = true }
 meerkat-skills = { workspace = true, optional = true }
@@ -82,7 +83,7 @@ session-compaction = ["meerkat-session/session-compaction"]
 memory-store-session = ["dep:meerkat-memory"]
 
 # Optional subsystems
-comms = ["dep:meerkat-comms", "meerkat-tools/comms"]
+comms = ["dep:meerkat-comms", "dep:parking_lot", "meerkat-tools/comms"]
 mcp = ["dep:meerkat-mcp", "meerkat-tools/mcp"]
 sub-agents = ["meerkat-tools/sub-agents"]
 skills = ["dep:meerkat-skills", "meerkat-skills/skills-http", "meerkat-tools/skills"]

@@ -143,6 +143,8 @@ pub struct SessionRuntime {
     /// materialized in the service. The first `start_turn` call promotes them.
     pending: RwLock<IndexMap<SessionId, PendingSession>>,
     max_sessions: usize,
+    /// Factory for building LLM clients on model/provider hot-swap.
+    factory: AgentFactory,
     /// Override LLM client for all sessions (primarily for testing).
     pub default_llm_client: Option<Arc<dyn LlmClient>>,
     realm_id: Option<String>,
@@ -207,6 +209,7 @@ impl SessionRuntime {
     ) -> Self {
         let runtime_adapter = persistence.runtime_adapter();
         let (store, runtime_store) = persistence.into_parts();
+        let factory_clone = factory.clone();
         let builder = FactoryAgentBuilder::new(factory, config);
         let service = Arc::new(PersistentSessionService::new(
             builder,
@@ -219,6 +222,7 @@ impl SessionRuntime {
             service,
             pending: RwLock::new(IndexMap::new()),
             max_sessions,
+            factory: factory_clone,
             default_llm_client: None,
             realm_id: None,
             instance_id: None,
@@ -251,6 +255,7 @@ impl SessionRuntime {
     ) -> Self {
         let runtime_adapter = persistence.runtime_adapter();
         let (store, runtime_store) = persistence.into_parts();
+        let factory_clone = factory.clone();
         let builder =
             FactoryAgentBuilder::new_with_config_store(factory, initial_config, config_store);
         let service = Arc::new(PersistentSessionService::new(
@@ -264,6 +269,7 @@ impl SessionRuntime {
             service,
             pending: RwLock::new(IndexMap::new()),
             max_sessions,
+            factory: factory_clone,
             default_llm_client: None,
             realm_id: None,
             instance_id: None,
@@ -1239,17 +1245,14 @@ impl SessionRuntime {
         }
 
         // Normal turn on an existing (materialized) session.
-        // Reject per-turn overrides that require pending state.
+        // Reject overrides that cannot be applied mid-session.
         if let Some(ref ov) = overrides {
             let rejected = [
-                ov.model.as_ref().map(|_| "model"),
-                ov.provider.as_ref().map(|_| "provider"),
                 ov.max_tokens.map(|_| "max_tokens"),
                 ov.system_prompt.as_ref().map(|_| "system_prompt"),
                 ov.output_schema.as_ref().map(|_| "output_schema"),
                 ov.structured_output_retries
                     .map(|_| "structured_output_retries"),
-                ov.provider_params.as_ref().map(|_| "provider_params"),
             ];
             let rejected: Vec<&str> = rejected.into_iter().flatten().collect();
             if !rejected.is_empty() {
@@ -1262,6 +1265,36 @@ impl SessionRuntime {
                     data: None,
                 });
             }
+        }
+
+        // Hot-swap LLM client if model/provider changed.
+        if let Some(ref ov) = overrides
+            && (ov.model.is_some() || ov.provider.is_some() || ov.provider_params.is_some())
+        {
+            let model = ov.model.as_deref().unwrap_or("claude-sonnet-4-5");
+            let provider = ov
+                .provider
+                .as_ref()
+                .map(|p| meerkat_core::Provider::from_name(p))
+                .unwrap_or_else(|| {
+                    meerkat_core::Provider::infer_from_model(model)
+                        .unwrap_or(meerkat_core::Provider::Other)
+                });
+            let raw_client = self
+                .factory
+                .build_llm_client(provider, None, None)
+                .await
+                .map_err(|e| RpcError {
+                    code: error::INTERNAL_ERROR,
+                    message: format!("Failed to build LLM client for model override: {e}"),
+                    data: None,
+                })?;
+            let adapter: Arc<dyn meerkat_core::AgentLlmClient> =
+                Arc::new(self.factory.build_llm_adapter(raw_client, model).await);
+            self.service
+                .set_session_client(session_id, adapter)
+                .await
+                .map_err(session_error_to_rpc)?;
         }
 
         let host_mode = match overrides.as_ref().and_then(|ov| ov.host_mode) {
@@ -3598,9 +3631,9 @@ mod tests {
         );
     }
 
-    /// turn/start on a materialized session rejects model override.
+    /// turn/start on a materialized session allows model override (hot-swap).
     #[tokio::test]
-    async fn turn_start_on_materialized_session_rejects_model_override() {
+    async fn turn_start_on_materialized_session_allows_model_override() {
         use crate::handlers::turn::TurnOverrides;
 
         let temp = tempfile::tempdir().unwrap();
@@ -3626,7 +3659,10 @@ mod tests {
             .await
             .unwrap();
 
-        // Second turn with model override should be rejected.
+        // Second turn with model override should NOT be rejected with INVALID_PARAMS.
+        // In CI (no API key), the client build may fail with INTERNAL_ERROR, which
+        // is fine — the point is that the override is accepted, not rejected at the
+        // parameter validation layer.
         let (event_tx, _rx) = mpsc::channel(100);
         let overrides = TurnOverrides {
             model: Some("claude-opus-4-6".to_string()),
@@ -3643,17 +3679,13 @@ mod tests {
                 Some(overrides),
             )
             .await;
-        assert!(
-            result.is_err(),
-            "model override should be rejected on materialized session"
-        );
-        let err = result.unwrap_err();
-        assert_eq!(err.code, error::INVALID_PARAMS);
-        assert!(
-            err.message.contains("Cannot override model"),
-            "Error should mention the rejected field: {}",
-            err.message,
-        );
+        if let Err(ref err) = result {
+            assert_ne!(
+                err.code,
+                error::INVALID_PARAMS,
+                "model override should not be rejected on materialized session: {err:?}"
+            );
+        }
     }
 
     /// StartTurnParams deserializes with all fields.

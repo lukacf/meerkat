@@ -170,6 +170,7 @@ impl DefaultFactoryConfig {
     }
 
     /// Get base URL for provider
+    #[allow(dead_code)]
     fn get_base_url(&self, provider: LlmProvider) -> Option<&str> {
         match provider {
             LlmProvider::Anthropic => self.anthropic_base_url.as_deref(),
@@ -217,6 +218,7 @@ impl LlmClientFactory for DefaultClientFactory {
             return Ok(Arc::new(TestClient::default()));
         }
         // Use provided key, or fall back to config/env
+        #[allow(unused_variables)]
         let key = api_key.or_else(|| self.config.get_api_key(provider));
 
         match provider {

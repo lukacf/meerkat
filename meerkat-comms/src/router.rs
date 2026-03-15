@@ -1,9 +1,8 @@
 //! Router for Meerkat comms - high-level send API.
 
-#[cfg(target_arch = "wasm32")]
-use crate::tokio;
 #[cfg(not(target_arch = "wasm32"))]
 use futures::{SinkExt, StreamExt};
+use parking_lot::RwLock;
 #[cfg(all(not(unix), not(target_arch = "wasm32")))]
 use std::io::ErrorKind;
 use std::sync::Arc;
@@ -16,7 +15,6 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 #[cfg(unix)]
 use tokio::net::UnixStream;
-use tokio::sync::RwLock;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio_util::codec::Framed;
 use uuid::Uuid;
@@ -71,6 +69,10 @@ fn map_inproc_send_error(err: InprocSendError) -> SendError {
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub struct Router {
     keypair: Arc<Keypair>,
+    /// Single source of truth for trusted peers. Shared by the Router,
+    /// CommsRuntime, IngressClassificationContext, and any callers of
+    /// `trusted_peers_shared()`. Uses `parking_lot::RwLock` so ingress
+    /// classification can read synchronously.
     trusted_peers: Arc<RwLock<TrustedPeers>>,
     config: CommsConfig,
     require_peer_auth: bool,
@@ -122,34 +124,38 @@ impl Router {
     pub fn keypair_arc(&self) -> Arc<Keypair> {
         self.keypair.clone()
     }
-    pub fn shared_trusted_peers(&self) -> Arc<RwLock<TrustedPeers>> {
+    pub fn shared_trusted_peers(&self) -> Arc<parking_lot::RwLock<TrustedPeers>> {
         self.trusted_peers.clone()
     }
     pub fn inbox_sender(&self) -> &InboxSender {
         &self.inbox_sender
     }
 
-    pub async fn has_peers(&self) -> bool {
-        self.trusted_peers.read().await.has_peers()
-    }
-    pub fn try_has_peers(&self) -> Option<bool> {
-        self.trusted_peers.try_read().ok().map(|g| g.has_peers())
+    pub fn has_peers(&self) -> bool {
+        self.trusted_peers.read().has_peers()
     }
 
-    pub async fn add_trusted_peer(&self, peer: TrustedPeer) {
-        let mut peers = self.trusted_peers.write().await;
-        peers.upsert(peer);
+    pub fn add_trusted_peer(&self, peer: TrustedPeer) {
+        self.trusted_peers.write().upsert(peer);
     }
 
-    pub async fn remove_trusted_peer(&self, pubkey: &crate::identity::PubKey) -> bool {
-        let mut peers = self.trusted_peers.write().await;
-        peers.remove(pubkey)
+    pub fn remove_trusted_peer(&self, pubkey: &crate::identity::PubKey) -> bool {
+        self.trusted_peers.write().remove(pubkey)
+    }
+
+    /// Get the trusted peers Arc.
+    ///
+    /// This is the single source of truth for trust state. The same Arc is
+    /// shared with IngressClassificationContext, so any mutation is
+    /// immediately visible to ingress classification.
+    pub fn classification_peers_arc(&self) -> Arc<parking_lot::RwLock<TrustedPeers>> {
+        self.trusted_peers.clone()
     }
 
     pub async fn send(&self, peer_name: &str, kind: MessageKind) -> Result<Uuid, SendError> {
         let inproc_namespace = self.inproc_namespace.as_deref().unwrap_or("");
         let peer = {
-            let peers = self.trusted_peers.read().await;
+            let peers = self.trusted_peers.read();
             peers.get_by_name(peer_name).cloned()
         }
         .or_else(|| {

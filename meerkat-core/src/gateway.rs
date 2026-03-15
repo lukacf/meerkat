@@ -367,6 +367,48 @@ impl AgentToolDispatcher for ToolGateway {
         entry.dispatcher.dispatch(call).await
     }
 
+    fn bind_wait_interrupt(
+        self: Arc<Self>,
+        rx: crate::wait_interrupt::WaitInterruptReceiver,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, crate::wait_interrupt::WaitInterruptBindError> {
+        let owned = Arc::try_unwrap(self)
+            .map_err(|_| crate::wait_interrupt::WaitInterruptBindError::SharedOwnership)?;
+
+        let mut builder = ToolGatewayBuilder::new();
+        let mut any_rebound = false;
+        for entry in owned.entries {
+            // Only rebind entries that support it. Entries without a wait
+            // tool (e.g. comms overlays, MCP surfaces) are passed through
+            // as-is. This lets a mixed gateway (CompositeDispatcher + overlay)
+            // rebind correctly instead of failing on the first Unsupported entry.
+            if entry.dispatcher.supports_wait_interrupt() {
+                let rebound = entry.dispatcher.bind_wait_interrupt(rx.clone())?;
+                builder = builder.add_dispatcher_with_availability(rebound, entry.availability);
+                any_rebound = true;
+            } else {
+                builder =
+                    builder.add_dispatcher_with_availability(entry.dispatcher, entry.availability);
+            }
+        }
+
+        // If no entry was actually rebound, the rx receiver will be dropped
+        // and waits remain non-interruptible. Signal this to the caller.
+        if !any_rebound {
+            return Err(crate::wait_interrupt::WaitInterruptBindError::Unsupported);
+        }
+
+        let gateway = builder
+            .build()
+            .map_err(|_| crate::wait_interrupt::WaitInterruptBindError::Unsupported)?;
+        Ok(Arc::new(gateway))
+    }
+
+    fn supports_wait_interrupt(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|e| e.dispatcher.supports_wait_interrupt())
+    }
+
     /// Aggregate external updates across all dispatcher entries.
     ///
     /// Deduplicates by server name for pending, by `(server, operation, status)`
@@ -784,5 +826,67 @@ mod tests {
         let tools = gateway.tools();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "task_create");
+    }
+
+    #[test]
+    fn test_unsupported_dispatcher_returns_unsupported() {
+        // MockDispatcher doesn't override bind_wait_interrupt, so the
+        // default returns Unsupported.
+        let dispatcher: Arc<dyn AgentToolDispatcher> =
+            Arc::new(MockDispatcher::new("base", &["task_create"]));
+        let (_tx, rx) = tokio::sync::watch::channel(None::<crate::wait_interrupt::WaitInterrupt>);
+        let result = dispatcher.bind_wait_interrupt(rx);
+        assert!(matches!(
+            result,
+            Err(crate::wait_interrupt::WaitInterruptBindError::Unsupported)
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::panic)]
+    fn test_gateway_bind_wait_interrupt_unsupported_when_no_entry_rebound() {
+        // When no entry supports binding, the gateway returns Unsupported
+        // so the caller knows waits are not actually interruptible.
+        let base: Arc<dyn AgentToolDispatcher> =
+            Arc::new(MockDispatcher::new("base", &["task_create"]));
+        let overlay: Arc<dyn AgentToolDispatcher> =
+            Arc::new(MockDispatcher::new("comms", &["send"]));
+
+        let gateway = Arc::new(
+            ToolGatewayBuilder::new()
+                .add_dispatcher(base)
+                .add_dispatcher(overlay)
+                .build()
+                .unwrap(),
+        );
+
+        let (_tx, rx) = tokio::sync::watch::channel(None::<crate::wait_interrupt::WaitInterrupt>);
+        match gateway.bind_wait_interrupt(rx) {
+            Err(crate::wait_interrupt::WaitInterruptBindError::Unsupported) => {}
+            Ok(_) => panic!("expected Unsupported error when no entry can be rebound"),
+            Err(e) => panic!("expected Unsupported, got {e:?}"),
+        }
+    }
+
+    #[test]
+    #[allow(clippy::panic)]
+    fn test_gateway_bind_wait_interrupt_shared_ownership() {
+        let base: Arc<dyn AgentToolDispatcher> =
+            Arc::new(MockDispatcher::new("base", &["task_create"]));
+
+        let gateway = Arc::new(
+            ToolGatewayBuilder::new()
+                .add_dispatcher(base)
+                .build()
+                .unwrap(),
+        );
+        let _clone = Arc::clone(&gateway);
+
+        let (_tx, rx) = tokio::sync::watch::channel(None::<crate::wait_interrupt::WaitInterrupt>);
+        match gateway.bind_wait_interrupt(rx) {
+            Err(crate::wait_interrupt::WaitInterruptBindError::SharedOwnership) => {}
+            Ok(_) => panic!("expected SharedOwnership error, got Ok"),
+            Err(e) => panic!("expected SharedOwnership, got {e:?}"),
+        }
     }
 }

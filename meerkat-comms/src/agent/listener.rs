@@ -8,8 +8,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::{InboxSender, Keypair, TrustedPeers, handle_connection};
+use parking_lot::RwLock;
 use tokio::net::TcpListener;
-use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
 /// Handle to a spawned listener task.
@@ -80,7 +80,7 @@ pub async fn spawn_uds_listener(
 
                     tokio::spawn(async move {
                         // Get a snapshot of trusted peers for this connection
-                        let trusted_snapshot = trusted.read().await.clone();
+                        let trusted_snapshot = trusted.read().clone();
                         if let Err(e) = handle_connection(
                             stream,
                             true,
@@ -136,7 +136,7 @@ pub async fn spawn_tcp_listener(
 
                     tokio::spawn(async move {
                         // Get a snapshot of trusted peers for this connection
-                        let trusted_snapshot = trusted.read().await.clone();
+                        let trusted_snapshot = trusted.read().clone();
                         if let Err(e) = handle_connection(
                             stream,
                             true,

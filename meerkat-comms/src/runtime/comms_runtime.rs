@@ -4,7 +4,7 @@
 use super::comms_config::ResolvedCommsConfig;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::InboxSender;
-use crate::agent::types::{CommsContent, CommsMessage};
+use crate::agent::types::CommsMessage;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::handle_connection;
 #[cfg(target_arch = "wasm32")]
@@ -31,14 +31,11 @@ use thiserror::Error;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::net::TcpListener;
 use tokio::sync::Mutex as AsyncMutex;
-use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Receiver;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::task::JoinHandle;
 use uuid::Uuid;
-
-use crate::agent::types::{DrainedMessage, drain_inbox_item};
 
 /// Reservation lifecycle state machine.
 ///
@@ -167,42 +164,16 @@ impl Drop for InteractionStream {
     }
 }
 
-fn is_dismiss(msg: &CommsMessage) -> bool {
-    matches!(&msg.content, CommsContent::Message { body } if body.trim().eq_ignore_ascii_case("DISMISS"))
-}
-
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl CoreCommsRuntime for CommsRuntime {
     async fn drain_messages(&self) -> Vec<String> {
-        let mut inbox = self.inbox.lock().await;
-        let items = inbox.try_drain();
-        let trusted = self.trusted_peers.read().await;
-
-        let drained: Vec<DrainedMessage> = items
-            .iter()
-            .filter_map(|item| drain_inbox_item(item, &trusted, self.require_peer_auth))
-            .collect();
-
-        // Check for DISMISS in authenticated messages
-        for msg in &drained {
-            if let DrainedMessage::Authenticated(m) = msg
-                && is_dismiss(m)
-            {
-                self.dismiss_flag.store(true, Ordering::SeqCst);
-            }
-        }
-
-        drained
-            .iter()
-            .filter(|m| {
-                // Filter out DISMISS messages from output
-                !matches!(m, DrainedMessage::Authenticated(m) if is_dismiss(m))
-            })
-            .map(|m| match m {
-                DrainedMessage::Authenticated(msg) => msg.to_user_message_text(),
-                DrainedMessage::Plain(msg) => msg.to_user_message_text(),
-            })
+        // Delegate through classified drain so messages from the classified
+        // inbox (the sole consumer since 0.4.10) are returned.
+        self.drain_inbox_interactions()
+            .await
+            .into_iter()
+            .map(|i| i.rendered_text)
             .collect()
     }
     fn inbox_notify(&self) -> Arc<tokio::sync::Notify> {
@@ -222,14 +193,16 @@ impl CoreCommsRuntime for CommsRuntime {
             addr: peer.address,
             meta: crate::PeerMeta::default(),
         };
-        self.trusted_peers.write().await.upsert(trusted_peer);
+        // Delegate to Router which updates both the async trusted_peers and
+        // the sync classification_peers sidecar (keeping them in sync).
+        self.router.add_trusted_peer(trusted_peer);
         Ok(())
     }
 
     async fn remove_trusted_peer(&self, peer_id: &str) -> Result<bool, SendError> {
         let public_key =
             PubKey::from_peer_id(peer_id).map_err(|err| SendError::Validation(err.to_string()))?;
-        let removed = self.router.remove_trusted_peer(&public_key).await;
+        let removed = self.router.remove_trusted_peer(&public_key);
         Ok(removed)
     }
 
@@ -520,84 +493,13 @@ impl CoreCommsRuntime for CommsRuntime {
     }
 
     async fn drain_inbox_interactions(&self) -> Vec<meerkat_core::InboxInteraction> {
-        let mut inbox = self.inbox.lock().await;
-        let items = inbox.try_drain();
-        let trusted = self.trusted_peers.read().await;
-
-        let drained: Vec<DrainedMessage> = items
-            .iter()
-            .filter_map(|item| drain_inbox_item(item, &trusted, self.require_peer_auth))
-            .collect();
-
-        // Check for DISMISS in authenticated messages
-        for msg in &drained {
-            if let DrainedMessage::Authenticated(m) = msg
-                && is_dismiss(m)
-            {
-                self.dismiss_flag.store(true, Ordering::SeqCst);
-            }
-        }
-
-        drained
+        // Delegate to classified drain and strip classification metadata.
+        // This ensures a single drain path: classified queue is the sole consumer.
+        self.drain_classified_inbox_interactions()
+            .await
+            .unwrap_or_default()
             .into_iter()
-            .filter(|m| !matches!(m, DrainedMessage::Authenticated(m) if is_dismiss(m)))
-            .map(|m| match m {
-                DrainedMessage::Authenticated(msg) => {
-                    let rendered_text = msg.to_user_message_text();
-                    let content = match msg.content {
-                        CommsContent::Message { body } => {
-                            meerkat_core::InteractionContent::Message { body }
-                        }
-                        CommsContent::Request {
-                            request_id: _,
-                            intent,
-                            params,
-                        } => meerkat_core::InteractionContent::Request {
-                            intent: intent.to_string(),
-                            params,
-                        },
-                        CommsContent::Response {
-                            in_reply_to,
-                            status,
-                            result,
-                        } => {
-                            let status = match status {
-                                crate::agent::types::CommsStatus::Accepted => {
-                                    meerkat_core::ResponseStatus::Accepted
-                                }
-                                crate::agent::types::CommsStatus::Completed => {
-                                    meerkat_core::ResponseStatus::Completed
-                                }
-                                crate::agent::types::CommsStatus::Failed => {
-                                    meerkat_core::ResponseStatus::Failed
-                                }
-                            };
-                            meerkat_core::InteractionContent::Response {
-                                in_reply_to: meerkat_core::InteractionId(in_reply_to),
-                                status,
-                                result,
-                            }
-                        }
-                    };
-                    meerkat_core::InboxInteraction {
-                        id: meerkat_core::InteractionId(msg.envelope_id),
-                        from: msg.from_peer,
-                        content,
-                        rendered_text,
-                    }
-                }
-                DrainedMessage::Plain(msg) => {
-                    let rendered_text = msg.to_user_message_text();
-                    meerkat_core::InboxInteraction {
-                        id: meerkat_core::InteractionId(
-                            msg.interaction_id.unwrap_or_else(uuid::Uuid::new_v4),
-                        ),
-                        from: format!("event:{}", msg.source),
-                        content: meerkat_core::InteractionContent::Message { body: msg.body },
-                        rendered_text,
-                    }
-                }
-            })
+            .map(|ci| ci.interaction)
             .collect()
     }
 
@@ -623,6 +525,173 @@ impl CoreCommsRuntime for CommsRuntime {
 
     fn mark_interaction_complete(&self, id: &meerkat_core::InteractionId) {
         self.mark_interaction_complete(id.0);
+    }
+
+    async fn drain_classified_inbox_interactions(
+        &self,
+    ) -> Result<Vec<meerkat_core::ClassifiedInboxInteraction>, meerkat_core::CommsCapabilityError>
+    {
+        use crate::agent::types::MessageIntent;
+        use crate::types::MessageKind;
+
+        let mut inbox = self.inbox.lock().await;
+        let classified_entries = inbox.try_drain_classified();
+
+        if classified_entries.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Use stored classification metadata — NO trust re-check.
+        // Snapshot semantics: classification was fixed at enqueue time.
+        Ok(classified_entries
+            .into_iter()
+            .filter_map(|entry| {
+                let from_peer = entry.from_peer.unwrap_or_else(|| "unknown".to_string());
+
+                match entry.item {
+                    crate::types::InboxItem::External { envelope } => {
+                        // Check for DISMISS
+                        if let MessageKind::Message { ref body } = envelope.kind
+                            && body.trim().eq_ignore_ascii_case("DISMISS") {
+                                self.dismiss_flag.store(true, Ordering::SeqCst);
+                                return None;
+                            }
+
+                        let (content, rendered_text) = match envelope.kind {
+                            MessageKind::Message { body } => {
+                                let rendered = format!(
+                                    "[COMMS MESSAGE from {from_peer}]\n{body}"
+                                );
+                                (
+                                    meerkat_core::InteractionContent::Message { body },
+                                    rendered,
+                                )
+                            }
+                            MessageKind::Request { intent, params } => {
+                                let typed_intent = MessageIntent::from(intent.as_str());
+                                let params_str = if params.is_null()
+                                    || params == serde_json::Value::Object(Default::default())
+                                {
+                                    String::new()
+                                } else {
+                                    format!(
+                                        "\nParams: {}",
+                                        serde_json::to_string_pretty(&params).unwrap_or_default()
+                                    )
+                                };
+                                let rendered = format!(
+                                    "[COMMS REQUEST from {} (id: {})]\n\
+                                     Intent: {}{}\n\
+                                     \n\
+                                     To respond, use send_response with peer=\"{}\", request_id=\"{}\"",
+                                    from_peer, envelope.id, typed_intent, params_str,
+                                    from_peer, envelope.id
+                                );
+                                (
+                                    meerkat_core::InteractionContent::Request {
+                                        intent: typed_intent.to_string(),
+                                        params,
+                                    },
+                                    rendered,
+                                )
+                            }
+                            MessageKind::Response {
+                                in_reply_to,
+                                status,
+                                result,
+                            } => {
+                                let core_status = match status {
+                                    crate::types::Status::Accepted => {
+                                        meerkat_core::ResponseStatus::Accepted
+                                    }
+                                    crate::types::Status::Completed => {
+                                        meerkat_core::ResponseStatus::Completed
+                                    }
+                                    crate::types::Status::Failed => {
+                                        meerkat_core::ResponseStatus::Failed
+                                    }
+                                };
+                                let status_str = match status {
+                                    crate::types::Status::Accepted => "accepted",
+                                    crate::types::Status::Completed => "completed",
+                                    crate::types::Status::Failed => "failed",
+                                };
+                                let result_str = if result.is_null()
+                                    || result == serde_json::Value::Object(Default::default())
+                                {
+                                    String::new()
+                                } else {
+                                    format!(
+                                        "\nResult: {}",
+                                        serde_json::to_string_pretty(&result).unwrap_or_default()
+                                    )
+                                };
+                                let rendered = format!(
+                                    "[COMMS RESPONSE from {from_peer} (to request: {in_reply_to})]\n\
+                                     Status: {status_str}{result_str}"
+                                );
+                                (
+                                    meerkat_core::InteractionContent::Response {
+                                        in_reply_to: meerkat_core::InteractionId(in_reply_to),
+                                        status: core_status,
+                                        result,
+                                    },
+                                    rendered,
+                                )
+                            }
+                            MessageKind::Ack { .. } => {
+                                // Acks should never reach classified drain
+                                return None;
+                            }
+                        };
+
+                        Some(meerkat_core::ClassifiedInboxInteraction {
+                            interaction: meerkat_core::InboxInteraction {
+                                id: meerkat_core::InteractionId(envelope.id),
+                                from: from_peer,
+                                content,
+                                rendered_text,
+                            },
+                            class: entry.class,
+                            lifecycle_peer: entry.lifecycle_peer,
+                        })
+                    }
+                    crate::types::InboxItem::PlainEvent {
+                        body,
+                        source,
+                        interaction_id,
+                    } => {
+                        let rendered = format!("[EVENT via {source}] {body}");
+                        Some(meerkat_core::ClassifiedInboxInteraction {
+                            interaction: meerkat_core::InboxInteraction {
+                                id: meerkat_core::InteractionId(
+                                    interaction_id.unwrap_or_else(uuid::Uuid::new_v4),
+                                ),
+                                from: format!("event:{source}"),
+                                content: meerkat_core::InteractionContent::Message { body },
+                                rendered_text: rendered,
+                            },
+                            class: entry.class,
+                            lifecycle_peer: entry.lifecycle_peer,
+                        })
+                    }
+                    crate::types::InboxItem::SubagentResult { .. } => {
+                        // Subagent results handled separately
+                        None
+                    }
+                }
+            })
+            .collect())
+    }
+
+    fn actionable_input_notify(
+        &self,
+    ) -> Result<Arc<tokio::sync::Notify>, meerkat_core::CommsCapabilityError> {
+        self.actionable_notify.clone().ok_or_else(|| {
+            meerkat_core::CommsCapabilityError::Unsupported(
+                "actionable_input_notify: classified inbox not initialized".to_string(),
+            )
+        })
     }
 }
 
@@ -663,7 +732,7 @@ pub enum CommsRuntimeError {
 pub struct CommsRuntime {
     public_key: PubKey,
     router: Arc<Router>,
-    trusted_peers: Arc<RwLock<TrustedPeers>>,
+    trusted_peers: Arc<parking_lot::RwLock<TrustedPeers>>,
     inbox: Arc<AsyncMutex<crate::Inbox>>,
     inbox_notify: Arc<tokio::sync::Notify>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -683,11 +752,24 @@ pub struct CommsRuntime {
     dismiss_flag: AtomicBool,
     subscriber_registry: crate::event_injector::SubscriberRegistry,
     interaction_stream_registry: InteractionStreamRegistry,
+    #[allow(dead_code)] // Kept alive — shared with IngressClassificationContext via Arc
+    silent_intents: Arc<HashSet<String>>,
+    /// Narrow notify that fires only for actionable peer input (messages/requests).
+    /// Set during construction when classified inbox is used.
+    actionable_notify: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl CommsRuntime {
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn new(config: ResolvedCommsConfig) -> Result<Self, CommsRuntimeError> {
+        Self::new_with_silent_intents(config, Arc::new(HashSet::new())).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn new_with_silent_intents(
+        config: ResolvedCommsConfig,
+        silent_intents: Arc<HashSet<String>>,
+    ) -> Result<Self, CommsRuntimeError> {
         // Always load keypair and trusted peers — outbound routing needs them
         // regardless of auth mode. The auth mode only affects the external
         // event listener, not the signed agent-to-agent path.
@@ -697,9 +779,20 @@ impl CommsRuntime {
         let trusted_peers = TrustedPeers::load_or_default(&config.trusted_peers_path)
             .map_err(|e| CommsRuntimeError::TrustLoadError(e.to_string()))?;
         let public_key = keypair.public_key();
-        let trusted_peers = Arc::new(RwLock::new(trusted_peers));
-        let (inbox, inbox_sender) = crate::Inbox::new();
+        // Single source of truth for trust state — shared by the Router,
+        // IngressClassificationContext, and callers of trusted_peers_shared().
+        let trusted_peers = Arc::new(parking_lot::RwLock::new(trusted_peers));
+
+        // Build classified inbox using the same trusted_peers Arc
+        let classification_context = Arc::new(crate::classify::IngressClassificationContext {
+            require_peer_auth: config.require_peer_auth,
+            trusted_peers: trusted_peers.clone(),
+            silent_intents: silent_intents.clone(),
+        });
+        let (inbox, inbox_sender) = crate::Inbox::new_classified(classification_context);
         let inbox_notify = inbox.notify();
+        let actionable_notify = inbox.classified_actionable_notify();
+
         let router = Router::with_shared_peers(
             keypair.clone(),
             trusted_peers.clone(),
@@ -708,6 +801,7 @@ impl CommsRuntime {
             config.require_peer_auth,
         )
         .with_inproc_namespace(config.inproc_namespace.clone());
+
         let runtime = Self {
             public_key,
             router: Arc::new(router),
@@ -722,6 +816,8 @@ impl CommsRuntime {
             dismiss_flag: AtomicBool::new(false),
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
+            silent_intents,
+            actionable_notify,
         };
         InprocRegistry::global().register_with_meta_in_namespace(
             config.inproc_namespace.as_deref().unwrap_or(""),
@@ -734,18 +830,34 @@ impl CommsRuntime {
     }
 
     pub fn inproc_only(name: &str) -> Result<Self, CommsRuntimeError> {
-        Self::inproc_only_scoped(name, None)
+        Self::inproc_only_with_silent_intents(name, None, Arc::new(HashSet::new()))
     }
 
     pub fn inproc_only_scoped(
         name: &str,
         namespace: Option<String>,
     ) -> Result<Self, CommsRuntimeError> {
+        Self::inproc_only_with_silent_intents(name, namespace, Arc::new(HashSet::new()))
+    }
+
+    pub fn inproc_only_with_silent_intents(
+        name: &str,
+        namespace: Option<String>,
+        silent_intents: Arc<HashSet<String>>,
+    ) -> Result<Self, CommsRuntimeError> {
         let keypair = Keypair::generate();
         let public_key = keypair.public_key();
-        let trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
-        let (inbox, inbox_sender) = crate::Inbox::new();
+        // Single source of truth — same Arc shared by Router, classification, and callers.
+        let trusted_peers = Arc::new(parking_lot::RwLock::new(TrustedPeers::new()));
+
+        let classification_context = Arc::new(crate::classify::IngressClassificationContext {
+            require_peer_auth: true,
+            trusted_peers: trusted_peers.clone(),
+            silent_intents: silent_intents.clone(),
+        });
+        let (inbox, inbox_sender) = crate::Inbox::new_classified(classification_context);
         let inbox_notify = inbox.notify();
+        let actionable_notify = inbox.classified_actionable_notify();
         let comms_config = crate::CommsConfig::default();
         #[cfg(not(target_arch = "wasm32"))]
         let config = ResolvedCommsConfig {
@@ -793,6 +905,8 @@ impl CommsRuntime {
             dismiss_flag: AtomicBool::new(false),
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
+            silent_intents,
+            actionable_notify,
         };
         InprocRegistry::global().register_with_meta_in_namespace(
             namespace.as_deref().unwrap_or(""),
@@ -915,6 +1029,13 @@ impl CommsRuntime {
         &self.router
     }
 
+    /// Add a trusted peer, updating both the async store and the sync
+    /// classification sidecar. Prefer this over writing to
+    /// `trusted_peers_shared()` directly.
+    pub fn upsert_trusted_peer(&self, peer: TrustedPeer) {
+        self.router.add_trusted_peer(peer);
+    }
+
     /// Update the inproc registry entry with friendly metadata.
     ///
     /// Call this after construction to advertise [`PeerMeta`] to other
@@ -983,7 +1104,7 @@ impl CommsRuntime {
         let mut emitted = 0usize;
 
         {
-            let trusted = self.trusted_peers.read().await;
+            let trusted = self.trusted_peers.read();
             for peer in &trusted.peers {
                 if peer.name == participant_name || peer.pubkey == self.public_key {
                     continue;
@@ -1109,7 +1230,7 @@ impl CommsRuntime {
     pub fn router_arc(&self) -> Arc<Router> {
         self.router.clone()
     }
-    pub fn trusted_peers_shared(&self) -> Arc<RwLock<TrustedPeers>> {
+    pub fn trusted_peers_shared(&self) -> Arc<parking_lot::RwLock<TrustedPeers>> {
         self.trusted_peers.clone()
     }
     pub fn inbox_notify(&self) -> Arc<tokio::sync::Notify> {
@@ -1149,14 +1270,14 @@ impl CommsRuntime {
             StreamRegistryEntry::reserved(sender, receiver),
         );
 
-        if let Err(error) = self
-            .router
-            .inbox_sender()
-            .send(crate::types::InboxItem::PlainEvent {
-                body,
-                source: PlainEventSource::from(source),
-                interaction_id: Some(interaction_id),
-            })
+        if let Err(error) =
+            self.router
+                .inbox_sender()
+                .send_classified(crate::types::InboxItem::PlainEvent {
+                    body,
+                    source: PlainEventSource::from(source),
+                    interaction_id: Some(interaction_id),
+                })
         {
             self.interaction_stream_registry
                 .lock()
@@ -1172,14 +1293,18 @@ impl CommsRuntime {
     }
 
     pub async fn drain_messages(&self) -> Vec<CommsMessage> {
+        // Drain from the classified queue (sole consumer since 0.4.10).
+        // Convert classified entries back to CommsMessage using the
+        // ingress-stored metadata (from_peer, class) rather than
+        // re-resolving against live trust state. This preserves the
+        // ingress-snapshot guarantee: a message accepted at ingress
+        // cannot disappear or change from_peer if the peer is
+        // removed/renamed before drain.
         let mut inbox = self.inbox.lock().await;
-        let items = inbox.try_drain();
-        let trusted = self.trusted_peers.read().await;
-        items
+        let entries = inbox.try_drain_classified();
+        entries
             .into_iter()
-            .filter_map(|item| {
-                CommsMessage::from_inbox_item(&item, &trusted, self.require_peer_auth)
-            })
+            .filter_map(|entry| CommsMessage::from_classified_entry(&entry))
             .collect()
     }
 
@@ -1187,12 +1312,12 @@ impl CommsRuntime {
         loop {
             {
                 let mut inbox = self.inbox.lock().await;
-                let items = inbox.try_drain();
-                if !items.is_empty() {
-                    let trusted = self.trusted_peers.read().await;
-                    if let Some(msg) = items.into_iter().find_map(|item| {
-                        CommsMessage::from_inbox_item(&item, &trusted, self.require_peer_auth)
-                    }) {
+                // Consume one entry at a time so back-to-back messages are
+                // preserved. The previous implementation drained the entire
+                // classified queue and discarded everything after the first
+                // decodable message.
+                while let Some(entry) = inbox.try_recv_one_classified() {
+                    if let Some(msg) = CommsMessage::from_classified_entry(&entry) {
                         return Some(msg);
                     }
                 }
@@ -1236,7 +1361,7 @@ impl ListenerHandle {
 async fn spawn_uds_listener(
     path: &Path,
     keypair: Arc<Keypair>,
-    trusted: Arc<RwLock<TrustedPeers>>,
+    trusted: Arc<parking_lot::RwLock<TrustedPeers>>,
     require_peer_auth: bool,
     inbox_sender: InboxSender,
 ) -> Result<ListenerHandle, std::io::Error> {
@@ -1256,7 +1381,7 @@ async fn spawn_uds_listener(
             let (keypair, trusted, inbox_sender) =
                 (keypair.clone(), trusted.clone(), inbox_sender.clone());
             tokio::spawn(async move {
-                let trusted_snapshot = trusted.read().await.clone();
+                let trusted_snapshot = trusted.read().clone();
                 let _ = handle_connection(
                     stream,
                     require_peer_auth,
@@ -1275,7 +1400,7 @@ async fn spawn_uds_listener(
 async fn spawn_tcp_listener(
     addr: &str,
     keypair: Arc<Keypair>,
-    trusted: Arc<RwLock<TrustedPeers>>,
+    trusted: Arc<parking_lot::RwLock<TrustedPeers>>,
     require_peer_auth: bool,
     inbox_sender: InboxSender,
 ) -> Result<ListenerHandle, std::io::Error> {
@@ -1285,7 +1410,7 @@ async fn spawn_tcp_listener(
             let (keypair, trusted, inbox_sender) =
                 (keypair.clone(), trusted.clone(), inbox_sender.clone());
             tokio::spawn(async move {
-                let trusted_snapshot = trusted.read().await.clone();
+                let trusted_snapshot = trusted.read().clone();
                 let _ = handle_connection(
                     stream,
                     require_peer_auth,
@@ -1516,15 +1641,13 @@ mod tests {
         let runtime = CommsRuntime::new(config).await.unwrap();
 
         let sender = Keypair::generate();
-        {
-            let mut trusted = runtime.trusted_peers.write().await;
-            trusted.upsert(crate::TrustedPeer {
-                name: "sender".to_string(),
-                pubkey: sender.public_key(),
-                addr: "tcp://127.0.0.1:4200".to_string(),
-                meta: crate::PeerMeta::default(),
-            });
-        }
+        // Use router.add_trusted_peer to sync both async store and classification sidecar
+        runtime.router.add_trusted_peer(crate::TrustedPeer {
+            name: "sender".to_string(),
+            pubkey: sender.public_key(),
+            addr: "tcp://127.0.0.1:4200".to_string(),
+            meta: crate::PeerMeta::default(),
+        });
 
         let request_id = Uuid::new_v4();
         let reply_to = Uuid::new_v4();
@@ -1560,17 +1683,17 @@ mod tests {
         runtime
             .router
             .inbox_sender()
-            .send(InboxItem::External { envelope: msg })
+            .send_classified(InboxItem::External { envelope: msg })
             .unwrap();
         runtime
             .router
             .inbox_sender()
-            .send(InboxItem::External { envelope: req })
+            .send_classified(InboxItem::External { envelope: req })
             .unwrap();
         runtime
             .router
             .inbox_sender()
-            .send(InboxItem::External { envelope: resp })
+            .send_classified(InboxItem::External { envelope: resp })
             .unwrap();
 
         let interactions = CoreCommsRuntime::drain_inbox_interactions(&runtime).await;
@@ -1635,7 +1758,7 @@ mod tests {
         runtime
             .router
             .inbox_sender()
-            .send(InboxItem::PlainEvent {
+            .send_classified(InboxItem::PlainEvent {
                 body: "evt".to_string(),
                 source: meerkat_core::PlainEventSource::Tcp,
                 interaction_id: Some(interaction_id),
@@ -1854,25 +1977,21 @@ mod tests {
         let sender = CommsRuntime::inproc_only(&sender_name).unwrap();
         let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
 
-        {
-            let mut trusted = sender.trusted_peers.write().await;
-            trusted.upsert(crate::TrustedPeer {
-                name: receiver_name.clone(),
-                pubkey: receiver.public_key(),
-                addr: format!("inproc://{receiver_name}"),
-                meta: crate::PeerMeta::default(),
-            });
-        }
+        // Use router.add_trusted_peer so both the async store AND the
+        // sync classification sidecar are updated.
+        sender.router.add_trusted_peer(crate::TrustedPeer {
+            name: receiver_name.clone(),
+            pubkey: receiver.public_key(),
+            addr: format!("inproc://{receiver_name}"),
+            meta: crate::PeerMeta::default(),
+        });
 
-        {
-            let mut trusted = receiver.trusted_peers.write().await;
-            trusted.upsert(crate::TrustedPeer {
-                name: sender_name.clone(),
-                pubkey: sender.public_key(),
-                addr: format!("inproc://{sender_name}"),
-                meta: crate::PeerMeta::default(),
-            });
-        }
+        receiver.router.add_trusted_peer(crate::TrustedPeer {
+            name: sender_name.clone(),
+            pubkey: sender.public_key(),
+            addr: format!("inproc://{sender_name}"),
+            meta: crate::PeerMeta::default(),
+        });
 
         let cmd = CommsCommand::PeerMessage {
             to: PeerName::new(receiver_name).expect("receiver_name is a valid peer name"),
@@ -2079,7 +2198,7 @@ mod tests {
         let runtime = CommsRuntime::inproc_only(&runtime_name).unwrap();
 
         {
-            let mut trusted = runtime.trusted_peers.write().await;
+            let mut trusted = runtime.trusted_peers.write();
             trusted.upsert(crate::TrustedPeer {
                 name: peer_name.clone(),
                 pubkey: peer.public_key(),
@@ -2125,7 +2244,7 @@ mod tests {
         let peer = CommsRuntime::inproc_only(&peer_name).unwrap();
         let runtime = CommsRuntime::inproc_only(&runtime_name).unwrap();
         {
-            let mut trusted = runtime.trusted_peers.write().await;
+            let mut trusted = runtime.trusted_peers.write();
             trusted.upsert(crate::TrustedPeer {
                 name: peer_name.clone(),
                 pubkey: peer.public_key(),
@@ -2280,7 +2399,7 @@ mod tests {
         let _peer = CommsRuntime::inproc_only(&peer_name).unwrap();
         let runtime = CommsRuntime::inproc_only(&runtime_name).unwrap();
         {
-            let mut trusted = runtime.trusted_peers.write().await;
+            let mut trusted = runtime.trusted_peers.write();
             trusted.upsert(crate::TrustedPeer {
                 name: peer_name.clone(),
                 pubkey: _peer.public_key(),

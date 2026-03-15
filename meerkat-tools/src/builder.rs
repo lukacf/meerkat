@@ -12,7 +12,7 @@ use meerkat_core::AgentToolDispatcher;
 #[cfg(feature = "mcp")]
 use meerkat_mcp::McpRouter;
 #[cfg(feature = "comms")]
-use tokio::sync::RwLock;
+use parking_lot::RwLock;
 
 use crate::builtin::shell::ShellConfig;
 use crate::builtin::{BuiltinToolConfig, CompositeDispatcher, CompositeDispatcherError, TaskStore};

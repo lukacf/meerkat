@@ -25,8 +25,6 @@ use meerkat_core::{
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
-#[cfg(feature = "comms")]
-use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 
 /// Configuration for spawning a sub-agent with comms
@@ -270,7 +268,10 @@ pub struct DynSubAgentSpec {
     /// When set, the sub-agent will be added to this list after comms setup
     /// so the parent can accept connections from the sub-agent.
     #[cfg(feature = "comms")]
-    pub parent_trusted_peers: Option<Arc<RwLock<TrustedPeers>>>,
+    pub parent_trusted_peers: Option<Arc<parking_lot::RwLock<TrustedPeers>>>,
+    /// Parent's sync classification sidecar. Updated alongside parent_trusted_peers.
+    #[cfg(feature = "comms")]
+    pub parent_classification_peers: Option<Arc<parking_lot::RwLock<TrustedPeers>>>,
     /// Host mode - agent stays alive processing comms messages after initial prompt
     pub host_mode: bool,
     /// Optional scoped stream sink for attributed child events.
@@ -351,8 +352,13 @@ pub async fn spawn_sub_agent_dyn(
                         addr: info.addr.clone(),
                         meta: meerkat_comms::PeerMeta::default(),
                     };
-                    let mut peers = parent_peers.write().await;
-                    peers.upsert(child_peer);
+                    // Update both the async store and the sync classification
+                    // sidecar so the parent accepts this child at ingress
+                    // immediately, before the next drain.
+                    parent_peers.write().upsert(child_peer.clone());
+                    if let Some(ref classification_peers) = spec.parent_classification_peers {
+                        classification_peers.write().upsert(child_peer);
+                    }
                     tracing::debug!("Added sub-agent '{}' to parent's trusted peers", name);
                 }
 

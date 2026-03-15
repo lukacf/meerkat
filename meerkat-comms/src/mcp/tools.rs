@@ -2,8 +2,6 @@
 //!
 //! Exposes exactly two tools: `send` and `peers`.
 
-#[cfg(target_arch = "wasm32")]
-use crate::tokio;
 use parking_lot::RwLock;
 use schemars::JsonSchema;
 use serde::Deserialize;

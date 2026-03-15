@@ -55,17 +55,38 @@ fn detect_family(model: &str) -> Option<&'static str> {
 }
 
 // ---------------------------------------------------------------------------
-// Parameter schema
+// Parameter schemas
+//
+// Two schemas: GPT-5 family (has reasoning_effort, no temperature) and
+// standard GPT (has seed/penalties only, temperature handled separately).
+// Matches what meerkat-client/src/openai.rs actually reads from
+// provider_params (lines 117-156).
 // ---------------------------------------------------------------------------
 
-/// OpenAI-specific model parameters accepted via `provider_params`.
+/// OpenAI parameters for GPT-5 family models.
 ///
-/// This struct drives the JSON Schema exposed in the catalog.
+/// These models support reasoning_effort but reject temperature.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct OpenAiModelParams {
-    /// Reasoning effort level for GPT-5 models.
+pub struct OpenAiGpt5Params {
+    /// Reasoning effort level. Only applied when model supports reasoning.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<OpenAiReasoningEffort>,
+    /// Random seed for reproducibility.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed: Option<i64>,
+    /// Frequency penalty (-2.0 to 2.0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frequency_penalty: Option<f32>,
+    /// Presence penalty (-2.0 to 2.0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presence_penalty: Option<f32>,
+}
+
+/// OpenAI parameters for non-GPT-5 models.
+///
+/// These models do not support reasoning_effort.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct OpenAiStandardParams {
     /// Random seed for reproducibility.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seed: Option<i64>,
@@ -86,10 +107,18 @@ pub enum OpenAiReasoningEffort {
     High,
 }
 
-fn params_schema() -> &'static serde_json::Value {
+fn gpt5_params_schema() -> &'static serde_json::Value {
     static SCHEMA: OnceLock<serde_json::Value> = OnceLock::new();
     SCHEMA.get_or_init(|| {
-        let schema = schemars::schema_for!(OpenAiModelParams);
+        let schema = schemars::schema_for!(OpenAiGpt5Params);
+        serde_json::to_value(schema).unwrap_or_default()
+    })
+}
+
+fn standard_params_schema() -> &'static serde_json::Value {
+    static SCHEMA: OnceLock<serde_json::Value> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        let schema = schemars::schema_for!(OpenAiStandardParams);
         serde_json::to_value(schema).unwrap_or_default()
     })
 }
@@ -101,13 +130,18 @@ fn params_schema() -> &'static serde_json::Value {
 /// Build a profile for an OpenAI model, or `None` if unrecognized.
 pub fn profile(model: &str) -> Option<ModelProfile> {
     let family = detect_family(model)?;
+    let schema = if is_gpt5_family(model) {
+        gpt5_params_schema()
+    } else {
+        standard_params_schema()
+    };
     Some(ModelProfile {
         provider: "openai".to_string(),
         model_family: family.to_string(),
         supports_temperature: supports_temperature(model),
         supports_thinking: supports_thinking(model),
         supports_reasoning: supports_reasoning(model),
-        params_schema: params_schema().clone(),
+        params_schema: schema.clone(),
     })
 }
 
@@ -146,14 +180,61 @@ mod tests {
     }
 
     #[test]
+    fn gpt5_schema_includes_reasoning_effort() {
+        let schema = gpt5_params_schema();
+        let props = schema.get("properties").and_then(|p| p.as_object());
+        assert!(props.is_some(), "schema must have properties");
+        let props = props.unwrap_or(&serde_json::Map::new()).clone();
+        assert!(
+            props.contains_key("reasoning_effort"),
+            "must include reasoning_effort"
+        );
+        assert!(props.contains_key("seed"), "must include seed");
+        assert!(
+            props.contains_key("frequency_penalty"),
+            "must include frequency_penalty"
+        );
+        assert!(
+            props.contains_key("presence_penalty"),
+            "must include presence_penalty"
+        );
+    }
+
+    #[test]
+    fn standard_schema_no_reasoning_effort() {
+        let schema = standard_params_schema();
+        let props = schema.get("properties").and_then(|p| p.as_object());
+        assert!(props.is_some(), "schema must have properties");
+        let props = props.unwrap_or(&serde_json::Map::new()).clone();
+        assert!(
+            !props.contains_key("reasoning_effort"),
+            "standard must not include reasoning_effort"
+        );
+        assert!(props.contains_key("seed"), "must include seed");
+    }
+
+    #[test]
+    fn per_model_schema_differs() {
+        let gpt5 = profile("gpt-5.2");
+        // No non-gpt5 models in catalog, but test the function directly
+        let standard_schema = standard_params_schema();
+        let gpt5_schema = gpt5_params_schema();
+        assert_ne!(
+            standard_schema, gpt5_schema,
+            "gpt-5 and standard schemas must differ"
+        );
+        assert!(gpt5.is_some());
+    }
+
+    #[test]
     fn non_openai_not_detected() {
         assert_eq!(detect_family("claude-opus-4-6"), None);
         assert!(!is_gpt5_family("claude-opus-4-6"));
     }
 
     #[test]
-    fn schema_is_valid_object() {
-        let schema = params_schema();
-        assert!(schema.is_object(), "schema must be a JSON object");
+    fn schemas_are_valid_objects() {
+        assert!(gpt5_params_schema().is_object());
+        assert!(standard_params_schema().is_object());
     }
 }

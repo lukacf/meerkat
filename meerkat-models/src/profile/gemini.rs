@@ -40,16 +40,32 @@ fn detect_family(model: &str) -> Option<&'static str> {
 
 // ---------------------------------------------------------------------------
 // Parameter schema
+//
+// Matches what meerkat-client/src/gemini.rs actually reads from
+// provider_params (lines 199-238):
+//   - thinking_budget (flat): legacy format
+//   - thinking.thinking_budget: nested format
+//   - top_k: sampling param
+//   - top_p: sampling param
+//
+// Note: the adapter does NOT read `thinking.include_thoughts`.
+// The typed GeminiParams in meerkat-client/src/types.rs has this field,
+// but the adapter only extracts thinking_budget from the nested object.
 // ---------------------------------------------------------------------------
 
 /// Gemini-specific model parameters accepted via `provider_params`.
 ///
-/// This struct drives the JSON Schema exposed in the catalog.
+/// This struct documents what the Gemini adapter actually reads.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GeminiModelParams {
-    /// Thinking configuration for Gemini 3+ models.
+    /// Thinking configuration (nested format).
+    /// The adapter reads `thinking.thinking_budget` from this object.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<GeminiThinkingParam>,
+    /// Legacy flat thinking budget (alternative to `thinking.thinking_budget`).
+    /// The adapter checks this first, then falls back to the nested format.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_budget: Option<u64>,
     /// Top-K sampling parameter.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_k: Option<u32>,
@@ -58,14 +74,12 @@ pub struct GeminiModelParams {
     pub top_p: Option<f32>,
 }
 
-/// Thinking configuration for Gemini models.
+/// Nested thinking configuration for Gemini models.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GeminiThinkingParam {
-    /// Whether to include thinking in the response.
-    pub include_thoughts: bool,
     /// Token budget for thinking.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub thinking_budget: Option<u32>,
+    pub thinking_budget: Option<u64>,
 }
 
 fn params_schema() -> &'static serde_json::Value {
@@ -119,6 +133,27 @@ mod tests {
     fn non_gemini_not_detected() {
         assert_eq!(detect_family("claude-opus-4-6"), None);
         assert_eq!(detect_family("gpt-5.2"), None);
+    }
+
+    #[test]
+    fn schema_matches_adapter_params() {
+        let schema = params_schema();
+        let props = schema.get("properties").and_then(|p| p.as_object());
+        assert!(props.is_some(), "schema must have properties");
+        let props = props.unwrap_or(&serde_json::Map::new()).clone();
+        // Must include what the adapter reads
+        assert!(props.contains_key("thinking"), "must include thinking");
+        assert!(
+            props.contains_key("thinking_budget"),
+            "must include thinking_budget (flat)"
+        );
+        assert!(props.contains_key("top_k"), "must include top_k");
+        assert!(props.contains_key("top_p"), "must include top_p");
+        // Must NOT include fields the adapter ignores
+        assert!(
+            !props.contains_key("include_thoughts"),
+            "must not include include_thoughts (adapter ignores it)"
+        );
     }
 
     #[test]

@@ -216,15 +216,18 @@ mod tests {
     #[test]
     fn defaults_exist_in_catalog() {
         for &provider in PROVIDER_NAMES {
-            let Some(default) = default_model(provider) else {
-                assert!(false, "no default for {provider}");
-                return;
-            };
-            let entry = entry_for(provider, default);
+            let default = default_model(provider);
             assert!(
-                entry.is_some(),
-                "default model '{default}' for provider '{provider}' must exist in catalog"
+                default.is_some(),
+                "provider '{provider}' must have a default model"
             );
+            if let Some(default) = default {
+                let entry = entry_for(provider, default);
+                assert!(
+                    entry.is_some(),
+                    "default model '{default}' for provider '{provider}' must exist in catalog"
+                );
+            }
         }
     }
 

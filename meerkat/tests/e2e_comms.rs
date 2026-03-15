@@ -19,11 +19,11 @@ use meerkat_comms::agent::{
     CommsAgent, CommsManager, CommsManagerConfig, CommsToolDispatcher, spawn_tcp_listener,
 };
 use meerkat_comms::{CommsConfig, Keypair, TrustedPeer, TrustedPeers};
+use parking_lot::RwLock;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
-use tokio::sync::RwLock;
 
 // ============================================================================
 // ADAPTERS - Bridge LlmClient/SessionStore to Agent traits

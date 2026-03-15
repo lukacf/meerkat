@@ -4,8 +4,8 @@ use super::tools::{CommsToolState, PeersTool, SendTool};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use meerkat_comms::{Router, TrustedPeers};
+use parking_lot::RwLock;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 /// Collection of all comms tools: `send` and `peers`.
 pub struct CommsToolSet {

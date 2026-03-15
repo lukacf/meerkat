@@ -133,6 +133,15 @@ where
         Ok(())
     }
 
+    /// Replace the LLM client for subsequent turns.
+    ///
+    /// Enables hot-swapping the model/provider on a live session without
+    /// rebuilding the agent. The new client takes effect on the next
+    /// `run()` / `run_with_events()` call.
+    pub fn replace_client(&mut self, client: Arc<C>) {
+        self.client = client;
+    }
+
     /// Set the runtime input sink for host-mode comms routing.
     ///
     /// When set, passthrough interactions and continuation runs in host-mode

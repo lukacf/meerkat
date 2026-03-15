@@ -438,6 +438,10 @@ impl AgentToolDispatcher for CompositeDispatcher {
         }
         Ok(Arc::new(owned))
     }
+
+    fn supports_wait_interrupt(&self) -> bool {
+        self.builtin_tools.iter().any(|t| t.name() == "wait")
+    }
 }
 
 #[cfg(test)]

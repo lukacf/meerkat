@@ -375,19 +375,38 @@ impl AgentToolDispatcher for ToolGateway {
             .map_err(|_| crate::wait_interrupt::WaitInterruptBindError::SharedOwnership)?;
 
         let mut builder = ToolGatewayBuilder::new();
+        let mut any_rebound = false;
         for entry in owned.entries {
-            // Forward bind to each entry. The factory binds before gateway
-            // composition, so this path is only used if bind_wait_interrupt
-            // is called directly on a gateway. Entries that don't support
-            // binding return Unsupported — propagated as error.
-            let rebound = entry.dispatcher.bind_wait_interrupt(rx.clone())?;
-            builder = builder.add_dispatcher_with_availability(rebound, entry.availability);
+            // Only rebind entries that support it. Entries without a wait
+            // tool (e.g. comms overlays, MCP surfaces) are passed through
+            // as-is. This lets a mixed gateway (CompositeDispatcher + overlay)
+            // rebind correctly instead of failing on the first Unsupported entry.
+            if entry.dispatcher.supports_wait_interrupt() {
+                let rebound = entry.dispatcher.bind_wait_interrupt(rx.clone())?;
+                builder = builder.add_dispatcher_with_availability(rebound, entry.availability);
+                any_rebound = true;
+            } else {
+                builder =
+                    builder.add_dispatcher_with_availability(entry.dispatcher, entry.availability);
+            }
+        }
+
+        // If no entry was actually rebound, the rx receiver will be dropped
+        // and waits remain non-interruptible. Signal this to the caller.
+        if !any_rebound {
+            return Err(crate::wait_interrupt::WaitInterruptBindError::Unsupported);
         }
 
         let gateway = builder
             .build()
             .map_err(|_| crate::wait_interrupt::WaitInterruptBindError::Unsupported)?;
         Ok(Arc::new(gateway))
+    }
+
+    fn supports_wait_interrupt(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|e| e.dispatcher.supports_wait_interrupt())
     }
 
     /// Aggregate external updates across all dispatcher entries.
@@ -825,10 +844,9 @@ mod tests {
 
     #[test]
     #[allow(clippy::panic)]
-    fn test_gateway_bind_wait_interrupt_propagates_unsupported() {
-        // When entries return Unsupported (default), the gateway propagates
-        // the error. The factory binds BEFORE gateway composition, so this
-        // path is only hit if bind is called directly on a gateway.
+    fn test_gateway_bind_wait_interrupt_unsupported_when_no_entry_rebound() {
+        // When no entry supports binding, the gateway returns Unsupported
+        // so the caller knows waits are not actually interruptible.
         let base: Arc<dyn AgentToolDispatcher> =
             Arc::new(MockDispatcher::new("base", &["task_create"]));
         let overlay: Arc<dyn AgentToolDispatcher> =
@@ -845,7 +863,7 @@ mod tests {
         let (_tx, rx) = tokio::sync::watch::channel(None::<crate::wait_interrupt::WaitInterrupt>);
         match gateway.bind_wait_interrupt(rx) {
             Err(crate::wait_interrupt::WaitInterruptBindError::Unsupported) => {}
-            Ok(_) => panic!("expected Unsupported error, got Ok"),
+            Ok(_) => panic!("expected Unsupported error when no entry can be rebound"),
             Err(e) => panic!("expected Unsupported, got {e:?}"),
         }
     }

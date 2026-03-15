@@ -287,6 +287,55 @@ impl CommsMessage {
         })
     }
 
+    /// Create a `CommsMessage` from a classified inbox entry.
+    ///
+    /// Uses the ingress-stored `from_peer` identity instead of re-resolving
+    /// against live trust state, preserving snapshot semantics: a message
+    /// accepted at ingress cannot disappear or change identity if the peer
+    /// is removed/renamed before drain.
+    ///
+    /// Returns `None` for non-External items, SubagentResult, PlainEvent, and Ack messages.
+    pub(crate) fn from_classified_entry(
+        entry: &crate::inbox::ClassifiedInboxEntry,
+    ) -> Option<Self> {
+        let envelope = match &entry.item {
+            InboxItem::External { envelope } => envelope,
+            InboxItem::SubagentResult { .. } | InboxItem::PlainEvent { .. } => return None,
+        };
+
+        let from_peer = entry.from_peer.clone().unwrap_or_else(|| {
+            InprocRegistry::global()
+                .get_name_by_pubkey(&envelope.from)
+                .unwrap_or_else(|| envelope.from.to_peer_id())
+        });
+
+        let content = match &envelope.kind {
+            MessageKind::Message { body } => CommsContent::Message { body: body.clone() },
+            MessageKind::Request { intent, params } => CommsContent::Request {
+                request_id: envelope.id,
+                intent: MessageIntent::from(intent.as_str()),
+                params: params.clone(),
+            },
+            MessageKind::Response {
+                in_reply_to,
+                status,
+                result,
+            } => CommsContent::Response {
+                in_reply_to: *in_reply_to,
+                status: (*status).into(),
+                result: result.clone(),
+            },
+            MessageKind::Ack { .. } => return None,
+        };
+
+        Some(CommsMessage {
+            envelope_id: envelope.id,
+            from_peer,
+            from_pubkey: envelope.from,
+            content,
+        })
+    }
+
     /// Format this message as text suitable for injection into an LLM session.
     ///
     /// The format is designed to be clear to the LLM about:

@@ -90,9 +90,7 @@ impl CommsBootstrap {
                     addr: parent.parent_addr,
                     meta: crate::PeerMeta::default(),
                 };
-                // Update both the async store and the sync classification
-                // sidecar so the parent is trusted at ingress immediately.
-                runtime.upsert_trusted_peer(parent_peer).await;
+                runtime.upsert_trusted_peer(parent_peer);
 
                 let advertise = CommsAdvertise {
                     name: self.config.name,

@@ -166,7 +166,7 @@ struct ErasedLlmClientOverride(Arc<dyn LlmClient>);
 #[derive(Clone)]
 struct SubAgentCommsWiring {
     parent_context: meerkat_comms::runtime::ParentCommsContext,
-    parent_trusted_peers: Arc<RwLock<meerkat_comms::TrustedPeers>>,
+    parent_trusted_peers: Arc<parking_lot::RwLock<meerkat_comms::TrustedPeers>>,
     parent_classification_peers: Arc<parking_lot::RwLock<meerkat_comms::TrustedPeers>>,
 }
 
@@ -1406,13 +1406,10 @@ impl AgentFactory {
         // Build the tool dispatcher WITHOUT wait interrupt wiring.
         // The interrupt is bound once after full composition (including comms gateway).
         // This ensures all dispatcher paths (builtin, override, WASM, composed) are covered.
-        #[allow(unused_mut, unused_assignments)]
-        let mut tools_from_override = false;
         #[allow(unused_mut)]
         let (mut tools, mut tool_usage_instructions) =
             if let Some(dispatcher) = build_config.tool_dispatcher_override.take() {
                 let usage = render_tool_usage_instructions(dispatcher.tools().as_ref());
-                tools_from_override = true;
                 (dispatcher, usage)
             } else {
                 #[cfg(not(target_arch = "wasm32"))]
@@ -1491,102 +1488,102 @@ impl AgentFactory {
         #[cfg(feature = "comms")]
         if let Some(ref runtime) = comms_runtime {
             use meerkat_core::agent::CommsRuntime as CoreCommsRuntimeTrait;
-            // Fail-closed: both classified capabilities must be available.
-            let actionable_notify = CoreCommsRuntimeTrait::actionable_input_notify(runtime)
-                .map_err(|e| {
-                    BuildAgentError::Config(format!(
-                        "Comms enabled but runtime does not expose actionable_input_notify: {e}"
-                    ))
-                })?;
 
-            // actionable_input_notify success implies classified drain is also
-            // available — they are co-constructed in the same inbox path.
-            // No probe drain: that would consume queued traffic during startup.
-            {
-                // Create the watch channel for wait interrupt signaling
-                #[cfg(not(target_arch = "wasm32"))]
-                let (tx, rx) = tokio::sync::watch::channel(
-                    None::<meerkat_core::wait_interrupt::WaitInterrupt>,
-                );
-                #[cfg(target_arch = "wasm32")]
-                let (tx, rx) = tokio_with_wasm::alias::sync::watch::channel(
-                    None::<meerkat_core::wait_interrupt::WaitInterrupt>,
-                );
+            // Attempt wait interrupt binding when the dispatcher supports it.
+            // This covers both factory-built builtins and caller-supplied
+            // overrides that implement supports_wait_interrupt(). The
+            // actionable_input_notify probe is deferred into this block so
+            // comms-enabled agents that skip wait rebinding don't fail the
+            // build on older/custom runtimes that lack the capability.
+            if effective_builtins || tools.supports_wait_interrupt() {
+                // Probe actionable_input_notify, falling back to inbox_notify
+                // for legacy/custom runtimes that predate the classified path.
+                // inbox_notify fires on ALL inbox traffic (not just actionable),
+                // which may wake wait slightly more often, but preserves the
+                // interrupt contract for send_request/wait workflows.
+                let notify = CoreCommsRuntimeTrait::actionable_input_notify(runtime)
+                    .ok()
+                    .or_else(|| Some(runtime.inbox_notify()));
 
-                // Try to bind wait interrupts. Three strategies in order:
-                //
-                // 1. Arc::try_unwrap (exclusive ownership) — consumes Arc, swaps
-                //    wait tool, returns new Arc. Works when factory built the
-                //    dispatcher fresh for this session.
-                //
-                // 2. Skip gracefully — dispatcher has no wait tool (builtins
-                //    disabled) or is a custom override without binding support.
-                //    Comms works, wait just isn't interruptible.
-                //
-                // Strategy 1 fails with SharedOwnership when FactoryAgentBuilder
-                // clones default_tool_dispatcher (refcount > 1). In that case
-                // we skip — the shared dispatcher is preserved intact, comms
-                // works, but wait won't be interrupted. This is acceptable
-                // because the shared dispatcher was built without this session's
-                // comms context, so it can't have session-specific interrupt
-                // wiring anyway.
-                let bind_succeeded = if !effective_builtins || tools_from_override {
-                    // Builtins disabled or dispatcher is a caller-supplied override
-                    // that may not support binding. Skip gracefully.
-                    tracing::debug!(
-                        "Skipping wait interrupt binding (builtins={effective_builtins}, override={tools_from_override})"
-                    );
-                    false
-                } else if Arc::strong_count(&tools) == 1 {
-                    // Exclusive ownership — safe to consume and rebind.
-                    // bind_wait_interrupt consumes the Arc, so on success we
-                    // get a new Arc back. On failure, the Arc is dropped by the
-                    // default impl, so we must not continue (would use moved value).
-                    tools = tools.bind_wait_interrupt(rx).map_err(|e| {
-                        BuildAgentError::Config(format!("Wait interrupt binding failed: {e}"))
-                    })?;
-                    true
-                } else {
-                    // Shared dispatcher (FactoryAgentBuilder clone). Cannot
-                    // consume the Arc. Preserve the dispatcher as-is.
-                    tracing::debug!(
-                        "Shared dispatcher (refcount={}) — wait interrupt not bound",
-                        Arc::strong_count(&tools)
-                    );
-                    false
-                };
-
-                // Bridge actionable_input_notify → watch channel (only if bind succeeded)
-                if bind_succeeded {
+                if let Some(actionable_notify) = notify {
                     #[cfg(not(target_arch = "wasm32"))]
-                    tokio::spawn(async move {
-                        loop {
-                            actionable_notify.notified().await;
-                            if tx
-                                .send(Some(meerkat_core::wait_interrupt::WaitInterrupt {
-                                    reason: "Incoming actionable peer message".to_string(),
-                                }))
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                    });
+                    let (tx, rx) = tokio::sync::watch::channel(
+                        None::<meerkat_core::wait_interrupt::WaitInterrupt>,
+                    );
                     #[cfg(target_arch = "wasm32")]
-                    tokio_with_wasm::alias::task::spawn(async move {
-                        loop {
-                            actionable_notify.notified().await;
-                            if tx
-                                .send(Some(meerkat_core::wait_interrupt::WaitInterrupt {
-                                    reason: "Incoming actionable peer message".to_string(),
-                                }))
-                                .is_err()
-                            {
-                                break;
+                    let (tx, rx) = tokio_with_wasm::alias::sync::watch::channel(
+                        None::<meerkat_core::wait_interrupt::WaitInterrupt>,
+                    );
+
+                    // Try to bind wait interrupts.
+                    //
+                    // Exclusive ownership (refcount == 1): consume Arc, swap wait
+                    // tool, get new Arc back. Works for factory-fresh dispatchers
+                    // AND unique per-session overrides that implement
+                    // bind_wait_interrupt().
+                    //
+                    // Shared ownership (refcount > 1): cannot consume the Arc.
+                    // Skip gracefully — comms works, wait just isn't interruptible.
+                    //
+                    // Unsupported: the dispatcher doesn't have a wait tool or
+                    // doesn't implement binding. Skip gracefully.
+                    // Probe before consuming: bind_wait_interrupt takes
+                    // `self: Arc<Self>` and is destructive on Unsupported.
+                    // The probe is non-consuming so it's safe to check first.
+                    let bind_succeeded = if !tools.supports_wait_interrupt() {
+                        tracing::debug!("Dispatcher does not support wait interrupt binding");
+                        false
+                    } else if Arc::strong_count(&tools) == 1 {
+                        // Exclusive ownership — safe to consume and rebind.
+                        tools = tools.bind_wait_interrupt(rx).map_err(|e| {
+                            BuildAgentError::Config(format!("Wait interrupt binding failed: {e}"))
+                        })?;
+                        true
+                    } else {
+                        tracing::debug!(
+                            "Shared dispatcher (refcount={}) — wait interrupt not bound",
+                            Arc::strong_count(&tools)
+                        );
+                        false
+                    };
+
+                    if bind_succeeded {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        tokio::spawn(async move {
+                            loop {
+                                actionable_notify.notified().await;
+                                if tx
+                                    .send(Some(meerkat_core::wait_interrupt::WaitInterrupt {
+                                        reason: "Incoming actionable peer message".to_string(),
+                                    }))
+                                    .is_err()
+                                {
+                                    break;
+                                }
                             }
-                        }
-                    });
+                        });
+                        #[cfg(target_arch = "wasm32")]
+                        tokio_with_wasm::alias::task::spawn(async move {
+                            loop {
+                                actionable_notify.notified().await;
+                                if tx
+                                    .send(Some(meerkat_core::wait_interrupt::WaitInterrupt {
+                                        reason: "Incoming actionable peer message".to_string(),
+                                    }))
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        });
+                    }
+                } else {
+                    tracing::debug!(
+                        "Comms runtime lacks actionable_input_notify — wait interrupt not bound"
+                    );
                 }
+            } else {
+                tracing::debug!("Builtins disabled — skipping wait interrupt binding");
             }
         }
 

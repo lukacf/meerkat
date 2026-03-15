@@ -230,6 +230,9 @@ pub async fn create_shell_dispatcher(
 ///
 /// - Inproc mode uses an in-memory runtime (no listeners).
 /// - TCP/UDS modes require `config.comms.address` to be set.
+///
+/// Uses an empty silent-intents set. For silent intent support, use
+/// [`build_comms_runtime_from_config_scoped_with_silent_intents`].
 #[cfg(feature = "comms")]
 pub async fn build_comms_runtime_from_config(
     config: &Config,
@@ -241,14 +244,10 @@ pub async fn build_comms_runtime_from_config(
 }
 
 /// Build a comms runtime from config with optional inproc namespace isolation.
-#[cfg(feature = "comms")]
-/// Build a comms runtime from config without silent intents.
 ///
-/// **Note (0.4.10+):** Silent-intent classification now happens at ingress.
-/// If you need silent intents, use
-/// [`build_comms_runtime_from_config_scoped_with_silent_intents`] instead
-/// and pass the intents explicitly. The `AgentBuilder::with_silent_comms_intents`
-/// field is no longer consulted after drain.
+/// Uses an empty silent-intents set. For silent intent support, use
+/// [`build_comms_runtime_from_config_scoped_with_silent_intents`].
+#[cfg(feature = "comms")]
 pub async fn build_comms_runtime_from_config_scoped(
     config: &Config,
     base_dir: impl AsRef<Path>,

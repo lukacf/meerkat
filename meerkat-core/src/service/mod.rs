@@ -61,6 +61,10 @@ pub enum SessionError {
     /// An agent-level error occurred during execution.
     #[error("agent error: {0}")]
     Agent(#[from] crate::error::AgentError),
+
+    /// The requested operation is not supported by this session service.
+    #[error("unsupported: {0}")]
+    Unsupported(String),
 }
 
 impl SessionError {
@@ -73,6 +77,7 @@ impl SessionError {
             Self::CompactionDisabled => "SESSION_COMPACTION_DISABLED",
             Self::NotRunning { .. } => "SESSION_NOT_RUNNING",
             Self::Store(_) => "SESSION_STORE_ERROR",
+            Self::Unsupported(_) => "SESSION_UNSUPPORTED",
             Self::Agent(_) => "AGENT_ERROR",
         }
     }
@@ -472,6 +477,20 @@ pub trait SessionService: Send + Sync {
     ///
     /// Returns `NotRunning` if no turn is active.
     async fn interrupt(&self, id: &SessionId) -> Result<(), SessionError>;
+
+    /// Replace the LLM client on a live session.
+    ///
+    /// Enables mid-session model/provider hot-swap without rebuilding the
+    /// agent. The new client takes effect on the next turn. Returns
+    /// `Unsupported` by default; session services that support live agents
+    /// override this.
+    async fn set_session_client(
+        &self,
+        _id: &SessionId,
+        _client: std::sync::Arc<dyn crate::AgentLlmClient>,
+    ) -> Result<(), SessionError> {
+        Err(SessionError::Unsupported("set_session_client".to_string()))
+    }
 
     /// Read the current state of a session.
     async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError>;

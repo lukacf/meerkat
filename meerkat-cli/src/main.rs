@@ -8763,7 +8763,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
         use meerkat_comms::agent::CommsToolDispatcher;
         use meerkat_comms::{CommsConfig, Keypair, TrustedPeers};
         use meerkat_core::AgentToolDispatcher;
-        use tokio::sync::RwLock;
+        use parking_lot::RwLock;
 
         // Create mock comms infrastructure
         let keypair = Keypair::generate();

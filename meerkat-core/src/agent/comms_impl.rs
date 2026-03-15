@@ -104,15 +104,58 @@ where
         let classified = match comms.drain_classified_inbox_interactions().await {
             Ok(v) => v,
             Err(_) => {
-                // Legacy runtime — use unclassified drain path
+                // Legacy runtime — classify by InteractionContent to preserve
+                // peer lifecycle batching and response routing semantics.
                 let interactions = comms.drain_inbox_interactions().await;
                 if interactions.is_empty() {
                     return false;
                 }
                 let mut messages = Vec::new();
+                let mut peer_lifecycle_batch = PeerLifecycleBatch::default();
+
                 for interaction in interactions {
-                    messages.push(interaction.rendered_text);
+                    match &interaction.content {
+                        InteractionContent::Request { intent, params }
+                            if intent == "mob.peer_added" =>
+                        {
+                            let peer = params
+                                .get("peer")
+                                .and_then(|v| v.as_str())
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or(interaction.from.as_str())
+                                .to_string();
+                            peer_lifecycle_batch.observe(peer, PeerLifecycleState::Added);
+                        }
+                        InteractionContent::Request { intent, params }
+                            if intent == "mob.peer_retired" =>
+                        {
+                            let peer = params
+                                .get("peer")
+                                .and_then(|v| v.as_str())
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or(interaction.from.as_str())
+                                .to_string();
+                            peer_lifecycle_batch.observe(peer, PeerLifecycleState::Retired);
+                        }
+                        _ => {
+                            // Turn-boundary drain: all non-lifecycle interactions
+                            // are injected as context for the next LLM call.
+                            messages.push(interaction.rendered_text);
+                        }
+                    }
                 }
+
+                if let Some(peer_update) = self
+                    .render_peer_lifecycle_update(&comms, &peer_lifecycle_batch)
+                    .await
+                {
+                    messages.push(peer_update);
+                }
+
+                if messages.is_empty() {
+                    return false;
+                }
+
                 let combined = messages.join("\n\n");
                 self.session
                     .push(Message::User(UserMessage { content: combined }));
@@ -280,8 +323,10 @@ where
             let classified = match comms.drain_classified_inbox_interactions().await {
                 Ok(v) => v,
                 Err(_) => {
-                    // Legacy runtime — use unclassified drain and process as
-                    // batched text, mirroring the pre-0.4.10 host-mode path.
+                    // Legacy runtime — classify by InteractionContent to
+                    // preserve per-interaction routing: peer lifecycle →
+                    // batch, responses → inline, silent intents → inline,
+                    // messages → batched run(), requests → individual run().
                     let interactions = comms.drain_inbox_interactions().await;
 
                     if comms.dismiss_received() {
@@ -290,36 +335,251 @@ where
                         return Ok(last_result);
                     }
 
+                    let mut had_legacy_work = false;
                     if !interactions.is_empty() {
-                        let combined = interactions
-                            .into_iter()
-                            .map(|i| i.rendered_text)
-                            .collect::<Vec<_>>()
-                            .join("\n\n");
-                        let batch_result = match &event_tx {
-                            Some(tx) => self.run_with_events(combined, tx.clone()).await,
-                            None => self.run(combined).await,
-                        };
-                        match batch_result {
-                            Ok(result) => {
-                                last_result = result;
-                                self.checkpoint_current_session().await;
-                            }
-                            Err(e) => {
-                                if e.is_graceful() {
-                                    self.host_drain_active = false;
-                                    return Ok(last_result);
+                        had_legacy_work = true;
+                        let mut batched_texts = Vec::new();
+                        let mut individual_requests: Vec<(
+                            InboxInteraction,
+                            Option<mpsc::Sender<AgentEvent>>,
+                        )> = Vec::new();
+                        let mut peer_lifecycle_batch = PeerLifecycleBatch::default();
+                        let mut had_session_injections = false;
+                        let mut had_response_injections = false;
+
+                        for interaction in interactions {
+                            // Consume the subscriber (if any) so it is removed
+                            // from the registry even when the legacy path does
+                            // not support tap-scoped streaming.
+                            let subscriber = comms.interaction_subscriber(&interaction.id);
+
+                            match &interaction.content {
+                                InteractionContent::Request { intent, params }
+                                    if intent == "mob.peer_added" =>
+                                {
+                                    drop(subscriber);
+                                    let peer = params
+                                        .get("peer")
+                                        .and_then(|v| v.as_str())
+                                        .filter(|s| !s.is_empty())
+                                        .unwrap_or(interaction.from.as_str())
+                                        .to_string();
+                                    peer_lifecycle_batch.observe(peer, PeerLifecycleState::Added);
                                 }
-                                self.host_drain_active = false;
-                                return Err(e);
+                                InteractionContent::Request { intent, params }
+                                    if intent == "mob.peer_retired" =>
+                                {
+                                    drop(subscriber);
+                                    let peer = params
+                                        .get("peer")
+                                        .and_then(|v| v.as_str())
+                                        .filter(|s| !s.is_empty())
+                                        .unwrap_or(interaction.from.as_str())
+                                        .to_string();
+                                    peer_lifecycle_batch.observe(peer, PeerLifecycleState::Retired);
+                                }
+                                InteractionContent::Response { status, .. } => {
+                                    drop(subscriber);
+                                    if matches!(
+                                        status,
+                                        crate::interaction::ResponseStatus::Completed
+                                            | crate::interaction::ResponseStatus::Failed
+                                    ) {
+                                        had_response_injections = true;
+                                    }
+                                    inject_response_into_session(&mut self.session, &interaction);
+                                    had_session_injections = true;
+                                }
+                                InteractionContent::Request { intent, .. }
+                                    if self.silent_comms_intents.contains(intent) =>
+                                {
+                                    drop(subscriber);
+                                    // Silent intents: inject as context only, no LLM turn.
+                                    self.session.push(Message::User(UserMessage {
+                                        content: interaction.rendered_text,
+                                    }));
+                                    had_session_injections = true;
+                                }
+                                InteractionContent::Message { .. } => {
+                                    // If there's a subscriber and event_tx, route
+                                    // individually so the subscriber gets terminal events.
+                                    if event_tx.is_some() && subscriber.is_some() {
+                                        individual_requests.push((interaction, subscriber));
+                                    } else {
+                                        drop(subscriber);
+                                        batched_texts.push(interaction.rendered_text);
+                                    }
+                                }
+                                InteractionContent::Request { .. } => {
+                                    if event_tx.is_some() && subscriber.is_some() {
+                                        individual_requests.push((interaction, subscriber));
+                                    } else {
+                                        drop(subscriber);
+                                        individual_requests.push((interaction, None));
+                                    }
+                                }
+                            }
+                        }
+
+                        if let Some(peer_update) = self
+                            .render_peer_lifecycle_update(&comms, &peer_lifecycle_batch)
+                            .await
+                        {
+                            self.session.push(Message::User(UserMessage {
+                                content: peer_update,
+                            }));
+                            had_session_injections = true;
+                        }
+
+                        if had_session_injections {
+                            self.checkpoint_current_session().await;
+                        }
+
+                        let had_passthrough_work =
+                            !individual_requests.is_empty() || !batched_texts.is_empty();
+
+                        // Process individual interactions (with subscriber support).
+                        // When runtime_input_sink is set, route through the runtime
+                        // queue instead of calling self.run() directly.
+                        for (interaction, subscriber) in individual_requests {
+                            if let Some(ref sink) = self.runtime_input_sink {
+                                drop(subscriber);
+                                if let Err(err) = sink.accept_peer_input(interaction).await {
+                                    tracing::warn!(
+                                        error = %err,
+                                        "runtime sink rejected peer input"
+                                    );
+                                }
+                                continue;
+                            }
+
+                            let has_tap = match subscriber {
+                                Some(tx) => {
+                                    self.event_tap.lock().replace(
+                                        crate::event_tap::EventTapState {
+                                            tx,
+                                            truncated: AtomicBool::new(false),
+                                        },
+                                    );
+                                    true
+                                }
+                                None => false,
+                            };
+
+                            let run_result = match &event_tx {
+                                Some(tx) => {
+                                    self.run_with_events(interaction.rendered_text, tx.clone())
+                                        .await
+                                }
+                                None => self.run(interaction.rendered_text).await,
+                            };
+                            match run_result {
+                                Ok(result) => {
+                                    if has_tap {
+                                        crate::event_tap::tap_send_terminal(
+                                            &self.event_tap,
+                                            AgentEvent::InteractionComplete {
+                                                interaction_id: interaction.id,
+                                                result: result.text.clone(),
+                                            },
+                                        )
+                                        .await;
+                                    }
+                                    comms.mark_interaction_complete(&interaction.id);
+                                    last_result = result;
+                                    self.checkpoint_current_session().await;
+                                }
+                                Err(e) => {
+                                    if has_tap {
+                                        crate::event_tap::tap_send_terminal(
+                                            &self.event_tap,
+                                            AgentEvent::InteractionFailed {
+                                                interaction_id: interaction.id,
+                                                error: e.to_string(),
+                                            },
+                                        )
+                                        .await;
+                                    }
+                                    comms.mark_interaction_complete(&interaction.id);
+                                    self.event_tap.lock().take();
+
+                                    if e.is_graceful() {
+                                        self.host_drain_active = false;
+                                        return Ok(last_result);
+                                    }
+                                    self.host_drain_active = false;
+                                    return Err(e);
+                                }
+                            }
+                            self.event_tap.lock().take();
+                        }
+
+                        // Continuation run for terminal responses without
+                        // passthrough work.
+                        if had_response_injections && !had_passthrough_work {
+                            if let Some(ref sink) = self.runtime_input_sink {
+                                if let Err(err) = sink.accept_continuation().await {
+                                    tracing::warn!(
+                                        error = %err,
+                                        "runtime sink rejected continuation"
+                                    );
+                                }
+                            } else {
+                                let cont_result = self.run_pending_inner(event_tx.clone()).await;
+                                match cont_result {
+                                    Ok(result) => {
+                                        last_result = result;
+                                        self.checkpoint_current_session().await;
+                                    }
+                                    Err(e) => {
+                                        if e.is_graceful() {
+                                            self.host_drain_active = false;
+                                            return Ok(last_result);
+                                        }
+                                        self.host_drain_active = false;
+                                        return Err(e);
+                                    }
+                                }
+                            }
+                        }
+
+                        // Process batched messages as one run.
+                        // When runtime_input_sink is set, batched messages are
+                        // skipped — individual interactions were already admitted
+                        // to the runtime queue.
+                        if !batched_texts.is_empty() && self.runtime_input_sink.is_none() {
+                            let combined = batched_texts.join("\n\n");
+                            let batch_result = match &event_tx {
+                                Some(tx) => self.run_with_events(combined, tx.clone()).await,
+                                None => self.run(combined).await,
+                            };
+                            match batch_result {
+                                Ok(result) => {
+                                    last_result = result;
+                                    self.checkpoint_current_session().await;
+                                }
+                                Err(e) => {
+                                    if e.is_graceful() {
+                                        self.host_drain_active = false;
+                                        return Ok(last_result);
+                                    }
+                                    self.host_drain_active = false;
+                                    return Err(e);
+                                }
                             }
                         }
                     }
 
-                    // Re-drain immediately — legacy runtimes may have
-                    // staged batches or dismiss state that only appears
-                    // on the next drain.
-                    continue;
+                    if had_legacy_work || comms.dismiss_received() {
+                        // Re-drain immediately — legacy runtimes may have
+                        // staged batches or dismiss state that only appears
+                        // on the next drain.
+                        continue;
+                    }
+                    // No work and no dismiss: produce an empty classified vec
+                    // so we fall through to the tokio::select! wait below
+                    // instead of hot-looping until budget exhaustion.
+                    Vec::new()
                 }
             };
 

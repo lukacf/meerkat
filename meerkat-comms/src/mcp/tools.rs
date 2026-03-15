@@ -4,12 +4,12 @@
 
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
+use parking_lot::RwLock;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 #[cfg(test)]
 use crate::{CommsConfig, Keypair};
@@ -223,7 +223,7 @@ fn format_comms_command_error(
 
 async fn handle_peers(ctx: &ToolContext) -> Result<Value, String> {
     let self_pubkey = ctx.router.keypair_arc().public_key();
-    let peers = ctx.trusted_peers.read().await;
+    let peers = ctx.trusted_peers.read();
     let peer_map: BTreeMap<String, Value> = peers
         .peers
         .iter()

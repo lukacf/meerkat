@@ -72,6 +72,10 @@ enum SessionCommand {
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
         flow_tool_overlay: Option<TurnToolOverlay>,
     },
+    ReplaceClient {
+        client: Arc<dyn meerkat_core::AgentLlmClient>,
+        reply_tx: oneshot::Sender<()>,
+    },
     ReadSnapshot {
         reply_tx: oneshot::Sender<SessionSnapshot>,
     },
@@ -181,6 +185,9 @@ pub trait SessionAgent: Send {
         &mut self,
         overlay: Option<TurnToolOverlay>,
     ) -> Result<(), meerkat_core::error::AgentError>;
+
+    /// Replace the LLM client for subsequent turns.
+    fn replace_client(&mut self, _client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>) {}
 
     /// Cancel the currently running turn.
     fn cancel(&mut self);
@@ -706,6 +713,32 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         result.map_err(SessionError::Agent)
     }
 
+    async fn set_session_client(
+        &self,
+        id: &SessionId,
+        client: Arc<dyn meerkat_core::AgentLlmClient>,
+    ) -> Result<(), SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .command_tx
+            .send(SessionCommand::ReplaceClient { client, reply_tx })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        reply_rx.await.map_err(|_| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                "Session task dropped reply channel".to_string(),
+            ))
+        })
+    }
+
     async fn interrupt(&self, id: &SessionId) -> Result<(), SessionError> {
         let sessions = self.sessions.read().await;
         let handle = sessions
@@ -955,6 +988,11 @@ async fn session_task<A: SessionAgent>(
     let source_id = format!("session:{}", agent.session_id());
     while let Some(cmd) = commands.recv().await {
         match cmd {
+            SessionCommand::ReplaceClient { client, reply_tx } => {
+                agent.replace_client(client);
+                let _ = reply_tx.send(());
+                continue;
+            }
             SessionCommand::StartTurn {
                 prompt,
                 host_mode,

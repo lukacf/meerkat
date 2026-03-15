@@ -31,7 +31,6 @@ use thiserror::Error;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::net::TcpListener;
 use tokio::sync::Mutex as AsyncMutex;
-use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Receiver;
 #[cfg(not(target_arch = "wasm32"))]
@@ -196,14 +195,14 @@ impl CoreCommsRuntime for CommsRuntime {
         };
         // Delegate to Router which updates both the async trusted_peers and
         // the sync classification_peers sidecar (keeping them in sync).
-        self.router.add_trusted_peer(trusted_peer).await;
+        self.router.add_trusted_peer(trusted_peer);
         Ok(())
     }
 
     async fn remove_trusted_peer(&self, peer_id: &str) -> Result<bool, SendError> {
         let public_key =
             PubKey::from_peer_id(peer_id).map_err(|err| SendError::Validation(err.to_string()))?;
-        let removed = self.router.remove_trusted_peer(&public_key).await;
+        let removed = self.router.remove_trusted_peer(&public_key);
         Ok(removed)
     }
 
@@ -535,16 +534,6 @@ impl CoreCommsRuntime for CommsRuntime {
         use crate::agent::types::MessageIntent;
         use crate::types::MessageKind;
 
-        // Sync the classification sidecar from the async store before draining.
-        // This catches trust mutations that bypassed the Router (e.g.,
-        // sub-agent runners writing to trusted_peers_shared() directly).
-        {
-            let async_peers = self.trusted_peers.read().await;
-            let sidecar = self.router.classification_peers_arc();
-            let mut sync_peers = sidecar.write();
-            *sync_peers = async_peers.clone();
-        }
-
         let mut inbox = self.inbox.lock().await;
         let classified_entries = inbox.try_drain_classified();
 
@@ -743,7 +732,7 @@ pub enum CommsRuntimeError {
 pub struct CommsRuntime {
     public_key: PubKey,
     router: Arc<Router>,
-    trusted_peers: Arc<RwLock<TrustedPeers>>,
+    trusted_peers: Arc<parking_lot::RwLock<TrustedPeers>>,
     inbox: Arc<AsyncMutex<crate::Inbox>>,
     inbox_notify: Arc<tokio::sync::Notify>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -790,32 +779,23 @@ impl CommsRuntime {
         let trusted_peers = TrustedPeers::load_or_default(&config.trusted_peers_path)
             .map_err(|e| CommsRuntimeError::TrustLoadError(e.to_string()))?;
         let public_key = keypair.public_key();
-        let trusted_peers = Arc::new(RwLock::new(trusted_peers));
+        // Single source of truth for trust state — shared by the Router,
+        // IngressClassificationContext, and callers of trusted_peers_shared().
+        let trusted_peers = Arc::new(parking_lot::RwLock::new(trusted_peers));
 
-        // Create the sync classification sidecar first. This single Arc is shared
-        // between the Router (which updates it on add/remove_trusted_peer) and the
-        // IngressClassificationContext (which reads it during classification).
-        let classification_peers = Arc::new(parking_lot::RwLock::new(
-            trusted_peers
-                .try_read()
-                .map(|g| g.clone())
-                .unwrap_or_default(),
-        ));
-
-        // Build classified inbox using the shared classification_peers sidecar
+        // Build classified inbox using the same trusted_peers Arc
         let classification_context = Arc::new(crate::classify::IngressClassificationContext {
             require_peer_auth: config.require_peer_auth,
-            trusted_peers: classification_peers.clone(),
+            trusted_peers: trusted_peers.clone(),
             silent_intents: silent_intents.clone(),
         });
         let (inbox, inbox_sender) = crate::Inbox::new_classified(classification_context);
         let inbox_notify = inbox.notify();
         let actionable_notify = inbox.classified_actionable_notify();
 
-        let router = Router::with_shared_peers_and_classification(
+        let router = Router::with_shared_peers(
             keypair.clone(),
             trusted_peers.clone(),
-            classification_peers,
             config.comms_config.clone(),
             inbox_sender.clone(),
             config.require_peer_auth,
@@ -867,13 +847,12 @@ impl CommsRuntime {
     ) -> Result<Self, CommsRuntimeError> {
         let keypair = Keypair::generate();
         let public_key = keypair.public_key();
-        let trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
+        // Single source of truth — same Arc shared by Router, classification, and callers.
+        let trusted_peers = Arc::new(parking_lot::RwLock::new(TrustedPeers::new()));
 
-        // Shared sync sidecar for classification (same Arc used by Router and context)
-        let classification_peers = Arc::new(parking_lot::RwLock::new(TrustedPeers::new()));
         let classification_context = Arc::new(crate::classify::IngressClassificationContext {
             require_peer_auth: true,
-            trusted_peers: classification_peers.clone(),
+            trusted_peers: trusted_peers.clone(),
             silent_intents: silent_intents.clone(),
         });
         let (inbox, inbox_sender) = crate::Inbox::new_classified(classification_context);
@@ -897,10 +876,9 @@ impl CommsRuntime {
             require_peer_auth: true,
             allow_external_unauthenticated: false,
         };
-        let router = Router::with_shared_peers_and_classification(
+        let router = Router::with_shared_peers(
             keypair.clone(),
             trusted_peers.clone(),
-            classification_peers,
             comms_config,
             inbox_sender.clone(),
             true,
@@ -1054,8 +1032,8 @@ impl CommsRuntime {
     /// Add a trusted peer, updating both the async store and the sync
     /// classification sidecar. Prefer this over writing to
     /// `trusted_peers_shared()` directly.
-    pub async fn upsert_trusted_peer(&self, peer: TrustedPeer) {
-        self.router.add_trusted_peer(peer).await;
+    pub fn upsert_trusted_peer(&self, peer: TrustedPeer) {
+        self.router.add_trusted_peer(peer);
     }
 
     /// Update the inproc registry entry with friendly metadata.
@@ -1126,7 +1104,7 @@ impl CommsRuntime {
         let mut emitted = 0usize;
 
         {
-            let trusted = self.trusted_peers.read().await;
+            let trusted = self.trusted_peers.read();
             for peer in &trusted.peers {
                 if peer.name == participant_name || peer.pubkey == self.public_key {
                     continue;
@@ -1252,7 +1230,7 @@ impl CommsRuntime {
     pub fn router_arc(&self) -> Arc<Router> {
         self.router.clone()
     }
-    pub fn trusted_peers_shared(&self) -> Arc<RwLock<TrustedPeers>> {
+    pub fn trusted_peers_shared(&self) -> Arc<parking_lot::RwLock<TrustedPeers>> {
         self.trusted_peers.clone()
     }
     pub fn inbox_notify(&self) -> Arc<tokio::sync::Notify> {
@@ -1316,16 +1294,17 @@ impl CommsRuntime {
 
     pub async fn drain_messages(&self) -> Vec<CommsMessage> {
         // Drain from the classified queue (sole consumer since 0.4.10).
-        // Convert classified entries back to CommsMessage for callers
-        // that use the inherent API.
+        // Convert classified entries back to CommsMessage using the
+        // ingress-stored metadata (from_peer, class) rather than
+        // re-resolving against live trust state. This preserves the
+        // ingress-snapshot guarantee: a message accepted at ingress
+        // cannot disappear or change from_peer if the peer is
+        // removed/renamed before drain.
         let mut inbox = self.inbox.lock().await;
         let entries = inbox.try_drain_classified();
-        let trusted = self.trusted_peers.read().await;
         entries
             .into_iter()
-            .filter_map(|entry| {
-                CommsMessage::from_inbox_item(&entry.item, &trusted, self.require_peer_auth)
-            })
+            .filter_map(|entry| CommsMessage::from_classified_entry(&entry))
             .collect()
     }
 
@@ -1333,12 +1312,12 @@ impl CommsRuntime {
         loop {
             {
                 let mut inbox = self.inbox.lock().await;
-                let entries = inbox.try_drain_classified();
-                if !entries.is_empty() {
-                    let trusted = self.trusted_peers.read().await;
-                    if let Some(msg) = entries.into_iter().find_map(|entry| {
-                        CommsMessage::from_inbox_item(&entry.item, &trusted, self.require_peer_auth)
-                    }) {
+                // Consume one entry at a time so back-to-back messages are
+                // preserved. The previous implementation drained the entire
+                // classified queue and discarded everything after the first
+                // decodable message.
+                while let Some(entry) = inbox.try_recv_one_classified() {
+                    if let Some(msg) = CommsMessage::from_classified_entry(&entry) {
                         return Some(msg);
                     }
                 }
@@ -1382,7 +1361,7 @@ impl ListenerHandle {
 async fn spawn_uds_listener(
     path: &Path,
     keypair: Arc<Keypair>,
-    trusted: Arc<RwLock<TrustedPeers>>,
+    trusted: Arc<parking_lot::RwLock<TrustedPeers>>,
     require_peer_auth: bool,
     inbox_sender: InboxSender,
 ) -> Result<ListenerHandle, std::io::Error> {
@@ -1402,7 +1381,7 @@ async fn spawn_uds_listener(
             let (keypair, trusted, inbox_sender) =
                 (keypair.clone(), trusted.clone(), inbox_sender.clone());
             tokio::spawn(async move {
-                let trusted_snapshot = trusted.read().await.clone();
+                let trusted_snapshot = trusted.read().clone();
                 let _ = handle_connection(
                     stream,
                     require_peer_auth,
@@ -1421,7 +1400,7 @@ async fn spawn_uds_listener(
 async fn spawn_tcp_listener(
     addr: &str,
     keypair: Arc<Keypair>,
-    trusted: Arc<RwLock<TrustedPeers>>,
+    trusted: Arc<parking_lot::RwLock<TrustedPeers>>,
     require_peer_auth: bool,
     inbox_sender: InboxSender,
 ) -> Result<ListenerHandle, std::io::Error> {
@@ -1431,7 +1410,7 @@ async fn spawn_tcp_listener(
             let (keypair, trusted, inbox_sender) =
                 (keypair.clone(), trusted.clone(), inbox_sender.clone());
             tokio::spawn(async move {
-                let trusted_snapshot = trusted.read().await.clone();
+                let trusted_snapshot = trusted.read().clone();
                 let _ = handle_connection(
                     stream,
                     require_peer_auth,
@@ -1663,15 +1642,12 @@ mod tests {
 
         let sender = Keypair::generate();
         // Use router.add_trusted_peer to sync both async store and classification sidecar
-        runtime
-            .router
-            .add_trusted_peer(crate::TrustedPeer {
-                name: "sender".to_string(),
-                pubkey: sender.public_key(),
-                addr: "tcp://127.0.0.1:4200".to_string(),
-                meta: crate::PeerMeta::default(),
-            })
-            .await;
+        runtime.router.add_trusted_peer(crate::TrustedPeer {
+            name: "sender".to_string(),
+            pubkey: sender.public_key(),
+            addr: "tcp://127.0.0.1:4200".to_string(),
+            meta: crate::PeerMeta::default(),
+        });
 
         let request_id = Uuid::new_v4();
         let reply_to = Uuid::new_v4();
@@ -2003,25 +1979,19 @@ mod tests {
 
         // Use router.add_trusted_peer so both the async store AND the
         // sync classification sidecar are updated.
-        sender
-            .router
-            .add_trusted_peer(crate::TrustedPeer {
-                name: receiver_name.clone(),
-                pubkey: receiver.public_key(),
-                addr: format!("inproc://{receiver_name}"),
-                meta: crate::PeerMeta::default(),
-            })
-            .await;
+        sender.router.add_trusted_peer(crate::TrustedPeer {
+            name: receiver_name.clone(),
+            pubkey: receiver.public_key(),
+            addr: format!("inproc://{receiver_name}"),
+            meta: crate::PeerMeta::default(),
+        });
 
-        receiver
-            .router
-            .add_trusted_peer(crate::TrustedPeer {
-                name: sender_name.clone(),
-                pubkey: sender.public_key(),
-                addr: format!("inproc://{sender_name}"),
-                meta: crate::PeerMeta::default(),
-            })
-            .await;
+        receiver.router.add_trusted_peer(crate::TrustedPeer {
+            name: sender_name.clone(),
+            pubkey: sender.public_key(),
+            addr: format!("inproc://{sender_name}"),
+            meta: crate::PeerMeta::default(),
+        });
 
         let cmd = CommsCommand::PeerMessage {
             to: PeerName::new(receiver_name).expect("receiver_name is a valid peer name"),
@@ -2228,7 +2198,7 @@ mod tests {
         let runtime = CommsRuntime::inproc_only(&runtime_name).unwrap();
 
         {
-            let mut trusted = runtime.trusted_peers.write().await;
+            let mut trusted = runtime.trusted_peers.write();
             trusted.upsert(crate::TrustedPeer {
                 name: peer_name.clone(),
                 pubkey: peer.public_key(),
@@ -2274,7 +2244,7 @@ mod tests {
         let peer = CommsRuntime::inproc_only(&peer_name).unwrap();
         let runtime = CommsRuntime::inproc_only(&runtime_name).unwrap();
         {
-            let mut trusted = runtime.trusted_peers.write().await;
+            let mut trusted = runtime.trusted_peers.write();
             trusted.upsert(crate::TrustedPeer {
                 name: peer_name.clone(),
                 pubkey: peer.public_key(),
@@ -2429,7 +2399,7 @@ mod tests {
         let _peer = CommsRuntime::inproc_only(&peer_name).unwrap();
         let runtime = CommsRuntime::inproc_only(&runtime_name).unwrap();
         {
-            let mut trusted = runtime.trusted_peers.write().await;
+            let mut trusted = runtime.trusted_peers.write();
             trusted.upsert(crate::TrustedPeer {
                 name: peer_name.clone(),
                 pubkey: _peer.public_key(),

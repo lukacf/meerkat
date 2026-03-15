@@ -181,6 +181,15 @@ pub trait AgentToolDispatcher: Send + Sync {
     ) -> Result<Arc<dyn AgentToolDispatcher>, crate::wait_interrupt::WaitInterruptBindError> {
         Err(crate::wait_interrupt::WaitInterruptBindError::Unsupported)
     }
+
+    /// Whether this dispatcher supports wait interrupt binding.
+    ///
+    /// Non-consuming probe that callers check before calling the consuming
+    /// `bind_wait_interrupt()`. Default: `false`. Dispatchers that contain a
+    /// `WaitTool` (e.g. `CompositeDispatcher`) override this to return `true`.
+    fn supports_wait_interrupt(&self) -> bool {
+        false
+    }
 }
 
 /// A tool dispatcher that filters tools based on a policy
@@ -248,6 +257,10 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for Filtered
             allowed_tools: owned.allowed_tools,
             filtered_tools: owned.filtered_tools,
         }))
+    }
+
+    fn supports_wait_interrupt(&self) -> bool {
+        self.inner.supports_wait_interrupt()
     }
 }
 

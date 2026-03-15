@@ -140,6 +140,11 @@ impl Inbox {
         entries
     }
 
+    /// Try to receive a single classified entry without blocking.
+    pub(crate) fn try_recv_one_classified(&mut self) -> Option<ClassifiedInboxEntry> {
+        self.classified_rx.as_mut()?.try_recv().ok()
+    }
+
     /// Get the actionable-input notifier (fires only for actionable classes).
     pub(crate) fn classified_actionable_notify(&self) -> Option<Arc<Notify>> {
         self.actionable_notify.clone()

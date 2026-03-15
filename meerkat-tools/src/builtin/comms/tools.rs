@@ -7,9 +7,9 @@ use crate::tokio;
 use async_trait::async_trait;
 use meerkat_comms::{Router, ToolContext, TrustedPeers, handle_tools_call, tools_list};
 use meerkat_core::ToolDef;
+use parking_lot::RwLock;
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 /// Shared state for all comms tools
 #[derive(Clone)]

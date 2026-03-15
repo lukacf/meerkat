@@ -10,9 +10,9 @@ use meerkat_core::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
 use meerkat_core::gateway::Availability;
 use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
+use parking_lot::RwLock;
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 /// Tool dispatcher that provides comms tools.
 pub struct CommsToolSurface {

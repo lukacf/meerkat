@@ -45,7 +45,7 @@ pub struct SubAgentToolState {
     /// Parent's trusted peers (for adding sub-agents as trusted)
     /// This is shared with the parent's CommsRuntime so updates are visible to listeners.
     #[cfg(feature = "comms")]
-    pub parent_trusted_peers: Option<Arc<RwLock<TrustedPeers>>>,
+    pub parent_trusted_peers: Option<Arc<parking_lot::RwLock<TrustedPeers>>>,
 
     /// Parent's sync classification sidecar. Updated alongside parent_trusted_peers
     /// so ingress classification sees newly trusted sub-agent peers immediately.
@@ -132,7 +132,7 @@ impl SubAgentToolState {
         config: SubAgentConfig,
         current_depth: u32,
         parent_comms: ParentCommsContext,
-        parent_trusted_peers: Arc<RwLock<TrustedPeers>>,
+        parent_trusted_peers: Arc<parking_lot::RwLock<TrustedPeers>>,
         parent_classification_peers: Arc<parking_lot::RwLock<TrustedPeers>>,
     ) -> Self {
         Self {
@@ -592,7 +592,7 @@ mod tests {
             inproc_namespace: None,
         };
 
-        let parent_trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
+        let parent_trusted_peers = Arc::new(parking_lot::RwLock::new(TrustedPeers::new()));
         let parent_classification_peers = Arc::new(parking_lot::RwLock::new(TrustedPeers::new()));
 
         let state = SubAgentToolState::with_comms(
@@ -649,7 +649,7 @@ mod tests {
             inproc_namespace: None,
         };
 
-        let parent_trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
+        let parent_trusted_peers = Arc::new(parking_lot::RwLock::new(TrustedPeers::new()));
         let parent_classification_peers = Arc::new(parking_lot::RwLock::new(TrustedPeers::new()));
 
         let state = SubAgentToolState::with_comms(
@@ -689,11 +689,11 @@ mod tests {
         use meerkat_comms::{PubKey, TrustedPeer};
         use std::path::PathBuf;
 
-        let trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
+        let trusted_peers = Arc::new(parking_lot::RwLock::new(TrustedPeers::new()));
 
         // Initially empty
         {
-            let peers = trusted_peers.read().await;
+            let peers = trusted_peers.read();
             assert!(!peers.has_peers(), "Initially should have no peers");
         }
 
@@ -707,13 +707,13 @@ mod tests {
         };
 
         {
-            let mut peers = trusted_peers.write().await;
+            let mut peers = trusted_peers.write();
             peers.upsert(child_peer);
         }
 
         // Now the child should be in the trusted peers
         {
-            let peers = trusted_peers.read().await;
+            let peers = trusted_peers.read();
             assert!(peers.has_peers(), "Should have the child peer after upsert");
             assert_eq!(peers.len(), 1);
 
@@ -756,7 +756,7 @@ mod tests {
         // Verify the state holds the same Arc and sees the child
         assert!(state.parent_trusted_peers.is_some());
         let peers_from_state = state.parent_trusted_peers.unwrap();
-        let peers = peers_from_state.read().await;
+        let peers = peers_from_state.read();
         assert!(
             peers.has_peers(),
             "State should see the child added earlier"

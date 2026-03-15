@@ -683,10 +683,10 @@ impl SessionRuntime {
 
         if pending_session.is_none() && !self.live_session_is_stale(session_id).await? {
             // Hot-swap LLM client if model/provider overrides are present.
-            if let Some(ref ov) = overrides {
-                if ov.model.is_some() || ov.provider.is_some() || ov.provider_params.is_some() {
-                    self.hot_swap_llm_client(session_id, ov).await?;
-                }
+            if let Some(ref ov) = overrides
+                && (ov.model.is_some() || ov.provider.is_some() || ov.provider_params.is_some())
+            {
+                self.hot_swap_llm_client(session_id, ov).await?;
             }
 
             let req = StartTurnRequest {

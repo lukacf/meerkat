@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.11] - 2026-03-15
+
+### Fixed
+
+- **RPC in-session model switching silently dropped** — `turn/start` model/provider/provider_params overrides were built in the handler but never reached the executor because `RuntimeTurnMetadata` did not carry those fields. Added model/provider/provider_params to `RuntimeTurnMetadata`, extracted `hot_swap_llm_client()`, and wired it into `apply_runtime_turn` so overrides propagate end-to-end.
+- **MCP drain race in tests** — `set_inflight_calls_for_testing` could fire before the MCP router was ready. Now waits for `wait_until_ready` first.
+
 ## [0.4.10] - 2026-03-15
 
 ### Added

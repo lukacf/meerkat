@@ -3197,6 +3197,7 @@ async fn run_agent(
                 skill_references: canonical_skill_refs,
                 flow_tool_overlay,
                 additional_instructions: None,
+                ..Default::default()
             },
         ),
     ));
@@ -3680,6 +3681,7 @@ async fn resume_session_with_llm_override(
                 skill_references: canonical_skill_refs,
                 flow_tool_overlay,
                 additional_instructions,
+                ..Default::default()
             },
         ),
     ));

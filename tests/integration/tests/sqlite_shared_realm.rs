@@ -192,8 +192,14 @@ async fn shutdown_rpc(mut process: RpcProcess) -> Result<(), Box<dyn std::error:
     let _ = process.stdin.shutdown().await;
     let _ = process.child.kill().await;
     let _ = timeout(Duration::from_secs(5), process.child.wait()).await;
+    // Drain stderr with a timeout — grandchild processes may hold the pipe
+    // open after kill(), causing read_to_string to block forever.
     let mut stderr = String::new();
-    let _ = process.stderr.read_to_string(&mut stderr).await;
+    let _ = timeout(
+        Duration::from_secs(2),
+        process.stderr.read_to_string(&mut stderr),
+    )
+    .await;
     Ok(())
 }
 
@@ -315,6 +321,7 @@ async fn assert_default_sqlite_realm(
 }
 
 #[tokio::test]
+#[ignore = "integration-real: spawns rkat-rpc/rkat-rest binaries"]
 async fn rpc_rest_rpc_default_sqlite_shared_realm_roundtrip()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = sqlite_shared_realm_test_lock().lock().await;
@@ -462,6 +469,7 @@ async fn rpc_rest_rpc_default_sqlite_shared_realm_roundtrip()
 }
 
 #[tokio::test]
+#[ignore = "integration-real: spawns rkat-rpc/rkat binaries"]
 async fn cli_rpc_cli_default_sqlite_shared_realm_roundtrip()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = sqlite_shared_realm_test_lock().lock().await;
@@ -560,6 +568,7 @@ async fn cli_rpc_cli_default_sqlite_shared_realm_roundtrip()
 }
 
 #[tokio::test]
+#[ignore = "integration-real: spawns rkat-rest/rkat binaries"]
 async fn cli_rest_cli_default_sqlite_shared_realm_roundtrip()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = sqlite_shared_realm_test_lock().lock().await;

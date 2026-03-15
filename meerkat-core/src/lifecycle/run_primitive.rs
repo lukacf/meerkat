@@ -82,6 +82,15 @@ pub struct RuntimeTurnMetadata {
     pub flow_tool_overlay: Option<TurnToolOverlay>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_instructions: Option<Vec<String>>,
+    /// Override model for this turn (hot-swap on materialized sessions).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Override provider for this turn (hot-swap on materialized sessions).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Override provider-specific parameters for this turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_params: Option<serde_json::Value>,
 }
 
 /// An input staged for application at a run boundary.

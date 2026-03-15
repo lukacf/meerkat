@@ -22,18 +22,20 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 // Mock LLM client
 // ---------------------------------------------------------------------------
 
+/// Mock LLM client that echoes the model name from each request.
 struct MockLlmClient;
 
 #[async_trait]
 impl LlmClient for MockLlmClient {
     fn stream<'a>(
         &'a self,
-        _request: &'a meerkat_client::LlmRequest,
+        request: &'a meerkat_client::LlmRequest,
     ) -> Pin<Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>>
     {
+        let model = request.model.clone();
         Box::pin(stream::iter(vec![
             Ok(meerkat_client::LlmEvent::TextDelta {
-                delta: "Hello from mock".to_string(),
+                delta: format!("Hello from mock [model={model}]"),
                 meta: None,
             }),
             Ok(meerkat_client::LlmEvent::Done {
@@ -635,6 +637,69 @@ async fn test_mcp_add_staged_response_has_persisted_false() {
     let result = &response["result"];
     assert_eq!(result["status"], "staged");
     assert_eq!(result["persisted"], false);
+
+    drop(writer);
+    server_handle.await.unwrap().unwrap();
+}
+
+/// 11. In-session model switching via turn/start with model override.
+///
+/// Create a session -> run first turn -> verify default model ->
+/// run second turn with model override -> verify model name changed.
+#[tokio::test]
+async fn in_session_model_switch_via_turn_start() {
+    let (mut writer, mut reader, server_handle) = spawn_test_server();
+
+    // 1. session/create with initial prompt (materializes the session)
+    let create_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "session/create",
+        "params": {"prompt": "Hello"}
+    });
+    send_request(&mut writer, &create_req).await;
+    let create_resp = read_response(&mut reader).await;
+    assert!(
+        create_resp["error"].is_null(),
+        "session/create failed: {create_resp}"
+    );
+    let session_id = create_resp["result"]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let first_text = create_resp["result"]["text"].as_str().unwrap();
+    assert!(
+        first_text.contains("Hello from mock"),
+        "First turn should produce mock text, got: {first_text}"
+    );
+    // Default model is claude-opus-4-6; verify it
+    assert!(
+        first_text.contains("model=claude-opus-4-6"),
+        "First turn should use default model (claude-opus-4-6), got: {first_text}"
+    );
+
+    // 2. turn/start with model override on the materialized session
+    let turn_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "turn/start",
+        "params": {
+            "session_id": session_id,
+            "prompt": "Follow up with new model",
+            "model": "claude-sonnet-4-5"
+        }
+    });
+    send_request(&mut writer, &turn_req).await;
+    let turn_resp = read_response(&mut reader).await;
+    assert!(
+        turn_resp["error"].is_null(),
+        "turn/start with model override failed: {turn_resp}"
+    );
+    let switched_text = turn_resp["result"]["text"].as_str().unwrap();
+    assert!(
+        switched_text.contains("model=claude-sonnet-4-5"),
+        "After model switch, response should use claude-sonnet-4-5, got: {switched_text}"
+    );
 
     drop(writer);
     server_handle.await.unwrap().unwrap();

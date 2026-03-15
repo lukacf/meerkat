@@ -1924,6 +1924,7 @@ async fn create_session(
                 skill_references,
                 flow_tool_overlay: None,
                 additional_instructions: None,
+                ..Default::default()
             },
         ),
     ));
@@ -2231,6 +2232,7 @@ async fn continue_session(
                 skill_references: svc_req.skill_references.clone(),
                 flow_tool_overlay: svc_req.flow_tool_overlay.clone(),
                 additional_instructions: svc_req.additional_instructions.clone(),
+                ..Default::default()
             },
         ),
     ));

@@ -1,13 +1,13 @@
 """Generated wire types for Meerkat SDK.
 
-Contract version: 0.4.11
+Contract version: 0.4.12
 """
 
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 
-CONTRACT_VERSION = "0.4.11"
+CONTRACT_VERSION = "0.4.12"
 
 
 @dataclass
@@ -157,3 +157,4 @@ class McpLiveOpResponse:
     server_name: Optional[str] = None
     session_id: str = ''
     status: str = ''
+

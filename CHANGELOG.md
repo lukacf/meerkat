@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.12] - 2026-03-16
+
+### Added
+
+#### Multimodal Content Support (Images) (#154)
+- **`ContentBlock` type** — `Text` and `Image` variants in `meerkat-core`, threaded through tool results (`ToolResult.content: Vec<ContentBlock>`), user messages (`UserMessage.content: Vec<ContentBlock>`), and all provider adapters. Backwards-compatible serde: plain strings deserialize to `[Text]`, text-only content serializes as string.
+- **`ContentInput` type** — untagged `Text(String) | Blocks(Vec<ContentBlock>)` accepted by `CreateSessionRequest.prompt` and `StartTurnRequest.prompt` across all surfaces (REST, RPC, CLI, MCP Server).
+- **`ToolOutput` enum** — `Json(Value) | Blocks(Vec<ContentBlock>)` replaces `Value` return on `BuiltinTool::call()`, enabling tools to return multimodal content.
+- **`view_image` builtin tool** — reads images from disk with path sandboxing (symlink-safe via `canonicalize`), 5MB size limit, extension validation (PNG/JPEG/GIF/WebP/SVG). Returns `ToolOutput::Blocks` with base64-encoded image data. Guarded with `#[cfg(not(target_arch = "wasm32"))]`.
+- **Provider capability gating** — `ModelProfile` gains `vision` and `image_tool_results` fields. `view_image` hidden via `ToolScope` external filter for models that can't process image tool results (OpenAI). Dynamic refresh on model hot-swap: filter composes with existing restrictions instead of clobbering.
+- **Provider image serialization** — Anthropic: native `image.source.base64` format in user messages and tool results. OpenAI: `image_url` data URIs in user messages, text degradation for tool results. Gemini: `inlineData` parts in user messages and alongside `functionResponse` for tool results.
+- **MCP image passthrough** — `McpConnection::call_tool()` returns `Vec<ContentBlock>`, capturing `image` content from MCP servers as `ContentBlock::Image`.
+- **Comms multimodal plumbing** — `blocks: Option<Vec<ContentBlock>>` added alongside `body: String` at every comms layer (`MessageKind`, `CommsContent`, `InteractionContent`, `CommsCommand`, `PlainMessage`, `InboxItem`, `SendInput`). CBOR backwards compat verified. Turn-boundary drain and host-mode batching paths preserve blocks.
+- **Runtime multimodal routing** — `CoreRenderable::Blocks` variant, `PromptInput.blocks` and `PeerInput.blocks` fields, `extract_prompt()` returns `ContentInput` on both RPC and REST runtime executors.
+- **Wire types** — `WireContentBlock` (no `source_path`), `WireContentInput`, `WireToolResultContent` in `meerkat-contracts`. Schema regenerated. Forward-compatible `Unknown` variant.
+- **SDK multimodal prompts** — Python: `prompt: str | list[dict]` on all session methods. TypeScript: `prompt: string | ContentBlock[]`. Web SDK: `ContentInput` parsed at WASM bridge.
+- **Hook `has_images` flag** — `HookToolResult.has_images` and `ToolExecutionCompleted.has_images` for downstream consumers.
+- **Hook patch rebuild rule** — deterministic: strip text blocks, prepend patched text, append image blocks in original order.
+- **Compaction image stripping** — `strip_images_for_compaction()` replaces images with `[image: {media_type}]` placeholders. `source_path` excluded from placeholders to prevent filesystem path leaks.
+- **`Display` impl for `ContentBlock`** — delegates to `text_projection()`.
+- **Dispatch-time tool gating** — hidden tools (via ToolScope external filter) are blocked at execution time, not just advertisement time.
+
+### Changed
+
+- **`ToolResult.content`** — `String` → `Vec<ContentBlock>` (breaking Rust API). `ToolResult::new()` still accepts `String`. Use `.text_content()` for string access.
+- **`UserMessage.content`** — `String` → `Vec<ContentBlock>` (breaking Rust API). `UserMessage::text()` constructor for common case.
+- **`BuiltinTool::call()` return** — `Result<Value, _>` → `Result<ToolOutput, _>` (breaking for custom tool implementors).
+- **`CreateSessionRequest.prompt` / `StartTurnRequest.prompt`** — `String` → `ContentInput` (breaking, use `.into()` from String).
+- **`AgentRunner::run()` / `run_with_events()`** — accept `ContentInput` instead of `String`.
+- **`content_blocks_serde`** — only collapses single text block to string; multi-block text arrays serialize as arrays to preserve block boundaries.
+- **`source_path`** — `#[serde(skip_serializing)]`: never persisted to session stores, only used in-memory for compaction re-read hints.
+
 ## [0.4.11] - 2026-03-15
 
 ### Fixed

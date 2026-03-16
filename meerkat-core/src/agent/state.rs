@@ -632,14 +632,27 @@ where
                             executable_tool_calls.push(tc);
                         }
 
+                        // Build a set of currently visible tool names for dispatch-time gating.
+                        // This prevents models from executing tools hidden by ToolScope
+                        // external filters (e.g. view_image on non-image-capable models).
+                        let visible_tool_names: std::collections::HashSet<String> =
+                            tool_defs.iter().map(|t| t.name.clone()).collect();
+
                         // Execute all allowed tool calls in parallel using join_all
                         let dispatch_futures: Vec<_> = executable_tool_calls
                             .into_iter()
                             .map(|tc| {
                                 let tools_ref = Arc::clone(&tools_ref);
+                                let visible = visible_tool_names.contains(&tc.name);
                                 async move {
                                     let start = crate::time_compat::Instant::now();
-                                    let dispatch_result = tools_ref.dispatch(tc.as_view()).await;
+                                    let dispatch_result = if visible {
+                                        tools_ref.dispatch(tc.as_view()).await
+                                    } else {
+                                        Err(crate::error::ToolError::NotFound {
+                                            name: tc.name.clone(),
+                                        })
+                                    };
                                     let duration_ms = start.elapsed().as_millis() as u64;
                                     (tc, dispatch_result, duration_ms)
                                 }
@@ -2054,7 +2067,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_receives_filtered_tools_but_dispatcher_keeps_full_execution_path() {
+    async fn provider_receives_filtered_tools_and_dispatch_blocks_hidden_tools() {
         let client = Arc::new(VisibilityRecordingLlmClient::new());
         let tools = Arc::new(FullToolDispatcher::new(&["visible", "secret"]));
         let mut agent = AgentBuilder::new()
@@ -2071,13 +2084,18 @@ mod tests {
         let result = agent.run("prompt".to_string().into()).await.unwrap();
         assert_eq!(result.text, "done");
 
+        // Provider sees only visible tools (filtered by ToolScope)
         let seen = client.seen_tools();
         assert_eq!(seen.len(), 2);
         assert_eq!(seen[0], vec!["visible".to_string()]);
         assert_eq!(seen[1], vec!["visible".to_string()]);
 
+        // Hidden tools are NOT dispatched — blocked at execution time too
         let dispatched = tools.dispatched();
-        assert_eq!(dispatched, vec!["secret".to_string()]);
+        assert!(
+            dispatched.is_empty(),
+            "hidden tools should not be dispatched, but got: {dispatched:?}"
+        );
     }
 
     #[tokio::test]

@@ -1220,7 +1220,9 @@ mod scenario_09_session_service {
         // 1. Create session (runs first turn)
         let create_req = CreateSessionRequest {
             model: smoke_model(),
-            prompt: "Hello, I am testing the session service.".to_string(),
+            prompt: "Hello, I am testing the session service."
+                .to_string()
+                .into(),
             system_prompt: Some("You are a helpful assistant. Be brief.".to_string()),
             max_tokens: Some(256),
             event_tx: None,
@@ -1268,7 +1270,7 @@ mod scenario_09_session_service {
 
         // 3. Start follow-up turn
         let turn_req = StartTurnRequest {
-            prompt: "What did I just say to you?".to_string(),
+            prompt: "What did I just say to you?".to_string().into(),
             event_tx: None,
             host_mode: false,
             skill_references: None,

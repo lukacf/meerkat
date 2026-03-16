@@ -29,7 +29,8 @@ async fn dispatch_json(
         args: &args_raw,
     };
     let result = dispatcher.dispatch(call).await?;
-    serde_json::from_str(&result.content).or(Ok(serde_json::Value::String(result.content)))
+    let text = result.text_content();
+    serde_json::from_str(&text).or(Ok(serde_json::Value::String(text)))
 }
 
 /// Create a CompositeDispatcher with shell tools enabled.

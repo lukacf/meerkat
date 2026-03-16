@@ -169,6 +169,7 @@ mod tests {
             .unwrap();
 
         // Verify output
+        let result = result.into_json().unwrap();
         assert_eq!(result["job_id"], job_id.0);
         assert_eq!(result["status"], "cancelled");
     }

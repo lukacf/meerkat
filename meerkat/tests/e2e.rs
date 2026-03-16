@@ -255,11 +255,7 @@ impl AgentToolDispatcher for MockToolDispatcher {
             .get(call.name)
             .cloned()
             .ok_or_else(|| ToolError::not_found(call.name))?;
-        Ok(ToolResult {
-            tool_use_id: call.id.to_string(),
-            content,
-            is_error: false,
-        })
+        Ok(ToolResult::new(call.id.to_string(), content, false))
     }
 }
 
@@ -1073,11 +1069,7 @@ mod parallel_tools {
                 Value::String(s) => s.clone(),
                 _ => serde_json::to_string(&value).unwrap_or_default(),
             };
-            Ok(ToolResult {
-                tool_use_id: call.id.to_string(),
-                content,
-                is_error: false,
-            })
+            Ok(ToolResult::new(call.id.to_string(), content, false))
         }
     }
 
@@ -1283,11 +1275,7 @@ mod parallel_tools {
                     Value::String(s) => s.clone(),
                     _ => serde_json::to_string(&value).unwrap_or_default(),
                 };
-                Ok(ToolResult {
-                    tool_use_id: call.id.to_string(),
-                    content,
-                    is_error: false,
-                })
+                Ok(ToolResult::new(call.id.to_string(), content, false))
             }
         }
 

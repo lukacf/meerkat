@@ -163,6 +163,7 @@ mod tests {
             .unwrap();
 
         // Verify output has expected fields
+        let result = result.into_json().unwrap();
         assert!(result.get("id").is_some());
         assert!(result.get("command").is_some());
         assert!(result.get("status").is_some());

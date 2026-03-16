@@ -76,7 +76,7 @@ mod scenario_22_session_service_lifecycle {
         let create_result = service
             .create_session(CreateSessionRequest {
                 model: smoke_model(),
-                prompt: "I am EphBot. Remember this name.".to_string(),
+                prompt: "I am EphBot. Remember this name.".to_string().into(),
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
@@ -106,7 +106,7 @@ mod scenario_22_session_service_lifecycle {
             .start_turn(
                 &session_id,
                 StartTurnRequest {
-                    prompt: "What is my name? Reply in one sentence.".to_string(),
+                    prompt: "What is my name? Reply in one sentence.".to_string().into(),
                     event_tx: None,
                     host_mode: false,
                     skill_references: None,

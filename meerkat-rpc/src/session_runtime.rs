@@ -36,7 +36,9 @@ use meerkat_core::skills::{SkillError, SourceIdentityRegistry};
 use meerkat_core::types::{RunResult, SessionId};
 #[cfg(feature = "mcp")]
 use meerkat_core::{AgentToolDispatcher, ToolGateway};
-use meerkat_core::{Config, ConfigStore, HookRunOverrides, Session, SessionSystemContextState};
+use meerkat_core::{
+    Config, ConfigStore, ContentInput, HookRunOverrides, Session, SessionSystemContextState,
+};
 #[cfg(all(test, feature = "mcp"))]
 use meerkat_core::{ToolConfigChangeOperation, ToolConfigChangedPayload};
 use meerkat_runtime::RuntimeSessionAdapter;
@@ -103,7 +105,7 @@ struct PendingSession {
     labels: Option<BTreeMap<String, String>>,
     /// Prompt from `session/create` when `initial_turn` is deferred.
     /// Prepended to the first `turn/start` prompt.
-    deferred_prompt: Option<String>,
+    deferred_prompt: Option<ContentInput>,
     /// Stable creation timestamp (Unix seconds), set when the pending session is staged.
     created_at_secs: u64,
     /// Last-modified timestamp (Unix seconds), updated on mutations like append_system_context.
@@ -115,6 +117,20 @@ fn now_unix_secs() -> u64 {
         .duration_since(meerkat_core::time_compat::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Merge a deferred prompt with a turn prompt, preserving multimodal content.
+/// If both are plain text, concatenates with `\n\n`. Otherwise, converts both
+/// to content blocks and concatenates (deferred blocks first, then turn blocks).
+fn merge_content_inputs(deferred: ContentInput, turn: ContentInput) -> ContentInput {
+    match (&deferred, &turn) {
+        (ContentInput::Text(d), ContentInput::Text(t)) => ContentInput::Text(format!("{d}\n\n{t}")),
+        _ => {
+            let mut blocks = deferred.into_blocks();
+            blocks.extend(turn.into_blocks());
+            ContentInput::Blocks(blocks)
+        }
+    }
 }
 
 enum PendingSessionPhase {
@@ -370,21 +386,65 @@ impl SessionRuntime {
             .await
             .map_err(session_error_to_rpc)?;
 
-        // Refresh view_image visibility based on the new model's capabilities.
+        // Refresh view_image visibility based on the new model's capabilities,
+        // merging with any pre-existing external tool filter so we don't clobber
+        // restrictions set by other sources.
         let provider_str = provider.as_str();
-        let filter =
-            if let Some(profile) = meerkat_models::profile::profile_for(provider_str, model) {
-                if profile.image_tool_results {
-                    // New model supports image tool results — clear any prior deny.
-                    meerkat_core::ToolFilter::All
-                } else {
-                    // New model does not support image tool results — hide view_image.
-                    meerkat_core::ToolFilter::Deny(["view_image".to_string()].into_iter().collect())
+        let Some(profile) = meerkat_models::profile::profile_for(provider_str, model) else {
+            // Unknown model — leave tool visibility unchanged.
+            return Ok(());
+        };
+
+        // Read the current external filter from session metadata.
+        let current_filter = self
+            .service
+            .export_live_session(session_id)
+            .await
+            .ok()
+            .and_then(|session| {
+                session
+                    .metadata()
+                    .get(meerkat_core::EXTERNAL_TOOL_FILTER_METADATA_KEY)
+                    .and_then(|v| {
+                        serde_json::from_value::<meerkat_core::ToolFilter>(v.clone()).ok()
+                    })
+            })
+            .unwrap_or(meerkat_core::ToolFilter::All);
+
+        let view_image = "view_image".to_string();
+        let filter = if profile.image_tool_results {
+            // New model supports image tool results — remove view_image from
+            // existing deny set (if present), keeping other denied tools.
+            match current_filter {
+                meerkat_core::ToolFilter::Deny(mut denied) => {
+                    denied.remove(&view_image);
+                    if denied.is_empty() {
+                        meerkat_core::ToolFilter::All
+                    } else {
+                        meerkat_core::ToolFilter::Deny(denied)
+                    }
                 }
-            } else {
-                // Unknown model — leave tool visibility unchanged.
-                return Ok(());
-            };
+                other => other,
+            }
+        } else {
+            // New model does not support image tool results — add view_image
+            // to the existing deny set, preserving other denied tools.
+            match current_filter {
+                meerkat_core::ToolFilter::Deny(mut denied) => {
+                    denied.insert(view_image);
+                    meerkat_core::ToolFilter::Deny(denied)
+                }
+                meerkat_core::ToolFilter::All => {
+                    meerkat_core::ToolFilter::Deny([view_image].into_iter().collect())
+                }
+                // Allow list: remove view_image so it's no longer permitted.
+                meerkat_core::ToolFilter::Allow(mut allowed) => {
+                    allowed.remove(&view_image);
+                    meerkat_core::ToolFilter::Allow(allowed)
+                }
+            }
+        };
+
         // Best-effort: if the filter references unknown tools (e.g., view_image
         // was never registered), the session service will return an error that
         // we intentionally ignore.
@@ -497,7 +557,7 @@ impl SessionRuntime {
     pub async fn start_turn_via_runtime(
         self: &Arc<Self>,
         session_id: &SessionId,
-        prompt: String,
+        prompt: ContentInput,
         event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
         flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
@@ -520,8 +580,15 @@ impl SessionRuntime {
         // (from mcp/add, mcp/remove, mcp/reload) must be connected and made
         // visible to the agent before the turn starts.
         #[cfg(feature = "mcp")]
-        self.apply_mcp_boundary(session_id, &event_tx, &mut prompt)
-            .await?;
+        {
+            let mut mcp_text = prompt.text_content();
+            self.apply_mcp_boundary(session_id, &event_tx, &mut mcp_text)
+                .await?;
+            // If the MCP boundary appended notices, update the prompt.
+            if mcp_text != prompt.text_content() {
+                prompt = ContentInput::Text(mcp_text);
+            }
+        }
 
         // Build turn metadata from overrides
         let turn_metadata = Some(
@@ -536,7 +603,7 @@ impl SessionRuntime {
             },
         );
 
-        let input = Input::Prompt(PromptInput::new(prompt, turn_metadata));
+        let input = Input::Prompt(PromptInput::from_content_input(prompt, turn_metadata));
 
         // Lazy-register executor if not already registered.
         if !self.runtime_adapter.contains_session(session_id).await {
@@ -744,10 +811,10 @@ impl SessionRuntime {
         if let Some((mut build_config, labels, deferred_prompt, created_at_secs, updated_at_secs)) =
             pending_session
         {
-            let mut runtime_prompt = prompt.clone();
+            let mut runtime_prompt: ContentInput = prompt.clone().into();
             let saved_deferred_prompt = deferred_prompt.clone();
             if let Some(deferred) = deferred_prompt {
-                runtime_prompt = format!("{deferred}\n\n{runtime_prompt}");
+                runtime_prompt = merge_content_inputs(deferred, runtime_prompt);
             }
 
             if let Some(ref ov) = overrides {
@@ -824,7 +891,7 @@ impl SessionRuntime {
                 .service
                 .create_session(CreateSessionRequest {
                     model: build_config.model.clone(),
-                    prompt: runtime_prompt.clone().into(),
+                    prompt: runtime_prompt.clone(),
                     system_prompt: build_config.system_prompt.clone(),
                     max_tokens: build_config.max_tokens,
                     event_tx: None,
@@ -890,7 +957,7 @@ impl SessionRuntime {
                     session_id,
                     run_id,
                     StartTurnRequest {
-                        prompt: runtime_prompt.into(),
+                        prompt: runtime_prompt,
                         event_tx: Some(event_tx),
                         host_mode: build_config.host_mode,
                         skill_references,
@@ -1049,7 +1116,7 @@ impl SessionRuntime {
         &self,
         build_config: AgentBuildConfig,
         labels: Option<BTreeMap<String, String>>,
-        deferred_prompt: Option<String>,
+        deferred_prompt: Option<ContentInput>,
     ) -> Result<SessionId, RpcError> {
         // Check combined capacity (pending + active).
         {
@@ -1117,7 +1184,7 @@ impl SessionRuntime {
     pub async fn start_turn(
         &self,
         session_id: &SessionId,
-        prompt: String,
+        prompt: ContentInput,
         event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
         flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
@@ -1127,8 +1194,14 @@ impl SessionRuntime {
         #[allow(unused_mut)]
         let mut turn_prompt = prompt;
         #[cfg(feature = "mcp")]
-        self.apply_mcp_boundary(session_id, &event_tx, &mut turn_prompt)
-            .await?;
+        {
+            let mut mcp_text = turn_prompt.text_content();
+            self.apply_mcp_boundary(session_id, &event_tx, &mut mcp_text)
+                .await?;
+            if mcp_text != turn_prompt.text_content() {
+                turn_prompt = ContentInput::Text(mcp_text);
+            }
+        }
 
         // Check if this is a pending (not-yet-materialized) session.
         let pending_session = {
@@ -1182,7 +1255,7 @@ impl SessionRuntime {
             let saved_created_at_secs = created_at_secs;
             let saved_updated_at_secs = updated_at_secs;
             if let Some(deferred) = deferred_prompt {
-                turn_prompt = format!("{deferred}\n\n{turn_prompt}");
+                turn_prompt = merge_content_inputs(deferred, turn_prompt);
             }
             // Apply per-turn overrides to the pending build config.
             if let Some(ref ov) = overrides {
@@ -1256,7 +1329,7 @@ impl SessionRuntime {
 
             let req = CreateSessionRequest {
                 model: build_config.model.clone(),
-                prompt: turn_prompt.into(),
+                prompt: turn_prompt,
                 system_prompt: build_config.system_prompt.clone(),
                 max_tokens: build_config.max_tokens,
                 event_tx: Some(event_tx),
@@ -1362,7 +1435,7 @@ impl SessionRuntime {
         };
 
         let req = StartTurnRequest {
-            prompt: turn_prompt.clone().into(),
+            prompt: turn_prompt.clone(),
             event_tx: Some(event_tx.clone()),
             host_mode,
             skill_references: skill_references.clone(),
@@ -1412,7 +1485,7 @@ impl SessionRuntime {
         session_id: &SessionId,
         build_config: AgentBuildConfig,
         labels: Option<BTreeMap<String, String>>,
-        deferred_prompt: Option<String>,
+        deferred_prompt: Option<ContentInput>,
         created_at_secs: u64,
         updated_at_secs: u64,
     ) {
@@ -1442,7 +1515,7 @@ impl SessionRuntime {
     async fn try_recover_persisted_session(
         &self,
         session_id: &SessionId,
-        prompt: String,
+        prompt: ContentInput,
         event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
         host_mode: bool,
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
@@ -2577,7 +2650,7 @@ mod tests {
         let result = runtime
             .start_turn(
                 &session_id,
-                "Hello".to_string(),
+                "Hello".into(),
                 event_tx,
                 None,
                 None,
@@ -2609,15 +2682,7 @@ mod tests {
         let sid_clone = session_id.clone();
         let turn_handle = tokio::spawn(async move {
             runtime_clone
-                .start_turn(
-                    &sid_clone,
-                    "Hello".to_string(),
-                    event_tx,
-                    None,
-                    None,
-                    None,
-                    None,
-                )
+                .start_turn(&sid_clone, "Hello".into(), event_tx, None, None, None, None)
                 .await
         });
 
@@ -2692,15 +2757,7 @@ mod tests {
 
         let turn_handle = tokio::spawn(async move {
             runtime_clone
-                .start_turn(
-                    &sid_clone,
-                    "Hello".to_string(),
-                    event_tx,
-                    None,
-                    None,
-                    None,
-                    None,
-                )
+                .start_turn(&sid_clone, "Hello".into(), event_tx, None, None, None, None)
                 .await
         });
 
@@ -2750,7 +2807,7 @@ mod tests {
             runtime_clone
                 .start_turn(
                     &sid_clone,
-                    "First".to_string(),
+                    "First".into(),
                     event_tx1,
                     None,
                     None,
@@ -2780,7 +2837,7 @@ mod tests {
         let result = runtime
             .start_turn(
                 &session_id,
-                "Second".to_string(),
+                "Second".into(),
                 event_tx2,
                 None,
                 None,
@@ -2814,7 +2871,7 @@ mod tests {
         let _result = runtime
             .start_turn(
                 &session_id,
-                "Hello".to_string(),
+                "Hello".into(),
                 event_tx,
                 None,
                 None,
@@ -2992,7 +3049,7 @@ mod tests {
         let first = runtime
             .start_turn(
                 &session_id,
-                "hello".to_string(),
+                "hello".into(),
                 event_tx,
                 None,
                 None,
@@ -3018,7 +3075,7 @@ mod tests {
         let second = runtime
             .start_turn(
                 &session_id,
-                "hello again".to_string(),
+                "hello again".into(),
                 event_tx,
                 None,
                 None,
@@ -3055,7 +3112,7 @@ mod tests {
         runtime
             .start_turn(
                 &session_id,
-                "turn add".to_string(),
+                "turn add".into(),
                 event_tx,
                 None,
                 None,
@@ -3079,7 +3136,7 @@ mod tests {
         runtime
             .start_turn(
                 &session_id,
-                "turn remove".to_string(),
+                "turn remove".into(),
                 event_tx,
                 None,
                 None,
@@ -3118,7 +3175,7 @@ mod tests {
         runtime
             .start_turn(
                 &session_id,
-                "turn add".to_string(),
+                "turn add".into(),
                 event_tx,
                 None,
                 None,
@@ -3156,7 +3213,7 @@ mod tests {
         runtime
             .start_turn(
                 &session_id,
-                "turn remove".to_string(),
+                "turn remove".into(),
                 event_tx,
                 None,
                 None,
@@ -3191,7 +3248,7 @@ mod tests {
         runtime
             .start_turn(
                 &session_id,
-                "turn after timeout".to_string(),
+                "turn after timeout".into(),
                 event_tx,
                 None,
                 None,
@@ -3247,7 +3304,7 @@ mod tests {
         runtime
             .start_turn(
                 &session_id,
-                "turn add first".to_string(),
+                "turn add first".into(),
                 event_tx,
                 None,
                 None,
@@ -3278,7 +3335,7 @@ mod tests {
         runtime
             .start_turn(
                 &session_id,
-                "turn remove first".to_string(),
+                "turn remove first".into(),
                 event_tx,
                 None,
                 None,
@@ -3316,7 +3373,7 @@ mod tests {
         runtime
             .start_turn(
                 &session_id,
-                "turn apply staged add".to_string(),
+                "turn apply staged add".into(),
                 event_tx,
                 None,
                 None,
@@ -3343,7 +3400,7 @@ mod tests {
         runtime
             .start_turn(
                 &session_id,
-                "turn drain pending add".to_string(),
+                "turn drain pending add".into(),
                 event_tx,
                 None,
                 None,
@@ -3394,7 +3451,7 @@ mod tests {
         runtime
             .start_turn(
                 &session_id,
-                "turn add".to_string(),
+                "turn add".into(),
                 event_tx,
                 None,
                 None,
@@ -3425,7 +3482,7 @@ mod tests {
         runtime
             .start_turn(
                 &session_id,
-                "turn remove".to_string(),
+                "turn remove".into(),
                 event_tx,
                 None,
                 None,
@@ -3462,7 +3519,7 @@ mod tests {
         let _result = runtime
             .start_turn(
                 &session_id,
-                "turn with broken add and queued removal".to_string(),
+                "turn with broken add and queued removal".into(),
                 event_tx,
                 None,
                 None,
@@ -3594,7 +3651,7 @@ mod tests {
         let result = runtime
             .start_turn(
                 &session_id,
-                "Hello".to_string(),
+                "Hello".into(),
                 event_tx,
                 None,
                 None,
@@ -3625,7 +3682,7 @@ mod tests {
         runtime
             .start_turn(
                 &session_id,
-                "First".to_string(),
+                "First".into(),
                 event_tx,
                 None,
                 None,
@@ -3646,7 +3703,7 @@ mod tests {
         let result = runtime
             .start_turn(
                 &session_id,
-                "Second".to_string(),
+                "Second".into(),
                 event_tx,
                 None,
                 None,
@@ -3682,7 +3739,7 @@ mod tests {
         let result = runtime
             .start_turn(
                 &session_id,
-                "Hello".to_string(),
+                "Hello".into(),
                 event_tx,
                 None,
                 None,
@@ -3714,7 +3771,7 @@ mod tests {
         runtime
             .start_turn(
                 &session_id,
-                "First".to_string(),
+                "First".into(),
                 event_tx,
                 None,
                 None,
@@ -3736,7 +3793,7 @@ mod tests {
         let result = runtime
             .start_turn(
                 &session_id,
-                "Second".to_string(),
+                "Second".into(),
                 event_tx,
                 None,
                 None,
@@ -3772,7 +3829,7 @@ mod tests {
         });
         let params: StartTurnParams = serde_json::from_value(json).unwrap();
         assert_eq!(params.session_id, "test-id");
-        assert_eq!(params.prompt, "hello");
+        assert_eq!(params.prompt, ContentInput::Text("hello".to_string()));
         assert_eq!(params.host_mode, Some(true));
         assert_eq!(params.model.as_deref(), Some("claude-opus-4-6"));
         assert_eq!(params.provider.as_deref(), Some("anthropic"));
@@ -3798,7 +3855,7 @@ mod tests {
         let result = runtime
             .start_turn(
                 &unknown_id,
-                "Hello".to_string(),
+                "Hello".into(),
                 event_tx,
                 None,
                 None,
@@ -3892,7 +3949,7 @@ mod tests {
         runtime
             .start_turn(
                 &session_id,
-                "Hello".to_string(),
+                "Hello".into(),
                 event_tx,
                 None,
                 None,
@@ -3933,7 +3990,7 @@ mod tests {
         let _ = runtime
             .start_turn(
                 &session_id,
-                "Hello".to_string(),
+                "Hello".into(),
                 event_tx,
                 None,
                 None,
@@ -3952,7 +4009,7 @@ mod tests {
         let _ = runtime
             .start_turn(
                 &session_id,
-                "Second turn".to_string(),
+                "Second turn".into(),
                 event_tx2,
                 None,
                 None,
@@ -3999,7 +4056,7 @@ mod tests {
         let _ = runtime
             .start_turn(
                 &session_id,
-                "Hello".to_string(),
+                "Hello".into(),
                 event_tx,
                 None,
                 None,
@@ -4018,7 +4075,7 @@ mod tests {
         let _ = runtime
             .start_turn(
                 &session_id,
-                "Second turn".to_string(),
+                "Second turn".into(),
                 event_tx2,
                 None,
                 None,
@@ -4037,7 +4094,7 @@ mod tests {
         let _ = runtime
             .start_turn(
                 &session_id,
-                "Third turn".to_string(),
+                "Third turn".into(),
                 event_tx3,
                 None,
                 None,
@@ -4063,6 +4120,165 @@ mod tests {
             filter,
             meerkat_core::ToolFilter::All,
             "hot-swap back to Anthropic should clear view_image deny"
+        );
+    }
+
+    /// Hot-swapping preserves pre-existing denied tools in the external filter.
+    #[tokio::test]
+    async fn hot_swap_preserves_preexisting_deny_filter() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = make_runtime(temp_factory_with_builtins(&temp), 10);
+        runtime.default_llm_client = Some(Arc::new(MockLlmClient));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .unwrap();
+        let (event_tx, _event_rx) = mpsc::channel(100);
+
+        // Materialize with first turn.
+        let _ = runtime
+            .start_turn(
+                &session_id,
+                "Hello".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Stage a pre-existing deny filter for "datetime".
+        runtime
+            .service
+            .set_session_tool_filter(
+                &session_id,
+                meerkat_core::ToolFilter::Deny(["datetime".to_string()].into_iter().collect()),
+            )
+            .await
+            .expect("staging deny filter for datetime should succeed");
+
+        // Hot-swap to OpenAI — should add view_image to the deny set, not replace it.
+        let overrides = crate::handlers::turn::TurnOverrides {
+            model: Some("gpt-5.2".to_string()),
+            ..Default::default()
+        };
+        let (event_tx2, _event_rx2) = mpsc::channel(100);
+        let _ = runtime
+            .start_turn(
+                &session_id,
+                "Second turn".into(),
+                event_tx2,
+                None,
+                None,
+                None,
+                Some(overrides),
+            )
+            .await
+            .unwrap();
+
+        let session = runtime
+            .service
+            .export_live_session(&session_id)
+            .await
+            .unwrap();
+        let filter_value = session
+            .metadata()
+            .get(meerkat_core::EXTERNAL_TOOL_FILTER_METADATA_KEY)
+            .expect("tool filter metadata should be set after hot-swap");
+        let filter: meerkat_core::ToolFilter =
+            serde_json::from_value(filter_value.clone()).unwrap();
+
+        let expected_deny: std::collections::HashSet<String> = ["datetime", "view_image"]
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            filter,
+            meerkat_core::ToolFilter::Deny(expected_deny),
+            "hot-swap should merge view_image into existing deny set, not replace it"
+        );
+    }
+
+    /// Hot-swapping back to a capable model removes only view_image, keeping other denied tools.
+    #[tokio::test]
+    async fn hot_swap_back_preserves_other_denied_tools() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = make_runtime(temp_factory_with_builtins(&temp), 10);
+        runtime.default_llm_client = Some(Arc::new(MockLlmClient));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .unwrap();
+        let (event_tx, _event_rx) = mpsc::channel(100);
+
+        // Materialize with first turn.
+        let _ = runtime
+            .start_turn(
+                &session_id,
+                "Hello".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Stage deny filter with datetime + view_image (simulating prior OpenAI swap).
+        runtime
+            .service
+            .set_session_tool_filter(
+                &session_id,
+                meerkat_core::ToolFilter::Deny(
+                    ["datetime", "view_image"]
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect(),
+                ),
+            )
+            .await
+            .expect("staging deny filter for datetime+view_image should succeed");
+
+        // Hot-swap to Anthropic — should remove view_image but keep datetime.
+        let overrides = crate::handlers::turn::TurnOverrides {
+            model: Some("claude-sonnet-4-5".to_string()),
+            ..Default::default()
+        };
+        let (event_tx2, _event_rx2) = mpsc::channel(100);
+        let _ = runtime
+            .start_turn(
+                &session_id,
+                "Second turn".into(),
+                event_tx2,
+                None,
+                None,
+                None,
+                Some(overrides),
+            )
+            .await
+            .unwrap();
+
+        let session = runtime
+            .service
+            .export_live_session(&session_id)
+            .await
+            .unwrap();
+        let filter_value = session
+            .metadata()
+            .get(meerkat_core::EXTERNAL_TOOL_FILTER_METADATA_KEY)
+            .expect("tool filter metadata should be set after hot-swap");
+        let filter: meerkat_core::ToolFilter =
+            serde_json::from_value(filter_value.clone()).unwrap();
+
+        assert_eq!(
+            filter,
+            meerkat_core::ToolFilter::Deny(["datetime".to_string()].into_iter().collect()),
+            "hot-swap to Anthropic should remove view_image but keep other denied tools"
         );
     }
 }

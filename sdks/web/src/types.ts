@@ -64,6 +64,11 @@ export interface SessionConfig {
   appContext?: unknown;
 }
 
+/** A content block in a multimodal prompt. */
+export type ContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'image'; media_type: string; data: string };
+
 /** Options for a single turn. */
 export interface TurnOptions {
   /** Additional instructions for this turn only. */

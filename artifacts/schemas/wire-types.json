@@ -339,6 +339,134 @@
     ],
     "title": "WireAssistantBlock"
   },
+  "WireContentBlock": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Wire-safe content block (no `source_path` — internal only).",
+    "oneOf": [
+      {
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "type": {
+            "const": "text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "text"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "data": {
+            "type": "string"
+          },
+          "media_type": {
+            "type": "string"
+          },
+          "type": {
+            "const": "image",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "media_type",
+          "data"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Forward-compatibility for unknown block types.",
+        "properties": {
+          "type": {
+            "const": "unknown",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireContentBlock"
+  },
+  "WireContentInput": {
+    "$defs": {
+      "WireContentBlock": {
+        "description": "Wire-safe content block (no `source_path` — internal only).",
+        "oneOf": [
+          {
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "type": "string"
+              },
+              "media_type": {
+                "type": "string"
+              },
+              "type": {
+                "const": "image",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward-compatibility for unknown block types.",
+            "properties": {
+              "type": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "anyOf": [
+      {
+        "type": "string"
+      },
+      {
+        "items": {
+          "$ref": "#/$defs/WireContentBlock"
+        },
+        "type": "array"
+      }
+    ],
+    "description": "Wire-safe content input (mirrors `ContentInput`).",
+    "title": "WireContentInput"
+  },
   "WireProviderMeta": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Provider continuity metadata for transcript blocks.",
@@ -569,6 +697,74 @@
           }
         ]
       },
+      "WireContentBlock": {
+        "description": "Wire-safe content block (no `source_path` — internal only).",
+        "oneOf": [
+          {
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "type": "string"
+              },
+              "media_type": {
+                "type": "string"
+              },
+              "type": {
+                "const": "image",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward-compatibility for unknown block types.",
+            "properties": {
+              "type": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireContentInput": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "items": {
+              "$ref": "#/$defs/WireContentBlock"
+            },
+            "type": "array"
+          }
+        ],
+        "description": "Wire-safe content input (mirrors `ContentInput`)."
+      },
       "WireProviderMeta": {
         "description": "Provider continuity metadata for transcript blocks.",
         "oneOf": [
@@ -694,7 +890,7 @@
           {
             "properties": {
               "content": {
-                "type": "string"
+                "$ref": "#/$defs/WireContentInput"
               },
               "role": {
                 "const": "user",
@@ -811,7 +1007,7 @@
         "description": "Tool result payload in a transcript.",
         "properties": {
           "content": {
-            "type": "string"
+            "$ref": "#/$defs/WireToolResultContent"
           },
           "is_error": {
             "default": false,
@@ -826,6 +1022,20 @@
           "content"
         ],
         "type": "object"
+      },
+      "WireToolResultContent": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "items": {
+              "$ref": "#/$defs/WireContentBlock"
+            },
+            "type": "array"
+          }
+        ],
+        "description": "Wire-safe tool result content that handles both legacy string and array formats."
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1057,6 +1267,74 @@
           }
         ]
       },
+      "WireContentBlock": {
+        "description": "Wire-safe content block (no `source_path` — internal only).",
+        "oneOf": [
+          {
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "type": "string"
+              },
+              "media_type": {
+                "type": "string"
+              },
+              "type": {
+                "const": "image",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward-compatibility for unknown block types.",
+            "properties": {
+              "type": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireContentInput": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "items": {
+              "$ref": "#/$defs/WireContentBlock"
+            },
+            "type": "array"
+          }
+        ],
+        "description": "Wire-safe content input (mirrors `ContentInput`)."
+      },
       "WireProviderMeta": {
         "description": "Provider continuity metadata for transcript blocks.",
         "oneOf": [
@@ -1194,7 +1472,7 @@
         "description": "Tool result payload in a transcript.",
         "properties": {
           "content": {
-            "type": "string"
+            "$ref": "#/$defs/WireToolResultContent"
           },
           "is_error": {
             "default": false,
@@ -1209,6 +1487,20 @@
           "content"
         ],
         "type": "object"
+      },
+      "WireToolResultContent": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "items": {
+              "$ref": "#/$defs/WireContentBlock"
+            },
+            "type": "array"
+          }
+        ],
+        "description": "Wire-safe tool result content that handles both legacy string and array formats."
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1233,7 +1525,7 @@
       {
         "properties": {
           "content": {
-            "type": "string"
+            "$ref": "#/$defs/WireContentInput"
           },
           "role": {
             "const": "user",
@@ -1406,11 +1698,81 @@
     "type": "object"
   },
   "WireToolResult": {
+    "$defs": {
+      "WireContentBlock": {
+        "description": "Wire-safe content block (no `source_path` — internal only).",
+        "oneOf": [
+          {
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "type": "string"
+              },
+              "media_type": {
+                "type": "string"
+              },
+              "type": {
+                "const": "image",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward-compatibility for unknown block types.",
+            "properties": {
+              "type": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireToolResultContent": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "items": {
+              "$ref": "#/$defs/WireContentBlock"
+            },
+            "type": "array"
+          }
+        ],
+        "description": "Wire-safe tool result content that handles both legacy string and array formats."
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Tool result payload in a transcript.",
     "properties": {
       "content": {
-        "type": "string"
+        "$ref": "#/$defs/WireToolResultContent"
       },
       "is_error": {
         "default": false,
@@ -1426,6 +1788,78 @@
     ],
     "title": "WireToolResult",
     "type": "object"
+  },
+  "WireToolResultContent": {
+    "$defs": {
+      "WireContentBlock": {
+        "description": "Wire-safe content block (no `source_path` — internal only).",
+        "oneOf": [
+          {
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "type": "string"
+              },
+              "media_type": {
+                "type": "string"
+              },
+              "type": {
+                "const": "image",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward-compatibility for unknown block types.",
+            "properties": {
+              "type": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "anyOf": [
+      {
+        "type": "string"
+      },
+      {
+        "items": {
+          "$ref": "#/$defs/WireContentBlock"
+        },
+        "type": "array"
+      }
+    ],
+    "description": "Wire-safe tool result content that handles both legacy string and array formats.",
+    "title": "WireToolResultContent"
   },
   "WireUsage": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",

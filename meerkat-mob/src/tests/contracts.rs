@@ -267,6 +267,7 @@ async fn contract_mob_005_remove_trusted_peer_revokes_send() {
     let cmd = CommsCommand::PeerMessage {
         to: PeerName::new(receiver_name.clone()).expect("valid peer name"),
         body: "before removal".to_string(),
+        blocks: None,
     };
     let receipt = CoreCommsRuntime::send(&sender, cmd).await;
     assert!(
@@ -295,6 +296,7 @@ async fn contract_mob_005_remove_trusted_peer_revokes_send() {
     let cmd_after = CommsCommand::PeerMessage {
         to: PeerName::new(receiver_name.clone()).expect("valid peer name"),
         body: "after removal".to_string(),
+        blocks: None,
     };
     let result = CoreCommsRuntime::send(&sender, cmd_after).await;
     assert!(

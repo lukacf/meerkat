@@ -5,7 +5,7 @@ use crate::event::AgentEvent;
 use crate::interaction::InteractionContent;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
-use crate::types::{Message, RunResult, Usage, UserMessage};
+use crate::types::{ContentInput, Message, RunResult, Usage, UserMessage};
 use std::collections::BTreeMap;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::mpsc;
@@ -216,14 +216,17 @@ where
     }
 
     /// Run the agent in host mode: process initial prompt, then stay alive for comms messages.
-    pub async fn run_host_mode(&mut self, initial_prompt: String) -> Result<RunResult, AgentError> {
+    pub async fn run_host_mode(
+        &mut self,
+        initial_prompt: ContentInput,
+    ) -> Result<RunResult, AgentError> {
         self.run_host_mode_inner(initial_prompt, None).await
     }
 
     /// Run in host mode with event streaming.
     pub async fn run_host_mode_with_events(
         &mut self,
-        initial_prompt: String,
+        initial_prompt: ContentInput,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, AgentError> {
         self.run_host_mode_inner(initial_prompt, Some(event_tx))
@@ -239,7 +242,7 @@ where
     /// consumed and dropped.
     async fn run_host_mode_inner(
         &mut self,
-        initial_prompt: String,
+        initial_prompt: ContentInput,
         event_tx: Option<mpsc::Sender<AgentEvent>>,
     ) -> Result<RunResult, AgentError> {
         use std::time::Duration;
@@ -260,7 +263,9 @@ where
             .last()
             .is_some_and(|m| matches!(m, Message::User(_)));
 
-        let mut last_result = if !initial_prompt.trim().is_empty() {
+        let has_content =
+            initial_prompt.has_images() || !initial_prompt.text_content().trim().is_empty();
+        let mut last_result = if has_content {
             match &event_tx {
                 Some(tx) => self.run_with_events(initial_prompt, tx.clone()).await?,
                 None => self.run(initial_prompt).await?,
@@ -467,10 +472,13 @@ where
 
                             let run_result = match &event_tx {
                                 Some(tx) => {
-                                    self.run_with_events(interaction.rendered_text, tx.clone())
-                                        .await
+                                    self.run_with_events(
+                                        interaction.rendered_text.into(),
+                                        tx.clone(),
+                                    )
+                                    .await
                                 }
-                                None => self.run(interaction.rendered_text).await,
+                                None => self.run(interaction.rendered_text.into()).await,
                             };
                             match run_result {
                                 Ok(result) => {
@@ -549,8 +557,8 @@ where
                         if !batched_texts.is_empty() && self.runtime_input_sink.is_none() {
                             let combined = batched_texts.join("\n\n");
                             let batch_result = match &event_tx {
-                                Some(tx) => self.run_with_events(combined, tx.clone()).await,
-                                None => self.run(combined).await,
+                                Some(tx) => self.run_with_events(combined.into(), tx.clone()).await,
+                                None => self.run(combined.into()).await,
                             };
                             match batch_result {
                                 Ok(result) => {
@@ -720,10 +728,10 @@ where
 
                     let run_result = match &event_tx {
                         Some(tx) => {
-                            self.run_with_events(interaction.rendered_text, tx.clone())
+                            self.run_with_events(interaction.rendered_text.into(), tx.clone())
                                 .await
                         }
-                        None => self.run(interaction.rendered_text).await,
+                        None => self.run(interaction.rendered_text.into()).await,
                     };
 
                     match run_result {
@@ -828,8 +836,8 @@ where
                         batched_texts.len()
                     );
                     let batch_result = match &event_tx {
-                        Some(tx) => self.run_with_events(combined, tx.clone()).await,
-                        None => self.run(combined).await,
+                        Some(tx) => self.run_with_events(combined.into(), tx.clone()).await,
+                        None => self.run(combined.into()).await,
                     };
                     match batch_result {
                         Ok(result) => {
@@ -1501,7 +1509,7 @@ mod tests {
             )
             .await;
 
-        let result = agent.run_host_mode(String::new()).await.unwrap();
+        let result = agent.run_host_mode(String::new().into()).await.unwrap();
 
         // Response should have been injected into session as a user message
         let user_msgs: Vec<_> = agent
@@ -1563,7 +1571,7 @@ mod tests {
             )
             .await;
 
-        let result = agent.run_host_mode(String::new()).await.unwrap();
+        let result = agent.run_host_mode(String::new().into()).await.unwrap();
 
         // Accepted is an interim acknowledgement — should NOT trigger continuation.
         assert_eq!(
@@ -1610,7 +1618,7 @@ mod tests {
             )
             .await;
 
-        let result = agent.run_host_mode(String::new()).await.unwrap();
+        let result = agent.run_host_mode(String::new().into()).await.unwrap();
         assert!(result.turns > 0, "continuation run should have fired");
 
         // Drain events and verify RunStarted was emitted with the response text.
@@ -1658,7 +1666,7 @@ mod tests {
             )
             .await;
 
-        let result = agent.run_host_mode(String::new()).await.unwrap();
+        let result = agent.run_host_mode(String::new().into()).await.unwrap();
 
         // Failed is terminal — should trigger continuation like Completed.
         assert!(
@@ -1683,6 +1691,7 @@ mod tests {
         let message = make_interaction(
             InteractionContent::Message {
                 body: "hello".into(),
+                blocks: None,
             },
             "hello from peer",
         );
@@ -1700,7 +1709,7 @@ mod tests {
             )
             .await;
 
-        let result = agent.run_host_mode(String::new()).await.unwrap();
+        let result = agent.run_host_mode(String::new().into()).await.unwrap();
 
         // The passthrough message triggers the run; the response is absorbed
         // as context. Should be exactly 1 turn (the message run), not 2.
@@ -1733,6 +1742,7 @@ mod tests {
         let message = make_interaction(
             InteractionContent::Message {
                 body: "do something".into(),
+                blocks: None,
             },
             "do something",
         );
@@ -1764,7 +1774,7 @@ mod tests {
             )
             .await;
 
-        let result = agent.run_host_mode(String::new()).await.unwrap();
+        let result = agent.run_host_mode(String::new().into()).await.unwrap();
 
         // result.turns is per-run (the last run), not cumulative.
         // The continuation should have fired (turns > 0).
@@ -1872,7 +1882,7 @@ mod tests {
             )
             .await;
 
-        let result = agent.run_host_mode(String::new()).await.unwrap();
+        let result = agent.run_host_mode(String::new().into()).await.unwrap();
         assert!(result.turns > 0, "continuation should have fired");
 
         // run_pending_inner should have invoked both run lifecycle hooks.
@@ -1891,6 +1901,7 @@ mod tests {
         let interaction = make_interaction(
             InteractionContent::Message {
                 body: "hello".into(),
+                blocks: None,
             },
             "hello",
         );
@@ -1927,6 +1938,7 @@ mod tests {
         let interaction = make_interaction(
             InteractionContent::Message {
                 body: "hello".into(),
+                blocks: None,
             },
             "hello",
         );
@@ -1966,6 +1978,7 @@ mod tests {
         let interaction = make_interaction(
             InteractionContent::Message {
                 body: "hello".into(),
+                blocks: None,
             },
             "hello",
         );
@@ -2076,12 +2089,14 @@ mod tests {
         let msg1 = make_interaction(
             InteractionContent::Message {
                 body: "msg1".into(),
+                blocks: None,
             },
             "Message from Alice",
         );
         let msg2 = make_interaction(
             InteractionContent::Message {
                 body: "msg2".into(),
+                blocks: None,
             },
             "Message from Bob",
         );
@@ -2115,6 +2130,7 @@ mod tests {
         let interaction = make_interaction(
             InteractionContent::Message {
                 body: "hello".into(),
+                blocks: None,
             },
             "hello",
         );
@@ -2152,6 +2168,7 @@ mod tests {
         let interaction = make_interaction(
             InteractionContent::Message {
                 body: "hello".into(),
+                blocks: None,
             },
             "hello",
         );
@@ -2228,7 +2245,7 @@ mod tests {
             )
             .await;
 
-        let result = agent.run_host_mode(String::new()).await.unwrap();
+        let result = agent.run_host_mode(String::new().into()).await.unwrap();
 
         // Silent intent should have been injected into session as a user message
         let user_msgs: Vec<_> = agent
@@ -2274,7 +2291,7 @@ mod tests {
             )
             .await;
 
-        let result = agent.run_host_mode(String::new()).await.unwrap();
+        let result = agent.run_host_mode(String::new().into()).await.unwrap();
 
         // Non-silent intent should be processed through LLM
         assert!(result.turns > 0);
@@ -2319,7 +2336,7 @@ mod tests {
             )
             .await;
 
-        let result = agent.run_host_mode(String::new()).await.unwrap();
+        let result = agent.run_host_mode(String::new().into()).await.unwrap();
         assert_eq!(result.turns, 0);
 
         let user_msgs: Vec<_> = agent
@@ -2375,7 +2392,7 @@ mod tests {
             )
             .await;
 
-        let result = agent.run_host_mode(String::new()).await.unwrap();
+        let result = agent.run_host_mode(String::new().into()).await.unwrap();
         assert_eq!(result.turns, 0);
 
         let user_msgs: Vec<_> = agent

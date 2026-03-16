@@ -20,8 +20,9 @@ pub use models::{
 pub use params::{CommsParams, CoreCreateParams, HookParams, SkillsParams, StructuredOutputParams};
 pub use result::WireRunResult;
 pub use session::{
-    WireAssistantBlock, WireProviderMeta, WireSessionHistory, WireSessionInfo, WireSessionMessage,
-    WireSessionSummary, WireStopReason, WireToolCall, WireToolResult,
+    WireAssistantBlock, WireContentBlock, WireContentInput, WireProviderMeta, WireSessionHistory,
+    WireSessionInfo, WireSessionMessage, WireSessionSummary, WireStopReason, WireToolCall,
+    WireToolResult, WireToolResultContent,
 };
 pub use skills::{SkillEntry, SkillInspectResponse, SkillListResponse};
 pub use usage::WireUsage;

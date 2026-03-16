@@ -567,7 +567,7 @@ mod tests {
             .build(client, tools, store)
             .await;
 
-        let result = agent.run("hello".to_string()).await;
+        let result = agent.run("hello".to_string().into()).await;
         assert!(result.is_ok());
 
         let mut saw_turn_started = false;

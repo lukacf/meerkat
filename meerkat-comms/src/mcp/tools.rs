@@ -41,6 +41,10 @@ pub struct SendInput {
     /// Message body (required for peer_message)
     #[serde(default)]
     pub body: Option<String>,
+    /// Optional multimodal content blocks
+    #[serde(default)]
+    #[schemars(skip)]
+    pub blocks: Option<Vec<meerkat_core::types::ContentBlock>>,
     /// Request intent (required for peer_request)
     #[serde(default)]
     pub intent: Option<String>,
@@ -111,6 +115,7 @@ async fn handle_send(ctx: &ToolContext, input: SendInput) -> Result<Value, Strin
         kind: input.kind,
         to: Some(input.to),
         body: input.body,
+        blocks: input.blocks,
         intent: input.intent,
         params: input.params,
         in_reply_to: input.in_reply_to,
@@ -129,9 +134,12 @@ async fn handle_send(ctx: &ToolContext, input: SendInput) -> Result<Value, Strin
         meerkat_core::comms::CommsCommand::Input { .. } => {
             Err("input command is not supported by MCP send".to_string())
         }
-        meerkat_core::comms::CommsCommand::PeerMessage { to, body } => {
+        meerkat_core::comms::CommsCommand::PeerMessage { to, body, blocks } => {
             ctx.router
-                .send(to.as_str(), crate::types::MessageKind::Message { body })
+                .send(
+                    to.as_str(),
+                    crate::types::MessageKind::Message { body, blocks },
+                )
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(json!({ "status": "sent", "kind": kind }))

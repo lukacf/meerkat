@@ -7,6 +7,7 @@ use serde_json::value::RawValue;
 use tokio::sync::mpsc;
 
 use meerkat_contracts::SkillsParams;
+use meerkat_core::ContentInput;
 use meerkat_core::EventEnvelope;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::TurnToolOverlay;
@@ -29,7 +30,7 @@ use meerkat_runtime::SessionServiceRuntimeExt;
 #[derive(Debug, Deserialize)]
 pub struct StartTurnParams {
     pub session_id: String,
-    pub prompt: String,
+    pub prompt: ContentInput,
     /// Structured refs for Skills V2.1.
     #[serde(default)]
     pub skill_refs: Option<Vec<SkillRef>>,

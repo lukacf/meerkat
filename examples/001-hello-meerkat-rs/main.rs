@@ -49,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 5. Run a single turn
     let result = agent
-        .run("What makes Rust's ownership model unique? Answer in two sentences.".to_string())
+        .run("What makes Rust's ownership model unique? Answer in two sentences.".into())
         .await?;
 
     println!("{}", result.text);

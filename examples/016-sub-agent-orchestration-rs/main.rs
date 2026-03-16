@@ -69,7 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
              2. Memory safety guarantees and how they work\n\
              3. Ecosystem maturity (libraries, tooling, community)\n\n\
              Synthesize the results into a final recommendation."
-                .to_string(),
+                .into(),
         )
         .await?;
 

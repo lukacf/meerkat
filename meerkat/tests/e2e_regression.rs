@@ -222,10 +222,7 @@ mod scenario_23_structured_output {
                 .expect("Anthropic structured output agent should build");
 
             let result = agent
-                .run(
-                    "What is the capital of France? Respond in the required JSON format."
-                        .to_string(),
-                )
+                .run("What is the capital of France? Respond in the required JSON format.".into())
                 .await
                 .expect("Anthropic structured output run should succeed");
 
@@ -271,10 +268,7 @@ mod scenario_23_structured_output {
                 .expect("OpenAI structured output agent should build");
 
             let result = agent
-                .run(
-                    "What is the capital of France? Respond in the required JSON format."
-                        .to_string(),
-                )
+                .run("What is the capital of France? Respond in the required JSON format.".into())
                 .await
                 .expect("OpenAI structured output run should succeed");
 
@@ -320,10 +314,7 @@ mod scenario_23_structured_output {
                 .expect("Gemini structured output agent should build");
 
             let result = agent
-                .run(
-                    "What is the capital of France? Respond in the required JSON format."
-                        .to_string(),
-                )
+                .run("What is the capital of France? Respond in the required JSON format.".into())
                 .await
                 .expect("Gemini structured output run should succeed");
 
@@ -384,7 +375,7 @@ mod scenario_24_event_capture {
 
         eprintln!("[scenario 24] Running agent with event capture...");
         let result = agent
-            .run("Write one sentence about Rust programming.".to_string())
+            .run("Write one sentence about Rust programming.".into())
             .await
             .expect("Event capture run should succeed");
 

@@ -9,7 +9,7 @@ use meerkat_core::EventEnvelope;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::SessionQuery;
 use meerkat_core::skills::{SkillKey, SkillRef};
-use meerkat_core::{BudgetLimits, HookRunOverrides, OutputSchema, Provider};
+use meerkat_core::{BudgetLimits, ContentInput, HookRunOverrides, OutputSchema, Provider};
 use meerkat_runtime::SessionServiceRuntimeExt;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -52,7 +52,7 @@ pub struct DeferredCreateResult {
 /// so callers only need to provide `prompt`.
 #[derive(Debug, Deserialize)]
 pub struct CreateSessionParams {
-    pub prompt: String,
+    pub prompt: ContentInput,
     /// Controls whether the first turn runs immediately or is deferred.
     /// Defaults to `run_immediately` when absent.
     #[serde(default)]

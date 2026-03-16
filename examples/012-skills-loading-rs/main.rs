@@ -240,7 +240,7 @@ fn process_items(items: Vec<String>) -> Vec<String> {
 }
 ```
 "
-            .to_string(),
+            .into(),
         )
         .await?;
 

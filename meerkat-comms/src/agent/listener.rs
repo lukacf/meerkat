@@ -238,6 +238,7 @@ mod tests {
             from: sender_pubkey,
             to: receiver_pubkey,
             kind: MessageKind::Message {
+                blocks: None,
                 body: "hello from test".to_string(),
             },
             sig: Signature::new([0u8; 64]),
@@ -321,6 +322,7 @@ mod tests {
             from: sender_pubkey,
             to: receiver_pubkey,
             kind: MessageKind::Message {
+                blocks: None,
                 body: "hello from tcp test".to_string(),
             },
             sig: Signature::new([0u8; 64]),
@@ -402,6 +404,7 @@ mod tests {
             from: sender_pubkey,
             to: receiver_pubkey,
             kind: MessageKind::Message {
+                blocks: None,
                 body: "hello via manager".to_string(),
             },
             sig: Signature::new([0u8; 64]),

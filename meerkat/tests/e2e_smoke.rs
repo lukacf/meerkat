@@ -296,7 +296,7 @@ mod scenario_01_multi_provider {
                 .expect("Anthropic agent should build");
 
             let result = agent
-                .run("What is 2+2? Answer with just the number.".to_string())
+                .run("What is 2+2? Answer with just the number.".into())
                 .await
                 .expect("Anthropic agent run should succeed");
 
@@ -335,7 +335,7 @@ mod scenario_01_multi_provider {
                 .expect("OpenAI agent should build");
 
             let result = agent
-                .run("What is 2+2? Answer with just the number.".to_string())
+                .run("What is 2+2? Answer with just the number.".into())
                 .await
                 .expect("OpenAI agent run should succeed");
 
@@ -371,7 +371,7 @@ mod scenario_01_multi_provider {
                 .expect("Gemini agent should build");
 
             let result = agent
-                .run("What is 2+2? Answer with just the number.".to_string())
+                .run("What is 2+2? Answer with just the number.".into())
                 .await
                 .expect("Gemini agent run should succeed");
 
@@ -433,7 +433,7 @@ mod scenario_02_tool_driven_shell {
             .run(
                 "Use the shell tool to run: echo 'hello meerkat smoke'. \
                  Then tell me what the output was."
-                    .to_string(),
+                    .into(),
             )
             .await
             .expect("Shell agent run should succeed");
@@ -530,7 +530,7 @@ mod scenario_03_structured_output {
             .run(
                 "List the files in the current directory using the shell tool, \
                  then report what you found."
-                    .to_string(),
+                    .into(),
             )
             .await
             .expect("Structured output run should succeed");
@@ -618,7 +618,7 @@ mod scenario_04_sub_agent {
             .run(
                 "Spawn a sub-agent to answer: what is 2+2? \
                  Then check its status with agent_status and tell me the result."
-                    .to_string(),
+                    .into(),
             )
             .await
             .expect("Sub-agent orchestration should succeed");
@@ -674,7 +674,7 @@ mod scenario_05_multi_turn {
 
         // Turn 1: Establish name and number
         let result1 = agent
-            .run("My name is SmokeBot and my favorite number is 7.".to_string())
+            .run("My name is SmokeBot and my favorite number is 7.".into())
             .await
             .expect("Turn 1 should succeed");
         assert!(!result1.text.is_empty());
@@ -682,7 +682,7 @@ mod scenario_05_multi_turn {
 
         // Turn 2: Unrelated question (to push context)
         let result2 = agent
-            .run("What is the capital of France?".to_string())
+            .run("What is the capital of France?".into())
             .await
             .expect("Turn 2 should succeed");
         assert!(!result2.text.is_empty());
@@ -690,7 +690,7 @@ mod scenario_05_multi_turn {
 
         // Turn 3: Arithmetic with the favorite number
         let result3 = agent
-            .run("Now multiply my favorite number by 6. What is the result?".to_string())
+            .run("Now multiply my favorite number by 6. What is the result?".into())
             .await
             .expect("Turn 3 should succeed");
         assert!(
@@ -702,7 +702,7 @@ mod scenario_05_multi_turn {
 
         // Turn 4: Another unrelated question
         let result4 = agent
-            .run("What is 100 + 200?".to_string())
+            .run("What is 100 + 200?".into())
             .await
             .expect("Turn 4 should succeed");
         assert!(!result4.text.is_empty());
@@ -710,7 +710,7 @@ mod scenario_05_multi_turn {
 
         // Turn 5: Recall name and number from turn 1
         let result5 = agent
-            .run("Remind me: what is my name and what was my favorite number?".to_string())
+            .run("Remind me: what is my name and what was my favorite number?".into())
             .await
             .expect("Turn 5 should succeed");
         let text5 = result5.text.to_lowercase();
@@ -883,7 +883,7 @@ mod scenario_06_hooks {
             .await;
 
         let result = agent
-            .run("Say hello.".to_string())
+            .run("Say hello.".into())
             .await
             .expect("Hooked agent run should succeed");
 
@@ -945,7 +945,7 @@ mod scenario_07_session_resume {
                 .expect("Phase 1 agent should build");
 
             let result = agent
-                .run("My secret code is ALPHA-7. Remember it.".to_string())
+                .run("My secret code is ALPHA-7. Remember it.".into())
                 .await
                 .expect("Phase 1 turn should succeed");
 
@@ -984,7 +984,7 @@ mod scenario_07_session_resume {
                 .expect("Phase 2 agent should build");
 
             let result = agent
-                .run("What was my secret code?".to_string())
+                .run("What was my secret code?".into())
                 .await
                 .expect("Phase 2 turn should succeed");
 
@@ -1155,7 +1155,7 @@ mod scenario_08_comms {
             .run(
                 "Use the send tool to send a peer_message to agent-b with body \
                  exactly: Smoke test ping from Agent A"
-                    .to_string(),
+                    .into(),
             )
             .await
             .expect("Agent A run should succeed");
@@ -1174,7 +1174,7 @@ mod scenario_08_comms {
 
         // Agent B processes the incoming message
         let result_b = agent_b
-            .run("Process your inbox and acknowledge what Agent A sent.".to_string())
+            .run("Process your inbox and acknowledge what Agent A sent.".into())
             .await
             .expect("Agent B inbox processing should succeed");
 
@@ -1381,21 +1381,21 @@ mod scenario_10_memory {
 
         // Turn 1: Distinctive content
         let r1 = agent
-            .run("The secret project codename is AURORA-7.".to_string())
+            .run("The secret project codename is AURORA-7.".into())
             .await
             .expect("Turn 1 should succeed");
         eprintln!("[scenario 10] Turn 1: {}", r1.text.trim());
 
         // Turn 2: More distinctive content
         let r2 = agent
-            .run("The project budget is exactly $42,000.".to_string())
+            .run("The project budget is exactly $42,000.".into())
             .await
             .expect("Turn 2 should succeed");
         eprintln!("[scenario 10] Turn 2: {}", r2.text.trim());
 
         // Turn 3: Even more content to push toward compaction threshold
         let r3 = agent
-            .run("The project deadline is March 15th. The team lead is named Zara.".to_string())
+            .run("The project deadline is March 15th. The team lead is named Zara.".into())
             .await
             .expect("Turn 3 should succeed");
         eprintln!("[scenario 10] Turn 3: {}", r3.text.trim());
@@ -1405,7 +1405,7 @@ mod scenario_10_memory {
             .run(
                 "The project uses Rust and targets embedded systems. \
                  Key dependencies include tokio and serde."
-                    .to_string(),
+                    .into(),
             )
             .await
             .expect("Turn 4 should succeed");
@@ -1419,7 +1419,7 @@ mod scenario_10_memory {
             .run(
                 "Use the memory_search tool to search for information about 'project codename'. \
                  What codename did we discuss?"
-                    .to_string(),
+                    .into(),
             )
             .await
             .expect("Turn 5 (memory search) should succeed");
@@ -1485,28 +1485,28 @@ mod scenario_19_multi_turn_context {
 
         // Turn 1: Establish fact A
         let r1 = agent
-            .run("Fact A: The color of the sky on planet Zorg is green.".to_string())
+            .run("Fact A: The color of the sky on planet Zorg is green.".into())
             .await
             .expect("Turn 1 should succeed");
         eprintln!("[scenario 19] Turn 1: {}", r1.text.trim());
 
         // Turn 2: Establish fact B
         let r2 = agent
-            .run("Fact B: The currency on planet Zorg is called the Glorb.".to_string())
+            .run("Fact B: The currency on planet Zorg is called the Glorb.".into())
             .await
             .expect("Turn 2 should succeed");
         eprintln!("[scenario 19] Turn 2: {}", r2.text.trim());
 
         // Turn 3: Establish fact C
         let r3 = agent
-            .run("Fact C: The population of planet Zorg is exactly 42 million.".to_string())
+            .run("Fact C: The population of planet Zorg is exactly 42 million.".into())
             .await
             .expect("Turn 3 should succeed");
         eprintln!("[scenario 19] Turn 3: {}", r3.text.trim());
 
         // Turn 4: Distractor question
         let r4 = agent
-            .run("What is 17 multiplied by 3?".to_string())
+            .run("What is 17 multiplied by 3?".into())
             .await
             .expect("Turn 4 should succeed");
         assert!(
@@ -1521,7 +1521,7 @@ mod scenario_19_multi_turn_context {
             .run(
                 "Please recall all three facts (A, B, and C) about planet Zorg \
                  that I told you earlier."
-                    .to_string(),
+                    .into(),
             )
             .await
             .expect("Turn 5 should succeed");

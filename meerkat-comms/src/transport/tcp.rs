@@ -98,6 +98,7 @@ mod tests {
             from: keypair.public_key(),
             to: PubKey::new([2u8; 32]),
             kind: MessageKind::Message {
+                blocks: None,
                 body: "hello from tcp".to_string(),
             },
             sig: Signature::new([0u8; 64]),

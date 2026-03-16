@@ -16,7 +16,7 @@ use crate::tokio;
 use crate::tool_scope::{
     EXTERNAL_TOOL_FILTER_METADATA_KEY, ToolFilter, ToolScopeRevision, ToolScopeStageError,
 };
-use crate::types::{Message, RunResult};
+use crate::types::{ContentInput, Message, RunResult};
 use async_trait::async_trait;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -81,11 +81,11 @@ fn spawn_scoped_forwarder(
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait AgentRunner: Send {
-    async fn run(&mut self, prompt: String) -> Result<RunResult, AgentError>;
+    async fn run(&mut self, prompt: ContentInput) -> Result<RunResult, AgentError>;
 
     async fn run_with_events(
         &mut self,
-        prompt: String,
+        prompt: ContentInput,
         tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, AgentError>;
 }
@@ -391,11 +391,13 @@ where
                     child_scope_frame,
                 );
                 (
-                    sub_agent.run_with_events(prompt, child_event_tx).await,
+                    sub_agent
+                        .run_with_events(prompt.into(), child_event_tx)
+                        .await,
                     Some(forwarder),
                 )
             } else {
-                (sub_agent.run(prompt).await, None)
+                (sub_agent.run(prompt.into()).await, None)
             };
             if let Some(forwarder) = forwarder_task {
                 let _ = forwarder.await;
@@ -546,11 +548,13 @@ where
                         child_scope_frame,
                     );
                     (
-                        sub_agent.run_with_events(prompt, child_event_tx).await,
+                        sub_agent
+                            .run_with_events(prompt.into(), child_event_tx)
+                            .await,
                         Some(forwarder),
                     )
                 } else {
-                    (sub_agent.run(prompt).await, None)
+                    (sub_agent.run(prompt.into()).await, None)
                 };
                 if let Some(forwarder) = forwarder_task {
                     let _ = forwarder.await;
@@ -834,14 +838,14 @@ where
     }
 
     /// Run the agent with a user message.
-    pub async fn run(&mut self, user_input: String) -> Result<RunResult, AgentError> {
+    pub async fn run(&mut self, user_input: ContentInput) -> Result<RunResult, AgentError> {
         self.run_inner(user_input, None).await
     }
 
     /// Run the agent with events streamed to the provided channel.
     pub async fn run_with_events(
         &mut self,
-        user_input: String,
+        user_input: ContentInput,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, AgentError> {
         self.run_inner(user_input, Some(event_tx)).await
@@ -875,7 +879,7 @@ where
     /// is provided, and delegates to `run_loop`.
     async fn run_inner(
         &mut self,
-        user_input: String,
+        user_input: ContentInput,
         event_tx: Option<mpsc::Sender<AgentEvent>>,
     ) -> Result<RunResult, AgentError> {
         let event_tx = event_tx.or_else(|| self.default_event_tx.clone());
@@ -889,13 +893,33 @@ where
         self.extraction_schema_warnings = None;
 
         // Apply canonical per-turn skill references staged by the surface.
-        let user_input = self.apply_skill_ref(user_input).await;
+        // Skill refs are text-only so they operate on the text projection.
+        let user_input = if user_input.has_images() {
+            // For multimodal input, prepend skill text to the text blocks only.
+            let skill_text = self.apply_skill_ref(String::new()).await;
+            if skill_text.is_empty() {
+                user_input
+            } else {
+                // Prepend skill text as a leading text block.
+                let mut blocks = vec![crate::types::ContentBlock::Text { text: skill_text }];
+                blocks.extend(user_input.into_blocks());
+                ContentInput::Blocks(blocks)
+            }
+        } else {
+            let text = self.apply_skill_ref(user_input.text_content()).await;
+            ContentInput::Text(text)
+        };
 
-        let run_prompt = user_input.clone();
+        // Hooks/events always see the text projection.
+        let run_prompt = user_input.text_content();
 
-        // Add user message
-        self.session
-            .push(Message::User(crate::types::UserMessage::text(user_input)));
+        // Add user message — preserve image blocks when present.
+        let user_message = if user_input.has_images() {
+            crate::types::UserMessage::with_blocks(user_input.into_blocks())
+        } else {
+            crate::types::UserMessage::text(user_input.text_content())
+        };
+        self.session.push(Message::User(user_message));
 
         self.emit_run_started_event(&run_prompt, event_tx.as_ref())
             .await;

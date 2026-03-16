@@ -4249,6 +4249,7 @@ fn parse_comms_send_payload(
         kind: req.kind,
         to: req.to,
         body: req.body,
+        blocks: None,
         intent: req.intent,
         params: req.params,
         in_reply_to: req.in_reply_to,
@@ -6727,6 +6728,7 @@ mod tests {
             source,
             stream,
             allow_self_session,
+            blocks: _,
         } = cmd
         else {
             return Err("unexpected command parsed for input payload".into());

@@ -46,7 +46,7 @@ struct MockAgent {
 impl SessionAgent for MockAgent {
     async fn run_with_events(
         &mut self,
-        _prompt: String,
+        _prompt: meerkat_core::types::ContentInput,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         if let Some(delay) = self.delay_ms {
@@ -81,7 +81,7 @@ impl SessionAgent for MockAgent {
 
     async fn run_host_mode(
         &mut self,
-        prompt: String,
+        prompt: meerkat_core::types::ContentInput,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         // Mock host mode delegates to regular run for testing purposes.
         // Session task forwards events from the shared internal channel.
@@ -403,7 +403,7 @@ struct RealSessionAgent {
 impl SessionAgent for RealSessionAgent {
     async fn run_with_events(
         &mut self,
-        prompt: String,
+        prompt: meerkat_core::types::ContentInput,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         self.agent.run_with_events(prompt, event_tx).await
@@ -411,7 +411,7 @@ impl SessionAgent for RealSessionAgent {
 
     async fn run_host_mode(
         &mut self,
-        prompt: String,
+        prompt: meerkat_core::types::ContentInput,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         self.agent.run_host_mode(prompt).await
     }

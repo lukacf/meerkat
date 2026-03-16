@@ -418,12 +418,12 @@ pub async fn spawn_sub_agent_dyn(
                 #[cfg(feature = "comms")]
                 {
                     agent
-                        .run_host_mode_with_events(String::new(), child_event_tx)
+                        .run_host_mode_with_events(String::new().into(), child_event_tx)
                         .await
                 }
                 #[cfg(not(feature = "comms"))]
                 {
-                    agent.run_host_mode(String::new()).await
+                    agent.run_host_mode(String::new().into()).await
                 }
             } else {
                 // The session already has the user prompt, so use run_pending()
@@ -433,7 +433,7 @@ pub async fn spawn_sub_agent_dyn(
             (result, Some(forwarder))
         } else {
             let result = if host_mode {
-                agent.run_host_mode(String::new()).await
+                agent.run_host_mode(String::new().into()).await
             } else {
                 // The session already has the user prompt, so use run_pending()
                 // which runs from the existing session without adding a new message.

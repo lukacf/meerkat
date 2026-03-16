@@ -53,6 +53,7 @@ import type {
   AgentEventEnvelope,
   AttributedMobEvent,
   Capability,
+  ContentBlock,
   MobCreateOptions,
   MobFlowStatus,
   MobMember,
@@ -303,7 +304,7 @@ export class MeerkatClient {
    * ```
    */
   async createSession(
-    prompt: string,
+    prompt: string | ContentBlock[],
     options?: SessionOptions,
   ): Promise<Session> {
     const params = MeerkatClient.buildCreateParams(prompt, options);
@@ -318,7 +319,7 @@ export class MeerkatClient {
    * Returns an {@link EventStream} `AsyncIterable<AgentEvent>`.
    */
   createSessionStreaming(
-    prompt: string,
+    prompt: string | ContentBlock[],
     options?: SessionOptions,
   ): EventStream {
     if (!this.process?.stdin) {
@@ -375,7 +376,7 @@ export class MeerkatClient {
    * turn with optional per-turn overrides.
    */
   async createDeferredSession(
-    prompt: string,
+    prompt: string | ContentBlock[],
     options?: SessionOptions,
   ): Promise<DeferredSession> {
     const params = MeerkatClient.buildCreateParams(prompt, options);
@@ -786,7 +787,7 @@ export class MeerkatClient {
   /** @internal */
   async _startTurn(
     sessionId: string,
-    prompt: string,
+    prompt: string | ContentBlock[],
     options?: {
       skillRefs?: SkillRef[];
       skillReferences?: string[];
@@ -832,7 +833,7 @@ export class MeerkatClient {
   /** @internal */
   _startTurnStreaming(
     sessionId: string,
-    prompt: string,
+    prompt: string | ContentBlock[],
     options?: {
       skillRefs?: SkillRef[];
       skillReferences?: string[];
@@ -1251,7 +1252,7 @@ export class MeerkatClient {
   }
 
   private static buildCreateParams(
-    prompt: string,
+    prompt: string | ContentBlock[],
     options?: SessionOptions,
   ): Record<string, unknown> {
     const params: Record<string, unknown> = { prompt };

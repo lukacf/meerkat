@@ -70,7 +70,7 @@ impl FactoryAgent {
 impl SessionAgent for FactoryAgent {
     async fn run_with_events(
         &mut self,
-        prompt: String,
+        prompt: meerkat_core::types::ContentInput,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         self.agent.run_with_events(prompt, event_tx).await
@@ -78,7 +78,7 @@ impl SessionAgent for FactoryAgent {
 
     async fn run_host_mode(
         &mut self,
-        prompt: String,
+        prompt: meerkat_core::types::ContentInput,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         self.agent.run_host_mode(prompt).await
     }
@@ -381,6 +381,7 @@ mod tests {
         CommsCommand::Input {
             session_id: session_id.clone(),
             body: "hello".to_string(),
+            blocks: None,
             source: InputSource::Rpc,
             stream,
             allow_self_session: true,
@@ -439,9 +440,10 @@ mod tests {
             .map_err(|err| format!("{err}"))?;
 
         let (run_event_tx, _run_event_rx) = mpsc::channel(8);
-        let result = SessionAgent::run_with_events(&mut agent, "hello".to_string(), run_event_tx)
-            .await
-            .map_err(|err| format!("{err}"))?;
+        let result =
+            SessionAgent::run_with_events(&mut agent, "hello".to_string().into(), run_event_tx)
+                .await
+                .map_err(|err| format!("{err}"))?;
         assert_eq!(result.text, "override");
         Ok(())
     }

@@ -239,6 +239,7 @@ mod tests {
             from: sender_pubkey,
             to: our_pubkey,
             kind: MessageKind::Message {
+                blocks: None,
                 body: "hello from sender".to_string(),
             },
             sig: Signature::new([0u8; 64]),

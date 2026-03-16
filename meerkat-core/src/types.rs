@@ -55,6 +55,12 @@ impl ContentBlock {
     }
 }
 
+impl fmt::Display for ContentBlock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.text_projection())
+    }
+}
+
 /// Concatenate text projections from a slice of content blocks.
 pub fn text_content(blocks: &[ContentBlock]) -> String {
     let mut result = String::new();
@@ -88,22 +94,16 @@ mod content_blocks_serde {
     where
         S: Serializer,
     {
-        if blocks
-            .iter()
-            .all(|b| matches!(b, ContentBlock::Text { .. }))
+        // Single text block → plain string (backwards compat).
+        // Multiple text blocks (e.g. after compaction replaces images with text
+        // placeholders) must serialize as an array to preserve block boundaries.
+        if blocks.len() == 1
+            && let ContentBlock::Text { text } = &blocks[0]
         {
-            let text: String = blocks
-                .iter()
-                .map(|b| match b {
-                    ContentBlock::Text { text } => text.as_str(),
-                    _ => "",
-                })
-                .collect::<Vec<_>>()
-                .join("");
-            text.serialize(serializer)
-        } else {
-            blocks.serialize(serializer)
+            return text.serialize(serializer);
         }
+        // Multiple blocks or any non-text → array
+        blocks.serialize(serializer)
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<ContentBlock>, D::Error>

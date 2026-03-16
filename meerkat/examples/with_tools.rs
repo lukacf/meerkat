@@ -99,7 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await;
 
     let result = agent
-        .run("What is 25 + 17, and then multiply the result by 3?".to_string())
+        .run("What is 25 + 17, and then multiply the result by 3?".into())
         .await?;
 
     println!("Response: {}", result.text);

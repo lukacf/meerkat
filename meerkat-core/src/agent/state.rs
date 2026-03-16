@@ -1708,7 +1708,7 @@ mod tests {
             )
             .await;
 
-        let result = agent.run("prompt".to_string()).await.unwrap();
+        let result = agent.run("prompt".to_string().into()).await.unwrap();
         assert_eq!(result.text, "ok");
         assert!(
             agent.session().messages().iter().any(|message| matches!(
@@ -1726,7 +1726,7 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
         let result = agent
-            .run_with_events("prompt".to_string(), tx)
+            .run_with_events("prompt".to_string().into(), tx)
             .await
             .unwrap();
         assert_eq!(result.turns, 0);
@@ -1796,7 +1796,7 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
         let result = agent
-            .run_with_events("prompt".to_string(), tx)
+            .run_with_events("prompt".to_string().into(), tx)
             .await
             .unwrap();
         assert_eq!(result.text, "patched-final-text");
@@ -1857,7 +1857,7 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
         let err = agent
-            .run_with_events("prompt".to_string(), tx)
+            .run_with_events("prompt".to_string().into(), tx)
             .await
             .expect_err("RunCompleted hook denial should fail the run");
         assert!(matches!(
@@ -1935,7 +1935,7 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
         let err = agent
-            .run_with_events("prompt".to_string(), tx)
+            .run_with_events("prompt".to_string().into(), tx)
             .await
             .expect_err("TurnBoundary denial should fail the run");
         assert!(matches!(
@@ -1994,7 +1994,10 @@ mod tests {
             )
             .await;
 
-        let result = agent.run("tap-only prompt".to_string()).await.unwrap();
+        let result = agent
+            .run("tap-only prompt".to_string().into())
+            .await
+            .unwrap();
         assert_eq!(result.text, "ok");
 
         let mut saw_run_started = false;
@@ -2028,7 +2031,7 @@ mod tests {
         agent.config.max_turns = Some(1);
 
         let result = agent
-            .run("plain user prompt".to_string())
+            .run("plain user prompt".to_string().into())
             .await
             .expect("run should succeed");
         assert_eq!(result.turns, 1);
@@ -2065,7 +2068,7 @@ mod tests {
             .unwrap();
         agent.config.max_turns = Some(2);
 
-        let result = agent.run("prompt".to_string()).await.unwrap();
+        let result = agent.run("prompt".to_string().into()).await.unwrap();
         assert_eq!(result.text, "done");
 
         let seen = client.seen_tools();
@@ -2092,7 +2095,7 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
         let result = agent
-            .run_with_events("prompt".to_string(), tx)
+            .run_with_events("prompt".to_string().into(), tx)
             .await
             .unwrap();
         assert_eq!(result.text, "done");
@@ -2147,7 +2150,7 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
         let result = agent
-            .run_with_events("prompt".to_string(), tx)
+            .run_with_events("prompt".to_string().into(), tx)
             .await
             .unwrap();
         assert_eq!(result.text, "done");
@@ -2202,7 +2205,7 @@ mod tests {
             .await;
         agent.config.max_turns = Some(2);
 
-        let result = agent.run("prompt".to_string()).await.unwrap();
+        let result = agent.run("prompt".to_string().into()).await.unwrap();
         assert_eq!(result.text, "done");
         assert_eq!(
             client.seen_tools(),
@@ -2231,7 +2234,7 @@ mod tests {
             .await;
         agent.config.max_turns = Some(2);
 
-        let result = agent.run("prompt".to_string()).await.unwrap();
+        let result = agent.run("prompt".to_string().into()).await.unwrap();
         assert_eq!(result.text, "done");
         let seen = client.seen_tools();
         assert_eq!(

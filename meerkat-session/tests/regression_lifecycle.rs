@@ -39,7 +39,7 @@ struct MockAgent {
 impl SessionAgent for MockAgent {
     async fn run_with_events(
         &mut self,
-        _prompt: String,
+        _prompt: meerkat_core::types::ContentInput,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         if let Some(delay) = self.delay_ms {
@@ -98,7 +98,7 @@ impl SessionAgent for MockAgent {
 
     async fn run_host_mode(
         &mut self,
-        prompt: String,
+        prompt: meerkat_core::types::ContentInput,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         let (event_tx, _event_rx) = mpsc::channel(16);
         self.run_with_events(prompt, event_tx).await

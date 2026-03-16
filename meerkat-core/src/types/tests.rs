@@ -1357,4 +1357,48 @@ mod content_block_tests {
         let json = serde_json::to_value(&input).unwrap();
         assert_eq!(json, "hello");
     }
+
+    #[test]
+    fn tool_result_serialize_multi_text_blocks_as_array() {
+        let result = ToolResult::with_blocks(
+            "tc_1".into(),
+            vec![
+                ContentBlock::Text {
+                    text: "line1".into(),
+                },
+                ContentBlock::Text {
+                    text: "line2".into(),
+                },
+            ],
+            false,
+        );
+        let json = serde_json::to_value(&result).unwrap();
+        // Multiple text blocks should serialize as array, not collapsed string
+        assert!(json["content"].is_array());
+        assert_eq!(json["content"].as_array().unwrap().len(), 2);
+
+        // Round-trip should preserve both blocks
+        let parsed: ToolResult = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.content.len(), 2);
+        assert!(matches!(&parsed.content[0], ContentBlock::Text { text } if text == "line1"));
+        assert!(matches!(&parsed.content[1], ContentBlock::Text { text } if text == "line2"));
+    }
+
+    #[test]
+    fn content_block_display_text() {
+        let block = ContentBlock::Text {
+            text: "hello world".to_string(),
+        };
+        assert_eq!(format!("{block}"), "hello world");
+    }
+
+    #[test]
+    fn content_block_display_image() {
+        let block = ContentBlock::Image {
+            media_type: "image/png".to_string(),
+            data: "abc".to_string(),
+            source_path: None,
+        };
+        assert_eq!(format!("{block}"), "[image: image/png]");
+    }
 }

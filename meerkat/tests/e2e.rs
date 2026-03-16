@@ -361,7 +361,7 @@ mod simple_chat {
 
         // Run with simple prompt
         let result = agent
-            .run("What is 2+2? Answer with just the number.".to_string())
+            .run("What is 2+2? Answer with just the number.".into())
             .await
             .expect("Agent run should succeed");
 
@@ -412,7 +412,7 @@ mod simple_chat {
             .await;
 
         let result = agent
-            .run("What is 2+2? Answer with just the number.".to_string())
+            .run("What is 2+2? Answer with just the number.".into())
             .await
             .expect("Agent run should succeed");
 
@@ -446,7 +446,7 @@ mod simple_chat {
             .await;
 
         let result = agent
-            .run("What is 2+2? Answer with just the number.".to_string())
+            .run("What is 2+2? Answer with just the number.".into())
             .await
             .expect("Agent run should succeed");
 
@@ -567,7 +567,7 @@ mod tool_invocation {
 
         // Run agent with prompt that should trigger tool use
         let result = agent
-            .run("Please use the echo tool to echo 'Hello from E2E test'".to_string())
+            .run("Please use the echo tool to echo 'Hello from E2E test'".into())
             .await
             .expect("Agent run should succeed");
 
@@ -615,21 +615,21 @@ mod multi_turn {
 
         // Turn 1: Establish context
         let result1 = agent
-            .run("My name is Alice and my favorite color is blue.".to_string())
+            .run("My name is Alice and my favorite color is blue.".into())
             .await
             .expect("Turn 1 should succeed");
         assert!(!result1.text.is_empty());
 
         // Turn 2: Add more context
         let result2 = agent
-            .run("I also like the number 42.".to_string())
+            .run("I also like the number 42.".into())
             .await
             .expect("Turn 2 should succeed");
         assert!(!result2.text.is_empty());
 
         // Turn 3: Verify context is maintained
         let result3 = agent
-            .run("What is my name?".to_string())
+            .run("What is my name?".into())
             .await
             .expect("Turn 3 should succeed");
         assert!(
@@ -640,7 +640,7 @@ mod multi_turn {
 
         // Turn 4: Verify more context
         let result4 = agent
-            .run("What is my favorite color?".to_string())
+            .run("What is my favorite color?".into())
             .await
             .expect("Turn 4 should succeed");
         assert!(
@@ -651,7 +651,7 @@ mod multi_turn {
 
         // Turn 5: Verify all context
         let result5 = agent
-            .run("What number do I like?".to_string())
+            .run("What number do I like?".into())
             .await
             .expect("Turn 5 should succeed");
         assert!(
@@ -708,7 +708,7 @@ mod session_resume {
 
             // Establish context
             let _ = agent
-                .run("Remember this secret code: ALPHA-BRAVO-7".to_string())
+                .run("Remember this secret code: ALPHA-BRAVO-7".into())
                 .await
                 .expect("Turn should succeed");
 
@@ -741,7 +741,7 @@ mod session_resume {
 
             // Verify context is maintained
             let result = agent
-                .run("What was the secret code I told you?".to_string())
+                .run("What was the secret code I told you?".into())
                 .await
                 .expect("Turn should succeed");
 
@@ -793,7 +793,7 @@ mod budget_exhaustion {
 
         // First turn should succeed
         let result1 = agent
-            .run("Say hello briefly.".to_string())
+            .run("Say hello briefly.".into())
             .await
             .expect("First turn should succeed");
 
@@ -811,7 +811,7 @@ mod budget_exhaustion {
         // If budget is not exhausted, try another turn
         if !budget.is_exhausted() {
             let result2 = agent
-                .run("Tell me more.".to_string())
+                .run("Tell me more.".into())
                 .await
                 .expect("Second turn should complete (may be limited)");
 
@@ -862,7 +862,7 @@ mod budget_exhaustion {
 
         // Run a query that might trigger tool calls
         let result = agent
-            .run("Please use the tools to get and process some data.".to_string())
+            .run("Please use the tools to get and process some data.".into())
             .await
             .expect("Should complete");
 
@@ -969,7 +969,7 @@ mod parallel_tools {
 
         // Ask for multiple calculations - LLM may issue multiple tool calls
         let result = agent
-            .run("Calculate 1+2 and 3+4 using the add tool".to_string())
+            .run("Calculate 1+2 and 3+4 using the add tool".into())
             .await
             .expect("Should complete");
 
@@ -1106,7 +1106,7 @@ mod parallel_tools {
         // Ask for multiple pieces of info to encourage parallel tool calls
         let overall_start = std::time::Instant::now();
         let result = agent
-            .run("I need the weather in Tokyo, the time in London, and the stock price for AAPL. Get all three.".to_string())
+            .run("I need the weather in Tokyo, the time in London, and the stock price for AAPL. Get all three.".into())
             .await
             .expect("Should complete");
         let overall_duration = overall_start.elapsed();
@@ -1182,7 +1182,7 @@ mod parallel_tools {
 
         // Turn 1: Multiple tool calls
         let result1 = agent
-            .run("Get the weather in Paris and the stock price for MSFT".to_string())
+            .run("Get the weather in Paris and the stock price for MSFT".into())
             .await
             .expect("Turn 1 should complete");
 
@@ -1193,7 +1193,7 @@ mod parallel_tools {
 
         // Turn 2: Follow-up (uses session history)
         let result2 = agent
-            .run("Now also get the time in New York".to_string())
+            .run("Now also get the time in New York".into())
             .await
             .expect("Turn 2 should complete");
 
@@ -1301,7 +1301,7 @@ mod parallel_tools {
         let result = agent
             .run(
                 "Please call working_tool, broken_tool, and another_working_tool to test them all"
-                    .to_string(),
+                    .into(),
             )
             .await
             .expect("Agent should complete even with partial tool failure");
@@ -1389,7 +1389,7 @@ mod sub_agent_fork {
         assert_eq!(agent.depth(), 0);
 
         // Run the parent agent - it should work independently
-        let result = agent.run("Say hello briefly.".to_string()).await.unwrap();
+        let result = agent.run("Say hello briefly.".into()).await.unwrap();
         assert!(!result.text.is_empty());
     }
 

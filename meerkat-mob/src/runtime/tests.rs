@@ -2015,7 +2015,7 @@ struct PersistentMockAgent {
 impl SessionAgent for PersistentMockAgent {
     async fn run_with_events(
         &mut self,
-        _prompt: String,
+        _prompt: meerkat_core::types::ContentInput,
         _event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         Ok(mock_run_result(
@@ -2026,7 +2026,7 @@ impl SessionAgent for PersistentMockAgent {
 
     async fn run_host_mode(
         &mut self,
-        prompt: String,
+        prompt: meerkat_core::types::ContentInput,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
         self.run_with_events(prompt, event_tx).await
@@ -2203,7 +2203,7 @@ struct OverlayProbeSessionAgent {
 impl SessionAgent for OverlayProbeSessionAgent {
     async fn run_with_events(
         &mut self,
-        prompt: String,
+        prompt: meerkat_core::types::ContentInput,
         event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         self.agent.run_with_events(prompt, event_tx).await
@@ -2211,7 +2211,7 @@ impl SessionAgent for OverlayProbeSessionAgent {
 
     async fn run_host_mode(
         &mut self,
-        prompt: String,
+        prompt: meerkat_core::types::ContentInput,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         self.agent.run_host_mode(prompt).await
     }

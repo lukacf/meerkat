@@ -172,28 +172,48 @@ impl GeminiClient {
                 Message::ToolResults { results } => {
                     // Per spec section 2.3: thoughtSignature NEVER on functionResponse
                     // Signature belongs on functionCall, not on the response
-                    let parts: Vec<Value> = results
-                        .iter()
-                        .map(|r| {
-                            let function_name = tool_name_by_id
-                                .get(&r.tool_use_id)
-                                .cloned()
-                                .unwrap_or_else(|| r.tool_use_id.clone());
-                            serde_json::json!({
-                                "functionResponse": {
-                                    "name": function_name,
-                                    "response": {
-                                        "content": r.text_content(),
-                                        "error": r.is_error
-                                    }
+                    let mut parts: Vec<Value> = Vec::new();
+
+                    for r in results {
+                        let function_name = tool_name_by_id
+                            .get(&r.tool_use_id)
+                            .cloned()
+                            .unwrap_or_else(|| r.tool_use_id.clone());
+
+                        // functionResponse only supports text content. For tool
+                        // results with images we emit text in the functionResponse
+                        // and append the images as separate inlineData parts so
+                        // the model still sees the actual image data.
+                        parts.push(serde_json::json!({
+                            "functionResponse": {
+                                "name": function_name,
+                                "response": {
+                                    "content": r.text_content(),
+                                    "error": r.is_error
                                 }
-                            })
-                            // NOTE: thoughtSignature is intentionally NOT included here
-                            // Verified by scripts/test_gemini_thought_signature.py:
-                            // - sig on functionCall only: PASS
-                            // - sig on functionResponse only: FAIL (400 error)
-                        })
-                        .collect();
+                            }
+                        }));
+                        // NOTE: thoughtSignature is intentionally NOT included here
+                        // Verified by scripts/test_gemini_thought_signature.py:
+                        // - sig on functionCall only: PASS
+                        // - sig on functionResponse only: FAIL (400 error)
+
+                        if r.has_images() {
+                            for block in &r.content {
+                                if let ContentBlock::Image {
+                                    media_type, data, ..
+                                } = block
+                                {
+                                    parts.push(serde_json::json!({
+                                        "inlineData": {
+                                            "mimeType": media_type,
+                                            "data": data
+                                        }
+                                    }));
+                                }
+                            }
+                        }
+                    }
 
                     contents.push(serde_json::json!({
                         "role": "user",
@@ -2329,7 +2349,8 @@ mod tests {
     }
 
     #[test]
-    fn gemini_tool_result_with_image_degrades_to_text() -> Result<(), Box<dyn std::error::Error>> {
+    fn gemini_tool_result_with_image_preserves_inline_data()
+    -> Result<(), Box<dyn std::error::Error>> {
         use serde_json::value::RawValue;
         let client = GeminiClient::new("test-key".to_string());
         let args_raw = RawValue::from_string(json!({"url": "http://example.com"}).to_string())?;
@@ -2375,16 +2396,30 @@ mod tests {
             .as_array()
             .ok_or("missing parts")?;
 
-        // Gemini functionResponse doesn't support images -- should degrade to text
+        // First part: functionResponse with text content
         let response = &parts[0]["functionResponse"]["response"];
         let content_str = response["content"].as_str().ok_or("content not string")?;
         assert!(
             content_str.contains("captured"),
-            "text content should be preserved"
+            "text content should be preserved in functionResponse"
         );
+
+        // Second part: inlineData with the actual image
         assert!(
-            content_str.contains("[image: image/png]"),
-            "image should degrade to text projection: got {content_str}"
+            parts.len() >= 2,
+            "should have functionResponse + inlineData parts, got {} parts",
+            parts.len()
+        );
+        let inline_data = &parts[1]["inlineData"];
+        assert_eq!(
+            inline_data["mimeType"].as_str(),
+            Some("image/png"),
+            "image mimeType should be preserved"
+        );
+        assert_eq!(
+            inline_data["data"].as_str(),
+            Some("iVBOR..."),
+            "image base64 data should be preserved"
         );
         Ok(())
     }

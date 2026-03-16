@@ -243,7 +243,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let result = agent
         .run_with_events(
-            "What's the weather like in San Francisco and Tokyo?".to_string(),
+            "What's the weather like in San Francisco and Tokyo?".into(),
             event_tx.clone(),
         )
         .await?;

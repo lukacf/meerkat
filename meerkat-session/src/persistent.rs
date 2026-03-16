@@ -1232,7 +1232,7 @@ mod tests {
     impl SessionAgent for DummyAgent {
         async fn run_with_events(
             &mut self,
-            prompt: String,
+            prompt: meerkat_core::types::ContentInput,
             _event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
         ) -> Result<RunResult, meerkat_core::error::AgentError> {
             let session_id = self.session_id();
@@ -1241,7 +1241,7 @@ mod tests {
                 Err(poisoned) => poisoned.into_inner(),
             };
             session.push(meerkat_core::types::Message::User(
-                meerkat_core::types::UserMessage::text(prompt),
+                meerkat_core::types::UserMessage::text(prompt.text_content()),
             ));
             session.push(meerkat_core::types::Message::Assistant(
                 meerkat_core::types::AssistantMessage {
@@ -1265,7 +1265,7 @@ mod tests {
 
         async fn run_host_mode(
             &mut self,
-            prompt: String,
+            prompt: meerkat_core::types::ContentInput,
         ) -> Result<RunResult, meerkat_core::error::AgentError> {
             self.run_with_events(prompt, tokio::sync::mpsc::channel(1).0)
                 .await

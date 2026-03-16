@@ -81,7 +81,7 @@ async fn build_agent_with_mock_client_produces_runnable_agent() {
 
     let mut agent = factory.build_agent(build_config, &config).await.unwrap();
 
-    let result = agent.run("Hello".to_string()).await.unwrap();
+    let result = agent.run("Hello".to_string().into()).await.unwrap();
     assert!(
         result.text.contains("Hello from mock"),
         "Agent should produce text from mock client, got: {}",
@@ -689,7 +689,7 @@ async fn build_agent_with_custom_session_store() {
     assert_eq!(store.save_count(), 0);
 
     // Run the agent — the agent loop saves the session on completion
-    let result = agent.run("Hello".to_string()).await.unwrap();
+    let result = agent.run("Hello".to_string().into()).await.unwrap();
     assert!(result.text.contains("Hello from mock"));
 
     // The custom store should have received at least one save call

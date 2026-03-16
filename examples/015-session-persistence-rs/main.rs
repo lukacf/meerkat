@@ -49,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Turn 1: Create session
     let result = agent
-        .run("My project is called Phoenix. Remember that.".to_string())
+        .run("My project is called Phoenix. Remember that.".into())
         .await?;
     let session_id = result.session_id.clone();
     println!("Created session: {session_id}");
@@ -77,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Turn 2: Continue the persisted session
-    let result = agent.run("What's my project called?".to_string()).await?;
+    let result = agent.run("What's my project called?".into()).await?;
     println!("\nTurn 2 response: {}", result.text);
 
     // ── Storage backend comparison ─────────────────────────────────────────

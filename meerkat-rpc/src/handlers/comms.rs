@@ -186,6 +186,7 @@ pub(crate) fn build_comms_command(
         kind: params.kind.clone(),
         to: params.to.clone(),
         body: params.body.clone(),
+        blocks: None,
         intent: params.intent.clone(),
         params: params.params.clone(),
         in_reply_to: params.in_reply_to.clone(),

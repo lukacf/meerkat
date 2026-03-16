@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::identity::{Keypair, PubKey, Signature};
 use ciborium::value::{CanonicalValue, Value};
+use meerkat_core::types::ContentBlock;
 
 /// Response status for Request messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -22,7 +23,13 @@ pub enum Status {
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum MessageKind {
     /// A simple text message.
-    Message { body: String },
+    Message {
+        body: String,
+        /// Optional multimodal content blocks. When present, carries full
+        /// multimodal content; `body` remains as text projection for backwards compat.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocks: Option<Vec<ContentBlock>>,
+    },
     /// A request for the peer to perform an action.
     Request { intent: String, params: JsonValue },
     /// A response to a previous request.
@@ -145,6 +152,9 @@ pub enum InboxItem {
         /// Set by `inject_with_subscription`, `None` for untracked events.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         interaction_id: Option<Uuid>,
+        /// Optional multimodal content blocks.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocks: Option<Vec<ContentBlock>>,
     },
 }
 
@@ -165,9 +175,11 @@ mod tests {
     fn test_message_kind_message_fields() {
         let msg = MessageKind::Message {
             body: "hello".to_string(),
+            blocks: None,
         };
-        if let MessageKind::Message { body } = msg {
+        if let MessageKind::Message { body, blocks } = msg {
             assert_eq!(body, "hello");
+            assert_eq!(blocks, None);
         } else {
             panic!("Expected Message variant");
         }
@@ -228,6 +240,7 @@ mod tests {
             to: PubKey::new([2u8; 32]),
             kind: MessageKind::Message {
                 body: "test".to_string(),
+                blocks: None,
             },
             sig: Signature::new([0u8; 64]),
         };
@@ -251,6 +264,7 @@ mod tests {
         let kinds = vec![
             MessageKind::Message {
                 body: "hello".to_string(),
+                blocks: None,
             },
             MessageKind::Request {
                 intent: "test".to_string(),
@@ -281,6 +295,7 @@ mod tests {
             to: PubKey::new([2u8; 32]),
             kind: MessageKind::Message {
                 body: "test".to_string(),
+                blocks: None,
             },
             sig: Signature::new([0u8; 64]),
         };
@@ -380,6 +395,7 @@ mod tests {
         // Verify MessageKind uses string tags, not ordinals
         let msg = MessageKind::Message {
             body: "test".to_string(),
+            blocks: None,
         };
         let mut buf = Vec::new();
         ciborium::into_writer(&msg, &mut buf).unwrap();
@@ -401,6 +417,7 @@ mod tests {
             to: PubKey::new([2u8; 32]),
             kind: MessageKind::Message {
                 body: "test".to_string(),
+                blocks: None,
             },
             sig: Signature::new([0u8; 64]),
         };
@@ -420,6 +437,7 @@ mod tests {
             to: PubKey::new([2u8; 32]),
             kind: MessageKind::Message {
                 body: "test".to_string(),
+                blocks: None,
             },
             sig: Signature::new([0u8; 64]),
         };
@@ -439,6 +457,7 @@ mod tests {
             to: PubKey::new([2u8; 32]),
             kind: MessageKind::Message {
                 body: "test".to_string(),
+                blocks: None,
             },
             sig: Signature::new([0u8; 64]),
         };
@@ -456,6 +475,7 @@ mod tests {
             body: "New email from john@example.com".to_string(),
             source: PlainEventSource::Tcp,
             interaction_id: None,
+            blocks: None,
         };
 
         // JSON round-trip
@@ -479,21 +499,25 @@ mod tests {
                 body: "hello".to_string(),
                 source: PlainEventSource::Tcp,
                 interaction_id: None,
+                blocks: None,
             },
             InboxItem::PlainEvent {
                 body: r#"{"event":"email"}"#.to_string(),
                 source: PlainEventSource::Stdin,
                 interaction_id: None,
+                blocks: None,
             },
             InboxItem::PlainEvent {
                 body: "webhook payload".to_string(),
                 source: PlainEventSource::Webhook,
                 interaction_id: None,
+                blocks: None,
             },
             InboxItem::PlainEvent {
                 body: "rpc event".to_string(),
                 source: PlainEventSource::Rpc,
                 interaction_id: None,
+                blocks: None,
             },
         ];
         for item in items {
@@ -506,7 +530,7 @@ mod tests {
 
     #[test]
     fn test_inbox_item_plain_event_backward_compat_json() {
-        // Old format (no interaction_id) should deserialize with interaction_id: None
+        // Old format (no interaction_id, no blocks) should deserialize with defaults
         let old_json = r#"{"type":"plain_event","body":"hello","source":"tcp"}"#;
         let parsed: InboxItem = serde_json::from_str(old_json).unwrap();
         match parsed {
@@ -514,10 +538,12 @@ mod tests {
                 body,
                 source,
                 interaction_id,
+                blocks,
             } => {
                 assert_eq!(body, "hello");
                 assert_eq!(source, meerkat_core::PlainEventSource::Tcp);
                 assert_eq!(interaction_id, None);
+                assert_eq!(blocks, None);
             }
             other => panic!("Expected PlainEvent, got {other:?}"),
         }
@@ -530,6 +556,7 @@ mod tests {
             body: "tracked event".to_string(),
             source: meerkat_core::PlainEventSource::Rpc,
             interaction_id: Some(id),
+            blocks: None,
         };
 
         let json = serde_json::to_string(&item).unwrap();
@@ -548,6 +575,7 @@ mod tests {
             body: "tracked event".to_string(),
             source: meerkat_core::PlainEventSource::Rpc,
             interaction_id: Some(id),
+            blocks: None,
         };
 
         let mut buf = Vec::new();
@@ -562,6 +590,7 @@ mod tests {
             body: "untracked".to_string(),
             source: meerkat_core::PlainEventSource::Tcp,
             interaction_id: None,
+            blocks: None,
         };
 
         let json = serde_json::to_string(&item).unwrap();
@@ -570,6 +599,70 @@ mod tests {
         assert!(
             value.get("interaction_id").is_none(),
             "interaction_id: None should not be serialized"
+        );
+    }
+
+    // === Multimodal blocks tests ===
+
+    #[test]
+    fn message_kind_with_blocks_cbor_roundtrip() {
+        let kind = MessageKind::Message {
+            body: "hello".to_string(),
+            blocks: Some(vec![
+                ContentBlock::Text {
+                    text: "hello".to_string(),
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: "iVBORw0KGgo=".to_string(),
+                    source_path: None,
+                },
+            ]),
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&kind, &mut buf).unwrap();
+        let decoded: MessageKind = ciborium::from_reader(&buf[..]).unwrap();
+        assert_eq!(kind, decoded);
+    }
+
+    #[test]
+    fn message_kind_without_blocks_backwards_compat() {
+        use crate::identity::Keypair;
+
+        // Serialize a Message without blocks, sign it, verify it.
+        // Then deserialize and verify blocks defaults to None.
+        let keypair = Keypair::generate();
+        let kind = MessageKind::Message {
+            body: "test".to_string(),
+            blocks: None,
+        };
+
+        // CBOR roundtrip preserves None
+        let mut buf = Vec::new();
+        ciborium::into_writer(&kind, &mut buf).unwrap();
+        let decoded: MessageKind = ciborium::from_reader(&buf[..]).unwrap();
+        assert_eq!(kind, decoded);
+
+        // Envelope sign+verify still works
+        let mut envelope = Envelope {
+            id: Uuid::new_v4(),
+            from: keypair.public_key(),
+            to: PubKey::new([2u8; 32]),
+            kind,
+            sig: Signature::new([0u8; 64]),
+        };
+        envelope.sign(&keypair);
+        assert!(
+            envelope.verify(),
+            "blocks=None envelope should still verify"
+        );
+
+        // JSON roundtrip omits blocks field entirely
+        let json = serde_json::to_string(&envelope.kind).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            value.get("blocks").is_none(),
+            "blocks: None should not appear in JSON"
         );
     }
 }

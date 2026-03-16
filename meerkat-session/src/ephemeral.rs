@@ -65,7 +65,7 @@ pub struct SessionSnapshot {
 /// Commands sent from the service to a session task.
 enum SessionCommand {
     StartTurn {
-        prompt: String,
+        prompt: meerkat_core::types::ContentInput,
         host_mode: bool,
         event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
         result_tx: oneshot::Sender<Result<RunResult, meerkat_core::error::AgentError>>,
@@ -169,7 +169,7 @@ pub trait SessionAgent: Send {
     /// Run the agent with the given prompt, streaming events.
     async fn run_with_events(
         &mut self,
-        prompt: String,
+        prompt: meerkat_core::types::ContentInput,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError>;
 
@@ -178,7 +178,7 @@ pub trait SessionAgent: Send {
     /// Event streaming should use the agent's build-time configured event channel.
     async fn run_host_mode(
         &mut self,
-        prompt: String,
+        prompt: meerkat_core::types::ContentInput,
     ) -> Result<RunResult, meerkat_core::error::AgentError>;
 
     /// Stage skill references to resolve and inject on the next turn.
@@ -512,7 +512,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             }
         };
 
-        let prompt = req.prompt.text_content();
+        let prompt = req.prompt.clone();
         let caller_event_tx = req.event_tx.clone();
         let defer_initial_turn =
             req.initial_turn == meerkat_core::service::InitialTurnPolicy::Defer;
@@ -673,8 +673,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         let (result_tx, result_rx) = oneshot::channel();
 
         // Prepend additional instructions as system notices to the prompt.
-        let prompt_text = req.prompt.text_content();
-        let prompt = match &req.additional_instructions {
+        let prompt: meerkat_core::types::ContentInput = match &req.additional_instructions {
             Some(instructions) if !instructions.is_empty() => {
                 let mut prefix = String::new();
                 for instruction in instructions {
@@ -682,10 +681,24 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                     prefix.push_str(instruction);
                     prefix.push_str("]\n\n");
                 }
-                prefix.push_str(&prompt_text);
-                prefix
+                if req.prompt.has_images() {
+                    // Preserve image blocks; prepend instructions as a text block.
+                    let mut blocks = vec![meerkat_core::types::ContentBlock::Text {
+                        text: prefix + &req.prompt.text_content(),
+                    }];
+                    // Append non-text blocks (images) from the original input.
+                    for block in req.prompt.clone().into_blocks() {
+                        if !matches!(block, meerkat_core::types::ContentBlock::Text { .. }) {
+                            blocks.push(block);
+                        }
+                    }
+                    meerkat_core::types::ContentInput::Blocks(blocks)
+                } else {
+                    prefix.push_str(&req.prompt.text_content());
+                    meerkat_core::types::ContentInput::Text(prefix)
+                }
             }
-            _ => prompt_text,
+            _ => req.prompt.clone(),
         };
 
         {

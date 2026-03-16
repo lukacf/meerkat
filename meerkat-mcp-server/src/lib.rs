@@ -2087,6 +2087,7 @@ async fn handle_meerkat_comms_send(
         kind: input.kind,
         to: input.to,
         body: input.body,
+        blocks: None,
         intent: input.intent,
         params: input.params,
         in_reply_to: input.in_reply_to,

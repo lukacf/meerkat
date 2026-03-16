@@ -196,7 +196,7 @@ fn wire_session_history_required_fields() {
                 content: "system".to_string(),
             },
             WireSessionMessage::User {
-                content: "user".to_string(),
+                content: meerkat_contracts::WireContentInput::Text("user".to_string()),
             },
         ],
     };
@@ -233,7 +233,7 @@ fn wire_session_history_roundtrip() {
             WireSessionMessage::ToolResults {
                 results: vec![meerkat_contracts::WireToolResult {
                     tool_use_id: "tool-1".to_string(),
-                    content: "ok".to_string(),
+                    content: meerkat_contracts::WireToolResultContent::Text("ok".to_string()),
                     is_error: false,
                 }],
             },

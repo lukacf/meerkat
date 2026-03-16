@@ -258,7 +258,7 @@ class MeerkatClient:
 
     async def create_session(
         self,
-        prompt: str,
+        prompt: str | list[dict],
         *,
         model: str | None = None,
         provider: str | None = None,
@@ -310,7 +310,7 @@ class MeerkatClient:
 
     def create_session_streaming(
         self,
-        prompt: str,
+        prompt: str | list[dict],
         *,
         model: str | None = None,
         provider: str | None = None,
@@ -377,7 +377,7 @@ class MeerkatClient:
 
     async def create_deferred_session(
         self,
-        prompt: str,
+        prompt: str | list[dict],
         *,
         model: str | None = None,
         provider: str | None = None,
@@ -811,7 +811,7 @@ class MeerkatClient:
     async def _start_turn(
         self,
         session_id: str,
-        prompt: str,
+        prompt: str | list[dict],
         *,
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
@@ -855,7 +855,7 @@ class MeerkatClient:
     def _start_turn_streaming(
         self,
         session_id: str,
-        prompt: str,
+        prompt: str | list[dict],
         *,
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
@@ -1083,7 +1083,7 @@ class MeerkatClient:
 
     @staticmethod
     def _build_create_params(
-        prompt: str,
+        prompt: str | list[dict],
         *,
         model: str | None = None,
         provider: str | None = None,

@@ -45,9 +45,9 @@ use meerkat_core::service::{
     SessionControlError, SessionError, StartTurnRequest as SvcStartTurnRequest,
 };
 use meerkat_core::{
-    Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore, FileConfigStore,
-    HookRunOverrides, Provider, RealmSelection, RuntimeBootstrap, SessionTooling, agent_event_type,
-    format_verbose_event,
+    Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore, ContentInput,
+    FileConfigStore, HookRunOverrides, Provider, RealmSelection, RuntimeBootstrap, SessionTooling,
+    agent_event_type, format_verbose_event,
 };
 use meerkat_runtime::SessionServiceRuntimeExt as _;
 use meerkat_store::{RealmBackend, RealmOrigin};
@@ -663,7 +663,7 @@ fn validate_public_peer_meta(peer_meta: Option<&meerkat_core::PeerMeta>) -> Resu
 /// Create session request
 #[derive(Debug, Deserialize)]
 pub struct CreateSessionRequest {
-    pub prompt: String,
+    pub prompt: ContentInput,
     #[serde(default)]
     pub system_prompt: Option<String>,
     #[serde(default)]
@@ -773,7 +773,7 @@ async fn canonical_skill_keys_for_state(
 #[derive(Debug, Deserialize, Clone)]
 pub struct ContinueSessionRequest {
     pub session_id: String,
-    pub prompt: String,
+    pub prompt: ContentInput,
     #[serde(default)]
     pub system_prompt: Option<String>,
     /// JSON schema for structured output extraction (wrapper or raw schema).
@@ -1375,6 +1375,7 @@ fn build_comms_command(
         kind: req.kind.clone(),
         to: req.to.clone(),
         body: req.body.clone(),
+        blocks: None,
         intent: req.intent.clone(),
         params: req.params.clone(),
         in_reply_to: req.in_reply_to.clone(),
@@ -1880,7 +1881,7 @@ async fn create_session(
 
     let svc_req = SvcCreateSessionRequest {
         model: model.to_string(),
-        prompt: req.prompt.clone().into(),
+        prompt: req.prompt.clone(),
         system_prompt: req.system_prompt,
         max_tokens: Some(max_tokens),
         event_tx: Some(caller_event_tx.clone()),
@@ -1916,7 +1917,7 @@ async fn create_session(
     }
 
     // Create input and route through runtime
-    let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+    let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::from_content_input(
         req.prompt,
         Some(
             meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
@@ -2201,14 +2202,23 @@ async fn continue_session(
     .await?;
 
     // Apply staged MCP operations at the turn boundary.
+    // MCP boundary appends text-only system notices; extract a String for it,
+    // then fold any additions back into the final ContentInput.
     #[allow(unused_mut)]
     let mut turn_prompt = req.prompt.clone();
     #[cfg(feature = "mcp")]
-    apply_mcp_boundary(&state, &session_id, &caller_event_tx, &mut turn_prompt).await?;
+    {
+        let mut mcp_text = turn_prompt.text_content();
+        apply_mcp_boundary(&state, &session_id, &caller_event_tx, &mut mcp_text).await?;
+        // If the MCP boundary appended notices, update the prompt.
+        if mcp_text != turn_prompt.text_content() {
+            turn_prompt = ContentInput::Text(mcp_text);
+        }
+    }
 
     // First, try to start a turn on a live session in the service.
     let svc_req = SvcStartTurnRequest {
-        prompt: turn_prompt.clone().into(),
+        prompt: turn_prompt.clone(),
         event_tx: Some(caller_event_tx.clone()),
         host_mode,
         skill_references: skill_references.clone(),
@@ -2224,8 +2234,8 @@ async fn continue_session(
         )));
     }
     let adapter = state.runtime_adapter.clone();
-    let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
-        svc_req.prompt.text_content(),
+    let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::from_content_input(
+        svc_req.prompt.clone(),
         Some(
             meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                 host_mode: if svc_req.host_mode { Some(true) } else { None },
@@ -2893,7 +2903,7 @@ mod tests {
         });
 
         let req: CreateSessionRequest = serde_json::from_value(req_json).unwrap();
-        assert_eq!(req.prompt, "Hello");
+        assert_eq!(req.prompt, ContentInput::Text("Hello".to_string()));
         assert!(req.host_mode);
         assert_eq!(req.comms_name, Some("test-agent".to_string()));
     }

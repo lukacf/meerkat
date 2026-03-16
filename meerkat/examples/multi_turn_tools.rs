@@ -211,7 +211,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Turn 1: Initial calculation and note
     println!("--- Turn 1: Calculate and save a note ---");
     let result = agent
-        .run("Calculate 15 * 8, then save a note about the result.".to_string())
+        .run("Calculate 15 * 8, then save a note about the result.".into())
         .await?;
     println!("Response: {}", result.text);
     println!("Tool calls: {}", result.tool_calls);
@@ -220,7 +220,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Turn 2: More calculations
     println!("--- Turn 2: More calculations ---");
     let result = agent
-        .run("Now calculate 100 / 4 and 25 + 37.".to_string())
+        .run("Now calculate 100 / 4 and 25 + 37.".into())
         .await?;
     println!("Response: {}", result.text);
     println!("Tool calls: {}", result.tool_calls);
@@ -229,7 +229,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Turn 3: Review history
     println!("--- Turn 3: Review calculation history and notes ---");
     let result = agent
-        .run("Show me all the calculations we've done and any notes we've saved.".to_string())
+        .run("Show me all the calculations we've done and any notes we've saved.".into())
         .await?;
     println!("Response: {}", result.text);
     println!("Tool calls: {}", result.tool_calls);
@@ -238,7 +238,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Turn 4: Save summary note
     println!("--- Turn 4: Save a summary ---");
     let result = agent
-        .run("Save a note summarizing our calculation session.".to_string())
+        .run("Save a note summarizing our calculation session.".into())
         .await?;
     println!("Response: {}", result.text);
     println!("Tool calls: {}", result.tool_calls);

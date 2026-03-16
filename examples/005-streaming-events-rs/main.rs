@@ -59,7 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let result = agent
         .run_with_events(
-            "Write a short poem about a meerkat standing guard.".to_string(),
+            "Write a short poem about a meerkat standing guard.".into(),
             event_tx,
         )
         .await?;
@@ -96,7 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let result = agent
         .run_with_events(
-            "Now write a limerick about the same meerkat.".to_string(),
+            "Now write a limerick about the same meerkat.".into(),
             event_tx,
         )
         .await?;

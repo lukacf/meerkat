@@ -196,7 +196,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .run(
             "Send the message 'Hello from Agent A! How are you today?' \
              to agent-b using the send tool."
-                .to_string(),
+                .into(),
         )
         .await?;
 
@@ -240,8 +240,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 from: msg.from_pubkey,
                 to: agent_b.comms_manager().keypair().public_key(),
                 kind: match msg.content {
-                    meerkat_comms::agent::CommsContent::Message { body } => {
-                        meerkat_comms::MessageKind::Message { body }
+                    meerkat_comms::agent::CommsContent::Message { body, .. } => {
+                        meerkat_comms::MessageKind::Message { body, blocks: None }
                     }
                     _ => continue,
                 },

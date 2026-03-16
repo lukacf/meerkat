@@ -249,7 +249,7 @@ async fn sdk_structured_output_extraction_succeeds() -> Result<(), Box<dyn std::
         .await;
 
     let result = agent
-        .run("Tell me about a person.".to_string())
+        .run("Tell me about a person.".to_string().into())
         .await
         .expect("agent run should succeed");
 
@@ -295,7 +295,7 @@ async fn sdk_structured_output_retry_on_invalid_json() -> Result<(), Box<dyn std
         .await;
 
     let result = agent
-        .run("Tell me about a person.".to_string())
+        .run("Tell me about a person.".to_string().into())
         .await
         .expect("agent run should succeed after retry");
 
@@ -332,7 +332,7 @@ async fn sdk_no_structured_output_without_schema() {
         .await;
 
     let result = agent
-        .run("Hello".to_string())
+        .run("Hello".to_string().into())
         .await
         .expect("agent run should succeed");
 
@@ -381,7 +381,7 @@ async fn sdk_structured_output_unwraps_named_envelope() -> Result<(), Box<dyn st
         .await;
 
     let result = agent
-        .run("Tell me about a person.".to_string())
+        .run("Tell me about a person.".to_string().into())
         .await
         .expect("agent run should succeed");
 

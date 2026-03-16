@@ -166,7 +166,7 @@ impl BuiltinTool for ViewImageTool {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
@@ -263,7 +263,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let img_path = dir.path().join("photo.jpg");
         // JPEG files start with 0xFF 0xD8; write minimal marker bytes.
-        std::fs::write(&img_path, &[0xFF, 0xD8, 0xFF, 0xD9]).unwrap();
+        std::fs::write(&img_path, [0xFF, 0xD8, 0xFF, 0xD9]).unwrap();
 
         let tool = ViewImageTool::new(dir.path().to_path_buf());
         let output = tool

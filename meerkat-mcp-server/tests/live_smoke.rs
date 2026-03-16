@@ -77,7 +77,7 @@ fn parse_tool_payload(blocks: &[meerkat_core::types::ContentBlock]) -> Value {
     serde_json::from_str(&text).expect("tool payload should be valid JSON")
 }
 
-fn parse_tool_payload_str(raw: &str) -> Value {
+fn _parse_tool_payload_str(raw: &str) -> Value {
     serde_json::from_str(raw).expect("tool payload should be valid JSON")
 }
 

@@ -46,6 +46,7 @@ pub fn profile_for(provider: &str, model: &str) -> Option<ModelProfile> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

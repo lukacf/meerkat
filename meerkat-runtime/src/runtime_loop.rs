@@ -394,7 +394,7 @@ mod tests {
             },
             convention: Some(crate::input::PeerConvention::Message),
             body: "see this image".into(),
-            blocks: Some(blocks.clone()),
+            blocks: Some(blocks),
         });
         let input_id = input.id().clone();
         let primitive = input_to_primitive(&input, input_id);

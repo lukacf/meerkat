@@ -596,7 +596,7 @@ where
                                     name: tc.name.clone(),
                                     result: tool_results
                                         .last()
-                                        .map(|r| r.text_content())
+                                        .map(ToolResult::text_content)
                                         .unwrap_or_default(),
                                     is_error: true,
                                     duration_ms: 0,

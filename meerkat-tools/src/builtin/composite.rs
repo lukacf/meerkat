@@ -663,7 +663,7 @@ mod tests {
         .expect("composite dispatcher should build");
 
         // datetime returns a JSON object - verify it's serialized to text
-        let call_json = serde_json::value::RawValue::from_string(r#"{}"#.to_string()).unwrap();
+        let call_json = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
         let call = ToolCallView {
             id: "test-obj",
             name: "datetime",

@@ -915,6 +915,7 @@ impl AgentFactory {
 
     /// Build a composite dispatcher so callers can register sub-agent tools.
     #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::too_many_arguments)]
     pub async fn build_composite_dispatcher(
         &self,
         store: Arc<dyn TaskStore>,
@@ -1419,7 +1420,7 @@ impl AgentFactory {
         // Resolve model profile for capability gating (e.g., hiding view_image
         // when the model cannot process image blocks in tool results).
         let image_tool_results = meerkat_models::profile::profile_for(provider.as_str(), &model)
-            .map_or(true, |p| p.image_tool_results);
+            .is_none_or(|p| p.image_tool_results);
 
         // Build the tool dispatcher WITHOUT wait interrupt wiring.
         // The interrupt is bound once after full composition (including comms gateway).

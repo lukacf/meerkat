@@ -112,7 +112,7 @@ task that owns the Agent exclusively (no mutex needed).
             prompt: "An alert just fired: 'CPU usage on prod-web-03 exceeded 95% for \
                      5 minutes.' Acknowledge the alert and describe your initial triage \
                      steps. Keep your response to 2-3 sentences."
-                .to_string(),
+                .into(),
             system_prompt: Some(
                 "You are a concise incident-response coordinator. \
                  You maintain context across multiple event injections, building an \
@@ -153,7 +153,7 @@ task that owns the Agent exclusively (no mutex needed).
                 prompt: "[MONITORING EVENT] Memory usage on prod-web-03 is now at 89%. \
                          Three other nodes in the cluster show normal metrics. \
                          The deployment log shows a new release was pushed 12 minutes ago."
-                    .to_string(),
+                    .into(),
                 event_tx: Some(event_tx),
                 host_mode: false,
                 skill_references: None,
@@ -188,7 +188,7 @@ task that owns the Agent exclusively (no mutex needed).
                 prompt: "[RESOLUTION EVENT] The team rolled back the release on prod-web-03. \
                          CPU is back to 40%, memory at 52%. All health checks passing. \
                          Summarize the full incident timeline and close it out."
-                    .to_string(),
+                    .into(),
                 event_tx: Some(event_tx),
                 host_mode: false,
                 skill_references: None,

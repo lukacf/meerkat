@@ -90,6 +90,7 @@ mod tests {
                 correlation_id: None,
             },
             text: "test".into(),
+            blocks: None,
             turn_metadata: None,
         })
     }

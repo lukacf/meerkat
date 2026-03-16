@@ -12,7 +12,7 @@ use std::sync::Arc;
 use super::config::ShellError;
 use super::job_manager::JobManager;
 use super::types::JobId;
-use crate::builtin::{BuiltinTool, BuiltinToolError};
+use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 
 /// Tool for checking the status of a background shell job
 ///
@@ -56,7 +56,7 @@ impl BuiltinTool for ShellJobStatusTool {
         false
     }
 
-    async fn call(&self, args: Value) -> Result<Value, BuiltinToolError> {
+    async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
         let input: JobStatusInput = serde_json::from_value(args)
             .map_err(|e| BuiltinToolError::invalid_args(e.to_string()))?;
 
@@ -68,7 +68,9 @@ impl BuiltinTool for ShellJobStatusTool {
             )
         })?;
 
-        serde_json::to_value(job).map_err(|e| BuiltinToolError::execution_failed(e.to_string()))
+        serde_json::to_value(job)
+            .map(ToolOutput::Json)
+            .map_err(|e| BuiltinToolError::execution_failed(e.to_string()))
     }
 }
 
@@ -161,6 +163,7 @@ mod tests {
             .unwrap();
 
         // Verify output has expected fields
+        let result = result.into_json().unwrap();
         assert!(result.get("id").is_some());
         assert!(result.get("command").is_some());
         assert!(result.get("status").is_some());

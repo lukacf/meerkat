@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::types::ContentBlock;
+
 /// Unique identifier for an interaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct InteractionId(pub Uuid);
@@ -37,7 +39,12 @@ pub enum ResponseStatus {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InteractionContent {
     /// A simple text message.
-    Message { body: String },
+    Message {
+        body: String,
+        /// Optional multimodal content blocks.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocks: Option<Vec<ContentBlock>>,
+    },
     /// A request for the agent to perform an action.
     Request { intent: String, params: Value },
     /// A response to a previous request.
@@ -112,7 +119,7 @@ pub struct ClassifiedInboxInteraction {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -128,6 +135,7 @@ mod tests {
     fn interaction_content_message_json_roundtrip() {
         let content = InteractionContent::Message {
             body: "hello".to_string(),
+            blocks: None,
         };
         let json = serde_json::to_value(&content).unwrap();
         assert_eq!(json["type"], "message");
@@ -174,5 +182,53 @@ mod tests {
             let parsed: ResponseStatus = serde_json::from_value(json).unwrap();
             assert_eq!(variant, parsed);
         }
+    }
+
+    #[test]
+    fn interaction_message_with_blocks_roundtrip() {
+        let content = InteractionContent::Message {
+            body: "hello".to_string(),
+            blocks: Some(vec![
+                ContentBlock::Text {
+                    text: "hello".to_string(),
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: "iVBORw0KGgo=".to_string(),
+                    source_path: None,
+                },
+            ]),
+        };
+        let json = serde_json::to_value(&content).unwrap();
+        assert_eq!(json["type"], "message");
+        assert!(json["blocks"].is_array());
+        let parsed: InteractionContent = serde_json::from_value(json).unwrap();
+        assert_eq!(content, parsed);
+    }
+
+    #[test]
+    fn interaction_message_without_blocks_compat() {
+        // Old format (no blocks field) should deserialize with blocks: None
+        let old_json = r#"{"type":"message","body":"hello"}"#;
+        let parsed: InteractionContent = serde_json::from_str(old_json).unwrap();
+        match parsed {
+            InteractionContent::Message { body, blocks } => {
+                assert_eq!(body, "hello");
+                assert_eq!(blocks, None);
+            }
+            other => panic!("Expected Message, got {other:?}"),
+        }
+
+        // Serialize with blocks: None should omit the field
+        let content = InteractionContent::Message {
+            body: "test".to_string(),
+            blocks: None,
+        };
+        let json = serde_json::to_string(&content).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            value.get("blocks").is_none(),
+            "blocks: None should not appear in JSON"
+        );
     }
 }

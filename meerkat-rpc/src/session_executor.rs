@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use meerkat_core::ContentInput;
 use meerkat_core::EventEnvelope;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
@@ -69,27 +70,46 @@ impl SessionRuntimeExecutor {
     }
 }
 
-/// Extract prompt text from a `RunPrimitive`.
-fn extract_prompt(primitive: &RunPrimitive) -> String {
+/// Extract prompt content from a `RunPrimitive`, preserving multimodal blocks.
+fn extract_prompt(primitive: &RunPrimitive) -> ContentInput {
     match primitive {
-        RunPrimitive::StagedInput(staged) => staged
-            .appends
-            .iter()
-            .filter_map(|a| match &a.content {
-                CoreRenderable::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
+        RunPrimitive::StagedInput(staged) => {
+            let mut all_blocks = Vec::new();
+            for append in &staged.appends {
+                match &append.content {
+                    CoreRenderable::Text { text } => {
+                        all_blocks
+                            .push(meerkat_core::types::ContentBlock::Text { text: text.clone() });
+                    }
+                    CoreRenderable::Blocks { blocks } => {
+                        all_blocks.extend(blocks.iter().cloned());
+                    }
+                    _ => {}
+                }
+            }
+            if all_blocks.is_empty() {
+                ContentInput::Text(String::new())
+            } else if all_blocks.len() == 1 {
+                if let meerkat_core::types::ContentBlock::Text { text } = &all_blocks[0] {
+                    ContentInput::Text(text.clone())
+                } else {
+                    ContentInput::Blocks(all_blocks)
+                }
+            } else {
+                ContentInput::Blocks(all_blocks)
+            }
+        }
         RunPrimitive::ImmediateAppend(append) => match &append.content {
-            CoreRenderable::Text { text } => text.clone(),
-            _ => String::new(),
+            CoreRenderable::Text { text } => ContentInput::Text(text.clone()),
+            CoreRenderable::Blocks { blocks } => ContentInput::Blocks(blocks.clone()),
+            _ => ContentInput::Text(String::new()),
         },
         RunPrimitive::ImmediateContextAppend(ctx) => match &ctx.content {
-            CoreRenderable::Text { text } => text.clone(),
-            _ => String::new(),
+            CoreRenderable::Text { text } => ContentInput::Text(text.clone()),
+            CoreRenderable::Blocks { blocks } => ContentInput::Blocks(blocks.clone()),
+            _ => ContentInput::Text(String::new()),
         },
-        _ => String::new(),
+        _ => ContentInput::Text(String::new()),
     }
 }
 

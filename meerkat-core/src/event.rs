@@ -224,6 +224,9 @@ pub enum AgentEvent {
         result: String,
         is_error: bool,
         duration_ms: u64,
+        /// Whether the tool result contains image content blocks.
+        #[serde(default)]
+        has_images: bool,
     },
 
     /// Tool execution timed out

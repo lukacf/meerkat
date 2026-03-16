@@ -7,7 +7,7 @@ use crate::builtin::skills::SkillToolSet;
 use crate::builtin::store::TaskStore;
 #[cfg(all(feature = "sub-agents", not(target_arch = "wasm32")))]
 use crate::builtin::sub_agent::SubAgentToolSet;
-use crate::builtin::{BuiltinTool, BuiltinToolConfig, BuiltinToolError};
+use crate::builtin::{BuiltinTool, BuiltinToolConfig, BuiltinToolError, ToolOutput};
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::ExternalToolUpdate;
@@ -50,6 +50,10 @@ pub struct CompositeDispatcher {
 
 impl CompositeDispatcher {
     /// Create a new composite dispatcher with builtin tools.
+    ///
+    /// `image_tool_results` is accepted for API compatibility but no longer used
+    /// for filtering — view_image is always registered. Visibility is controlled
+    /// at the factory level via `ToolScope` external filters.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn new(
         task_store: Arc<dyn TaskStore>,
@@ -58,6 +62,7 @@ impl CompositeDispatcher {
         shell_config: Option<ShellConfig>,
         external: Option<Arc<dyn AgentToolDispatcher>>,
         session_id: Option<String>,
+        _image_tool_results: bool,
     ) -> Result<Self, CompositeDispatcherError> {
         let mut builtin_tools: Vec<Arc<dyn BuiltinTool>> = Vec::new();
         let project_root = project_root
@@ -82,10 +87,11 @@ impl CompositeDispatcher {
         )));
 
         // Add utility tools
-        use crate::builtin::utility::{ApplyPatchTool, DateTimeTool, WaitTool};
+        use crate::builtin::utility::{ApplyPatchTool, DateTimeTool, ViewImageTool, WaitTool};
         builtin_tools.push(Arc::new(WaitTool::new()));
         builtin_tools.push(Arc::new(DateTimeTool::new()));
-        builtin_tools.push(Arc::new(ApplyPatchTool::new(project_root)));
+        builtin_tools.push(Arc::new(ApplyPatchTool::new(project_root.clone())));
+        builtin_tools.push(Arc::new(ViewImageTool::new(project_root)));
 
         // Add shell tools if enabled
         let job_manager = if let Some(cfg) = shell_config {
@@ -117,6 +123,10 @@ impl CompositeDispatcher {
                 allowed_tools.insert(name);
             }
         }
+
+        // NOTE: view_image is always kept in allowed_tools regardless of image_tool_results.
+        // Visibility gating for non-image models is handled at the factory level via
+        // ToolScope external filters, enabling hot-swap to reveal view_image later.
 
         Ok(Self {
             builtin_tools,
@@ -325,7 +335,7 @@ impl AgentToolDispatcher for CompositeDispatcher {
         // Check builtin tools
         for tool in &self.builtin_tools {
             if tool.name() == call.name {
-                let value = tool.call(args.clone()).await.map_err(|e| match e {
+                let output = tool.call(args.clone()).await.map_err(|e| match e {
                     BuiltinToolError::InvalidArgs(msg) => ToolError::InvalidArguments {
                         name: call.name.to_string(),
                         reason: msg,
@@ -335,15 +345,18 @@ impl AgentToolDispatcher for CompositeDispatcher {
                     }
                     BuiltinToolError::TaskError(te) => ToolError::ExecutionFailed { message: te },
                 })?;
-                let content = match &value {
-                    Value::String(s) => s.clone(),
-                    _ => serde_json::to_string(&value).unwrap_or_default(),
-                };
-                return Ok(ToolResult {
-                    tool_use_id: call.id.to_string(),
-                    content,
-                    is_error: false,
-                });
+                match output {
+                    ToolOutput::Json(value) => {
+                        let content = match &value {
+                            Value::String(s) => s.clone(),
+                            _ => serde_json::to_string(&value).unwrap_or_default(),
+                        };
+                        return Ok(ToolResult::new(call.id.to_string(), content, false));
+                    }
+                    ToolOutput::Blocks(blocks) => {
+                        return Ok(ToolResult::with_blocks(call.id.to_string(), blocks, false));
+                    }
+                }
             }
         }
 
@@ -352,7 +365,7 @@ impl AgentToolDispatcher for CompositeDispatcher {
         if let Some(ref sub) = self.sub_agent_tools {
             for tool in sub.tools() {
                 if tool.name() == call.name {
-                    let value = tool.call(args.clone()).await.map_err(|e| match e {
+                    let output = tool.call(args.clone()).await.map_err(|e| match e {
                         BuiltinToolError::InvalidArgs(msg) => ToolError::InvalidArguments {
                             name: call.name.to_string(),
                             reason: msg,
@@ -364,15 +377,18 @@ impl AgentToolDispatcher for CompositeDispatcher {
                             ToolError::ExecutionFailed { message: te }
                         }
                     })?;
-                    let content = match &value {
-                        Value::String(s) => s.clone(),
-                        _ => serde_json::to_string(&value).unwrap_or_default(),
-                    };
-                    return Ok(ToolResult {
-                        tool_use_id: call.id.to_string(),
-                        content,
-                        is_error: false,
-                    });
+                    match output {
+                        ToolOutput::Json(value) => {
+                            let content = match &value {
+                                Value::String(s) => s.clone(),
+                                _ => serde_json::to_string(&value).unwrap_or_default(),
+                            };
+                            return Ok(ToolResult::new(call.id.to_string(), content, false));
+                        }
+                        ToolOutput::Blocks(blocks) => {
+                            return Ok(ToolResult::with_blocks(call.id.to_string(), blocks, false));
+                        }
+                    }
                 }
             }
         }
@@ -382,7 +398,7 @@ impl AgentToolDispatcher for CompositeDispatcher {
         if let Some(ref skill) = self.skill_tools {
             for tool in skill.tools() {
                 if tool.name() == call.name {
-                    let value = tool.call(args.clone()).await.map_err(|e| match e {
+                    let output = tool.call(args.clone()).await.map_err(|e| match e {
                         BuiltinToolError::InvalidArgs(msg) => ToolError::InvalidArguments {
                             name: call.name.to_string(),
                             reason: msg,
@@ -394,15 +410,18 @@ impl AgentToolDispatcher for CompositeDispatcher {
                             ToolError::ExecutionFailed { message: te }
                         }
                     })?;
-                    let content = match &value {
-                        Value::String(s) => s.clone(),
-                        _ => serde_json::to_string(&value).unwrap_or_default(),
-                    };
-                    return Ok(ToolResult {
-                        tool_use_id: call.id.to_string(),
-                        content,
-                        is_error: false,
-                    });
+                    match output {
+                        ToolOutput::Json(value) => {
+                            let content = match &value {
+                                Value::String(s) => s.clone(),
+                                _ => serde_json::to_string(&value).unwrap_or_default(),
+                            };
+                            return Ok(ToolResult::new(call.id.to_string(), content, false));
+                        }
+                        ToolOutput::Blocks(blocks) => {
+                            return Ok(ToolResult::with_blocks(call.id.to_string(), blocks, false));
+                        }
+                    }
                 }
             }
         }
@@ -478,11 +497,11 @@ mod tests {
 
         async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
             if self.tools.iter().any(|tool| tool.name == call.name) {
-                return Ok(ToolResult {
-                    tool_use_id: call.id.to_string(),
-                    content: "{}".to_string(),
-                    is_error: false,
-                });
+                return Ok(ToolResult::new(
+                    call.id.to_string(),
+                    "{}".to_string(),
+                    false,
+                ));
             }
             Err(ToolError::not_found(call.name))
         }
@@ -501,6 +520,7 @@ mod tests {
             None,
             Some(external),
             None,
+            true,
         )
         .expect("composite dispatcher should build");
 
@@ -519,8 +539,16 @@ mod tests {
 
         let store = Arc::new(MemoryTaskStore::new());
         let dispatcher = Arc::new(
-            CompositeDispatcher::new(store, &BuiltinToolConfig::default(), None, None, None, None)
-                .expect("composite dispatcher should build"),
+            CompositeDispatcher::new(
+                store,
+                &BuiltinToolConfig::default(),
+                None,
+                None,
+                None,
+                None,
+                true,
+            )
+            .expect("composite dispatcher should build"),
         );
 
         let (tx, rx) = tokio::sync::watch::channel(None::<WaitInterrupt>);
@@ -555,7 +583,7 @@ mod tests {
             elapsed < Duration::from_secs(2),
             "wait should be interrupted quickly, took {elapsed:?}"
         );
-        let content: serde_json::Value = serde_json::from_str(&result.content).unwrap();
+        let content: serde_json::Value = serde_json::from_str(&result.text_content()).unwrap();
         assert_eq!(content["status"], "interrupted");
     }
 
@@ -564,8 +592,16 @@ mod tests {
     fn bind_wait_interrupt_shared_ownership_error() {
         let store = Arc::new(MemoryTaskStore::new());
         let dispatcher = Arc::new(
-            CompositeDispatcher::new(store, &BuiltinToolConfig::default(), None, None, None, None)
-                .expect("composite dispatcher should build"),
+            CompositeDispatcher::new(
+                store,
+                &BuiltinToolConfig::default(),
+                None,
+                None,
+                None,
+                None,
+                true,
+            )
+            .expect("composite dispatcher should build"),
         );
         let _clone = Arc::clone(&dispatcher);
 
@@ -575,6 +611,114 @@ mod tests {
             Err(meerkat_core::wait_interrupt::WaitInterruptBindError::SharedOwnership) => {}
             Ok(_) => panic!("expected SharedOwnership error, got Ok"),
             Err(e) => panic!("expected SharedOwnership, got {e:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_json_string_produces_text_result() {
+        let store = Arc::new(MemoryTaskStore::new());
+        let dispatcher = CompositeDispatcher::new(
+            store,
+            &BuiltinToolConfig::default(),
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
+        .expect("composite dispatcher should build");
+
+        // The "wait" tool returns ToolOutput::Json with a JSON object.
+        // A string JSON value should be returned as-is (not double-quoted).
+        let call_json =
+            serde_json::value::RawValue::from_string(r#"{"seconds": 0.1}"#.to_string()).unwrap();
+        let call = ToolCallView {
+            id: "test-str",
+            name: "wait",
+            args: &call_json,
+        };
+        let result = dispatcher
+            .dispatch(call)
+            .await
+            .expect("dispatch should succeed");
+        assert!(!result.is_error);
+        // wait returns {"waited_seconds": ..., "status": "complete"} which is an object
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result.text_content()).expect("content should be valid JSON");
+        assert_eq!(parsed["status"], "complete");
+    }
+
+    #[tokio::test]
+    async fn dispatch_json_object_produces_serialized_text() {
+        let store = Arc::new(MemoryTaskStore::new());
+        let dispatcher = CompositeDispatcher::new(
+            store,
+            &BuiltinToolConfig::default(),
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
+        .expect("composite dispatcher should build");
+
+        // datetime returns a JSON object - verify it's serialized to text
+        let call_json = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "test-obj",
+            name: "datetime",
+            args: &call_json,
+        };
+        let result = dispatcher
+            .dispatch(call)
+            .await
+            .expect("dispatch should succeed");
+        assert!(!result.is_error);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result.text_content()).expect("content should be valid JSON");
+        assert!(
+            parsed.get("iso8601").is_some(),
+            "should contain iso8601 field"
+        );
+    }
+
+    #[tokio::test]
+    async fn existing_datetime_tool_returns_json_output() {
+        use crate::builtin::BuiltinTool;
+        use crate::builtin::utility::DateTimeTool;
+
+        let tool = DateTimeTool::new();
+        let output = tool.call(json!({})).await.expect("call should succeed");
+
+        // Verify it returns ToolOutput::Json
+        let value = output.into_json().expect("should be Json variant");
+        assert!(value.get("iso8601").is_some());
+        assert!(value.get("unix_timestamp").is_some());
+    }
+
+    #[test]
+    fn view_image_always_in_base_tool_set() {
+        // view_image is always registered regardless of image_tool_results flag.
+        // Visibility gating is handled at the factory/ToolScope level via external filters.
+        for image_tool_results in [false, true] {
+            let store = Arc::new(MemoryTaskStore::new());
+            let dispatcher = CompositeDispatcher::new(
+                store,
+                &BuiltinToolConfig::default(),
+                None,
+                None,
+                None,
+                None,
+                image_tool_results,
+            )
+            .expect("composite dispatcher should build");
+
+            let tools = dispatcher.tools();
+            let tool_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
+            assert!(
+                tool_names.contains(&"view_image".to_string()),
+                "view_image should always be in base tool set (image_tool_results={image_tool_results}), but found: {tool_names:?}"
+            );
         }
     }
 }

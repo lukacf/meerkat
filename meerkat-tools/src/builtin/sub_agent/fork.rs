@@ -5,7 +5,7 @@ use super::config::SubAgentError;
 use super::runner::SubAgentCommsConfig;
 use super::runner::{DynSubAgentSpec, create_fork_session, spawn_sub_agent_dyn};
 use super::state::SubAgentToolState;
-use crate::builtin::{BuiltinTool, BuiltinToolError};
+use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 use crate::dispatcher::FilteredDispatcher;
 use async_trait::async_trait;
 use meerkat_client::LlmProvider;
@@ -413,14 +413,16 @@ impl BuiltinTool for AgentForkTool {
         false // Sub-agent tools are disabled by default
     }
 
-    async fn call(&self, args: Value) -> Result<Value, BuiltinToolError> {
+    async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
         let params: ForkParams = serde_json::from_value(args)
             .map_err(|e| BuiltinToolError::invalid_args(format!("Invalid parameters: {e}")))?;
 
         let response = self.fork_agent(params).await?;
-        serde_json::to_value(response).map_err(|e| {
-            BuiltinToolError::execution_failed(format!("Failed to serialize response: {e}"))
-        })
+        serde_json::to_value(response)
+            .map(ToolOutput::Json)
+            .map_err(|e| {
+                BuiltinToolError::execution_failed(format!("Failed to serialize response: {e}"))
+            })
     }
 }
 
@@ -529,12 +531,8 @@ mod tests {
         let session_store = Arc::new(MockSessionStore);
 
         let mut session = Session::new();
-        session.push(Message::User(UserMessage {
-            content: "Hello".to_string(),
-        }));
-        session.push(Message::User(UserMessage {
-            content: "World".to_string(),
-        }));
+        session.push(Message::User(UserMessage::text("Hello".to_string())));
+        session.push(Message::User(UserMessage::text("World".to_string())));
 
         let parent_session = Arc::new(RwLock::new(session));
         let config = SubAgentConfig::default();

@@ -134,6 +134,7 @@ async fn integration_real_router_send() {
             "test-peer",
             MessageKind::Message {
                 body: "hello".to_string(),
+                blocks: None,
             },
         )
         .await;
@@ -165,6 +166,7 @@ async fn integration_real_router_resolves_peer_name() {
             "unknown-peer",
             MessageKind::Message {
                 body: "hello".to_string(),
+                blocks: None,
             },
         )
         .await;
@@ -205,6 +207,7 @@ async fn integration_real_router_connects_to_peer() {
             "test-peer",
             MessageKind::Message {
                 body: "hello".to_string(),
+                blocks: None,
             },
         )
         .await;
@@ -264,6 +267,7 @@ async fn integration_real_router_signs_envelope() {
             "test-peer",
             MessageKind::Message {
                 body: "hello".to_string(),
+                blocks: None,
             },
         )
         .await;
@@ -320,6 +324,7 @@ async fn integration_real_router_waits_for_ack() {
             "test-peer",
             MessageKind::Message {
                 body: "hello".to_string(),
+                blocks: None,
             },
         )
         .await;
@@ -365,6 +370,7 @@ async fn integration_real_router_timeout_returns_offline() {
             "test-peer",
             MessageKind::Message {
                 body: "hello".to_string(),
+                blocks: None,
             },
         )
         .await;
@@ -407,7 +413,7 @@ async fn integration_real_send() {
         let envelope = read_envelope_async(&mut stream).await.unwrap();
 
         match envelope.kind {
-            MessageKind::Message { body } => {
+            MessageKind::Message { body, .. } => {
                 assert_eq!(body, "test body");
             }
             _ => panic!("expected Message"),
@@ -431,6 +437,7 @@ async fn integration_real_send() {
             "test-peer",
             MessageKind::Message {
                 body: "test body".to_string(),
+                blocks: None,
             },
         )
         .await;
@@ -657,6 +664,7 @@ async fn integration_real_router_inproc_send() {
             "receiver-agent",
             MessageKind::Message {
                 body: "hello via inproc".to_string(),
+                blocks: None,
             },
         )
         .await;
@@ -671,7 +679,7 @@ async fn integration_real_router_inproc_send() {
             assert_eq!(envelope.from, sender_pubkey);
             assert_eq!(envelope.to, receiver_pubkey);
             match &envelope.kind {
-                MessageKind::Message { body } => {
+                MessageKind::Message { body, .. } => {
                     assert_eq!(body, "hello via inproc");
                 }
                 _ => panic!("expected Message kind"),
@@ -715,6 +723,7 @@ async fn integration_real_router_inproc_peer_not_found() {
             "missing-agent",
             MessageKind::Message {
                 body: "hello".to_string(),
+                blocks: None,
             },
         )
         .await;

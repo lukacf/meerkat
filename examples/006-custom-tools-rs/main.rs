@@ -183,7 +183,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "I'm planning a trip from San Francisco to Tokyo. \
              What's the weather like in both cities? \
              Also, how far is it in miles if it's about 8,280 km?"
-                .to_string(),
+                .into(),
         )
         .await?;
 

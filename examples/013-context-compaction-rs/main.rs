@@ -102,7 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("User: {topic}\n");
 
         let result = agent
-            .run_with_events(topic.to_string(), event_tx.clone())
+            .run_with_events(topic.to_string().into(), event_tx.clone())
             .await?;
 
         println!("Assistant: {}", &result.text[..result.text.len().min(200)]);

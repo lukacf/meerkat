@@ -131,7 +131,7 @@ class Session:
 
     async def turn(
         self,
-        prompt: str,
+        prompt: str | list[dict],
         *,
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
@@ -154,7 +154,7 @@ class Session:
 
     def stream(
         self,
-        prompt: str,
+        prompt: str | list[dict],
         *,
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
@@ -212,7 +212,7 @@ class Session:
     async def invoke_skill(
         self,
         skill_ref: SkillRef,
-        prompt: str,
+        prompt: str | list[dict],
     ) -> RunResult:
         """Invoke a skill in this session.
 
@@ -285,7 +285,7 @@ class DeferredSession:
 
     async def start_turn(
         self,
-        prompt: str,
+        prompt: str | list[dict],
         *,
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,

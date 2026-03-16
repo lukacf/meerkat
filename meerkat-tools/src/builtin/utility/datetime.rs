@@ -1,6 +1,6 @@
 //! DateTime tool for getting current date and time
 
-use crate::builtin::{BuiltinTool, BuiltinToolError};
+use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 use crate::schema::empty_object_schema;
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
@@ -44,7 +44,7 @@ impl BuiltinTool for DateTimeTool {
         true // Utility tools enabled by default
     }
 
-    async fn call(&self, _args: Value) -> Result<Value, BuiltinToolError> {
+    async fn call(&self, _args: Value) -> Result<ToolOutput, BuiltinToolError> {
         use meerkat_core::time_compat::{SystemTime, UNIX_EPOCH};
 
         let now = SystemTime::now();
@@ -60,7 +60,7 @@ impl BuiltinTool for DateTimeTool {
         let time = datetime.format("%H:%M:%S").to_string();
         let timezone = "UTC";
 
-        Ok(json!({
+        Ok(ToolOutput::Json(json!({
             "iso8601": iso8601,
             "date": date,
             "time": time,
@@ -70,7 +70,7 @@ impl BuiltinTool for DateTimeTool {
             "month": datetime.format("%m").to_string(),
             "day": datetime.format("%d").to_string(),
             "weekday": datetime.format("%A").to_string()
-        }))
+        })))
     }
 }
 
@@ -102,7 +102,7 @@ mod tests {
     #[tokio::test]
     async fn test_datetime_tool_returns_valid_data() {
         let tool = DateTimeTool::new();
-        let result = tool.call(json!({})).await.unwrap();
+        let result = tool.call(json!({})).await.unwrap().into_json().unwrap();
 
         // Check all expected fields are present
         assert!(result.get("iso8601").is_some());
@@ -119,7 +119,7 @@ mod tests {
     #[tokio::test]
     async fn test_datetime_tool_iso8601_format() {
         let tool = DateTimeTool::new();
-        let result = tool.call(json!({})).await.unwrap();
+        let result = tool.call(json!({})).await.unwrap().into_json().unwrap();
 
         let iso8601 = result["iso8601"].as_str().unwrap();
         // Basic ISO 8601 format check: contains T and ends with Z or timezone
@@ -129,7 +129,7 @@ mod tests {
     #[tokio::test]
     async fn test_datetime_tool_unix_timestamp_reasonable() {
         let tool = DateTimeTool::new();
-        let result = tool.call(json!({})).await.unwrap();
+        let result = tool.call(json!({})).await.unwrap().into_json().unwrap();
 
         let timestamp = result["unix_timestamp"].as_u64().unwrap();
         // Should be after 2020 and before 2100

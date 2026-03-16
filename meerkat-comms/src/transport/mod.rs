@@ -127,6 +127,7 @@ mod tests {
             from: keypair.public_key(),
             to: PubKey::new([2u8; 32]),
             kind: MessageKind::Message {
+                blocks: None,
                 body: "hello".to_string(),
             },
             sig: crate::identity::Signature::new([0u8; 64]),

@@ -50,6 +50,7 @@ impl EventInjector for CommsEventInjector {
                 body,
                 source,
                 interaction_id: None,
+                blocks: None,
             })
             .map_err(|e| match e {
                 InboxError::Full => EventInjectorError::Full,
@@ -75,6 +76,7 @@ impl meerkat_core::event_injector::SubscribableInjector for CommsEventInjector {
             body,
             source,
             interaction_id: Some(id),
+            blocks: None,
         }) {
             // Clean up subscriber on send failure
             self.subscriber_registry.lock().remove(&id);

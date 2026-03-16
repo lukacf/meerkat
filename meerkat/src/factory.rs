@@ -915,6 +915,7 @@ impl AgentFactory {
 
     /// Build a composite dispatcher so callers can register sub-agent tools.
     #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::too_many_arguments)]
     pub async fn build_composite_dispatcher(
         &self,
         store: Arc<dyn TaskStore>,
@@ -923,6 +924,7 @@ impl AgentFactory {
         shell_config: Option<ShellConfig>,
         external: Option<Arc<dyn AgentToolDispatcher>>,
         session_id: Option<String>,
+        image_tool_results: bool,
     ) -> Result<CompositeDispatcher, CompositeDispatcherError> {
         CompositeDispatcher::new(
             store,
@@ -931,6 +933,7 @@ impl AgentFactory {
             shell_config,
             external,
             session_id,
+            image_tool_results,
         )
     }
 
@@ -984,6 +987,8 @@ impl AgentFactory {
             None,
             #[cfg(all(feature = "sub-agents", feature = "comms"))]
             None,
+            // Public API defaults to true (all tools visible).
+            true,
         )
         .await
     }
@@ -1010,6 +1015,7 @@ impl AgentFactory {
         #[cfg(all(feature = "sub-agents", feature = "comms"))] sub_agent_comms: Option<
             SubAgentCommsWiring,
         >,
+        image_tool_results: bool,
     ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
         let builder = BuiltinDispatcherConfig {
             store,
@@ -1018,6 +1024,7 @@ impl AgentFactory {
             shell_config,
             external,
             session_id,
+            image_tool_results,
         };
         #[cfg(not(feature = "sub-agents"))]
         {
@@ -1029,6 +1036,7 @@ impl AgentFactory {
                 builder.shell_config,
                 builder.external,
                 builder.session_id,
+                builder.image_tool_results,
             )?;
             #[cfg(feature = "skills")]
             if let Some(engine) = skill_engine {
@@ -1049,6 +1057,7 @@ impl AgentFactory {
                 builder.shell_config,
                 builder.external,
                 builder.session_id,
+                builder.image_tool_results,
             )?;
             #[cfg(feature = "skills")]
             if let Some(engine) = skill_engine {
@@ -1069,6 +1078,7 @@ impl AgentFactory {
                 shell_config,
                 external,
                 session_id,
+                image_tool_results: builder_image_tool_results,
             } = builder;
 
             let shell_config_for_subagents = shell_config.clone();
@@ -1080,6 +1090,7 @@ impl AgentFactory {
                     shell_config,
                     external.clone(),
                     session_id,
+                    builder_image_tool_results,
                 )
                 .await?;
 
@@ -1102,6 +1113,9 @@ impl AgentFactory {
                     shell_config_for_subagents,
                     external,
                     None,
+                    // Sub-agents may use a different model; default to true here.
+                    // The sub-agent's own build_agent() will resolve its model profile.
+                    true,
                 )
                 .await?;
             let sub_agent_tools: Arc<dyn AgentToolDispatcher> = Arc::new(sub_agent_dispatcher);
@@ -1403,6 +1417,11 @@ impl AgentFactory {
             None
         };
 
+        // Resolve model profile for capability gating (e.g., hiding view_image
+        // when the model cannot process image blocks in tool results).
+        let image_tool_results = meerkat_models::profile::profile_for(provider.as_str(), &model)
+            .is_none_or(|p| p.image_tool_results);
+
         // Build the tool dispatcher WITHOUT wait interrupt wiring.
         // The interrupt is bound once after full composition (including comms gateway).
         // This ensures all dispatcher paths (builtin, override, WASM, composed) are covered.
@@ -1426,6 +1445,7 @@ impl AgentFactory {
                         #[cfg(all(feature = "sub-agents", feature = "comms"))]
                         sub_agent_comms,
                         build_config.shell_env.take(),
+                        image_tool_results,
                     )
                     .await?
                 }
@@ -1811,6 +1831,7 @@ impl AgentFactory {
         if let Some(schema) = build_config.output_schema {
             builder = builder.output_schema(schema);
         }
+        let _is_resumed = build_config.resume_session.is_some();
         if let Some(session) = build_config.resume_session {
             builder = builder.resume_session(session);
         }
@@ -1922,6 +1943,21 @@ impl AgentFactory {
             agent.set_runtime_input_sink(sink);
         }
 
+        // 13c. Stage initial external filter to hide view_image when the model
+        // cannot process image blocks in tool results. For resumed sessions,
+        // the persisted filter is already restored by the builder — only gate
+        // fresh sessions.
+        if !image_tool_results {
+            // Applied to both fresh and resumed sessions — old sessions without
+            // filter metadata would otherwise expose view_image on models that
+            // can't handle image tool results.
+            let deny = std::collections::HashSet::from(["view_image".to_string()]);
+            if let Err(err) = agent.stage_external_tool_filter(meerkat_core::ToolFilter::Deny(deny))
+            {
+                tracing::warn!(error = %err, "failed to stage initial view_image deny filter");
+            }
+        }
+
         // 14. Set SessionMetadata
         let metadata = SessionMetadata {
             model,
@@ -1974,6 +2010,7 @@ impl AgentFactory {
             SubAgentCommsWiring,
         >,
         shell_env: Option<std::collections::HashMap<String, String>>,
+        image_tool_results: bool,
     ) -> Result<(Arc<dyn AgentToolDispatcher>, String), BuildAgentError> {
         if !effective_builtins {
             // No builtins — return the external tools if provided, otherwise empty.
@@ -2039,6 +2076,7 @@ impl AgentFactory {
                 sub_agent_scope_path,
                 #[cfg(all(feature = "sub-agents", feature = "comms"))]
                 sub_agent_comms,
+                image_tool_results,
             )
             .await?;
 

@@ -40,12 +40,13 @@ pub fn interaction_to_peer_input(
         },
         convention: Some(convention),
         body,
+        blocks: None,
     })
 }
 
 fn map_convention(content: &InteractionContent) -> (PeerConvention, String) {
     match content {
-        InteractionContent::Message { body } => (PeerConvention::Message, body.clone()),
+        InteractionContent::Message { body, .. } => (PeerConvention::Message, body.clone()),
         InteractionContent::Request { intent, params, .. } => (
             PeerConvention::Request {
                 request_id: uuid::Uuid::now_v7().to_string(),
@@ -110,6 +111,7 @@ mod tests {
             from: "peer-1".into(),
             content: InteractionContent::Message {
                 body: "hello".into(),
+                blocks: None,
             },
             id: make_interaction_id(),
             rendered_text: String::new(),
@@ -231,7 +233,10 @@ mod tests {
     fn peer_source_includes_runtime_id() {
         let interaction = InboxInteraction {
             from: "peer-1".into(),
-            content: InteractionContent::Message { body: "hi".into() },
+            content: InteractionContent::Message {
+                body: "hi".into(),
+                blocks: None,
+            },
             id: make_interaction_id(),
             rendered_text: String::new(),
         };
@@ -259,7 +264,10 @@ mod tests {
         let interactions = vec![
             InboxInteraction {
                 from: "p".into(),
-                content: InteractionContent::Message { body: "m".into() },
+                content: InteractionContent::Message {
+                    body: "m".into(),
+                    blocks: None,
+                },
                 id: make_interaction_id(),
                 rendered_text: String::new(),
             },

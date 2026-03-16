@@ -6,7 +6,7 @@ use meerkat_core::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
 use meerkat_core::event::ToolConfigChangeOperation;
 use meerkat_core::types::ToolDef;
-use meerkat_core::types::{ToolCallView, ToolResult};
+use meerkat_core::types::{ContentBlock, ToolCallView, ToolResult};
 use meerkat_core::{ExternalToolNotice, ExternalToolUpdate};
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
@@ -632,8 +632,8 @@ impl McpRouter {
         delta
     }
 
-    /// Call a tool by name
-    pub async fn call_tool(&self, name: &str, args: &Value) -> Result<String, McpError> {
+    /// Call a tool by name, returning multimodal content blocks.
+    pub async fn call_tool(&self, name: &str, args: &Value) -> Result<Vec<ContentBlock>, McpError> {
         let server_name = self
             .tool_to_server
             .get(name)
@@ -688,7 +688,7 @@ impl AgentToolDispatcher for McpRouter {
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
         let args: Value = serde_json::from_str(call.args.get())
             .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
-        let result_str = self
+        let blocks = self
             .call_tool(call.name, &args)
             .await
             .map_err(|e| match e {
@@ -698,11 +698,7 @@ impl AgentToolDispatcher for McpRouter {
                 },
             })?;
 
-        Ok(ToolResult {
-            tool_use_id: call.id.to_string(),
-            content: result_str,
-            is_error: false,
-        })
+        Ok(ToolResult::with_blocks(call.id.to_string(), blocks, false))
     }
 }
 

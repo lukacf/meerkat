@@ -18,7 +18,7 @@ fn make_test_envelope(body: String) -> Envelope {
         id: Uuid::new_v4(),
         from: keypair.public_key(),
         to: PubKey::new([2u8; 32]),
-        kind: MessageKind::Message { body },
+        kind: MessageKind::Message { body, blocks: None },
         sig: Signature::new([0u8; 64]),
     };
     envelope.sign(&keypair);
@@ -33,6 +33,7 @@ fn test_rct_contracts_envelope_signable_bytes_are_canonical() {
         to: PubKey::new([2u8; 32]),
         kind: MessageKind::Message {
             body: "hello".to_string(),
+            blocks: None,
         },
         sig: Signature::new([0u8; 64]),
     };
@@ -132,6 +133,7 @@ fn test_regression_ack_must_match_sent_message() {
         to: receiver_keypair.public_key(),
         kind: MessageKind::Message {
             body: "hello".to_string(),
+            blocks: None,
         },
         sig: Signature::new([0u8; 64]),
     };

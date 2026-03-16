@@ -76,7 +76,7 @@ mod scenario_22_session_service_lifecycle {
         let create_result = service
             .create_session(CreateSessionRequest {
                 model: smoke_model(),
-                prompt: "I am EphBot. Remember this name.".to_string(),
+                prompt: "I am EphBot. Remember this name.".to_string().into(),
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
@@ -106,7 +106,7 @@ mod scenario_22_session_service_lifecycle {
             .start_turn(
                 &session_id,
                 StartTurnRequest {
-                    prompt: "What is my name? Reply in one sentence.".to_string(),
+                    prompt: "What is my name? Reply in one sentence.".to_string().into(),
                     event_tx: None,
                     host_mode: false,
                     skill_references: None,
@@ -222,10 +222,7 @@ mod scenario_23_structured_output {
                 .expect("Anthropic structured output agent should build");
 
             let result = agent
-                .run(
-                    "What is the capital of France? Respond in the required JSON format."
-                        .to_string(),
-                )
+                .run("What is the capital of France? Respond in the required JSON format.".into())
                 .await
                 .expect("Anthropic structured output run should succeed");
 
@@ -271,10 +268,7 @@ mod scenario_23_structured_output {
                 .expect("OpenAI structured output agent should build");
 
             let result = agent
-                .run(
-                    "What is the capital of France? Respond in the required JSON format."
-                        .to_string(),
-                )
+                .run("What is the capital of France? Respond in the required JSON format.".into())
                 .await
                 .expect("OpenAI structured output run should succeed");
 
@@ -320,10 +314,7 @@ mod scenario_23_structured_output {
                 .expect("Gemini structured output agent should build");
 
             let result = agent
-                .run(
-                    "What is the capital of France? Respond in the required JSON format."
-                        .to_string(),
-                )
+                .run("What is the capital of France? Respond in the required JSON format.".into())
                 .await
                 .expect("Gemini structured output run should succeed");
 
@@ -384,7 +375,7 @@ mod scenario_24_event_capture {
 
         eprintln!("[scenario 24] Running agent with event capture...");
         let result = agent
-            .run("Write one sentence about Rust programming.".to_string())
+            .run("Write one sentence about Rust programming.".into())
             .await
             .expect("Event capture run should succeed");
 

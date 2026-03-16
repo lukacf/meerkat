@@ -63,7 +63,7 @@ async fn integration_real_shell_sync_execute() {
 
     assert!(result.is_ok(), "Shell command should succeed");
 
-    let output: ShellOutput = serde_json::from_value(result.unwrap()).unwrap();
+    let output: ShellOutput = serde_json::from_value(result.unwrap().into_json().unwrap()).unwrap();
 
     assert!(!output.timed_out, "Command should not time out");
     assert_eq!(output.exit_code, Some(0), "Exit code should be 0");
@@ -96,7 +96,7 @@ async fn integration_real_shell_sync_timeout() {
         "Timeout should return Ok with timed_out flag"
     );
 
-    let output: ShellOutput = serde_json::from_value(result.unwrap()).unwrap();
+    let output: ShellOutput = serde_json::from_value(result.unwrap().into_json().unwrap()).unwrap();
 
     assert!(output.timed_out, "Command should have timed out");
     assert!(
@@ -122,7 +122,7 @@ async fn integration_real_shell_exit_code() {
 
     assert!(result.is_ok(), "Command should complete");
 
-    let output: ShellOutput = serde_json::from_value(result.unwrap()).unwrap();
+    let output: ShellOutput = serde_json::from_value(result.unwrap().into_json().unwrap()).unwrap();
 
     assert!(!output.timed_out, "Should not timeout");
     assert_eq!(
@@ -150,7 +150,7 @@ async fn integration_real_shell_stderr() {
 
     assert!(result.is_ok(), "Command should complete");
 
-    let output: ShellOutput = serde_json::from_value(result.unwrap()).unwrap();
+    let output: ShellOutput = serde_json::from_value(result.unwrap().into_json().unwrap()).unwrap();
 
     assert!(!output.timed_out, "Should not timeout");
     assert!(
@@ -525,7 +525,7 @@ async fn integration_real_shell_basic_sh_execution() {
 
     assert!(result.is_ok(), "Basic sh execution should succeed");
 
-    let output: ShellOutput = serde_json::from_value(result.unwrap()).unwrap();
+    let output: ShellOutput = serde_json::from_value(result.unwrap().into_json().unwrap()).unwrap();
 
     assert!(!output.timed_out);
     assert_eq!(output.exit_code, Some(0));
@@ -796,7 +796,7 @@ async fn integration_real_regression_non_utf8_output() {
         "Non-UTF-8 output should be handled gracefully: {result:?}"
     );
 
-    let output: ShellOutput = serde_json::from_value(result.unwrap()).unwrap();
+    let output: ShellOutput = serde_json::from_value(result.unwrap().into_json().unwrap()).unwrap();
     assert!(!output.timed_out, "Should not timeout");
     // The output may contain replacement characters, which is correct behavior
 }
@@ -830,7 +830,7 @@ async fn integration_real_regression_truncation_keeps_tail() {
 
     assert!(result.is_ok(), "Long output command should succeed");
 
-    let output: ShellOutput = serde_json::from_value(result.unwrap()).unwrap();
+    let output: ShellOutput = serde_json::from_value(result.unwrap().into_json().unwrap()).unwrap();
 
     // The end marker should always be present (tail preserved)
     assert!(

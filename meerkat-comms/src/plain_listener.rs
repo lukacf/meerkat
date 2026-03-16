@@ -43,6 +43,7 @@ pub async fn handle_plain_connection<S>(
                     body,
                     source,
                     interaction_id: None,
+                    blocks: None,
                 }) {
                     Ok(()) => {}
                     Err(InboxError::Full) => {

@@ -98,6 +98,7 @@ mod tests {
         let input = Input::Prompt(PromptInput {
             header: make_header(InputDurability::Derived, InputOrigin::System),
             text: "hi".into(),
+            blocks: None,
             turn_metadata: None,
         });
         assert!(validate_durability(&input).is_err());
@@ -108,6 +109,7 @@ mod tests {
         let input = Input::Prompt(PromptInput {
             header: make_header(InputDurability::Durable, InputOrigin::Operator),
             text: "hi".into(),
+            blocks: None,
             turn_metadata: None,
         });
         assert!(validate_durability(&input).is_ok());
@@ -118,6 +120,7 @@ mod tests {
         let input = Input::Prompt(PromptInput {
             header: make_header(InputDurability::Ephemeral, InputOrigin::Operator),
             text: "hi".into(),
+            blocks: None,
             turn_metadata: None,
         });
         assert!(validate_durability(&input).is_ok());
@@ -129,6 +132,7 @@ mod tests {
             header: make_header(InputDurability::Derived, InputOrigin::System),
             convention: Some(PeerConvention::Message),
             body: "hi".into(),
+            blocks: None,
         });
         assert!(validate_durability(&input).is_err());
     }
@@ -142,6 +146,7 @@ mod tests {
                 intent: "i".into(),
             }),
             body: "hi".into(),
+            blocks: None,
         });
         assert!(validate_durability(&input).is_err());
     }
@@ -155,6 +160,7 @@ mod tests {
                 status: ResponseTerminalStatus::Completed,
             }),
             body: "done".into(),
+            blocks: None,
         });
         assert!(validate_durability(&input).is_err());
     }
@@ -168,6 +174,7 @@ mod tests {
                 phase: ResponseProgressPhase::InProgress,
             }),
             body: "working".into(),
+            blocks: None,
         });
         assert!(validate_durability(&input).is_ok());
     }

@@ -184,6 +184,7 @@ mod tests {
         let envelope = make_envelope(
             &sender,
             MessageKind::Message {
+                blocks: None,
                 body: "hello".to_string(),
             },
         );
@@ -326,6 +327,7 @@ mod tests {
         let envelope = make_envelope(
             &sender,
             MessageKind::Message {
+                blocks: None,
                 body: "hello".to_string(),
             },
         );
@@ -341,6 +343,7 @@ mod tests {
     fn classify_plain_event() {
         let ctx = make_context(false, TrustedPeers::new(), vec![]);
         let item = InboxItem::PlainEvent {
+            blocks: None,
             body: "event".to_string(),
             source: meerkat_core::PlainEventSource::Tcp,
             interaction_id: None,

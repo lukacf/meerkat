@@ -32,7 +32,10 @@ fn make_message(from: &str, body: &str) -> InboxInteraction {
     InboxInteraction {
         id: iid(),
         from: from.into(),
-        content: InteractionContent::Message { body: body.into() },
+        content: InteractionContent::Message {
+            body: body.into(),
+            blocks: None,
+        },
         rendered_text: format!("[{from}]: {body}"),
     }
 }

@@ -67,6 +67,17 @@ pub trait Compactor: Send + Sync {
     /// Maximum tokens the summarization response may consume.
     fn max_summary_tokens(&self) -> u32;
 
+    /// Prepare messages for the summarization LLM call.
+    ///
+    /// Called before sending the history to the LLM for summarization.
+    /// Implementations may strip content that is not suitable for the
+    /// summarization pass (e.g. base64-encoded images).
+    ///
+    /// The default implementation returns an unmodified clone.
+    fn prepare_for_summarization(&self, messages: &[Message]) -> Vec<Message> {
+        messages.to_vec()
+    }
+
     /// Rebuild the session history from a summary and current messages.
     ///
     /// The system prompt is extracted from `messages` directly (the first

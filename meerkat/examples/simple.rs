@@ -38,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await;
 
     let result = agent
-        .run("What is the capital of France? Answer in one sentence.".to_string())
+        .run("What is the capital of France? Answer in one sentence.".into())
         .await?;
 
     println!("Response: {}", result.text);

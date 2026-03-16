@@ -21,6 +21,7 @@
 
 import type {
   AgentEventEnvelope,
+  ContentBlock,
   RunResult,
   SessionHistory,
   SkillRef,
@@ -79,7 +80,7 @@ export class Session {
   }
 
   async turn(
-    prompt: string,
+    prompt: string | ContentBlock[],
     options?: {
       skillRefs?: SkillRef[];
       skillReferences?: string[];
@@ -92,7 +93,7 @@ export class Session {
   }
 
   stream(
-    prompt: string,
+    prompt: string | ContentBlock[],
     options?: {
       skillRefs?: SkillRef[];
       skillReferences?: string[];
@@ -120,7 +121,7 @@ export class Session {
     return this._client.subscribeSessionEvents(this._id);
   }
 
-  async invokeSkill(skillRef: SkillRef, prompt: string): Promise<RunResult> {
+  async invokeSkill(skillRef: SkillRef, prompt: string | ContentBlock[]): Promise<RunResult> {
     this._client.requireCapability("skills");
     return this.turn(prompt, { skillRefs: [skillRef] });
   }
@@ -193,7 +194,7 @@ export class DeferredSession {
    * before the session is materialized.
    */
   async startTurn(
-    prompt: string,
+    prompt: string | ContentBlock[],
     options?: DeferredTurnOptions,
   ): Promise<RunResult> {
     return this._client._startTurn(this._id, prompt, options);

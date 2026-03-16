@@ -6,6 +6,7 @@
 use crate::inproc::InprocRegistry;
 use crate::{InboxItem, MessageKind, PubKey, TrustedPeers};
 use meerkat_core::PlainEventSource;
+use meerkat_core::types::ContentBlock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::borrow::Cow;
@@ -20,6 +21,8 @@ pub struct PlainMessage {
     pub source: PlainEventSource,
     /// Optional interaction ID for subscription correlation.
     pub interaction_id: Option<uuid::Uuid>,
+    /// Optional multimodal content blocks.
+    pub blocks: Option<Vec<ContentBlock>>,
 }
 
 impl PlainMessage {
@@ -62,10 +65,12 @@ pub fn drain_inbox_item(
             body,
             source,
             interaction_id,
+            blocks,
         } => Some(DrainedMessage::Plain(PlainMessage {
             body: body.clone(),
             source: *source,
             interaction_id: *interaction_id,
+            blocks: blocks.clone(),
         })),
         InboxItem::SubagentResult { .. } => None,
     }
@@ -163,6 +168,9 @@ pub enum CommsContent {
     Message {
         /// The message body.
         body: String,
+        /// Optional multimodal content blocks.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocks: Option<Vec<ContentBlock>>,
     },
     /// A request from a peer asking this agent to perform an action.
     Request {
@@ -261,7 +269,10 @@ impl CommsMessage {
 
         // Convert MessageKind to CommsContent
         let content = match &envelope.kind {
-            MessageKind::Message { body } => CommsContent::Message { body: body.clone() },
+            MessageKind::Message { body, blocks } => CommsContent::Message {
+                body: body.clone(),
+                blocks: blocks.clone(),
+            },
             MessageKind::Request { intent, params } => CommsContent::Request {
                 request_id: envelope.id,
                 intent: MessageIntent::from(intent.as_str()),
@@ -310,7 +321,10 @@ impl CommsMessage {
         });
 
         let content = match &envelope.kind {
-            MessageKind::Message { body } => CommsContent::Message { body: body.clone() },
+            MessageKind::Message { body, blocks } => CommsContent::Message {
+                body: body.clone(),
+                blocks: blocks.clone(),
+            },
             MessageKind::Request { intent, params } => CommsContent::Request {
                 request_id: envelope.id,
                 intent: MessageIntent::from(intent.as_str()),
@@ -344,8 +358,12 @@ impl CommsMessage {
     /// - How to respond (for requests)
     pub fn to_user_message_text(&self) -> String {
         match &self.content {
-            CommsContent::Message { body } => {
-                format!("[COMMS MESSAGE from {}]\n{}", self.from_peer, body)
+            CommsContent::Message { body, blocks } => {
+                let text = match blocks {
+                    Some(b) if !b.is_empty() => meerkat_core::types::text_content(b),
+                    _ => body.clone(),
+                };
+                format!("[COMMS MESSAGE from {}]\n{}", self.from_peer, text)
             }
             CommsContent::Request {
                 request_id,
@@ -463,6 +481,7 @@ mod tests {
             from_pubkey: PubKey::new([1u8; 32]),
             content: CommsContent::Message {
                 body: "hello".to_string(),
+                blocks: None,
             },
         };
         assert_eq!(msg.from_peer, "test-peer");
@@ -473,6 +492,7 @@ mod tests {
         // Message
         let _ = CommsContent::Message {
             body: "hello".to_string(),
+            blocks: None,
         };
         // Request
         let _ = CommsContent::Request {
@@ -499,6 +519,7 @@ mod tests {
             receiver.public_key(),
             MessageKind::Message {
                 body: "hello world".to_string(),
+                blocks: None,
             },
         );
 
@@ -509,7 +530,10 @@ mod tests {
         let msg = msg.unwrap();
         assert_eq!(msg.from_peer, "sender-agent");
         match msg.content {
-            CommsContent::Message { body } => assert_eq!(body, "hello world"),
+            CommsContent::Message { body, blocks } => {
+                assert_eq!(body, "hello world");
+                assert_eq!(blocks, None);
+            }
             _ => unreachable!("expected Message"),
         }
     }
@@ -645,6 +669,7 @@ mod tests {
             receiver.public_key(),
             MessageKind::Message {
                 body: "hello".to_string(),
+                blocks: None,
             },
         );
 
@@ -673,6 +698,7 @@ mod tests {
             receiver.public_key(),
             MessageKind::Message {
                 body: "hello".to_string(),
+                blocks: None,
             },
         );
         let item = InboxItem::External { envelope };
@@ -680,7 +706,7 @@ mod tests {
 
         assert_eq!(msg.from_peer, sender_name);
         match msg.content {
-            CommsContent::Message { body } => assert_eq!(body, "hello"),
+            CommsContent::Message { body, .. } => assert_eq!(body, "hello"),
             _ => unreachable!("expected Message"),
         }
 
@@ -709,6 +735,7 @@ mod tests {
             from_pubkey: PubKey::new([1u8; 32]),
             content: CommsContent::Message {
                 body: "Please review PR #42".to_string(),
+                blocks: None,
             },
         };
 
@@ -855,6 +882,7 @@ mod tests {
             receiver.public_key(),
             MessageKind::Message {
                 body: "hello".to_string(),
+                blocks: None,
             },
         );
         let item = InboxItem::External { envelope };
@@ -878,6 +906,7 @@ mod tests {
             body: "New email arrived".to_string(),
             source: PlainEventSource::Tcp,
             interaction_id: None,
+            blocks: None,
         };
         let drained = drain_inbox_item(&item, &trusted, true);
 
@@ -900,6 +929,7 @@ mod tests {
             body: "CPU > 95% on prod-3".to_string(),
             source: PlainEventSource::Webhook,
             interaction_id: None,
+            blocks: None,
         };
         let text = msg.to_user_message_text();
         assert_eq!(text, "[EVENT via webhook] CPU > 95% on prod-3");
@@ -920,6 +950,7 @@ mod tests {
                 body: "test".to_string(),
                 source,
                 interaction_id: None,
+                blocks: None,
             };
             assert!(
                 msg.to_user_message_text().contains(label),

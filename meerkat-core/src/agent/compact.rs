@@ -108,10 +108,10 @@ where
     let compaction_prompt = compactor.compaction_prompt();
     let max_summary_tokens = compactor.max_summary_tokens();
 
-    let mut compaction_messages = messages.to_vec();
-    compaction_messages.push(Message::User(crate::types::UserMessage {
-        content: compaction_prompt.to_string(),
-    }));
+    let mut compaction_messages = compactor.prepare_for_summarization(messages);
+    compaction_messages.push(Message::User(crate::types::UserMessage::text(
+        compaction_prompt.to_string(),
+    )));
 
     // 3. Call LLM with empty tools, max_summary_tokens
     let llm_result = client

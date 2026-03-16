@@ -586,7 +586,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     .as_ref()
                     .map(|meta| meta.model.clone())
                     .ok_or_else(|| SessionError::NotFound { id: id.clone() })?,
-                prompt: String::new(),
+                prompt: String::new().into(),
                 system_prompt: None,
                 max_tokens: Some(
                     stored_metadata
@@ -703,6 +703,14 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
     ) -> Result<(), SessionError> {
         self.inner.set_session_client(id, client).await
+    }
+
+    async fn set_session_tool_filter(
+        &self,
+        id: &SessionId,
+        filter: meerkat_core::ToolFilter,
+    ) -> Result<(), SessionError> {
+        self.inner.set_session_tool_filter(id, filter).await
     }
 
     async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
@@ -1224,7 +1232,7 @@ mod tests {
     impl SessionAgent for DummyAgent {
         async fn run_with_events(
             &mut self,
-            prompt: String,
+            prompt: meerkat_core::types::ContentInput,
             _event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
         ) -> Result<RunResult, meerkat_core::error::AgentError> {
             let session_id = self.session_id();
@@ -1233,7 +1241,7 @@ mod tests {
                 Err(poisoned) => poisoned.into_inner(),
             };
             session.push(meerkat_core::types::Message::User(
-                meerkat_core::types::UserMessage { content: prompt },
+                meerkat_core::types::UserMessage::text(prompt.text_content()),
             ));
             session.push(meerkat_core::types::Message::Assistant(
                 meerkat_core::types::AssistantMessage {
@@ -1257,7 +1265,7 @@ mod tests {
 
         async fn run_host_mode(
             &mut self,
-            prompt: String,
+            prompt: meerkat_core::types::ContentInput,
         ) -> Result<RunResult, meerkat_core::error::AgentError> {
             self.run_with_events(prompt, tokio::sync::mpsc::channel(1).0)
                 .await
@@ -1444,9 +1452,7 @@ mod tests {
 
         let mut session = Session::new();
         session.push(meerkat_core::types::Message::User(
-            meerkat_core::types::UserMessage {
-                content: "hello".to_string(),
-            },
+            meerkat_core::types::UserMessage::text("hello".to_string()),
         ));
 
         // Checkpoint should persist the session
@@ -1479,9 +1485,7 @@ mod tests {
 
         let mut session = Session::new();
         session.push(meerkat_core::types::Message::User(
-            meerkat_core::types::UserMessage {
-                content: "hello".to_string(),
-            },
+            meerkat_core::types::UserMessage::text("hello".to_string()),
         ));
 
         // First checkpoint should persist (message count changed)
@@ -1497,9 +1501,7 @@ mod tests {
 
         // Checkpoint after cancellation should be a no-op
         session.push(meerkat_core::types::Message::User(
-            meerkat_core::types::UserMessage {
-                content: "world".to_string(),
-            },
+            meerkat_core::types::UserMessage::text("world".to_string()),
         ));
         checkpointer.checkpoint(&session).await;
         assert!(
@@ -1523,9 +1525,7 @@ mod tests {
 
         let mut session = Session::new();
         session.push(meerkat_core::types::Message::User(
-            meerkat_core::types::UserMessage {
-                content: "hello".to_string(),
-            },
+            meerkat_core::types::UserMessage::text("hello".to_string()),
         ));
 
         // First checkpoint saves (message count changed from 0 -> 1)
@@ -1544,9 +1544,7 @@ mod tests {
 
         // Add a message and checkpoint again — should save
         session.push(meerkat_core::types::Message::User(
-            meerkat_core::types::UserMessage {
-                content: "world".to_string(),
-            },
+            meerkat_core::types::UserMessage::text("world".to_string()),
         ));
         checkpointer.checkpoint(&session).await;
         assert!(
@@ -1567,7 +1565,7 @@ mod tests {
         let result = service
             .create_session(CreateSessionRequest {
                 model: "test".to_string(),
-                prompt: "hello".to_string(),
+                prompt: "hello".to_string().into(),
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
@@ -1593,9 +1591,9 @@ mod tests {
 
         let mut mutated = original.clone();
         mutated.push(meerkat_core::types::Message::User(
-            meerkat_core::types::UserMessage {
-                content: "checkpoint should not bypass runtime boundary".to_string(),
-            },
+            meerkat_core::types::UserMessage::text(
+                "checkpoint should not bypass runtime boundary".to_string(),
+            ),
         ));
         checkpointer.checkpoint(&mutated).await;
 
@@ -1673,7 +1671,7 @@ mod tests {
         let created = service
             .create_session(CreateSessionRequest {
                 model: "test".to_string(),
-                prompt: "hello".to_string(),
+                prompt: "hello".to_string().into(),
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
@@ -1694,7 +1692,7 @@ mod tests {
                     host_mode: false,
                     skill_references: None,
                     flow_tool_overlay: None,
-                    prompt: "follow up".to_string(),
+                    prompt: "follow up".to_string().into(),
                     event_tx: None,
                     additional_instructions: None,
                 },
@@ -1745,7 +1743,7 @@ mod tests {
         let first = service
             .create_session(CreateSessionRequest {
                 model: "test".to_string(),
-                prompt: "first".to_string(),
+                prompt: "first".to_string().into(),
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
@@ -1765,7 +1763,7 @@ mod tests {
         let second = service
             .create_session(CreateSessionRequest {
                 model: "test".to_string(),
-                prompt: "second".to_string(),
+                prompt: "second".to_string().into(),
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
@@ -1815,7 +1813,7 @@ mod tests {
         let result = service
             .create_session(CreateSessionRequest {
                 model: "test".to_string(),
-                prompt: "hello".to_string(),
+                prompt: "hello".to_string().into(),
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
@@ -1879,7 +1877,7 @@ mod tests {
         let result = service
             .create_session(CreateSessionRequest {
                 model: "test".to_string(),
-                prompt: "hello".to_string(),
+                prompt: "hello".to_string().into(),
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
@@ -1957,7 +1955,7 @@ mod tests {
         let result = service
             .create_session(CreateSessionRequest {
                 model: "test".to_string(),
-                prompt: "hello".to_string(),
+                prompt: "hello".to_string().into(),
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
@@ -1991,7 +1989,7 @@ mod tests {
         let result = service
             .create_session(CreateSessionRequest {
                 model: "test".to_string(),
-                prompt: "hello".to_string(),
+                prompt: "hello".to_string().into(),
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
@@ -2016,7 +2014,7 @@ mod tests {
             .start_turn(
                 &id,
                 StartTurnRequest {
-                    prompt: "follow up".to_string(),
+                    prompt: "follow up".to_string().into(),
                     event_tx: None,
                     host_mode: false,
                     skill_references: None,
@@ -2048,7 +2046,7 @@ mod tests {
         let result = service
             .create_session(CreateSessionRequest {
                 model: "test".to_string(),
-                prompt: "hello".to_string(),
+                prompt: "hello".to_string().into(),
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
@@ -2099,7 +2097,7 @@ mod tests {
         let result = service
             .create_session(CreateSessionRequest {
                 model: "test".to_string(),
-                prompt: "hello".to_string(),
+                prompt: "hello".to_string().into(),
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
@@ -2168,7 +2166,7 @@ mod tests {
         let result = service
             .create_session(CreateSessionRequest {
                 model: "test".to_string(),
-                prompt: "hello".to_string(),
+                prompt: "hello".to_string().into(),
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
@@ -2186,7 +2184,7 @@ mod tests {
                 &result.session_id,
                 RunId::new(),
                 StartTurnRequest {
-                    prompt: "runtime committed turn".to_string(),
+                    prompt: "runtime committed turn".to_string().into(),
                     event_tx: None,
                     host_mode: false,
                     skill_references: None,
@@ -2260,7 +2258,7 @@ mod tests {
         let result = service
             .create_session(CreateSessionRequest {
                 model: "test".to_string(),
-                prompt: "hello".to_string(),
+                prompt: "hello".to_string().into(),
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
@@ -2278,7 +2276,7 @@ mod tests {
                 &result.session_id,
                 RunId::new(),
                 StartTurnRequest {
-                    prompt: "runtime committed turn".to_string(),
+                    prompt: "runtime committed turn".to_string().into(),
                     event_tx: None,
                     host_mode: false,
                     skill_references: None,
@@ -2295,7 +2293,7 @@ mod tests {
             .start_turn(
                 &result.session_id,
                 StartTurnRequest {
-                    prompt: "direct follow-up".to_string(),
+                    prompt: "direct follow-up".to_string().into(),
                     event_tx: None,
                     host_mode: false,
                     skill_references: None,

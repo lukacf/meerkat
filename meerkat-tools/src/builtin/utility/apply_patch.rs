@@ -1,6 +1,6 @@
 //! ApplyPatch tool for structured file edits within the project root.
 
-use crate::builtin::{BuiltinTool, BuiltinToolError};
+use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
 use serde::Deserialize;
@@ -110,7 +110,7 @@ impl BuiltinTool for ApplyPatchTool {
         true
     }
 
-    async fn call(&self, args: Value) -> Result<Value, BuiltinToolError> {
+    async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
         let args: ApplyPatchArgs = serde_json::from_value(args)
             .map_err(|e| BuiltinToolError::invalid_args(format!("Invalid arguments: {e}")))?;
         let project_root = self.project_root.clone();
@@ -122,7 +122,7 @@ impl BuiltinTool for ApplyPatchTool {
             })?
             .map_err(|e| BuiltinToolError::execution_failed(e.to_string()))?;
 
-        Ok(json!({
+        Ok(ToolOutput::Json(json!({
             "status": "success",
             "added_files": affected
                 .added
@@ -139,7 +139,7 @@ impl BuiltinTool for ApplyPatchTool {
                 .iter()
                 .map(|p| p.display().to_string())
                 .collect::<Vec<_>>(),
-        }))
+        })))
     }
 }
 

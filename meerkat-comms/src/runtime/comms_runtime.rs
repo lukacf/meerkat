@@ -274,6 +274,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 stream,
                 allow_self_session,
                 session_id: _,
+                blocks: _,
             } => {
                 // Self-input guard: when allow_self_session is false, this runtime's
                 // inbox is the target, which is a self-loop. Reject unless explicitly
@@ -307,8 +308,11 @@ impl CoreCommsRuntime for CommsRuntime {
                     }
                 }
             }
-            CommsCommand::PeerMessage { to, body } => self
-                .send_peer_command(to.as_str(), crate::types::MessageKind::Message { body })
+            CommsCommand::PeerMessage { to, body, blocks } => self
+                .send_peer_command(
+                    to.as_str(),
+                    crate::types::MessageKind::Message { body, blocks },
+                )
                 .await
                 .map(|envelope_id| SendReceipt::PeerMessageSent {
                     envelope_id,
@@ -401,6 +405,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 stream: InputStreamMode::ReserveInteraction,
                 allow_self_session,
                 session_id: _,
+                blocks: _,
             } => {
                 if !allow_self_session {
                     return Err(SendAndStreamError::Send(SendError::Validation(
@@ -551,19 +556,23 @@ impl CoreCommsRuntime for CommsRuntime {
                 match entry.item {
                     crate::types::InboxItem::External { envelope } => {
                         // Check for DISMISS
-                        if let MessageKind::Message { ref body } = envelope.kind
+                        if let MessageKind::Message { blocks: None, ref body, .. } = envelope.kind
                             && body.trim().eq_ignore_ascii_case("DISMISS") {
                                 self.dismiss_flag.store(true, Ordering::SeqCst);
                                 return None;
                             }
 
                         let (content, rendered_text) = match envelope.kind {
-                            MessageKind::Message { body } => {
+                            MessageKind::Message { body, blocks } => {
+                                let text = match &blocks {
+                                    Some(b) if !b.is_empty() => meerkat_core::types::text_content(b),
+                                    _ => body.clone(),
+                                };
                                 let rendered = format!(
-                                    "[COMMS MESSAGE from {from_peer}]\n{body}"
+                                    "[COMMS MESSAGE from {from_peer}]\n{text}"
                                 );
                                 (
-                                    meerkat_core::InteractionContent::Message { body },
+                                    meerkat_core::InteractionContent::Message { body, blocks },
                                     rendered,
                                 )
                             }
@@ -660,6 +669,7 @@ impl CoreCommsRuntime for CommsRuntime {
                         body,
                         source,
                         interaction_id,
+                        blocks,
                     } => {
                         let rendered = format!("[EVENT via {source}] {body}");
                         Some(meerkat_core::ClassifiedInboxInteraction {
@@ -668,7 +678,7 @@ impl CoreCommsRuntime for CommsRuntime {
                                     interaction_id.unwrap_or_else(uuid::Uuid::new_v4),
                                 ),
                                 from: format!("event:{source}"),
-                                content: meerkat_core::InteractionContent::Message { body },
+                                content: meerkat_core::InteractionContent::Message { body, blocks },
                                 rendered_text: rendered,
                             },
                             class: entry.class,
@@ -1277,6 +1287,7 @@ impl CommsRuntime {
                     body,
                     source: PlainEventSource::from(source),
                     interaction_id: Some(interaction_id),
+                    blocks: None,
                 })
         {
             self.interaction_stream_registry
@@ -1656,6 +1667,7 @@ mod tests {
             &sender,
             runtime.public_key(),
             MessageKind::Message {
+                blocks: None,
                 body: "hello".to_string(),
             },
         );
@@ -1702,7 +1714,7 @@ mod tests {
         assert!(interactions.iter().any(|i| {
             matches!(
                 &i.content,
-                meerkat_core::InteractionContent::Message { body } if body == "hello"
+                meerkat_core::InteractionContent::Message { body, .. } if body == "hello"
             )
         }));
         assert!(interactions.iter().any(|i| {
@@ -1759,6 +1771,7 @@ mod tests {
             .router
             .inbox_sender()
             .send_classified(InboxItem::PlainEvent {
+                blocks: None,
                 body: "evt".to_string(),
                 source: meerkat_core::PlainEventSource::Tcp,
                 interaction_id: Some(interaction_id),
@@ -1784,6 +1797,7 @@ mod tests {
         let runtime = CommsRuntime::inproc_only(&format!("input-nores-{suffix}")).unwrap();
 
         let cmd = CommsCommand::Input {
+            blocks: None,
             session_id: SessionId::new(),
             body: "standalone test input".to_string(),
             source: InputSource::Rpc,
@@ -1806,7 +1820,7 @@ mod tests {
         assert_eq!(interactions.len(), 1);
         assert!(matches!(
             &interactions[0].content,
-            meerkat_core::InteractionContent::Message { body } if body == "standalone test input"
+            meerkat_core::InteractionContent::Message { body, .. } if body == "standalone test input"
         ));
     }
 
@@ -1816,6 +1830,7 @@ mod tests {
         let runtime = CommsRuntime::inproc_only(&format!("input-res-{suffix}")).unwrap();
 
         let cmd = CommsCommand::Input {
+            blocks: None,
             session_id: SessionId::new(),
             body: "streaming input".to_string(),
             source: InputSource::Rpc,
@@ -1853,6 +1868,7 @@ mod tests {
         let runtime = CommsRuntime::inproc_only(&format!("dup-attach-{suffix}")).unwrap();
 
         let cmd = CommsCommand::Input {
+            blocks: None,
             session_id: SessionId::new(),
             body: "duplicate stream test".to_string(),
             source: InputSource::Rpc,
@@ -1894,6 +1910,7 @@ mod tests {
         assert!(matches!(missing, Err(StreamError::NotReserved(_))));
 
         let cmd = CommsCommand::Input {
+            blocks: None,
             session_id: SessionId::new(),
             body: "send before stream attach".to_string(),
             source: InputSource::Rpc,
@@ -1921,6 +1938,7 @@ mod tests {
         let runtime = CommsRuntime::inproc_only(&format!("sas-{suffix}")).unwrap();
 
         let cmd = CommsCommand::Input {
+            blocks: None,
             session_id: SessionId::new(),
             body: "stream-first".to_string(),
             source: InputSource::Rpc,
@@ -1957,6 +1975,7 @@ mod tests {
         let runtime = CommsRuntime::inproc_only(&format!("sender-{suffix}")).unwrap();
 
         let cmd = CommsCommand::PeerMessage {
+            blocks: None,
             to: PeerName::new("missing-peer".to_string())
                 .expect("missing-peer is a valid peer name"),
             body: "hello".to_string(),
@@ -1994,6 +2013,7 @@ mod tests {
         });
 
         let cmd = CommsCommand::PeerMessage {
+            blocks: None,
             to: PeerName::new(receiver_name).expect("receiver_name is a valid peer name"),
             body: "greeting".to_string(),
         };
@@ -2011,7 +2031,7 @@ mod tests {
         assert_eq!(interactions.len(), 1);
         assert!(matches!(
             &interactions[0].content,
-            meerkat_core::InteractionContent::Message { body } if body == "greeting"
+            meerkat_core::InteractionContent::Message { body, .. } if body == "greeting"
         ));
     }
 
@@ -2024,6 +2044,7 @@ mod tests {
         let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
 
         let cmd = CommsCommand::PeerMessage {
+            blocks: None,
             to: PeerName::new(receiver_name.clone()).expect("receiver_name is a valid peer name"),
             body: "inproc-only hello".to_string(),
         };
@@ -2086,6 +2107,7 @@ mod tests {
         let receiver_pubkey = receiver.public_key();
 
         let cmd = CommsCommand::PeerMessage {
+            blocks: None,
             to: PeerName::new(receiver_name.clone()).expect("receiver_name is a valid peer name"),
             body: "hello without trusted".to_string(),
         };
@@ -2104,7 +2126,7 @@ mod tests {
         assert_eq!(interactions[0].from, sender_name);
         assert!(matches!(
             &interactions[0].content,
-            meerkat_core::InteractionContent::Message { body } if body == "hello without trusted"
+            meerkat_core::InteractionContent::Message { body, .. } if body == "hello without trusted"
         ));
 
         assert!(crate::InprocRegistry::global().unregister(&sender_pubkey));
@@ -2149,6 +2171,7 @@ mod tests {
         assert_eq!(receiver_entries.len(), 1, "peer should appear in peers()");
 
         let send_cmd = CommsCommand::PeerMessage {
+            blocks: None,
             to: PeerName::new(receiver_name.clone()).expect("receiver_name is a valid peer name"),
             body: "hello trusted peer".to_string(),
         };
@@ -2159,7 +2182,7 @@ mod tests {
         assert_eq!(interactions.len(), 1);
         assert!(matches!(
             &interactions[0].content,
-            meerkat_core::InteractionContent::Message { body } if body == "hello trusted peer"
+            meerkat_core::InteractionContent::Message { body, .. } if body == "hello trusted peer"
         ));
     }
 
@@ -2268,6 +2291,7 @@ mod tests {
             for kind in &entry.sendable_kinds {
                 let cmd = match kind.as_str() {
                     "peer_message" => CommsCommand::PeerMessage {
+                        blocks: None,
                         to: entry.name.clone(),
                         body: "truthfulness test".to_string(),
                     },
@@ -2305,6 +2329,7 @@ mod tests {
         let session_id = meerkat_core::SessionId::new();
 
         let cmd = CommsCommand::Input {
+            blocks: None,
             session_id: session_id.clone(),
             body: "hello".to_string(),
             source: meerkat_core::InputSource::Rpc,
@@ -2333,6 +2358,7 @@ mod tests {
         let session_id = meerkat_core::SessionId::new();
 
         let cmd = CommsCommand::Input {
+            blocks: None,
             session_id: session_id.clone(),
             body: "hello".to_string(),
             source: meerkat_core::InputSource::Rpc,
@@ -2409,6 +2435,7 @@ mod tests {
         }
 
         let cmd = CommsCommand::PeerMessage {
+            blocks: None,
             to: PeerName::new(peer_name).expect("peer_name is a valid peer name"),
             body: "not streamable".to_string(),
         };
@@ -2436,6 +2463,7 @@ mod tests {
         let session_id = meerkat_core::SessionId::new();
 
         let cmd = CommsCommand::Input {
+            blocks: None,
             session_id: session_id.clone(),
             body: "no stream".to_string(),
             source: meerkat_core::InputSource::Rpc,
@@ -2469,6 +2497,7 @@ mod tests {
         let session_id = meerkat_core::SessionId::new();
 
         let cmd = CommsCommand::Input {
+            blocks: None,
             session_id: session_id.clone(),
             body: "hello".to_string(),
             source: meerkat_core::InputSource::Rpc,
@@ -2500,6 +2529,7 @@ mod tests {
         let suffix = Uuid::new_v4().simple().to_string();
         let runtime = CommsRuntime::inproc_only(&format!("self-guard-{suffix}")).unwrap();
         let cmd = CommsCommand::Input {
+            blocks: None,
             session_id: meerkat_core::SessionId::new(),
             body: "blocked".to_string(),
             source: meerkat_core::InputSource::Rpc,
@@ -2565,6 +2595,7 @@ mod tests {
 
         // Verify sending to the removed peer fails (PeerNotFound)
         let cmd = CommsCommand::PeerMessage {
+            blocks: None,
             to: PeerName::new(receiver_name.clone()).expect("valid peer name"),
             body: "should fail".to_string(),
         };

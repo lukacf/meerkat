@@ -93,9 +93,7 @@ mod tests {
         let store = MemoryStore::new();
 
         let mut session = Session::new();
-        session.push(Message::User(UserMessage {
-            content: "Test".to_string(),
-        }));
+        session.push(Message::User(UserMessage::text("Test".to_string())));
 
         let id = session.id().clone();
 

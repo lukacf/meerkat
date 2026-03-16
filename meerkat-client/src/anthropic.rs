@@ -7,7 +7,7 @@ use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream};
 use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat_core::schema::{CompiledSchema, SchemaError};
-use meerkat_core::{Message, OutputSchema, StopReason, Usage};
+use meerkat_core::{ContentBlock, Message, OutputSchema, StopReason, Usage};
 use serde::Deserialize;
 use serde_json::Value;
 use std::time::Duration;
@@ -152,10 +152,41 @@ impl AnthropicClient {
                     system_prompt = Some(s.content.clone());
                 }
                 Message::User(u) => {
-                    messages.push(serde_json::json!({
-                        "role": "user",
-                        "content": u.content
-                    }));
+                    if meerkat_core::has_images(&u.content) {
+                        let content_array: Vec<Value> = u
+                            .content
+                            .iter()
+                            .map(|block| match block {
+                                ContentBlock::Text { text } => serde_json::json!({
+                                    "type": "text",
+                                    "text": text
+                                }),
+                                ContentBlock::Image {
+                                    media_type, data, ..
+                                } => serde_json::json!({
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": media_type,
+                                        "data": data
+                                    }
+                                }),
+                                _ => serde_json::json!({
+                                    "type": "text",
+                                    "text": block.text_projection()
+                                }),
+                            })
+                            .collect();
+                        messages.push(serde_json::json!({
+                            "role": "user",
+                            "content": content_array
+                        }));
+                    } else {
+                        messages.push(serde_json::json!({
+                            "role": "user",
+                            "content": u.text_content()
+                        }));
+                    }
                 }
                 Message::Assistant(a) => {
                     // Legacy format: flat content + tool_calls
@@ -258,12 +289,45 @@ impl AnthropicClient {
                     let mut content = Vec::new();
 
                     for r in results {
-                        content.push(serde_json::json!({
-                            "type": "tool_result",
-                            "tool_use_id": r.tool_use_id,
-                            "content": r.content,
-                            "is_error": r.is_error
-                        }));
+                        if r.has_images() {
+                            let result_content: Vec<Value> = r
+                                .content
+                                .iter()
+                                .map(|block| match block {
+                                    ContentBlock::Text { text } => serde_json::json!({
+                                        "type": "text",
+                                        "text": text
+                                    }),
+                                    ContentBlock::Image {
+                                        media_type, data, ..
+                                    } => serde_json::json!({
+                                        "type": "image",
+                                        "source": {
+                                            "type": "base64",
+                                            "media_type": media_type,
+                                            "data": data
+                                        }
+                                    }),
+                                    _ => serde_json::json!({
+                                        "type": "text",
+                                        "text": block.text_projection()
+                                    }),
+                                })
+                                .collect();
+                            content.push(serde_json::json!({
+                                "type": "tool_result",
+                                "tool_use_id": r.tool_use_id,
+                                "content": result_content,
+                                "is_error": r.is_error
+                            }));
+                        } else {
+                            content.push(serde_json::json!({
+                                "type": "tool_result",
+                                "tool_use_id": r.tool_use_id,
+                                "content": r.text_content(),
+                                "is_error": r.is_error
+                            }));
+                        }
                     }
 
                     messages.push(serde_json::json!({
@@ -918,7 +982,9 @@ struct AnthropicUsage {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use meerkat_core::{AssistantBlock, BlockAssistantMessage, ProviderMeta, UserMessage};
+    use meerkat_core::{
+        AssistantBlock, BlockAssistantMessage, ContentBlock, ProviderMeta, UserMessage,
+    };
 
     // =========================================================================
     // Thinking block SSE parsing tests (spec section 3.5)
@@ -1014,13 +1080,11 @@ mod tests {
         let request = LlmRequest::new(
             "claude-sonnet-4-5",
             vec![
-                Message::User(UserMessage {
-                    content: "What is the meaning of life?".to_string(),
-                }),
+                Message::User(UserMessage::text(
+                    "What is the meaning of life?".to_string(),
+                )),
                 assistant_msg,
-                Message::User(UserMessage {
-                    content: "Can you elaborate?".to_string(),
-                }),
+                Message::User(UserMessage::text("Can you elaborate?".to_string())),
             ],
         );
 
@@ -1069,9 +1133,7 @@ mod tests {
         let request = LlmRequest::new(
             "claude-sonnet-4-5",
             vec![
-                Message::User(UserMessage {
-                    content: "Question".to_string(),
-                }),
+                Message::User(UserMessage::text("Question".to_string())),
                 assistant_msg,
             ],
         );
@@ -1113,9 +1175,7 @@ mod tests {
         let request = LlmRequest::new(
             "claude-sonnet-4-5",
             vec![
-                Message::User(UserMessage {
-                    content: "Read /tmp/test.txt".to_string(),
-                }),
+                Message::User(UserMessage::text("Read /tmp/test.txt".to_string())),
                 assistant_msg,
             ],
         );
@@ -1142,9 +1202,7 @@ mod tests {
         // When thinking is enabled via provider_params, beta header should be added
         let request = LlmRequest::new(
             "claude-sonnet-4-5",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_provider_param("thinking_budget", 10000);
 
@@ -1169,9 +1227,7 @@ mod tests {
 
         let request = LlmRequest::new(
             "claude-sonnet-4-20250514",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_provider_param("thinking_budget", 10000);
 
@@ -1193,9 +1249,7 @@ mod tests {
 
         let request = LlmRequest::new(
             "claude-sonnet-4-20250514",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_provider_param("top_k", 40);
 
@@ -1210,9 +1264,7 @@ mod tests {
         let client = AnthropicClient::new("test-key".to_string())?;
         let request = LlmRequest::new(
             "claude-sonnet-4-20250514",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         );
 
         let body = client.build_request_body(&request)?;
@@ -1283,9 +1335,7 @@ mod tests {
         // Simulate CLI --param which passes values as strings
         let request = LlmRequest::new(
             "claude-sonnet-4-20250514",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_provider_param("top_k", "40"); // String, not number!
 
@@ -1307,9 +1357,7 @@ mod tests {
 
         let request = LlmRequest::new(
             "claude-sonnet-4-20250514",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_provider_param("top_k", "not_a_number");
 
@@ -1370,9 +1418,7 @@ mod tests {
 
         let request = LlmRequest::new(
             "claude-sonnet-4-20250514",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_provider_param(
             "structured_output",
@@ -1407,9 +1453,7 @@ mod tests {
 
         let request = LlmRequest::new(
             "claude-sonnet-4-20250514",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         );
 
         let body = client.build_request_body(&request)?;
@@ -1528,9 +1572,7 @@ mod tests {
 
         let request = LlmRequest::new(
             "claude-opus-4-6",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_provider_param("thinking", serde_json::json!({"type": "adaptive"}));
 
@@ -1552,9 +1594,7 @@ mod tests {
 
         let request = LlmRequest::new(
             "claude-opus-4-6",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_provider_param("effort", "medium");
 
@@ -1583,9 +1623,7 @@ mod tests {
 
         let mut request = LlmRequest::new(
             "claude-opus-4-6",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         );
         request.provider_params = Some(serde_json::json!({
             "effort": "high",
@@ -1613,9 +1651,7 @@ mod tests {
 
         let request = LlmRequest::new(
             "claude-opus-4-6",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_provider_param("thinking", serde_json::json!({"type": "adaptive"}));
 
@@ -1638,9 +1674,7 @@ mod tests {
         // Legacy flat format should still produce type: enabled
         let request = LlmRequest::new(
             "claude-sonnet-4-5",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_provider_param("thinking_budget", 10000);
 
@@ -1657,9 +1691,7 @@ mod tests {
 
         let request = LlmRequest::new(
             "claude-opus-4-6",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_provider_param("inference_geo", "us");
 
@@ -1675,9 +1707,7 @@ mod tests {
 
         let request = LlmRequest::new(
             "claude-opus-4-6",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_provider_param("compaction", "auto");
 
@@ -1695,9 +1725,7 @@ mod tests {
 
         let mut request = LlmRequest::new(
             "claude-opus-4-6",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         );
         request.provider_params = Some(serde_json::json!({
             "compaction": {
@@ -1738,9 +1766,7 @@ mod tests {
         let request = LlmRequest::new(
             "claude-opus-4-6",
             vec![
-                Message::User(UserMessage {
-                    content: "Question".to_string(),
-                }),
+                Message::User(UserMessage::text("Question".to_string())),
                 assistant_msg,
             ],
         );
@@ -1783,9 +1809,7 @@ mod tests {
         let request = LlmRequest::new(
             "claude-opus-4-6",
             vec![
-                Message::User(UserMessage {
-                    content: "Continue".to_string(),
-                }),
+                Message::User(UserMessage::text("Continue".to_string())),
                 assistant_msg,
             ],
         );
@@ -1859,9 +1883,7 @@ mod tests {
             .unwrap();
         let request = LlmRequest::new(
             "claude-sonnet-4-5",
-            vec![Message::User(UserMessage {
-                content: "hello".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("hello".to_string()))],
         );
 
         let mut stream = client.stream(&request);
@@ -1904,9 +1926,7 @@ mod tests {
             .unwrap();
         let request = LlmRequest::new(
             "claude-sonnet-4-5",
-            vec![Message::User(UserMessage {
-                content: "hello".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("hello".to_string()))],
         );
 
         let mut stream = client.stream(&request);
@@ -1949,9 +1969,7 @@ mod tests {
             .unwrap();
         let request = LlmRequest::new(
             "claude-sonnet-4-5",
-            vec![Message::User(UserMessage {
-                content: "hello".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("hello".to_string()))],
         );
 
         let mut stream = client.stream(&request);
@@ -1965,5 +1983,167 @@ mod tests {
         server.abort();
 
         assert_eq!(done_count, 1, "Expected exactly one Done event");
+    }
+
+    // =========================================================================
+    // Multimodal content (ContentBlock::Image) serialization tests
+    // =========================================================================
+
+    #[test]
+    fn anthropic_text_only_tool_result_as_string() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+        let request = LlmRequest::new(
+            "claude-sonnet-4-5",
+            vec![
+                Message::User(UserMessage::text("Read the file")),
+                Message::ToolResults {
+                    results: vec![meerkat_core::ToolResult::new(
+                        "tu_1".to_string(),
+                        "file contents here".to_string(),
+                        false,
+                    )],
+                },
+            ],
+        );
+
+        let body = client.build_request_body(&request)?;
+        let messages = body["messages"].as_array().unwrap();
+        let tool_msg = &messages[1]["content"].as_array().unwrap()[0];
+
+        // Text-only tool result should serialize content as a string
+        assert_eq!(tool_msg["type"], "tool_result");
+        assert_eq!(tool_msg["tool_use_id"], "tu_1");
+        assert_eq!(tool_msg["content"], "file contents here");
+        assert!(
+            tool_msg["content"].is_string(),
+            "text-only tool result content should be a string"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn anthropic_image_tool_result_as_array() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+        let request = LlmRequest::new(
+            "claude-sonnet-4-5",
+            vec![
+                Message::User(UserMessage::text("Take a screenshot")),
+                Message::ToolResults {
+                    results: vec![meerkat_core::ToolResult::with_blocks(
+                        "tu_2".to_string(),
+                        vec![
+                            ContentBlock::Text {
+                                text: "screenshot taken".to_string(),
+                            },
+                            ContentBlock::Image {
+                                media_type: "image/png".to_string(),
+                                data: "iVBOR...".to_string(),
+                                source_path: Some("/tmp/screenshot.png".to_string()),
+                            },
+                        ],
+                        false,
+                    )],
+                },
+            ],
+        );
+
+        let body = client.build_request_body(&request)?;
+        let messages = body["messages"].as_array().unwrap();
+        let tool_msg = &messages[1]["content"].as_array().unwrap()[0];
+
+        assert_eq!(tool_msg["type"], "tool_result");
+        assert_eq!(tool_msg["tool_use_id"], "tu_2");
+
+        // Content should be an array with text + image blocks
+        let content = tool_msg["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "screenshot taken");
+
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], "iVBOR...");
+
+        // source_path must NOT leak into serialized output
+        assert!(
+            !serde_json::to_string(&body)
+                .unwrap()
+                .contains("source_path"),
+            "source_path must never appear in provider payload"
+        );
+        assert!(
+            !serde_json::to_string(&body)
+                .unwrap()
+                .contains("/tmp/screenshot.png"),
+            "source_path value must never appear in provider payload"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn anthropic_user_message_with_image() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+        let request = LlmRequest::new(
+            "claude-sonnet-4-5",
+            vec![Message::User(UserMessage::with_blocks(vec![
+                ContentBlock::Text {
+                    text: "describe this".to_string(),
+                },
+                ContentBlock::Image {
+                    media_type: "image/jpeg".to_string(),
+                    data: "/9j/4AAQ...".to_string(),
+                    source_path: Some("/home/user/photo.jpg".to_string()),
+                },
+            ]))],
+        );
+
+        let body = client.build_request_body(&request)?;
+        let messages = body["messages"].as_array().unwrap();
+        let user_msg = &messages[0];
+
+        assert_eq!(user_msg["role"], "user");
+
+        // Content should be an array (not a string) when images are present
+        let content = user_msg["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "describe this");
+
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "image/jpeg");
+        assert_eq!(content[1]["source"]["data"], "/9j/4AAQ...");
+
+        // source_path must NOT leak
+        assert!(
+            !serde_json::to_string(&body)
+                .unwrap()
+                .contains("source_path"),
+            "source_path must never appear in provider payload"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn anthropic_text_only_user_message_stays_string() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+        let request = LlmRequest::new(
+            "claude-sonnet-4-5",
+            vec![Message::User(UserMessage::text("just text"))],
+        );
+
+        let body = client.build_request_body(&request)?;
+        let messages = body["messages"].as_array().unwrap();
+
+        // Text-only user message should remain a plain string
+        assert!(
+            messages[0]["content"].is_string(),
+            "text-only user message content should be a string"
+        );
+        assert_eq!(messages[0]["content"], "just text");
+        Ok(())
     }
 }

@@ -120,7 +120,7 @@ where
 fn should_ack(kind: &MessageKind) -> bool {
     matches!(
         kind,
-        MessageKind::Message { .. } | MessageKind::Request { .. }
+        MessageKind::Message { blocks: None, .. } | MessageKind::Request { .. }
     )
 }
 
@@ -245,6 +245,7 @@ mod tests {
             &sender_keypair,
             receiver_keypair.public_key(),
             MessageKind::Message {
+                blocks: None,
                 body: "hello".to_string(),
             },
         );
@@ -281,6 +282,7 @@ mod tests {
             from: sender_keypair.public_key(),
             to: receiver_keypair.public_key(),
             kind: MessageKind::Message {
+                blocks: None,
                 body: "hello".to_string(),
             },
             sig: Signature::new([0u8; 64]), // Invalid signature
@@ -316,6 +318,7 @@ mod tests {
             &untrusted_keypair, // Not in trusted list
             receiver_keypair.public_key(),
             MessageKind::Message {
+                blocks: None,
                 body: "hello".to_string(),
             },
         );
@@ -349,6 +352,7 @@ mod tests {
             from: sender_keypair.public_key(),
             to: receiver_keypair.public_key(),
             kind: MessageKind::Message {
+                blocks: None,
                 body: "hello".to_string(),
             },
             sig: Signature::new([0u8; 64]), // Invalid signature
@@ -393,6 +397,7 @@ mod tests {
             &sender_keypair, // not in trusted list
             receiver_keypair.public_key(),
             MessageKind::Message {
+                blocks: None,
                 body: "hello".to_string(),
             },
         );
@@ -435,6 +440,7 @@ mod tests {
             &sender_keypair,
             receiver_keypair.public_key(),
             MessageKind::Message {
+                blocks: None,
                 body: "hello".to_string(),
             },
         );
@@ -479,6 +485,7 @@ mod tests {
             &sender_keypair,
             receiver_keypair.public_key(),
             MessageKind::Message {
+                blocks: None,
                 body: "hello".to_string(),
             },
         );
@@ -521,6 +528,7 @@ mod tests {
             &sender_keypair,
             receiver_keypair.public_key(),
             MessageKind::Message {
+                blocks: None,
                 body: "hello".to_string(),
             },
         );
@@ -669,6 +677,7 @@ mod tests {
             from: sender_keypair.public_key(),
             to: receiver_keypair.public_key(),
             kind: MessageKind::Message {
+                blocks: None,
                 body: "hello".to_string(),
             },
             sig: Signature::new([0u8; 64]), // Invalid
@@ -707,6 +716,7 @@ mod tests {
             &sender_keypair, // Not trusted
             receiver_keypair.public_key(),
             MessageKind::Message {
+                blocks: None,
                 body: "hello".to_string(),
             },
         );

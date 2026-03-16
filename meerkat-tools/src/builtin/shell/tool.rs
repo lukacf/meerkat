@@ -20,7 +20,7 @@ use tokio::time::timeout;
 use tracing::{debug, info, instrument, warn};
 
 use super::config::{ShellConfig, ShellError};
-use crate::builtin::{BuiltinTool, BuiltinToolError};
+use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 
 /// Maximum number of characters to keep in output before truncation.
 /// This is measured in Unicode characters, not bytes.
@@ -399,7 +399,7 @@ impl BuiltinTool for ShellTool {
     }
 
     #[instrument(skip(self, args), fields(tool = "shell"))]
-    async fn call(&self, args: Value) -> Result<Value, BuiltinToolError> {
+    async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
         let input: ShellInput = serde_json::from_value(args)
             .map_err(|e| BuiltinToolError::invalid_args(e.to_string()))?;
 
@@ -440,11 +440,11 @@ impl BuiltinTool for ShellTool {
                 .await
                 .map_err(|e| BuiltinToolError::execution_failed(e.to_string()))?;
 
-            return Ok(serde_json::json!({
+            return Ok(ToolOutput::Json(serde_json::json!({
                 "job_id": job_id.to_string(),
                 "status": "running",
                 "message": format!("Command started in background with job ID: {}", job_id)
-            }));
+            })));
         }
 
         // Get timeout (use provided or config default)
@@ -470,8 +470,9 @@ impl BuiltinTool for ShellTool {
         );
 
         // Return structured JSON output
-        Ok(serde_json::to_value(output)
-            .map_err(|e| BuiltinToolError::execution_failed(e.to_string()))?)
+        Ok(ToolOutput::Json(serde_json::to_value(output).map_err(
+            |e| BuiltinToolError::execution_failed(e.to_string()),
+        )?))
     }
 }
 
@@ -851,7 +852,7 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
-        let val = result.unwrap();
+        let val = result.unwrap().into_json().unwrap();
         assert!(val["job_id"].is_string());
         assert_eq!(val["status"], "running");
     }
@@ -876,7 +877,7 @@ mod tests {
             .unwrap();
 
         // Parse the output
-        let output: ShellOutput = serde_json::from_value(result).unwrap();
+        let output: ShellOutput = serde_json::from_value(result.into_json().unwrap()).unwrap();
         assert!(!output.timed_out);
         assert_eq!(output.exit_code, Some(0));
         assert!(output.stdout.contains("hello"));
@@ -905,7 +906,7 @@ mod tests {
             .await
             .unwrap();
 
-        let output: ShellOutput = serde_json::from_value(result).unwrap();
+        let output: ShellOutput = serde_json::from_value(result.into_json().unwrap()).unwrap();
         assert!(output.stdout.contains("mydir"));
     }
 
@@ -1002,7 +1003,8 @@ mod tests {
             "Timeout should return Ok with timed_out flag"
         );
 
-        let output: ShellOutput = serde_json::from_value(result.unwrap()).unwrap();
+        let output: ShellOutput =
+            serde_json::from_value(result.unwrap().into_json().unwrap()).unwrap();
 
         assert!(output.timed_out, "Command should have timed out");
         assert!(
@@ -1044,7 +1046,8 @@ mod tests {
             "Non-UTF-8 output should be handled gracefully: {result:?}"
         );
 
-        let output: ShellOutput = serde_json::from_value(result.unwrap()).unwrap();
+        let output: ShellOutput =
+            serde_json::from_value(result.unwrap().into_json().unwrap()).unwrap();
 
         assert!(!output.timed_out, "Should not timeout");
         assert_eq!(output.exit_code, Some(0), "Exit code should be 0");
@@ -1075,7 +1078,8 @@ mod tests {
 
         assert!(result.is_ok(), "Long output command should succeed");
 
-        let output: ShellOutput = serde_json::from_value(result.unwrap()).unwrap();
+        let output: ShellOutput =
+            serde_json::from_value(result.unwrap().into_json().unwrap()).unwrap();
 
         assert!(!output.timed_out, "Should not timeout");
         assert_eq!(output.exit_code, Some(0), "Exit code should be 0");
@@ -1428,7 +1432,8 @@ mod tests {
             "Pipeline command should succeed: {result:?}"
         );
 
-        let output: ShellOutput = serde_json::from_value(result.unwrap()).unwrap();
+        let output: ShellOutput =
+            serde_json::from_value(result.unwrap().into_json().unwrap()).unwrap();
         assert!(!output.timed_out, "Should not timeout");
         assert_eq!(output.exit_code, Some(0), "Exit code should be 0");
 
@@ -1471,7 +1476,8 @@ mod tests {
             "Redirection command should succeed: {result:?}"
         );
 
-        let output: ShellOutput = serde_json::from_value(result.unwrap()).unwrap();
+        let output: ShellOutput =
+            serde_json::from_value(result.unwrap().into_json().unwrap()).unwrap();
         assert_eq!(output.exit_code, Some(0), "Exit code should be 0");
 
         // Verify the file was actually created with the content

@@ -76,11 +76,11 @@ impl AgentToolDispatcher for CommsToolSurface {
         let result = handle_tools_call(&self.tool_context, call.name, &args)
             .await
             .map_err(|e| ToolError::ExecutionFailed { message: e })?;
-        Ok(ToolResult {
-            tool_use_id: call.id.to_string(),
-            content: result.to_string(),
-            is_error: false,
-        })
+        Ok(ToolResult::new(
+            call.id.to_string(),
+            result.to_string(),
+            false,
+        ))
     }
 }
 

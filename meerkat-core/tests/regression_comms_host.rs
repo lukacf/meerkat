@@ -256,7 +256,7 @@ async fn completed_response_triggers_continuation_run() {
         )
         .await;
 
-    let result = agent.run_host_mode(String::new()).await.unwrap();
+    let result = agent.run_host_mode(String::new().into()).await.unwrap();
 
     assert!(
         result.turns > 0,
@@ -295,7 +295,7 @@ async fn accepted_response_injects_context_no_continuation() {
         )
         .await;
 
-    let result = agent.run_host_mode(String::new()).await.unwrap();
+    let result = agent.run_host_mode(String::new().into()).await.unwrap();
 
     assert_eq!(
         result.turns, 0,
@@ -336,7 +336,7 @@ async fn failed_response_triggers_continuation_run() {
         )
         .await;
 
-    let result = agent.run_host_mode(String::new()).await.unwrap();
+    let result = agent.run_host_mode(String::new().into()).await.unwrap();
 
     assert!(
         result.turns > 0,
@@ -356,6 +356,7 @@ async fn response_with_passthrough_message_single_turn() {
     let message = make_interaction(
         InteractionContent::Message {
             body: "hello".into(),
+            blocks: None,
         },
         "hello from peer",
     );
@@ -371,7 +372,7 @@ async fn response_with_passthrough_message_single_turn() {
         )
         .await;
 
-    let result = agent.run_host_mode(String::new()).await.unwrap();
+    let result = agent.run_host_mode(String::new().into()).await.unwrap();
 
     // The passthrough message triggers the run; the response is absorbed
     // as context. Should be exactly 1 turn (the message run), not 2.
@@ -386,7 +387,7 @@ async fn response_with_passthrough_message_single_turn() {
         .messages()
         .iter()
         .filter_map(|m| match m {
-            Message::User(u) => Some(u.content.as_str()),
+            Message::User(u) => Some(u.text_content()),
             _ => None,
         })
         .collect();
@@ -404,6 +405,7 @@ async fn response_after_completed_host_turn_triggers_continuation() {
     let message = make_interaction(
         InteractionContent::Message {
             body: "do something".into(),
+            blocks: None,
         },
         "do something",
     );
@@ -428,7 +430,7 @@ async fn response_after_completed_host_turn_triggers_continuation() {
         )
         .await;
 
-    let result = agent.run_host_mode(String::new()).await.unwrap();
+    let result = agent.run_host_mode(String::new().into()).await.unwrap();
 
     // result.turns is per-run (the last run), not cumulative.
     // The continuation should have fired (turns > 0).
@@ -439,13 +441,13 @@ async fn response_after_completed_host_turn_triggers_continuation() {
 
     // Session should have the full sequence:
     // User("do something") -> Assistant -> User("[Response]...") -> Assistant
-    let msgs: Vec<&str> = agent
+    let msgs: Vec<String> = agent
         .session()
         .messages()
         .iter()
         .filter_map(|m| match m {
-            Message::User(u) => Some(u.content.as_str()),
-            Message::BlockAssistant(_) | Message::Assistant(_) => Some("[assistant]"),
+            Message::User(u) => Some(u.text_content()),
+            Message::BlockAssistant(_) | Message::Assistant(_) => Some("[assistant]".to_string()),
             _ => None,
         })
         .collect();
@@ -455,7 +457,7 @@ async fn response_after_completed_host_turn_triggers_continuation() {
         "response should be in session history: {msgs:?}"
     );
 
-    let assistant_count = msgs.iter().filter(|m| **m == "[assistant]").count();
+    let assistant_count = msgs.iter().filter(|m| m.as_str() == "[assistant]").count();
     assert!(
         assistant_count >= 2,
         "expected at least 2 assistant messages (initial turn + continuation), got {assistant_count}: {msgs:?}"
@@ -501,7 +503,7 @@ async fn peer_lifecycle_batching_collapses_to_one_entry() {
         )
         .await;
 
-    let result = agent.run_host_mode(String::new()).await.unwrap();
+    let result = agent.run_host_mode(String::new().into()).await.unwrap();
     assert_eq!(
         result.turns, 0,
         "peer lifecycle should not trigger LLM turn"
@@ -512,7 +514,7 @@ async fn peer_lifecycle_batching_collapses_to_one_entry() {
         .messages()
         .iter()
         .filter_map(|m| match m {
-            Message::User(u) => Some(u.content.as_str()),
+            Message::User(u) => Some(u.text_content()),
             _ => None,
         })
         .collect();
@@ -564,7 +566,7 @@ async fn peer_lifecycle_net_out_cancels_opposites() {
         )
         .await;
 
-    let result = agent.run_host_mode(String::new()).await.unwrap();
+    let result = agent.run_host_mode(String::new().into()).await.unwrap();
     assert_eq!(result.turns, 0);
 
     let user_msgs: Vec<_> = agent
@@ -572,7 +574,7 @@ async fn peer_lifecycle_net_out_cancels_opposites() {
         .messages()
         .iter()
         .filter_map(|m| match m {
-            Message::User(u) => Some(u.content.as_str()),
+            Message::User(u) => Some(u.text_content()),
             _ => None,
         })
         .collect();
@@ -614,7 +616,7 @@ async fn silent_comms_intent_no_llm_turn() {
         )
         .await;
 
-    let result = agent.run_host_mode(String::new()).await.unwrap();
+    let result = agent.run_host_mode(String::new().into()).await.unwrap();
 
     assert_eq!(result.turns, 0, "silent intent should not trigger LLM turn");
 
@@ -657,7 +659,7 @@ async fn non_silent_comms_intent_triggers_llm_turn() {
         )
         .await;
 
-    let result = agent.run_host_mode(String::new()).await.unwrap();
+    let result = agent.run_host_mode(String::new().into()).await.unwrap();
 
     assert!(
         result.turns > 0,
@@ -674,6 +676,7 @@ async fn message_interaction_triggers_host_mode_run() {
     let message = make_interaction(
         InteractionContent::Message {
             body: "hello world".into(),
+            blocks: None,
         },
         "hello world",
     );
@@ -688,7 +691,7 @@ async fn message_interaction_triggers_host_mode_run() {
         )
         .await;
 
-    let result = agent.run_host_mode(String::new()).await.unwrap();
+    let result = agent.run_host_mode(String::new().into()).await.unwrap();
 
     assert!(
         result.turns > 0,
@@ -720,7 +723,7 @@ async fn request_interaction_triggers_host_mode_run() {
         )
         .await;
 
-    let result = agent.run_host_mode(String::new()).await.unwrap();
+    let result = agent.run_host_mode(String::new().into()).await.unwrap();
 
     assert!(
         result.turns > 0,
@@ -777,7 +780,7 @@ async fn empty_inbox_no_turns() {
         )
         .await;
 
-    let result = agent.run_host_mode(String::new()).await.unwrap();
+    let result = agent.run_host_mode(String::new().into()).await.unwrap();
 
     assert_eq!(result.turns, 0, "empty inbox should not trigger any turns");
 }

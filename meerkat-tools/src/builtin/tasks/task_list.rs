@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use crate::builtin::store::TaskStore;
 use crate::builtin::types::TaskStatus;
-use crate::builtin::{BuiltinTool, BuiltinToolError};
+use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 
 /// Parameters for the task_list tool
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
@@ -74,7 +74,7 @@ impl BuiltinTool for TaskListTool {
         true
     }
 
-    async fn call(&self, args: Value) -> Result<Value, BuiltinToolError> {
+    async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
         let params: TaskListParams = serde_json::from_value(args)
             .map_err(|e| BuiltinToolError::InvalidArgs(e.to_string()))?;
 
@@ -94,7 +94,9 @@ impl BuiltinTool for TaskListTool {
             tasks.retain(|t| t.labels.iter().any(|l| labels.contains(l)));
         }
 
-        serde_json::to_value(&tasks).map_err(|e| BuiltinToolError::ExecutionFailed(e.to_string()))
+        serde_json::to_value(&tasks)
+            .map(ToolOutput::Json)
+            .map_err(|e| BuiltinToolError::ExecutionFailed(e.to_string()))
     }
 }
 
@@ -286,7 +288,7 @@ mod tests {
         let store = Arc::new(MemoryTaskStore::new());
         let tool = TaskListTool::new(store);
 
-        let result = tool.call(json!({})).await.unwrap();
+        let result = tool.call(json!({})).await.unwrap().into_json().unwrap();
 
         let tasks: Vec<Task> = serde_json::from_value(result).unwrap();
         assert!(tasks.is_empty());
@@ -297,7 +299,7 @@ mod tests {
         let store = create_test_store().await;
         let tool = TaskListTool::new(store);
 
-        let result = tool.call(json!({})).await.unwrap();
+        let result = tool.call(json!({})).await.unwrap().into_json().unwrap();
 
         let tasks: Vec<Task> = serde_json::from_value(result).unwrap();
         assert_eq!(tasks.len(), 4);
@@ -316,7 +318,12 @@ mod tests {
         let tool = TaskListTool::new(store);
 
         // Filter by pending
-        let result = tool.call(json!({"status": "pending"})).await.unwrap();
+        let result = tool
+            .call(json!({"status": "pending"}))
+            .await
+            .unwrap()
+            .into_json()
+            .unwrap();
         let tasks: Vec<Task> = serde_json::from_value(result).unwrap();
         assert_eq!(tasks.len(), 2);
         assert!(tasks.iter().all(|t| t.status == TaskStatus::Pending));
@@ -325,14 +332,24 @@ mod tests {
         assert!(subjects.contains(&"Write documentation"));
 
         // Filter by in_progress
-        let result = tool.call(json!({"status": "in_progress"})).await.unwrap();
+        let result = tool
+            .call(json!({"status": "in_progress"}))
+            .await
+            .unwrap()
+            .into_json()
+            .unwrap();
         let tasks: Vec<Task> = serde_json::from_value(result).unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].subject, "Fix API timeout");
         assert_eq!(tasks[0].status, TaskStatus::InProgress);
 
         // Filter by completed
-        let result = tool.call(json!({"status": "completed"})).await.unwrap();
+        let result = tool
+            .call(json!({"status": "completed"}))
+            .await
+            .unwrap()
+            .into_json()
+            .unwrap();
         let tasks: Vec<Task> = serde_json::from_value(result).unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].subject, "Add user authentication");
@@ -345,7 +362,12 @@ mod tests {
         let tool = TaskListTool::new(store);
 
         // Filter by "feature" label
-        let result = tool.call(json!({"labels": ["feature"]})).await.unwrap();
+        let result = tool
+            .call(json!({"labels": ["feature"]}))
+            .await
+            .unwrap()
+            .into_json()
+            .unwrap();
         let tasks: Vec<Task> = serde_json::from_value(result).unwrap();
         assert_eq!(tasks.len(), 2);
         let subjects: Vec<&str> = tasks.iter().map(|t| t.subject.as_str()).collect();
@@ -353,7 +375,12 @@ mod tests {
         assert!(subjects.contains(&"Add user authentication"));
 
         // Filter by "backend" label
-        let result = tool.call(json!({"labels": ["backend"]})).await.unwrap();
+        let result = tool
+            .call(json!({"labels": ["backend"]}))
+            .await
+            .unwrap()
+            .into_json()
+            .unwrap();
         let tasks: Vec<Task> = serde_json::from_value(result).unwrap();
         assert_eq!(tasks.len(), 2);
         let subjects: Vec<&str> = tasks.iter().map(|t| t.subject.as_str()).collect();
@@ -361,7 +388,12 @@ mod tests {
         assert!(subjects.contains(&"Add user authentication"));
 
         // Filter by "frontend" label
-        let result = tool.call(json!({"labels": ["frontend"]})).await.unwrap();
+        let result = tool
+            .call(json!({"labels": ["frontend"]}))
+            .await
+            .unwrap()
+            .into_json()
+            .unwrap();
         let tasks: Vec<Task> = serde_json::from_value(result).unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].subject, "Implement login page");
@@ -370,6 +402,8 @@ mod tests {
         let result = tool
             .call(json!({"labels": ["bug", "frontend"]}))
             .await
+            .unwrap()
+            .into_json()
             .unwrap();
         let tasks: Vec<Task> = serde_json::from_value(result).unwrap();
         assert_eq!(tasks.len(), 2);
@@ -378,7 +412,12 @@ mod tests {
         assert!(subjects.contains(&"Fix API timeout")); // has "bug"
 
         // Filter by non-existent label
-        let result = tool.call(json!({"labels": ["nonexistent"]})).await.unwrap();
+        let result = tool
+            .call(json!({"labels": ["nonexistent"]}))
+            .await
+            .unwrap()
+            .into_json()
+            .unwrap();
         let tasks: Vec<Task> = serde_json::from_value(result).unwrap();
         assert!(tasks.is_empty());
     }
@@ -392,6 +431,8 @@ mod tests {
         let result = tool
             .call(json!({"status": "pending", "labels": ["feature"]}))
             .await
+            .unwrap()
+            .into_json()
             .unwrap();
         let tasks: Vec<Task> = serde_json::from_value(result).unwrap();
         assert_eq!(tasks.len(), 1);
@@ -401,6 +442,8 @@ mod tests {
         let result = tool
             .call(json!({"status": "completed", "labels": ["backend"]}))
             .await
+            .unwrap()
+            .into_json()
             .unwrap();
         let tasks: Vec<Task> = serde_json::from_value(result).unwrap();
         assert_eq!(tasks.len(), 1);
@@ -410,6 +453,8 @@ mod tests {
         let result = tool
             .call(json!({"status": "completed", "labels": ["frontend"]}))
             .await
+            .unwrap()
+            .into_json()
             .unwrap();
         let tasks: Vec<Task> = serde_json::from_value(result).unwrap();
         assert!(tasks.is_empty());
@@ -439,7 +484,12 @@ mod tests {
         let tool = TaskListTool::new(store);
 
         // Empty labels array should return no tasks
-        let result = tool.call(json!({"labels": []})).await.unwrap();
+        let result = tool
+            .call(json!({"labels": []}))
+            .await
+            .unwrap()
+            .into_json()
+            .unwrap();
         let tasks: Vec<Task> = serde_json::from_value(result).unwrap();
         assert!(tasks.is_empty());
     }
@@ -453,6 +503,8 @@ mod tests {
         let result = tool
             .call(json!({"status": null, "labels": null}))
             .await
+            .unwrap()
+            .into_json()
             .unwrap();
         let tasks: Vec<Task> = serde_json::from_value(result).unwrap();
         assert_eq!(tasks.len(), 4);

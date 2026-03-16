@@ -267,6 +267,7 @@ async fn contract_mob_005_remove_trusted_peer_revokes_send() {
     let cmd = CommsCommand::PeerMessage {
         to: PeerName::new(receiver_name.clone()).expect("valid peer name"),
         body: "before removal".to_string(),
+        blocks: None,
     };
     let receipt = CoreCommsRuntime::send(&sender, cmd).await;
     assert!(
@@ -295,6 +296,7 @@ async fn contract_mob_005_remove_trusted_peer_revokes_send() {
     let cmd_after = CommsCommand::PeerMessage {
         to: PeerName::new(receiver_name.clone()).expect("valid peer name"),
         body: "after removal".to_string(),
+        blocks: None,
     };
     let result = CoreCommsRuntime::send(&sender, cmd_after).await;
     assert!(
@@ -588,7 +590,7 @@ impl SessionService for ContractSessionService {
 fn host_mode_req(comms_name: &str) -> CreateSessionRequest {
     CreateSessionRequest {
         model: "contract-mock".to_string(),
-        prompt: "hello".to_string(),
+        prompt: "hello".to_string().into(),
         system_prompt: None,
         max_tokens: None,
         event_tx: None,
@@ -671,7 +673,7 @@ async fn contract_mob_001_host_mode_session_stays_alive() {
         .start_turn(
             &sid_a,
             StartTurnRequest {
-                prompt: "follow up".to_string(),
+                prompt: "follow up".to_string().into(),
                 event_tx: None,
                 host_mode: true,
                 skill_references: None,
@@ -742,7 +744,7 @@ async fn contract_mob_007_session_archive_removes_from_active_list() {
         .start_turn(
             &sid,
             StartTurnRequest {
-                prompt: "should fail".to_string(),
+                prompt: "should fail".to_string().into(),
                 event_tx: None,
                 host_mode: false,
                 skill_references: None,

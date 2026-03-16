@@ -2087,6 +2087,7 @@ async fn handle_meerkat_comms_send(
         kind: input.kind,
         to: input.to,
         body: input.body,
+        blocks: None,
         intent: input.intent,
         params: input.params,
         in_reply_to: input.in_reply_to,
@@ -2241,7 +2242,7 @@ async fn handle_meerkat_run(
 
     let req = CreateSessionRequest {
         model,
-        prompt: input.prompt,
+        prompt: input.prompt.into(),
         system_prompt: input.system_prompt,
         max_tokens: input.max_tokens,
         event_tx: event_tx.clone(),
@@ -2450,7 +2451,7 @@ async fn handle_meerkat_resume(
     let result = if needs_rebuild {
         let req = CreateSessionRequest {
             model,
-            prompt,
+            prompt: prompt.into(),
             system_prompt: input.system_prompt.clone(),
             max_tokens,
             event_tx: event_tx.clone(),
@@ -2465,7 +2466,7 @@ async fn handle_meerkat_resume(
         // Try start_turn on the live session first (it may still be alive
         // from a prior meerkat_run in the same MCP server process).
         let turn_req = StartTurnRequest {
-            prompt: prompt.clone(),
+            prompt: prompt.clone().into(),
             event_tx: event_tx.clone(),
             host_mode,
             skill_references: skill_references.clone(),
@@ -2477,7 +2478,7 @@ async fn handle_meerkat_resume(
             Err(SessionError::NotFound { .. }) => {
                 let req = CreateSessionRequest {
                     model,
-                    prompt,
+                    prompt: prompt.into(),
                     system_prompt: input.system_prompt.clone(),
                     max_tokens,
                     event_tx: event_tx.clone(),
@@ -2946,7 +2947,7 @@ mod tests {
         assert_eq!(input.session_id, "01234567-89ab-cdef-0123-456789abcdef");
         assert_eq!(input.tool_results.len(), 1);
         assert_eq!(input.tool_results[0].tool_use_id, "tc_123");
-        assert_eq!(input.tool_results[0].content, "Sunny, 72°F");
+        assert_eq!(input.tool_results[0].content, "Sunny, 72\u{b0}F");
         assert!(!input.tool_results[0].is_error);
     }
 
@@ -3336,9 +3337,7 @@ mod tests {
             },
         ));
         session.push(meerkat_core::types::Message::User(
-            meerkat_core::types::UserMessage {
-                content: "Hello".to_string(),
-            },
+            meerkat_core::types::UserMessage::text("Hello".to_string()),
         ));
         session.push(meerkat_core::types::Message::Assistant(
             meerkat_core::types::AssistantMessage {
@@ -3349,9 +3348,7 @@ mod tests {
             },
         ));
         session.push(meerkat_core::types::Message::User(
-            meerkat_core::types::UserMessage {
-                content: "Follow up".to_string(),
-            },
+            meerkat_core::types::UserMessage::text("Follow up".to_string()),
         ));
         session.push(meerkat_core::types::Message::Assistant(
             meerkat_core::types::AssistantMessage {
@@ -3420,9 +3417,7 @@ mod tests {
             },
         ));
         session.push(meerkat_core::types::Message::User(
-            meerkat_core::types::UserMessage {
-                content: "hello".to_string(),
-            },
+            meerkat_core::types::UserMessage::text("hello".to_string()),
         ));
         session.push(meerkat_core::types::Message::Assistant(
             meerkat_core::types::AssistantMessage {
@@ -3451,11 +3446,11 @@ mod tests {
             },
         ));
         session.push(meerkat_core::types::Message::ToolResults {
-            results: vec![meerkat_core::types::ToolResult {
-                tool_use_id: "tool-2".to_string(),
-                content: "done".to_string(),
-                is_error: false,
-            }],
+            results: vec![meerkat_core::types::ToolResult::new(
+                "tool-2".to_string(),
+                "done".to_string(),
+                false,
+            )],
         });
         store.save(&session).await.expect("persisted mixed session");
 

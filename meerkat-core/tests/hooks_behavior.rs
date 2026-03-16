@@ -286,7 +286,7 @@ async fn pre_tool_deny_blocks_dispatch() {
     )
     .await;
 
-    let _ = agent.run("test".to_string()).await.unwrap();
+    let _ = agent.run("test".to_string().into()).await.unwrap();
     assert!(seen_args.lock().await.is_empty());
 }
 
@@ -306,7 +306,7 @@ async fn pre_tool_rewrite_mutates_args() {
     )
     .await;
 
-    let _ = agent.run("test".to_string()).await.unwrap();
+    let _ = agent.run("test".to_string().into()).await.unwrap();
     let args = seen_args.lock().await;
     assert_eq!(args.len(), 1);
     assert_eq!(args[0], serde_json::json!({"value": "patched"}));
@@ -322,7 +322,7 @@ async fn post_tool_rewrite_mutates_result() {
     };
     let mut agent = build_agent(ClientMode::ToolThenText, hooks, seen_args, seen_tokens).await;
 
-    let _ = agent.run("test".to_string()).await.unwrap();
+    let _ = agent.run("test".to_string().into()).await.unwrap();
     let tool_result_message = agent
         .session()
         .messages()
@@ -333,7 +333,7 @@ async fn post_tool_rewrite_mutates_result() {
         })
         .expect("tool results message should exist");
 
-    assert_eq!(tool_result_message[0].content, "patched-result");
+    assert_eq!(tool_result_message[0].text_content(), "patched-result");
 }
 
 #[tokio::test]
@@ -346,7 +346,7 @@ async fn pre_llm_rewrite_mutates_request_payload() {
     };
     let mut agent = build_agent(ClientMode::TextOnly, hooks, seen_args, seen_tokens.clone()).await;
 
-    let _ = agent.run("test".to_string()).await.unwrap();
+    let _ = agent.run("test".to_string().into()).await.unwrap();
     let observed = seen_tokens.lock().await;
     assert_eq!(observed.first().copied(), Some(42));
 }
@@ -361,7 +361,7 @@ async fn post_llm_rewrite_mutates_assistant_content() {
     };
     let mut agent = build_agent(ClientMode::TextOnly, hooks, seen_args, seen_tokens).await;
 
-    let result = agent.run("test".to_string()).await.unwrap();
+    let result = agent.run("test".to_string().into()).await.unwrap();
     assert_eq!(result.text, "patched");
 }
 
@@ -375,7 +375,7 @@ async fn run_started_deny_blocks_run() {
     };
     let mut agent = build_agent(ClientMode::TextOnly, hooks, seen_args, seen_tokens).await;
 
-    let err = agent.run("test".to_string()).await.unwrap_err();
+    let err = agent.run("test".to_string().into()).await.unwrap_err();
     assert!(matches!(
         err,
         AgentError::HookDenied {
@@ -395,7 +395,7 @@ async fn turn_boundary_deny_blocks_next_turn() {
     };
     let mut agent = build_agent(ClientMode::ToolThenText, hooks, seen_args, seen_tokens).await;
 
-    let err = agent.run("test".to_string()).await.unwrap_err();
+    let err = agent.run("test".to_string().into()).await.unwrap_err();
     assert!(matches!(
         err,
         AgentError::HookDenied {
@@ -413,7 +413,7 @@ async fn run_failed_hook_is_invoked_on_llm_error() {
     let invocations = hooks.invocations.clone();
     let mut agent = build_agent(ClientMode::FailImmediately, hooks, seen_args, seen_tokens).await;
 
-    let _ = agent.run("test".to_string()).await.unwrap_err();
+    let _ = agent.run("test".to_string().into()).await.unwrap_err();
     let seen = invocations.lock().await.clone();
     assert!(seen.contains(&HookPoint::RunFailed));
 }

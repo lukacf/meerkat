@@ -210,15 +210,11 @@ impl AgentToolDispatcher for McpRouterAdapter {
             Some(router) => {
                 let args: Value = serde_json::from_str(call.args.get())
                     .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
-                let result = router
+                let blocks = router
                     .call_tool(call.name, &args)
                     .await
                     .map_err(|e| ToolError::execution_failed(e.to_string()))?;
-                Ok(ToolResult {
-                    tool_use_id: call.id.to_string(),
-                    content: result,
-                    is_error: false,
-                })
+                Ok(ToolResult::with_blocks(call.id.to_string(), blocks, false))
             }
             None => Err(ToolError::execution_failed("MCP router has been shut down")),
         }

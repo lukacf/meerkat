@@ -5,7 +5,7 @@ use crate::event::AgentEvent;
 use crate::interaction::InteractionContent;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
-use crate::types::{Message, RunResult, Usage, UserMessage};
+use crate::types::{ContentInput, Message, RunResult, Usage, UserMessage};
 use std::collections::BTreeMap;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::mpsc;
@@ -110,7 +110,7 @@ where
                 if interactions.is_empty() {
                     return false;
                 }
-                let mut messages = Vec::new();
+                let mut content_blocks: Vec<crate::types::ContentBlock> = Vec::new();
                 let mut peer_lifecycle_batch = PeerLifecycleBatch::default();
 
                 for interaction in interactions {
@@ -140,7 +140,19 @@ where
                         _ => {
                             // Turn-boundary drain: all non-lifecycle interactions
                             // are injected as context for the next LLM call.
-                            messages.push(interaction.rendered_text);
+                            // Preserve multimodal blocks when present.
+                            if let InteractionContent::Message {
+                                blocks: Some(blocks),
+                                ..
+                            } = &interaction.content
+                                && !blocks.is_empty()
+                            {
+                                content_blocks.extend(blocks.iter().cloned());
+                            } else {
+                                content_blocks.push(crate::types::ContentBlock::Text {
+                                    text: interaction.rendered_text,
+                                });
+                            }
                         }
                     }
                 }
@@ -149,16 +161,15 @@ where
                     .render_peer_lifecycle_update(&comms, &peer_lifecycle_batch)
                     .await
                 {
-                    messages.push(peer_update);
+                    content_blocks.push(crate::types::ContentBlock::Text { text: peer_update });
                 }
 
-                if messages.is_empty() {
+                if content_blocks.is_empty() {
                     return false;
                 }
 
-                let combined = messages.join("\n\n");
                 self.session
-                    .push(Message::User(UserMessage { content: combined }));
+                    .push(Message::User(UserMessage::with_blocks(content_blocks)));
                 return true;
             }
         };
@@ -167,7 +178,7 @@ where
             return false;
         }
 
-        let mut messages = Vec::new();
+        let mut content_blocks: Vec<crate::types::ContentBlock> = Vec::new();
         let mut peer_lifecycle_batch = PeerLifecycleBatch::default();
 
         for ci in classified {
@@ -190,9 +201,19 @@ where
                 | PeerInputClass::ActionableMessage
                 | PeerInputClass::ActionableRequest
                 | PeerInputClass::PlainEvent => {
-                    // Turn-boundary drain injects all non-lifecycle, non-ack
-                    // interactions as context for the next LLM call.
-                    messages.push(ci.interaction.rendered_text);
+                    // Turn-boundary drain: preserve multimodal blocks when present.
+                    if let InteractionContent::Message {
+                        blocks: Some(blocks),
+                        ..
+                    } = &ci.interaction.content
+                        && !blocks.is_empty()
+                    {
+                        content_blocks.extend(blocks.iter().cloned());
+                    } else {
+                        content_blocks.push(crate::types::ContentBlock::Text {
+                            text: ci.interaction.rendered_text,
+                        });
+                    }
                 }
             }
         }
@@ -201,29 +222,34 @@ where
             .render_peer_lifecycle_update(&comms, &peer_lifecycle_batch)
             .await
         {
-            messages.push(peer_update);
+            content_blocks.push(crate::types::ContentBlock::Text { text: peer_update });
         }
 
-        if messages.is_empty() {
+        if content_blocks.is_empty() {
             return false;
         }
 
-        tracing::debug!("Injecting {} comms messages into session", messages.len());
-        let combined = messages.join("\n\n");
+        tracing::debug!(
+            "Injecting {} comms content blocks into session",
+            content_blocks.len()
+        );
         self.session
-            .push(Message::User(UserMessage { content: combined }));
+            .push(Message::User(UserMessage::with_blocks(content_blocks)));
         true
     }
 
     /// Run the agent in host mode: process initial prompt, then stay alive for comms messages.
-    pub async fn run_host_mode(&mut self, initial_prompt: String) -> Result<RunResult, AgentError> {
+    pub async fn run_host_mode(
+        &mut self,
+        initial_prompt: ContentInput,
+    ) -> Result<RunResult, AgentError> {
         self.run_host_mode_inner(initial_prompt, None).await
     }
 
     /// Run in host mode with event streaming.
     pub async fn run_host_mode_with_events(
         &mut self,
-        initial_prompt: String,
+        initial_prompt: ContentInput,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, AgentError> {
         self.run_host_mode_inner(initial_prompt, Some(event_tx))
@@ -239,7 +265,7 @@ where
     /// consumed and dropped.
     async fn run_host_mode_inner(
         &mut self,
-        initial_prompt: String,
+        initial_prompt: ContentInput,
         event_tx: Option<mpsc::Sender<AgentEvent>>,
     ) -> Result<RunResult, AgentError> {
         use std::time::Duration;
@@ -260,7 +286,9 @@ where
             .last()
             .is_some_and(|m| matches!(m, Message::User(_)));
 
-        let mut last_result = if !initial_prompt.trim().is_empty() {
+        let has_content =
+            initial_prompt.has_images() || !initial_prompt.text_content().trim().is_empty();
+        let mut last_result = if has_content {
             match &event_tx {
                 Some(tx) => self.run_with_events(initial_prompt, tx.clone()).await?,
                 None => self.run(initial_prompt).await?,
@@ -272,7 +300,7 @@ where
                     .messages()
                     .last()
                     .and_then(|msg| match msg {
-                        Message::User(user) => Some(user.content.clone()),
+                        Message::User(user) => Some(user.text_content()),
                         _ => None,
                     })
                     .unwrap_or_default();
@@ -338,7 +366,7 @@ where
                     let mut had_legacy_work = false;
                     if !interactions.is_empty() {
                         had_legacy_work = true;
-                        let mut batched_texts = Vec::new();
+                        let mut batched_blocks: Vec<crate::types::ContentBlock> = Vec::new();
                         let mut individual_requests: Vec<(
                             InboxInteraction,
                             Option<mpsc::Sender<AgentEvent>>,
@@ -395,9 +423,9 @@ where
                                 {
                                     drop(subscriber);
                                     // Silent intents: inject as context only, no LLM turn.
-                                    self.session.push(Message::User(UserMessage {
-                                        content: interaction.rendered_text,
-                                    }));
+                                    self.session.push(Message::User(UserMessage::text(
+                                        interaction.rendered_text,
+                                    )));
                                     had_session_injections = true;
                                 }
                                 InteractionContent::Message { .. } => {
@@ -407,7 +435,18 @@ where
                                         individual_requests.push((interaction, subscriber));
                                     } else {
                                         drop(subscriber);
-                                        batched_texts.push(interaction.rendered_text);
+                                        if let InteractionContent::Message {
+                                            blocks: Some(blocks),
+                                            ..
+                                        } = &interaction.content
+                                            && !blocks.is_empty()
+                                        {
+                                            batched_blocks.extend(blocks.iter().cloned());
+                                        } else {
+                                            batched_blocks.push(crate::types::ContentBlock::Text {
+                                                text: interaction.rendered_text,
+                                            });
+                                        }
                                     }
                                 }
                                 InteractionContent::Request { .. } => {
@@ -425,9 +464,8 @@ where
                             .render_peer_lifecycle_update(&comms, &peer_lifecycle_batch)
                             .await
                         {
-                            self.session.push(Message::User(UserMessage {
-                                content: peer_update,
-                            }));
+                            self.session
+                                .push(Message::User(UserMessage::text(peer_update)));
                             had_session_injections = true;
                         }
 
@@ -436,7 +474,7 @@ where
                         }
 
                         let had_passthrough_work =
-                            !individual_requests.is_empty() || !batched_texts.is_empty();
+                            !individual_requests.is_empty() || !batched_blocks.is_empty();
 
                         // Process individual interactions (with subscriber support).
                         // When runtime_input_sink is set, route through the runtime
@@ -466,12 +504,13 @@ where
                                 None => false,
                             };
 
+                            // Build ContentInput from the interaction, preserving
+                            // multimodal blocks when present.
+                            let prompt = interaction_to_content_input(&interaction);
+
                             let run_result = match &event_tx {
-                                Some(tx) => {
-                                    self.run_with_events(interaction.rendered_text, tx.clone())
-                                        .await
-                                }
-                                None => self.run(interaction.rendered_text).await,
+                                Some(tx) => self.run_with_events(prompt, tx.clone()).await,
+                                None => self.run(prompt).await,
                             };
                             match run_result {
                                 Ok(result) => {
@@ -547,11 +586,11 @@ where
                         // When runtime_input_sink is set, batched messages are
                         // skipped — individual interactions were already admitted
                         // to the runtime queue.
-                        if !batched_texts.is_empty() && self.runtime_input_sink.is_none() {
-                            let combined = batched_texts.join("\n\n");
+                        if !batched_blocks.is_empty() && self.runtime_input_sink.is_none() {
+                            let batch_prompt = ContentInput::Blocks(batched_blocks);
                             let batch_result = match &event_tx {
-                                Some(tx) => self.run_with_events(combined, tx.clone()).await,
-                                None => self.run(combined).await,
+                                Some(tx) => self.run_with_events(batch_prompt, tx.clone()).await,
+                                None => self.run(batch_prompt).await,
                             };
                             match batch_result {
                                 Ok(result) => {
@@ -601,7 +640,7 @@ where
                 // messages are batched for efficiency.
                 use crate::interaction::PeerInputClass;
 
-                let mut batched_texts = Vec::new();
+                let mut batched_blocks: Vec<crate::types::ContentBlock> = Vec::new();
                 let mut individual: Vec<(InboxInteraction, Option<mpsc::Sender<AgentEvent>>)> =
                     Vec::new();
                 let mut peer_lifecycle_batch = PeerLifecycleBatch::default();
@@ -653,17 +692,29 @@ where
                                 drop(subscriber);
                                 match &interaction.content {
                                     InteractionContent::Message { .. } => {
-                                        batched_texts.push(interaction.rendered_text);
+                                        if let InteractionContent::Message {
+                                            blocks: Some(blocks),
+                                            ..
+                                        } = &interaction.content
+                                            && !blocks.is_empty()
+                                        {
+                                            batched_blocks.extend(blocks.iter().cloned());
+                                        } else {
+                                            batched_blocks.push(crate::types::ContentBlock::Text {
+                                                text: interaction.rendered_text,
+                                            });
+                                        }
                                     }
                                     InteractionContent::Request { .. } => {
                                         individual.push((interaction, None));
                                     }
                                     InteractionContent::Response { .. } => {
-                                        // Responses are routed to inline-only above
                                         // Responses are routed to the inline-only arm above;
                                         // this arm handles only actionable classes.
                                         tracing::warn!("unexpected Response in actionable arm");
-                                        batched_texts.push(interaction.rendered_text);
+                                        batched_blocks.push(crate::types::ContentBlock::Text {
+                                            text: interaction.rendered_text,
+                                        });
                                     }
                                 }
                             }
@@ -678,9 +729,8 @@ where
                     .render_peer_lifecycle_update(&comms, &peer_lifecycle_batch)
                     .await
                 {
-                    self.session.push(Message::User(UserMessage {
-                        content: peer_update,
-                    }));
+                    self.session
+                        .push(Message::User(UserMessage::text(peer_update)));
                     had_session_injections = true;
                 }
 
@@ -689,7 +739,7 @@ where
                     self.checkpoint_current_session().await;
                 }
 
-                let had_passthrough_work = !individual.is_empty() || !batched_texts.is_empty();
+                let had_passthrough_work = !individual.is_empty() || !batched_blocks.is_empty();
 
                 // Process individual interactions (requests, or subscriber-bound)
                 for (interaction, subscriber) in individual {
@@ -720,12 +770,11 @@ where
                         None => false,
                     };
 
+                    let prompt = interaction_to_content_input(&interaction);
+
                     let run_result = match &event_tx {
-                        Some(tx) => {
-                            self.run_with_events(interaction.rendered_text, tx.clone())
-                                .await
-                        }
-                        None => self.run(interaction.rendered_text).await,
+                        Some(tx) => self.run_with_events(prompt, tx.clone()).await,
+                        None => self.run(prompt).await,
                     };
 
                     match run_result {
@@ -823,15 +872,15 @@ where
                 // Process batched messages as one run (no tap).
                 // When runtime_input_sink is set, batched messages are skipped —
                 // individual interactions were already admitted to the runtime queue.
-                if !batched_texts.is_empty() && self.runtime_input_sink.is_none() {
-                    let combined = batched_texts.join("\n\n");
+                if !batched_blocks.is_empty() && self.runtime_input_sink.is_none() {
                     tracing::debug!(
-                        "Host mode: processing {} batched message(s)",
-                        batched_texts.len()
+                        "Host mode: processing {} batched block(s)",
+                        batched_blocks.len()
                     );
+                    let batch_prompt = ContentInput::Blocks(batched_blocks);
                     let batch_result = match &event_tx {
-                        Some(tx) => self.run_with_events(combined, tx.clone()).await,
-                        None => self.run(combined).await,
+                        Some(tx) => self.run_with_events(batch_prompt, tx.clone()).await,
+                        None => self.run(batch_prompt).await,
                     };
                     match batch_result {
                         Ok(result) => {
@@ -869,9 +918,25 @@ where
 /// In host mode, the idle host loop triggers a continuation run after injection
 /// so the agent can decide whether to act on the new context.
 fn inject_response_into_session(session: &mut Session, interaction: &InboxInteraction) {
-    session.push(Message::User(UserMessage {
-        content: interaction.rendered_text.clone(),
-    }));
+    session.push(Message::User(UserMessage::text(
+        interaction.rendered_text.clone(),
+    )));
+}
+
+/// Build a `ContentInput` from an inbox interaction, preserving multimodal
+/// blocks from `InteractionContent::Message { blocks }` when present.
+fn interaction_to_content_input(
+    interaction: &crate::interaction::InboxInteraction,
+) -> crate::types::ContentInput {
+    if let crate::interaction::InteractionContent::Message {
+        blocks: Some(blocks),
+        ..
+    } = &interaction.content
+        && !blocks.is_empty()
+    {
+        return crate::types::ContentInput::Blocks(blocks.clone());
+    }
+    crate::types::ContentInput::Text(interaction.rendered_text.clone())
 }
 
 fn render_named_list(mut names: Vec<String>) -> String {
@@ -1388,8 +1453,8 @@ mod tests {
         let last = messages.last().unwrap();
         match last {
             Message::User(user) => {
-                assert!(user.content.contains("Hello from peer"));
-                assert!(user.content.contains("Another message"));
+                assert!(user.text_content().contains("Hello from peer"));
+                assert!(user.text_content().contains("Another message"));
             }
             _ => panic!("Expected User message, got {last:?}"),
         }
@@ -1503,7 +1568,7 @@ mod tests {
             )
             .await;
 
-        let result = agent.run_host_mode(String::new()).await.unwrap();
+        let result = agent.run_host_mode(String::new().into()).await.unwrap();
 
         // Response should have been injected into session as a user message
         let user_msgs: Vec<_> = agent
@@ -1514,7 +1579,7 @@ mod tests {
             .collect();
         assert_eq!(user_msgs.len(), 1);
         match &user_msgs[0] {
-            Message::User(u) => assert!(u.content.contains("completed")),
+            Message::User(u) => assert!(u.text_content().contains("completed")),
             _ => unreachable!(),
         }
 
@@ -1565,7 +1630,7 @@ mod tests {
             )
             .await;
 
-        let result = agent.run_host_mode(String::new()).await.unwrap();
+        let result = agent.run_host_mode(String::new().into()).await.unwrap();
 
         // Accepted is an interim acknowledgement — should NOT trigger continuation.
         assert_eq!(
@@ -1612,7 +1677,7 @@ mod tests {
             )
             .await;
 
-        let result = agent.run_host_mode(String::new()).await.unwrap();
+        let result = agent.run_host_mode(String::new().into()).await.unwrap();
         assert!(result.turns > 0, "continuation run should have fired");
 
         // Drain events and verify RunStarted was emitted with the response text.
@@ -1660,7 +1725,7 @@ mod tests {
             )
             .await;
 
-        let result = agent.run_host_mode(String::new()).await.unwrap();
+        let result = agent.run_host_mode(String::new().into()).await.unwrap();
 
         // Failed is terminal — should trigger continuation like Completed.
         assert!(
@@ -1685,6 +1750,7 @@ mod tests {
         let message = make_interaction(
             InteractionContent::Message {
                 body: "hello".into(),
+                blocks: None,
             },
             "hello from peer",
         );
@@ -1702,7 +1768,7 @@ mod tests {
             )
             .await;
 
-        let result = agent.run_host_mode(String::new()).await.unwrap();
+        let result = agent.run_host_mode(String::new().into()).await.unwrap();
 
         // The passthrough message triggers the run; the response is absorbed
         // as context. Should be exactly 1 turn (the message run), not 2.
@@ -1712,12 +1778,12 @@ mod tests {
         );
 
         // Response should still be injected into session as context.
-        let user_msgs: Vec<_> = agent
+        let user_msgs: Vec<String> = agent
             .session
             .messages()
             .iter()
             .filter_map(|m| match m {
-                Message::User(u) => Some(u.content.as_str()),
+                Message::User(u) => Some(u.text_content()),
                 _ => None,
             })
             .collect();
@@ -1735,6 +1801,7 @@ mod tests {
         let message = make_interaction(
             InteractionContent::Message {
                 body: "do something".into(),
+                blocks: None,
             },
             "do something",
         );
@@ -1766,7 +1833,7 @@ mod tests {
             )
             .await;
 
-        let result = agent.run_host_mode(String::new()).await.unwrap();
+        let result = agent.run_host_mode(String::new().into()).await.unwrap();
 
         // result.turns is per-run (the last run), not cumulative.
         // The continuation should have fired (turns > 0).
@@ -1778,14 +1845,14 @@ mod tests {
         // Session should have the full sequence:
         // User("do something") → Assistant("Done") → User("[Response]...") → Assistant("Done")
         // This proves run_pending_inner reset state after the first completed turn.
-        let msgs: Vec<&str> = agent
+        let msgs: Vec<String> = agent
             .session
             .messages()
             .iter()
             .filter_map(|m| match m {
-                Message::User(u) => Some(u.content.as_str()),
-                Message::BlockAssistant(_) => Some("[assistant]"),
-                Message::Assistant(_) => Some("[assistant]"),
+                Message::User(u) => Some(u.text_content()),
+                Message::BlockAssistant(_) => Some("[assistant]".to_string()),
+                Message::Assistant(_) => Some("[assistant]".to_string()),
                 _ => None,
             })
             .collect();
@@ -1874,7 +1941,7 @@ mod tests {
             )
             .await;
 
-        let result = agent.run_host_mode(String::new()).await.unwrap();
+        let result = agent.run_host_mode(String::new().into()).await.unwrap();
         assert!(result.turns > 0, "continuation should have fired");
 
         // run_pending_inner should have invoked both run lifecycle hooks.
@@ -1893,6 +1960,7 @@ mod tests {
         let interaction = make_interaction(
             InteractionContent::Message {
                 body: "hello".into(),
+                blocks: None,
             },
             "hello",
         );
@@ -1929,6 +1997,7 @@ mod tests {
         let interaction = make_interaction(
             InteractionContent::Message {
                 body: "hello".into(),
+                blocks: None,
             },
             "hello",
         );
@@ -1968,6 +2037,7 @@ mod tests {
         let interaction = make_interaction(
             InteractionContent::Message {
                 body: "hello".into(),
+                blocks: None,
             },
             "hello",
         );
@@ -2078,12 +2148,14 @@ mod tests {
         let msg1 = make_interaction(
             InteractionContent::Message {
                 body: "msg1".into(),
+                blocks: None,
             },
             "Message from Alice",
         );
         let msg2 = make_interaction(
             InteractionContent::Message {
                 body: "msg2".into(),
+                blocks: None,
             },
             "Message from Bob",
         );
@@ -2117,6 +2189,7 @@ mod tests {
         let interaction = make_interaction(
             InteractionContent::Message {
                 body: "hello".into(),
+                blocks: None,
             },
             "hello",
         );
@@ -2154,6 +2227,7 @@ mod tests {
         let interaction = make_interaction(
             InteractionContent::Message {
                 body: "hello".into(),
+                blocks: None,
             },
             "hello",
         );
@@ -2230,7 +2304,7 @@ mod tests {
             )
             .await;
 
-        let result = agent.run_host_mode(String::new()).await.unwrap();
+        let result = agent.run_host_mode(String::new().into()).await.unwrap();
 
         // Silent intent should have been injected into session as a user message
         let user_msgs: Vec<_> = agent
@@ -2242,8 +2316,8 @@ mod tests {
         assert_eq!(user_msgs.len(), 1);
         match &user_msgs[0] {
             Message::User(u) => {
-                assert!(u.content.contains("[PEER UPDATE]"));
-                assert!(u.content.contains("worker-1"));
+                assert!(u.text_content().contains("[PEER UPDATE]"));
+                assert!(u.text_content().contains("worker-1"));
             }
             _ => unreachable!(),
         }
@@ -2276,7 +2350,7 @@ mod tests {
             )
             .await;
 
-        let result = agent.run_host_mode(String::new()).await.unwrap();
+        let result = agent.run_host_mode(String::new().into()).await.unwrap();
 
         // Non-silent intent should be processed through LLM
         assert!(result.turns > 0);
@@ -2321,7 +2395,7 @@ mod tests {
             )
             .await;
 
-        let result = agent.run_host_mode(String::new()).await.unwrap();
+        let result = agent.run_host_mode(String::new().into()).await.unwrap();
         assert_eq!(result.turns, 0);
 
         let user_msgs: Vec<_> = agent
@@ -2332,7 +2406,7 @@ mod tests {
             .collect();
         assert_eq!(user_msgs.len(), 1);
         let text = match &user_msgs[0] {
-            Message::User(u) => u.content.as_str(),
+            Message::User(u) => &u.text_content(),
             _ => unreachable!(),
         };
         assert!(text.contains("[PEER UPDATE]"));
@@ -2377,7 +2451,7 @@ mod tests {
             )
             .await;
 
-        let result = agent.run_host_mode(String::new()).await.unwrap();
+        let result = agent.run_host_mode(String::new().into()).await.unwrap();
         assert_eq!(result.turns, 0);
 
         let user_msgs: Vec<_> = agent
@@ -2388,7 +2462,7 @@ mod tests {
             .collect();
         assert_eq!(user_msgs.len(), 1);
         let text = match &user_msgs[0] {
-            Message::User(u) => u.content.as_str(),
+            Message::User(u) => &u.text_content(),
             _ => unreachable!(),
         };
         assert!(text.contains("1 peer connected"));
@@ -2435,7 +2509,7 @@ mod tests {
             .messages()
             .iter()
             .filter_map(|m| match m {
-                Message::User(u) => Some(u.content.clone()),
+                Message::User(u) => Some(u.text_content()),
                 _ => None,
             })
             .collect();
@@ -2490,7 +2564,7 @@ mod tests {
             .messages()
             .iter()
             .filter_map(|m| match m {
-                Message::User(u) => Some(u.content.clone()),
+                Message::User(u) => Some(u.text_content()),
                 _ => None,
             })
             .collect();
@@ -2538,7 +2612,7 @@ mod tests {
             .messages()
             .iter()
             .filter_map(|m| match m {
-                Message::User(u) => Some(u.content.clone()),
+                Message::User(u) => Some(u.text_content()),
                 _ => None,
             })
             .collect();
@@ -2568,7 +2642,7 @@ mod tests {
         let msgs = session.messages();
         assert_eq!(msgs.len(), 1);
         match &msgs[0] {
-            Message::User(u) => assert_eq!(u.content, "[Response] ok: result data"),
+            Message::User(u) => assert_eq!(u.text_content(), "[Response] ok: result data"),
             _ => panic!("Expected User message"),
         }
     }

@@ -45,9 +45,9 @@ use meerkat_core::service::{
     SessionControlError, SessionError, StartTurnRequest as SvcStartTurnRequest,
 };
 use meerkat_core::{
-    Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore, FileConfigStore,
-    HookRunOverrides, Provider, RealmSelection, RuntimeBootstrap, SessionTooling, agent_event_type,
-    format_verbose_event,
+    Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore, ContentInput,
+    FileConfigStore, HookRunOverrides, Provider, RealmSelection, RuntimeBootstrap, SessionTooling,
+    agent_event_type, format_verbose_event,
 };
 use meerkat_runtime::SessionServiceRuntimeExt as _;
 use meerkat_store::{RealmBackend, RealmOrigin};
@@ -343,26 +343,44 @@ impl RestSessionRuntimeExecutor {
     }
 }
 
-fn extract_runtime_prompt(primitive: &RunPrimitive) -> String {
+fn extract_runtime_prompt(primitive: &RunPrimitive) -> ContentInput {
     match primitive {
-        RunPrimitive::StagedInput(staged) => staged
-            .appends
-            .iter()
-            .filter_map(|append| match &append.content {
-                CoreRenderable::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
+        RunPrimitive::StagedInput(staged) => {
+            let mut all_blocks = Vec::new();
+            for append in &staged.appends {
+                match &append.content {
+                    CoreRenderable::Text { text } => {
+                        all_blocks
+                            .push(meerkat_core::types::ContentBlock::Text { text: text.clone() });
+                    }
+                    CoreRenderable::Blocks { blocks } => {
+                        all_blocks.extend(blocks.iter().cloned());
+                    }
+                    _ => {}
+                }
+            }
+            if all_blocks.len() == 1
+                && let meerkat_core::types::ContentBlock::Text { text } = &all_blocks[0]
+            {
+                return ContentInput::Text(text.clone());
+            }
+            if all_blocks.is_empty() {
+                ContentInput::Text(String::new())
+            } else {
+                ContentInput::Blocks(all_blocks)
+            }
+        }
         RunPrimitive::ImmediateAppend(append) => match &append.content {
-            CoreRenderable::Text { text } => text.clone(),
-            _ => String::new(),
+            CoreRenderable::Text { text } => ContentInput::Text(text.clone()),
+            CoreRenderable::Blocks { blocks } => ContentInput::Blocks(blocks.clone()),
+            _ => ContentInput::Text(String::new()),
         },
         RunPrimitive::ImmediateContextAppend(append) => match &append.content {
-            CoreRenderable::Text { text } => text.clone(),
-            _ => String::new(),
+            CoreRenderable::Text { text } => ContentInput::Text(text.clone()),
+            CoreRenderable::Blocks { blocks } => ContentInput::Blocks(blocks.clone()),
+            _ => ContentInput::Text(String::new()),
         },
-        _ => String::new(),
+        _ => ContentInput::Text(String::new()),
     }
 }
 
@@ -371,7 +389,7 @@ async fn apply_runtime_turn(
     session_id: &SessionId,
     run_id: meerkat_core::lifecycle::RunId,
     primitive: &RunPrimitive,
-    prompt: String,
+    prompt: ContentInput,
 ) -> Result<CoreApplyOutput, SessionError> {
     if let RunPrimitive::StagedInput(staged) = primitive
         && staged.appends.is_empty()
@@ -663,7 +681,7 @@ fn validate_public_peer_meta(peer_meta: Option<&meerkat_core::PeerMeta>) -> Resu
 /// Create session request
 #[derive(Debug, Deserialize)]
 pub struct CreateSessionRequest {
-    pub prompt: String,
+    pub prompt: ContentInput,
     #[serde(default)]
     pub system_prompt: Option<String>,
     #[serde(default)]
@@ -773,7 +791,7 @@ async fn canonical_skill_keys_for_state(
 #[derive(Debug, Deserialize, Clone)]
 pub struct ContinueSessionRequest {
     pub session_id: String,
-    pub prompt: String,
+    pub prompt: ContentInput,
     #[serde(default)]
     pub system_prompt: Option<String>,
     /// JSON schema for structured output extraction (wrapper or raw schema).
@@ -1375,6 +1393,7 @@ fn build_comms_command(
         kind: req.kind.clone(),
         to: req.to.clone(),
         body: req.body.clone(),
+        blocks: None,
         intent: req.intent.clone(),
         params: req.params.clone(),
         in_reply_to: req.in_reply_to.clone(),
@@ -1916,7 +1935,7 @@ async fn create_session(
     }
 
     // Create input and route through runtime
-    let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+    let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::from_content_input(
         req.prompt,
         Some(
             meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
@@ -2201,10 +2220,25 @@ async fn continue_session(
     .await?;
 
     // Apply staged MCP operations at the turn boundary.
+    // MCP boundary appends text-only system notices; extract a String for it,
+    // then fold any additions back into the final ContentInput.
     #[allow(unused_mut)]
     let mut turn_prompt = req.prompt.clone();
     #[cfg(feature = "mcp")]
-    apply_mcp_boundary(&state, &session_id, &caller_event_tx, &mut turn_prompt).await?;
+    {
+        let mut mcp_text = String::new();
+        apply_mcp_boundary(&state, &session_id, &caller_event_tx, &mut mcp_text).await?;
+        // If the MCP boundary appended notices, prepend as a text block
+        // to preserve any multimodal content in the original prompt.
+        if !mcp_text.is_empty() {
+            let mut blocks = turn_prompt.into_blocks();
+            blocks.insert(
+                0,
+                meerkat_core::types::ContentBlock::Text { text: mcp_text },
+            );
+            turn_prompt = ContentInput::Blocks(blocks);
+        }
+    }
 
     // First, try to start a turn on a live session in the service.
     let svc_req = SvcStartTurnRequest {
@@ -2224,7 +2258,7 @@ async fn continue_session(
         )));
     }
     let adapter = state.runtime_adapter.clone();
-    let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+    let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::from_content_input(
         svc_req.prompt.clone(),
         Some(
             meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
@@ -2893,7 +2927,7 @@ mod tests {
         });
 
         let req: CreateSessionRequest = serde_json::from_value(req_json).unwrap();
-        assert_eq!(req.prompt, "Hello");
+        assert_eq!(req.prompt, ContentInput::Text("Hello".to_string()));
         assert!(req.host_mode);
         assert_eq!(req.comms_name, Some("test-agent".to_string()));
     }
@@ -2971,7 +3005,7 @@ mod tests {
         let created = session_service
             .create_session(SvcCreateSessionRequest {
                 model: state.default_model.to_string(),
-                prompt: "Hello".to_string(),
+                prompt: "Hello".to_string().into(),
                 system_prompt: None,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
@@ -3042,7 +3076,7 @@ mod tests {
         let create_result = session_service
             .create_session(SvcCreateSessionRequest {
                 model: state.default_model.to_string(),
-                prompt: "Hello".to_string(),
+                prompt: "Hello".to_string().into(),
                 system_prompt: None,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
@@ -3109,7 +3143,7 @@ mod tests {
         let create_result = session_service
             .create_session(SvcCreateSessionRequest {
                 model: state.default_model.to_string(),
-                prompt: "Hello".to_string(),
+                prompt: "Hello".to_string().into(),
                 system_prompt: None,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
@@ -3162,7 +3196,7 @@ mod tests {
         let created = session_service
             .create_session(SvcCreateSessionRequest {
                 model: state.default_model.to_string(),
-                prompt: "Hello".to_string(),
+                prompt: "Hello".to_string().into(),
                 system_prompt: None,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
@@ -3186,7 +3220,7 @@ mod tests {
             .start_turn(
                 &created.session_id,
                 meerkat_core::service::StartTurnRequest {
-                    prompt: "Follow up".to_string(),
+                    prompt: "Follow up".to_string().into(),
                     event_tx: None,
                     host_mode: false,
                     skill_references: None,

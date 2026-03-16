@@ -43,6 +43,10 @@ pub struct BuiltinDispatcherConfig {
     pub shell_config: Option<ShellConfig>,
     pub external: Option<Arc<dyn AgentToolDispatcher>>,
     pub session_id: Option<String>,
+    /// Whether the model can process image blocks in tool results.
+    /// When false, `view_image` is hidden from the tool list.
+    /// Defaults to `true`.
+    pub image_tool_results: bool,
 }
 
 /// Configuration for a comms-enabled dispatcher
@@ -114,6 +118,7 @@ impl ToolDispatcherBuilder {
                 comp.shell_config,
                 comp.external,
                 comp.session_id,
+                comp.image_tool_results,
             )?),
         };
 
@@ -153,5 +158,6 @@ pub fn build_builtin_dispatcher(
         config.shell_config,
         config.external,
         config.session_id,
+        config.image_tool_results,
     )?))
 }

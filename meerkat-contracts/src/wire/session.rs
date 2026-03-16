@@ -5,8 +5,8 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 use meerkat_core::{
-    AssistantBlock, Message, ProviderMeta, SessionHistoryPage, SessionId, SessionInfo,
-    SessionSummary, StopReason,
+    AssistantBlock, ContentBlock, ContentInput, Message, ProviderMeta, SessionHistoryPage,
+    SessionId, SessionInfo, SessionSummary, StopReason,
 };
 
 /// Canonical session info for wire protocol.
@@ -135,6 +135,64 @@ impl From<ProviderMeta> for WireProviderMeta {
     }
 }
 
+/// Wire-safe content block (no `source_path` — internal only).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WireContentBlock {
+    Text {
+        text: String,
+    },
+    Image {
+        media_type: String,
+        data: String,
+    },
+    /// Forward-compatibility for unknown block types.
+    #[serde(other)]
+    Unknown,
+}
+
+impl From<ContentBlock> for WireContentBlock {
+    fn from(block: ContentBlock) -> Self {
+        match block {
+            ContentBlock::Text { text } => WireContentBlock::Text { text },
+            ContentBlock::Image {
+                media_type, data, ..
+            } => WireContentBlock::Image { media_type, data },
+            _ => WireContentBlock::Unknown,
+        }
+    }
+}
+
+/// Wire-safe content input (mirrors `ContentInput`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+pub enum WireContentInput {
+    Text(String),
+    Blocks(Vec<WireContentBlock>),
+}
+
+impl From<ContentInput> for WireContentInput {
+    fn from(input: ContentInput) -> Self {
+        match input {
+            ContentInput::Text(s) => WireContentInput::Text(s),
+            ContentInput::Blocks(blocks) => {
+                WireContentInput::Blocks(blocks.into_iter().map(Into::into).collect())
+            }
+        }
+    }
+}
+
+/// Wire-safe tool result content that handles both legacy string and array formats.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+pub enum WireToolResultContent {
+    Text(String),
+    Blocks(Vec<WireContentBlock>),
+}
+
 /// Transcript block inside a block-assistant message.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -228,7 +286,7 @@ pub struct WireToolCall {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WireToolResult {
     pub tool_use_id: String,
-    pub content: String,
+    pub content: WireToolResultContent,
     #[serde(default)]
     pub is_error: bool,
 }
@@ -242,7 +300,7 @@ pub enum WireSessionMessage {
         content: String,
     },
     User {
-        content: String,
+        content: WireContentInput,
     },
     Assistant {
         content: String,
@@ -267,9 +325,16 @@ impl From<Message> for WireSessionMessage {
             Message::System(message) => Self::System {
                 content: message.content,
             },
-            Message::User(message) => Self::User {
-                content: message.content,
-            },
+            Message::User(message) => {
+                let content = if message.content.len() == 1
+                    && matches!(&message.content[0], ContentBlock::Text { .. })
+                {
+                    WireContentInput::Text(message.text_content())
+                } else {
+                    WireContentInput::Blocks(message.content.into_iter().map(Into::into).collect())
+                };
+                Self::User { content }
+            }
             Message::Assistant(message) => Self::Assistant {
                 content: message.content,
                 tool_calls: message
@@ -290,10 +355,21 @@ impl From<Message> for WireSessionMessage {
             Message::ToolResults { results } => Self::ToolResults {
                 results: results
                     .into_iter()
-                    .map(|result| WireToolResult {
-                        tool_use_id: result.tool_use_id,
-                        content: result.content,
-                        is_error: result.is_error,
+                    .map(|result| {
+                        let content = if result.content.len() == 1
+                            && matches!(&result.content[0], ContentBlock::Text { .. })
+                        {
+                            WireToolResultContent::Text(result.text_content())
+                        } else {
+                            WireToolResultContent::Blocks(
+                                result.content.into_iter().map(Into::into).collect(),
+                            )
+                        };
+                        WireToolResult {
+                            tool_use_id: result.tool_use_id,
+                            content,
+                            is_error: result.is_error,
+                        }
                     })
                     .collect(),
             },
@@ -332,7 +408,7 @@ impl From<SessionHistoryPage> for WireSessionHistory {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use meerkat_core::time_compat::SystemTime;
@@ -477,7 +553,7 @@ mod tests {
                     content: "You are helpful".to_string(),
                 },
                 WireSessionMessage::User {
-                    content: "hello".to_string(),
+                    content: WireContentInput::Text("hello".to_string()),
                 },
                 WireSessionMessage::Assistant {
                     content: "hi".to_string(),
@@ -504,7 +580,7 @@ mod tests {
                 WireSessionMessage::ToolResults {
                     results: vec![WireToolResult {
                         tool_use_id: "tool-1".to_string(),
-                        content: "ok".to_string(),
+                        content: WireToolResultContent::Text("ok".to_string()),
                         is_error: false,
                     }],
                 },
@@ -527,9 +603,7 @@ mod tests {
                 Message::System(SystemMessage {
                     content: "sys".to_string(),
                 }),
-                Message::User(UserMessage {
-                    content: "hi".to_string(),
-                }),
+                Message::User(UserMessage::text("hi".to_string())),
                 Message::Assistant(AssistantMessage {
                     content: "hello".to_string(),
                     tool_calls: vec![ToolCall::new(
@@ -572,11 +646,11 @@ mod tests {
                     stop_reason: StopReason::EndTurn,
                 }),
                 Message::ToolResults {
-                    results: vec![meerkat_core::ToolResult {
-                        tool_use_id: "tool-2".to_string(),
-                        content: "done".to_string(),
-                        is_error: false,
-                    }],
+                    results: vec![meerkat_core::ToolResult::new(
+                        "tool-2".to_string(),
+                        "done".to_string(),
+                        false,
+                    )],
                 },
             ],
         };
@@ -589,5 +663,229 @@ mod tests {
             wire.messages[1],
             WireSessionMessage::ToolResults { .. }
         ));
+    }
+
+    #[test]
+    fn test_wire_content_block_text_roundtrip() {
+        let block = WireContentBlock::Text {
+            text: "hello".to_string(),
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        let parsed: WireContentBlock = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, block);
+    }
+
+    #[test]
+    fn test_wire_content_block_image_roundtrip() {
+        let block = WireContentBlock::Image {
+            media_type: "image/png".to_string(),
+            data: "iVBOR...".to_string(),
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        let parsed: WireContentBlock = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, block);
+    }
+
+    #[test]
+    fn test_wire_content_block_unknown_forward_compat() {
+        let json = r#"{"type":"video","url":"https://example.com/v.mp4"}"#;
+        let parsed: WireContentBlock = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed, WireContentBlock::Unknown);
+    }
+
+    #[test]
+    fn test_wire_content_block_from_core_strips_source_path() {
+        let core_block = ContentBlock::Image {
+            media_type: "image/jpeg".to_string(),
+            data: "base64data".to_string(),
+            source_path: Some("/tmp/img.jpg".to_string()),
+        };
+        let wire: WireContentBlock = core_block.into();
+        assert_eq!(
+            wire,
+            WireContentBlock::Image {
+                media_type: "image/jpeg".to_string(),
+                data: "base64data".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_wire_content_input_text_roundtrip() {
+        let input = WireContentInput::Text("hello world".to_string());
+        let json = serde_json::to_string(&input).unwrap();
+        assert_eq!(json, r#""hello world""#);
+        let parsed: WireContentInput = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, input);
+    }
+
+    #[test]
+    fn test_wire_content_input_blocks_roundtrip() {
+        let input = WireContentInput::Blocks(vec![
+            WireContentBlock::Text {
+                text: "look at this".to_string(),
+            },
+            WireContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: "abc123".to_string(),
+            },
+        ]);
+        let json = serde_json::to_string(&input).unwrap();
+        let parsed: WireContentInput = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, input);
+    }
+
+    #[test]
+    fn test_wire_tool_result_content_text_roundtrip() {
+        let content = WireToolResultContent::Text("result text".to_string());
+        let json = serde_json::to_string(&content).unwrap();
+        assert_eq!(json, r#""result text""#);
+        let parsed: WireToolResultContent = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, content);
+    }
+
+    #[test]
+    fn test_wire_tool_result_content_blocks_roundtrip() {
+        let content = WireToolResultContent::Blocks(vec![
+            WireContentBlock::Text {
+                text: "output".to_string(),
+            },
+            WireContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: "data".to_string(),
+            },
+        ]);
+        let json = serde_json::to_string(&content).unwrap();
+        let parsed: WireToolResultContent = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, content);
+    }
+
+    #[test]
+    fn test_wire_tool_result_backward_compat_string() {
+        let json = r#"{"tool_use_id":"t1","content":"hello","is_error":false}"#;
+        let parsed: WireToolResult = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            parsed.content,
+            WireToolResultContent::Text("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn test_wire_user_message_text_backward_compat() {
+        let json = r#"{"role":"user","content":"hello"}"#;
+        let parsed: WireSessionMessage = serde_json::from_str(json).unwrap();
+        match parsed {
+            WireSessionMessage::User { content } => {
+                assert_eq!(content, WireContentInput::Text("hello".to_string()));
+            }
+            _ => panic!("expected User message"),
+        }
+    }
+
+    #[test]
+    fn test_wire_user_message_blocks() {
+        let json = r#"{"role":"user","content":[{"type":"text","text":"look"},{"type":"image","media_type":"image/png","data":"abc"}]}"#;
+        let parsed: WireSessionMessage = serde_json::from_str(json).unwrap();
+        match parsed {
+            WireSessionMessage::User { content } => {
+                assert_eq!(
+                    content,
+                    WireContentInput::Blocks(vec![
+                        WireContentBlock::Text {
+                            text: "look".to_string()
+                        },
+                        WireContentBlock::Image {
+                            media_type: "image/png".to_string(),
+                            data: "abc".to_string()
+                        },
+                    ])
+                );
+            }
+            _ => panic!("expected User message"),
+        }
+    }
+
+    #[test]
+    fn test_wire_user_message_from_multimodal_core() {
+        let page = SessionHistoryPage {
+            session_id: SessionId::new(),
+            message_count: 1,
+            offset: 0,
+            limit: None,
+            has_more: false,
+            messages: vec![Message::User(UserMessage::with_blocks(vec![
+                ContentBlock::Text {
+                    text: "describe this".to_string(),
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: "base64data".to_string(),
+                    source_path: Some("/tmp/img.png".to_string()),
+                },
+            ]))],
+        };
+        let wire: WireSessionHistory = page.into();
+        match &wire.messages[0] {
+            WireSessionMessage::User { content } => {
+                assert_eq!(
+                    *content,
+                    WireContentInput::Blocks(vec![
+                        WireContentBlock::Text {
+                            text: "describe this".to_string()
+                        },
+                        WireContentBlock::Image {
+                            media_type: "image/png".to_string(),
+                            data: "base64data".to_string()
+                        },
+                    ])
+                );
+            }
+            _ => panic!("expected User message"),
+        }
+    }
+
+    #[test]
+    fn test_wire_tool_result_from_multimodal_core() {
+        let page = SessionHistoryPage {
+            session_id: SessionId::new(),
+            message_count: 1,
+            offset: 0,
+            limit: None,
+            has_more: false,
+            messages: vec![Message::ToolResults {
+                results: vec![meerkat_core::ToolResult::with_blocks(
+                    "tool-1".to_string(),
+                    vec![
+                        ContentBlock::Text {
+                            text: "screenshot:".to_string(),
+                        },
+                        ContentBlock::Image {
+                            media_type: "image/png".to_string(),
+                            data: "imgdata".to_string(),
+                            source_path: Some("/tmp/shot.png".to_string()),
+                        },
+                    ],
+                    false,
+                )],
+            }],
+        };
+        let wire: WireSessionHistory = page.into();
+        match &wire.messages[0] {
+            WireSessionMessage::ToolResults { results } => {
+                assert_eq!(
+                    results[0].content,
+                    WireToolResultContent::Blocks(vec![
+                        WireContentBlock::Text {
+                            text: "screenshot:".to_string()
+                        },
+                        WireContentBlock::Image {
+                            media_type: "image/png".to_string(),
+                            data: "imgdata".to_string()
+                        },
+                    ])
+                );
+            }
+            _ => panic!("expected ToolResults message"),
+        }
     }
 }

@@ -435,6 +435,20 @@
     "title": "TaskUpdateParams",
     "type": "object"
   },
+  "view_image": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "path": {
+        "description": "Path to the image file to view (relative to project root, or absolute within project).",
+        "type": "string"
+      }
+    },
+    "required": [
+      "path"
+    ],
+    "title": "ViewImageArgs",
+    "type": "object"
+  },
   "wait": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "properties": {

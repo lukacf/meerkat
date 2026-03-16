@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use super::job_manager::JobManager;
-use crate::builtin::{BuiltinTool, BuiltinToolError};
+use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 
 /// Tool for listing all background shell jobs
 ///
@@ -46,10 +46,12 @@ impl BuiltinTool for ShellJobsListTool {
         false
     }
 
-    async fn call(&self, _args: Value) -> Result<Value, BuiltinToolError> {
+    async fn call(&self, _args: Value) -> Result<ToolOutput, BuiltinToolError> {
         let jobs = self.job_manager.list_jobs().await;
 
-        serde_json::to_value(jobs).map_err(|e| BuiltinToolError::execution_failed(e.to_string()))
+        serde_json::to_value(jobs)
+            .map(ToolOutput::Json)
+            .map_err(|e| BuiltinToolError::execution_failed(e.to_string()))
     }
 }
 
@@ -129,7 +131,7 @@ mod tests {
         let tool = ShellJobsListTool::new(Arc::clone(&manager));
 
         // Initially empty
-        let result = tool.call(json!({})).await.unwrap();
+        let result = tool.call(json!({})).await.unwrap().into_json().unwrap();
         let jobs = result.as_array().unwrap();
         assert!(jobs.is_empty());
 
@@ -138,7 +140,7 @@ mod tests {
         let _id2 = manager.spawn_job("echo two", None, 30).await.unwrap();
 
         // Now should have 2 jobs
-        let result = tool.call(json!({})).await.unwrap();
+        let result = tool.call(json!({})).await.unwrap().into_json().unwrap();
         let jobs = result.as_array().unwrap();
         assert_eq!(jobs.len(), 2);
 
@@ -158,7 +160,7 @@ mod tests {
         let tool = ShellJobsListTool::new(manager);
 
         // Empty list should return empty array
-        let result = tool.call(json!({})).await.unwrap();
+        let result = tool.call(json!({})).await.unwrap().into_json().unwrap();
         let jobs = result.as_array().unwrap();
         assert!(jobs.is_empty());
     }

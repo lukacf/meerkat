@@ -137,7 +137,7 @@ async fn create_deferred_session(state: &AppState, prompt: &str) -> String {
         .session_service
         .create_session(SvcCreateSessionRequest {
             model: state.default_model.to_string(),
-            prompt: prompt.to_string(),
+            prompt: prompt.to_string().into(),
             system_prompt: None,
             max_tokens: Some(state.max_tokens),
             event_tx: None,

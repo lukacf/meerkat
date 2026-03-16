@@ -53,6 +53,11 @@ export interface SkillKey {
 /** A skill reference — either a {@link SkillKey} or a legacy string. */
 export type SkillRef = SkillKey | string;
 
+/** A content block in a multimodal prompt. */
+export type ContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; media_type: string; data: string };
+
 /** Ephemeral per-turn tool visibility overlay. */
 export interface TurnToolOverlay {
   readonly allowedTools?: readonly string[];

@@ -105,11 +105,11 @@ impl<T: AgentToolDispatcher + 'static> AgentToolDispatcher for CommsToolDispatch
             let result = handle_tools_call(&self.tool_context, normalized_name, &normalized_args)
                 .await
                 .map_err(|e| ToolError::ExecutionFailed { message: e })?;
-            Ok(ToolResult {
-                tool_use_id: call.id.to_string(),
-                content: result.to_string(),
-                is_error: false,
-            })
+            Ok(ToolResult::new(
+                call.id.to_string(),
+                result.to_string(),
+                false,
+            ))
         } else if let Some(inner) = &self.inner {
             inner.dispatch(call).await
         } else {
@@ -161,11 +161,11 @@ impl AgentToolDispatcher for DynCommsToolDispatcher {
             let result = handle_tools_call(&self.tool_context, normalized_name, &normalized_args)
                 .await
                 .map_err(|e| ToolError::ExecutionFailed { message: e })?;
-            Ok(ToolResult {
-                tool_use_id: call.id.to_string(),
-                content: result.to_string(),
-                is_error: false,
-            })
+            Ok(ToolResult::new(
+                call.id.to_string(),
+                result.to_string(),
+                false,
+            ))
         } else {
             self.inner.dispatch(call).await
         }

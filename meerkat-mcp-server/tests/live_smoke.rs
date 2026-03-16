@@ -72,7 +72,12 @@ fn stdio_server_config(root: &Path, instance_id: &str) -> McpServerConfig {
     )
 }
 
-fn parse_tool_payload(raw: &str) -> Value {
+fn parse_tool_payload(blocks: &[meerkat_core::types::ContentBlock]) -> Value {
+    let text = meerkat_core::types::text_content(blocks);
+    serde_json::from_str(&text).expect("tool payload should be valid JSON")
+}
+
+fn _parse_tool_payload_str(raw: &str) -> Value {
     serde_json::from_str(raw).expect("tool payload should be valid JSON")
 }
 

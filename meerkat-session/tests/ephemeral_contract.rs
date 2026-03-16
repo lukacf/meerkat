@@ -46,7 +46,7 @@ struct MockAgent {
 impl SessionAgent for MockAgent {
     async fn run_with_events(
         &mut self,
-        _prompt: String,
+        _prompt: meerkat_core::types::ContentInput,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         if let Some(delay) = self.delay_ms {
@@ -81,7 +81,7 @@ impl SessionAgent for MockAgent {
 
     async fn run_host_mode(
         &mut self,
-        prompt: String,
+        prompt: meerkat_core::types::ContentInput,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         // Mock host mode delegates to regular run for testing purposes.
         // Session task forwards events from the shared internal channel.
@@ -403,7 +403,7 @@ struct RealSessionAgent {
 impl SessionAgent for RealSessionAgent {
     async fn run_with_events(
         &mut self,
-        prompt: String,
+        prompt: meerkat_core::types::ContentInput,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         self.agent.run_with_events(prompt, event_tx).await
@@ -411,7 +411,7 @@ impl SessionAgent for RealSessionAgent {
 
     async fn run_host_mode(
         &mut self,
-        prompt: String,
+        prompt: meerkat_core::types::ContentInput,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         self.agent.run_host_mode(prompt).await
     }
@@ -516,7 +516,7 @@ fn make_service(builder: MockAgentBuilder) -> Arc<EphemeralSessionService<MockAg
 fn create_req(prompt: &str) -> CreateSessionRequest {
     CreateSessionRequest {
         model: "mock".to_string(),
-        prompt: prompt.to_string(),
+        prompt: prompt.to_string().into(),
         system_prompt: None,
         max_tokens: None,
         event_tx: None,
@@ -579,7 +579,7 @@ async fn test_create_session_can_defer_initial_turn() {
                 host_mode: false,
                 skill_references: None,
                 flow_tool_overlay: None,
-                prompt: "now run".to_string(),
+                prompt: "now run".to_string().into(),
                 event_tx: None,
                 additional_instructions: None,
             },
@@ -610,7 +610,7 @@ async fn test_subscribe_session_events_available_before_first_turn() {
                 host_mode: false,
                 skill_references: None,
                 flow_tool_overlay: None,
-                prompt: "trigger".to_string(),
+                prompt: "trigger".to_string().into(),
                 event_tx: None,
                 additional_instructions: None,
             },
@@ -650,7 +650,7 @@ async fn test_start_turn_on_existing_session() {
                 host_mode: false,
                 skill_references: None,
                 flow_tool_overlay: None,
-                prompt: "Follow up".to_string(),
+                prompt: "Follow up".to_string().into(),
                 event_tx: None,
                 additional_instructions: None,
             },
@@ -756,7 +756,7 @@ async fn test_turn_on_archived_session_returns_not_found() {
                 host_mode: false,
                 skill_references: None,
                 flow_tool_overlay: None,
-                prompt: "After archive".to_string(),
+                prompt: "After archive".to_string().into(),
                 event_tx: None,
                 additional_instructions: None,
             },
@@ -814,7 +814,7 @@ async fn test_concurrent_turns_return_busy() {
                     host_mode: false,
                     skill_references: None,
                     flow_tool_overlay: None,
-                    prompt: "Slow".to_string(),
+                    prompt: "Slow".to_string().into(),
                     event_tx: None,
                     additional_instructions: None,
                 },
@@ -833,7 +833,7 @@ async fn test_concurrent_turns_return_busy() {
                 host_mode: false,
                 skill_references: None,
                 flow_tool_overlay: None,
-                prompt: "Fast".to_string(),
+                prompt: "Fast".to_string().into(),
                 event_tx: None,
                 additional_instructions: None,
             },
@@ -868,7 +868,7 @@ async fn test_interrupt_cancels_inflight_turn() {
                     host_mode: false,
                     skill_references: None,
                     flow_tool_overlay: None,
-                    prompt: "Slow".to_string(),
+                    prompt: "Slow".to_string().into(),
                     event_tx: None,
                     additional_instructions: None,
                 },
@@ -920,7 +920,7 @@ async fn test_flow_tool_overlay_is_cleared_after_canceled_turn() {
                     host_mode: false,
                     skill_references: None,
                     flow_tool_overlay: Some(overlay),
-                    prompt: "Slow with overlay".to_string(),
+                    prompt: "Slow with overlay".to_string().into(),
                     event_tx: None,
                     additional_instructions: None,
                 },
@@ -978,7 +978,7 @@ async fn test_flow_tool_overlay_enforced_by_runtime_and_resets_next_turn() {
                     allowed_tools: Some(vec!["alpha".to_string(), "beta".to_string()]),
                     blocked_tools: Some(vec!["beta".to_string()]),
                 }),
-                prompt: "overlayed turn".to_string(),
+                prompt: "overlayed turn".to_string().into(),
                 event_tx: None,
                 additional_instructions: None,
             },
@@ -993,7 +993,7 @@ async fn test_flow_tool_overlay_enforced_by_runtime_and_resets_next_turn() {
                 host_mode: false,
                 skill_references: None,
                 flow_tool_overlay: None,
-                prompt: "baseline turn".to_string(),
+                prompt: "baseline turn".to_string().into(),
                 event_tx: None,
                 additional_instructions: None,
             },
@@ -1047,7 +1047,7 @@ async fn test_start_turn_returns_error_when_overlay_clear_fails() {
                     allowed_tools: Some(vec!["alpha".to_string()]),
                     blocked_tools: None,
                 }),
-                prompt: "overlay clear fails".to_string(),
+                prompt: "overlay clear fails".to_string().into(),
                 event_tx: None,
                 additional_instructions: None,
             },
@@ -1193,7 +1193,7 @@ async fn test_staged_system_context_applies_at_next_llm_boundary() {
                 host_mode: false,
                 skill_references: None,
                 flow_tool_overlay: None,
-                prompt: "apply staged context".to_string(),
+                prompt: "apply staged context".to_string().into(),
                 event_tx: None,
                 additional_instructions: None,
             },
@@ -1283,7 +1283,7 @@ async fn test_staged_system_context_is_not_replayed_on_later_turns() {
                 host_mode: false,
                 skill_references: None,
                 flow_tool_overlay: None,
-                prompt: "apply staged context".to_string(),
+                prompt: "apply staged context".to_string().into(),
                 event_tx: None,
                 additional_instructions: None,
             },
@@ -1298,7 +1298,7 @@ async fn test_staged_system_context_is_not_replayed_on_later_turns() {
                 host_mode: false,
                 skill_references: None,
                 flow_tool_overlay: None,
-                prompt: "follow-up turn".to_string(),
+                prompt: "follow-up turn".to_string().into(),
                 event_tx: None,
                 additional_instructions: None,
             },
@@ -1359,7 +1359,7 @@ async fn test_staged_system_context_appended_during_active_turn_waits_for_next_t
                         host_mode: false,
                         skill_references: None,
                         flow_tool_overlay: None,
-                        prompt: "first turn".to_string(),
+                        prompt: "first turn".to_string().into(),
                         event_tx: None,
                         additional_instructions: None,
                     },
@@ -1393,7 +1393,7 @@ async fn test_staged_system_context_appended_during_active_turn_waits_for_next_t
                 host_mode: false,
                 skill_references: None,
                 flow_tool_overlay: None,
-                prompt: "second turn".to_string(),
+                prompt: "second turn".to_string().into(),
                 event_tx: None,
                 additional_instructions: None,
             },
@@ -1462,7 +1462,7 @@ async fn test_pre_llm_denied_turn_does_not_consume_staged_system_context() {
                 host_mode: false,
                 skill_references: None,
                 flow_tool_overlay: None,
-                prompt: "denied turn".to_string(),
+                prompt: "denied turn".to_string().into(),
                 event_tx: None,
                 additional_instructions: None,
             },
@@ -1486,7 +1486,7 @@ async fn test_pre_llm_denied_turn_does_not_consume_staged_system_context() {
                 host_mode: false,
                 skill_references: None,
                 flow_tool_overlay: None,
-                prompt: "eligible turn".to_string(),
+                prompt: "eligible turn".to_string().into(),
                 event_tx: None,
                 additional_instructions: None,
             },
@@ -1544,7 +1544,7 @@ async fn test_interrupt_host_mode_returns_without_waiting_for_ack() {
                     host_mode: true,
                     skill_references: None,
                     flow_tool_overlay: None,
-                    prompt: "host turn".to_string(),
+                    prompt: "host turn".to_string().into(),
                     event_tx: None,
                     additional_instructions: None,
                 },

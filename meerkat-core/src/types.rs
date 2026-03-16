@@ -5,10 +5,175 @@
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use serde_json::{Map, Value};
+use std::borrow::Cow;
 use std::fmt;
 use uuid::Uuid;
 
 use crate::schema::{MeerkatSchema, SchemaCompat, SchemaError, SchemaFormat, SchemaWarning};
+
+// ===========================================================================
+// Multimodal content blocks
+// ===========================================================================
+
+/// A block of content in user messages and tool results.
+///
+/// Supports text and images for multimodal agent interactions.
+#[non_exhaustive]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentBlock {
+    /// Plain text content.
+    Text { text: String },
+    /// Base64-encoded image content.
+    Image {
+        /// MIME type (e.g. "image/png", "image/jpeg").
+        media_type: String,
+        /// Base64-encoded image data.
+        data: String,
+        /// Internal-only source path for re-reading after compaction.
+        /// Never serialized — only used in-memory.
+        #[serde(default, skip_serializing)]
+        source_path: Option<String>,
+    },
+}
+
+impl ContentBlock {
+    /// Canonical text projection for display, hooks, and indexing.
+    ///
+    /// Text blocks return their content. Image blocks return `[image: {media_type}]`.
+    /// `source_path` is internal metadata and is NOT included in the projection.
+    pub fn text_projection(&self) -> Cow<'_, str> {
+        match self {
+            ContentBlock::Text { text } => Cow::Borrowed(text),
+            ContentBlock::Image { media_type, .. } => Cow::Owned(format!("[image: {media_type}]")),
+        }
+    }
+
+    /// Convenience: wrap a string into a single-element Vec of Text blocks.
+    pub fn text_vec(s: String) -> Vec<ContentBlock> {
+        vec![ContentBlock::Text { text: s }]
+    }
+}
+
+impl fmt::Display for ContentBlock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.text_projection())
+    }
+}
+
+/// Concatenate text projections from a slice of content blocks.
+pub fn text_content(blocks: &[ContentBlock]) -> String {
+    let mut result = String::new();
+    for block in blocks {
+        let projection = block.text_projection();
+        if !result.is_empty() && !projection.is_empty() {
+            result.push('\n');
+        }
+        result.push_str(&projection);
+    }
+    result
+}
+
+/// Check if any content blocks contain images.
+pub fn has_images(blocks: &[ContentBlock]) -> bool {
+    blocks
+        .iter()
+        .any(|b| matches!(b, ContentBlock::Image { .. }))
+}
+
+/// Custom serde for `Vec<ContentBlock>` fields that provides backwards
+/// compatibility with legacy `String` content.
+///
+/// - Deserialize: `"text"` -> `[Text { text }]`, `[{...}]` -> `[ContentBlock...]`
+/// - Serialize: text-only -> `"concatenated"`, mixed -> `[{...}, ...]`
+mod content_blocks_serde {
+    use super::ContentBlock;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(blocks: &Vec<ContentBlock>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // Single text block → plain string (backwards compat).
+        // Multiple text blocks (e.g. after compaction replaces images with text
+        // placeholders) must serialize as an array to preserve block boundaries.
+        if blocks.len() == 1
+            && let ContentBlock::Text { text } = &blocks[0]
+        {
+            return text.serialize(serializer);
+        }
+        // Multiple blocks or any non-text → array
+        blocks.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<ContentBlock>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum StringOrBlocks {
+            Text(String),
+            Blocks(Vec<ContentBlock>),
+        }
+
+        match StringOrBlocks::deserialize(deserializer)? {
+            StringOrBlocks::Text(s) => Ok(vec![ContentBlock::Text { text: s }]),
+            StringOrBlocks::Blocks(blocks) => Ok(blocks),
+        }
+    }
+}
+
+/// Input content that can be either a plain text string or multimodal content blocks.
+///
+/// Deserializes from either `"text"` or `[{type: "text", text: "..."}, ...]`.
+/// Provides `From<String>` and `From<&str>` for ergonomic construction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ContentInput {
+    /// Plain text input.
+    Text(String),
+    /// Multimodal content blocks (text + images).
+    Blocks(Vec<ContentBlock>),
+}
+
+impl ContentInput {
+    /// Convert to content blocks.
+    pub fn into_blocks(self) -> Vec<ContentBlock> {
+        match self {
+            ContentInput::Text(s) => ContentBlock::text_vec(s),
+            ContentInput::Blocks(blocks) => blocks,
+        }
+    }
+
+    /// Get text content (text projection for all blocks).
+    pub fn text_content(&self) -> String {
+        match self {
+            ContentInput::Text(s) => s.clone(),
+            ContentInput::Blocks(blocks) => text_content(blocks),
+        }
+    }
+
+    /// Check if this input contains any images.
+    pub fn has_images(&self) -> bool {
+        match self {
+            ContentInput::Text(_) => false,
+            ContentInput::Blocks(blocks) => has_images(blocks),
+        }
+    }
+}
+
+impl From<String> for ContentInput {
+    fn from(s: String) -> Self {
+        ContentInput::Text(s)
+    }
+}
+
+impl From<&str> for ContentInput {
+    fn from(s: &str) -> Self {
+        ContentInput::Text(s.to_string())
+    }
+}
 
 // ===========================================================================
 // New ordered transcript types (spec section 3.1)
@@ -393,7 +558,7 @@ impl Message {
     /// content, tool results are structured data).
     pub fn as_indexable_text(&self) -> String {
         match self {
-            Message::User(u) => u.content.clone(),
+            Message::User(u) => u.text_content(),
             Message::Assistant(a) => a.content.clone(),
             Message::BlockAssistant(ba) => {
                 let mut result = String::new();
@@ -421,7 +586,32 @@ pub struct SystemMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct UserMessage {
-    pub content: String,
+    #[serde(with = "content_blocks_serde")]
+    pub content: Vec<ContentBlock>,
+}
+
+impl UserMessage {
+    /// Create a text-only user message.
+    pub fn text(content: impl Into<String>) -> Self {
+        Self {
+            content: ContentBlock::text_vec(content.into()),
+        }
+    }
+
+    /// Create a multimodal user message.
+    pub fn with_blocks(content: Vec<ContentBlock>) -> Self {
+        Self { content }
+    }
+
+    /// Get concatenated text content (text projection for all blocks).
+    pub fn text_content(&self) -> String {
+        text_content(&self.content)
+    }
+
+    /// Check whether any content blocks are images.
+    pub fn has_images(&self) -> bool {
+        has_images(&self.content)
+    }
 }
 
 /// New assistant message with ordered blocks - no billing metadata.
@@ -522,16 +712,38 @@ impl ToolCall {
 pub struct ToolResult {
     /// Matches the tool_call.id
     pub tool_use_id: String,
-    /// Content returned by the tool
-    pub content: String,
+    /// Content returned by the tool (text or multimodal blocks).
+    ///
+    /// Backwards-compatible serde: deserializes from plain string or array,
+    /// serializes text-only content as string.
+    #[serde(with = "content_blocks_serde")]
+    pub content: Vec<ContentBlock>,
     /// Whether this is an error result
     #[serde(default)]
     pub is_error: bool,
 }
 
 impl ToolResult {
-    /// Create a new tool result
+    /// Create a text-only tool result.
     pub fn new(tool_use_id: String, content: String, is_error: bool) -> Self {
+        Self {
+            tool_use_id,
+            content: ContentBlock::text_vec(content),
+            is_error,
+        }
+    }
+
+    /// Create a tool result from a ToolCall with text content.
+    pub fn from_tool_call(tool_call: &ToolCall, content: String, is_error: bool) -> Self {
+        Self {
+            tool_use_id: tool_call.id.clone(),
+            content: ContentBlock::text_vec(content),
+            is_error,
+        }
+    }
+
+    /// Create a tool result with multimodal content blocks.
+    pub fn with_blocks(tool_use_id: String, content: Vec<ContentBlock>, is_error: bool) -> Self {
         Self {
             tool_use_id,
             content,
@@ -539,13 +751,19 @@ impl ToolResult {
         }
     }
 
-    /// Create a tool result from a ToolCall
-    pub fn from_tool_call(tool_call: &ToolCall, content: String, is_error: bool) -> Self {
-        Self {
-            tool_use_id: tool_call.id.clone(),
-            content,
-            is_error,
-        }
+    /// Get concatenated text content (text projection for all blocks).
+    pub fn text_content(&self) -> String {
+        text_content(&self.content)
+    }
+
+    /// Check whether any content blocks are images.
+    pub fn has_images(&self) -> bool {
+        has_images(&self.content)
+    }
+
+    /// Set text content, replacing all blocks with a single text block.
+    pub fn set_text_content(&mut self, text: String) {
+        self.content = ContentBlock::text_vec(text);
     }
 }
 

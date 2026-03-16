@@ -53,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await;
 
     let result = agent
-        .run("Explain quantum computing in simple terms.".to_string())
+        .run("Explain quantum computing in simple terms.".into())
         .await?;
 
     println!("Response: {}", result.text);
@@ -98,7 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await;
 
     match agent2
-        .run("Write a 500-word essay about machine learning.".to_string())
+        .run("Write a 500-word essay about machine learning.".into())
         .await
     {
         Ok(result) => {

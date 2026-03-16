@@ -81,7 +81,7 @@ async fn build_agent_with_mock_client_produces_runnable_agent() {
 
     let mut agent = factory.build_agent(build_config, &config).await.unwrap();
 
-    let result = agent.run("Hello".to_string()).await.unwrap();
+    let result = agent.run("Hello".to_string().into()).await.unwrap();
     assert!(
         result.text.contains("Hello from mock"),
         "Agent should produce text from mock client, got: {}",
@@ -234,9 +234,9 @@ async fn build_agent_with_resume_preserves_messages() {
 
     // Create a session with existing messages
     let mut session = Session::new();
-    session.push(meerkat_core::Message::User(UserMessage {
-        content: "Previous question".to_string(),
-    }));
+    session.push(meerkat_core::Message::User(UserMessage::text(
+        "Previous question".to_string(),
+    )));
 
     let build_config = AgentBuildConfig {
         llm_client_override: Some(Arc::new(MockLlmClient)),
@@ -250,7 +250,7 @@ async fn build_agent_with_resume_preserves_messages() {
     let messages = agent.session().messages();
     let has_previous = messages.iter().any(|m| {
         if let meerkat_core::Message::User(u) = m {
-            u.content == "Previous question"
+            u.text_content() == "Previous question"
         } else {
             false
         }
@@ -573,9 +573,9 @@ async fn test_resume_filters_persisted_active_skills_unavailable_on_current_surf
     let config = Config::default();
 
     let mut resumed = Session::new();
-    resumed.push(meerkat::Message::User(UserMessage {
-        content: "Remember the codename ResumeOtter.".into(),
-    }));
+    resumed.push(meerkat::Message::User(UserMessage::text(
+        "Remember the codename ResumeOtter.",
+    )));
     resumed
         .set_session_metadata(SessionMetadata {
             model: "claude-sonnet-4-5".into(),
@@ -689,7 +689,7 @@ async fn build_agent_with_custom_session_store() {
     assert_eq!(store.save_count(), 0);
 
     // Run the agent — the agent loop saves the session on completion
-    let result = agent.run("Hello".to_string()).await.unwrap();
+    let result = agent.run("Hello".to_string().into()).await.unwrap();
     assert!(result.text.contains("Hello from mock"));
 
     // The custom store should have received at least one save call

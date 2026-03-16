@@ -968,11 +968,11 @@ impl meerkat_core::AgentToolDispatcher for JsToolDispatcher {
         // Fire-and-forget tools return immediately. The host watches
         // ToolCallRequested events in the stream to act on the call.
         if Self::is_fire_and_forget(call.name) {
-            return Ok(meerkat_core::ToolResult {
-                tool_use_id: call.id.to_string(),
-                content: "acknowledged".to_string(),
-                is_error: false,
-            });
+            return Ok(meerkat_core::ToolResult::new(
+                call.id.to_string(),
+                "acknowledged".to_string(),
+                false,
+            ));
         }
 
         let callback = Self::get_callback(call.name)
@@ -1006,11 +1006,11 @@ impl meerkat_core::AgentToolDispatcher for JsToolDispatcher {
             ))
         })?;
 
-        Ok(meerkat_core::ToolResult {
-            tool_use_id: call.id.to_string(),
-            content: parsed.content,
-            is_error: parsed.is_error,
-        })
+        Ok(meerkat_core::ToolResult::new(
+            call.id.to_string(),
+            parsed.content,
+            parsed.is_error,
+        ))
     }
 }
 
@@ -1521,8 +1521,14 @@ pub async fn start_turn(handle: u32, prompt: &str, options_json: &str) -> Result
         }
     });
 
+    // Parse the prompt as structured ContentInput (supports both plain strings
+    // and JSON-serialized content blocks from the Web SDK). Falls back to plain
+    // text when the prompt is not valid ContentInput JSON.
+    let content_input: meerkat_core::types::ContentInput =
+        serde_json::from_str(prompt).unwrap_or_else(|_| prompt.into());
+
     // Run the turn. Events are drained concurrently into pending_events.
-    let run_result = agent.run(prompt.into()).await;
+    let run_result = agent.run(content_input).await;
 
     // Preserve the session BEFORE dropping the agent.
     let mut agent_session = agent.session().clone();

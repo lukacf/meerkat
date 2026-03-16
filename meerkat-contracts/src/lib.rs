@@ -26,7 +26,8 @@ pub use wire::{
     CatalogModelEntry, CommsParams, CoreCreateParams, HookParams, McpAddParams, McpLiveOpResponse,
     McpLiveOpStatus, McpLiveOperation, McpReloadParams, McpRemoveParams, ModelsCatalogResponse,
     ProviderCatalog, SkillEntry, SkillInspectResponse, SkillListResponse, SkillsParams,
-    StructuredOutputParams, WireAssistantBlock, WireEvent, WireModelProfile, WireModelTier,
-    WireProviderMeta, WireRunResult, WireSessionHistory, WireSessionInfo, WireSessionMessage,
-    WireSessionSummary, WireStopReason, WireToolCall, WireToolResult, WireUsage,
+    StructuredOutputParams, WireAssistantBlock, WireContentBlock, WireContentInput, WireEvent,
+    WireModelProfile, WireModelTier, WireProviderMeta, WireRunResult, WireSessionHistory,
+    WireSessionInfo, WireSessionMessage, WireSessionSummary, WireStopReason, WireToolCall,
+    WireToolResult, WireToolResultContent, WireUsage,
 };

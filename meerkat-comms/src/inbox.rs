@@ -243,6 +243,7 @@ mod tests {
             from: PubKey::new([1u8; 32]),
             to: PubKey::new([2u8; 32]),
             kind: MessageKind::Message {
+                blocks: None,
                 body: "test".to_string(),
             },
             sig: crate::identity::Signature::new([0u8; 64]),
@@ -532,6 +533,7 @@ mod tests {
                 body: "event".to_string(),
                 source: meerkat_core::PlainEventSource::Tcp,
                 interaction_id: None,
+                blocks: None,
             })
             .unwrap();
 

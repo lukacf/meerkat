@@ -76,7 +76,7 @@ where
                 format!("{comms_text}\n\n---\n\n{user_input}")
             }
         };
-        self.agent.run(combined_input).await
+        self.agent.run(combined_input.into()).await
     }
 
     pub async fn run_stay_alive(
@@ -113,14 +113,14 @@ where
                 return Ok(last_result);
             }
             let comms_text = format_inbox_messages(&messages);
-            last_result = self.agent.run(comms_text).await?;
+            last_result = self.agent.run(comms_text.into()).await?;
         }
     }
 }
 
 fn contains_dismiss(messages: &[CommsMessage]) -> bool {
     messages.iter().any(|m| match &m.content {
-        crate::agent::types::CommsContent::Message { body } => {
+        crate::agent::types::CommsContent::Message { body, .. } => {
             body.trim().eq_ignore_ascii_case("DISMISS")
         }
         _ => false,

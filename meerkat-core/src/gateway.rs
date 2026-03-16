@@ -467,7 +467,7 @@ mod tests {
             args: &args_raw,
         };
         let result = gateway.dispatch(call).await?;
-        serde_json::from_str(&result.content)
+        serde_json::from_str(&result.text_content())
             .map_err(|e| ToolError::execution_failed(e.to_string()))
     }
 
@@ -517,11 +517,11 @@ mod tests {
 
         async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
             if self.tools.iter().any(|t| t.name == call.name) {
-                Ok(ToolResult {
-                    tool_use_id: call.id.to_string(),
-                    content: json!({"source": self.prefix, "tool": call.name}).to_string(),
-                    is_error: false,
-                })
+                Ok(ToolResult::new(
+                    call.id.to_string(),
+                    json!({"source": self.prefix, "tool": call.name}).to_string(),
+                    false,
+                ))
             } else {
                 Err(ToolError::not_found(call.name))
             }

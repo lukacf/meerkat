@@ -141,14 +141,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .run(
             "What programming languages does our team use? \
              And what database do we run? Search your memory to find out."
-                .to_string(),
+                .into(),
         )
         .await?;
     println!("Agent: {}\n", result.text);
 
     println!("=== Asking about deployment schedule ===\n");
     let result = agent
-        .run("When do we deploy and where? Check your memory.".to_string())
+        .run("When do we deploy and where? Check your memory.".into())
         .await?;
     println!("Agent: {}\n", result.text);
 

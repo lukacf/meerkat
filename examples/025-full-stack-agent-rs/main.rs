@@ -206,7 +206,7 @@ Professional, concise, action-oriented. Always provide next steps.
             "A customer reports that the API is returning 500 errors on the /users endpoint. \
              Search our docs for troubleshooting steps, and if you can't find a solution, \
              create a high-priority ticket for the engineering team."
-                .to_string(),
+                .into(),
             event_tx,
         )
         .await?;

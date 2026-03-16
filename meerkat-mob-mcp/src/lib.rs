@@ -645,7 +645,7 @@ impl SessionService for LocalSessionService {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            format!("{staged_sections}\n\n{}", req.prompt)
+            format!("{staged_sections}\n\n{}", req.prompt.text_content()).into()
         };
 
         let event_tx = self.event_txs.read().await.get(id).cloned();
@@ -663,7 +663,7 @@ impl SessionService for LocalSessionService {
                 None,
                 AgentEvent::RunStarted {
                     session_id: id.clone(),
-                    prompt: effective_prompt.clone(),
+                    prompt: effective_prompt.text_content(),
                 },
             ));
             let _ = event_tx.send(EventEnvelope::new(
@@ -1045,11 +1045,7 @@ fn tool(name: &str, description: &str, input_schema: serde_json::Value) -> Arc<T
 fn encode(call: ToolCallView<'_>, payload: serde_json::Value) -> Result<ToolResult, ToolError> {
     let content = serde_json::to_string(&payload)
         .map_err(|e| ToolError::execution_failed(format!("encode result: {e}")))?;
-    Ok(ToolResult {
-        tool_use_id: call.id.to_string(),
-        content,
-        is_error: false,
-    })
+    Ok(ToolResult::new(call.id.to_string(), content, false))
 }
 
 fn map_mob_err(call: ToolCallView<'_>, err: MobError) -> ToolError {
@@ -1528,10 +1524,11 @@ pub async fn handle_tools_call(
             message: e.to_string(),
             data: None,
         })?;
-    serde_json::from_str(&result.content).map_err(|e| McpToolError {
+    let text = result.text_content();
+    serde_json::from_str(&text).map_err(|e| McpToolError {
         code: -32603,
         message: format!("invalid tool result payload: {e}"),
-        data: Some(json!({"raw": result.content})),
+        data: Some(json!({"raw": text})),
     })
 }
 
@@ -1930,7 +1927,7 @@ mod tests {
         let run = service
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
-                prompt: "hello".to_string(),
+                prompt: "hello".to_string().into(),
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
@@ -1968,7 +1965,7 @@ mod tests {
         let run = service
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
-                prompt: "hello".to_string(),
+                prompt: "hello".to_string().into(),
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
@@ -2002,7 +1999,7 @@ mod tests {
             .start_turn(
                 &session_id,
                 StartTurnRequest {
-                    prompt: "hello".to_string(),
+                    prompt: "hello".to_string().into(),
                     event_tx: None,
                     host_mode: false,
                     skill_references: None,
@@ -2032,7 +2029,7 @@ mod tests {
         let run = service
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
-                prompt: "hello".to_string(),
+                prompt: "hello".to_string().into(),
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
@@ -2075,7 +2072,7 @@ mod tests {
         let run = service
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
-                prompt: "hello".to_string(),
+                prompt: "hello".to_string().into(),
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
@@ -2097,7 +2094,7 @@ mod tests {
             .start_turn(
                 &session_id,
                 StartTurnRequest {
-                    prompt: "hello".to_string(),
+                    prompt: "hello".to_string().into(),
                     event_tx: None,
                     host_mode: false,
                     skill_references: None,
@@ -2129,7 +2126,7 @@ mod tests {
     ) -> serde_json::Value {
         let raw = serde_json::value::RawValue::from_string(args.to_string()).expect("raw args");
         let out = d.dispatch(mk_call(name, &raw)).await.expect("tool call");
-        serde_json::from_str(&out.content).expect("tool json")
+        serde_json::from_str(&out.text_content()).expect("tool json")
     }
 
     async fn call_tool_err(d: &MobMcpDispatcher, name: &str, args: serde_json::Value) -> ToolError {

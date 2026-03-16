@@ -129,7 +129,7 @@ async fn test_sdk_agentfactory_tool_dispatch() {
         .await;
 
     let result = agent
-        .run("Use the echo tool.".to_string())
+        .run("Use the echo tool.".to_string().into())
         .await
         .expect("agent run");
 

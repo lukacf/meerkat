@@ -236,11 +236,7 @@ impl MobToolDispatcher {
     ) -> Result<ToolResult, ToolError> {
         let content = serde_json::to_string(&value)
             .map_err(|error| ToolError::execution_failed(format!("encode tool result: {error}")))?;
-        Ok(ToolResult {
-            tool_use_id: call.id.to_string(),
-            content,
-            is_error: false,
-        })
+        Ok(ToolResult::new(call.id.to_string(), content, false))
     }
 }
 

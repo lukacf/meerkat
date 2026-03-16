@@ -155,6 +155,10 @@ pub struct PromptInput {
     pub header: InputHeader,
     /// The prompt text.
     pub text: String,
+    /// Optional multimodal content blocks. When present, `text` serves as the
+    /// text projection (backwards compat), and `blocks` carries the full content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocks: Option<Vec<meerkat_core::types::ContentBlock>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_metadata: Option<RuntimeTurnMetadata>,
 }
@@ -174,6 +178,35 @@ impl PromptInput {
                 correlation_id: None,
             },
             text: text.into(),
+            blocks: None,
+            turn_metadata,
+        }
+    }
+
+    /// Create a multimodal prompt from `ContentInput`.
+    pub fn from_content_input(
+        input: meerkat_core::types::ContentInput,
+        turn_metadata: Option<RuntimeTurnMetadata>,
+    ) -> Self {
+        let text = input.text_content();
+        let blocks = if input.has_images() {
+            Some(input.into_blocks())
+        } else {
+            None
+        };
+        Self {
+            header: InputHeader {
+                id: meerkat_core::lifecycle::InputId::new(),
+                timestamp: chrono::Utc::now(),
+                source: InputOrigin::Operator,
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            text,
+            blocks,
             turn_metadata,
         }
     }
@@ -188,6 +221,10 @@ pub struct PeerInput {
     pub convention: Option<PeerConvention>,
     /// Message body.
     pub body: String,
+    /// Optional multimodal content blocks. When present, `body` serves as the
+    /// text projection (backwards compat), and `blocks` carries the full content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocks: Option<Vec<meerkat_core::types::ContentBlock>>,
 }
 
 /// Peer communication conventions.
@@ -306,6 +343,7 @@ mod tests {
         let input = Input::Prompt(PromptInput {
             header: make_header(),
             text: "hello".into(),
+            blocks: None,
             turn_metadata: None,
         });
         let json = serde_json::to_value(&input).unwrap();
@@ -320,6 +358,7 @@ mod tests {
             header: make_header(),
             convention: Some(PeerConvention::Message),
             body: "hi there".into(),
+            blocks: None,
         });
         let json = serde_json::to_value(&input).unwrap();
         assert_eq!(json["input_type"], "peer");
@@ -336,6 +375,7 @@ mod tests {
                 intent: "mob.peer_added".into(),
             }),
             body: "Agent joined".into(),
+            blocks: None,
         });
         let json = serde_json::to_value(&input).unwrap();
         let parsed: Input = serde_json::from_value(json).unwrap();
@@ -355,6 +395,7 @@ mod tests {
                 status: ResponseTerminalStatus::Completed,
             }),
             body: "Done".into(),
+            blocks: None,
         });
         let json = serde_json::to_value(&input).unwrap();
         let parsed: Input = serde_json::from_value(json).unwrap();
@@ -370,6 +411,7 @@ mod tests {
                 phase: ResponseProgressPhase::InProgress,
             }),
             body: "Working...".into(),
+            blocks: None,
         });
         let json = serde_json::to_value(&input).unwrap();
         let parsed: Input = serde_json::from_value(json).unwrap();
@@ -438,6 +480,7 @@ mod tests {
         let prompt = Input::Prompt(PromptInput {
             header: make_header(),
             text: "hi".into(),
+            blocks: None,
             turn_metadata: None,
         });
         assert_eq!(prompt.kind_id().0, "prompt");
@@ -446,6 +489,7 @@ mod tests {
             header: make_header(),
             convention: Some(PeerConvention::Message),
             body: "hi".into(),
+            blocks: None,
         });
         assert_eq!(peer_msg.kind_id().0, "peer_message");
 
@@ -456,6 +500,7 @@ mod tests {
                 intent: "i".into(),
             }),
             body: "hi".into(),
+            blocks: None,
         });
         assert_eq!(peer_req.kind_id().0, "peer_request");
     }

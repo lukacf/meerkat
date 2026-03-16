@@ -96,9 +96,7 @@ pub fn create_spawn_session(prompt: &str, system_prompt: Option<&str>) -> Sessio
     }
 
     // Add the user prompt
-    session.push(Message::User(UserMessage {
-        content: prompt.to_string(),
-    }));
+    session.push(Message::User(UserMessage::text(prompt.to_string())));
 
     session
 }
@@ -108,9 +106,7 @@ pub fn create_fork_session(parent_session: &Session, fork_prompt: &str) -> Sessi
     let mut session = parent_session.clone();
 
     // Append the fork prompt as a new user message
-    session.push(Message::User(UserMessage {
-        content: fork_prompt.to_string(),
-    }));
+    session.push(Message::User(UserMessage::text(fork_prompt.to_string())));
 
     session
 }
@@ -422,12 +418,12 @@ pub async fn spawn_sub_agent_dyn(
                 #[cfg(feature = "comms")]
                 {
                     agent
-                        .run_host_mode_with_events(String::new(), child_event_tx)
+                        .run_host_mode_with_events(String::new().into(), child_event_tx)
                         .await
                 }
                 #[cfg(not(feature = "comms"))]
                 {
-                    agent.run_host_mode(String::new()).await
+                    agent.run_host_mode(String::new().into()).await
                 }
             } else {
                 // The session already has the user prompt, so use run_pending()
@@ -437,7 +433,7 @@ pub async fn spawn_sub_agent_dyn(
             (result, Some(forwarder))
         } else {
             let result = if host_mode {
-                agent.run_host_mode(String::new()).await
+                agent.run_host_mode(String::new().into()).await
             } else {
                 // The session already has the user prompt, so use run_pending()
                 // which runs from the existing session without adding a new message.
@@ -586,7 +582,7 @@ mod tests {
         let session = create_spawn_session("Do this task", None);
         assert_eq!(session.messages().len(), 1);
         match &session.messages()[0] {
-            Message::User(u) => assert_eq!(u.content, "Do this task"),
+            Message::User(u) => assert_eq!(u.text_content(), "Do this task"),
             _ => unreachable!("Expected User message"),
         }
     }
@@ -600,7 +596,7 @@ mod tests {
             _ => unreachable!("Expected System message"),
         }
         match &session.messages()[1] {
-            Message::User(u) => assert_eq!(u.content, "Do this task"),
+            Message::User(u) => assert_eq!(u.text_content(), "Do this task"),
             _ => unreachable!("Expected User message"),
         }
     }
@@ -608,14 +604,14 @@ mod tests {
     #[test]
     fn test_create_fork_session() {
         let mut parent = Session::new();
-        parent.push(Message::User(UserMessage {
-            content: "Original prompt".to_string(),
-        }));
+        parent.push(Message::User(UserMessage::text(
+            "Original prompt".to_string(),
+        )));
 
         let forked = create_fork_session(&parent, "Continue with this");
         assert_eq!(forked.messages().len(), 2);
         match &forked.messages()[1] {
-            Message::User(u) => assert_eq!(u.content, "Continue with this"),
+            Message::User(u) => assert_eq!(u.text_content(), "Continue with this"),
             _ => unreachable!("Expected User message"),
         }
     }

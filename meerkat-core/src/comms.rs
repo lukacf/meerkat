@@ -6,6 +6,7 @@
 
 use crate::event::{AgentEvent, EventEnvelope};
 use crate::interaction::{InteractionId, ResponseStatus};
+use crate::types::ContentBlock;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -60,6 +61,7 @@ pub struct CommsCommandRequest {
     pub kind: String,
     pub to: Option<String>,
     pub body: Option<String>,
+    pub blocks: Option<Vec<ContentBlock>>,
     pub intent: Option<String>,
     pub params: Option<serde_json::Value>,
     pub in_reply_to: Option<String>,
@@ -153,6 +155,7 @@ impl CommsCommandRequest {
                 Ok(CommsCommand::Input {
                     session_id: session_id.clone(),
                     body,
+                    blocks: self.blocks.clone(),
                     source,
                     stream,
                     allow_self_session: self.allow_self_session.unwrap_or(false),
@@ -164,6 +167,7 @@ impl CommsCommandRequest {
                     Ok(CommsCommand::PeerMessage {
                         to,
                         body: self.body.clone().unwrap_or_default(),
+                        blocks: self.blocks.clone(),
                     })
                 } else {
                     Err(errors)
@@ -354,12 +358,17 @@ pub enum CommsCommand {
     Input {
         session_id: crate::types::SessionId,
         body: String,
+        blocks: Option<Vec<ContentBlock>>,
         source: InputSource,
         stream: InputStreamMode,
         allow_self_session: bool,
     },
     /// Send a one-way peer message.
-    PeerMessage { to: PeerName, body: String },
+    PeerMessage {
+        to: PeerName,
+        body: String,
+        blocks: Option<Vec<ContentBlock>>,
+    },
     /// Send a request to a peer.
     PeerRequest {
         to: PeerName,

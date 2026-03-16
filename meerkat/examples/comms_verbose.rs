@@ -72,7 +72,7 @@ impl AgentLlmClient for LoggingLlmAdapter {
         // Show last user message
         for msg in messages.iter().rev() {
             if let Message::User(u) = msg {
-                let preview: String = u.content.chars().take(150).collect();
+                let preview: String = u.text_content().chars().take(150).collect();
                 println!("║ Last user message: {preview}...");
                 break;
             }
@@ -237,7 +237,7 @@ impl AgentToolDispatcher for LoggingToolDispatcher {
 
         match &result {
             Ok(r) => {
-                println!("┃ SUCCESS: {}", r.content);
+                println!("┃ SUCCESS: {}", r.text_content());
             }
             Err(e) => {
                 println!("┃ ERROR: {e}");
@@ -426,7 +426,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("╚══════════════════════════════════════════════════════════════╝");
 
     let result_a = agent_a
-        .run("Send the message 'Hello from Agent A!' to agent-b using the send tool.".to_string())
+        .run("Send the message 'Hello from Agent A!' to agent-b using the send tool.".into())
         .await?;
 
     println!("\n═══════════════════════════════════════════════════════════════");
@@ -480,8 +480,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 from: msg.from_pubkey,
                 to: agent_b.comms_manager().keypair().public_key(),
                 kind: match msg.content {
-                    meerkat_comms::agent::CommsContent::Message { body } => {
-                        meerkat_comms::MessageKind::Message { body }
+                    meerkat_comms::agent::CommsContent::Message { body, .. } => {
+                        meerkat_comms::MessageKind::Message { body, blocks: None }
                     }
                     _ => continue,
                 },

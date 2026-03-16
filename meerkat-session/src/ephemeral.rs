@@ -65,7 +65,7 @@ pub struct SessionSnapshot {
 /// Commands sent from the service to a session task.
 enum SessionCommand {
     StartTurn {
-        prompt: String,
+        prompt: meerkat_core::types::ContentInput,
         host_mode: bool,
         event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
         result_tx: oneshot::Sender<Result<RunResult, meerkat_core::error::AgentError>>,
@@ -75,6 +75,10 @@ enum SessionCommand {
     ReplaceClient {
         client: Arc<dyn meerkat_core::AgentLlmClient>,
         reply_tx: oneshot::Sender<()>,
+    },
+    StageToolFilter {
+        filter: meerkat_core::ToolFilter,
+        reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
     },
     ReadSnapshot {
         reply_tx: oneshot::Sender<SessionSnapshot>,
@@ -165,7 +169,7 @@ pub trait SessionAgent: Send {
     /// Run the agent with the given prompt, streaming events.
     async fn run_with_events(
         &mut self,
-        prompt: String,
+        prompt: meerkat_core::types::ContentInput,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError>;
 
@@ -174,7 +178,7 @@ pub trait SessionAgent: Send {
     /// Event streaming should use the agent's build-time configured event channel.
     async fn run_host_mode(
         &mut self,
-        prompt: String,
+        prompt: meerkat_core::types::ContentInput,
     ) -> Result<RunResult, meerkat_core::error::AgentError>;
 
     /// Stage skill references to resolve and inject on the next turn.
@@ -188,6 +192,14 @@ pub trait SessionAgent: Send {
 
     /// Replace the LLM client for subsequent turns.
     fn replace_client(&mut self, _client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>) {}
+
+    /// Stage an external tool visibility filter for subsequent turns.
+    fn stage_external_tool_filter(
+        &mut self,
+        _filter: meerkat_core::ToolFilter,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        Ok(())
+    }
 
     /// Cancel the currently running turn.
     fn cancel(&mut self);
@@ -661,7 +673,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         let (result_tx, result_rx) = oneshot::channel();
 
         // Prepend additional instructions as system notices to the prompt.
-        let prompt = match &req.additional_instructions {
+        let prompt: meerkat_core::types::ContentInput = match &req.additional_instructions {
             Some(instructions) if !instructions.is_empty() => {
                 let mut prefix = String::new();
                 for instruction in instructions {
@@ -669,10 +681,17 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                     prefix.push_str(instruction);
                     prefix.push_str("]\n\n");
                 }
-                prefix.push_str(&req.prompt);
-                prefix
+                if req.prompt.has_images() {
+                    // Preserve original block ordering; prepend instructions as a leading text block.
+                    let mut blocks = vec![meerkat_core::types::ContentBlock::Text { text: prefix }];
+                    blocks.extend(req.prompt.clone().into_blocks());
+                    meerkat_core::types::ContentInput::Blocks(blocks)
+                } else {
+                    prefix.push_str(&req.prompt.text_content());
+                    meerkat_core::types::ContentInput::Text(prefix)
+                }
             }
-            _ => req.prompt,
+            _ => req.prompt.clone(),
         };
 
         {
@@ -737,6 +756,35 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                 "Session task dropped reply channel".to_string(),
             ))
         })
+    }
+
+    async fn set_session_tool_filter(
+        &self,
+        id: &SessionId,
+        filter: meerkat_core::ToolFilter,
+    ) -> Result<(), SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .command_tx
+            .send(SessionCommand::StageToolFilter { filter, reply_tx })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        reply_rx
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task dropped reply channel".to_string(),
+                ))
+            })?
+            .map_err(SessionError::Agent)
     }
 
     async fn interrupt(&self, id: &SessionId) -> Result<(), SessionError> {
@@ -991,6 +1039,10 @@ async fn session_task<A: SessionAgent>(
             SessionCommand::ReplaceClient { client, reply_tx } => {
                 agent.replace_client(client);
                 let _ = reply_tx.send(());
+                continue;
+            }
+            SessionCommand::StageToolFilter { filter, reply_tx } => {
+                let _ = reply_tx.send(agent.stage_external_tool_filter(filter));
                 continue;
             }
             SessionCommand::StartTurn {

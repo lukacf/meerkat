@@ -482,9 +482,7 @@ mod tests {
         // Create a session with an existing system prompt
         let mut existing_session = Session::new();
         existing_session.set_system_prompt("Original system prompt".to_string());
-        existing_session.push(Message::User(UserMessage {
-            content: "Hello".to_string(),
-        }));
+        existing_session.push(Message::User(UserMessage::text("Hello".to_string())));
 
         // Resume the session with a NEW system prompt
         let agent = AgentBuilder::new()
@@ -511,7 +509,7 @@ mod tests {
         assert!(messages.len() >= 2, "Should have system + user messages");
         match &messages[1] {
             Message::User(user) => {
-                assert_eq!(user.content, "Hello");
+                assert_eq!(user.text_content(), "Hello");
             }
             other => panic!("Second message should be User, got: {other:?}"),
         }
@@ -569,7 +567,7 @@ mod tests {
             .build(client, tools, store)
             .await;
 
-        let result = agent.run("hello".to_string()).await;
+        let result = agent.run("hello".to_string().into()).await;
         assert!(result.is_ok());
 
         let mut saw_turn_started = false;

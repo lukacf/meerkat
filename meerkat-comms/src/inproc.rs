@@ -12,7 +12,7 @@
 //! InprocRegistry::global().register("my-agent", pubkey, sender);
 //!
 //! // Send to an inproc peer (via Router with inproc:// address)
-//! router.send("my-agent", MessageKind::Message { body: "hello".into() }).await?;
+//! router.send("my-agent", MessageKind::Message { blocks: None, body: "hello".into() }).await?;
 //!
 //! // Unregister when done
 //! InprocRegistry::global().unregister(&pubkey);
@@ -698,6 +698,7 @@ mod tests {
             &sender_keypair,
             "receiver",
             MessageKind::Message {
+                blocks: None,
                 body: "hello inproc".to_string(),
             },
         );
@@ -712,7 +713,7 @@ mod tests {
                 assert_eq!(envelope.from, sender_keypair.public_key());
                 assert_eq!(envelope.to, receiver_keypair.public_key());
                 match &envelope.kind {
-                    MessageKind::Message { body } => {
+                    MessageKind::Message { blocks: None, body } => {
                         assert_eq!(body, "hello inproc");
                     }
                     _ => panic!("expected Message kind"),
@@ -733,6 +734,7 @@ mod tests {
             &sender_keypair,
             "nonexistent",
             MessageKind::Message {
+                blocks: None,
                 body: "hello".to_string(),
             },
         );
@@ -756,6 +758,7 @@ mod tests {
             &sender_keypair,
             "receiver",
             MessageKind::Message {
+                blocks: None,
                 body: "hello".to_string(),
             },
         );
@@ -792,6 +795,7 @@ mod tests {
             &sender_keypair,
             "receiver",
             MessageKind::Message {
+                blocks: None,
                 body: "hello scoped".to_string(),
             },
             true,
@@ -804,6 +808,7 @@ mod tests {
             &sender_keypair,
             "receiver",
             MessageKind::Message {
+                blocks: None,
                 body: "should not deliver".to_string(),
             },
             true,

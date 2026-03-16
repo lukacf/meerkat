@@ -7,7 +7,7 @@ use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream};
 use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat_core::schema::{CompiledSchema, SchemaCompat, SchemaError, SchemaWarning};
-use meerkat_core::{Message, OutputSchema, Provider, StopReason, Usage};
+use meerkat_core::{ContentBlock, Message, OutputSchema, Provider, StopReason, Usage};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
@@ -76,10 +76,37 @@ impl GeminiClient {
                     }));
                 }
                 Message::User(u) => {
-                    contents.push(serde_json::json!({
-                        "role": "user",
-                        "parts": [{"text": u.content}]
-                    }));
+                    if meerkat_core::has_images(&u.content) {
+                        let parts: Vec<Value> = u
+                            .content
+                            .iter()
+                            .map(|block| match block {
+                                ContentBlock::Text { text } => serde_json::json!({
+                                    "text": text
+                                }),
+                                ContentBlock::Image {
+                                    media_type, data, ..
+                                } => serde_json::json!({
+                                    "inlineData": {
+                                        "mimeType": media_type,
+                                        "data": data
+                                    }
+                                }),
+                                _ => serde_json::json!({
+                                    "text": block.text_projection()
+                                }),
+                            })
+                            .collect();
+                        contents.push(serde_json::json!({
+                            "role": "user",
+                            "parts": parts
+                        }));
+                    } else {
+                        contents.push(serde_json::json!({
+                            "role": "user",
+                            "parts": [{"text": u.text_content()}]
+                        }));
+                    }
                 }
                 Message::Assistant(_) => {
                     return Err(LlmError::InvalidRequest {
@@ -145,28 +172,48 @@ impl GeminiClient {
                 Message::ToolResults { results } => {
                     // Per spec section 2.3: thoughtSignature NEVER on functionResponse
                     // Signature belongs on functionCall, not on the response
-                    let parts: Vec<Value> = results
-                        .iter()
-                        .map(|r| {
-                            let function_name = tool_name_by_id
-                                .get(&r.tool_use_id)
-                                .cloned()
-                                .unwrap_or_else(|| r.tool_use_id.clone());
-                            serde_json::json!({
-                                "functionResponse": {
-                                    "name": function_name,
-                                    "response": {
-                                        "content": r.content,
-                                        "error": r.is_error
-                                    }
+                    let mut parts: Vec<Value> = Vec::new();
+
+                    for r in results {
+                        let function_name = tool_name_by_id
+                            .get(&r.tool_use_id)
+                            .cloned()
+                            .unwrap_or_else(|| r.tool_use_id.clone());
+
+                        // functionResponse only supports text content. For tool
+                        // results with images we emit text in the functionResponse
+                        // and append the images as separate inlineData parts so
+                        // the model still sees the actual image data.
+                        parts.push(serde_json::json!({
+                            "functionResponse": {
+                                "name": function_name,
+                                "response": {
+                                    "content": r.text_content(),
+                                    "error": r.is_error
                                 }
-                            })
-                            // NOTE: thoughtSignature is intentionally NOT included here
-                            // Verified by scripts/test_gemini_thought_signature.py:
-                            // - sig on functionCall only: PASS
-                            // - sig on functionResponse only: FAIL (400 error)
-                        })
-                        .collect();
+                            }
+                        }));
+                        // NOTE: thoughtSignature is intentionally NOT included here
+                        // Verified by scripts/test_gemini_thought_signature.py:
+                        // - sig on functionCall only: PASS
+                        // - sig on functionResponse only: FAIL (400 error)
+
+                        if r.has_images() {
+                            for block in &r.content {
+                                if let ContentBlock::Image {
+                                    media_type, data, ..
+                                } = block
+                                {
+                                    parts.push(serde_json::json!({
+                                        "inlineData": {
+                                            "mimeType": media_type,
+                                            "data": data
+                                        }
+                                    }));
+                                }
+                            }
+                        }
+                    }
 
                     contents.push(serde_json::json!({
                         "role": "user",
@@ -944,7 +991,9 @@ struct GeminiUsage {
 )]
 mod tests {
     use super::*;
-    use meerkat_core::{AssistantBlock, BlockAssistantMessage, ProviderMeta, UserMessage};
+    use meerkat_core::{
+        AssistantBlock, BlockAssistantMessage, ContentBlock, ProviderMeta, UserMessage,
+    };
 
     fn assert_no_const_or_type_arrays(value: &Value) {
         match value {
@@ -977,9 +1026,7 @@ mod tests {
         let client = GeminiClient::new("test-key".to_string());
         let request = LlmRequest::new(
             "gemini-1.5-pro",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_provider_param("thinking_budget", 10000);
 
@@ -1002,9 +1049,7 @@ mod tests {
         let client = GeminiClient::new("test-key".to_string());
         let request = LlmRequest::new(
             "gemini-1.5-pro",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_provider_param("top_k", 40);
 
@@ -1022,9 +1067,7 @@ mod tests {
         let client = GeminiClient::new("test-key".to_string());
         let request = LlmRequest::new(
             "gemini-1.5-pro",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_provider_param("top_k", 50)
         .with_provider_param("thinking_budget", 5000);
@@ -1050,9 +1093,7 @@ mod tests {
         let client = GeminiClient::new("test-key".to_string());
         let request = LlmRequest::new(
             "gemini-1.5-pro",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         );
 
         let body = client.build_request_body(&request)?;
@@ -1075,9 +1116,7 @@ mod tests {
         let request = LlmRequest::new(
             "gemini-1.5-pro",
             vec![
-                Message::User(UserMessage {
-                    content: "test".to_string(),
-                }),
+                Message::User(UserMessage::text("test".to_string())),
                 Message::BlockAssistant(BlockAssistantMessage {
                     blocks: vec![AssistantBlock::ToolUse {
                         id: "call_1".to_string(),
@@ -1307,9 +1346,7 @@ mod tests {
 
         let request = LlmRequest::new(
             "gemini-3-pro-preview",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_provider_param(
             "structured_output",
@@ -1358,9 +1395,7 @@ mod tests {
 
         let request = LlmRequest::new(
             "gemini-3-pro-preview",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_provider_param("structured_output", serde_json::json!({"schema": schema}));
 
@@ -1524,9 +1559,7 @@ mod tests {
         let client = GeminiClient::new("test-key".to_string());
         let request = LlmRequest::new(
             "gemini-3-pro-preview",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_provider_param(
             "structured_output",
@@ -1562,9 +1595,7 @@ mod tests {
 
         let request = LlmRequest::new(
             "gemini-3-pro-preview",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         );
 
         let body = client.build_request_body(&request)?;
@@ -1602,9 +1633,7 @@ mod tests {
         let client = GeminiClient::new("test-key".to_string());
         let request = LlmRequest::new(
             "gemini-3-pro-preview",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_tools(vec![Arc::new(ToolDef {
             name: "test_tool".to_string(),
@@ -1690,9 +1719,7 @@ mod tests {
         let client = GeminiClient::new("test-key".to_string());
         let request = LlmRequest::new(
             "gemini-3-pro-preview",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_tools(vec![Arc::new(ToolDef {
             name: "test_tool".to_string(),
@@ -1763,9 +1790,7 @@ mod tests {
         let client = GeminiClient::new("test-key".to_string());
         let request = LlmRequest::new(
             "gemini-3-pro-preview",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_tools(vec![Arc::new(ToolDef {
             name: "test_tool".to_string(),
@@ -1848,9 +1873,7 @@ mod tests {
         let client = GeminiClient::new("test-key".to_string());
         let request = LlmRequest::new(
             "gemini-3-pro-preview",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_tools(vec![Arc::new(ToolDef {
             name: "test_tool".to_string(),
@@ -1898,9 +1921,7 @@ mod tests {
         let client = GeminiClient::new("test-key".to_string());
         let request = LlmRequest::new(
             "gemini-3-pro-preview",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_tools(vec![Arc::new(ToolDef {
             name: "test_tool".to_string(),
@@ -1945,9 +1966,7 @@ mod tests {
         let client = GeminiClient::new("test-key".to_string());
         let request = LlmRequest::new(
             "gemini-3-pro-preview",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_tools(vec![Arc::new(ToolDef {
             name: "upsert_record".to_string(),
@@ -2102,9 +2121,7 @@ mod tests {
         let request = LlmRequest::new(
             "gemini-3-pro-preview",
             vec![
-                Message::User(UserMessage {
-                    content: "What's the weather?".to_string(),
-                }),
+                Message::User(UserMessage::text("What's the weather?".to_string())),
                 Message::BlockAssistant(BlockAssistantMessage {
                     blocks: vec![AssistantBlock::ToolUse {
                         id: "call_1".to_string(),
@@ -2259,5 +2276,151 @@ mod tests {
             }
             _ => panic!("expected TextDelta"),
         }
+    }
+
+    // =========================================================================
+    // Multimodal content (ContentBlock::Image) serialization tests
+    // =========================================================================
+
+    #[test]
+    fn gemini_user_message_with_image_inline_data() -> Result<(), Box<dyn std::error::Error>> {
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-3.1-pro-preview",
+            vec![Message::User(UserMessage::with_blocks(vec![
+                ContentBlock::Text {
+                    text: "describe this".to_string(),
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: "iVBOR...".to_string(),
+                    source_path: Some("/tmp/img.png".to_string()),
+                },
+            ]))],
+        );
+
+        let body = client.build_request_body(&request)?;
+        let contents = body["contents"].as_array().ok_or("missing contents")?;
+        let user_content = &contents[0];
+
+        assert_eq!(user_content["role"], "user");
+
+        let parts = user_content["parts"].as_array().ok_or("missing parts")?;
+        assert_eq!(parts.len(), 2);
+
+        assert_eq!(parts[0]["text"], "describe this");
+
+        assert_eq!(parts[1]["inlineData"]["mimeType"], "image/png");
+        assert_eq!(parts[1]["inlineData"]["data"], "iVBOR...");
+
+        // source_path must NOT leak
+        let body_str = serde_json::to_string(&body)?;
+        assert!(
+            !body_str.contains("source_path"),
+            "source_path must never appear in provider payload"
+        );
+        assert!(
+            !body_str.contains("/tmp/img.png"),
+            "source_path value must never appear in provider payload"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn gemini_text_only_user_message_stays_simple() -> Result<(), Box<dyn std::error::Error>> {
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-3.1-pro-preview",
+            vec![Message::User(UserMessage::text("just text"))],
+        );
+
+        let body = client.build_request_body(&request)?;
+        let contents = body["contents"].as_array().ok_or("missing contents")?;
+        let parts = contents[0]["parts"].as_array().ok_or("missing parts")?;
+
+        // Text-only should use simple single-part format
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["text"], "just text");
+        assert!(
+            parts[0].get("inlineData").is_none(),
+            "text-only should not have inlineData"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn gemini_tool_result_with_image_preserves_inline_data()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::value::RawValue;
+        let client = GeminiClient::new("test-key".to_string());
+        let args_raw = RawValue::from_string(json!({"url": "http://example.com"}).to_string())?;
+
+        let request = LlmRequest::new(
+            "gemini-3.1-pro-preview",
+            vec![
+                Message::User(UserMessage::text("take a screenshot")),
+                Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::ToolUse {
+                        id: "call_1".to_string(),
+                        name: "screenshot".to_string(),
+                        args: args_raw,
+                        meta: None,
+                    }],
+                    stop_reason: StopReason::ToolUse,
+                }),
+                Message::ToolResults {
+                    results: vec![meerkat_core::ToolResult::with_blocks(
+                        "call_1".to_string(),
+                        vec![
+                            ContentBlock::Text {
+                                text: "captured".to_string(),
+                            },
+                            ContentBlock::Image {
+                                media_type: "image/png".to_string(),
+                                data: "iVBOR...".to_string(),
+                                source_path: None,
+                            },
+                        ],
+                        false,
+                    )],
+                },
+            ],
+        );
+
+        let body = client.build_request_body(&request)?;
+        let contents = body["contents"].as_array().ok_or("missing contents")?;
+
+        // Last content entry is the tool result
+        let tool_result_content = contents.last().ok_or("no last content")?;
+        let parts = tool_result_content["parts"]
+            .as_array()
+            .ok_or("missing parts")?;
+
+        // First part: functionResponse with text content
+        let response = &parts[0]["functionResponse"]["response"];
+        let content_str = response["content"].as_str().ok_or("content not string")?;
+        assert!(
+            content_str.contains("captured"),
+            "text content should be preserved in functionResponse"
+        );
+
+        // Second part: inlineData with the actual image
+        assert!(
+            parts.len() >= 2,
+            "should have functionResponse + inlineData parts, got {} parts",
+            parts.len()
+        );
+        let inline_data = &parts[1]["inlineData"];
+        assert_eq!(
+            inline_data["mimeType"].as_str(),
+            Some("image/png"),
+            "image mimeType should be preserved"
+        );
+        assert_eq!(
+            inline_data["data"].as_str(),
+            Some("iVBOR..."),
+            "image base64 data should be preserved"
+        );
+        Ok(())
     }
 }

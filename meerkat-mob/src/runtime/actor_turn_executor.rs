@@ -346,7 +346,7 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                         run_id,
                         step_id,
                         StartTurnRequest {
-                            prompt: message,
+                            prompt: message.into(),
                             event_tx: Some(event_tx),
                             host_mode: false,
                             skill_references: None,

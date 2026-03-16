@@ -584,9 +584,7 @@ mod tests {
     fn test_fork_shares_arc_no_clone() {
         let mut session = Session::new();
         for i in 0..100 {
-            session.push(Message::User(UserMessage {
-                content: format!("Message {i}"),
-            }));
+            session.push(Message::User(UserMessage::text(format!("Message {i}"))));
         }
 
         // Fork should share the same Arc, not clone messages
@@ -601,9 +599,7 @@ mod tests {
     fn test_fork_at_shares_arc_prefix() {
         let mut session = Session::new();
         for i in 0..100 {
-            session.push(Message::User(UserMessage {
-                content: format!("Message {i}"),
-            }));
+            session.push(Message::User(UserMessage::text(format!("Message {i}"))));
         }
 
         // Fork at 50 should create new Arc with copied prefix
@@ -617,18 +613,14 @@ mod tests {
     #[test]
     fn test_push_cow_behavior() {
         let mut session = Session::new();
-        session.push(Message::User(UserMessage {
-            content: "First".to_string(),
-        }));
+        session.push(Message::User(UserMessage::text("First".to_string())));
 
         // Fork shares the Arc
         let forked = session.fork();
         assert!(Arc::ptr_eq(&session.messages, &forked.messages));
 
         // Push on original triggers CoW - original gets new Arc
-        session.push(Message::User(UserMessage {
-            content: "Second".to_string(),
-        }));
+        session.push(Message::User(UserMessage::text("Second".to_string())));
 
         // Now they should have different Arcs
         assert!(!Arc::ptr_eq(&session.messages, &forked.messages));
@@ -645,15 +637,9 @@ mod tests {
 
         // Use push_batch to add multiple messages without repeated syscalls
         session.push_batch(vec![
-            Message::User(UserMessage {
-                content: "First".to_string(),
-            }),
-            Message::User(UserMessage {
-                content: "Second".to_string(),
-            }),
-            Message::User(UserMessage {
-                content: "Third".to_string(),
-            }),
+            Message::User(UserMessage::text("First".to_string())),
+            Message::User(UserMessage::text("Second".to_string())),
+            Message::User(UserMessage::text("Third".to_string())),
         ]);
 
         assert_eq!(session.messages().len(), 3);
@@ -682,9 +668,7 @@ mod tests {
         // Small delay to ensure time changes
         std::thread::sleep(std::time::Duration::from_millis(10));
 
-        session.push(Message::User(UserMessage {
-            content: "Hello".to_string(),
-        }));
+        session.push(Message::User(UserMessage::text("Hello".to_string())));
 
         assert_eq!(session.messages().len(), 1);
         assert!(session.updated_at() > initial_updated);
@@ -696,9 +680,7 @@ mod tests {
         session.push(Message::System(SystemMessage {
             content: "System prompt".to_string(),
         }));
-        session.push(Message::User(UserMessage {
-            content: "Hello".to_string(),
-        }));
+        session.push(Message::User(UserMessage::text("Hello".to_string())));
         session.push(Message::Assistant(AssistantMessage {
             content: "Hi!".to_string(),
             tool_calls: vec![],
@@ -727,9 +709,7 @@ mod tests {
     #[test]
     fn test_session_serialization() {
         let mut session = Session::new();
-        session.push(Message::User(UserMessage {
-            content: "Test".to_string(),
-        }));
+        session.push(Message::User(UserMessage::text("Test".to_string())));
 
         let json = serde_json::to_string(&session).unwrap();
         let parsed: Session = serde_json::from_str(&json).unwrap();
@@ -742,9 +722,7 @@ mod tests {
     #[test]
     fn test_session_meta_from_session() {
         let mut session = Session::new();
-        session.push(Message::User(UserMessage {
-            content: "Hello".to_string(),
-        }));
+        session.push(Message::User(UserMessage::text("Hello".to_string())));
         session.push(Message::Assistant(AssistantMessage {
             content: "Hi!".to_string(),
             tool_calls: vec![],

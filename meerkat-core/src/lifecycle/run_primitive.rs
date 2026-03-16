@@ -29,6 +29,10 @@ pub enum RunApplyBoundary {
 pub enum CoreRenderable {
     /// Plain text content.
     Text { text: String },
+    /// Multimodal content blocks (text + images).
+    Blocks {
+        blocks: Vec<crate::types::ContentBlock>,
+    },
     /// JSON-structured content. Uses `Value` because the runtime layer constructs
     /// these from various typed sources (peer messages, external events) and core
     /// needs to render them into conversation messages — not a pass-through boundary.

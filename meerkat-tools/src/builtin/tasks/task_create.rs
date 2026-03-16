@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use crate::builtin::store::TaskStore;
 use crate::builtin::types::{NewTask, TaskId, TaskPriority};
-use crate::builtin::{BuiltinTool, BuiltinToolError};
+use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 
 /// Parameters for the task_create tool
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -113,7 +113,7 @@ impl BuiltinTool for TaskCreateTool {
         true
     }
 
-    async fn call(&self, args: Value) -> Result<Value, BuiltinToolError> {
+    async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
         let params: TaskCreateParams = serde_json::from_value(args)
             .map_err(|e| BuiltinToolError::InvalidArgs(e.to_string()))?;
 
@@ -138,7 +138,9 @@ impl BuiltinTool for TaskCreateTool {
             .await
             .map_err(|e| BuiltinToolError::TaskError(e.to_string()))?;
 
-        serde_json::to_value(&task).map_err(|e| BuiltinToolError::ExecutionFailed(e.to_string()))
+        serde_json::to_value(&task)
+            .map(ToolOutput::Json)
+            .map_err(|e| BuiltinToolError::ExecutionFailed(e.to_string()))
     }
 }
 
@@ -256,7 +258,7 @@ mod tests {
             "description": "Add the new feature X to the system"
         });
 
-        let result = tool.call(args).await.unwrap();
+        let result = tool.call(args).await.unwrap().into_json().unwrap();
         let task: Task = serde_json::from_value(result).unwrap();
 
         assert_eq!(task.subject, "Implement feature X");
@@ -284,7 +286,7 @@ mod tests {
             "description": "This task was created by a session"
         });
 
-        let result = tool.call(args).await.unwrap();
+        let result = tool.call(args).await.unwrap().into_json().unwrap();
         let task: Task = serde_json::from_value(result).unwrap();
 
         assert_eq!(
@@ -308,7 +310,7 @@ mod tests {
             "description": "Not urgent",
             "priority": "low"
         });
-        let result = tool.call(args).await.unwrap();
+        let result = tool.call(args).await.unwrap().into_json().unwrap();
         let task: Task = serde_json::from_value(result).unwrap();
         assert_eq!(task.priority, TaskPriority::Low);
 
@@ -318,7 +320,7 @@ mod tests {
             "description": "Normal urgency",
             "priority": "medium"
         });
-        let result = tool.call(args).await.unwrap();
+        let result = tool.call(args).await.unwrap().into_json().unwrap();
         let task: Task = serde_json::from_value(result).unwrap();
         assert_eq!(task.priority, TaskPriority::Medium);
 
@@ -328,7 +330,7 @@ mod tests {
             "description": "Very urgent",
             "priority": "high"
         });
-        let result = tool.call(args).await.unwrap();
+        let result = tool.call(args).await.unwrap().into_json().unwrap();
         let task: Task = serde_json::from_value(result).unwrap();
         assert_eq!(task.priority, TaskPriority::High);
     }
@@ -344,7 +346,7 @@ mod tests {
             "labels": ["bug", "urgent", "backend"]
         });
 
-        let result = tool.call(args).await.unwrap();
+        let result = tool.call(args).await.unwrap().into_json().unwrap();
         let task: Task = serde_json::from_value(result).unwrap();
 
         assert_eq!(task.labels.len(), 3);
@@ -364,7 +366,7 @@ mod tests {
             "blocks": ["01ARZ3NDEKTSV4RRFFQ69G5FAV", "01ARZ3NDEKTSV4RRFFQ69G5FAW"]
         });
 
-        let result = tool.call(args).await.unwrap();
+        let result = tool.call(args).await.unwrap().into_json().unwrap();
         let task: Task = serde_json::from_value(result).unwrap();
 
         assert_eq!(task.blocks.len(), 2);
@@ -385,7 +387,7 @@ mod tests {
             "blocks": ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]
         });
 
-        let result = tool.call(args).await.unwrap();
+        let result = tool.call(args).await.unwrap().into_json().unwrap();
         let task: Task = serde_json::from_value(result).unwrap();
 
         assert_eq!(task.subject, "Complete task");
@@ -476,7 +478,7 @@ mod tests {
             "labels": []
         });
 
-        let result = tool.call(args).await.unwrap();
+        let result = tool.call(args).await.unwrap().into_json().unwrap();
         let task: Task = serde_json::from_value(result).unwrap();
 
         assert!(task.labels.is_empty());
@@ -493,7 +495,7 @@ mod tests {
                 "subject": format!("Task {}", i),
                 "description": format!("Description for task {}", i)
             });
-            tool.call(args).await.unwrap();
+            tool.call(args).await.unwrap().into_json().unwrap();
         }
 
         // Verify all tasks were created

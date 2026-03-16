@@ -804,10 +804,9 @@ async fn e2e_openai_structured_output_strict_nested_schema()
     let client = OpenAiClient::new(api_key);
     let request = LlmRequest::new(
         "gpt-5.2",
-        vec![Message::User(UserMessage {
-            content: "Return JSON with person={name:'Dina',age:41} and tags=[{label:'runner'}]."
-                .to_string(),
-        })],
+        vec![Message::User(UserMessage::text(
+            "Return JSON with person={name:'Dina',age:41} and tags=[{label:'runner'}].",
+        ))],
     )
     .with_provider_param(
         "structured_output",
@@ -842,10 +841,9 @@ async fn e2e_anthropic_structured_output_strict_nested_schema()
     let client = AnthropicClient::new(api_key)?;
     let request = LlmRequest::new(
         "claude-sonnet-4-5",
-        vec![Message::User(UserMessage {
-            content: "Return JSON with person={name:'Evan',age:29} and tags=[{label:'designer'}]."
-                .to_string(),
-        })],
+        vec![Message::User(UserMessage::text(
+            "Return JSON with person={name:'Evan',age:29} and tags=[{label:'designer'}].",
+        ))],
     )
     .with_provider_param(
         "structured_output",

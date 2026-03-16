@@ -294,15 +294,18 @@ impl MobBuilder {
             .into_iter()
             .filter(|event| event.mob_id == definition.id)
             .collect();
-        let mut roster = Roster::project(&mob_events);
-        let task_board = TaskBoard::project(&mob_events);
-        // Determine resumed state from events in the current epoch (after the
-        // last MobReset, or all events if no reset has occurred).
+        // Determine the current epoch boundary (after the last MobReset, or
+        // all events if no reset has occurred). Roster and task board are
+        // projected only from the current epoch to avoid replaying stale
+        // spawn/retire sequences from prior epochs.
         let epoch_start = mob_events
             .iter()
             .rposition(|event| matches!(event.kind, MobEventKind::MobReset))
             .map_or(0, |pos| pos + 1);
-        let resumed_state = if mob_events[epoch_start..]
+        let epoch_events = &mob_events[epoch_start..];
+        let mut roster = Roster::project(epoch_events);
+        let task_board = TaskBoard::project(epoch_events);
+        let resumed_state = if epoch_events
             .iter()
             .any(|event| matches!(event.kind, MobEventKind::MobCompleted))
         {

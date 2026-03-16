@@ -40,6 +40,7 @@ pub fn interaction_to_peer_input(
         },
         convention: Some(convention),
         body,
+        blocks: None,
     })
 }
 

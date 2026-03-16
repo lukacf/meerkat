@@ -173,7 +173,7 @@ impl MobActor {
                         .start_turn(
                             &member_ref,
                             meerkat_core::service::StartTurnRequest {
-                                prompt: message,
+                                prompt: message.into(),
                                 event_tx: None,
                                 host_mode: false,
                                 skill_references: None,
@@ -334,7 +334,7 @@ impl MobActor {
                 .start_turn(
                     &member_ref_cloned,
                     meerkat_core::service::StartTurnRequest {
-                        prompt,
+                        prompt: prompt.into(),
                         event_tx: None,
                         host_mode: true,
                         skill_references: None,
@@ -2328,7 +2328,7 @@ impl MobActor {
                     ))
                 })?;
                 let req = meerkat_core::service::StartTurnRequest {
-                    prompt: message,
+                    prompt: message.into(),
                     event_tx: None,
                     host_mode: false,
                     skill_references: None,

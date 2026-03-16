@@ -227,11 +227,11 @@ mod tests {
 
         async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
             if self.tool_names.contains(&call.name) {
-                Ok(ToolResult {
-                    tool_use_id: call.id.to_string(),
-                    content: json!({"called": call.name}).to_string(),
-                    is_error: false,
-                })
+                Ok(ToolResult::new(
+                    call.id.to_string(),
+                    json!({"called": call.name}).to_string(),
+                    false,
+                ))
             } else {
                 Err(ToolError::NotFound {
                     name: call.name.to_string(),

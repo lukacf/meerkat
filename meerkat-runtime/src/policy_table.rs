@@ -465,6 +465,7 @@ mod tests {
         let input = Input::Prompt(PromptInput {
             header,
             text: "hello".into(),
+            blocks: None,
             turn_metadata: None,
         });
         let decision = DefaultPolicyTable::resolve(&input, true);

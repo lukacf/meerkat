@@ -9,7 +9,9 @@ use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream};
 use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat_core::schema::{CompiledSchema, SchemaError};
-use meerkat_core::{AssistantBlock, Message, OutputSchema, ProviderMeta, StopReason, Usage};
+use meerkat_core::{
+    AssistantBlock, ContentBlock, Message, OutputSchema, ProviderMeta, StopReason, Usage,
+};
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::value::RawValue;
@@ -178,11 +180,39 @@ impl OpenAiClient {
                     }));
                 }
                 Message::User(u) => {
-                    items.push(serde_json::json!({
-                        "type": "message",
-                        "role": "user",
-                        "content": u.content
-                    }));
+                    if meerkat_core::has_images(&u.content) {
+                        let content_array: Vec<Value> = u
+                            .content
+                            .iter()
+                            .map(|block| match block {
+                                ContentBlock::Text { text } => serde_json::json!({
+                                    "type": "input_text",
+                                    "text": text
+                                }),
+                                ContentBlock::Image {
+                                    media_type, data, ..
+                                } => serde_json::json!({
+                                    "type": "input_image",
+                                    "image_url": format!("data:{media_type};base64,{data}")
+                                }),
+                                _ => serde_json::json!({
+                                    "type": "input_text",
+                                    "text": block.text_projection()
+                                }),
+                            })
+                            .collect();
+                        items.push(serde_json::json!({
+                            "type": "message",
+                            "role": "user",
+                            "content": content_array
+                        }));
+                    } else {
+                        items.push(serde_json::json!({
+                            "type": "message",
+                            "role": "user",
+                            "content": u.text_content()
+                        }));
+                    }
                 }
                 Message::Assistant(a) => {
                     // Legacy AssistantMessage format - convert to items
@@ -231,11 +261,13 @@ impl OpenAiClient {
                     }
                 }
                 Message::ToolResults { results } => {
+                    // OpenAI function_call_output only accepts strings; images
+                    // degrade to text projection via text_content().
                     for r in results {
                         items.push(serde_json::json!({
                             "type": "function_call_output",
                             "call_id": r.tool_use_id,
-                            "output": r.content
+                            "output": r.text_content()
                         }));
                     }
                 }
@@ -790,9 +822,7 @@ mod tests {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
             "gpt-5.2",
-            vec![Message::User(UserMessage {
-                content: "Hello".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("Hello".to_string()))],
         );
 
         let body = client.build_request_body(&request).expect("build request");
@@ -824,9 +854,7 @@ mod tests {
                 Message::System(meerkat_core::SystemMessage {
                     content: "You are helpful".to_string(),
                 }),
-                Message::User(UserMessage {
-                    content: "Hello".to_string(),
-                }),
+                Message::User(UserMessage::text("Hello".to_string())),
             ],
         );
 
@@ -851,9 +879,7 @@ mod tests {
         let request = LlmRequest::new(
             "gpt-5.2",
             vec![
-                Message::User(UserMessage {
-                    content: "Weather?".to_string(),
-                }),
+                Message::User(UserMessage::text("Weather?".to_string())),
                 Message::Assistant(meerkat_core::AssistantMessage {
                     content: String::new(),
                     tool_calls: vec![meerkat_core::ToolCall::new(
@@ -888,9 +914,7 @@ mod tests {
         let request = LlmRequest::new(
             "gpt-5.2",
             vec![
-                Message::User(UserMessage {
-                    content: "Weather?".to_string(),
-                }),
+                Message::User(UserMessage::text("Weather?".to_string())),
                 Message::ToolResults {
                     results: vec![meerkat_core::ToolResult::new(
                         "call_abc123".to_string(),
@@ -918,9 +942,7 @@ mod tests {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
             "gpt-4.1-mini",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_tools(vec![Arc::new(ToolDef {
             name: "get_weather".to_string(),
@@ -950,9 +972,7 @@ mod tests {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
             "gpt-5.2",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         );
 
         let body = client.build_request_body(&request).expect("build request");
@@ -968,9 +988,7 @@ mod tests {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
             "gpt-5.2",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_provider_param("reasoning_effort", "high");
 
@@ -984,9 +1002,7 @@ mod tests {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
             "gpt-4.1-mini",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         );
 
         let body = client.build_request_body(&request).expect("build request");
@@ -999,9 +1015,7 @@ mod tests {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
             "gpt-4.1-mini",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_provider_param("reasoning_effort", "high");
 
@@ -1021,9 +1035,7 @@ mod tests {
         let request = LlmRequest::new(
             "gpt-5.2",
             vec![
-                Message::User(UserMessage {
-                    content: "Hello".to_string(),
-                }),
+                Message::User(UserMessage::text("Hello".to_string())),
                 Message::BlockAssistant(BlockAssistantMessage {
                     blocks: vec![AssistantBlock::Text {
                         text: "Hi there!".to_string(),
@@ -1050,9 +1062,7 @@ mod tests {
         let request = LlmRequest::new(
             "gpt-5.2",
             vec![
-                Message::User(UserMessage {
-                    content: "Hello".to_string(),
-                }),
+                Message::User(UserMessage::text("Hello".to_string())),
                 Message::BlockAssistant(BlockAssistantMessage {
                     blocks: vec![
                         AssistantBlock::Reasoning {
@@ -1090,9 +1100,7 @@ mod tests {
         let request = LlmRequest::new(
             "gpt-5.2",
             vec![
-                Message::User(UserMessage {
-                    content: "Weather?".to_string(),
-                }),
+                Message::User(UserMessage::text("Weather?".to_string())),
                 Message::BlockAssistant(BlockAssistantMessage {
                     blocks: vec![AssistantBlock::ToolUse {
                         id: "call_xyz".to_string(),
@@ -1127,9 +1135,7 @@ mod tests {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
             "gpt-5.2",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_provider_param("seed", 12345);
 
@@ -1143,9 +1149,7 @@ mod tests {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
             "gpt-5.2",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_provider_param("frequency_penalty", 0.5);
 
@@ -1159,9 +1163,7 @@ mod tests {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
             "gpt-5.2",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_provider_param("presence_penalty", 0.8);
 
@@ -1175,9 +1177,7 @@ mod tests {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
             "gpt-5.2",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_provider_param("unknown_param", "some_value")
         .with_provider_param("another_unknown", 123)
@@ -1195,9 +1195,7 @@ mod tests {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
             "gpt-5.2-codex",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_temperature(0.2);
 
@@ -1213,9 +1211,7 @@ mod tests {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
             "gpt-4.1-mini",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_temperature(0.3);
 
@@ -1231,9 +1227,7 @@ mod tests {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
             "gpt-5.2",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_provider_param("reasoning_effort", "high")
         .with_provider_param("seed", 999)
@@ -1256,9 +1250,7 @@ mod tests {
         let request = LlmRequest::new(
             "gpt-5.2",
             vec![
-                Message::User(UserMessage {
-                    content: "What's the weather?".to_string(),
-                }),
+                Message::User(UserMessage::text("What's the weather?".to_string())),
                 Message::Assistant(meerkat_core::AssistantMessage {
                     content: String::new(),
                     tool_calls: vec![meerkat_core::ToolCall::new(
@@ -1312,9 +1304,7 @@ mod tests {
 
         let request = LlmRequest::new(
             "gpt-5.2",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_provider_param(
             "structured_output",
@@ -1344,9 +1334,7 @@ mod tests {
 
         let request = LlmRequest::new(
             "gpt-5.2",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_provider_param(
             "structured_output",
@@ -1368,9 +1356,7 @@ mod tests {
 
         let request = LlmRequest::new(
             "gpt-5.2",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         );
 
         let body = client.build_request_body(&request).expect("build request");
@@ -1422,9 +1408,7 @@ mod tests {
 
         let request = LlmRequest::new(
             "gpt-5.2",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_provider_param(
             "structured_output",
@@ -1479,9 +1463,7 @@ mod tests {
 
         let request = LlmRequest::new(
             "gpt-5.2",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_provider_param(
             "structured_output",
@@ -1523,9 +1505,7 @@ mod tests {
 
         let request = LlmRequest::new(
             "gpt-5.2",
-            vec![Message::User(UserMessage {
-                content: "test".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_provider_param(
             "structured_output",
@@ -1717,9 +1697,7 @@ mod tests {
         let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
         let request = LlmRequest::new(
             "gpt-5-mini",
-            vec![Message::User(UserMessage {
-                content: "hello".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("hello".to_string()))],
         );
 
         let mut stream = client.stream(&request);
@@ -1829,9 +1807,7 @@ mod tests {
         let request = LlmRequest::new(
             "gpt-5.2",
             vec![
-                Message::User(UserMessage {
-                    content: "Hello".to_string(),
-                }),
+                Message::User(UserMessage::text("Hello".to_string())),
                 // Reasoning-only response (e.g., stream interrupted after reasoning)
                 Message::BlockAssistant(BlockAssistantMessage {
                     blocks: vec![AssistantBlock::Reasoning {
@@ -1863,9 +1839,7 @@ mod tests {
         let request = LlmRequest::new(
             "gpt-5.2",
             vec![
-                Message::User(UserMessage {
-                    content: "First question".to_string(),
-                }),
+                Message::User(UserMessage::text("First question".to_string())),
                 // Reasoning without output, followed by next user turn
                 Message::BlockAssistant(BlockAssistantMessage {
                     blocks: vec![AssistantBlock::Reasoning {
@@ -1877,9 +1851,7 @@ mod tests {
                     }],
                     stop_reason: StopReason::EndTurn,
                 }),
-                Message::User(UserMessage {
-                    content: "Second question".to_string(),
-                }),
+                Message::User(UserMessage::text("Second question".to_string())),
             ],
         );
 
@@ -1902,9 +1874,7 @@ mod tests {
         let request = LlmRequest::new(
             "gpt-5.2",
             vec![
-                Message::User(UserMessage {
-                    content: "Hello".to_string(),
-                }),
+                Message::User(UserMessage::text("Hello".to_string())),
                 // Reasoning-only at end of one assistant message
                 Message::BlockAssistant(BlockAssistantMessage {
                     blocks: vec![AssistantBlock::Reasoning {
@@ -1945,9 +1915,7 @@ mod tests {
         let request = LlmRequest::new(
             "gpt-5.2",
             vec![
-                Message::User(UserMessage {
-                    content: "Hello".to_string(),
-                }),
+                Message::User(UserMessage::text("Hello".to_string())),
                 Message::BlockAssistant(BlockAssistantMessage {
                     blocks: vec![
                         AssistantBlock::Reasoning {
@@ -1985,9 +1953,7 @@ mod tests {
         let request = LlmRequest::new(
             "gpt-5.2",
             vec![
-                Message::User(UserMessage {
-                    content: "Hello".to_string(),
-                }),
+                Message::User(UserMessage::text("Hello".to_string())),
                 Message::BlockAssistant(BlockAssistantMessage {
                     blocks: vec![
                         AssistantBlock::Reasoning {
@@ -2025,9 +1991,7 @@ mod tests {
         let request = LlmRequest::new(
             "gpt-5.2",
             vec![
-                Message::User(UserMessage {
-                    content: "Hello".to_string(),
-                }),
+                Message::User(UserMessage::text("Hello".to_string())),
                 // Two consecutive reasoning-only messages (e.g., repeated interruptions)
                 Message::BlockAssistant(BlockAssistantMessage {
                     blocks: vec![AssistantBlock::Reasoning {
@@ -2049,9 +2013,7 @@ mod tests {
                     }],
                     stop_reason: StopReason::EndTurn,
                 }),
-                Message::User(UserMessage {
-                    content: "Still here".to_string(),
-                }),
+                Message::User(UserMessage::text("Still here".to_string())),
             ],
         );
 
@@ -2106,9 +2068,7 @@ mod tests {
         let request = LlmRequest::new(
             "gpt-5.2",
             vec![
-                Message::User(UserMessage {
-                    content: "Hello".to_string(),
-                }),
+                Message::User(UserMessage::text("Hello".to_string())),
                 Message::BlockAssistant(BlockAssistantMessage {
                     blocks: vec![
                         AssistantBlock::Reasoning {
@@ -2147,9 +2107,7 @@ mod tests {
         let request = LlmRequest::new(
             "gpt-5.2",
             vec![
-                Message::User(UserMessage {
-                    content: "Hello".to_string(),
-                }),
+                Message::User(UserMessage::text("Hello".to_string())),
                 Message::BlockAssistant(BlockAssistantMessage {
                     blocks: vec![
                         AssistantBlock::Reasoning {
@@ -2199,9 +2157,7 @@ mod tests {
         let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
         let request = LlmRequest::new(
             "gpt-5-mini",
-            vec![Message::User(UserMessage {
-                content: "weather".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("weather".to_string()))],
         );
 
         let mut stream = client.stream(&request);
@@ -2237,9 +2193,7 @@ mod tests {
         let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
         let request = LlmRequest::new(
             "gpt-5-mini",
-            vec![Message::User(UserMessage {
-                content: "hello".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("hello".to_string()))],
         );
 
         let mut stream = client.stream(&request);
@@ -2269,9 +2223,7 @@ mod tests {
         let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
         let request = LlmRequest::new(
             "gpt-5-mini",
-            vec![Message::User(UserMessage {
-                content: "hello".to_string(),
-            })],
+            vec![Message::User(UserMessage::text("hello".to_string()))],
         );
 
         let mut stream = client.stream(&request);
@@ -2297,5 +2249,129 @@ mod tests {
         server.abort();
 
         assert!(saw_error_done, "Expected Done with error outcome");
+    }
+
+    // =========================================================================
+    // Multimodal content (ContentBlock::Image) serialization tests
+    // =========================================================================
+
+    #[test]
+    fn openai_user_message_with_image() {
+        use meerkat_core::ContentBlock;
+
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.2",
+            vec![Message::User(UserMessage::with_blocks(vec![
+                ContentBlock::Text {
+                    text: "describe this".to_string(),
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: "iVBOR...".to_string(),
+                    source_path: Some("/tmp/img.png".to_string()),
+                },
+            ]))],
+        );
+
+        let body = client.build_request_body(&request).expect("build request");
+        let input = body["input"].as_array().expect("input array");
+        let user_item = &input[0];
+
+        assert_eq!(user_item["type"], "message");
+        assert_eq!(user_item["role"], "user");
+
+        // Content should be an array with typed content parts
+        let content = user_item["content"].as_array().expect("content array");
+        assert_eq!(content.len(), 2);
+
+        assert_eq!(content[0]["type"], "input_text");
+        assert_eq!(content[0]["text"], "describe this");
+
+        assert_eq!(content[1]["type"], "input_image");
+        assert_eq!(
+            content[1]["image_url"], "data:image/png;base64,iVBOR...",
+            "should be a data URI"
+        );
+
+        // source_path must NOT leak
+        let body_str = serde_json::to_string(&body).unwrap();
+        assert!(
+            !body_str.contains("source_path"),
+            "source_path must never appear in provider payload"
+        );
+        assert!(
+            !body_str.contains("/tmp/img.png"),
+            "source_path value must never appear in provider payload"
+        );
+    }
+
+    #[test]
+    fn openai_text_only_user_message_stays_string() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.2",
+            vec![Message::User(UserMessage::text("just text"))],
+        );
+
+        let body = client.build_request_body(&request).expect("build request");
+        let input = body["input"].as_array().expect("input array");
+
+        // Text-only user message content should remain a plain string
+        assert!(
+            input[0]["content"].is_string(),
+            "text-only user message content should be a string"
+        );
+        assert_eq!(input[0]["content"], "just text");
+    }
+
+    #[test]
+    fn openai_tool_result_with_image_degrades_to_text() {
+        use meerkat_core::ContentBlock;
+
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.2",
+            vec![
+                Message::User(UserMessage::text("Take a screenshot")),
+                Message::ToolResults {
+                    results: vec![meerkat_core::ToolResult::with_blocks(
+                        "call_1".to_string(),
+                        vec![
+                            ContentBlock::Text {
+                                text: "screenshot taken".to_string(),
+                            },
+                            ContentBlock::Image {
+                                media_type: "image/png".to_string(),
+                                data: "iVBOR...".to_string(),
+                                source_path: None,
+                            },
+                        ],
+                        false,
+                    )],
+                },
+            ],
+        );
+
+        let body = client.build_request_body(&request).expect("build request");
+        let input = body["input"].as_array().expect("input array");
+
+        // Tool result item
+        let tool_output = &input[1];
+        assert_eq!(tool_output["type"], "function_call_output");
+        assert_eq!(tool_output["call_id"], "call_1");
+
+        // OpenAI tool results only accept strings -- images degrade to text projection
+        let output = tool_output["output"]
+            .as_str()
+            .expect("output should be string");
+        assert!(
+            output.contains("screenshot taken"),
+            "text content should be preserved"
+        );
+        assert!(
+            output.contains("[image: image/png]"),
+            "image should degrade to text projection: got {output}"
+        );
     }
 }

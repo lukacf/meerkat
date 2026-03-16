@@ -20,7 +20,7 @@ use tokio::time::timeout;
 use tracing::{debug, info, instrument, warn};
 
 use super::config::{ShellConfig, ShellError};
-use crate::builtin::{BuiltinTool, BuiltinToolError};
+use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 
 /// Maximum number of characters to keep in output before truncation.
 /// This is measured in Unicode characters, not bytes.
@@ -399,7 +399,7 @@ impl BuiltinTool for ShellTool {
     }
 
     #[instrument(skip(self, args), fields(tool = "shell"))]
-    async fn call(&self, args: Value) -> Result<Value, BuiltinToolError> {
+    async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
         let input: ShellInput = serde_json::from_value(args)
             .map_err(|e| BuiltinToolError::invalid_args(e.to_string()))?;
 
@@ -440,11 +440,11 @@ impl BuiltinTool for ShellTool {
                 .await
                 .map_err(|e| BuiltinToolError::execution_failed(e.to_string()))?;
 
-            return Ok(serde_json::json!({
+            return Ok(ToolOutput::Json(serde_json::json!({
                 "job_id": job_id.to_string(),
                 "status": "running",
                 "message": format!("Command started in background with job ID: {}", job_id)
-            }));
+            })));
         }
 
         // Get timeout (use provided or config default)
@@ -470,8 +470,9 @@ impl BuiltinTool for ShellTool {
         );
 
         // Return structured JSON output
-        Ok(serde_json::to_value(output)
-            .map_err(|e| BuiltinToolError::execution_failed(e.to_string()))?)
+        Ok(ToolOutput::Json(serde_json::to_value(output).map_err(
+            |e| BuiltinToolError::execution_failed(e.to_string()),
+        )?))
     }
 }
 

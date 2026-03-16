@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use crate::builtin::store::TaskStore;
 use crate::builtin::types::TaskId;
-use crate::builtin::{BuiltinTool, BuiltinToolError};
+use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 
 /// Parameters for the task_get tool
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -55,7 +55,7 @@ impl BuiltinTool for TaskGetTool {
         true
     }
 
-    async fn call(&self, args: Value) -> Result<Value, BuiltinToolError> {
+    async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
         let params: TaskGetParams = serde_json::from_value(args)
             .map_err(|e| BuiltinToolError::InvalidArgs(e.to_string()))?;
 
@@ -68,6 +68,7 @@ impl BuiltinTool for TaskGetTool {
 
         match task {
             Some(t) => serde_json::to_value(&t)
+                .map(ToolOutput::Json)
                 .map_err(|e| BuiltinToolError::ExecutionFailed(e.to_string())),
             None => Err(BuiltinToolError::ExecutionFailed(format!(
                 "Task not found: {id}"
@@ -144,7 +145,7 @@ mod tests {
             "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
         });
 
-        let result = tool.call(args).await.unwrap();
+        let result = tool.call(args).await.unwrap().into_json().unwrap();
 
         // Verify the returned task matches the expected task
         assert_eq!(result["id"], "01ARZ3NDEKTSV4RRFFQ69G5FAV");
@@ -256,7 +257,7 @@ mod tests {
             "another_extra": 123
         });
 
-        let result = tool.call(args).await.unwrap();
+        let result = tool.call(args).await.unwrap().into_json().unwrap();
 
         // Should still work and return the task
         assert_eq!(result["id"], "01ARZ3NDEKTSV4RRFFQ69G5FAV");
@@ -295,7 +296,7 @@ mod tests {
             "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
         });
 
-        let result = tool.call(args).await.unwrap();
+        let result = tool.call(args).await.unwrap().into_json().unwrap();
 
         // Verify all expected fields are present in the result
         assert!(result.get("id").is_some());

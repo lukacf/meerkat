@@ -268,7 +268,7 @@ impl From<Message> for WireSessionMessage {
                 content: message.content,
             },
             Message::User(message) => Self::User {
-                content: message.content,
+                content: meerkat_core::types::text_content(&message.content),
             },
             Message::Assistant(message) => Self::Assistant {
                 content: message.content,
@@ -290,10 +290,13 @@ impl From<Message> for WireSessionMessage {
             Message::ToolResults { results } => Self::ToolResults {
                 results: results
                     .into_iter()
-                    .map(|result| WireToolResult {
-                        tool_use_id: result.tool_use_id,
-                        content: result.content,
-                        is_error: result.is_error,
+                    .map(|result| {
+                        let content = result.text_content();
+                        WireToolResult {
+                            tool_use_id: result.tool_use_id,
+                            content,
+                            is_error: result.is_error,
+                        }
                     })
                     .collect(),
             },
@@ -527,9 +530,7 @@ mod tests {
                 Message::System(SystemMessage {
                     content: "sys".to_string(),
                 }),
-                Message::User(UserMessage {
-                    content: "hi".to_string(),
-                }),
+                Message::User(UserMessage::text("hi".to_string())),
                 Message::Assistant(AssistantMessage {
                     content: "hello".to_string(),
                     tool_calls: vec![ToolCall::new(
@@ -572,11 +573,11 @@ mod tests {
                     stop_reason: StopReason::EndTurn,
                 }),
                 Message::ToolResults {
-                    results: vec![meerkat_core::ToolResult {
-                        tool_use_id: "tool-2".to_string(),
-                        content: "done".to_string(),
-                        is_error: false,
-                    }],
+                    results: vec![meerkat_core::ToolResult::new(
+                        "tool-2".to_string(),
+                        "done".to_string(),
+                        false,
+                    )],
                 },
             ],
         };

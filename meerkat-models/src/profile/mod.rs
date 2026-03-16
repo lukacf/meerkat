@@ -23,6 +23,11 @@ pub struct ModelProfile {
     pub supports_thinking: bool,
     /// Whether the model supports explicit reasoning effort control.
     pub supports_reasoning: bool,
+    /// Whether the model accepts image content in user messages.
+    pub vision: bool,
+    /// Whether the model can process image blocks in tool results.
+    /// When false, `view_image` is hidden from the tool list.
+    pub image_tool_results: bool,
     /// JSON Schema describing accepted provider-specific parameters.
     pub params_schema: serde_json::Value,
 }
@@ -60,6 +65,43 @@ mod tests {
     #[test]
     fn unknown_provider_returns_none() {
         assert!(profile_for("unknown", "some-model").is_none());
+    }
+
+    #[test]
+    fn claude_profile_vision_and_image_tool_results_true() {
+        let profile = profile_for("anthropic", "claude-opus-4-6")
+            .expect("claude-opus-4-6 must have a profile");
+        assert!(profile.vision, "Anthropic models must support vision");
+        assert!(
+            profile.image_tool_results,
+            "Anthropic models must support image tool results"
+        );
+
+        let profile = profile_for("anthropic", "claude-sonnet-4-5")
+            .expect("claude-sonnet-4-5 must have a profile");
+        assert!(profile.vision);
+        assert!(profile.image_tool_results);
+    }
+
+    #[test]
+    fn gpt_profile_vision_true_image_tool_results_false() {
+        let profile = profile_for("openai", "gpt-5.2").expect("gpt-5.2 must have a profile");
+        assert!(profile.vision, "OpenAI models must support vision");
+        assert!(
+            !profile.image_tool_results,
+            "OpenAI models must NOT support image tool results"
+        );
+    }
+
+    #[test]
+    fn gemini_profile_vision_and_image_tool_results_true() {
+        let profile = profile_for("gemini", "gemini-3-flash-preview")
+            .expect("gemini-3-flash-preview must have a profile");
+        assert!(profile.vision, "Gemini models must support vision");
+        assert!(
+            profile.image_tool_results,
+            "Gemini models must support image tool results"
+        );
     }
 
     #[test]

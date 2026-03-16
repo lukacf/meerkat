@@ -154,7 +154,7 @@ pub fn to_create_session_request(
 
     CreateSessionRequest {
         model: config.model.clone(),
-        prompt,
+        prompt: prompt.into(),
         system_prompt: config.system_prompt.clone(),
         max_tokens: config.max_tokens,
         event_tx: None,
@@ -642,7 +642,7 @@ mod tests {
         let req = to_create_session_request(&config, "Hello mob".into());
         assert_eq!(req.model, "claude-opus-4-6");
         assert!(!req.host_mode, "host_mode must carry through as false");
-        assert_eq!(req.prompt, "Hello mob");
+        assert_eq!(req.prompt.text_content(), "Hello mob");
         assert!(req.system_prompt.is_some());
 
         let build = req.build.expect("build options should be set");

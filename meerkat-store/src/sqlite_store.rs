@@ -254,9 +254,7 @@ mod tests {
     async fn save_load_roundtrip() {
         let (_dir, store) = temp_store();
         let mut session = Session::new();
-        session.push(Message::User(UserMessage {
-            content: "hello".to_string(),
-        }));
+        session.push(Message::User(UserMessage::text("hello".to_string())));
 
         store.save(&session).await.unwrap();
         let loaded = store.load(session.id()).await.unwrap().unwrap();

@@ -416,7 +416,7 @@ async fn apply_runtime_turn(
     };
 
     let svc_req = SvcStartTurnRequest {
-        prompt: prompt.clone(),
+        prompt: prompt.clone().into(),
         event_tx: Some(event_tx.clone()),
         host_mode,
         skill_references: primitive
@@ -528,7 +528,7 @@ async fn apply_runtime_turn(
                     || context.default_model.to_string(),
                     |meta| meta.model.clone(),
                 ),
-                prompt,
+                prompt: prompt.into(),
                 system_prompt: None,
                 max_tokens: Some(
                     stored_metadata
@@ -550,7 +550,7 @@ async fn apply_runtime_turn(
                     session_id,
                     run_id,
                     SvcStartTurnRequest {
-                        prompt: extract_runtime_prompt(primitive),
+                        prompt: extract_runtime_prompt(primitive).into(),
                         event_tx: Some(event_tx.clone()),
                         host_mode: primitive
                             .turn_metadata()
@@ -1880,7 +1880,7 @@ async fn create_session(
 
     let svc_req = SvcCreateSessionRequest {
         model: model.to_string(),
-        prompt: req.prompt.clone(),
+        prompt: req.prompt.clone().into(),
         system_prompt: req.system_prompt,
         max_tokens: Some(max_tokens),
         event_tx: Some(caller_event_tx.clone()),
@@ -2208,7 +2208,7 @@ async fn continue_session(
 
     // First, try to start a turn on a live session in the service.
     let svc_req = SvcStartTurnRequest {
-        prompt: turn_prompt.clone(),
+        prompt: turn_prompt.clone().into(),
         event_tx: Some(caller_event_tx.clone()),
         host_mode,
         skill_references: skill_references.clone(),
@@ -2225,7 +2225,7 @@ async fn continue_session(
     }
     let adapter = state.runtime_adapter.clone();
     let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
-        svc_req.prompt.clone(),
+        svc_req.prompt.text_content(),
         Some(
             meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                 host_mode: if svc_req.host_mode { Some(true) } else { None },
@@ -2971,7 +2971,7 @@ mod tests {
         let created = session_service
             .create_session(SvcCreateSessionRequest {
                 model: state.default_model.to_string(),
-                prompt: "Hello".to_string(),
+                prompt: "Hello".to_string().into(),
                 system_prompt: None,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
@@ -3042,7 +3042,7 @@ mod tests {
         let create_result = session_service
             .create_session(SvcCreateSessionRequest {
                 model: state.default_model.to_string(),
-                prompt: "Hello".to_string(),
+                prompt: "Hello".to_string().into(),
                 system_prompt: None,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
@@ -3109,7 +3109,7 @@ mod tests {
         let create_result = session_service
             .create_session(SvcCreateSessionRequest {
                 model: state.default_model.to_string(),
-                prompt: "Hello".to_string(),
+                prompt: "Hello".to_string().into(),
                 system_prompt: None,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
@@ -3162,7 +3162,7 @@ mod tests {
         let created = session_service
             .create_session(SvcCreateSessionRequest {
                 model: state.default_model.to_string(),
-                prompt: "Hello".to_string(),
+                prompt: "Hello".to_string().into(),
                 system_prompt: None,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
@@ -3186,7 +3186,7 @@ mod tests {
             .start_turn(
                 &created.session_id,
                 meerkat_core::service::StartTurnRequest {
-                    prompt: "Follow up".to_string(),
+                    prompt: "Follow up".to_string().into(),
                     event_tx: None,
                     host_mode: false,
                     skill_references: None,

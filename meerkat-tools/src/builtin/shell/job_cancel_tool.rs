@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use super::job_manager::JobManager;
 use super::types::JobId;
-use crate::builtin::{BuiltinTool, BuiltinToolError};
+use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 
 /// Tool for cancelling a running background shell job
 ///
@@ -56,7 +56,7 @@ impl BuiltinTool for ShellJobCancelTool {
         false
     }
 
-    async fn call(&self, args: Value) -> Result<Value, BuiltinToolError> {
+    async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
         let input: JobCancelInput = serde_json::from_value(args)
             .map_err(|e| BuiltinToolError::invalid_args(e.to_string()))?;
 
@@ -67,10 +67,10 @@ impl BuiltinTool for ShellJobCancelTool {
             .await
             .map_err(|e| BuiltinToolError::execution_failed(e.to_string()))?;
 
-        Ok(json!({
+        Ok(ToolOutput::Json(json!({
             "job_id": input.job_id,
             "status": "cancelled"
-        }))
+        })))
     }
 }
 

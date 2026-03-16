@@ -203,7 +203,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
         });
 
         let req = meerkat_core::service::StartTurnRequest {
-            prompt,
+            prompt: prompt.into(),
             event_tx: Some(event_tx),
             host_mode: primitive
                 .turn_metadata()

@@ -1,6 +1,6 @@
 //! Comms tool implementations: `send` and `peers`.
 
-use crate::builtin::{BuiltinTool, BuiltinToolError};
+use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 use crate::schema::empty_object_schema;
 use async_trait::async_trait;
 use meerkat_comms::{Router, ToolContext, TrustedPeers, handle_tools_call, tools_list};
@@ -70,9 +70,10 @@ impl BuiltinTool for SendTool {
         true
     }
 
-    async fn call(&self, args: Value) -> Result<Value, BuiltinToolError> {
+    async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
         handle_tools_call(&self.state.tool_context, "send", &args)
             .await
+            .map(ToolOutput::Json)
             .map_err(BuiltinToolError::ExecutionFailed)
     }
 }
@@ -103,9 +104,10 @@ impl BuiltinTool for PeersTool {
         true
     }
 
-    async fn call(&self, args: Value) -> Result<Value, BuiltinToolError> {
+    async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
         handle_tools_call(&self.state.tool_context, "peers", &args)
             .await
+            .map(ToolOutput::Json)
             .map_err(BuiltinToolError::ExecutionFailed)
     }
 }
@@ -159,7 +161,7 @@ mod tests {
         let tool = PeersTool::new(state);
         let result = tool.call(serde_json::json!({})).await;
         assert!(result.is_ok());
-        let output = result.unwrap();
+        let output = result.unwrap().into_json().unwrap();
         assert!(output.get("peers").is_some());
     }
 }

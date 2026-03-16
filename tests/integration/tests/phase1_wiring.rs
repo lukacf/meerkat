@@ -30,9 +30,9 @@ async fn test_store_adapter_roundtrip() {
     let adapter = StoreAdapter::new(store);
 
     let mut session = Session::new();
-    session.push(Message::User(UserMessage {
-        content: "integration test".to_string(),
-    }));
+    session.push(Message::User(UserMessage::text(
+        "integration test".to_string(),
+    )));
 
     let id = session.id().to_string();
 

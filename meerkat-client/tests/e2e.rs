@@ -129,9 +129,7 @@ async fn e2e_anthropic_stream() -> Result<(), Box<dyn std::error::Error>> {
     let client = AnthropicClient::new(api_key)?;
     let request = LlmRequest::new(
         "claude-3-haiku-20240307",
-        vec![Message::User(UserMessage {
-            content: "Say 'Hello'".to_string(),
-        })],
+        vec![Message::User(UserMessage::text("Say 'Hello'".to_string()))],
     );
 
     let mut stream = client.stream(&request);
@@ -164,9 +162,9 @@ async fn e2e_anthropic_tool_use() -> Result<(), Box<dyn std::error::Error>> {
     let client = AnthropicClient::new(api_key)?;
     let request = LlmRequest::new(
         "claude-3-haiku-20240307",
-        vec![Message::User(UserMessage {
-            content: "What's the weather in Tokyo?".to_string(),
-        })],
+        vec![Message::User(UserMessage::text(
+            "What's the weather in Tokyo?".to_string(),
+        ))],
     )
     .with_tools(vec![std::sync::Arc::new(meerkat_core::ToolDef {
         name: "get_weather".to_string(),
@@ -216,9 +214,7 @@ async fn test_anthropic_auth_error() -> Result<(), Box<dyn std::error::Error>> {
 
     let request = LlmRequest::new(
         "claude-3-haiku-20240307",
-        vec![Message::User(UserMessage {
-            content: "test".to_string(),
-        })],
+        vec![Message::User(UserMessage::text("test".to_string()))],
     );
 
     let mut stream = client.stream(&request);
@@ -259,9 +255,7 @@ async fn test_anthropic_message_stop_without_newline_yields_done()
         .build()?;
     let request = LlmRequest::new(
         "claude-3-haiku-20240307",
-        vec![Message::User(UserMessage {
-            content: "test".to_string(),
-        })],
+        vec![Message::User(UserMessage::text("test".to_string()))],
     );
 
     let mut stream = client.stream(&request);
@@ -322,9 +316,7 @@ async fn test_anthropic_message_stop_without_space_prefix_yields_done()
         .build()?;
     let request = LlmRequest::new(
         "claude-3-haiku-20240307",
-        vec![Message::User(UserMessage {
-            content: "test".to_string(),
-        })],
+        vec![Message::User(UserMessage::text("test".to_string()))],
     );
 
     let mut stream = client.stream(&request);
@@ -382,9 +374,7 @@ async fn test_anthropic_stream_end_without_done_yields_success()
         .build()?;
     let request = LlmRequest::new(
         "claude-3-haiku-20240307",
-        vec![Message::User(UserMessage {
-            content: "test".to_string(),
-        })],
+        vec![Message::User(UserMessage::text("test".to_string()))],
     );
 
     let mut stream = client.stream(&request);
@@ -433,9 +423,7 @@ async fn e2e_openai_stream() -> Result<(), Box<dyn std::error::Error>> {
     let client = OpenAiClient::new(api_key);
     let request = LlmRequest::new(
         "gpt-5.2",
-        vec![Message::User(UserMessage {
-            content: "Say 'Hello'".to_string(),
-        })],
+        vec![Message::User(UserMessage::text("Say 'Hello'".to_string()))],
     );
 
     let mut stream = client.stream(&request);
@@ -468,9 +456,9 @@ async fn e2e_openai_tool_use() -> Result<(), Box<dyn std::error::Error>> {
     let client = OpenAiClient::new(api_key);
     let request = LlmRequest::new(
         "gpt-5.2",
-        vec![Message::User(UserMessage {
-            content: "What's the weather in Tokyo?".to_string(),
-        })],
+        vec![Message::User(UserMessage::text(
+            "What's the weather in Tokyo?".to_string(),
+        ))],
     )
     .with_tools(vec![std::sync::Arc::new(meerkat_core::ToolDef {
         name: "get_weather".to_string(),
@@ -514,9 +502,7 @@ async fn e2e_gemini_stream() -> Result<(), Box<dyn std::error::Error>> {
     let client = GeminiClient::new(api_key);
     let request = LlmRequest::new(
         "gemini-1.5-flash",
-        vec![Message::User(UserMessage {
-            content: "Say 'Hello'".to_string(),
-        })],
+        vec![Message::User(UserMessage::text("Say 'Hello'".to_string()))],
     );
 
     let mut stream = client.stream(&request);
@@ -549,9 +535,9 @@ async fn e2e_gemini_tool_use() -> Result<(), Box<dyn std::error::Error>> {
     let client = GeminiClient::new(api_key);
     let request = LlmRequest::new(
         "gemini-1.5-flash",
-        vec![Message::User(UserMessage {
-            content: "What's the weather in Tokyo?".to_string(),
-        })],
+        vec![Message::User(UserMessage::text(
+            "What's the weather in Tokyo?".to_string(),
+        ))],
     )
     .with_tools(vec![std::sync::Arc::new(meerkat_core::ToolDef {
         name: "get_weather".to_string(),
@@ -604,9 +590,7 @@ async fn test_openai_auth_error() -> Result<(), Box<dyn std::error::Error>> {
 
     let request = LlmRequest::new(
         "gpt-5.2",
-        vec![Message::User(UserMessage {
-            content: "test".to_string(),
-        })],
+        vec![Message::User(UserMessage::text("test".to_string()))],
     );
 
     let mut stream = client.stream(&request);
@@ -732,9 +716,9 @@ async fn e2e_anthropic_structured_output() -> Result<(), Box<dyn std::error::Err
     let client = AnthropicClient::new(api_key)?;
     let request = LlmRequest::new(
         "claude-sonnet-4-5",
-        vec![Message::User(UserMessage {
-            content: "Generate a person named Alice who is 30 years old.".to_string(),
-        })],
+        vec![Message::User(UserMessage::text(
+            "Generate a person named Alice who is 30 years old.".to_string(),
+        ))],
     )
     .with_provider_param(
         "structured_output",
@@ -761,9 +745,9 @@ async fn e2e_openai_structured_output() -> Result<(), Box<dyn std::error::Error>
     let client = OpenAiClient::new(api_key);
     let request = LlmRequest::new(
         "gpt-5.2",
-        vec![Message::User(UserMessage {
-            content: "Generate a person named Bob who is 25 years old.".to_string(),
-        })],
+        vec![Message::User(UserMessage::text(
+            "Generate a person named Bob who is 25 years old.".to_string(),
+        ))],
     )
     .with_provider_param(
         "structured_output",
@@ -790,9 +774,9 @@ async fn e2e_gemini_structured_output() -> Result<(), Box<dyn std::error::Error>
     let client = GeminiClient::new(api_key);
     let request = LlmRequest::new(
         "gemini-3-flash-preview",
-        vec![Message::User(UserMessage {
-            content: "Generate a person named Carol who is 35 years old.".to_string(),
-        })],
+        vec![Message::User(UserMessage::text(
+            "Generate a person named Carol who is 35 years old.".to_string(),
+        ))],
     )
     .with_provider_param(
         "structured_output",
@@ -896,9 +880,9 @@ async fn e2e_gemini_structured_output_rich_schema_keywords()
     let client = GeminiClient::new(api_key);
     let request = LlmRequest::new(
         "gemini-3-flash-preview",
-        vec![Message::User(UserMessage {
-            content: "Return JSON: status='ok', payload={score:0.6, category:'test'}.".to_string(),
-        })],
+        vec![Message::User(UserMessage::text(
+            "Return JSON: status='ok', payload={score:0.6, category:'test'}.".to_string(),
+        ))],
     )
     .with_provider_param(
         "structured_output",

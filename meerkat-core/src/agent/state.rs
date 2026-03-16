@@ -110,11 +110,7 @@ where
         if !sub_agent_results.is_empty() {
             let results: Vec<ToolResult> = sub_agent_results
                 .into_iter()
-                .map(|r| ToolResult {
-                    tool_use_id: r.id.to_string(),
-                    content: r.content,
-                    is_error: r.is_error,
-                })
+                .map(|r| ToolResult::new(r.id.to_string(), r.content, r.is_error))
                 .collect();
             self.session.push(Message::ToolResults { results });
         }
@@ -264,16 +260,14 @@ where
                     //    Uses starts_with on a strict prefix to avoid matching user text.
                     const MCP_PENDING_PREFIX: &str = "[SYSTEM NOTICE][MCP_PENDING] ";
                     self.session.messages_mut().retain(
-                        |m| !matches!(m, Message::User(u) if u.content.starts_with(MCP_PENDING_PREFIX)),
+                        |m| !matches!(m, Message::User(u) if u.text_content().starts_with(MCP_PENDING_PREFIX)),
                     );
                     if !ext.pending.is_empty() {
-                        self.session.push(Message::User(UserMessage {
-                            content: format!(
-                                "{MCP_PENDING_PREFIX}Servers connecting: {}. \
-                                 Tools will appear when ready.",
-                                ext.pending.join(", ")
-                            ),
-                        }));
+                        self.session.push(Message::User(UserMessage::text(format!(
+                            "{MCP_PENDING_PREFIX}Servers connecting: {}. \
+                             Tools will appear when ready.",
+                            ext.pending.join(", ")
+                        ))));
                     }
 
                     // 4. Apply tool scope staged updates atomically at the CallingLlm boundary.
@@ -300,11 +294,9 @@ where
                                     // Represent runtime notices as user-scoped synthetic context
                                     // (same pattern as peer lifecycle updates) so this does not
                                     // mutate or replace the canonical system prompt.
-                                    self.session.push(Message::User(UserMessage {
-                                        content: format!(
-                                            "[SYSTEM NOTICE][TOOL_SCOPE] Tool configuration changed at turn boundary: {status}"
-                                        ),
-                                    }));
+                                    self.session.push(Message::User(UserMessage::text(format!(
+                                        "[SYSTEM NOTICE][TOOL_SCOPE] Tool configuration changed at turn boundary: {status}"
+                                    ))));
                                 }
                                 applied.tools
                             }
@@ -323,11 +315,9 @@ where
                                         applied_at_turn: Some(turn_count),
                                     },
                                 });
-                                self.session.push(Message::User(UserMessage {
-                                    content: format!(
-                                        "[SYSTEM NOTICE][TOOL_SCOPE][WARNING] Tool scope apply failed ({err}); falling back to full tool set."
-                                    ),
-                                }));
+                                self.session.push(Message::User(UserMessage::text(format!(
+                                    "[SYSTEM NOTICE][TOOL_SCOPE][WARNING] Tool scope apply failed ({err}); falling back to full tool set."
+                                ))));
                                 dispatcher_tools
                             }
                         }
@@ -596,20 +586,21 @@ where
                                         "{\"error\":\"hook_denied\",\"message\":\"denied by hook\"}"
                                             .to_string()
                                     });
-                                tool_results.push(ToolResult {
-                                    tool_use_id: tc.id.clone(),
-                                    content: denied_content,
-                                    is_error: true,
-                                });
+                                tool_results.push(ToolResult::new(
+                                    tc.id.clone(),
+                                    denied_content,
+                                    true,
+                                ));
                                 emit_event!(AgentEvent::ToolExecutionCompleted {
                                     id: tc.id.clone(),
                                     name: tc.name.clone(),
                                     result: tool_results
                                         .last()
-                                        .map(|r| r.content.clone())
+                                        .map(|r| r.text_content())
                                         .unwrap_or_default(),
                                     is_error: true,
                                     duration_ms: 0,
+                                    has_images: false,
                                 });
                                 emit_event!(AgentEvent::ToolResultReceived {
                                     id: tc.id.clone(),
@@ -684,11 +675,7 @@ where
                                             "{\"error\":\"tool_error\",\"message\":\"tool error\"}"
                                                 .to_string()
                                         });
-                                    ToolResult {
-                                        tool_use_id: tc.id.clone(),
-                                        content: serialized,
-                                        is_error: true,
-                                    }
+                                    ToolResult::new(tc.id.clone(), serialized, true)
                                 }
                             };
 
@@ -710,8 +697,9 @@ where
                                         tool_result: Some(HookToolResult {
                                             tool_use_id: tc.id.clone(),
                                             name: tc.name.clone(),
-                                            content: tool_result.content.clone(),
+                                            content: tool_result.text_content(),
                                             is_error: tool_result.is_error,
+                                            has_images: tool_result.has_images(),
                                         }),
                                     },
                                     event_tx.as_ref(),
@@ -731,11 +719,12 @@ where
                                     "message": message,
                                     "payload": payload,
                                 });
-                                tool_result.content = serde_json::to_string(&denied_payload)
-                                    .unwrap_or_else(|_| {
+                                tool_result.set_text_content(
+                                    serde_json::to_string(&denied_payload).unwrap_or_else(|_| {
                                         "{\"error\":\"hook_denied\",\"message\":\"denied by hook\"}"
                                             .to_string()
-                                    });
+                                    }),
+                                );
                                 tool_result.is_error = true;
                             }
 
@@ -750,10 +739,13 @@ where
                                                 is_error: *is_error,
                                             },
                                         });
-                                        tool_result.content = content.clone();
-                                        if let Some(value) = is_error {
-                                            tool_result.is_error = *value;
-                                        }
+                                        // Rebuild: patched text first, then image blocks
+                                        // in their original relative order.
+                                        crate::hooks::apply_tool_result_patch(
+                                            &mut tool_result,
+                                            content.clone(),
+                                            *is_error,
+                                        );
                                     }
                                 }
                             }
@@ -762,9 +754,10 @@ where
                             emit_event!(AgentEvent::ToolExecutionCompleted {
                                 id: tc.id.clone(),
                                 name: tc.name.clone(),
-                                result: tool_result.content.clone(),
+                                result: tool_result.text_content(),
                                 is_error: tool_result.is_error,
                                 duration_ms,
+                                has_images: tool_result.has_images(),
                             });
 
                             // Emit result received
@@ -860,9 +853,8 @@ where
                                             Please provide valid JSON matching the schema. \
                                             Output ONLY the JSON, no additional text."
                                         );
-                                        self.session.push(Message::User(UserMessage {
-                                            content: retry_prompt,
-                                        }));
+                                        self.session
+                                            .push(Message::User(UserMessage::text(retry_prompt)));
                                         self.state.transition(LoopState::CallingLlm)?;
                                         turn_count += 1;
                                         continue;
@@ -913,9 +905,8 @@ where
                                         Please provide valid JSON matching the schema. \
                                         Output ONLY the JSON, no additional text."
                                     );
-                                    self.session.push(Message::User(UserMessage {
-                                        content: retry_prompt,
-                                    }));
+                                    self.session
+                                        .push(Message::User(UserMessage::text(retry_prompt)));
                                     self.state.transition(LoopState::CallingLlm)?;
                                     turn_count += 1;
                                     continue;
@@ -976,8 +967,7 @@ where
                                 self.config.extraction_prompt.clone().unwrap_or_else(|| {
                                     super::extraction::DEFAULT_EXTRACTION_PROMPT.to_string()
                                 });
-                            self.session
-                                .push(Message::User(UserMessage { content: prompt }));
+                            self.session.push(Message::User(UserMessage::text(prompt)));
 
                             // Re-enter main loop via CallingLlm
                             self.state.transition(LoopState::CallingLlm)?;
@@ -1343,7 +1333,7 @@ mod tests {
             let mut seen = self.seen_user_messages.lock().unwrap();
             for msg in messages {
                 if let Message::User(user) = msg {
-                    seen.push(user.content.clone());
+                    seen.push(user.text_content());
                 }
             }
             drop(seen);
@@ -1723,7 +1713,7 @@ mod tests {
         assert!(
             agent.session().messages().iter().any(|message| matches!(
                 message,
-                Message::User(user) if user.content.contains("late boundary message")
+                Message::User(user) if user.text_content().contains("late boundary message")
             )),
             "completion path should drain late comms messages into the final session transcript"
         );
@@ -1959,7 +1949,7 @@ mod tests {
         assert!(
             !agent.session().messages().iter().any(|message| matches!(
                 message,
-                Message::User(user) if user.content.contains("late boundary message")
+                Message::User(user) if user.text_content().contains("late boundary message")
             )),
             "boundary-denied turns should not commit late comms boundary side effects"
         );
@@ -2130,8 +2120,10 @@ mod tests {
             .messages()
             .iter()
             .filter_map(|msg| match msg {
-                Message::User(user) if user.content.contains("[SYSTEM NOTICE][TOOL_SCOPE]") => {
-                    Some(user.content.clone())
+                Message::User(user)
+                    if user.text_content().contains("[SYSTEM NOTICE][TOOL_SCOPE]") =>
+                {
+                    Some(user.text_content())
                 }
                 _ => None,
             })
@@ -2182,8 +2174,8 @@ mod tests {
             .messages()
             .iter()
             .filter_map(|msg| match msg {
-                Message::User(user) if user.content.contains("[TOOL_SCOPE][WARNING]") => {
-                    Some(user.content.clone())
+                Message::User(user) if user.text_content().contains("[TOOL_SCOPE][WARNING]") => {
+                    Some(user.text_content())
                 }
                 _ => None,
             })

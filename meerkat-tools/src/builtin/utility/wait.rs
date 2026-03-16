@@ -1,6 +1,6 @@
 //! Wait tool for pausing execution
 
-use crate::builtin::{BuiltinTool, BuiltinToolError};
+use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
 use meerkat_core::time_compat::{Duration, Instant};
@@ -86,7 +86,7 @@ impl BuiltinTool for WaitTool {
         true // Utility tools enabled by default
     }
 
-    async fn call(&self, args: Value) -> Result<Value, BuiltinToolError> {
+    async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
         #[cfg(target_arch = "wasm32")]
         use crate::tokio::time::sleep;
         #[cfg(not(target_arch = "wasm32"))]
@@ -124,25 +124,25 @@ impl BuiltinTool for WaitTool {
 
             if interrupted && let Some(interrupt) = rx.borrow().as_ref() {
                 let waited = start.elapsed().as_secs_f64();
-                return Ok(json!({
+                return Ok(ToolOutput::Json(json!({
                     "waited_seconds": waited,
                     "requested_seconds": seconds,
                     "status": "interrupted",
                     "reason": format!("Wait interrupted after {:.1}s: {}", waited, interrupt.reason)
-                }));
+                })));
             }
             // Completed normally (either sleep finished or channel closed without data)
-            Ok(json!({
+            Ok(ToolOutput::Json(json!({
                 "waited_seconds": seconds,
                 "status": "complete"
-            }))
+            })))
         } else {
             // No interrupt receiver - just sleep
             sleep(duration).await;
-            Ok(json!({
+            Ok(ToolOutput::Json(json!({
                 "waited_seconds": seconds,
                 "status": "complete"
-            }))
+            })))
         }
     }
 }
@@ -173,7 +173,12 @@ mod tests {
             }));
         });
 
-        let result = tool.call(json!({"seconds": 10.0})).await.unwrap();
+        let result = tool
+            .call(json!({"seconds": 10.0}))
+            .await
+            .unwrap()
+            .into_json()
+            .unwrap();
 
         let elapsed = start.elapsed();
         assert!(
@@ -190,7 +195,12 @@ mod tests {
         let (_tx, rx) = tokio::sync::watch::channel(None::<WaitInterrupt>);
         let tool = WaitTool::with_interrupt(rx);
 
-        let result = tool.call(json!({"seconds": 0.1})).await.unwrap();
+        let result = tool
+            .call(json!({"seconds": 0.1}))
+            .await
+            .unwrap()
+            .into_json()
+            .unwrap();
 
         assert_eq!(result["status"], "complete");
         assert_eq!(result["waited_seconds"], 0.1);
@@ -201,7 +211,12 @@ mod tests {
         // Original behavior - no interrupt receiver
         let tool = WaitTool::new();
 
-        let result = tool.call(json!({"seconds": 0.1})).await.unwrap();
+        let result = tool
+            .call(json!({"seconds": 0.1}))
+            .await
+            .unwrap()
+            .into_json()
+            .unwrap();
 
         assert_eq!(result["status"], "complete");
     }
@@ -226,7 +241,12 @@ mod tests {
         let tool = WaitTool::new();
         let start = Instant::now();
 
-        let result = tool.call(json!({"seconds": 0.1})).await.unwrap();
+        let result = tool
+            .call(json!({"seconds": 0.1}))
+            .await
+            .unwrap()
+            .into_json()
+            .unwrap();
 
         let elapsed = start.elapsed();
         assert!(elapsed >= Duration::from_millis(100));
@@ -288,7 +308,12 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(10)).await;
 
         let start = Instant::now();
-        let result = tool.call(json!({"seconds": 0.2})).await.unwrap();
+        let result = tool
+            .call(json!({"seconds": 0.2}))
+            .await
+            .unwrap()
+            .into_json()
+            .unwrap();
         let elapsed = start.elapsed();
 
         // Should complete normally since interrupt was stale (sent before wait started)
@@ -314,7 +339,12 @@ mod tests {
             }));
         });
 
-        let result = tool.call(json!({"seconds": 30.0})).await.unwrap();
+        let result = tool
+            .call(json!({"seconds": 30.0}))
+            .await
+            .unwrap()
+            .into_json()
+            .unwrap();
 
         assert_eq!(result["status"], "interrupted");
         assert!(
@@ -347,7 +377,12 @@ mod tests {
             }));
         });
 
-        let result1 = tool.call(json!({"seconds": 10.0})).await.unwrap();
+        let result1 = tool
+            .call(json!({"seconds": 10.0}))
+            .await
+            .unwrap()
+            .into_json()
+            .unwrap();
         assert_eq!(result1["status"], "interrupted");
 
         // Second wait + interrupt
@@ -358,7 +393,12 @@ mod tests {
             }));
         });
 
-        let result2 = tool.call(json!({"seconds": 10.0})).await.unwrap();
+        let result2 = tool
+            .call(json!({"seconds": 10.0}))
+            .await
+            .unwrap()
+            .into_json()
+            .unwrap();
         assert_eq!(result2["status"], "interrupted");
         assert!(
             result2["reason"]

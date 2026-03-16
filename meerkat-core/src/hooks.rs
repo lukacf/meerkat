@@ -210,6 +210,11 @@ pub struct HookToolCall {
 }
 
 /// Tool result view exposed to hooks.
+///
+/// The `content` field is always the text projection of the tool result.
+/// When `ToolResult.content` migrates to `Vec<ContentBlock>`, this will
+/// contain the concatenated text and `has_images` will signal the presence
+/// of non-text blocks.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct HookToolResult {
@@ -217,6 +222,11 @@ pub struct HookToolResult {
     pub name: String,
     pub content: String,
     pub is_error: bool,
+    /// Whether the original tool result contains image blocks.
+    /// Hooks always see the text projection; this flag signals that
+    /// non-text content exists so hook authors can make informed decisions.
+    #[serde(default)]
+    pub has_images: bool,
 }
 
 /// Full invocation payload passed into the hook engine.
@@ -288,6 +298,33 @@ pub fn default_failure_policy(capability: HookCapability) -> HookFailurePolicy {
     }
 }
 
+/// Apply a `HookPatch::ToolResult` to a `ToolResult`, preserving image blocks.
+///
+/// Deterministic rebuild rule:
+/// 1. Strip all `ContentBlock::Text` blocks from the original vec.
+/// 2. Prepend a single `ContentBlock::Text { text: patched_text }` at position 0.
+/// 3. Append all image blocks in their original relative order.
+pub fn apply_tool_result_patch(
+    tool_result: &mut crate::types::ToolResult,
+    patched_text: String,
+    is_error: Option<bool>,
+) {
+    use crate::types::ContentBlock;
+
+    let image_blocks: Vec<ContentBlock> = tool_result
+        .content
+        .iter()
+        .filter(|b| matches!(b, ContentBlock::Image { .. }))
+        .cloned()
+        .collect();
+    let mut new_content = vec![ContentBlock::Text { text: patched_text }];
+    new_content.extend(image_blocks);
+    tool_result.content = new_content;
+    if let Some(value) = is_error {
+        tool_result.is_error = value;
+    }
+}
+
 /// Engine-level failures that prevented hook execution.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum HookEngineError {
@@ -316,4 +353,174 @@ pub trait HookEngine: Send + Sync {
         invocation: HookInvocation,
         overrides: Option<&crate::config::HookRunOverrides>,
     ) -> Result<HookExecutionReport, HookEngineError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{ContentBlock, ToolResult};
+
+    fn text_block(s: &str) -> ContentBlock {
+        ContentBlock::Text {
+            text: s.to_string(),
+        }
+    }
+
+    fn image_block(media_type: &str, data: &str) -> ContentBlock {
+        ContentBlock::Image {
+            media_type: media_type.to_string(),
+            data: data.to_string(),
+            source_path: None,
+        }
+    }
+
+    #[test]
+    fn hook_result_from_multimodal_uses_text_projection() {
+        let tr = ToolResult::with_blocks(
+            "tc_1".into(),
+            vec![text_block("hello"), image_block("image/png", "AAAA")],
+            false,
+        );
+        let hook_result = HookToolResult {
+            tool_use_id: tr.tool_use_id.clone(),
+            name: "test_tool".into(),
+            content: tr.text_content(),
+            is_error: tr.is_error,
+            has_images: tr.has_images(),
+        };
+        // text_content concatenates text projections; image blocks produce "[image: image/png]"
+        assert_eq!(hook_result.content, "hello\n[image: image/png]");
+        assert!(hook_result.has_images);
+    }
+
+    #[test]
+    fn hook_result_text_only_has_images_false() {
+        let tr = ToolResult::new("tc_1".into(), "just text".into(), false);
+        let hook_result = HookToolResult {
+            tool_use_id: tr.tool_use_id.clone(),
+            name: "test_tool".into(),
+            content: tr.text_content(),
+            is_error: tr.is_error,
+            has_images: tr.has_images(),
+        };
+        assert_eq!(hook_result.content, "just text");
+        assert!(!hook_result.has_images);
+    }
+
+    #[test]
+    fn hook_patch_replaces_text_preserves_images() {
+        let mut tr = ToolResult::with_blocks(
+            "tc_1".into(),
+            vec![
+                text_block("original text"),
+                image_block("image/png", "AAAA"),
+                image_block("image/jpeg", "BBBB"),
+            ],
+            false,
+        );
+        apply_tool_result_patch(&mut tr, "patched text".into(), None);
+        assert_eq!(tr.content.len(), 3);
+        assert_eq!(
+            tr.content[0],
+            ContentBlock::Text {
+                text: "patched text".into()
+            }
+        );
+        assert!(
+            matches!(&tr.content[1], ContentBlock::Image { media_type, data, .. }
+            if media_type == "image/png" && data == "AAAA")
+        );
+        assert!(
+            matches!(&tr.content[2], ContentBlock::Image { media_type, data, .. }
+            if media_type == "image/jpeg" && data == "BBBB")
+        );
+    }
+
+    #[test]
+    fn hook_patch_text_only_unchanged() {
+        let mut tr = ToolResult::new("tc_1".into(), "original".into(), false);
+        apply_tool_result_patch(&mut tr, "patched".into(), None);
+        assert_eq!(tr.content.len(), 1);
+        assert_eq!(tr.text_content(), "patched");
+        assert!(!tr.is_error);
+    }
+
+    #[test]
+    fn hook_patch_image_only_result_prepends_text() {
+        let mut tr =
+            ToolResult::with_blocks("tc_1".into(), vec![image_block("image/png", "AAAA")], false);
+        apply_tool_result_patch(&mut tr, "added text".into(), None);
+        assert_eq!(tr.content.len(), 2);
+        assert_eq!(
+            tr.content[0],
+            ContentBlock::Text {
+                text: "added text".into()
+            }
+        );
+        assert!(matches!(&tr.content[1], ContentBlock::Image { .. }));
+    }
+
+    #[test]
+    fn hook_patch_interleaved_reorders_text_before_images() {
+        // [Text("a"), Image(X), Text("b"), Image(Y)] + patch "c"
+        // -> [Text("c"), Image(X), Image(Y)]
+        let mut tr = ToolResult::with_blocks(
+            "tc_1".into(),
+            vec![
+                text_block("a"),
+                image_block("image/png", "X"),
+                text_block("b"),
+                image_block("image/jpeg", "Y"),
+            ],
+            false,
+        );
+        apply_tool_result_patch(&mut tr, "c".into(), None);
+        assert_eq!(tr.content.len(), 3);
+        assert_eq!(tr.content[0], ContentBlock::Text { text: "c".into() });
+        assert!(
+            matches!(&tr.content[1], ContentBlock::Image { media_type, data, .. }
+            if media_type == "image/png" && data == "X")
+        );
+        assert!(
+            matches!(&tr.content[2], ContentBlock::Image { media_type, data, .. }
+            if media_type == "image/jpeg" && data == "Y")
+        );
+    }
+
+    #[test]
+    fn hook_patch_sets_is_error() {
+        let mut tr = ToolResult::new("tc_1".into(), "ok".into(), false);
+        apply_tool_result_patch(&mut tr, "error".into(), Some(true));
+        assert!(tr.is_error);
+        assert_eq!(tr.text_content(), "error");
+    }
+
+    #[test]
+    fn hook_tool_result_has_images_serde_default() {
+        // Verify has_images defaults to false when deserializing JSON without it.
+        // This ensures backwards compatibility with existing hook payloads.
+        let json = r#"{
+            "tool_use_id": "tc_1",
+            "name": "test",
+            "content": "hello",
+            "is_error": false
+        }"#;
+        let result: HookToolResult =
+            serde_json::from_str(json).expect("should deserialize without has_images");
+        assert!(!result.has_images);
+    }
+
+    #[test]
+    fn hook_tool_result_has_images_roundtrip() {
+        let result = HookToolResult {
+            tool_use_id: "tc_1".into(),
+            name: "tool".into(),
+            content: "text".into(),
+            is_error: false,
+            has_images: true,
+        };
+        let json = serde_json::to_string(&result).expect("should serialize");
+        let decoded: HookToolResult = serde_json::from_str(&json).expect("should deserialize");
+        assert!(decoded.has_images);
+    }
 }

@@ -2924,6 +2924,7 @@ name = "meerkat-tools"
 version = "0.4.11"
 dependencies = [
  "async-trait",
+ "base64",
  "chrono",
  "ciborium",
  "futures",

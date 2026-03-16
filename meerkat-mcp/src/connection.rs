@@ -7,6 +7,7 @@ use crate::transport::{
 use crate::{McpError, McpServerConfig};
 use meerkat_core::ToolDef;
 use meerkat_core::mcp_config::{McpHttpTransport, McpTransportConfig};
+use meerkat_core::types::ContentBlock;
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::{
@@ -167,8 +168,12 @@ impl McpConnection {
         Ok(tools)
     }
 
-    /// Call a tool
-    pub async fn call_tool(&self, name: &str, args: &Value) -> Result<String, McpError> {
+    /// Call a tool, returning multimodal content blocks.
+    ///
+    /// MCP servers can return text, image, and other content types. Text and
+    /// image content are captured as [`ContentBlock`] variants; other content
+    /// types (resources, audio, etc.) are silently dropped.
+    pub async fn call_tool(&self, name: &str, args: &Value) -> Result<Vec<ContentBlock>, McpError> {
         let arguments = args.as_object().cloned();
 
         let result = self
@@ -193,26 +198,16 @@ impl McpConnection {
             });
         }
 
-        // Extract text content from result using fold to avoid intermediate Vec allocation
-        let text = result
-            .content
-            .into_iter()
-            .filter_map(|c| {
-                if let RawContent::Text(text_content) = c.raw {
-                    Some(text_content.text)
-                } else {
-                    None
-                }
-            })
-            .fold(String::new(), |mut acc, text| {
-                if !acc.is_empty() {
-                    acc.push('\n');
-                }
-                acc.push_str(&text);
-                acc
-            });
+        Ok(extract_content_blocks(result.content))
+    }
 
-        Ok(text)
+    /// Call a tool, returning only the text content as a concatenated string.
+    ///
+    /// This is a convenience wrapper around [`call_tool`](Self::call_tool) that
+    /// discards non-text content. Useful for callers that only need text.
+    pub async fn call_tool_text(&self, name: &str, args: &Value) -> Result<String, McpError> {
+        let blocks = self.call_tool(name, args).await?;
+        Ok(meerkat_core::types::text_content(&blocks))
     }
 
     /// Close the connection
@@ -227,6 +222,26 @@ impl McpConnection {
     }
 }
 
+/// Convert MCP [`Content`] items to [`ContentBlock`] variants.
+///
+/// Text and image content are captured. Other content types (resources,
+/// audio, resource links) are silently dropped since the core agent loop
+/// does not model them.
+fn extract_content_blocks(contents: Vec<rmcp::model::Content>) -> Vec<ContentBlock> {
+    contents
+        .into_iter()
+        .filter_map(|c| match c.raw {
+            RawContent::Text(text) => Some(ContentBlock::Text { text: text.text }),
+            RawContent::Image(image) => Some(ContentBlock::Image {
+                media_type: image.mime_type,
+                data: image.data,
+                source_path: None,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 pub mod tests {
@@ -235,55 +250,114 @@ pub mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
-    /// Helper function that extracts text from Content items using the optimized approach
-    /// This mirrors the logic in call_tool() but as a standalone testable function
-    fn extract_text_content(contents: Vec<Content>) -> String {
-        contents
-            .into_iter()
-            .filter_map(|c| {
-                if let RawContent::Text(text_content) = c.raw {
-                    Some(text_content.text)
-                } else {
-                    None
-                }
-            })
-            .fold(String::new(), |mut acc, text| {
-                if !acc.is_empty() {
-                    acc.push('\n');
-                }
-                acc.push_str(&text);
-                acc
-            })
-    }
-
-    /// Test that text content extraction works correctly with multiple items
+    /// Test that content block extraction works correctly with multiple text items
     #[test]
-    fn test_extract_text_content_multiple_items() {
+    fn test_extract_content_blocks_multiple_text() {
         let contents = vec![
             Content::text("Line 1"),
             Content::text("Line 2"),
             Content::text("Line 3"),
         ];
 
-        let result = extract_text_content(contents);
-        assert_eq!(result, "Line 1\nLine 2\nLine 3");
+        let blocks = extract_content_blocks(contents);
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(
+            blocks[0],
+            ContentBlock::Text {
+                text: "Line 1".to_string()
+            }
+        );
+        assert_eq!(
+            blocks[1],
+            ContentBlock::Text {
+                text: "Line 2".to_string()
+            }
+        );
+        assert_eq!(
+            blocks[2],
+            ContentBlock::Text {
+                text: "Line 3".to_string()
+            }
+        );
     }
 
-    /// Test that text content extraction works with single item (no separator)
+    /// Test that content block extraction works with single text item
     #[test]
-    fn test_extract_text_content_single_item() {
+    fn test_extract_content_blocks_single_text() {
         let contents = vec![Content::text("Only line")];
 
-        let result = extract_text_content(contents);
-        assert_eq!(result, "Only line");
+        let blocks = extract_content_blocks(contents);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(
+            blocks[0],
+            ContentBlock::Text {
+                text: "Only line".to_string()
+            }
+        );
     }
 
-    /// Test that text content extraction returns empty string for empty input
+    /// Test that content block extraction returns empty vec for empty input
     #[test]
-    fn test_extract_text_content_empty() {
-        let contents: Vec<Content> = vec![];
-        let result = extract_text_content(contents);
-        assert_eq!(result, "");
+    fn test_extract_content_blocks_empty() {
+        let contents: Vec<Content> = Vec::new();
+        let blocks = extract_content_blocks(contents);
+        assert!(blocks.is_empty());
+    }
+
+    /// Test that image content from MCP is captured as ContentBlock::Image
+    #[test]
+    fn mcp_call_tool_captures_image() {
+        let contents = vec![Content::image("aW1hZ2VkYXRh", "image/png")];
+
+        let blocks = extract_content_blocks(contents);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(
+            blocks[0],
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: "aW1hZ2VkYXRh".to_string(),
+                source_path: None,
+            }
+        );
+    }
+
+    /// Test that mixed text and image content is preserved in order
+    #[test]
+    fn mcp_call_tool_mixed_text_and_image() {
+        let contents = vec![
+            Content::text("description of the image"),
+            Content::image("cG5nZGF0YQ==", "image/png"),
+            Content::text("additional context"),
+        ];
+
+        let blocks = extract_content_blocks(contents);
+        assert_eq!(blocks.len(), 3);
+        assert!(
+            matches!(&blocks[0], ContentBlock::Text { text } if text == "description of the image")
+        );
+        assert!(
+            matches!(&blocks[1], ContentBlock::Image { media_type, data, .. } if media_type == "image/png" && data == "cG5nZGF0YQ==")
+        );
+        assert!(matches!(&blocks[2], ContentBlock::Text { text } if text == "additional context"));
+    }
+
+    /// Test that text-only responses still work as before
+    #[test]
+    fn mcp_call_tool_text_only_compat() {
+        let contents = vec![Content::text("Hello, MCP!")];
+
+        let blocks = extract_content_blocks(contents);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(
+            blocks[0],
+            ContentBlock::Text {
+                text: "Hello, MCP!".to_string()
+            }
+        );
+
+        // Verify text_content projection matches legacy behavior
+        let text = meerkat_core::types::text_content(&blocks);
+        assert_eq!(text, "Hello, MCP!");
     }
 
     /// Get path to the test server binary
@@ -400,7 +474,7 @@ pub mod tests {
         conn.close().await.expect("Failed to close connection");
     }
 
-    /// RCT: Verify tools/call round-trip
+    /// RCT: Verify tools/call round-trip (returns Vec<ContentBlock>)
     #[tokio::test]
     async fn test_mcp_tools_call_round_trip() {
         let Some(server_path) = skip_if_no_test_server() else {
@@ -418,19 +492,19 @@ pub mod tests {
             .await
             .expect("Failed to connect");
 
-        // Test echo tool
-        let result = conn
+        // Test echo tool -- returns Vec<ContentBlock>
+        let blocks = conn
             .call_tool("echo", &serde_json::json!({"message": "Hello, MCP!"}))
             .await
             .expect("Echo call failed");
-        assert_eq!(result, "Hello, MCP!");
+        assert_eq!(meerkat_core::types::text_content(&blocks), "Hello, MCP!");
 
         // Test add tool
-        let result = conn
+        let blocks = conn
             .call_tool("add", &serde_json::json!({"a": 5, "b": 3}))
             .await
             .expect("Add call failed");
-        assert_eq!(result, "8");
+        assert_eq!(meerkat_core::types::text_content(&blocks), "8");
 
         // Test fail tool returns error
         let result = conn

@@ -29,7 +29,7 @@ async fn test_rct_contracts_tool_dispatcher_contract() -> Result<(), Box<dyn std
     let store = Arc::new(MemoryTaskStore::new());
     let config = BuiltinToolConfig::default();
 
-    let dispatcher = CompositeDispatcher::new(store, &config, None, None, None, None)?;
+    let dispatcher = CompositeDispatcher::new(store, &config, None, None, None, None, true)?;
 
     let tools = dispatcher.tools();
     assert!(!tools.is_empty());
@@ -54,7 +54,7 @@ async fn test_rct_contracts_task_store_persistence_contract()
 -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(MemoryTaskStore::new());
     let config = BuiltinToolConfig::default();
-    let tool = CompositeDispatcher::new(store, &config, None, None, None, None)?;
+    let tool = CompositeDispatcher::new(store, &config, None, None, None, None, true)?;
 
     let result = dispatch_tool(
         &tool,
@@ -62,8 +62,8 @@ async fn test_rct_contracts_task_store_persistence_contract()
         json!({"subject":"Test","description":"Persist"}),
     )
     .await?;
-    let value: serde_json::Value =
-        serde_json::from_str(&result.content).unwrap_or_else(|_| json!(result.content));
+    let value: serde_json::Value = serde_json::from_str(&result.text_content())
+        .unwrap_or_else(|_| json!(result.text_content()));
     assert!(value.get("id").is_some());
     Ok(())
 }
@@ -80,6 +80,7 @@ async fn test_rct_contracts_inv_004_task_tools_session_id() -> Result<(), Box<dy
         None,
         None,
         Some("test-session-123".into()),
+        true,
     )?;
 
     let result = dispatch_tool(
@@ -88,8 +89,8 @@ async fn test_rct_contracts_inv_004_task_tools_session_id() -> Result<(), Box<dy
         json!({"subject":"Task","description":"Track session"}),
     )
     .await?;
-    let value: serde_json::Value =
-        serde_json::from_str(&result.content).unwrap_or_else(|_| json!(result.content));
+    let value: serde_json::Value = serde_json::from_str(&result.text_content())
+        .unwrap_or_else(|_| json!(result.text_content()));
     assert_eq!(
         value.get("created_by_session").and_then(|v| v.as_str()),
         Some("test-session-123")
@@ -102,7 +103,7 @@ fn test_rct_contracts_all_builtin_schemas_have_required_field()
 -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(MemoryTaskStore::new());
     let config = BuiltinToolConfig::default();
-    let dispatcher = CompositeDispatcher::new(store, &config, None, None, None, None)?;
+    let dispatcher = CompositeDispatcher::new(store, &config, None, None, None, None, true)?;
 
     for tool in dispatcher.tools().iter() {
         let schema = &tool.input_schema;
@@ -120,7 +121,7 @@ fn test_rct_contracts_inv_007_builtin_task_persistence_strategy()
     let store = Arc::new(MemoryTaskStore::new());
     let config = BuiltinToolConfig::default();
 
-    let dispatcher = CompositeDispatcher::new(store, &config, None, None, None, None)?;
+    let dispatcher = CompositeDispatcher::new(store, &config, None, None, None, None, true)?;
 
     // Verify task_create is available as a tool
     let tools = dispatcher.tools();
@@ -281,7 +282,7 @@ async fn test_regression_shell_job_tool_names() -> Result<(), Box<dyn std::error
 
     let store = Arc::new(MemoryTaskStore::new());
     let dispatcher =
-        CompositeDispatcher::new(store, &config, None, Some(shell_config), None, None)?;
+        CompositeDispatcher::new(store, &config, None, Some(shell_config), None, None, true)?;
 
     let tools = dispatcher.tools();
     let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
@@ -338,6 +339,7 @@ async fn test_regression_builder_populates_registry() -> Result<(), Box<dyn std:
             shell_config: None,
             external: None,
             session_id: None,
+            image_tool_results: true,
         })),
         comms: None,
         default_timeout: Duration::from_secs(30),
@@ -500,7 +502,8 @@ async fn test_regression_composite_deduplicates_external_tools()
     let config = BuiltinToolConfig::default();
     let external = Arc::new(DuplicatingDispatcher) as Arc<dyn AgentToolDispatcher>;
 
-    let dispatcher = CompositeDispatcher::new(store, &config, None, None, Some(external), None)?;
+    let dispatcher =
+        CompositeDispatcher::new(store, &config, None, None, Some(external), None, true)?;
     let tools = dispatcher.tools();
 
     // Count occurrences of task_list

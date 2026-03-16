@@ -894,9 +894,8 @@ where
         let run_prompt = user_input.clone();
 
         // Add user message
-        self.session.push(Message::User(crate::types::UserMessage {
-            content: user_input,
-        }));
+        self.session
+            .push(Message::User(crate::types::UserMessage::text(user_input)));
 
         self.emit_run_started_event(&run_prompt, event_tx.as_ref())
             .await;
@@ -939,7 +938,7 @@ where
         let event_tx = event_tx.or_else(|| self.default_event_tx.clone());
 
         let pending_prompt = self.session.messages().last().and_then(|m| match m {
-            Message::User(u) => Some(u.content.clone()),
+            Message::User(u) => Some(u.text_content()),
             _ => None,
         });
 

@@ -51,8 +51,30 @@ pub use store::TaskStore;
 
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
+use meerkat_core::types::ContentBlock;
 use serde_json::Value;
 use std::sync::Arc;
+
+/// Output type for builtin tools, supporting text and multimodal content.
+#[derive(Debug, Clone)]
+pub enum ToolOutput {
+    /// JSON value (existing behavior). Serialized to text for ToolResult.
+    Json(serde_json::Value),
+    /// Multimodal content blocks (e.g., images from view_image).
+    Blocks(Vec<ContentBlock>),
+}
+
+impl ToolOutput {
+    /// Try to extract the inner JSON value.
+    ///
+    /// Returns `None` if this is a `Blocks` variant.
+    pub fn into_json(self) -> Option<serde_json::Value> {
+        match self {
+            Self::Json(v) => Some(v),
+            Self::Blocks(_) => None,
+        }
+    }
+}
 
 /// Trait for implementing built-in tools
 ///
@@ -76,9 +98,9 @@ pub trait BuiltinTool: Send + Sync {
     /// * `args` - JSON value containing the tool arguments
     ///
     /// # Returns
-    /// * `Ok(Value)` - The tool's result as JSON
+    /// * `Ok(ToolOutput)` - The tool's result (JSON or multimodal blocks)
     /// * `Err(BuiltinToolError)` - If execution failed
-    async fn call(&self, args: Value) -> Result<Value, BuiltinToolError>;
+    async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError>;
 }
 
 /// A registry entry for a built-in tool with its enabled state

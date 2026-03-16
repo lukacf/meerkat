@@ -8,7 +8,7 @@ use meerkat_core::skills::{SkillId, SkillRuntime};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::builtin::{BuiltinTool, BuiltinToolError};
+use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[allow(dead_code)]
@@ -57,7 +57,7 @@ impl BuiltinTool for SkillInvokeFunctionTool {
         false
     }
 
-    async fn call(&self, args: Value) -> Result<Value, BuiltinToolError> {
+    async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
         let id_str = args.get("id").and_then(|v| v.as_str()).ok_or_else(|| {
             BuiltinToolError::InvalidArgs("Missing required 'id' parameter".into())
         })?;
@@ -79,11 +79,11 @@ impl BuiltinTool for SkillInvokeFunctionTool {
             .await
             .map_err(|e| BuiltinToolError::ExecutionFailed(e.to_string()))?;
 
-        Ok(json!({
+        Ok(ToolOutput::Json(json!({
             "id": id.0,
             "canonical_key": canonical_key(&id),
             "function_name": function_name,
             "output": output,
-        }))
+        })))
     }
 }

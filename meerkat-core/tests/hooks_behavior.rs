@@ -333,7 +333,7 @@ async fn post_tool_rewrite_mutates_result() {
         })
         .expect("tool results message should exist");
 
-    assert_eq!(tool_result_message[0].content, "patched-result");
+    assert_eq!(tool_result_message[0].text_content(), "patched-result");
 }
 
 #[tokio::test]

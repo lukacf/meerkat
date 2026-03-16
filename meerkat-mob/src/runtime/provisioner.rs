@@ -175,7 +175,7 @@ impl SubagentBackend {
             let prompt = extract_prompt_from_input(&input);
             let meta = extract_turn_metadata(&input);
             state.queued_turns.lock().await.push_back(StartTurnRequest {
-                prompt,
+                prompt: prompt.into(),
                 event_tx,
                 host_mode: meta.as_ref().and_then(|m| m.host_mode).unwrap_or(false),
                 skill_references: meta.as_ref().and_then(|m| m.skill_references.clone()),
@@ -298,7 +298,7 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
         let req = {
             let mut queued_turns = self.state.queued_turns.lock().await;
             queued_turns.pop_front().unwrap_or(StartTurnRequest {
-                prompt: extract_prompt(&primitive),
+                prompt: extract_prompt(&primitive).into(),
                 event_tx: None,
                 host_mode: primitive
                     .turn_metadata()
@@ -485,7 +485,8 @@ impl MobProvisioner for SubagentBackend {
                     supersession_key: None,
                     correlation_id: None,
                 },
-                text: req.prompt,
+                text: req.prompt.text_content(),
+                blocks: None,
                 turn_metadata: Some(turn_metadata),
             });
             return self
@@ -511,7 +512,7 @@ impl MobProvisioner for SubagentBackend {
         if self.runtime_adapter.is_some() {
             let input = meerkat_runtime::mob_adapter::create_flow_step_input(
                 step_id.as_str(),
-                &req.prompt,
+                &req.prompt.text_content(),
                 &run_id.to_string(),
                 0,
                 Some(

@@ -533,9 +533,7 @@ mod tests {
         session.push(Message::System(SystemMessage {
             content: "System".to_string(),
         }));
-        session.push(Message::User(UserMessage {
-            content: "User 1".to_string(),
-        }));
+        session.push(Message::User(UserMessage::text("User 1".to_string())));
 
         let messages = manager.apply_context_strategy(&session, &ContextStrategy::FullHistory);
         assert_eq!(messages.len(), 2);
@@ -550,12 +548,8 @@ mod tests {
         }));
         // Add 4 turns (8 messages)
         for i in 0..4 {
-            session.push(Message::User(UserMessage {
-                content: format!("User {i}"),
-            }));
-            session.push(Message::User(UserMessage {
-                content: format!("Assistant {i}"),
-            }));
+            session.push(Message::User(UserMessage::text(format!("User {i}"))));
+            session.push(Message::User(UserMessage::text(format!("Assistant {i}"))));
         }
 
         // Get last 2 turns = 4 messages + system = 5

@@ -37,9 +37,9 @@ mod llm_normalization {
         let client = AnthropicClient::new(api_key).unwrap();
         let request = LlmRequest::new(
             "claude-opus-4-6",
-            vec![Message::User(UserMessage {
-                content: "Say 'hello' and nothing else".to_string(),
-            })],
+            vec![Message::User(UserMessage::text(
+                "Say 'hello' and nothing else".to_string(),
+            ))],
         );
 
         // Stream returns Pin<Box<dyn Stream>> directly
@@ -104,9 +104,9 @@ mod llm_normalization {
         let client = OpenAiClient::new(api_key);
         let request = LlmRequest::new(
             "gpt-5.2",
-            vec![Message::User(UserMessage {
-                content: "Say 'hello' and nothing else".to_string(),
-            })],
+            vec![Message::User(UserMessage::text(
+                "Say 'hello' and nothing else".to_string(),
+            ))],
         );
 
         let mut stream = client.stream(&request);
@@ -143,9 +143,9 @@ mod llm_normalization {
         let client = GeminiClient::new(api_key);
         let request = LlmRequest::new(
             "gemini-2.0-flash",
-            vec![Message::User(UserMessage {
-                content: "Say 'hello' and nothing else".to_string(),
-            })],
+            vec![Message::User(UserMessage::text(
+                "Say 'hello' and nothing else".to_string(),
+            ))],
         );
 
         let mut stream = client.stream(&request);
@@ -286,18 +286,14 @@ mod session_persistence {
 
         // Create session with multiple messages
         let mut session = Session::new();
-        session.push(Message::User(UserMessage {
-            content: "Hello".to_string(),
-        }));
+        session.push(Message::User(UserMessage::text("Hello".to_string())));
         session.push(Message::Assistant(AssistantMessage {
             content: "Hi there!".to_string(),
             tool_calls: vec![],
             stop_reason: StopReason::EndTurn,
             usage: Usage::default(),
         }));
-        session.push(Message::User(UserMessage {
-            content: "How are you?".to_string(),
-        }));
+        session.push(Message::User(UserMessage::text("How are you?".to_string())));
 
         // Save should succeed atomically
         let session_id = session.id().clone();
@@ -326,9 +322,7 @@ mod session_persistence {
         // Simulate: Session saved, then "crash" (drop store), then resume
         let session_id = {
             let mut session = Session::new();
-            session.push(Message::User(UserMessage {
-                content: "Before crash".to_string(),
-            }));
+            session.push(Message::User(UserMessage::text("Before crash".to_string())));
             session.push(Message::Assistant(AssistantMessage {
                 content: "Response before crash".to_string(),
                 tool_calls: vec![],
@@ -364,18 +358,14 @@ mod session_persistence {
         session.push(Message::System(SystemMessage {
             content: "You are helpful".to_string(),
         }));
-        session.push(Message::User(UserMessage {
-            content: "Hello".to_string(),
-        }));
+        session.push(Message::User(UserMessage::text("Hello".to_string())));
         session.push(Message::Assistant(AssistantMessage {
             content: "Hi!".to_string(),
             tool_calls: vec![],
             stop_reason: StopReason::EndTurn,
             usage: Usage::default(),
         }));
-        session.push(Message::User(UserMessage {
-            content: "Call a tool".to_string(),
-        }));
+        session.push(Message::User(UserMessage::text("Call a tool".to_string())));
         session.push(Message::ToolResults {
             results: vec![ToolResult::new(
                 "call_123".to_string(),
@@ -917,13 +907,14 @@ mod mcp_protocol {
             .expect("Test server should have echo tool");
         assert_eq!(echo_tool.name, "echo");
 
-        // Call echo tool
-        let result = connection
+        // Call echo tool -- returns Vec<ContentBlock>
+        let blocks = connection
             .call_tool("echo", &serde_json::json!({"message": "test"}))
             .await
             .expect("Tool call should succeed");
 
-        assert!(result.contains("test"), "Echo should return input");
+        let result_text = meerkat_core::types::text_content(&blocks);
+        assert!(result_text.contains("test"), "Echo should return input");
 
         // Clean up
         connection.close().await.expect("Should close cleanly");
@@ -955,9 +946,7 @@ mod combined {
         let mut session = Session::new();
 
         // Add messages including tool results
-        session.push(Message::User(UserMessage {
-            content: "Call a tool".to_string(),
-        }));
+        session.push(Message::User(UserMessage::text("Call a tool".to_string())));
 
         let first_usage = Usage {
             input_tokens: 100,
@@ -1068,9 +1057,9 @@ mod combined {
 
         let request = LlmRequest::new(
             "claude-opus-4-6",
-            vec![Message::User(UserMessage {
-                content: "Read the file".to_string(),
-            })],
+            vec![Message::User(UserMessage::text(
+                "Read the file".to_string(),
+            ))],
         )
         .with_tools(tools)
         .with_max_tokens(4096)

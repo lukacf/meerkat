@@ -47,7 +47,19 @@ pub(crate) fn input_to_primitive(input: &Input, input_id: InputId) -> RunPrimiti
             turn_metadata: None,
         }),
         _ => {
-            let prompt = input_to_prompt(input);
+            // Use multimodal blocks when available (PromptInput/PeerInput with images),
+            // otherwise fall back to text.
+            let content = match input {
+                Input::Prompt(p) if p.blocks.is_some() => CoreRenderable::Blocks {
+                    blocks: p.blocks.clone().unwrap_or_default(),
+                },
+                Input::Peer(p) if p.blocks.is_some() => CoreRenderable::Blocks {
+                    blocks: p.blocks.clone().unwrap_or_default(),
+                },
+                _ => CoreRenderable::Text {
+                    text: input_to_prompt(input),
+                },
+            };
             let turn_metadata = match input {
                 Input::Prompt(prompt) => prompt.turn_metadata.clone(),
                 Input::FlowStep(flow_step) => flow_step.turn_metadata.clone(),
@@ -57,7 +69,7 @@ pub(crate) fn input_to_primitive(input: &Input, input_id: InputId) -> RunPrimiti
                 boundary: RunApplyBoundary::RunStart,
                 appends: vec![ConversationAppend {
                     role: ConversationAppendRole::User,
-                    content: CoreRenderable::Text { text: prompt },
+                    content,
                 }],
                 context_appends: vec![],
                 contributing_input_ids: vec![input_id],
@@ -299,6 +311,7 @@ mod tests {
                 correlation_id: None,
             },
             text: text.into(),
+            blocks: None,
             turn_metadata: None,
         })
     }
@@ -327,6 +340,7 @@ mod tests {
             },
             convention: None,
             body: "peer message".into(),
+            blocks: None,
         });
         assert_eq!(input_to_prompt(&input), "peer message");
     }
@@ -346,6 +360,53 @@ mod tests {
                 match &staged.appends[0].content {
                     CoreRenderable::Text { text } => assert_eq!(text, "test prompt"),
                     _ => panic!("Expected Text content"),
+                }
+            }
+            _ => panic!("Expected StagedInput"),
+        }
+    }
+
+    #[test]
+    fn peer_input_with_blocks_produces_blocks_renderable() {
+        let blocks = vec![
+            meerkat_core::types::ContentBlock::Text {
+                text: "see this image".into(),
+            },
+            meerkat_core::types::ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "abc123".into(),
+                source_path: None,
+            },
+        ];
+        let input = Input::Peer(PeerInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::Peer {
+                    peer_id: "p".into(),
+                    runtime_id: None,
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            convention: Some(crate::input::PeerConvention::Message),
+            body: "see this image".into(),
+            blocks: Some(blocks.clone()),
+        });
+        let input_id = input.id().clone();
+        let primitive = input_to_primitive(&input, input_id);
+
+        match primitive {
+            RunPrimitive::StagedInput(staged) => {
+                assert_eq!(staged.appends.len(), 1);
+                match &staged.appends[0].content {
+                    CoreRenderable::Blocks { blocks: got } => {
+                        assert_eq!(got.len(), 2);
+                    }
+                    other => panic!("Expected Blocks content, got {other:?}"),
                 }
             }
             _ => panic!("Expected StagedInput"),

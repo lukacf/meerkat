@@ -536,9 +536,7 @@ fn test_regression_session_with_user_message_is_valid_for_run_pending() {
     use meerkat_core::types::{Message, UserMessage};
 
     let mut session = Session::new();
-    session.push(Message::User(UserMessage {
-        content: "Test prompt".to_string(),
-    }));
+    session.push(Message::User(UserMessage::text("Test prompt".to_string())));
 
     let has_user_message = session
         .messages()
@@ -552,10 +550,10 @@ fn test_regression_session_with_user_message_is_valid_for_run_pending() {
 
     // Verify the content is preserved - extract content and check
     let content = session.messages().last().and_then(|m| match m {
-        Message::User(user) => Some(user.content.as_str()),
+        Message::User(user) => Some(user.text_content()),
         _ => None,
     });
-    assert_eq!(content, Some("Test prompt"));
+    assert_eq!(content.as_deref(), Some("Test prompt"));
 }
 
 // ============================================================================

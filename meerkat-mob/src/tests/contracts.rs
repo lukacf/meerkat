@@ -588,7 +588,7 @@ impl SessionService for ContractSessionService {
 fn host_mode_req(comms_name: &str) -> CreateSessionRequest {
     CreateSessionRequest {
         model: "contract-mock".to_string(),
-        prompt: "hello".to_string(),
+        prompt: "hello".to_string().into(),
         system_prompt: None,
         max_tokens: None,
         event_tx: None,
@@ -671,7 +671,7 @@ async fn contract_mob_001_host_mode_session_stays_alive() {
         .start_turn(
             &sid_a,
             StartTurnRequest {
-                prompt: "follow up".to_string(),
+                prompt: "follow up".to_string().into(),
                 event_tx: None,
                 host_mode: true,
                 skill_references: None,
@@ -742,7 +742,7 @@ async fn contract_mob_007_session_archive_removes_from_active_list() {
         .start_turn(
             &sid,
             StartTurnRequest {
-                prompt: "should fail".to_string(),
+                prompt: "should fail".to_string().into(),
                 event_tx: None,
                 host_mode: false,
                 skill_references: None,

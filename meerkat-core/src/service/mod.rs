@@ -11,7 +11,7 @@ use crate::session::SystemContextStageError;
 use crate::time_compat::SystemTime;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
-use crate::types::{Message, RunResult, SessionId, Usage};
+use crate::types::{ContentInput, Message, RunResult, SessionId, Usage};
 use crate::{
     AgentToolDispatcher, BudgetLimits, HookRunOverrides, OutputSchema, PeerMeta, Provider, Session,
 };
@@ -130,8 +130,8 @@ impl SystemContextStageError {
 pub struct CreateSessionRequest {
     /// Model name (e.g. "claude-opus-4-6").
     pub model: String,
-    /// Initial user prompt.
-    pub prompt: String,
+    /// Initial user prompt (text or multimodal).
+    pub prompt: ContentInput,
     /// Optional system prompt override.
     pub system_prompt: Option<String>,
     /// Max tokens per LLM turn.
@@ -293,8 +293,8 @@ impl std::fmt::Debug for SessionBuildOptions {
 /// Request to start a new turn on an existing session.
 #[derive(Debug)]
 pub struct StartTurnRequest {
-    /// User prompt for this turn.
-    pub prompt: String,
+    /// User prompt for this turn (text or multimodal).
+    pub prompt: ContentInput,
     /// Channel for streaming events during the turn.
     pub event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
     /// Run this turn in host mode.
@@ -490,6 +490,21 @@ pub trait SessionService: Send + Sync {
         _client: std::sync::Arc<dyn crate::AgentLlmClient>,
     ) -> Result<(), SessionError> {
         Err(SessionError::Unsupported("set_session_client".to_string()))
+    }
+
+    /// Stage an external tool visibility filter on a live session.
+    ///
+    /// Used to dynamically hide/show tools (e.g., `view_image`) after a
+    /// model hot-swap changes capability support. Returns `Unsupported`
+    /// by default.
+    async fn set_session_tool_filter(
+        &self,
+        _id: &SessionId,
+        _filter: crate::ToolFilter,
+    ) -> Result<(), SessionError> {
+        Err(SessionError::Unsupported(
+            "set_session_tool_filter".to_string(),
+        ))
     }
 
     /// Read the current state of a session.

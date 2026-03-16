@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use crate::builtin::store::TaskStore;
 use crate::builtin::types::{TaskId, TaskPriority, TaskStatus, TaskUpdate};
-use crate::builtin::{BuiltinTool, BuiltinToolError};
+use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 
 /// Parameters for the task_update tool
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -103,7 +103,7 @@ impl BuiltinTool for TaskUpdateTool {
         true
     }
 
-    async fn call(&self, args: Value) -> Result<Value, BuiltinToolError> {
+    async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
         let params: TaskUpdateParams = serde_json::from_value(args)
             .map_err(|e| BuiltinToolError::InvalidArgs(e.to_string()))?;
 
@@ -135,7 +135,9 @@ impl BuiltinTool for TaskUpdateTool {
             .await
             .map_err(|e| BuiltinToolError::TaskError(e.to_string()))?;
 
-        serde_json::to_value(&task).map_err(|e| BuiltinToolError::ExecutionFailed(e.to_string()))
+        serde_json::to_value(&task)
+            .map(ToolOutput::Json)
+            .map_err(|e| BuiltinToolError::ExecutionFailed(e.to_string()))
     }
 }
 
@@ -294,6 +296,8 @@ mod tests {
                 "status": "in_progress"
             }))
             .await
+            .unwrap()
+            .into_json()
             .unwrap();
 
         let updated: Task = serde_json::from_value(result).unwrap();
@@ -312,6 +316,8 @@ mod tests {
                 "status": "completed"
             }))
             .await
+            .unwrap()
+            .into_json()
             .unwrap();
 
         let updated: Task = serde_json::from_value(result).unwrap();
@@ -330,6 +336,8 @@ mod tests {
                 "priority": "high"
             }))
             .await
+            .unwrap()
+            .into_json()
             .unwrap();
 
         let updated: Task = serde_json::from_value(result).unwrap();
@@ -342,6 +350,8 @@ mod tests {
                 "priority": "low"
             }))
             .await
+            .unwrap()
+            .into_json()
             .unwrap();
 
         let updated: Task = serde_json::from_value(result).unwrap();
@@ -360,6 +370,8 @@ mod tests {
                 "description": "Updated description"
             }))
             .await
+            .unwrap()
+            .into_json()
             .unwrap();
 
         let updated: Task = serde_json::from_value(result).unwrap();
@@ -380,6 +392,8 @@ mod tests {
                 "labels": ["new-label", "another-label"]
             }))
             .await
+            .unwrap()
+            .into_json()
             .unwrap();
 
         let updated: Task = serde_json::from_value(result).unwrap();
@@ -416,6 +430,8 @@ mod tests {
                 "add_blocks": [blocker.id.0]
             }))
             .await
+            .unwrap()
+            .into_json()
             .unwrap();
 
         let updated: Task = serde_json::from_value(result).unwrap();
@@ -444,6 +460,8 @@ mod tests {
                 "add_blocks": [blocker2.id.0]
             }))
             .await
+            .unwrap()
+            .into_json()
             .unwrap();
 
         let updated: Task = serde_json::from_value(result).unwrap();
@@ -482,6 +500,8 @@ mod tests {
                 "remove_blocks": ["blocker-1"]
             }))
             .await
+            .unwrap()
+            .into_json()
             .unwrap();
 
         let updated: Task = serde_json::from_value(result).unwrap();
@@ -569,6 +589,8 @@ mod tests {
                 "subject": "Updated with session"
             }))
             .await
+            .unwrap()
+            .into_json()
             .unwrap();
 
         let updated: Task = serde_json::from_value(result).unwrap();
@@ -608,6 +630,8 @@ mod tests {
                 "labels": ["done", "reviewed"]
             }))
             .await
+            .unwrap()
+            .into_json()
             .unwrap();
 
         let updated: Task = serde_json::from_value(result).unwrap();
@@ -716,6 +740,8 @@ mod tests {
                 "owner": "alice"
             }))
             .await
+            .unwrap()
+            .into_json()
             .unwrap();
 
         let updated: Task = serde_json::from_value(result).unwrap();
@@ -743,6 +769,8 @@ mod tests {
                 }
             }))
             .await
+            .unwrap()
+            .into_json()
             .unwrap();
 
         let updated: Task = serde_json::from_value(result).unwrap();
@@ -780,6 +808,8 @@ mod tests {
                 }
             }))
             .await
+            .unwrap()
+            .into_json()
             .unwrap();
 
         let updated: Task = serde_json::from_value(result).unwrap();
@@ -813,6 +843,8 @@ mod tests {
                 }
             }))
             .await
+            .unwrap()
+            .into_json()
             .unwrap();
 
         let updated: Task = serde_json::from_value(result).unwrap();
@@ -848,6 +880,8 @@ mod tests {
                 "add_blocked_by": [blocker.id.0]
             }))
             .await
+            .unwrap()
+            .into_json()
             .unwrap();
 
         let updated: Task = serde_json::from_value(result).unwrap();
@@ -895,6 +929,8 @@ mod tests {
                 "remove_blocked_by": ["blocker-1"]
             }))
             .await
+            .unwrap()
+            .into_json()
             .unwrap();
 
         let updated: Task = serde_json::from_value(result).unwrap();
@@ -920,6 +956,8 @@ mod tests {
                 "add_blocked_by": ["prerequisite-task-1", "prerequisite-task-2"]
             }))
             .await
+            .unwrap()
+            .into_json()
             .unwrap();
 
         let updated: Task = serde_json::from_value(result).unwrap();

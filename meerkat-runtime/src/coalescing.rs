@@ -180,6 +180,7 @@ mod tests {
                 phase: ResponseProgressPhase::InProgress,
             }),
             body: "progress".into(),
+            blocks: None,
         });
         assert!(is_coalescing_eligible(&input));
     }
@@ -189,6 +190,7 @@ mod tests {
         let input = Input::Prompt(PromptInput {
             header: make_header_with_supersession(None),
             text: "hello".into(),
+            blocks: None,
             turn_metadata: None,
         });
         assert!(!is_coalescing_eligible(&input));
@@ -200,6 +202,7 @@ mod tests {
             header: make_header_with_supersession(None),
             convention: Some(PeerConvention::Message),
             body: "hello".into(),
+            blocks: None,
         });
         assert!(!is_coalescing_eligible(&input));
     }
@@ -267,6 +270,7 @@ mod tests {
         let input2 = Input::Prompt(PromptInput {
             header: make_header_with_supersession(Some("same-key")),
             text: "hello".into(),
+            blocks: None,
             turn_metadata: None,
         });
         let result = check_supersession(&input2, &input1, &runtime);

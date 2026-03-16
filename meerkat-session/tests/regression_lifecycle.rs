@@ -263,7 +263,7 @@ fn make_failing_service() -> Arc<EphemeralSessionService<FailingMockAgentBuilder
 fn create_req(prompt: &str) -> CreateSessionRequest {
     CreateSessionRequest {
         model: "mock".to_string(),
-        prompt: prompt.to_string(),
+        prompt: prompt.to_string().into(),
         system_prompt: None,
         max_tokens: None,
         event_tx: None,
@@ -291,7 +291,7 @@ fn create_req_with_labels(prompt: &str, labels: BTreeMap<String, String>) -> Cre
 
 fn turn_req(prompt: &str) -> StartTurnRequest {
     StartTurnRequest {
-        prompt: prompt.to_string(),
+        prompt: prompt.to_string().into(),
         event_tx: None,
         host_mode: false,
         skill_references: None,
@@ -430,7 +430,7 @@ async fn interrupt_during_slow_turn_returns_promptly() {
         .create_session(CreateSessionRequest {
             initial_turn: InitialTurnPolicy::Defer,
             model: "mock".to_string(),
-            prompt: "slow".to_string(),
+            prompt: "slow".to_string().into(),
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
@@ -500,7 +500,7 @@ async fn interrupt_host_mode_returns_without_blocking() {
         .create_session(CreateSessionRequest {
             initial_turn: InitialTurnPolicy::Defer,
             model: "mock".to_string(),
-            prompt: "host".to_string(),
+            prompt: "host".to_string().into(),
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
@@ -520,7 +520,7 @@ async fn interrupt_host_mode_returns_without_blocking() {
         svc.start_turn(
             &sid2,
             StartTurnRequest {
-                prompt: "Host mode turn".to_string(),
+                prompt: "Host mode turn".to_string().into(),
                 event_tx: None,
                 host_mode: true,
                 skill_references: None,
@@ -558,7 +558,7 @@ async fn concurrent_turn_on_busy_session_returns_busy() {
         .create_session(CreateSessionRequest {
             initial_turn: InitialTurnPolicy::Defer,
             model: "mock".to_string(),
-            prompt: "busy".to_string(),
+            prompt: "busy".to_string().into(),
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
@@ -876,7 +876,7 @@ async fn failed_turn_returns_agent_error() {
         .create_session(CreateSessionRequest {
             initial_turn: InitialTurnPolicy::Defer,
             model: "mock".to_string(),
-            prompt: "will fail".to_string(),
+            prompt: "will fail".to_string().into(),
             system_prompt: None,
             max_tokens: None,
             event_tx: None,

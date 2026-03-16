@@ -5,7 +5,7 @@ use super::config::SubAgentError;
 use super::runner::SubAgentCommsConfig;
 use super::runner::{DynSubAgentSpec, create_spawn_session, spawn_sub_agent_dyn};
 use super::state::SubAgentToolState;
-use crate::builtin::{BuiltinTool, BuiltinToolError};
+use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 use crate::dispatcher::FilteredDispatcher;
 use async_trait::async_trait;
 use meerkat_client::LlmProvider;
@@ -548,7 +548,7 @@ impl BuiltinTool for AgentSpawnTool {
         false // Sub-agent tools are disabled by default
     }
 
-    async fn call(&self, args: Value) -> Result<Value, BuiltinToolError> {
+    async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
         #[cfg(feature = "comms")]
         let params: SpawnParams = serde_json::from_value(args)
             .map_err(|e| BuiltinToolError::invalid_args(format!("Invalid parameters: {e}")))?;
@@ -562,9 +562,11 @@ impl BuiltinTool for AgentSpawnTool {
         };
 
         let response = self.spawn_agent(params).await?;
-        serde_json::to_value(response).map_err(|e| {
-            BuiltinToolError::execution_failed(format!("Failed to serialize response: {e}"))
-        })
+        serde_json::to_value(response)
+            .map(ToolOutput::Json)
+            .map_err(|e| {
+                BuiltinToolError::execution_failed(format!("Failed to serialize response: {e}"))
+            })
     }
 }
 

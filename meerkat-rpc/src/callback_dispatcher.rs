@@ -118,11 +118,11 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
             ToolError::execution_failed(format!("Failed to parse callback result: {e}"))
         })?;
 
-        Ok(ToolResult {
-            tool_use_id: call.id.to_string(),
-            content: parsed.content,
-            is_error: parsed.is_error,
-        })
+        Ok(ToolResult::new(
+            call.id.to_string(),
+            parsed.content,
+            parsed.is_error,
+        ))
     }
 }
 
@@ -179,7 +179,7 @@ mod tests {
             .unwrap();
 
         let result = handle.await.unwrap().unwrap();
-        assert_eq!(result.content, "results here");
+        assert_eq!(result.text_content(), "results here");
         assert!(!result.is_error);
     }
 

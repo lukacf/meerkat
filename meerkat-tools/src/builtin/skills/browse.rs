@@ -8,7 +8,7 @@ use meerkat_core::skills::{SkillCollection, SkillDescriptor, SkillFilter, SkillI
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::builtin::{BuiltinTool, BuiltinToolError};
+use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 
 /// Arguments for the browse_skills tool (used for schema generation).
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -115,7 +115,7 @@ impl BuiltinTool for BrowseSkillsTool {
         false // Enabled conditionally when skills are active
     }
 
-    async fn call(&self, args: Value) -> Result<Value, BuiltinToolError> {
+    async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
         let query = args.get("query").and_then(|v| v.as_str());
         let path = args.get("path").and_then(|v| v.as_str());
 
@@ -143,11 +143,11 @@ impl BuiltinTool for BrowseSkillsTool {
                 })
                 .collect();
 
-            return Ok(json!({
+            return Ok(ToolOutput::Json(json!({
                 "type": "search",
                 "query": query_str,
                 "skills": skill_values,
-            }));
+            })));
         }
 
         // Listing mode
@@ -174,12 +174,12 @@ impl BuiltinTool for BrowseSkillsTool {
 
         let (subcollections, direct_skills) = partition_at_path(browse_path, &skills, &collections);
 
-        Ok(json!({
+        Ok(ToolOutput::Json(json!({
             "type": "listing",
             "path": browse_path,
             "subcollections": subcollections,
             "skills": direct_skills,
-        }))
+        })))
     }
 }
 
@@ -316,7 +316,7 @@ mod tests {
     #[tokio::test]
     async fn test_browse_root_returns_listing() {
         let tool = BrowseSkillsTool::new(test_engine());
-        let result = tool.call(json!({})).await.unwrap();
+        let result = tool.call(json!({})).await.unwrap().into_json().unwrap();
 
         assert_eq!(result["type"], "listing");
         assert_eq!(result["path"], "");
@@ -335,7 +335,12 @@ mod tests {
     #[tokio::test]
     async fn test_browse_collection_returns_listing() {
         let tool = BrowseSkillsTool::new(test_engine());
-        let result = tool.call(json!({"path": "extraction"})).await.unwrap();
+        let result = tool
+            .call(json!({"path": "extraction"}))
+            .await
+            .unwrap()
+            .into_json()
+            .unwrap();
 
         assert_eq!(result["type"], "listing");
         assert_eq!(result["path"], "extraction");
@@ -349,7 +354,12 @@ mod tests {
     #[tokio::test]
     async fn test_browse_search_returns_search() {
         let tool = BrowseSkillsTool::new(test_engine());
-        let result = tool.call(json!({"query": "email"})).await.unwrap();
+        let result = tool
+            .call(json!({"query": "email"}))
+            .await
+            .unwrap()
+            .into_json()
+            .unwrap();
 
         assert_eq!(result["type"], "search");
         assert_eq!(result["query"], "email");
@@ -365,6 +375,8 @@ mod tests {
         let result = tool
             .call(json!({"path": "formatting", "query": "email"}))
             .await
+            .unwrap()
+            .into_json()
             .unwrap();
 
         // Query wins — returns search mode, not listing
@@ -375,7 +387,12 @@ mod tests {
     #[tokio::test]
     async fn test_browse_empty_collection() {
         let tool = BrowseSkillsTool::new(test_engine());
-        let result = tool.call(json!({"path": "nonexistent"})).await.unwrap();
+        let result = tool
+            .call(json!({"path": "nonexistent"}))
+            .await
+            .unwrap()
+            .into_json()
+            .unwrap();
 
         assert_eq!(result["type"], "listing");
         let skills = result["skills"].as_array().unwrap();

@@ -968,11 +968,11 @@ impl meerkat_core::AgentToolDispatcher for JsToolDispatcher {
         // Fire-and-forget tools return immediately. The host watches
         // ToolCallRequested events in the stream to act on the call.
         if Self::is_fire_and_forget(call.name) {
-            return Ok(meerkat_core::ToolResult {
-                tool_use_id: call.id.to_string(),
-                content: "acknowledged".to_string(),
-                is_error: false,
-            });
+            return Ok(meerkat_core::ToolResult::new(
+                call.id.to_string(),
+                "acknowledged".to_string(),
+                false,
+            ));
         }
 
         let callback = Self::get_callback(call.name)
@@ -1006,11 +1006,11 @@ impl meerkat_core::AgentToolDispatcher for JsToolDispatcher {
             ))
         })?;
 
-        Ok(meerkat_core::ToolResult {
-            tool_use_id: call.id.to_string(),
-            content: parsed.content,
-            is_error: parsed.is_error,
-        })
+        Ok(meerkat_core::ToolResult::new(
+            call.id.to_string(),
+            parsed.content,
+            parsed.is_error,
+        ))
     }
 }
 

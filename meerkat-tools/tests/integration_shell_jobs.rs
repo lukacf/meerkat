@@ -60,6 +60,7 @@ fn create_dispatcher_with_shell(
         Some(shell_config),
         None,
         None,
+        true,
     )?;
     Ok(dispatcher)
 }

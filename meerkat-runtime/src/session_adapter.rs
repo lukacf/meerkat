@@ -804,6 +804,7 @@ mod tests {
                 correlation_id: None,
             },
             text: text.into(),
+            blocks: None,
             turn_metadata: None,
         })
     }

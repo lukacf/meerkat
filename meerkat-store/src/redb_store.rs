@@ -326,9 +326,9 @@ mod tests {
     async fn test_save_and_load() {
         let (_dir, store) = temp_store();
         let mut session = Session::new();
-        session.push(meerkat_core::types::Message::User(UserMessage {
-            content: "Hello".to_string(),
-        }));
+        session.push(meerkat_core::types::Message::User(UserMessage::text(
+            "Hello".to_string(),
+        )));
 
         store.save(&session).await.unwrap();
 
@@ -390,9 +390,9 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
 
         // Update the session
-        session.push(meerkat_core::types::Message::User(UserMessage {
-            content: "Update".to_string(),
-        }));
+        session.push(meerkat_core::types::Message::User(UserMessage::text(
+            "Update".to_string(),
+        )));
         store.save(&session).await.unwrap();
 
         // Should still have exactly one entry in list
@@ -429,9 +429,9 @@ mod tests {
             let store = RedbSessionStore::open(&path).unwrap();
             let mut session = Session::new();
             session_id = session.id().clone();
-            session.push(meerkat_core::types::Message::User(UserMessage {
-                content: "Persistent".to_string(),
-            }));
+            session.push(meerkat_core::types::Message::User(UserMessage::text(
+                "Persistent".to_string(),
+            )));
             store.save(&session).await.unwrap();
         }
 

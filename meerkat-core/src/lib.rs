@@ -102,7 +102,7 @@ pub use hooks::{
     HookCapability, HookDecision, HookEngine, HookEngineError, HookExecutionMode,
     HookExecutionReport, HookFailurePolicy, HookId, HookInvocation, HookLlmRequest,
     HookLlmResponse, HookOutcome, HookPatch, HookPatchEnvelope, HookPoint, HookReasonCode,
-    HookRevision, HookToolCall, HookToolResult, default_failure_policy,
+    HookRevision, HookToolCall, HookToolResult, apply_tool_result_patch, default_failure_policy,
 };
 pub use interaction::{
     ClassifiedInboxInteraction, InboxInteraction, InteractionContent, InteractionId,
@@ -150,8 +150,9 @@ pub use tool_scope::{
 };
 pub use turn_boundary::{TurnBoundaryHook, TurnBoundaryMessage};
 pub use types::{
-    ArtifactRef, AssistantBlock, AssistantMessage, BlockAssistantMessage, Message, OutputSchema,
-    ProviderMeta, RunResult, SecurityMode, SessionId, StopReason, SystemMessage, ToolCall,
-    ToolCallIter, ToolCallView, ToolDef, ToolResult, Usage, UserMessage,
+    ArtifactRef, AssistantBlock, AssistantMessage, BlockAssistantMessage, ContentBlock,
+    ContentInput, Message, OutputSchema, ProviderMeta, RunResult, SecurityMode, SessionId,
+    StopReason, SystemMessage, ToolCall, ToolCallIter, ToolCallView, ToolDef, ToolResult, Usage,
+    UserMessage, has_images,
 };
 pub use wait_interrupt::{WaitInterrupt, WaitInterruptBindError, WaitInterruptReceiver};

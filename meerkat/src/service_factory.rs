@@ -100,6 +100,16 @@ impl SessionAgent for FactoryAgent {
         self.agent.replace_client(client);
     }
 
+    fn stage_external_tool_filter(
+        &mut self,
+        filter: meerkat_core::ToolFilter,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        self.agent
+            .stage_external_tool_filter(filter)
+            .map(|_| ())
+            .map_err(|error| meerkat_core::error::AgentError::ConfigError(error.to_string()))
+    }
+
     fn cancel(&mut self) {
         self.agent.cancel();
     }
@@ -411,7 +421,7 @@ mod tests {
         };
         let req = CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            prompt: "ignored".to_string(),
+            prompt: "ignored".to_string().into(),
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
@@ -446,7 +456,7 @@ mod tests {
     fn make_session_request(model: &str) -> CreateSessionRequest {
         CreateSessionRequest {
             model: model.to_string(),
-            prompt: "test".to_string(),
+            prompt: "test".to_string().into(),
             system_prompt: None,
             max_tokens: None,
             event_tx: None,

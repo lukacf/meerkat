@@ -8,7 +8,7 @@ use meerkat_core::skills::{SkillId, SkillRuntime};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::builtin::{BuiltinTool, BuiltinToolError};
+use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 
 /// Arguments for the load_skill tool (used for schema generation).
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -48,7 +48,7 @@ impl BuiltinTool for LoadSkillTool {
         false // Enabled conditionally when skills are active
     }
 
-    async fn call(&self, args: Value) -> Result<Value, BuiltinToolError> {
+    async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
         let id_str = args.get("id").and_then(|v| v.as_str()).ok_or_else(|| {
             BuiltinToolError::InvalidArgs("Missing required 'id' parameter".into())
         })?;
@@ -61,13 +61,13 @@ impl BuiltinTool for LoadSkillTool {
             .map_err(|e| BuiltinToolError::ExecutionFailed(e.to_string()))?;
 
         match results.into_iter().next() {
-            Some(resolved) => Ok(json!({
+            Some(resolved) => Ok(ToolOutput::Json(json!({
                 "id": resolved.id.0,
                 "canonical_key": canonical_key(&resolved.id),
                 "name": resolved.name,
                 "body": resolved.rendered_body,
                 "byte_size": resolved.byte_size,
-            })),
+            }))),
             None => Err(BuiltinToolError::ExecutionFailed(
                 "Skill resolved but returned no content".into(),
             )),
@@ -203,7 +203,12 @@ mod tests {
     #[tokio::test]
     async fn test_load_skill_returns_body() {
         let tool = LoadSkillTool::new(test_engine());
-        let result = tool.call(json!({"id": "extraction/email"})).await.unwrap();
+        let result = tool
+            .call(json!({"id": "extraction/email"}))
+            .await
+            .unwrap()
+            .into_json()
+            .unwrap();
 
         assert_eq!(result["id"], "extraction/email");
         assert_eq!(result["name"], "email");

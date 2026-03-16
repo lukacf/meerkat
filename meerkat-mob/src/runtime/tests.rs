@@ -677,7 +677,7 @@ impl SessionService for MockSessionService {
         self.prompts
             .write()
             .await
-            .push((session_id.clone(), req.prompt));
+            .push((session_id.clone(), req.prompt.text_content()));
         let external_tools = req
             .build
             .as_ref()
@@ -715,7 +715,7 @@ impl SessionService for MockSessionService {
             self.host_mode_prompts
                 .write()
                 .await
-                .push((id.clone(), req.prompt.clone()));
+                .push((id.clone(), req.prompt.text_content()));
         }
         let start_turn_delay = self.start_turn_delay_ms.load(Ordering::Relaxed);
         if start_turn_delay > 0 {
@@ -1998,11 +1998,11 @@ impl AgentToolDispatcher for EchoBundleDispatcher {
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
-        Ok(meerkat_core::ToolResult {
-            tool_use_id: call.id.to_string(),
-            content: serde_json::json!({ "echo": echoed }).to_string(),
-            is_error: false,
-        })
+        Ok(meerkat_core::ToolResult::new(
+            call.id.to_string(),
+            serde_json::json!({ "echo": echoed }).to_string(),
+            false,
+        ))
     }
 }
 
@@ -2848,7 +2848,8 @@ async fn test_register_tool_bundle_is_wired_into_spawn() {
         )
         .await
         .expect("bundle tool dispatch");
-    let payload: serde_json::Value = serde_json::from_str(&result.content).expect("bundle payload");
+    let payload: serde_json::Value =
+        serde_json::from_str(&result.text_content()).expect("bundle payload");
     assert_eq!(payload["echo"], "hello");
 }
 
@@ -2967,7 +2968,7 @@ async fn test_mob_management_tools_dispatch_to_handle() {
         .await
         .expect("list_meerkats");
     let listed_json: serde_json::Value =
-        serde_json::from_str(&listed.content).expect("list content json");
+        serde_json::from_str(&listed.text_content()).expect("list content json");
     assert!(
         listed_json["meerkats"]
             .as_array()
@@ -3038,7 +3039,7 @@ async fn test_mob_flow_tools_dispatch_mutate_and_query_real_run_state() {
         .await
         .expect("mob_list_flows");
     let listed_json: serde_json::Value =
-        serde_json::from_str(&listed.content).expect("flows payload json");
+        serde_json::from_str(&listed.text_content()).expect("flows payload json");
     assert_eq!(listed_json["flows"], serde_json::json!(["demo"]));
 
     let started = service
@@ -3053,7 +3054,7 @@ async fn test_mob_flow_tools_dispatch_mutate_and_query_real_run_state() {
         .await
         .expect("mob_run_flow");
     let started_json: serde_json::Value =
-        serde_json::from_str(&started.content).expect("run payload json");
+        serde_json::from_str(&started.text_content()).expect("run payload json");
     let run_id_str = started_json["run_id"]
         .as_str()
         .expect("run_id should be a string");
@@ -3068,7 +3069,7 @@ async fn test_mob_flow_tools_dispatch_mutate_and_query_real_run_state() {
         .await
         .expect("mob_flow_status");
     let status_json: serde_json::Value =
-        serde_json::from_str(&status.content).expect("status payload json");
+        serde_json::from_str(&status.text_content()).expect("status payload json");
     assert_eq!(status_json["run"]["run_id"], run_id_str);
     assert_eq!(status_json["run"]["flow_id"], "demo");
 
@@ -3179,7 +3180,7 @@ async fn test_flow_step_tool_overlay_is_step_scoped() {
         .await
         .expect("start flow");
     let started_json: serde_json::Value =
-        serde_json::from_str(&started.content).expect("run payload json");
+        serde_json::from_str(&started.text_content()).expect("run payload json");
     let run_id = started_json["run_id"]
         .as_str()
         .expect("run_id string")
@@ -3197,7 +3198,7 @@ async fn test_flow_step_tool_overlay_is_step_scoped() {
         .start_turn(
             &sid,
             StartTurnRequest {
-                prompt: "non-flow turn".to_string(),
+                prompt: "non-flow turn".to_string().into(),
                 event_tx: None,
                 host_mode: false,
                 skill_references: None,
@@ -3326,7 +3327,7 @@ async fn test_spawn_meerkat_tool_dispatches_backend_selection() {
         .await
         .expect("spawn external via tool");
     let payload: serde_json::Value =
-        serde_json::from_str(&spawned.content).expect("spawn payload json");
+        serde_json::from_str(&spawned.text_content()).expect("spawn payload json");
     assert_eq!(payload["member_ref"]["kind"], "backend_peer");
 
     let entry = handle
@@ -3377,7 +3378,7 @@ async fn test_mob_task_tools_dispatch_and_blocked_by_enforcement() {
         .await
         .expect("create t1");
     let created_1_json: serde_json::Value =
-        serde_json::from_str(&created_1.content).expect("task create content json");
+        serde_json::from_str(&created_1.text_content()).expect("task create content json");
     let t1 = created_1_json["task_id"]
         .as_str()
         .expect("task_id should be present")
@@ -3396,7 +3397,7 @@ async fn test_mob_task_tools_dispatch_and_blocked_by_enforcement() {
         .await
         .expect("create t2");
     let created_2_json: serde_json::Value =
-        serde_json::from_str(&created_2.content).expect("task create content json");
+        serde_json::from_str(&created_2.text_content()).expect("task create content json");
     let t2 = created_2_json["task_id"]
         .as_str()
         .expect("task_id should be present")
@@ -3454,7 +3455,7 @@ async fn test_mob_task_tools_dispatch_and_blocked_by_enforcement() {
         .await
         .expect("task get");
     let task_json: serde_json::Value =
-        serde_json::from_str(&task.content).expect("task get content json");
+        serde_json::from_str(&task.text_content()).expect("task get content json");
     assert_eq!(task_json["task"]["status"], "in_progress");
     assert_eq!(task_json["task"]["owner"], "w-1");
 
@@ -3463,7 +3464,7 @@ async fn test_mob_task_tools_dispatch_and_blocked_by_enforcement() {
         .await
         .expect("task list");
     let list_json: serde_json::Value =
-        serde_json::from_str(&listed.content).expect("task list content json");
+        serde_json::from_str(&listed.text_content()).expect("task list content json");
     assert_eq!(
         list_json["tasks"].as_array().map_or(0, std::vec::Vec::len),
         2,
@@ -3641,7 +3642,7 @@ async fn test_resume_reconciles_orphaned_sessions() {
     let orphan = service
         .create_session(CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            prompt: "orphan".to_string(),
+            prompt: "orphan".to_string().into(),
             system_prompt: None,
             max_tokens: None,
             event_tx: None,

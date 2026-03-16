@@ -1,7 +1,7 @@
 //! agent_list tool - List all sub-agents and their states
 
 use super::state::SubAgentToolState;
-use crate::builtin::{BuiltinTool, BuiltinToolError};
+use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
 use meerkat_core::ops::SubAgentState;
@@ -118,11 +118,13 @@ impl BuiltinTool for AgentListTool {
         false // Sub-agent tools are disabled by default
     }
 
-    async fn call(&self, _args: Value) -> Result<Value, BuiltinToolError> {
+    async fn call(&self, _args: Value) -> Result<ToolOutput, BuiltinToolError> {
         let response = self.list_agents().await?;
-        serde_json::to_value(response).map_err(|e| {
-            BuiltinToolError::execution_failed(format!("Failed to serialize response: {e}"))
-        })
+        serde_json::to_value(response)
+            .map(ToolOutput::Json)
+            .map_err(|e| {
+                BuiltinToolError::execution_failed(format!("Failed to serialize response: {e}"))
+            })
     }
 }
 
@@ -238,7 +240,7 @@ mod tests {
         let result = tool.call(json!({})).await;
         assert!(result.is_ok());
 
-        let response = result.unwrap();
+        let response = result.unwrap().into_json().unwrap();
         assert_eq!(response["agents"], json!([]));
         assert_eq!(response["total_count"], 0);
         assert_eq!(response["running_count"], 0);
@@ -262,7 +264,7 @@ mod tests {
         let result = tool.call(json!({})).await;
         assert!(result.is_ok());
 
-        let response = result.unwrap();
+        let response = result.unwrap().into_json().unwrap();
         assert_eq!(response["total_count"], 1);
         assert_eq!(response["running_count"], 1);
         assert_eq!(response["agents"][0]["name"], "test-agent");

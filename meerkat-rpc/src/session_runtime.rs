@@ -369,6 +369,29 @@ impl SessionRuntime {
             .set_session_client(session_id, adapter)
             .await
             .map_err(session_error_to_rpc)?;
+
+        // Refresh view_image visibility based on the new model's capabilities.
+        let provider_str = provider.as_str();
+        let filter =
+            if let Some(profile) = meerkat_models::profile::profile_for(provider_str, model) {
+                if profile.image_tool_results {
+                    // New model supports image tool results — clear any prior deny.
+                    meerkat_core::ToolFilter::All
+                } else {
+                    // New model does not support image tool results — hide view_image.
+                    meerkat_core::ToolFilter::Deny(["view_image".to_string()].into_iter().collect())
+                }
+            } else {
+                // Unknown model — leave tool visibility unchanged.
+                return Ok(());
+            };
+        // Best-effort: if the filter references unknown tools (e.g., view_image
+        // was never registered), the session service will return an error that
+        // we intentionally ignore.
+        let _ = self
+            .service
+            .set_session_tool_filter(session_id, filter)
+            .await;
         Ok(())
     }
 
@@ -690,7 +713,7 @@ impl SessionRuntime {
             }
 
             let req = StartTurnRequest {
-                prompt: prompt.clone(),
+                prompt: prompt.clone().into(),
                 event_tx: Some(event_tx.clone()),
                 host_mode,
                 skill_references: skill_references.clone(),
@@ -801,7 +824,7 @@ impl SessionRuntime {
                 .service
                 .create_session(CreateSessionRequest {
                     model: build_config.model.clone(),
-                    prompt: runtime_prompt.clone(),
+                    prompt: runtime_prompt.clone().into(),
                     system_prompt: build_config.system_prompt.clone(),
                     max_tokens: build_config.max_tokens,
                     event_tx: None,
@@ -867,7 +890,7 @@ impl SessionRuntime {
                     session_id,
                     run_id,
                     StartTurnRequest {
-                        prompt: runtime_prompt,
+                        prompt: runtime_prompt.into(),
                         event_tx: Some(event_tx),
                         host_mode: build_config.host_mode,
                         skill_references,
@@ -965,7 +988,7 @@ impl SessionRuntime {
                         ),
                         data: None,
                     })?,
-                prompt: prompt.clone(),
+                prompt: prompt.clone().into(),
                 system_prompt: overrides.as_ref().and_then(|ov| ov.system_prompt.clone()),
                 max_tokens: overrides
                     .as_ref()
@@ -986,7 +1009,7 @@ impl SessionRuntime {
                 session_id,
                 run_id,
                 StartTurnRequest {
-                    prompt,
+                    prompt: prompt.into(),
                     event_tx: Some(event_tx),
                     host_mode,
                     skill_references,
@@ -1233,7 +1256,7 @@ impl SessionRuntime {
 
             let req = CreateSessionRequest {
                 model: build_config.model.clone(),
-                prompt: turn_prompt,
+                prompt: turn_prompt.into(),
                 system_prompt: build_config.system_prompt.clone(),
                 max_tokens: build_config.max_tokens,
                 event_tx: Some(event_tx),
@@ -1339,7 +1362,7 @@ impl SessionRuntime {
         };
 
         let req = StartTurnRequest {
-            prompt: turn_prompt.clone(),
+            prompt: turn_prompt.clone().into(),
             event_tx: Some(event_tx.clone()),
             host_mode,
             skill_references: skill_references.clone(),
@@ -3884,6 +3907,162 @@ mod tests {
         assert!(
             info.last_assistant_text.is_some(),
             "idle session should have last_assistant_text, got None"
+        );
+    }
+
+    fn temp_factory_with_builtins(temp: &tempfile::TempDir) -> AgentFactory {
+        AgentFactory::new(temp.path().join("sessions")).builtins(true)
+    }
+
+    /// After hot-swapping from an Anthropic model to an OpenAI model, the
+    /// `view_image` tool should be denied via an external tool filter.
+    #[tokio::test]
+    async fn hot_swap_to_openai_hides_view_image() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = make_runtime(temp_factory_with_builtins(&temp), 10);
+        runtime.default_llm_client = Some(Arc::new(MockLlmClient));
+
+        // Create session with an Anthropic model (supports image_tool_results).
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .unwrap();
+        let (event_tx, _event_rx) = mpsc::channel(100);
+
+        // Materialize the session with the first turn.
+        let _ = runtime
+            .start_turn(
+                &session_id,
+                "Hello".to_string(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Hot-swap to an OpenAI model (does NOT support image_tool_results).
+        let overrides = crate::handlers::turn::TurnOverrides {
+            model: Some("gpt-5.2".to_string()),
+            ..Default::default()
+        };
+        let (event_tx2, _event_rx2) = mpsc::channel(100);
+        let _ = runtime
+            .start_turn(
+                &session_id,
+                "Second turn".to_string(),
+                event_tx2,
+                None,
+                None,
+                None,
+                Some(overrides),
+            )
+            .await
+            .unwrap();
+
+        // Export the session and check that the tool filter metadata blocks view_image.
+        let session = runtime
+            .service
+            .export_live_session(&session_id)
+            .await
+            .unwrap();
+        let filter_value = session
+            .metadata()
+            .get(meerkat_core::EXTERNAL_TOOL_FILTER_METADATA_KEY)
+            .expect("tool filter metadata should be set after hot-swap");
+        let filter: meerkat_core::ToolFilter =
+            serde_json::from_value(filter_value.clone()).unwrap();
+        assert_eq!(
+            filter,
+            meerkat_core::ToolFilter::Deny(["view_image".to_string()].into_iter().collect()),
+            "hot-swap to OpenAI should deny view_image"
+        );
+    }
+
+    /// After hot-swapping from OpenAI back to Anthropic, the tool filter should
+    /// be cleared (set to All).
+    #[tokio::test]
+    async fn hot_swap_to_anthropic_clears_view_image_deny() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = make_runtime(temp_factory_with_builtins(&temp), 10);
+        runtime.default_llm_client = Some(Arc::new(MockLlmClient));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .unwrap();
+        let (event_tx, _event_rx) = mpsc::channel(100);
+
+        // Materialize with first turn.
+        let _ = runtime
+            .start_turn(
+                &session_id,
+                "Hello".to_string(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Hot-swap to OpenAI (deny view_image).
+        let overrides = crate::handlers::turn::TurnOverrides {
+            model: Some("gpt-5.2".to_string()),
+            ..Default::default()
+        };
+        let (event_tx2, _event_rx2) = mpsc::channel(100);
+        let _ = runtime
+            .start_turn(
+                &session_id,
+                "Second turn".to_string(),
+                event_tx2,
+                None,
+                None,
+                None,
+                Some(overrides),
+            )
+            .await
+            .unwrap();
+
+        // Hot-swap back to Anthropic (should clear the deny).
+        let overrides = crate::handlers::turn::TurnOverrides {
+            model: Some("claude-sonnet-4-5".to_string()),
+            ..Default::default()
+        };
+        let (event_tx3, _event_rx3) = mpsc::channel(100);
+        let _ = runtime
+            .start_turn(
+                &session_id,
+                "Third turn".to_string(),
+                event_tx3,
+                None,
+                None,
+                None,
+                Some(overrides),
+            )
+            .await
+            .unwrap();
+
+        // Export session and verify filter is cleared.
+        let session = runtime
+            .service
+            .export_live_session(&session_id)
+            .await
+            .unwrap();
+        let filter_value = session
+            .metadata()
+            .get(meerkat_core::EXTERNAL_TOOL_FILTER_METADATA_KEY)
+            .expect("tool filter metadata should be set after hot-swap");
+        let filter: meerkat_core::ToolFilter =
+            serde_json::from_value(filter_value.clone()).unwrap();
+        assert_eq!(
+            filter,
+            meerkat_core::ToolFilter::All,
+            "hot-swap back to Anthropic should clear view_image deny"
         );
     }
 }

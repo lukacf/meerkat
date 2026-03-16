@@ -158,7 +158,7 @@ where
 
                 let combined = messages.join("\n\n");
                 self.session
-                    .push(Message::User(UserMessage { content: combined }));
+                    .push(Message::User(UserMessage::text(combined)));
                 return true;
             }
         };
@@ -211,7 +211,7 @@ where
         tracing::debug!("Injecting {} comms messages into session", messages.len());
         let combined = messages.join("\n\n");
         self.session
-            .push(Message::User(UserMessage { content: combined }));
+            .push(Message::User(UserMessage::text(combined)));
         true
     }
 
@@ -272,7 +272,7 @@ where
                     .messages()
                     .last()
                     .and_then(|msg| match msg {
-                        Message::User(user) => Some(user.content.clone()),
+                        Message::User(user) => Some(user.text_content()),
                         _ => None,
                     })
                     .unwrap_or_default();
@@ -395,9 +395,9 @@ where
                                 {
                                     drop(subscriber);
                                     // Silent intents: inject as context only, no LLM turn.
-                                    self.session.push(Message::User(UserMessage {
-                                        content: interaction.rendered_text,
-                                    }));
+                                    self.session.push(Message::User(UserMessage::text(
+                                        interaction.rendered_text,
+                                    )));
                                     had_session_injections = true;
                                 }
                                 InteractionContent::Message { .. } => {
@@ -425,9 +425,8 @@ where
                             .render_peer_lifecycle_update(&comms, &peer_lifecycle_batch)
                             .await
                         {
-                            self.session.push(Message::User(UserMessage {
-                                content: peer_update,
-                            }));
+                            self.session
+                                .push(Message::User(UserMessage::text(peer_update)));
                             had_session_injections = true;
                         }
 
@@ -678,9 +677,8 @@ where
                     .render_peer_lifecycle_update(&comms, &peer_lifecycle_batch)
                     .await
                 {
-                    self.session.push(Message::User(UserMessage {
-                        content: peer_update,
-                    }));
+                    self.session
+                        .push(Message::User(UserMessage::text(peer_update)));
                     had_session_injections = true;
                 }
 
@@ -869,9 +867,9 @@ where
 /// In host mode, the idle host loop triggers a continuation run after injection
 /// so the agent can decide whether to act on the new context.
 fn inject_response_into_session(session: &mut Session, interaction: &InboxInteraction) {
-    session.push(Message::User(UserMessage {
-        content: interaction.rendered_text.clone(),
-    }));
+    session.push(Message::User(UserMessage::text(
+        interaction.rendered_text.clone(),
+    )));
 }
 
 fn render_named_list(mut names: Vec<String>) -> String {
@@ -1388,8 +1386,8 @@ mod tests {
         let last = messages.last().unwrap();
         match last {
             Message::User(user) => {
-                assert!(user.content.contains("Hello from peer"));
-                assert!(user.content.contains("Another message"));
+                assert!(user.text_content().contains("Hello from peer"));
+                assert!(user.text_content().contains("Another message"));
             }
             _ => panic!("Expected User message, got {last:?}"),
         }
@@ -1514,7 +1512,7 @@ mod tests {
             .collect();
         assert_eq!(user_msgs.len(), 1);
         match &user_msgs[0] {
-            Message::User(u) => assert!(u.content.contains("completed")),
+            Message::User(u) => assert!(u.text_content().contains("completed")),
             _ => unreachable!(),
         }
 
@@ -1712,12 +1710,12 @@ mod tests {
         );
 
         // Response should still be injected into session as context.
-        let user_msgs: Vec<_> = agent
+        let user_msgs: Vec<String> = agent
             .session
             .messages()
             .iter()
             .filter_map(|m| match m {
-                Message::User(u) => Some(u.content.as_str()),
+                Message::User(u) => Some(u.text_content()),
                 _ => None,
             })
             .collect();
@@ -1778,14 +1776,14 @@ mod tests {
         // Session should have the full sequence:
         // User("do something") → Assistant("Done") → User("[Response]...") → Assistant("Done")
         // This proves run_pending_inner reset state after the first completed turn.
-        let msgs: Vec<&str> = agent
+        let msgs: Vec<String> = agent
             .session
             .messages()
             .iter()
             .filter_map(|m| match m {
-                Message::User(u) => Some(u.content.as_str()),
-                Message::BlockAssistant(_) => Some("[assistant]"),
-                Message::Assistant(_) => Some("[assistant]"),
+                Message::User(u) => Some(u.text_content()),
+                Message::BlockAssistant(_) => Some("[assistant]".to_string()),
+                Message::Assistant(_) => Some("[assistant]".to_string()),
                 _ => None,
             })
             .collect();
@@ -2242,8 +2240,8 @@ mod tests {
         assert_eq!(user_msgs.len(), 1);
         match &user_msgs[0] {
             Message::User(u) => {
-                assert!(u.content.contains("[PEER UPDATE]"));
-                assert!(u.content.contains("worker-1"));
+                assert!(u.text_content().contains("[PEER UPDATE]"));
+                assert!(u.text_content().contains("worker-1"));
             }
             _ => unreachable!(),
         }
@@ -2332,7 +2330,7 @@ mod tests {
             .collect();
         assert_eq!(user_msgs.len(), 1);
         let text = match &user_msgs[0] {
-            Message::User(u) => u.content.as_str(),
+            Message::User(u) => &u.text_content(),
             _ => unreachable!(),
         };
         assert!(text.contains("[PEER UPDATE]"));
@@ -2388,7 +2386,7 @@ mod tests {
             .collect();
         assert_eq!(user_msgs.len(), 1);
         let text = match &user_msgs[0] {
-            Message::User(u) => u.content.as_str(),
+            Message::User(u) => &u.text_content(),
             _ => unreachable!(),
         };
         assert!(text.contains("1 peer connected"));
@@ -2435,7 +2433,7 @@ mod tests {
             .messages()
             .iter()
             .filter_map(|m| match m {
-                Message::User(u) => Some(u.content.clone()),
+                Message::User(u) => Some(u.text_content()),
                 _ => None,
             })
             .collect();
@@ -2490,7 +2488,7 @@ mod tests {
             .messages()
             .iter()
             .filter_map(|m| match m {
-                Message::User(u) => Some(u.content.clone()),
+                Message::User(u) => Some(u.text_content()),
                 _ => None,
             })
             .collect();
@@ -2538,7 +2536,7 @@ mod tests {
             .messages()
             .iter()
             .filter_map(|m| match m {
-                Message::User(u) => Some(u.content.clone()),
+                Message::User(u) => Some(u.text_content()),
                 _ => None,
             })
             .collect();
@@ -2568,7 +2566,7 @@ mod tests {
         let msgs = session.messages();
         assert_eq!(msgs.len(), 1);
         match &msgs[0] {
-            Message::User(u) => assert_eq!(u.content, "[Response] ok: result data"),
+            Message::User(u) => assert_eq!(u.text_content(), "[Response] ok: result data"),
             _ => panic!("Expected User message"),
         }
     }

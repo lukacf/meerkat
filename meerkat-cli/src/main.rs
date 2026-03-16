@@ -2254,7 +2254,7 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
     > {
         let prompt = extract_cli_prompt(&primitive);
         let turn_req = StartTurnRequest {
-            prompt,
+            prompt: prompt.into(),
             event_tx: None,
             host_mode: primitive
                 .turn_metadata()
@@ -2413,7 +2413,7 @@ impl SessionService for RunMobSessionService {
             target: "mob_tools",
             "RunMobSessionService::start_turn start session_id={} prompt_len={}",
             id,
-            req.prompt.len()
+            req.prompt.text_content().len()
         );
         let out = self.inner.start_turn(id, req).await;
         match &out {
@@ -3076,7 +3076,7 @@ async fn run_agent(
     // Route through SessionService::create_session()
     let create_req = CreateSessionRequest {
         model: model.to_string(),
-        prompt: prompt.to_string(),
+        prompt: prompt.to_string().into(),
         system_prompt,
         max_tokens: Some(max_tokens),
         event_tx: event_tx.clone(),
@@ -3638,7 +3638,7 @@ async fn resume_session_with_llm_override(
     let create_result = service
         .create_session(CreateSessionRequest {
             model,
-            prompt: prompt.to_string(),
+            prompt: prompt.to_string().into(),
             system_prompt,
             max_tokens: Some(max_tokens),
             event_tx: event_tx.clone(),
@@ -4104,7 +4104,7 @@ async fn show_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
             }
             Message::User(u) => {
                 println!("\n[{}] USER:", i + 1);
-                println!("  {}", u.content);
+                println!("  {}", u.text_content());
             }
             Message::Assistant(a) => {
                 println!("\n[{}] ASSISTANT:", i + 1);
@@ -4129,10 +4129,11 @@ async fn show_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
                 for result in results {
                     let status = if result.is_error { "ERROR" } else { "OK" };
                     // Truncate long results
-                    let content = if result.content.len() > 200 {
-                        format!("{}...", truncate_str(&result.content, 200))
+                    let text = result.text_content();
+                    let content = if text.len() > 200 {
+                        format!("{}...", truncate_str(&text, 200))
                     } else {
-                        result.content.clone()
+                        text
                     };
                     println!("  [{}] {}: {}", status, result.tool_use_id, content);
                 }
@@ -6197,11 +6198,11 @@ mod tests {
 
         async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
             if self.tools.iter().any(|tool| tool.name == call.name) {
-                return Ok(ToolResult {
-                    tool_use_id: call.id.to_string(),
-                    content: self.content.clone(),
-                    is_error: false,
-                });
+                return Ok(ToolResult::new(
+                    call.id.to_string(),
+                    self.content.clone(),
+                    false,
+                ));
             }
             Err(ToolError::not_found(call.name))
         }
@@ -8314,7 +8315,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             })
             .await
             .expect("dispatch should succeed");
-        assert_eq!(result.content, "primary");
+        assert_eq!(result.text_content(), "primary");
     }
 
     #[tokio::test]
@@ -8349,7 +8350,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
 
         let req = CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            prompt: "list tools".to_string(),
+            prompt: "list tools".to_string().into(),
             system_prompt: None,
             max_tokens: Some(32),
             event_tx: None,
@@ -8401,8 +8402,8 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             })
             .await
             .expect("tool dispatch should succeed");
-        assert!(!out.is_error, "tool returned error: {}", out.content);
-        serde_json::from_str(&out.content).expect("tool content should be valid json")
+        assert!(!out.is_error, "tool returned error: {}", out.text_content());
+        serde_json::from_str(&out.text_content()).expect("tool content should be valid json")
     }
 
     #[tokio::test]

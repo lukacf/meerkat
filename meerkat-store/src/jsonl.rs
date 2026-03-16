@@ -386,9 +386,7 @@ mod tests {
 
         // Create a session with some content
         let mut session = Session::new();
-        session.push(Message::User(UserMessage {
-            content: "Hello".to_string(),
-        }));
+        session.push(Message::User(UserMessage::text("Hello".to_string())));
 
         let id = session.id().clone();
         store.save(&session).await?;
@@ -415,9 +413,7 @@ mod tests {
 
         // Create a session
         let mut session = Session::new();
-        session.push(Message::User(UserMessage {
-            content: "Hello".to_string(),
-        }));
+        session.push(Message::User(UserMessage::text("Hello".to_string())));
         store.save(&session).await?;
 
         // Delete the main session file but keep the metadata
@@ -438,9 +434,7 @@ mod tests {
         let store = JsonlStore::new(temp_dir.path().to_path_buf());
 
         let mut session = Session::new();
-        session.push(Message::User(UserMessage {
-            content: "Hello".to_string(),
-        }));
+        session.push(Message::User(UserMessage::text("Hello".to_string())));
         let id = session.id().clone();
         store.save(&session).await?;
 
@@ -463,9 +457,7 @@ mod tests {
         let id = {
             let store = JsonlStore::new(store_path.clone());
             let mut session = Session::new();
-            session.push(Message::User(UserMessage {
-                content: "Hello".to_string(),
-            }));
+            session.push(Message::User(UserMessage::text("Hello".to_string())));
             let id = session.id().clone();
             store.save(&session).await?;
             id
@@ -491,9 +483,7 @@ mod tests {
 
         // Create a session
         let mut session = Session::new();
-        session.push(Message::User(UserMessage {
-            content: "Hello".to_string(),
-        }));
+        session.push(Message::User(UserMessage::text("Hello".to_string())));
 
         store.save(&session).await?;
 
@@ -517,9 +507,7 @@ mod tests {
 
         // Create a session
         let mut session = Session::new();
-        session.push(Message::User(UserMessage {
-            content: "Hello".to_string(),
-        }));
+        session.push(Message::User(UserMessage::text("Hello".to_string())));
 
         store.save(&session).await?;
 
@@ -542,9 +530,7 @@ mod tests {
 
         // Create a session
         let mut session = Session::new();
-        session.push(Message::User(UserMessage {
-            content: "Hello".to_string(),
-        }));
+        session.push(Message::User(UserMessage::text("Hello".to_string())));
 
         let id = session.id().clone();
 
@@ -586,9 +572,7 @@ mod tests {
         // Create multiple sessions
         for i in 0..5 {
             let mut session = Session::new();
-            session.push(Message::User(UserMessage {
-                content: format!("Message {i}"),
-            }));
+            session.push(Message::User(UserMessage::text(format!("Message {i}"))));
             store.save(&session).await?;
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         }

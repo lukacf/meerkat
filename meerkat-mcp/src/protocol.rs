@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use meerkat_core::ToolDef;
+use meerkat_core::types::ContentBlock;
 use rmcp::{
     model::{CallToolRequestParams, Content, RawContent},
     service::{RoleClient, RunningService},
@@ -54,6 +55,38 @@ impl McpProtocol {
         Ok(tools)
     }
 
+    /// Call a tool, returning multimodal content blocks.
+    ///
+    /// Text and image content are captured as [`ContentBlock`] variants.
+    /// Other content types are silently dropped.
+    pub async fn call_tool(&self, name: &str, args: &Value) -> Result<Vec<ContentBlock>, McpError> {
+        let arguments = args.as_object().cloned();
+
+        let result = self
+            .service
+            .call_tool(CallToolRequestParams {
+                name: name.to_string().into(),
+                arguments,
+                meta: None,
+                task: None,
+            })
+            .await
+            .map_err(|e| McpError::ToolCallFailed {
+                tool: name.to_string(),
+                reason: e.to_string(),
+            })?;
+
+        if result.is_error.unwrap_or(false) {
+            return Err(McpError::ToolCallFailed {
+                tool: name.to_string(),
+                reason: "Tool returned error".to_string(),
+            });
+        }
+
+        Ok(extract_content_blocks(result.content))
+    }
+
+    /// Call a tool, returning only text content (errors on non-text content).
     pub async fn call_tool_text(&self, name: &str, args: &Value) -> Result<String, McpError> {
         let arguments = args.as_object().cloned();
 
@@ -92,6 +125,25 @@ impl McpProtocol {
             })?;
         Ok(())
     }
+}
+
+/// Convert MCP [`Content`] items to [`ContentBlock`] variants.
+///
+/// Shared extraction logic for the protocol layer (mirrors
+/// `connection::extract_content_blocks`).
+fn extract_content_blocks(contents: Vec<Content>) -> Vec<ContentBlock> {
+    contents
+        .into_iter()
+        .filter_map(|c| match c.raw {
+            RawContent::Text(text) => Some(ContentBlock::Text { text: text.text }),
+            RawContent::Image(image) => Some(ContentBlock::Image {
+                media_type: image.mime_type,
+                data: image.data,
+                source_path: None,
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 fn extract_text_content_strict(contents: Vec<Content>) -> Result<String, String> {
@@ -140,5 +192,47 @@ mod tests {
         let contents: Vec<Content> = Vec::new();
         let result = extract_text_content_strict(contents).unwrap();
         assert_eq!(result, "");
+    }
+
+    #[test]
+    fn protocol_extract_content_blocks_captures_image() {
+        let contents = vec![Content::image("aW1hZ2VkYXRh", "image/png")];
+        let blocks = extract_content_blocks(contents);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(
+            blocks[0],
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: "aW1hZ2VkYXRh".to_string(),
+                source_path: None,
+            }
+        );
+    }
+
+    #[test]
+    fn protocol_extract_content_blocks_mixed() {
+        let contents = vec![
+            Content::text("Before image"),
+            Content::image("cG5nZGF0YQ==", "image/jpeg"),
+        ];
+        let blocks = extract_content_blocks(contents);
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(&blocks[0], ContentBlock::Text { text } if text == "Before image"));
+        assert!(
+            matches!(&blocks[1], ContentBlock::Image { media_type, .. } if media_type == "image/jpeg")
+        );
+    }
+
+    #[test]
+    fn protocol_extract_content_blocks_text_only() {
+        let contents = vec![Content::text("just text")];
+        let blocks = extract_content_blocks(contents);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(
+            blocks[0],
+            ContentBlock::Text {
+                text: "just text".to_string()
+            }
+        );
     }
 }

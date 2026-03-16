@@ -55,9 +55,7 @@ fn test_message_json_schema() {
     assert_eq!(json["content"], "You are a helpful assistant.");
 
     // User message
-    let user = Message::User(UserMessage {
-        content: "Hello!".to_string(),
-    });
+    let user = Message::User(UserMessage::text("Hello!"));
     let json = serde_json::to_value(&user).unwrap();
     assert_eq!(json["role"], "user");
     assert_eq!(json["content"], "Hello!");
@@ -115,7 +113,7 @@ fn test_tool_result_serialization() {
     let parsed: ToolResult = serde_json::from_str(&json).unwrap();
 
     assert_eq!(parsed.tool_use_id, "tc_abc123");
-    assert_eq!(parsed.content, "File contents here");
+    assert_eq!(parsed.text_content(), "File contents here");
     assert!(!parsed.is_error);
 
     // Error result
@@ -137,7 +135,7 @@ fn test_tool_result_from_tool_call() {
     let result = ToolResult::from_tool_call(&tool_call, "output".to_string(), false);
 
     assert_eq!(result.tool_use_id, "tc_123");
-    assert_eq!(result.content, "output");
+    assert_eq!(result.text_content(), "output");
     assert!(!result.is_error);
 }
 
@@ -324,9 +322,7 @@ fn test_session_checkpoint_complex() {
 
     // Add 25 user/assistant pairs with tool calls
     for i in 0..25 {
-        messages.push(Message::User(UserMessage {
-            content: format!("Request {i}"),
-        }));
+        messages.push(Message::User(UserMessage::text(format!("Request {i}"))));
 
         if i % 3 == 0 {
             // With tool calls
@@ -1117,5 +1113,248 @@ mod ordered_transcript_types {
         assert_eq!(text_blocks.len(), 2);
         assert_eq!(text_blocks[0], "Hello");
         assert_eq!(text_blocks[1], "World");
+    }
+}
+
+// ===========================================================================
+// Multimodal ContentBlock + ContentInput tests
+// ===========================================================================
+
+mod content_block_tests {
+    use super::*;
+
+    #[test]
+    fn content_block_text_roundtrip() {
+        let block = ContentBlock::Text {
+            text: "hello world".to_string(),
+        };
+        let json = serde_json::to_value(&block).unwrap();
+        assert_eq!(json["type"], "text");
+        let parsed: ContentBlock = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, block);
+    }
+
+    #[test]
+    fn content_block_image_roundtrip() {
+        let block = ContentBlock::Image {
+            media_type: "image/png".to_string(),
+            data: "iVBOR".to_string(),
+            source_path: Some("/tmp/test.png".to_string()),
+        };
+        let json = serde_json::to_value(&block).unwrap();
+        assert_eq!(json["type"], "image");
+        assert_eq!(json["media_type"], "image/png");
+        let parsed: ContentBlock = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, block);
+    }
+
+    #[test]
+    fn content_block_image_omits_null_source_path() {
+        let block = ContentBlock::Image {
+            media_type: "image/jpeg".to_string(),
+            data: "data".to_string(),
+            source_path: None,
+        };
+        let json = serde_json::to_value(&block).unwrap();
+        assert!(json.get("source_path").is_none());
+    }
+
+    #[test]
+    fn text_projection_text_returns_text() {
+        let block = ContentBlock::Text {
+            text: "hello".to_string(),
+        };
+        assert_eq!(block.text_projection().as_ref(), "hello");
+    }
+
+    #[test]
+    fn text_projection_image_excludes_source_path() {
+        let block = ContentBlock::Image {
+            media_type: "image/png".to_string(),
+            data: "d".to_string(),
+            source_path: Some("/tmp/x.png".to_string()),
+        };
+        assert_eq!(block.text_projection().as_ref(), "[image: image/png]");
+    }
+
+    #[test]
+    fn tool_result_deserialize_legacy_string() {
+        let json = json!({"tool_use_id": "tc_1", "content": "hello", "is_error": false});
+        let result: ToolResult = serde_json::from_value(json).unwrap();
+        assert_eq!(result.content.len(), 1);
+        assert!(matches!(&result.content[0], ContentBlock::Text { text } if text == "hello"));
+    }
+
+    #[test]
+    fn tool_result_deserialize_array() {
+        let json = json!({
+            "tool_use_id": "tc_1",
+            "content": [{"type": "text", "text": "desc"}, {"type": "image", "media_type": "image/png", "data": "abc"}],
+            "is_error": false
+        });
+        let result: ToolResult = serde_json::from_value(json).unwrap();
+        assert_eq!(result.content.len(), 2);
+    }
+
+    #[test]
+    fn tool_result_serialize_text_only_string() {
+        let result = ToolResult::new("tc_1".to_string(), "hello".to_string(), false);
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["content"], "hello");
+    }
+
+    #[test]
+    fn tool_result_serialize_with_image_array() {
+        let result = ToolResult::with_blocks(
+            "tc_1".to_string(),
+            vec![
+                ContentBlock::Text {
+                    text: "desc".to_string(),
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: "abc".to_string(),
+                    source_path: None,
+                },
+            ],
+            false,
+        );
+        let json = serde_json::to_value(&result).unwrap();
+        assert!(json["content"].is_array());
+    }
+
+    #[test]
+    fn tool_result_text_content_concatenates() {
+        let result = ToolResult::with_blocks(
+            "tc_1".to_string(),
+            vec![
+                ContentBlock::Text {
+                    text: "line1".to_string(),
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: "d".to_string(),
+                    source_path: None,
+                },
+                ContentBlock::Text {
+                    text: "line2".to_string(),
+                },
+            ],
+            false,
+        );
+        assert_eq!(result.text_content(), "line1\n[image: image/png]\nline2");
+    }
+
+    #[test]
+    fn tool_result_has_images() {
+        let with = ToolResult::with_blocks(
+            "t".into(),
+            vec![ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "d".into(),
+                source_path: None,
+            }],
+            false,
+        );
+        assert!(with.has_images());
+        let without = ToolResult::new("t".into(), "text".into(), false);
+        assert!(!without.has_images());
+    }
+
+    #[test]
+    fn user_message_deserialize_legacy_string() {
+        let json = json!({"role": "user", "content": "hello"});
+        let msg: Message = serde_json::from_value(json).unwrap();
+        match msg {
+            Message::User(u) => assert_eq!(u.text_content(), "hello"),
+            _ => panic!("Expected User"),
+        }
+    }
+
+    #[test]
+    fn user_message_serialize_text_only_string() {
+        let msg = UserMessage::text("hello");
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["content"], "hello");
+    }
+
+    #[test]
+    fn user_message_serialize_with_image_array() {
+        let msg = UserMessage::with_blocks(vec![
+            ContentBlock::Text {
+                text: "look".to_string(),
+            },
+            ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "d".into(),
+                source_path: None,
+            },
+        ]);
+        let json = serde_json::to_value(&msg).unwrap();
+        assert!(json["content"].is_array());
+    }
+
+    #[test]
+    fn indexable_text_user_with_image_uses_projection() {
+        let msg = Message::User(UserMessage::with_blocks(vec![
+            ContentBlock::Text {
+                text: "describe this".to_string(),
+            },
+            ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "d".into(),
+                source_path: None,
+            },
+        ]));
+        let text = msg.as_indexable_text();
+        assert!(text.contains("describe this"));
+        assert!(text.contains("[image: image/png]"));
+    }
+
+    // ContentInput tests
+    #[test]
+    fn content_input_from_string() {
+        let input = ContentInput::from("hello".to_string());
+        assert_eq!(input.text_content(), "hello");
+        assert!(!input.has_images());
+    }
+
+    #[test]
+    fn content_input_from_blocks() {
+        let input = ContentInput::Blocks(vec![
+            ContentBlock::Text {
+                text: "desc".to_string(),
+            },
+            ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "d".into(),
+                source_path: None,
+            },
+        ]);
+        assert!(input.has_images());
+        assert!(input.text_content().contains("[image: image/png]"));
+    }
+
+    #[test]
+    fn content_input_deserialize_string() {
+        let input: ContentInput = serde_json::from_value(json!("hello")).unwrap();
+        assert_eq!(input.text_content(), "hello");
+    }
+
+    #[test]
+    fn content_input_deserialize_array() {
+        let input: ContentInput = serde_json::from_value(json!([
+            {"type": "text", "text": "look"},
+            {"type": "image", "media_type": "image/png", "data": "abc"}
+        ]))
+        .unwrap();
+        assert!(input.has_images());
+    }
+
+    #[test]
+    fn content_input_serialize_text_as_string() {
+        let input = ContentInput::Text("hello".to_string());
+        let json = serde_json::to_value(&input).unwrap();
+        assert_eq!(json, "hello");
     }
 }

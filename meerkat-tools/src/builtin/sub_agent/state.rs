@@ -406,11 +406,11 @@ mod tests {
 
         async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
             if self.tool_names.iter().any(|n| n == call.name) {
-                Ok(ToolResult {
-                    tool_use_id: call.id.to_string(),
-                    content: format!("{} executed", call.name),
-                    is_error: false,
-                })
+                Ok(ToolResult::new(
+                    call.id.to_string(),
+                    format!("{} executed", call.name),
+                    false,
+                ))
             } else {
                 Err(ToolError::not_found(call.name))
             }

@@ -19,7 +19,7 @@
 //! ensure_rkat_dir(&project_root).unwrap();
 //! let store = Arc::new(FileTaskStore::in_project(&project_root));
 //! let dispatcher =
-//!     CompositeDispatcher::new(store, &BuiltinToolConfig::default(), None, None, None, None)?;
+//!     CompositeDispatcher::new(store, &BuiltinToolConfig::default(), None, None, None, None, true)?;
 //! ```
 
 // On wasm32, use tokio_with_wasm as a drop-in replacement for tokio.

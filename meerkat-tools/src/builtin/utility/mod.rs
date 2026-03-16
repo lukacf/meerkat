@@ -11,10 +11,14 @@
 mod apply_patch;
 mod datetime;
 mod tool_set;
+#[cfg(not(target_arch = "wasm32"))]
+mod view_image;
 mod wait;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use apply_patch::ApplyPatchTool;
 pub use datetime::DateTimeTool;
 pub use tool_set::UtilityToolSet;
+#[cfg(not(target_arch = "wasm32"))]
+pub use view_image::ViewImageTool;
 pub use wait::{WaitInterrupt, WaitTool};

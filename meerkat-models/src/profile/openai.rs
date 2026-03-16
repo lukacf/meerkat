@@ -141,6 +141,8 @@ pub fn profile(model: &str) -> Option<ModelProfile> {
         supports_temperature: supports_temperature(model),
         supports_thinking: supports_thinking(model),
         supports_reasoning: supports_reasoning(model),
+        vision: true,
+        image_tool_results: false,
         params_schema: schema.clone(),
     })
 }

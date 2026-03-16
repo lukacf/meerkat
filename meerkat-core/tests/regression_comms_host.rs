@@ -386,7 +386,7 @@ async fn response_with_passthrough_message_single_turn() {
         .messages()
         .iter()
         .filter_map(|m| match m {
-            Message::User(u) => Some(u.content.as_str()),
+            Message::User(u) => Some(u.text_content()),
             _ => None,
         })
         .collect();
@@ -439,13 +439,13 @@ async fn response_after_completed_host_turn_triggers_continuation() {
 
     // Session should have the full sequence:
     // User("do something") -> Assistant -> User("[Response]...") -> Assistant
-    let msgs: Vec<&str> = agent
+    let msgs: Vec<String> = agent
         .session()
         .messages()
         .iter()
         .filter_map(|m| match m {
-            Message::User(u) => Some(u.content.as_str()),
-            Message::BlockAssistant(_) | Message::Assistant(_) => Some("[assistant]"),
+            Message::User(u) => Some(u.text_content()),
+            Message::BlockAssistant(_) | Message::Assistant(_) => Some("[assistant]".to_string()),
             _ => None,
         })
         .collect();
@@ -455,7 +455,7 @@ async fn response_after_completed_host_turn_triggers_continuation() {
         "response should be in session history: {msgs:?}"
     );
 
-    let assistant_count = msgs.iter().filter(|m| **m == "[assistant]").count();
+    let assistant_count = msgs.iter().filter(|m| m.as_str() == "[assistant]").count();
     assert!(
         assistant_count >= 2,
         "expected at least 2 assistant messages (initial turn + continuation), got {assistant_count}: {msgs:?}"
@@ -512,7 +512,7 @@ async fn peer_lifecycle_batching_collapses_to_one_entry() {
         .messages()
         .iter()
         .filter_map(|m| match m {
-            Message::User(u) => Some(u.content.as_str()),
+            Message::User(u) => Some(u.text_content()),
             _ => None,
         })
         .collect();
@@ -572,7 +572,7 @@ async fn peer_lifecycle_net_out_cancels_opposites() {
         .messages()
         .iter()
         .filter_map(|m| match m {
-            Message::User(u) => Some(u.content.as_str()),
+            Message::User(u) => Some(u.text_content()),
             _ => None,
         })
         .collect();

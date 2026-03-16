@@ -766,6 +766,7 @@ mod tests {
                 correlation_id: None,
             },
             text: text.into(),
+            blocks: None,
             turn_metadata: None,
         })
     }
@@ -790,6 +791,7 @@ mod tests {
                 status: ResponseTerminalStatus::Completed,
             }),
             body: body.into(),
+            blocks: None,
         })
     }
 
@@ -813,6 +815,7 @@ mod tests {
                 phase: ResponseProgressPhase::InProgress,
             }),
             body: "working...".into(),
+            blocks: None,
         })
     }
 
@@ -939,6 +942,7 @@ mod tests {
                 correlation_id: None,
             },
             text: "hi".into(),
+            blocks: None,
             turn_metadata: None,
         });
         let result = driver.accept_input(input).await.unwrap();

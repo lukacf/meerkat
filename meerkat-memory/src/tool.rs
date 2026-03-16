@@ -121,11 +121,11 @@ impl AgentToolDispatcher for MemorySearchDispatcher {
             })
             .collect();
 
-        Ok(ToolResult {
-            tool_use_id: call.id.to_string(),
-            content: serde_json::to_string(&results_json).unwrap_or_else(|_| "[]".to_string()),
-            is_error: false,
-        })
+        Ok(ToolResult::new(
+            call.id.to_string(),
+            serde_json::to_string(&results_json).unwrap_or_else(|_| "[]".to_string()),
+            false,
+        ))
     }
 }
 
@@ -229,7 +229,7 @@ mod tests {
         let result = dispatcher.dispatch(view).await.unwrap();
         assert!(!result.is_error);
 
-        let parsed: Vec<Value> = serde_json::from_str(&result.content).unwrap();
+        let parsed: Vec<Value> = serde_json::from_str(&result.text_content()).unwrap();
         assert!(!parsed.is_empty());
         assert!(parsed[0]["content"].as_str().unwrap().contains("AURORA"));
         assert!(parsed[0]["score"].as_f64().unwrap() > 0.0);
@@ -247,7 +247,7 @@ mod tests {
         let result = dispatcher.dispatch(view).await.unwrap();
         assert!(!result.is_error);
 
-        let parsed: Vec<Value> = serde_json::from_str(&result.content).unwrap();
+        let parsed: Vec<Value> = serde_json::from_str(&result.text_content()).unwrap();
         assert!(parsed.is_empty());
     }
 
@@ -266,7 +266,7 @@ mod tests {
         let view = call_view(&id, &raw, &name);
 
         let result = dispatcher.dispatch(view).await.unwrap();
-        let parsed: Vec<Value> = serde_json::from_str(&result.content).unwrap();
+        let parsed: Vec<Value> = serde_json::from_str(&result.text_content()).unwrap();
         assert_eq!(parsed.len(), 3);
     }
 
@@ -285,7 +285,7 @@ mod tests {
         let view = call_view(&id, &raw, &name);
 
         let result = dispatcher.dispatch(view).await.unwrap();
-        let parsed: Vec<Value> = serde_json::from_str(&result.content).unwrap();
+        let parsed: Vec<Value> = serde_json::from_str(&result.text_content()).unwrap();
         assert_eq!(parsed.len(), DEFAULT_LIMIT);
     }
 
@@ -302,7 +302,7 @@ mod tests {
         let view = call_view(&id, &raw, &name);
 
         let result = dispatcher.dispatch(view).await.unwrap();
-        let parsed: Vec<Value> = serde_json::from_str(&result.content).unwrap();
+        let parsed: Vec<Value> = serde_json::from_str(&result.text_content()).unwrap();
         assert!(parsed.is_empty());
     }
 
@@ -351,7 +351,7 @@ mod tests {
         let view = call_view(&id, &raw, &name);
 
         let result = dispatcher.dispatch(view).await.unwrap();
-        let parsed: Vec<Value> = serde_json::from_str(&result.content).unwrap();
+        let parsed: Vec<Value> = serde_json::from_str(&result.text_content()).unwrap();
         assert!(parsed.len() <= 20);
     }
 

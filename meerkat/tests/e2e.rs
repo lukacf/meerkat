@@ -506,11 +506,7 @@ mod tool_invocation {
                 .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
             // Call the tool through the router
             match self.router.call_tool(call.name, &args).await {
-                Ok(result) => Ok(ToolResult {
-                    tool_use_id: call.id.to_string(),
-                    content: result,
-                    is_error: false,
-                }),
+                Ok(blocks) => Ok(ToolResult::with_blocks(call.id.to_string(), blocks, false)),
                 Err(e) => Err(ToolError::execution_failed(e.to_string())),
             }
         }
@@ -1455,18 +1451,18 @@ mod sub_agent_fork {
 
         let mut session = Session::new();
         session.set_system_prompt("System prompt".to_string());
-        session.push(Message::User(meerkat::UserMessage {
-            content: "Turn 1".to_string(),
-        }));
-        session.push(Message::User(meerkat::UserMessage {
-            content: "Turn 2".to_string(),
-        }));
-        session.push(Message::User(meerkat::UserMessage {
-            content: "Turn 3".to_string(),
-        }));
-        session.push(Message::User(meerkat::UserMessage {
-            content: "Turn 4".to_string(),
-        }));
+        session.push(Message::User(meerkat::UserMessage::text(
+            "Turn 1".to_string(),
+        )));
+        session.push(Message::User(meerkat::UserMessage::text(
+            "Turn 2".to_string(),
+        )));
+        session.push(Message::User(meerkat::UserMessage::text(
+            "Turn 3".to_string(),
+        )));
+        session.push(Message::User(meerkat::UserMessage::text(
+            "Turn 4".to_string(),
+        )));
 
         // FullHistory should include everything
         let full = manager.apply_context_strategy(&session, &ContextStrategy::FullHistory);

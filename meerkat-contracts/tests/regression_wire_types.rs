@@ -405,6 +405,7 @@ fn agent_event_all_variants_roundtrip() {
             result: "ok".to_string(),
             is_error: false,
             duration_ms: 100,
+            has_images: false,
         },
         AgentEvent::ToolExecutionTimedOut {
             id: "tc3".to_string(),

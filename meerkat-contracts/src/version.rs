@@ -22,7 +22,7 @@ impl ContractVersion {
     pub const CURRENT: Self = Self {
         major: 0,
         minor: 4,
-        patch: 11,
+        patch: 12,
     };
 
     /// Check compatibility: same major version (for 1.0+), or same major+minor (for 0.x).

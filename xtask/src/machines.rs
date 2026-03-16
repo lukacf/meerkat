@@ -1625,10 +1625,11 @@ mod tests {
 
         machine_codegen_at_root(dir.path(), &selection).expect("generate outputs");
 
-        let model =
-            fs::read_to_string(dir.path().join("specs/compositions/mob_bundle/model.tla"))
-                .expect("mob model");
-        assert!(model.contains("WitnessStateConstraint_mob_flow_success_path == /\\ model_step_count <= 26"));
+        let model = fs::read_to_string(dir.path().join("specs/compositions/mob_bundle/model.tla"))
+            .expect("mob model");
+        assert!(model.contains(
+            "WitnessStateConstraint_mob_flow_success_path == /\\ model_step_count <= 26"
+        ));
         assert!(model.contains("Cardinality(delivered_routes) <= 7"));
         assert!(model.contains("Cardinality(emitted_effects) <= 14"));
     }
@@ -1677,7 +1678,9 @@ mod tests {
         )
         .expect("runtime pipeline model");
         assert!(model.contains("WitnessInit_control_preemption =="));
-        assert!(model.contains("pending_inputs = <<[machine |-> \"runtime_control\", variant |-> \"Initialize\""));
+        assert!(model.contains(
+            "pending_inputs = <<[machine |-> \"runtime_control\", variant |-> \"Initialize\""
+        ));
         assert!(model.contains("[machine |-> \"runtime_ingress\", variant |-> \"AdmitQueued\""));
         assert!(model.contains("wake |-> TRUE"));
         assert!(model.contains("process |-> TRUE"));

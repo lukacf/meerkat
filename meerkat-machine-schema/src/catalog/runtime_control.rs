@@ -124,6 +124,8 @@ pub fn runtime_control_machine() -> MachineSchema {
                         field("candidate_id", TypeRef::Named("CandidateId".into())),
                         field("candidate_kind", TypeRef::Named("InputKind".into())),
                         field("admission_effect", TypeRef::Named("AdmissionEffect".into())),
+                        field("wake", TypeRef::Bool),
+                        field("process", TypeRef::Bool),
                     ],
                 },
                 VariantSchema {
@@ -646,6 +648,8 @@ pub fn runtime_control_machine() -> MachineSchema {
                             "admission_effect".into(),
                             Expr::Binding("admission_effect".into()),
                         ),
+                        ("wake".into(), Expr::Binding("wake".into())),
+                        ("process".into(), Expr::Binding("process".into())),
                     ]),
                 }],
             },
@@ -702,6 +706,8 @@ pub fn runtime_control_machine() -> MachineSchema {
                                 "admission_effect".into(),
                                 Expr::Binding("admission_effect".into()),
                             ),
+                            ("wake".into(), Expr::Binding("wake".into())),
+                            ("process".into(), Expr::Binding("process".into())),
                         ]),
                     },
                     EffectEmit {
@@ -763,6 +769,8 @@ pub fn runtime_control_machine() -> MachineSchema {
                                 "admission_effect".into(),
                                 Expr::Binding("admission_effect".into()),
                             ),
+                            ("wake".into(), Expr::Binding("wake".into())),
+                            ("process".into(), Expr::Binding("process".into())),
                         ]),
                     },
                     EffectEmit {
@@ -824,6 +832,8 @@ pub fn runtime_control_machine() -> MachineSchema {
                                 "admission_effect".into(),
                                 Expr::Binding("admission_effect".into()),
                             ),
+                            ("wake".into(), Expr::Binding("wake".into())),
+                            ("process".into(), Expr::Binding("process".into())),
                         ]),
                     },
                     EffectEmit {
@@ -888,6 +898,8 @@ pub fn runtime_control_machine() -> MachineSchema {
                             "admission_effect".into(),
                             Expr::Binding("admission_effect".into()),
                         ),
+                        ("wake".into(), Expr::Binding("wake".into())),
+                        ("process".into(), Expr::Binding("process".into())),
                     ]),
                 }],
             },
@@ -944,6 +956,8 @@ pub fn runtime_control_machine() -> MachineSchema {
                                 "admission_effect".into(),
                                 Expr::Binding("admission_effect".into()),
                             ),
+                            ("wake".into(), Expr::Binding("wake".into())),
+                            ("process".into(), Expr::Binding("process".into())),
                         ]),
                     },
                     EffectEmit {
@@ -1005,6 +1019,8 @@ pub fn runtime_control_machine() -> MachineSchema {
                                 "admission_effect".into(),
                                 Expr::Binding("admission_effect".into()),
                             ),
+                            ("wake".into(), Expr::Binding("wake".into())),
+                            ("process".into(), Expr::Binding("process".into())),
                         ]),
                     },
                     EffectEmit {
@@ -1066,6 +1082,8 @@ pub fn runtime_control_machine() -> MachineSchema {
                                 "admission_effect".into(),
                                 Expr::Binding("admission_effect".into()),
                             ),
+                            ("wake".into(), Expr::Binding("wake".into())),
+                            ("process".into(), Expr::Binding("process".into())),
                         ]),
                     },
                     EffectEmit {

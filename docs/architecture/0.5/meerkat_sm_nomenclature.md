@@ -484,6 +484,41 @@ Assignment:
 is a runtime-owned wake decision, not a side effect inferred later from
 post-drain routing.
 
+### `PromptPriorityMode`
+
+The admission-priority mode attached to an ordinary user prompt.
+
+Examples:
+
+- `Queue`
+- `Steer`
+
+Meaning:
+
+- `Queue`: admit the prompt as ordinary queued work that waits for the next
+  ordinary admissible boundary when a run is already in progress
+- `Steer`: admit the prompt as ordinary queued work that requests ASAP
+  handling at the earliest admissible cooperative boundary
+
+Important:
+`PromptPriorityMode` is not a control-plane override.
+
+- it does not turn a user prompt into authority work
+- it only changes how ordinary prompt work is scheduled once admitted
+
+`0.5` runtime-policy mapping:
+
+- `Queue`
+  - idle: `wake=true`, `process=false`
+  - running: `wake=false`, `process=false`
+- `Steer`
+  - idle: `wake=true`, `process=true`
+  - running: `wake=true`, `process=true`
+
+Assignment:
+`PromptPriorityMode` is chosen at the user-prompt boundary and preserved
+through runtime admission. It must not be reconstructed later from heuristics.
+
 ### `ControlPlane`
 
 An out-of-band authority path for runtime control commands.

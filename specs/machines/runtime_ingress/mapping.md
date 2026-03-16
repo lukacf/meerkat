@@ -97,6 +97,8 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 
 ### Scenarios
 - `admit-and-stage-prefix` — individually admitted inputs form a runtime-authored staged prefix
+- `prompt-queue` — queued user prompt enters ingress without immediate processing when already running
+- `prompt-steer` — steering user prompt enters ingress with immediate-processing intent
 - `rollback-on-failure` — failed or cancelled run restores staged contributors to the queue front
 - `recover-retire-reset-destroy` — recovery and lifecycle terminalization preserve contributor legality
 

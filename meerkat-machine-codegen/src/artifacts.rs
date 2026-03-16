@@ -2720,7 +2720,8 @@ impl<'a> CompositionTlaCompiler<'a> {
         for instance in &self.schema.machines {
             let machine = self.machine(instance.instance_id.as_str());
             for transition in &machine.transitions {
-                branches.push(self.machine_transition_call(instance.instance_id.as_str(), transition));
+                branches
+                    .push(self.machine_transition_call(instance.instance_id.as_str(), transition));
             }
         }
         branches.push("QuiescentStutter".into());
@@ -2732,21 +2733,16 @@ impl<'a> CompositionTlaCompiler<'a> {
         if !self.schema.routes.is_empty() {
             clauses.push("DeliverQueuedRoute".into());
         }
-        clauses.extend(
-            self.schema
-                .machines
+        clauses.extend(self.schema.machines.iter().flat_map(|instance| {
+            let machine = self.machine(instance.instance_id.as_str());
+            machine
+                .transitions
                 .iter()
-                .flat_map(|instance| {
-                    let machine = self.machine(instance.instance_id.as_str());
-                    machine
-                        .transitions
-                        .iter()
-                        .map(|transition| {
-                            self.machine_transition_call(instance.instance_id.as_str(), transition)
-                        })
-                        .collect::<Vec<_>>()
-                }),
-        );
+                .map(|transition| {
+                    self.machine_transition_call(instance.instance_id.as_str(), transition)
+                })
+                .collect::<Vec<_>>()
+        }));
         if witness.preload_inputs.len() > 1 {
             clauses.push(self.render_witness_inject_next_call(witness));
         }

@@ -13,12 +13,17 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 - `run_event`: `meerkat-core/src/lifecycle/run_event.rs` — boundary/completion effect surface precursor
 
 ### Scenarios
+- `prompt-queue` — queued prompt stays ordinary and waits for the next normal boundary when a run is already active
+- `prompt-steer` — steering prompt requests ASAP admission-to-ingress handling while preserving ordinary-work semantics
 - `runtime-success-path` — staged work begins a run, applies a boundary, and completes
 - `runtime-failure-rollback` — failed run rolls staged contributors back before steady state
 - `runtime-cancel-rollback` — cancelled run rolls staged contributors back before steady state
 - `control-preemption` — control-plane work preempts ordinary ingress scheduling
 
 ### Routes
+- `admitted_work_enters_ingress`
+  - anchors: `runtime_loop`, `core_executor`, `run_event`
+  - scenarios: `runtime-success-path`
 - `staged_run_notifies_control`
   - anchors: `runtime_loop`, `core_executor`, `run_event`
   - scenarios: `runtime-success-path`
@@ -53,6 +58,9 @@ This section is generated from the Rust composition catalog. Do not edit it by h
   - scenarios: `control-preemption`
 
 ### Invariants
+- `admitted_work_reaches_ingress_through_runtime_control`
+  - anchors: `runtime_loop`, `core_executor`, `run_event`
+  - scenarios: `runtime-success-path`
 - `control_preempts_ordinary_work`
   - anchors: `runtime_loop`, `core_executor`, `run_event`
   - scenarios: `control-preemption`

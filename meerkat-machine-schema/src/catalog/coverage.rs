@@ -119,6 +119,14 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     "control commands preempt ordinary ingress work",
                 ),
                 scenario(
+                    "prompt-queue",
+                    "queued user prompt sets wake/process flags conservatively and waits for the next ordinary drain",
+                ),
+                scenario(
+                    "prompt-steer",
+                    "steering user prompt requests ASAP processing at the earliest admissible boundary",
+                ),
+                scenario(
                     "begin-run-complete",
                     "runtime transitions idle to running to idle for a completed run",
                 ),
@@ -156,6 +164,14 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 scenario(
                     "admit-and-stage-prefix",
                     "individually admitted inputs form a runtime-authored staged prefix",
+                ),
+                scenario(
+                    "prompt-queue",
+                    "queued user prompt enters ingress without immediate processing when already running",
+                ),
+                scenario(
+                    "prompt-steer",
+                    "steering user prompt enters ingress with immediate-processing intent",
                 ),
                 scenario(
                     "rollback-on-failure",
@@ -435,6 +451,14 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
                 ),
             ],
             &[
+                scenario(
+                    "prompt-queue",
+                    "queued prompt stays ordinary and waits for the next normal boundary when a run is already active",
+                ),
+                scenario(
+                    "prompt-steer",
+                    "steering prompt requests ASAP admission-to-ingress handling while preserving ordinary-work semantics",
+                ),
                 scenario(
                     "runtime-success-path",
                     "staged work begins a run, applies a boundary, and completes",

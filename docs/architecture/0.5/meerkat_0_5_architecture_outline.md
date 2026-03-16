@@ -1409,9 +1409,13 @@ semantics explicit as `InterruptPolicy`, `DrainPolicy`,
 
 Current baseline:
 
-- `Prompt`
+- `PromptQueue`
   `ApplyMode::StageRunStart`; `WakeMode::WakeIfIdle` when idle and
   `WakeMode::None` when already running; `QueueMode::Fifo`;
+  `ConsumePoint::OnRunComplete`
+- `PromptSteer`
+  `ApplyMode::StageRunStart`; `WakeMode::WakeIfIdle` when idle and
+  `WakeMode::InterruptYielding` when already running; `QueueMode::Fifo`;
   `ConsumePoint::OnRunComplete`
 - `PeerConvention::Message`
   `ApplyMode::StageRunStart`; `WakeMode::WakeIfIdle` when idle and
@@ -1446,6 +1450,29 @@ The conceptual terms in this document map onto that implementation roughly as:
 
 - `InterruptPolicy` aligns primarily with `WakeMode::InterruptYielding`
 - `DrainPolicy` aligns primarily with wake/apply timing concerns
+
+`0.5` must treat these prompt modes as explicit runtime admission semantics,
+not as UI sugar:
+
+- `PromptQueue` is the default queued user prompt path. When the runtime is
+  already running it does not force immediate processing; it waits for the
+  next ordinary admissible boundary.
+- `PromptSteer` is a steering prompt path. It is still ordinary runtime work,
+  not control-plane authority, but it must request ASAP handling at the
+  earliest admissible cooperative boundary.
+
+Operationally, the machine-authority path for `0.5` maps those prompt modes to
+runtime admission as follows:
+
+- `PromptQueue`
+  - idle admission: `wake=true`, `process=false`
+  - already-running admission: `wake=false`, `process=false`
+- `PromptSteer`
+  - idle admission: `wake=true`, `process=true`
+  - already-running admission: `wake=true`, `process=true`
+
+This is a hard `0.5` rule so the distinction survives rebases and later
+surface work.
 - `RoutingDisposition` aligns primarily with `ApplyMode` plus runtime-state
   specific drain planning
 

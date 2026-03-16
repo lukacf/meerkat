@@ -78,6 +78,8 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 
 ### Scenarios
 - `control-preempts-ingress` — control commands preempt ordinary ingress work
+- `prompt-queue` — queued user prompt sets wake/process flags conservatively and waits for the next ordinary drain
+- `prompt-steer` — steering user prompt requests ASAP processing at the earliest admissible boundary
 - `begin-run-complete` — runtime transitions idle to running to idle for a completed run
 - `retire-stop-destroy` — runtime transitions through retire/stop/destroy commands without reopening ordinary work
 

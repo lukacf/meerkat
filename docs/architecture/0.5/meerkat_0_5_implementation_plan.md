@@ -1,6 +1,6 @@
 # Meerkat 0.5 Implementation Plan
 
-Status: normative `0.5` implementation backlog  
+Status: normative `0.5` implementation backlog
 Audience: maintainers landing the `0.5` architecture package on this branch
 
 ## Purpose
@@ -17,7 +17,7 @@ architecture to:
 - per-task verification gates
 - per-phase deletion checkpoints
 - explicit surface compatibility and versioning policy
-- explicit PureHand verification-harness work
+- explicit advanced machine-authority verification work
 
 If the execution plan says *what must be true*, this document says *what we
 change in this repo, in what order, and how we know each slice is complete*.
@@ -48,8 +48,8 @@ Authority rule:
    package for this branch during planning and migration.
 2. The formal machine bundle is checked into `specs/machines/<machine>/`, and
    no external bundle is allowed to be the place reviewers or CI rely on.
-3. Once a canonical machine lands in checked-in schema or explicit Rust kernel
-   form, that executable machine definition becomes the long-term semantic
+3. Once a canonical machine lands in the checked-in Rust-native authority
+   catalog and generated-kernel path, that executable machine definition becomes the long-term semantic
    source of truth for that machine and the docs become explanatory/derived.
 
 ## Execution Rules
@@ -58,8 +58,9 @@ Authority rule:
    early adapters into the canonical path.
 2. No task is complete without an explicit owner crate, concrete touched files,
    a verification gate, and a deletion checkpoint.
-3. `SchemaKernel` and `PureHandKernel` machines are both valid end states, but
-   they have different verification obligations.
+3. `SchemaKernel` is the only valid final implementation mode for a canonical
+   `0.5` machine. `SchemaExtension` and `BoundaryRedesign` are temporary
+   execution statuses only.
 4. Public surface changes must update docs, examples, generated schemas, and
    SDK bindings in the same slice when public behavior changes.
 5. `BoundaryRedesign` is a temporary implementation status only. No canonical
@@ -119,11 +120,11 @@ machines.
 | `RuntimeControlMachine` | `SchemaKernel` | `meerkat-runtime` | `src/machines/runtime_control/` | `src/state_machine.rs`, `src/traits.rs`, `src/runtime_loop.rs` | generated Rust + generated TLA + control-plane tests |
 | `MobLifecycleMachine` | `SchemaKernel` | `meerkat-mob` | `src/machines/mob_lifecycle/` | `src/runtime/state.rs`, `src/run.rs`, `src/runtime/terminalization.rs` | generated Rust + generated TLA + mob lifecycle tests |
 | `OpsLifecycleMachine` | `SchemaKernel` after seam cut | `meerkat-runtime` | `src/machines/ops_lifecycle/` | `meerkat-core/src/ops.rs`, `meerkat-mob/src/runtime/provisioner.rs`, `meerkat-tools/src/builtin/shell/job_manager.rs` | generated Rust + generated TLA + registry tests + async-op integration tests |
-| `PeerCommsMachine` | `PureHandKernel` | `meerkat-comms` | `src/machines/peer_comms_kernel.rs` | `src/inbox.rs`, `src/runtime/comms_runtime.rs` | pure-kernel tests + TLC |
-| `ExternalToolSurfaceMachine` | `PureHandKernel` | `meerkat-mcp` | `src/machines/external_tool_surface_kernel.rs` | `src/router.rs`, `src/adapter.rs` | pure-kernel tests + async adapter tests + TLC |
-| `TurnExecutionMachine` | `PureHandKernel` | `meerkat-core` | `src/agent/turn_execution.rs` | `src/agent/state.rs`, `src/agent/runner.rs`, `src/agent/comms_impl.rs` | pure-kernel tests + agent regression tests + TLC |
-| `FlowRunMachine` | `PureHandKernel` | `meerkat-mob` | `src/runtime/flow_run_kernel.rs` | `src/runtime/flow.rs`, `src/runtime/actor_turn_executor.rs`, `src/run.rs` | pure-kernel tests + flow replay tests + TLC |
-| `MobOrchestratorMachine` | `PureHandKernel` | `meerkat-mob` | `src/runtime/orchestrator_kernel.rs` | `src/runtime/actor.rs`, `src/runtime/builder.rs`, `src/runtime/provisioner.rs` | pure-kernel tests + orchestration replay tests + TLC |
+| `PeerCommsMachine` | `SchemaKernel` | `meerkat-comms` | `meerkat-machine-schema/src/catalog/peer_comms.rs` plus generated owner under `src/machines/peer_comms/` | `src/inbox.rs`, `src/runtime/comms_runtime.rs` | generated Rust + generated TLA + owner tests |
+| `ExternalToolSurfaceMachine` | `SchemaKernel` | `meerkat-mcp` | `meerkat-machine-schema/src/catalog/external_tool_surface.rs` plus generated owner under `src/machines/external_tool_surface/` | `src/router.rs`, `src/adapter.rs` | generated Rust + generated TLA + async adapter tests |
+| `TurnExecutionMachine` | `SchemaKernel` | `meerkat-core` | `meerkat-machine-schema/src/catalog/turn_execution.rs` plus generated owner under `src/agent/machines/turn_execution/` | `src/agent/state.rs`, `src/agent/runner.rs`, `src/agent/comms_impl.rs` | generated Rust + generated TLA + agent regression tests |
+| `FlowRunMachine` | `SchemaKernel` | `meerkat-mob` | `meerkat-machine-schema/src/catalog/flow_run.rs` plus generated owner under `src/runtime/machines/flow_run/` | `src/runtime/flow.rs`, `src/runtime/actor_turn_executor.rs`, `src/run.rs` | generated Rust + generated TLA + flow replay tests |
+| `MobOrchestratorMachine` | `SchemaKernel` | `meerkat-mob` | `meerkat-machine-schema/src/catalog/mob_orchestrator.rs` plus generated owner under `src/runtime/machines/mob_orchestrator/` | `src/runtime/actor.rs`, `src/runtime/builder.rs`, `src/runtime/provisioner.rs` | generated Rust + generated TLA + orchestration replay tests |
 
 ## Critical Path
 
@@ -138,7 +139,7 @@ flowchart TD
     D1 --> D2[Phase 4: host-mode cutover]
     C2 --> E1[Phase 5: mob member lifecycle convergence]
     E1 --> E2[Phase 5: MobActor decomposition]
-    A1 --> F1[Phase 5: PureHand harness scaffolding]
+    A1 --> F1[Phase 5: advanced machine-authority harness]
     D2 --> G1[Phase 5: surface cutovers]
     E2 --> G1
     F1 --> H1[Phase 6: final deletions]
@@ -158,7 +159,7 @@ minimum repo landing that makes the architecture package enforceable.
   - `meerkat-machine-schema`
   - `meerkat-machine-codegen`
   - `xtask`
-- bootstrap the initial schema-generated owners for:
+- bootstrap the initial catalog-owned generated owners for:
   - `InputLifecycleMachine`
   - `RuntimeIngressMachine`
   - `RuntimeControlMachine`
@@ -171,13 +172,13 @@ minimum repo landing that makes the architecture package enforceable.
 - `OpsLifecycleMachine` runtime seam cutover
 - host-mode execution deletion
 - surface API behavior changes
-- PureHand kernel extraction
+- full rich-machine authority conversion
 
 ### Slice 1 exit gate
 
 The repo must fail PRs when:
 
-- a schema-generated machine drifts from checked-in outputs
+- a generated machine drifts from checked-in outputs
 - a bounded TLC profile fails
 - the owning Rust kernel tests fail
 
@@ -197,15 +198,15 @@ cutover work.
 | `specs/machines/<machine>/ci.cfg` | checked-in bounded CI model profile | checked-in bounded CI model profile | keep/normalize |
 | `specs/machines/<machine>/mapping.md` | checked-in Rust/model mapping note | checked-in Rust/model mapping note | keep/normalize |
 | `specs/machines/README.md` | repo-local artifact and command guide | repo-local artifact and command guide | keep |
-| `specs/machines/<schema-machine>/schema.yaml` | missing | authoritative schema for `SchemaKernel` machines | introduce |
-| `meerkat-machine-schema/` | missing | schema parser + validator crate | introduce |
+| `specs/compositions/<bundle>/` | missing | checked-in composition bundle generated from Rust-native authority | introduce |
+| `meerkat-machine-schema/` | missing | Rust-native machine/composition authority catalog + validator crate | introduce |
 | `meerkat-machine-codegen/` | missing | Rust/TLA/doc codegen crate | introduce |
 | `xtask/src/machines.rs` | missing | shared machine codegen + verify entrypoint | introduce |
 | `Cargo.toml` | no machine crates or `xtask` | include new workspace members | refactor |
 | `Makefile` | no machine targets | add `machine-codegen`, `machine-verify`, `machine-check-drift` | refactor |
 | `.github/workflows/ci.yml` | no machine verification jobs | enforce drift, TLC, and machine-test jobs | refactor |
 | `scripts/verify-schema-freshness.sh` | only API schema freshness | keep for API schema freshness; add separate machine drift gate | keep |
-| `specs/machines/validate.sh` | repo-local TLC helper pending `xtask` convergence | transitional helper until `cargo xtask machine-verify` is the only authoritative entrypoint | keep then demote |
+| `specs/machines/validate.sh` | convenience wrapper for machine verification | thin wrapper over `cargo xtask machine-verify --all` for local use only | keep as wrapper |
 
 ### B. Runtime Core Convergence And Host-Mode Cutover
 
@@ -297,14 +298,14 @@ cutover work.
 | --- | --- | --- | --- |
 | `meerkat-mcp/src/router.rs` | staged async server lifecycle owner | shell around explicit `ExternalToolSurfaceMachine` kernel | refactor |
 | `meerkat-mcp/src/adapter.rs` | adapter into `AgentToolDispatcher` | keep as adapter only | refactor |
-| `meerkat-mcp/src/machines/external_tool_surface_kernel.rs` | missing | explicit pure kernel for tool-surface transitions | introduce |
+| `meerkat-mcp/src/machines/external_tool_surface/` | missing | generated owner for tool-surface transitions | introduce |
 | `meerkat-core/src/agent/state.rs` | projects tool config changes and pending notices | consume typed tool-surface deltas only | refactor |
 | `meerkat-core/src/gateway.rs` | aggregates external tool updates | keep, align to typed notice contract | refactor |
 | `meerkat/src/surface.rs` | surface-facing runtime/tool-surface glue | remove transport-ish notice ownership and keep surface projection thin | refactor |
-| `meerkat-comms/src/machines/peer_comms_kernel.rs` | missing | explicit pure kernel for peer comms transitions | introduce |
-| `meerkat-core/src/agent/turn_execution.rs` | missing | explicit pure kernel for turn execution | introduce |
-| `meerkat-mob/src/runtime/flow_run_kernel.rs` | missing | explicit pure kernel for flow execution | introduce |
-| `meerkat-mob/src/runtime/orchestrator_kernel.rs` | missing | explicit pure kernel for mob orchestration | introduce |
+| `meerkat-comms/src/machines/peer_comms/` | missing | generated owner for peer comms transitions | introduce |
+| `meerkat-core/src/agent/machines/turn_execution/` | missing | generated owner for turn execution | introduce |
+| `meerkat-mob/src/runtime/machines/flow_run/` | missing | generated owner for flow execution | introduce |
+| `meerkat-mob/src/runtime/machines/mob_orchestrator/` | missing | generated owner for mob orchestration | introduce |
 | `meerkat-mcp-server/src/lib.rs` | `meerkat_run` / `meerkat_resume` direct session-turn path | runtime-backed adapter + completion waiting only | refactor |
 | `meerkat-cli/src/main.rs` | CLI runtime bridge and compatibility logic | runtime-backed surface only | refactor |
 | `meerkat-cli/src/stdin_events.rs` | `EventInjector`-based stdin ingress | runtime `ExternalEvent` adapter or delete | refactor/delete |
@@ -340,7 +341,7 @@ deletion checkpoint.
 | --- | --- | --- | --- | --- | --- |
 | `A1.1` | Treat `docs/architecture/0.5/` as the canonical in-repo home for the architecture package docs and keep the area out of Mintlify nav until the package stabilizes. | `docs/architecture/0.5/*`, `docs/docs.json` | none | all architecture package docs live in-repo and cross-link correctly; no nav update required yet | legacy top-level planning docs stay retired and stop being used in code review |
 | `A1.2` | Normalize the checked-in `specs/machines/<machine>/` bundle so each canonical machine has contract/model/ci/mapping artifacts under repo ownership and updated `0.5` semantics. | `specs/machines/*` | `A1.1` | each canonical machine has required checked-in artifacts under repo ownership and semantic drift from the locked architecture package is removed | any external machine bundle stops being authoritative |
-| `A1.3` | Keep a repo-local `specs/machines/README.md` describing artifact rules and command entrypoints. | `specs/machines/README.md`, `specs/machines/validate.sh` | `A1.2` | README points only at in-repo paths and command entrypoints | docs no longer treat any external validation helper as primary |
+| `A1.3` | Keep a repo-local `specs/machines/README.md` describing artifact rules and command entrypoints. | `specs/machines/README.md`, `specs/machines/validate.sh` | `A1.2` | README points only at in-repo paths and command entrypoints; `validate.sh` is explicitly documented as a wrapper over `xtask` | docs no longer treat any parallel validation helper as primary |
 
 #### Epic A2. Bootstrap schema/codegen for the initial `SchemaKernel` set
 
@@ -348,8 +349,8 @@ deletion checkpoint.
 | --- | --- | --- | --- | --- | --- |
 | `A2.1` | Add `meerkat-machine-schema` and `meerkat-machine-codegen` as workspace members. | `Cargo.toml`, `meerkat-machine-schema/`, `meerkat-machine-codegen/` | `A1.2` | `cargo check -p meerkat-machine-schema -p meerkat-machine-codegen` succeeds | ad hoc generation logic does not spread into multiple crates |
 | `A2.2` | Add `xtask` with `machine-codegen`, `machine-verify`, and `machine-check-drift`. | `xtask/`, `Cargo.toml` | `A2.1` | `cargo xtask machine-codegen --all` and `cargo xtask machine-verify --all` run locally | external shell-only verification flow is no longer required |
-| `A2.3` | Generate and land the initial machine owners for `InputLifecycleMachine`, `RuntimeIngressMachine`, `RuntimeControlMachine`, and `MobLifecycleMachine`. | `specs/machines/{input_lifecycle,runtime_ingress,runtime_control,mob_lifecycle}/schema.yaml`, `meerkat-runtime/src/machines/*`, `meerkat-mob/src/machines/*`, `meerkat-runtime/src/lib.rs`, `meerkat-mob/src/lib.rs` | `A2.2` | generated kernels compile; existing tests are updated to point at generated owners | handwritten ownership in `input_machine.rs` and `state_machine.rs` is reduced to shim or deleted |
-| `A2.4` | Reserve `OpsLifecycleMachine` schema path but keep it gated behind the seam cutover. | `specs/machines/ops_lifecycle/schema.yaml` | `A2.3`, `C2.1` | schema path exists, but generation is not claimed authoritative until the seam lands | `BoundaryRedesign` status for `OpsLifecycleMachine` remains explicit until `C2.1` completes |
+| `A2.3` | Generate and land the initial machine owners for `InputLifecycleMachine`, `RuntimeIngressMachine`, `RuntimeControlMachine`, and `MobLifecycleMachine` from the Rust-native authority catalog. | `meerkat-machine-schema/src/catalog/{input_lifecycle,runtime_ingress,runtime_control,mob_lifecycle}.rs`, `specs/machines/{input_lifecycle,runtime_ingress,runtime_control,mob_lifecycle}/*`, `meerkat-runtime/src/machines/*`, `meerkat-mob/src/machines/*`, `meerkat-runtime/src/lib.rs`, `meerkat-mob/src/lib.rs` | `A2.2` | generated kernels compile; generated spec artifacts refresh cleanly; existing tests are updated to point at generated owners | handwritten ownership in `input_machine.rs` and `state_machine.rs` is reduced to shim or deleted |
+| `A2.4` | Reserve `OpsLifecycleMachine` authority path in the Rust-native catalog but keep it gated behind the seam cutover. | `meerkat-machine-schema/src/catalog/ops_lifecycle.rs`, `specs/machines/ops_lifecycle/*` | `A2.3`, `C2.1` | authority path exists, but generation is not claimed authoritative until the seam lands | `BoundaryRedesign` status for `OpsLifecycleMachine` remains explicit until `C2.1` completes |
 
 #### Epic A3. Make verification enforceable in CI
 
@@ -403,7 +404,7 @@ deletion checkpoint.
 | `C2.1` | Add `RuntimeOpsLifecycleRegistry` and store it alongside runtime session entries. | `meerkat-runtime/src/ops_lifecycle.rs`, `meerkat-runtime/src/session_adapter.rs`, `meerkat-runtime/src/lib.rs` | `C1.1`, `B2.2` | register/progress/complete/fail/cancel/watch works per runtime instance for child work and background async ops | lifecycle ownership is no longer split across mob, shell, or legacy subagent code |
 | `C2.2` | Add explicit runtime admission for operation/lifecycle events. | `meerkat-runtime/src/input.rs`, `meerkat-runtime/src/runtime_loop.rs`, `meerkat-runtime/src/policy_table.rs` | `C2.1` | runtime can admit and process typed `OperationInput` | lifecycle events are no longer transcript-only projections |
 | `C2.3` | Route background async tool operations, including shell jobs, through `RuntimeOpsLifecycleRegistry`. | `meerkat-tools/src/builtin/shell/{job_manager.rs,job_status_tool.rs,job_cancel_tool.rs,jobs_list_tool.rs}`, `meerkat-tools/tests/integration_shell_jobs.rs`, `meerkat-runtime/src/ops_lifecycle.rs` | `C2.1` | async tool progress/completion/cancel/watch is sourced from the shared registry rather than shell-local truth | shell-local job registries stop being authoritative owners |
-| `C2.4` | Activate `OpsLifecycleMachine` schema/codegen once the seam is real. | `specs/machines/ops_lifecycle/schema.yaml`, `meerkat-runtime/src/machines/ops_lifecycle/*` | `C2.1`, `A2.4` | `OpsLifecycleMachine` leaves `BoundaryRedesign` and becomes schema-owned | redesign-only status for ops lifecycle ends |
+| `C2.4` | Activate `OpsLifecycleMachine` codegen once the seam is real. | `meerkat-machine-schema/src/catalog/ops_lifecycle.rs`, `specs/machines/ops_lifecycle/*`, `meerkat-runtime/src/machines/ops_lifecycle/*` | `C2.1`, `A2.4` | `OpsLifecycleMachine` leaves `BoundaryRedesign` and becomes catalog-owned + generated | redesign-only status for ops lifecycle ends |
 
 #### Epic C3. Delete the separate subagent path and move child behavior onto mobs
 
@@ -458,8 +459,8 @@ deletion checkpoint.
 
 | ID | Task | Owner crates/files | Depends on | Acceptance and verification | Deletion checkpoint |
 | --- | --- | --- | --- | --- | --- |
-| `E3.1` | Extract `FlowRunMachine` pure kernel and keep `flow.rs` as shell/orchestration, with durable run truth beating actor-side fallback task/cancel tracking. | `meerkat-mob/src/runtime/flow_run_kernel.rs`, `meerkat-mob/src/runtime/flow.rs`, `meerkat-mob/src/runtime/actor_turn_executor.rs`, `meerkat-mob/src/runtime/terminalization.rs`, `meerkat-mob/src/run.rs`, `meerkat-mob/src/runtime/actor.rs` | `E2.2`, `E2.3`, `H1.1` | explicit step/apply boundary exists, terminalization is store/CAS-owned, and actor cleanup no longer acts as a fallback durable truth owner | implicit flow state mutation and fallback terminal ownership outside the kernel are removed |
-| `E3.2` | Extract `MobOrchestratorMachine` pure kernel and keep `actor.rs`/`provisioner.rs` as shell/policy composition, including explicit coordinator binding, pending-spawn ownership, topology revision, and supervisor activation semantics. | `meerkat-mob/src/runtime/orchestrator_kernel.rs`, `meerkat-mob/src/runtime/actor.rs`, `meerkat-mob/src/runtime/provisioner.rs`, `meerkat-mob/src/runtime/builder.rs`, `meerkat-mob/src/{definition.rs,validate.rs}`, `meerkat-mob/src/runtime/topology.rs` | `E2.2`, `E2.3`, `H1.1` | explicit orchestrator boundary exists and covers coordinator binding and orchestration-owned counters/flags rather than deriving them implicitly from actor state | `MobActor` stops owning orchestration semantics directly |
+| `E3.1` | Converge `FlowRunMachine` into the generated-kernel path and keep `flow.rs` as shell/orchestration, with durable run truth beating actor-side fallback task/cancel tracking. | `meerkat-machine-schema/src/catalog/flow_run.rs`, `meerkat-mob/src/runtime/machines/flow_run/*`, `meerkat-mob/src/runtime/flow.rs`, `meerkat-mob/src/runtime/actor_turn_executor.rs`, `meerkat-mob/src/runtime/terminalization.rs`, `meerkat-mob/src/run.rs`, `meerkat-mob/src/runtime/actor.rs` | `E2.2`, `E2.3`, `H1.1` | explicit step/apply boundary exists, terminalization is store/CAS-owned, and actor cleanup no longer acts as a fallback durable truth owner | implicit flow state mutation and fallback terminal ownership outside the generated kernel are removed |
+| `E3.2` | Converge `MobOrchestratorMachine` into the generated-kernel path and keep `actor.rs`/`provisioner.rs` as shell/policy composition, including explicit coordinator binding, pending-spawn ownership, topology revision, and supervisor activation semantics. | `meerkat-machine-schema/src/catalog/mob_orchestrator.rs`, `meerkat-mob/src/runtime/machines/mob_orchestrator/*`, `meerkat-mob/src/runtime/actor.rs`, `meerkat-mob/src/runtime/provisioner.rs`, `meerkat-mob/src/runtime/builder.rs`, `meerkat-mob/src/{definition.rs,validate.rs}`, `meerkat-mob/src/runtime/topology.rs` | `E2.2`, `E2.3`, `H1.1` | explicit orchestrator boundary exists and covers coordinator binding and orchestration-owned counters/flags rather than deriving them implicitly from actor state | `MobActor` stops owning orchestration semantics directly |
 
 ### Workstream F. External Tool Surface And Notice Model
 
@@ -467,7 +468,7 @@ deletion checkpoint.
 
 | ID | Task | Owner crates/files | Depends on | Acceptance and verification | Deletion checkpoint |
 | --- | --- | --- | --- | --- | --- |
-| `F1.1` | Extract `ExternalToolSurfaceMachine` pure kernel around staged add/remove/reload semantics. | `meerkat-mcp/src/machines/external_tool_surface_kernel.rs`, `meerkat-mcp/src/router.rs`, `meerkat-mcp/src/adapter.rs` | `A2.2`, `H1.1` | explicit kernel owns state transitions; async router remains shell | transition logic no longer hides inside router mutation code |
+| `F1.1` | Converge `ExternalToolSurfaceMachine` into the generated-kernel path around staged add/remove/reload semantics. | `meerkat-machine-schema/src/catalog/external_tool_surface.rs`, `meerkat-mcp/src/machines/external_tool_surface/*`, `meerkat-mcp/src/router.rs`, `meerkat-mcp/src/adapter.rs` | `A2.2`, `H1.1` | explicit generated kernel owns state transitions; async router remains shell | transition logic no longer hides inside router mutation code |
 | `F1.2` | Keep `McpRouterAdapter` as the `AgentToolDispatcher` bridge only. | `meerkat-mcp/src/adapter.rs` | `F1.1` | adapter only translates between router deltas and agent tool surface | adapter no longer owns machine semantics |
 | `F1.3` | Collapse the split outward shapes for tool-surface lifecycle (`McpLifecycleAction` vs `ExternalToolNotice`) into one canonical typed delta/notice contract and remove transport-ish drain ownership from surfaces. | `meerkat-mcp/src/{router.rs,adapter.rs}`, `meerkat-core/src/gateway.rs`, `meerkat/src/surface.rs`, `meerkat-rest/src/lib.rs`, `meerkat-rpc/src/session_runtime.rs` | `F1.1`, `F1.2` | one outward typed contract exists for surface lifecycle changes; REST/RPC no longer own transport-ish drain semantics | duplicate outward lifecycle shapes are removed |
 
@@ -502,21 +503,21 @@ deletion checkpoint.
 | --- | --- | --- | --- | --- | --- |
 | `G3.1` | Rewrite docs/examples to present runtime-backed embedding as the default and direct `Agent` execution as advanced-only. | `docs/rust/{overview,advanced}.mdx`, `docs/guides/{comms,sub-agents}.mdx`, `examples/024-host-mode-event-mesh-rs/*`, other affected examples | `C3.2`, `D3.2`, `G1.1`-`G2.3` | docs and examples stop implying bypass paths are authoritative | host-mode/direct-agent guidance is demoted or removed |
 
-### Workstream H. PureHand Verification Harness And Final Cleanup
+### Workstream H. Advanced Machine-Authority Harness And Final Cleanup
 
-#### Epic H1. Add the PureHand harness contract
-
-| ID | Task | Owner crates/files | Depends on | Acceptance and verification | Deletion checkpoint |
-| --- | --- | --- | --- | --- | --- |
-| `H1.1` | Add a repo-wide PureHand kernel convention: closed state/input/effect enums plus `step/apply/transition` boundary and per-machine verify entrypoint in `xtask`. | `xtask/src/machines.rs`, `specs/machines/*/mapping.md`, owning crates below | `A2.2` | `cargo xtask machine-verify --machine <name>` can run TLC plus owner tests for pure-hand machines | ad hoc one-off verification conventions stop multiplying |
-
-#### Epic H2. Land per-machine pure kernels and tests
+#### Epic H1. Add the advanced machine-authority harness contract
 
 | ID | Task | Owner crates/files | Depends on | Acceptance and verification | Deletion checkpoint |
 | --- | --- | --- | --- | --- | --- |
-| `H2.1` | Extract `PeerCommsMachine` kernel and add owner tests. | `meerkat-comms/src/machines/peer_comms_kernel.rs`, `meerkat-comms/src/inbox.rs`, `meerkat-comms/src/runtime/comms_runtime.rs`, `meerkat-comms/tests/*` | `H1.1`, `D3.3` | pure-kernel transition tests and bounded TLC both pass, including trust snapshot stickiness and absence of `SubagentResult` classification | raw/classified compatibility vestiges are removed |
-| `H2.2` | Extract `TurnExecutionMachine` kernel and add owner tests. | `meerkat-core/src/agent/turn_execution.rs`, `meerkat-core/src/agent/state.rs`, `meerkat-core/src/agent/runner.rs`, `meerkat-core/tests/*` | `H1.1`, `D3.2` | explicit turn-execution boundary exists, including immediate/context primitives and inner retry/cancel boundaries; regression tests still pass | hidden turn-state mutation outside the kernel is removed |
-| `H2.3` | Extract `ExternalToolSurfaceMachine`, `FlowRunMachine`, and `MobOrchestratorMachine` kernels and add owner tests. | `meerkat-mcp/src/machines/*`, `meerkat-mob/src/runtime/{flow_run_kernel,orchestrator_kernel}.rs`, related tests | `H1.1`, `E3.1`, `E3.2`, `F1.1` | every PureHand machine has an explicit kernel and owner tests | no canonical machine remains in `BoundaryRedesign` |
+| `H1.1` | Add a repo-wide rich-machine authority convention: generated kernels from `meerkat-machine-schema`, explicit transition boundaries, and per-machine verify entrypoints in `xtask`. | `xtask/src/machines.rs`, `meerkat-machine-schema/src/catalog/*`, `specs/machines/*/mapping.md`, owning crates below | `A2.2` | `cargo xtask machine-verify --machine <name>` can run TLC plus owner tests for every richer generated machine | ad hoc one-off verification conventions stop multiplying |
+
+#### Epic H2. Land per-machine generated kernels and tests
+
+| ID | Task | Owner crates/files | Depends on | Acceptance and verification | Deletion checkpoint |
+| --- | --- | --- | --- | --- | --- |
+| `H2.1` | Converge `PeerCommsMachine` into the Rust-native authority catalog and generated owner modules, then add owner tests. | `meerkat-machine-schema/src/catalog/peer_comms.rs`, `meerkat-comms/src/machines/peer_comms/*`, `meerkat-comms/src/inbox.rs`, `meerkat-comms/src/runtime/comms_runtime.rs`, `meerkat-comms/tests/*` | `H1.1`, `D3.3` | generated transition tests and bounded TLC both pass, including trust snapshot stickiness and absence of `SubagentResult` classification | raw/classified compatibility vestiges are removed |
+| `H2.2` | Converge `TurnExecutionMachine` into the Rust-native authority catalog and generated owner modules, then add owner tests. | `meerkat-machine-schema/src/catalog/turn_execution.rs`, `meerkat-core/src/agent/machines/turn_execution/*`, `meerkat-core/src/agent/state.rs`, `meerkat-core/src/agent/runner.rs`, `meerkat-core/tests/*` | `H1.1`, `D3.2` | explicit turn-execution boundary exists, including immediate/context primitives and inner retry/cancel boundaries; regression tests still pass | hidden turn-state mutation outside the generated kernel is removed |
+| `H2.3` | Converge `ExternalToolSurfaceMachine`, `FlowRunMachine`, and `MobOrchestratorMachine` into the Rust-native authority catalog and generated owner modules, then add owner tests. | `meerkat-machine-schema/src/catalog/{external_tool_surface,flow_run,mob_orchestrator}.rs`, `meerkat-mcp/src/machines/*`, `meerkat-mob/src/runtime/machines/{flow_run,mob_orchestrator}/*`, related tests | `H1.1`, `E3.1`, `E3.2`, `F1.1` | every richer canonical machine has a generated kernel and owner tests | no canonical machine remains in `BoundaryRedesign` or `SchemaExtension` |
 
 #### Epic H3. Final deletion and release gate cleanup
 
@@ -540,32 +541,35 @@ This is the concrete cutover matrix for the public surfaces on this branch.
 | TypeScript SDK | `sdks/typescript/src/*` | regenerate on canonical backend and browser contract changes | wrapper owns no independent semantics | TS e2e smoke + version parity |
 | Rust advanced embedding docs | `docs/rust/advanced.mdx`, `docs/rust/overview.mdx`, related examples | runtime-backed embedding becomes default in docs | direct `Agent` described as advanced execution-only API | docs review + examples compile |
 
-## PureHand Verification Harness Plan
+## Advanced Machine-Authority Harness Plan
 
-This is the concrete repo plan for non-generated machines.
+This is the concrete repo plan for richer machines that need catalog-owned
+authority, generated kernels, and owner tests in addition to machine-level
+model checking.
 
 ### Kernel contract
 
-Every `PureHandKernel` machine must expose one explicit pure boundary:
+Every richer canonical machine must expose one explicit generated transition
+boundary sourced from the Rust-native authority catalog:
 
 - closed `State` enum
 - closed `Input` enum
 - closed `Effect` enum
-- pure `step/apply/transition` function
+- generated `step/apply/transition` function
 - shell code that performs I/O around the emitted effects, but does not mutate
-  machine state outside the kernel
+  machine state outside the generated kernel
 
 ### Target repo shape
 
-- `meerkat-comms/src/machines/peer_comms_kernel.rs`
-- `meerkat-mcp/src/machines/external_tool_surface_kernel.rs`
-- `meerkat-core/src/agent/turn_execution.rs`
-- `meerkat-mob/src/runtime/flow_run_kernel.rs`
-- `meerkat-mob/src/runtime/orchestrator_kernel.rs`
+- `meerkat-machine-schema/src/catalog/peer_comms.rs`
+- `meerkat-machine-schema/src/catalog/external_tool_surface.rs`
+- `meerkat-machine-schema/src/catalog/turn_execution.rs`
+- `meerkat-machine-schema/src/catalog/flow_run.rs`
+- `meerkat-machine-schema/src/catalog/mob_orchestrator.rs`
 
 ### Test obligations
 
-For every PureHand machine:
+For every richer canonical machine:
 
 1. `cargo xtask machine-verify --machine <name>` must run:
    - the machine's TLC profile from `specs/machines/<machine>/ci.cfg`
@@ -597,13 +601,13 @@ These deletions are mandatory for closing each phase.
 | Phase | Required deletions or demotions before the phase closes |
 | --- | --- |
 | `Phase 0` | legacy top-level planning docs stay retired and no external machine-spec bundle remains authoritative for reviews or implementation planning |
-| `Phase 1` | `specs/machines/validate.sh` is demoted once `cargo xtask machine-verify` becomes the authoritative machine verification entrypoint |
+| `Phase 1` | `specs/machines/validate.sh` is reduced to a thin wrapper once `cargo xtask machine-verify` becomes the authoritative machine verification entrypoint |
 | `Phase 2` | generic continuation via `SystemGeneratedInput` and any dead runtime stub/scope seams are removed |
 | `Phase 3` | `SubAgentManager` is deleted; separate builtin subagent mechanism is removed or reduced to zero-semantics mob preset helpers; `ops.rs` is reduced or deleted; `SubagentResult` is removed from comms/inbox ownership; shell-local job registries stop owning async-op truth |
 | `Phase 4` | direct ordinary `drain_comms_inbox()` ownership, direct host-loop continuation synthesis, and `RuntimeCommsInputSink::accept_continuation()` are deleted |
 | `Phase 5` | `MobActor` monolithic lifecycle/orchestration ownership is deleted; actor-side fallback terminalization/task-board/topology ownership is deleted; transcript-visible tool notices stop being primary contract |
 | `Phase 5 surface closure` | CLI `EventInjector` ingress, REST injector path, RPC `event/push`, MCP direct create/start-turn flow, and WASM direct authoritative session owner are deleted |
-| `Phase 6` | temporary allowlist entries, transition shims, and any remaining `BoundaryRedesign` machine implementations are deleted |
+| `Phase 6` | temporary allowlist entries, transition shims, and any remaining `BoundaryRedesign` or `SchemaExtension` machine implementations are deleted |
 
 ## Final Release Gate
 
@@ -613,8 +617,8 @@ This implementation plan is complete only when all are true:
 2. machine verification is enforced by repo CI
 3. every canonical machine has one explicit Rust owner and one explicit
    transition boundary
-4. every `SchemaKernel` machine is generated from checked-in schema
-5. every `PureHandKernel` machine has an explicit pure kernel and owner tests
+4. every canonical machine is generated from checked-in Rust-native authority in `meerkat-machine-schema`
+5. every richer canonical machine has an explicit generated kernel and owner tests
 6. `OpsLifecycleMachine` is the shared substrate for mob-backed child work and background async operations
 7. host-mode no longer owns ordinary execution scheduling
 8. every public surface routes ordinary work into the same runtime path

@@ -51,3 +51,67 @@ That is by design:
 - some cleanup/cancellation behavior is currently intertwined with actor logic
   rather than expressed as a standalone lifecycle owner
 
+<!-- GENERATED_COVERAGE_START -->
+## Generated Coverage
+This section is generated from the Rust machine catalog. Do not edit it by hand.
+
+### Machine
+- `MobLifecycleMachine`
+
+### Code Anchors
+- `mob_lifecycle_state`: `meerkat-mob/src/runtime/state.rs` — mob lifecycle state precursor
+- `mob_actor`: `meerkat-mob/src/runtime/actor.rs` — serialized lifecycle owner precursor
+- `mob_handle`: `meerkat-mob/src/runtime/handle.rs` — public lifecycle handle precursor
+
+### Scenarios
+- `start-stop-resume` — mob lifecycle transitions through start/stop/resume cleanly
+- `run-count-and-cleanup` — active run count and cleanup semantics stay consistent
+- `complete-destroy` — completed/destroyed lifecycle phases stay terminal
+
+### Transitions
+- `Start`
+  - anchors: `mob_lifecycle_state`, `mob_actor`, `mob_handle`
+  - scenarios: `start-stop-resume`
+- `Stop`
+  - anchors: `mob_lifecycle_state`, `mob_actor`, `mob_handle`
+  - scenarios: `start-stop-resume`
+- `Resume`
+  - anchors: `mob_lifecycle_state`, `mob_actor`, `mob_handle`
+  - scenarios: `start-stop-resume`
+- `MarkCompleted`
+  - anchors: `mob_lifecycle_state`, `mob_actor`, `mob_handle`
+  - scenarios: `complete-destroy`
+- `Destroy`
+  - anchors: `mob_lifecycle_state`, `mob_actor`, `mob_handle`
+  - scenarios: `start-stop-resume`
+- `StartRun`
+  - anchors: `mob_lifecycle_state`, `mob_actor`, `mob_handle`
+  - scenarios: `start-stop-resume`
+- `FinishRun`
+  - anchors: `mob_lifecycle_state`, `mob_actor`, `mob_handle`
+  - scenarios: `start-stop-resume`
+- `BeginCleanup`
+  - anchors: `mob_lifecycle_state`, `mob_actor`, `mob_handle`
+  - scenarios: `start-stop-resume`
+- `FinishCleanup`
+  - anchors: `mob_lifecycle_state`, `mob_actor`, `mob_handle`
+  - scenarios: `start-stop-resume`
+
+### Effects
+- `EmitLifecycleNotice`
+  - anchors: `mob_lifecycle_state`, `mob_actor`, `mob_handle`
+  - scenarios: `start-stop-resume`
+- `RequestCleanup`
+  - anchors: `mob_lifecycle_state`, `mob_actor`, `mob_handle`
+  - scenarios: `start-stop-resume`
+
+### Invariants
+- `destroyed_has_no_active_runs`
+  - anchors: `mob_lifecycle_state`, `mob_actor`, `mob_handle`
+  - scenarios: `start-stop-resume`
+- `completed_has_no_active_runs`
+  - anchors: `mob_lifecycle_state`, `mob_actor`, `mob_handle`
+  - scenarios: `complete-destroy`
+
+
+<!-- GENERATED_COVERAGE_END -->

@@ -64,3 +64,150 @@ That exclusion is intentional:
   execution paths
 - some immediate/context-only behavior is still realized through current
   runtime loop conversions rather than a fully explicit turn-execution owner
+
+<!-- GENERATED_COVERAGE_START -->
+## Generated Coverage
+This section is generated from the Rust machine catalog. Do not edit it by hand.
+
+### Machine
+- `TurnExecutionMachine`
+
+### Code Anchors
+- `turn_state`: `meerkat-core/src/agent/state.rs` — core turn loop state precursor
+- `turn_runner`: `meerkat-core/src/agent/runner.rs` — turn runner precursor
+- `run_primitive`: `meerkat-core/src/lifecycle/run_primitive.rs` — canonical run primitive input precursor
+- `run_event`: `meerkat-core/src/lifecycle/run_event.rs` — canonical run event/effect precursor
+
+### Scenarios
+- `conversation-run` — conversation run starts, applies boundaries, and completes cleanly
+- `tool-and-retry-loop` — tool calls and retry/yield semantics stay inside the turn owner
+- `cancel-and-fail` — cancelled and failed runs produce explicit terminal outcomes
+
+### Transitions
+- `StartConversationRun`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `StartImmediateAppend`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `StartImmediateContext`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `PrimitiveAppliedConversationTurn`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `PrimitiveAppliedImmediateAppend`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `PrimitiveAppliedImmediateContext`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `LlmReturnedToolCalls`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `tool-and-retry-loop`
+- `ToolCallsResolved`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `tool-and-retry-loop`
+- `LlmReturnedTerminal`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `BoundaryContinue`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `BoundaryComplete`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `RecoverableFailureFromCallingLlm`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `tool-and-retry-loop`
+- `RecoverableFailureFromWaitingForOps`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `tool-and-retry-loop`
+- `RecoverableFailureFromDrainingBoundary`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `tool-and-retry-loop`
+- `RetryRequested`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `tool-and-retry-loop`
+- `FatalFailureFromApplyingPrimitive`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `FatalFailureFromCallingLlm`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `FatalFailureFromWaitingForOps`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `FatalFailureFromDrainingBoundary`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `FatalFailureFromErrorRecovery`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `CancelRequestedFromApplyingPrimitive`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `cancel-and-fail`
+- `CancelRequestedFromCallingLlm`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `cancel-and-fail`
+- `CancelRequestedFromWaitingForOps`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `cancel-and-fail`
+- `CancelRequestedFromDrainingBoundary`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `cancel-and-fail`
+- `CancelRequestedFromErrorRecovery`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `cancel-and-fail`
+- `CancellationObserved`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `cancel-and-fail`
+- `AcknowledgeTerminalFromCompleted`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `AcknowledgeTerminalFromFailed`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `AcknowledgeTerminalFromCancelled`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `cancel-and-fail`
+
+### Effects
+- `RunStarted`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `BoundaryApplied`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `RunCompleted`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `RunFailed`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `RunCancelled`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `cancel-and-fail`
+
+### Invariants
+- `ready_has_no_active_run`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `non_ready_has_active_run`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `waiting_for_ops_implies_pending_tools`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `tool-and-retry-loop`
+- `immediate_primitives_skip_llm_and_recovery`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `terminal_states_match_terminal_outcome`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `completed_runs_have_seen_a_boundary`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+
+
+<!-- GENERATED_COVERAGE_END -->

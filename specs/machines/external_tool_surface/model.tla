@@ -1,204 +1,322 @@
 ---- MODULE model ----
-EXTENDS Naturals, TLC
+EXTENDS TLC, Naturals, Sequences, FiniteSets
 
-\* Abstract, architecture-level model of ExternalToolSurfaceMachine.
-\* This models staged ops, pending activation/reload, visibility, and
-\* inflight-aware removal semantics without transport payload detail. The
-\* outward contract is one canonical typed delta per surface.
+\* Generated semantic machine model for ExternalToolSurfaceMachine.
 
-CONSTANTS
-    Surfaces,
-    MaxInflight
+CONSTANTS SurfaceIdValues, TurnNumberValues
 
-ASSUME Surfaces # {}
-ASSUME MaxInflight \in Nat
+None == [tag |-> "none", value |-> "none"]
+Some(v) == [tag |-> "some", value |-> v]
+MapLookup(map, key) == IF key \in DOMAIN map THEN map[key] ELSE None
+MapSet(map, key, value) == [x \in DOMAIN map \cup {key} |-> IF x = key THEN value ELSE map[x]]
+StartsWith(seq, prefix) == /\ Len(prefix) <= Len(seq) /\ SubSeq(seq, 1, Len(prefix)) = prefix
+SeqElements(seq) == {seq[i] : i \in 1..Len(seq)}
+RECURSIVE SeqRemove(_, _)
+SeqRemove(seq, value) == IF Len(seq) = 0 THEN <<>> ELSE IF Head(seq) = value THEN SeqRemove(Tail(seq), value) ELSE <<Head(seq)>> \o SeqRemove(Tail(seq), value)
+RECURSIVE SeqRemoveAll(_, _)
+SeqRemoveAll(seq, values) == IF Len(values) = 0 THEN seq ELSE SeqRemoveAll(SeqRemove(seq, Head(values)), Tail(values))
 
-BaseStates == {"absent", "active", "removing", "removed"}
-PendingOps == {"none", "add", "reload"}
-StagedOps == {"none", "add", "remove", "reload"}
-DeltaOps == {"none", "add", "remove", "reload"}
-DeltaPhases == {"none", "pending", "applied", "draining", "forced", "failed"}
+VARIABLES phase, model_step_count, known_surfaces, visible_surfaces, base_state, pending_op, staged_op, inflight_calls, last_delta_operation, last_delta_phase
 
-VARIABLES
-    baseState,
-    pendingOp,
-    stagedOp,
-    inflight,
-    lastDeltaOp,
-    lastDeltaPhase
+vars == << phase, model_step_count, known_surfaces, visible_surfaces, base_state, pending_op, staged_op, inflight_calls, last_delta_operation, last_delta_phase >>
 
-vars ==
-    << baseState, pendingOp, stagedOp, inflight, lastDeltaOp, lastDeltaPhase >>
+SurfaceBase(surface_id) == (IF ~((surface_id \in DOMAIN base_state)) THEN "Absent" ELSE (IF surface_id \in DOMAIN base_state THEN base_state[surface_id] ELSE "None"))
+PendingOp(surface_id) == (IF ~((surface_id \in DOMAIN pending_op)) THEN "None" ELSE (IF surface_id \in DOMAIN pending_op THEN pending_op[surface_id] ELSE "None"))
+StagedOp(surface_id) == (IF ~((surface_id \in DOMAIN staged_op)) THEN "None" ELSE (IF surface_id \in DOMAIN staged_op THEN staged_op[surface_id] ELSE "None"))
+InflightCallCount(surface_id) == (IF ~((surface_id \in DOMAIN inflight_calls)) THEN 0 ELSE (IF surface_id \in DOMAIN inflight_calls THEN inflight_calls[surface_id] ELSE 0))
+LastDeltaOperation(surface_id) == (IF ~((surface_id \in DOMAIN last_delta_operation)) THEN "None" ELSE (IF surface_id \in DOMAIN last_delta_operation THEN last_delta_operation[surface_id] ELSE "None"))
+LastDeltaPhase(surface_id) == (IF ~((surface_id \in DOMAIN last_delta_phase)) THEN "None" ELSE (IF surface_id \in DOMAIN last_delta_phase THEN last_delta_phase[surface_id] ELSE "None"))
+IsVisible(surface_id) == (surface_id \in visible_surfaces)
 
 Init ==
-    /\ baseState = [s \in Surfaces |-> "absent"]
-    /\ pendingOp = [s \in Surfaces |-> "none"]
-    /\ stagedOp = [s \in Surfaces |-> "none"]
-    /\ inflight = [s \in Surfaces |-> 0]
-    /\ lastDeltaOp = [s \in Surfaces |-> "none"]
-    /\ lastDeltaPhase = [s \in Surfaces |-> "none"]
+    /\ phase = "Operating"
+    /\ model_step_count = 0
+    /\ known_surfaces = {}
+    /\ visible_surfaces = {}
+    /\ base_state = [x \in {} |-> None]
+    /\ pending_op = [x \in {} |-> None]
+    /\ staged_op = [x \in {} |-> None]
+    /\ inflight_calls = [x \in {} |-> None]
+    /\ last_delta_operation = [x \in {} |-> None]
+    /\ last_delta_phase = [x \in {} |-> None]
 
-StageAdd(s) ==
-    /\ s \in Surfaces
-    /\ stagedOp' = [stagedOp EXCEPT ![s] = "add"]
-    /\ UNCHANGED << baseState, pendingOp, inflight, lastDeltaOp, lastDeltaPhase >>
+TerminalStutter ==
+    /\ phase = "Shutdown"
+    /\ UNCHANGED vars
 
-StageRemove(s) ==
-    /\ s \in Surfaces
-    /\ stagedOp' = [stagedOp EXCEPT ![s] = "remove"]
-    /\ UNCHANGED << baseState, pendingOp, inflight, lastDeltaOp, lastDeltaPhase >>
+StageAdd(surface_id) ==
+    /\ phase = "Operating"
+    /\ phase' = "Operating"
+    /\ model_step_count' = model_step_count + 1
+    /\ known_surfaces' = (known_surfaces \cup {surface_id})
+    /\ staged_op' = MapSet(staged_op, surface_id, "Add")
+    /\ UNCHANGED << visible_surfaces, base_state, pending_op, inflight_calls, last_delta_operation, last_delta_phase >>
 
-StageReload(s) ==
-    /\ s \in Surfaces
-    /\ baseState[s] = "active"
-    /\ stagedOp' = [stagedOp EXCEPT ![s] = "reload"]
-    /\ UNCHANGED << baseState, pendingOp, inflight, lastDeltaOp, lastDeltaPhase >>
 
-ApplyAdd(s) ==
-    /\ s \in Surfaces
-    /\ stagedOp[s] = "add"
-    /\ baseState[s] \in {"absent", "active", "removed"}
-    /\ stagedOp' = [stagedOp EXCEPT ![s] = "none"]
-    /\ pendingOp' = [pendingOp EXCEPT ![s] = "add"]
-    /\ lastDeltaOp' = [lastDeltaOp EXCEPT ![s] = "add"]
-    /\ lastDeltaPhase' = [lastDeltaPhase EXCEPT ![s] = "pending"]
-    /\ UNCHANGED << baseState, inflight >>
+StageRemove(surface_id) ==
+    /\ phase = "Operating"
+    /\ phase' = "Operating"
+    /\ model_step_count' = model_step_count + 1
+    /\ known_surfaces' = (known_surfaces \cup {surface_id})
+    /\ staged_op' = MapSet(staged_op, surface_id, "Remove")
+    /\ UNCHANGED << visible_surfaces, base_state, pending_op, inflight_calls, last_delta_operation, last_delta_phase >>
 
-ApplyReload(s) ==
-    /\ s \in Surfaces
-    /\ stagedOp[s] = "reload"
-    /\ baseState[s] = "active"
-    /\ stagedOp' = [stagedOp EXCEPT ![s] = "none"]
-    /\ pendingOp' = [pendingOp EXCEPT ![s] = "reload"]
-    /\ lastDeltaOp' = [lastDeltaOp EXCEPT ![s] = "reload"]
-    /\ lastDeltaPhase' = [lastDeltaPhase EXCEPT ![s] = "pending"]
-    /\ UNCHANGED << baseState, inflight >>
 
-ApplyRemove(s) ==
-    /\ s \in Surfaces
-    /\ stagedOp[s] = "remove"
-    /\ stagedOp' = [stagedOp EXCEPT ![s] = "none"]
-    /\ pendingOp' = [pendingOp EXCEPT ![s] = "none"]
-    /\ baseState' =
-        [baseState EXCEPT
-            ![s] =
-                IF baseState[s] = "active"
-                THEN "removing"
-                ELSE baseState[s]]
-    /\ inflight' = inflight
-    /\ lastDeltaOp' =
-        [lastDeltaOp EXCEPT
-            ![s] =
-                IF baseState[s] = "active"
-                THEN "remove"
-                ELSE "none"]
-    /\ lastDeltaPhase' =
-        [lastDeltaPhase EXCEPT
-            ![s] =
-                IF baseState[s] = "active"
-                THEN "draining"
-                ELSE "none"]
+StageReload(surface_id) ==
+    /\ phase = "Operating"
+    /\ (SurfaceBase(surface_id) = "Active")
+    /\ phase' = "Operating"
+    /\ model_step_count' = model_step_count + 1
+    /\ known_surfaces' = (known_surfaces \cup {surface_id})
+    /\ staged_op' = MapSet(staged_op, surface_id, "Reload")
+    /\ UNCHANGED << visible_surfaces, base_state, pending_op, inflight_calls, last_delta_operation, last_delta_phase >>
 
-PendingSucceeded(s) ==
-    /\ s \in Surfaces
-    /\ pendingOp[s] \in {"add", "reload"}
-    /\ pendingOp' = [pendingOp EXCEPT ![s] = "none"]
-    /\ baseState' = [baseState EXCEPT ![s] = "active"]
-    /\ lastDeltaOp' = [lastDeltaOp EXCEPT ![s] = pendingOp[s]]
-    /\ lastDeltaPhase' = [lastDeltaPhase EXCEPT ![s] = "applied"]
-    /\ UNCHANGED << stagedOp, inflight >>
 
-PendingFailed(s) ==
-    /\ s \in Surfaces
-    /\ pendingOp[s] \in {"add", "reload"}
-    /\ pendingOp' = [pendingOp EXCEPT ![s] = "none"]
-    /\ lastDeltaOp' = [lastDeltaOp EXCEPT ![s] = pendingOp[s]]
-    /\ lastDeltaPhase' = [lastDeltaPhase EXCEPT ![s] = "failed"]
-    /\ UNCHANGED << baseState, stagedOp, inflight >>
+ApplyBoundaryAdd(surface_id, applied_at_turn) ==
+    /\ phase = "Operating"
+    /\ (StagedOp(surface_id) = "Add")
+    /\ ((SurfaceBase(surface_id) = "Absent") \/ (SurfaceBase(surface_id) = "Active") \/ (SurfaceBase(surface_id) = "Removed"))
+    /\ phase' = "Operating"
+    /\ model_step_count' = model_step_count + 1
+    /\ known_surfaces' = (known_surfaces \cup {surface_id})
+    /\ pending_op' = MapSet(pending_op, surface_id, "Add")
+    /\ staged_op' = MapSet(staged_op, surface_id, "None")
+    /\ last_delta_operation' = MapSet(last_delta_operation, surface_id, "Add")
+    /\ last_delta_phase' = MapSet(last_delta_phase, surface_id, "Pending")
+    /\ UNCHANGED << visible_surfaces, base_state, inflight_calls >>
 
-StartCall(s) ==
-    /\ s \in Surfaces
-    /\ baseState[s] = "active"
-    /\ inflight[s] < MaxInflight
-    /\ inflight' = [inflight EXCEPT ![s] = @ + 1]
-    /\ UNCHANGED << baseState, pendingOp, stagedOp, lastDeltaOp, lastDeltaPhase >>
 
-FinishCall(s) ==
-    /\ s \in Surfaces
-    /\ baseState[s] \in {"active", "removing"}
-    /\ inflight[s] > 0
-    /\ inflight' = [inflight EXCEPT ![s] = @ - 1]
-    /\ UNCHANGED << baseState, pendingOp, stagedOp, lastDeltaOp, lastDeltaPhase >>
+ApplyBoundaryReload(surface_id, applied_at_turn) ==
+    /\ phase = "Operating"
+    /\ (StagedOp(surface_id) = "Reload")
+    /\ (SurfaceBase(surface_id) = "Active")
+    /\ phase' = "Operating"
+    /\ model_step_count' = model_step_count + 1
+    /\ known_surfaces' = (known_surfaces \cup {surface_id})
+    /\ pending_op' = MapSet(pending_op, surface_id, "Reload")
+    /\ staged_op' = MapSet(staged_op, surface_id, "None")
+    /\ last_delta_operation' = MapSet(last_delta_operation, surface_id, "Reload")
+    /\ last_delta_phase' = MapSet(last_delta_phase, surface_id, "Pending")
+    /\ UNCHANGED << visible_surfaces, base_state, inflight_calls >>
 
-FinalizeRemovalClean(s) ==
-    /\ s \in Surfaces
-    /\ baseState[s] = "removing"
-    /\ inflight[s] = 0
-    /\ baseState' = [baseState EXCEPT ![s] = "removed"]
-    /\ lastDeltaOp' = [lastDeltaOp EXCEPT ![s] = "remove"]
-    /\ lastDeltaPhase' = [lastDeltaPhase EXCEPT ![s] = "applied"]
-    /\ UNCHANGED << pendingOp, stagedOp, inflight >>
 
-FinalizeRemovalForced(s) ==
-    /\ s \in Surfaces
-    /\ baseState[s] = "removing"
-    /\ inflight[s] > 0
-    /\ baseState' = [baseState EXCEPT ![s] = "removed"]
-    /\ inflight' = [inflight EXCEPT ![s] = 0]
-    /\ lastDeltaOp' = [lastDeltaOp EXCEPT ![s] = "remove"]
-    /\ lastDeltaPhase' = [lastDeltaPhase EXCEPT ![s] = "forced"]
-    /\ UNCHANGED << pendingOp, stagedOp >>
+ApplyBoundaryRemoveDraining(surface_id, applied_at_turn) ==
+    /\ phase = "Operating"
+    /\ (StagedOp(surface_id) = "Remove")
+    /\ (SurfaceBase(surface_id) = "Active")
+    /\ phase' = "Operating"
+    /\ model_step_count' = model_step_count + 1
+    /\ known_surfaces' = (known_surfaces \cup {surface_id})
+    /\ visible_surfaces' = (visible_surfaces \ {surface_id})
+    /\ base_state' = MapSet(base_state, surface_id, "Removing")
+    /\ pending_op' = MapSet(pending_op, surface_id, "None")
+    /\ staged_op' = MapSet(staged_op, surface_id, "None")
+    /\ last_delta_operation' = MapSet(last_delta_operation, surface_id, "Remove")
+    /\ last_delta_phase' = MapSet(last_delta_phase, surface_id, "Draining")
+    /\ UNCHANGED << inflight_calls >>
+
+
+ApplyBoundaryRemoveNoop(surface_id, applied_at_turn) ==
+    /\ phase = "Operating"
+    /\ (StagedOp(surface_id) = "Remove")
+    /\ (SurfaceBase(surface_id) # "Active")
+    /\ phase' = "Operating"
+    /\ model_step_count' = model_step_count + 1
+    /\ known_surfaces' = (known_surfaces \cup {surface_id})
+    /\ pending_op' = MapSet(pending_op, surface_id, "None")
+    /\ staged_op' = MapSet(staged_op, surface_id, "None")
+    /\ UNCHANGED << visible_surfaces, base_state, inflight_calls, last_delta_operation, last_delta_phase >>
+
+
+PendingSucceededAdd(surface_id, applied_at_turn) ==
+    /\ phase = "Operating"
+    /\ (PendingOp(surface_id) = "Add")
+    /\ phase' = "Operating"
+    /\ model_step_count' = model_step_count + 1
+    /\ known_surfaces' = (known_surfaces \cup {surface_id})
+    /\ visible_surfaces' = (visible_surfaces \cup {surface_id})
+    /\ base_state' = MapSet(base_state, surface_id, "Active")
+    /\ pending_op' = MapSet(pending_op, surface_id, "None")
+    /\ last_delta_operation' = MapSet(last_delta_operation, surface_id, "Add")
+    /\ last_delta_phase' = MapSet(last_delta_phase, surface_id, "Applied")
+    /\ UNCHANGED << staged_op, inflight_calls >>
+
+
+PendingSucceededReload(surface_id, applied_at_turn) ==
+    /\ phase = "Operating"
+    /\ (PendingOp(surface_id) = "Reload")
+    /\ phase' = "Operating"
+    /\ model_step_count' = model_step_count + 1
+    /\ known_surfaces' = (known_surfaces \cup {surface_id})
+    /\ visible_surfaces' = (visible_surfaces \cup {surface_id})
+    /\ base_state' = MapSet(base_state, surface_id, "Active")
+    /\ pending_op' = MapSet(pending_op, surface_id, "None")
+    /\ last_delta_operation' = MapSet(last_delta_operation, surface_id, "Reload")
+    /\ last_delta_phase' = MapSet(last_delta_phase, surface_id, "Applied")
+    /\ UNCHANGED << staged_op, inflight_calls >>
+
+
+PendingFailedAdd(surface_id, applied_at_turn) ==
+    /\ phase = "Operating"
+    /\ (PendingOp(surface_id) = "Add")
+    /\ phase' = "Operating"
+    /\ model_step_count' = model_step_count + 1
+    /\ known_surfaces' = (known_surfaces \cup {surface_id})
+    /\ pending_op' = MapSet(pending_op, surface_id, "None")
+    /\ last_delta_operation' = MapSet(last_delta_operation, surface_id, "Add")
+    /\ last_delta_phase' = MapSet(last_delta_phase, surface_id, "Failed")
+    /\ UNCHANGED << visible_surfaces, base_state, staged_op, inflight_calls >>
+
+
+PendingFailedReload(surface_id, applied_at_turn) ==
+    /\ phase = "Operating"
+    /\ (PendingOp(surface_id) = "Reload")
+    /\ phase' = "Operating"
+    /\ model_step_count' = model_step_count + 1
+    /\ known_surfaces' = (known_surfaces \cup {surface_id})
+    /\ pending_op' = MapSet(pending_op, surface_id, "None")
+    /\ last_delta_operation' = MapSet(last_delta_operation, surface_id, "Reload")
+    /\ last_delta_phase' = MapSet(last_delta_phase, surface_id, "Failed")
+    /\ UNCHANGED << visible_surfaces, base_state, staged_op, inflight_calls >>
+
+
+CallStartedActive(surface_id) ==
+    /\ phase = "Operating"
+    /\ (SurfaceBase(surface_id) = "Active")
+    /\ phase' = "Operating"
+    /\ model_step_count' = model_step_count + 1
+    /\ known_surfaces' = (known_surfaces \cup {surface_id})
+    /\ inflight_calls' = MapSet(inflight_calls, surface_id, (InflightCallCount(surface_id) + 1))
+    /\ UNCHANGED << visible_surfaces, base_state, pending_op, staged_op, last_delta_operation, last_delta_phase >>
+
+
+CallStartedRejectWhileRemoving(surface_id) ==
+    /\ phase = "Operating"
+    /\ (SurfaceBase(surface_id) = "Removing")
+    /\ phase' = "Operating"
+    /\ model_step_count' = model_step_count + 1
+    /\ known_surfaces' = (known_surfaces \cup {surface_id})
+    /\ UNCHANGED << visible_surfaces, base_state, pending_op, staged_op, inflight_calls, last_delta_operation, last_delta_phase >>
+
+
+CallStartedRejectWhileUnavailable(surface_id) ==
+    /\ phase = "Operating"
+    /\ ((SurfaceBase(surface_id) # "Active") /\ (SurfaceBase(surface_id) # "Removing"))
+    /\ phase' = "Operating"
+    /\ model_step_count' = model_step_count + 1
+    /\ known_surfaces' = (known_surfaces \cup {surface_id})
+    /\ UNCHANGED << visible_surfaces, base_state, pending_op, staged_op, inflight_calls, last_delta_operation, last_delta_phase >>
+
+
+CallFinishedActive(surface_id) ==
+    /\ phase = "Operating"
+    /\ (SurfaceBase(surface_id) = "Active")
+    /\ (InflightCallCount(surface_id) > 0)
+    /\ phase' = "Operating"
+    /\ model_step_count' = model_step_count + 1
+    /\ known_surfaces' = (known_surfaces \cup {surface_id})
+    /\ inflight_calls' = MapSet(inflight_calls, surface_id, (InflightCallCount(surface_id) - 1))
+    /\ UNCHANGED << visible_surfaces, base_state, pending_op, staged_op, last_delta_operation, last_delta_phase >>
+
+
+CallFinishedRemoving(surface_id) ==
+    /\ phase = "Operating"
+    /\ (SurfaceBase(surface_id) = "Removing")
+    /\ (InflightCallCount(surface_id) > 0)
+    /\ phase' = "Operating"
+    /\ model_step_count' = model_step_count + 1
+    /\ known_surfaces' = (known_surfaces \cup {surface_id})
+    /\ inflight_calls' = MapSet(inflight_calls, surface_id, (InflightCallCount(surface_id) - 1))
+    /\ UNCHANGED << visible_surfaces, base_state, pending_op, staged_op, last_delta_operation, last_delta_phase >>
+
+
+FinalizeRemovalClean(surface_id, applied_at_turn) ==
+    /\ phase = "Operating"
+    /\ (SurfaceBase(surface_id) = "Removing")
+    /\ (InflightCallCount(surface_id) = 0)
+    /\ phase' = "Operating"
+    /\ model_step_count' = model_step_count + 1
+    /\ known_surfaces' = (known_surfaces \cup {surface_id})
+    /\ visible_surfaces' = (visible_surfaces \ {surface_id})
+    /\ base_state' = MapSet(base_state, surface_id, "Removed")
+    /\ pending_op' = MapSet(pending_op, surface_id, "None")
+    /\ last_delta_operation' = MapSet(last_delta_operation, surface_id, "Remove")
+    /\ last_delta_phase' = MapSet(last_delta_phase, surface_id, "Applied")
+    /\ UNCHANGED << staged_op, inflight_calls >>
+
+
+FinalizeRemovalForced(surface_id, applied_at_turn) ==
+    /\ phase = "Operating"
+    /\ (SurfaceBase(surface_id) = "Removing")
+    /\ phase' = "Operating"
+    /\ model_step_count' = model_step_count + 1
+    /\ known_surfaces' = (known_surfaces \cup {surface_id})
+    /\ visible_surfaces' = (visible_surfaces \ {surface_id})
+    /\ base_state' = MapSet(base_state, surface_id, "Removed")
+    /\ pending_op' = MapSet(pending_op, surface_id, "None")
+    /\ inflight_calls' = MapSet(inflight_calls, surface_id, 0)
+    /\ last_delta_operation' = MapSet(last_delta_operation, surface_id, "Remove")
+    /\ last_delta_phase' = MapSet(last_delta_phase, surface_id, "Forced")
+    /\ UNCHANGED << staged_op >>
+
 
 Shutdown ==
-    /\ baseState' = [s \in Surfaces |-> "absent"]
-    /\ pendingOp' = [s \in Surfaces |-> "none"]
-    /\ stagedOp' = [s \in Surfaces |-> "none"]
-    /\ inflight' = [s \in Surfaces |-> 0]
-    /\ lastDeltaOp' = [s \in Surfaces |-> "none"]
-    /\ lastDeltaPhase' = [s \in Surfaces |-> "none"]
+    /\ phase = "Operating" \/ phase = "Shutdown"
+    /\ phase' = "Shutdown"
+    /\ model_step_count' = model_step_count + 1
+    /\ known_surfaces' = {}
+    /\ visible_surfaces' = {}
+    /\ base_state' = [x \in {} |-> None]
+    /\ pending_op' = [x \in {} |-> None]
+    /\ staged_op' = [x \in {} |-> None]
+    /\ inflight_calls' = [x \in {} |-> None]
+    /\ last_delta_operation' = [x \in {} |-> None]
+    /\ last_delta_phase' = [x \in {} |-> None]
+
 
 Next ==
-    \/ \E s \in Surfaces : StageAdd(s)
-    \/ \E s \in Surfaces : StageRemove(s)
-    \/ \E s \in Surfaces : StageReload(s)
-    \/ \E s \in Surfaces : ApplyAdd(s)
-    \/ \E s \in Surfaces : ApplyReload(s)
-    \/ \E s \in Surfaces : ApplyRemove(s)
-    \/ \E s \in Surfaces : PendingSucceeded(s)
-    \/ \E s \in Surfaces : PendingFailed(s)
-    \/ \E s \in Surfaces : StartCall(s)
-    \/ \E s \in Surfaces : FinishCall(s)
-    \/ \E s \in Surfaces : FinalizeRemovalClean(s)
-    \/ \E s \in Surfaces : FinalizeRemovalForced(s)
+    \/ \E surface_id \in SurfaceIdValues : StageAdd(surface_id)
+    \/ \E surface_id \in SurfaceIdValues : StageRemove(surface_id)
+    \/ \E surface_id \in SurfaceIdValues : StageReload(surface_id)
+    \/ \E surface_id \in SurfaceIdValues : \E applied_at_turn \in TurnNumberValues : ApplyBoundaryAdd(surface_id, applied_at_turn)
+    \/ \E surface_id \in SurfaceIdValues : \E applied_at_turn \in TurnNumberValues : ApplyBoundaryReload(surface_id, applied_at_turn)
+    \/ \E surface_id \in SurfaceIdValues : \E applied_at_turn \in TurnNumberValues : ApplyBoundaryRemoveDraining(surface_id, applied_at_turn)
+    \/ \E surface_id \in SurfaceIdValues : \E applied_at_turn \in TurnNumberValues : ApplyBoundaryRemoveNoop(surface_id, applied_at_turn)
+    \/ \E surface_id \in SurfaceIdValues : \E applied_at_turn \in TurnNumberValues : PendingSucceededAdd(surface_id, applied_at_turn)
+    \/ \E surface_id \in SurfaceIdValues : \E applied_at_turn \in TurnNumberValues : PendingSucceededReload(surface_id, applied_at_turn)
+    \/ \E surface_id \in SurfaceIdValues : \E applied_at_turn \in TurnNumberValues : PendingFailedAdd(surface_id, applied_at_turn)
+    \/ \E surface_id \in SurfaceIdValues : \E applied_at_turn \in TurnNumberValues : PendingFailedReload(surface_id, applied_at_turn)
+    \/ \E surface_id \in SurfaceIdValues : CallStartedActive(surface_id)
+    \/ \E surface_id \in SurfaceIdValues : CallStartedRejectWhileRemoving(surface_id)
+    \/ \E surface_id \in SurfaceIdValues : CallStartedRejectWhileUnavailable(surface_id)
+    \/ \E surface_id \in SurfaceIdValues : CallFinishedActive(surface_id)
+    \/ \E surface_id \in SurfaceIdValues : CallFinishedRemoving(surface_id)
+    \/ \E surface_id \in SurfaceIdValues : \E applied_at_turn \in TurnNumberValues : FinalizeRemovalClean(surface_id, applied_at_turn)
+    \/ \E surface_id \in SurfaceIdValues : \E applied_at_turn \in TurnNumberValues : FinalizeRemovalForced(surface_id, applied_at_turn)
     \/ Shutdown
+    \/ TerminalStutter
 
-PendingConstrainedByBaseState ==
-    \A s \in Surfaces :
-        /\ (baseState[s] = "removing") => pendingOp[s] = "none"
-        /\ (baseState[s] = "removed") => pendingOp[s] \in {"none", "add"}
+removing_or_removed_surfaces_are_not_visible == \A surface_id \in known_surfaces : (((SurfaceBase(surface_id) = "Removing") /\ ~(IsVisible(surface_id))) \/ ((SurfaceBase(surface_id) = "Removed") /\ ~(IsVisible(surface_id))) \/ ((SurfaceBase(surface_id) # "Removing") /\ (SurfaceBase(surface_id) # "Removed")))
+visible_membership_matches_active_base_state == \A surface_id \in known_surfaces : (IsVisible(surface_id) = (SurfaceBase(surface_id) = "Active"))
+removing_surfaces_have_no_pending_add_or_reload == \A surface_id \in known_surfaces : ((SurfaceBase(surface_id) # "Removing") \/ (PendingOp(surface_id) = "None"))
+removed_surfaces_only_allow_pending_none_or_add == \A surface_id \in known_surfaces : ((SurfaceBase(surface_id) # "Removed") \/ ((PendingOp(surface_id) = "None") \/ (PendingOp(surface_id) = "Add")))
+inflight_calls_only_exist_for_active_or_removing_surfaces == \A surface_id \in known_surfaces : ((InflightCallCount(surface_id) = 0) \/ ((SurfaceBase(surface_id) = "Active") \/ (SurfaceBase(surface_id) = "Removing")))
+reload_pending_requires_active_base_state == \A surface_id \in known_surfaces : ((PendingOp(surface_id) # "Reload") \/ (SurfaceBase(surface_id) = "Active"))
+removed_surfaces_have_zero_inflight_calls == \A surface_id \in known_surfaces : ((SurfaceBase(surface_id) # "Removed") \/ (InflightCallCount(surface_id) = 0))
+forced_delta_phase_is_always_a_remove_delta == \A surface_id \in known_surfaces : ((LastDeltaPhase(surface_id) # "Forced") \/ (LastDeltaOperation(surface_id) = "Remove"))
 
-NoInflightOnAbsentOrRemoved ==
-    \A s \in Surfaces :
-        baseState[s] \in {"absent", "removed"} => inflight[s] = 0
-
-ReloadRequiresActiveBase ==
-    \A s \in Surfaces :
-        pendingOp[s] = "reload" => baseState[s] = "active"
-
-ForcedPhaseMatchesRemoved ==
-    \A s \in Surfaces :
-        lastDeltaPhase[s] = "forced" => baseState[s] = "removed"
-
-PendingPhaseHasPendingOp ==
-    \A s \in Surfaces :
-        lastDeltaPhase[s] = "pending" => pendingOp[s] \in {"add", "reload"}
+CiStateConstraint == /\ model_step_count <= 6 /\ Cardinality(known_surfaces) <= 1 /\ Cardinality(visible_surfaces) <= 1 /\ Cardinality(DOMAIN base_state) <= 1 /\ Cardinality(DOMAIN pending_op) <= 1 /\ Cardinality(DOMAIN staged_op) <= 1 /\ Cardinality(DOMAIN inflight_calls) <= 1 /\ Cardinality(DOMAIN last_delta_operation) <= 1 /\ Cardinality(DOMAIN last_delta_phase) <= 1
+DeepStateConstraint == /\ model_step_count <= 8 /\ Cardinality(known_surfaces) <= 2 /\ Cardinality(visible_surfaces) <= 2 /\ Cardinality(DOMAIN base_state) <= 2 /\ Cardinality(DOMAIN pending_op) <= 2 /\ Cardinality(DOMAIN staged_op) <= 2 /\ Cardinality(DOMAIN inflight_calls) <= 2 /\ Cardinality(DOMAIN last_delta_operation) <= 2 /\ Cardinality(DOMAIN last_delta_phase) <= 2
 
 Spec == Init /\ [][Next]_vars
 
-THEOREM Spec => []PendingConstrainedByBaseState
-THEOREM Spec => []NoInflightOnAbsentOrRemoved
-THEOREM Spec => []ReloadRequiresActiveBase
-THEOREM Spec => []ForcedPhaseMatchesRemoved
-THEOREM Spec => []PendingPhaseHasPendingOp
+THEOREM Spec => []removing_or_removed_surfaces_are_not_visible
+THEOREM Spec => []visible_membership_matches_active_base_state
+THEOREM Spec => []removing_surfaces_have_no_pending_add_or_reload
+THEOREM Spec => []removed_surfaces_only_allow_pending_none_or_add
+THEOREM Spec => []inflight_calls_only_exist_for_active_or_removing_surfaces
+THEOREM Spec => []reload_pending_requires_active_base_state
+THEOREM Spec => []removed_surfaces_have_zero_inflight_calls
+THEOREM Spec => []forced_delta_phase_is_always_a_remove_delta
 
 =============================================================================

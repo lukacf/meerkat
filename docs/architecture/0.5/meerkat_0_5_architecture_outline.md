@@ -18,10 +18,10 @@ It is the planning-time architectural source of truth for the core elements
 we want to make first-class, the layers we want to keep distinct, and the
 major confusions we want to remove.
 
-Once a canonical machine lands in checked-in schema or explicit Rust kernel
-form, that executable machine definition becomes the long-term semantic source
-of truth for that machine and this document becomes explanatory/derived for
-that landed owner.
+Once a canonical machine lands in checked-in Rust-native catalog form with its
+generated authority outputs wired, that executable machine definition becomes
+the long-term semantic source of truth for that machine and this document
+becomes explanatory/derived for that landed owner.
 
 This note is target-oriented. It defines the destination architecture, not a
 claim that the `0.4` public API already uses these names.
@@ -1707,7 +1707,7 @@ Preferred formal baseline:
   implementation should refine it rather than drift from it
 
 Theorem-prover option rule:
-machine schemas where present, and formal specs for every machine, should be
+Rust-native catalog definitions and formal specs for every machine should be
 written declaratively enough that they could be transliterated into stronger
 proof systems such as Lean without semantic reinterpretation, even if `0.5`
 itself stops at model checking rather than full theorem proving.
@@ -1805,17 +1805,20 @@ Artifact rules:
   - one explicit Rust owner
   - one explicit Rust transition boundary
 - `SchemaKernel` machines additionally carry:
-  - checked-in `schema.yaml`
+  - checked-in Rust-native authority under `meerkat-machine-schema/src/catalog/`
   - generated Rust kernel
   - generated contract/model artifacts
-- `PureHandKernel` machines additionally carry:
-  - one hand-written pure kernel
-  - kernel-focused Rust tests
-- no canonical machine may remain in `BoundaryRedesign` at the end of `0.5`
+- machines in `SchemaExtension` additionally carry:
+  - an explicit named schema/codegen blocker
+  - temporary Rust shell/kernels only as migration scaffolding
+  - a closure path to `SchemaKernel`
+- no canonical machine may remain in `BoundaryRedesign` or `SchemaExtension`
+  at the end of `0.5`
 
 Repo-shape and command rule:
 
-- the authoritative repo layout, schema format, codegen commands, and CI gates
+- the authoritative repo layout, Rust-native catalog format, codegen commands,
+  and CI gates
   are defined in `meerkat_machine_schema_workflow_spec.md`
 
 ### Verification Gates
@@ -1830,6 +1833,8 @@ Minimum gate for introducing or materially changing a machine:
 - mapping note updated if the abstraction boundary changed
 - Rust kernel/tests updated
 - generated artifacts refreshed for `SchemaKernel` machines
+- schema blocker inventory updated if the machine is still in
+  `SchemaExtension`
 
 Verified-set gate:
 the following machines should be considered mandatory formal-spec machines for
@@ -1854,8 +1859,8 @@ Implementation-mode gate:
 
 - the required final implementation mode for each machine is defined in
   `meerkat_machine_formalization_strategy.md`
-- `BoundaryRedesign` is allowed only as an execution-phase state, never as the
-  final release state of a canonical `0.5` machine
+- `BoundaryRedesign` and `SchemaExtension` are allowed only as execution-phase
+  states, never as the final release state of a canonical `0.5` machine
 
 Important interpretation rule:
 

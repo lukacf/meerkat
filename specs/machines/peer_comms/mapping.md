@@ -59,3 +59,49 @@ In `0.5`:
 - `SubagentResult` currently leaks through comms/inbox machinery even though
   `0.5` moves that responsibility into `OpsLifecycleMachine`
 
+<!-- GENERATED_COVERAGE_START -->
+## Generated Coverage
+This section is generated from the Rust machine catalog. Do not edit it by hand.
+
+### Machine
+- `PeerCommsMachine`
+
+### Code Anchors
+- `peer_classify`: `meerkat-comms/src/classify.rs` — peer classification precursor
+- `peer_inbox`: `meerkat-comms/src/inbox.rs` — peer inbox and request/reservation registry precursor
+- `peer_runtime`: `meerkat-comms/src/runtime/comms_runtime.rs` — runtime comms owner precursor
+
+### Scenarios
+- `trust-normalize-submit` — trusted peer envelope is normalized and submitted exactly once
+- `untrusted-drop` — untrusted or invalid peer work is dropped before runtime admission
+- `request-response-correlation` — reservation/request state remains consistent across peer traffic
+
+### Transitions
+- `TrustPeer`
+  - anchors: `peer_classify`, `peer_inbox`, `peer_runtime`
+  - scenarios: `trust-normalize-submit`, `untrusted-drop`
+- `ReceiveTrustedPeerEnvelope`
+  - anchors: `peer_classify`, `peer_inbox`, `peer_runtime`
+  - scenarios: `trust-normalize-submit`, `untrusted-drop`
+- `DropUntrustedPeerEnvelope`
+  - anchors: `peer_classify`, `peer_inbox`, `peer_runtime`
+  - scenarios: `trust-normalize-submit`, `untrusted-drop`
+- `SubmitTypedPeerInputDelivered`
+  - anchors: `peer_classify`, `peer_inbox`, `peer_runtime`
+  - scenarios: `trust-normalize-submit`
+- `SubmitTypedPeerInputContinue`
+  - anchors: `peer_classify`, `peer_inbox`, `peer_runtime`
+  - scenarios: `trust-normalize-submit`
+
+### Effects
+- `SubmitPeerInputCandidate`
+  - anchors: `peer_classify`, `peer_inbox`, `peer_runtime`
+  - scenarios: `trust-normalize-submit`
+
+### Invariants
+- `queued_items_are_classified`
+  - anchors: `peer_classify`, `peer_inbox`, `peer_runtime`
+  - scenarios: `trust-normalize-submit`, `untrusted-drop`
+
+
+<!-- GENERATED_COVERAGE_END -->

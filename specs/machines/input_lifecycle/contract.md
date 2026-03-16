@@ -1,249 +1,101 @@
 # InputLifecycleMachine
 
-Status: normative `0.5` machine contract, first formal-spec draft
+_Generated from the Rust machine catalog. Do not edit by hand._
 
-## Purpose
+- Version: `1`
+- Rust owner: `meerkat-runtime` / `machines::input_lifecycle`
 
-`InputLifecycleMachine` owns the lifecycle semantics of one admitted runtime
-input after runtime admission has accepted it.
+## State
+- Phase enum: `Accepted | Queued | Staged | Applied | AppliedPendingConsumption | Consumed | Superseded | Coalesced | Abandoned`
+- `terminal_outcome`: `Option<InputTerminalOutcome>`
+- `last_run_id`: `Option<RunId>`
+- `last_boundary_sequence`: `Option<BoundarySequence>`
 
-It is the authoritative owner of:
-
-- per-input lifecycle state
-- terminal outcome assignment
-- run association for staged/applied work
-- boundary receipt association after application
-- legality of lifecycle transitions
-
-It is **not** the owner of:
-
-- runtime-wide queue ordering
-- raw admission/rejection decisions
-- policy resolution
-- runtime control/state
-- persistence mechanics
-
-## Scope Boundary
-
-This machine begins once a runtime input has been accepted into runtime-owned
-processing.
-
-It ends when the input reaches a terminal state:
-
-- `Consumed`
-- `Superseded`
-- `Coalesced`
-- `Abandoned`
-
-Runtime-wide queueing, recovery, and multi-input sequencing belong to
-`RuntimeIngressMachine`.
-
-## Authoritative State Model
-
-For one admitted input instance, the machine state is the tuple:
-
-- `lifecycle_state: InputLifecycleState`
-- `terminal_outcome: Option<InputTerminalOutcome>`
-- `last_run_id: Option<RunId>`
-- `last_boundary_sequence: Option<BoundarySequence>`
-
-`InputLifecycleState` is the closed state set:
-
-- `Accepted`
-- `Queued`
-- `Staged`
-- `Applied`
-- `AppliedPendingConsumption`
-- `Consumed`
-- `Superseded`
-- `Coalesced`
-- `Abandoned`
-
-Terminal states:
-
-- `Consumed`
-- `Superseded`
-- `Coalesced`
-- `Abandoned`
-
-## Input Alphabet
-
-The closed external input/command alphabet for this machine is:
-
+## Inputs
 - `QueueAccepted`
-- `StageForRun(run_id)`
+- `StageForRun`(run_id: RunId)
 - `RollbackStaged`
-- `MarkApplied(run_id)`
-- `MarkAppliedPendingConsumption(boundary_sequence)`
+- `MarkApplied`(run_id: RunId)
+- `MarkAppliedPendingConsumption`(boundary_sequence: BoundarySequence)
 - `Consume`
 - `Supersede`
 - `Coalesce`
 - `Abandon`
 
-Notes:
-
-- `QueueAccepted` corresponds to the runtime deciding that an accepted input
-  should participate in ordinary queue/drain execution.
-- `RollbackStaged` is the only rollback path; `AppliedPendingConsumption ->
-  Queued` remains forbidden.
-- Recovery logic in runtime ingress may decide whether to requeue, consume, or
-  abandon an input, but those decisions must still refine this lifecycle
-  relation rather than mutate state ad hoc.
-
-## Effect Family
-
-The closed machine-boundary effect family is:
-
-- `InputLifecycleNotice(new_state)`
-- `RecordTerminalOutcome(outcome)`
-- `RecordRunAssociation(run_id)`
-- `RecordBoundarySequence(boundary_sequence)`
-
-Architecture rule:
-
-- persistence writes, event emission, and transcript-visible notices are
-  implementations or projections of these lifecycle effects, not substitutes
-  for the machine contract itself
-
-## Transition Relation
-
-### Admission-to-queue progression
-
-1. `QueueAccepted`
-
-Preconditions:
-
-- `lifecycle_state = Accepted`
-
-State updates:
-
-- `Accepted -> Queued`
-
-2. `StageForRun(run_id)`
-
-Preconditions:
-
-- `lifecycle_state = Queued`
-
-State updates:
-
-- `Queued -> Staged`
-- `last_run_id := run_id`
-
-3. `RollbackStaged`
-
-Preconditions:
-
-- `lifecycle_state = Staged`
-
-State updates:
-
-- `Staged -> Queued`
-
-### Run application and consumption
-
-4. `MarkApplied(run_id)`
-
-Preconditions:
-
-- `lifecycle_state = Staged`
-- `last_run_id = run_id`
-
-State updates:
-
-- `Staged -> Applied`
-
-5. `MarkAppliedPendingConsumption(boundary_sequence)`
-
-Preconditions:
-
-- `lifecycle_state = Applied`
-
-State updates:
-
-- `Applied -> AppliedPendingConsumption`
-- `last_boundary_sequence := boundary_sequence`
-
-6. `Consume`
-
-Preconditions:
-
-- `lifecycle_state = AppliedPendingConsumption`
-
-State updates:
-
-- `AppliedPendingConsumption -> Consumed`
-- `terminal_outcome := Consumed`
-
-### Terminalization side paths
-
-7. `Supersede`
-
-Preconditions:
-
-- `lifecycle_state ∈ {Accepted, Queued, Staged}`
-
-State updates:
-
-- `-> Superseded`
-- `terminal_outcome := Superseded`
-
-8. `Coalesce`
-
-Preconditions:
-
-- `lifecycle_state ∈ {Accepted, Queued}`
-
-State updates:
-
-- `-> Coalesced`
-- `terminal_outcome := Coalesced`
-
-9. `Abandon`
-
-Preconditions:
-
-- `lifecycle_state ∈ {Accepted, Queued, Staged, Applied, AppliedPendingConsumption}`
-
-State updates:
-
-- `-> Abandoned`
-- `terminal_outcome := Abandoned`
-
-Hard rule:
-
-- terminal states reject all further transitions
-- `AppliedPendingConsumption -> Queued` is forbidden
+## Effects
+- `InputLifecycleNotice`(new_state: InputLifecycleState)
+- `RecordTerminalOutcome`(outcome: InputTerminalOutcome)
+- `RecordRunAssociation`(run_id: RunId)
+- `RecordBoundarySequence`(boundary_sequence: BoundarySequence)
 
 ## Invariants
+- `accepted_has_no_run_or_boundary_metadata`
+- `boundary_metadata_requires_application`
 
-The machine must maintain:
+## Transitions
+### `QueueAccepted`
+- From: `Accepted`
+- On: `QueueAccepted`()
+- Emits: `InputLifecycleNotice`
+- To: `Queued`
 
-1. terminal states are terminal
+### `StageForRun`
+- From: `Queued`
+- On: `StageForRun`(run_id)
+- Emits: `InputLifecycleNotice`, `RecordRunAssociation`
+- To: `Staged`
 
-- `Consumed`, `Superseded`, `Coalesced`, and `Abandoned` reject all further
-  lifecycle transitions
+### `RollbackStaged`
+- From: `Staged`
+- On: `RollbackStaged`()
+- Emits: `InputLifecycleNotice`
+- To: `Queued`
 
-2. terminal outcome matches terminal state
+### `MarkApplied`
+- From: `Staged`
+- On: `MarkApplied`(run_id)
+- Guards:
+  - `matches_last_run`
+- Emits: `InputLifecycleNotice`
+- To: `Applied`
 
-- nonterminal states have no terminal outcome
-- terminal states have the matching terminal outcome
+### `MarkAppliedPendingConsumption`
+- From: `Applied`
+- On: `MarkAppliedPendingConsumption`(boundary_sequence)
+- Emits: `InputLifecycleNotice`, `RecordBoundarySequence`
+- To: `AppliedPendingConsumption`
 
-3. boundary metadata only exists after application
+### `Consume`
+- From: `AppliedPendingConsumption`
+- On: `Consume`()
+- Emits: `InputLifecycleNotice`, `RecordTerminalOutcome`
+- To: `Consumed`
 
-- `last_boundary_sequence` may only be present once the input has crossed an
-  apply boundary
+### `Supersede`
+- From: `Queued`
+- On: `Supersede`()
+- Emits: `InputLifecycleNotice`, `RecordTerminalOutcome`
+- To: `Superseded`
 
-4. accepted inputs carry no run/boundary metadata
+### `Coalesce`
+- From: `Queued`
+- On: `Coalesce`()
+- Emits: `InputLifecycleNotice`, `RecordTerminalOutcome`
+- To: `Coalesced`
 
-- `Accepted` implies no run association and no boundary sequence
+### `Abandon`
+- From: `Accepted`, `Queued`, `Staged`, `Applied`, `AppliedPendingConsumption`
+- On: `Abandon`()
+- Emits: `InputLifecycleNotice`, `RecordTerminalOutcome`
+- To: `Abandoned`
 
-## Model-check candidates
+## Coverage
+### Code Anchors
+- `meerkat-runtime/src/input_state.rs` — authoritative input lifecycle record shape
+- `meerkat-runtime/src/input_machine.rs` — lifecycle transition validator/reducer precursor
+- `meerkat-runtime/src/input_ledger.rs` — runtime-owned lifecycle ledger precursor
 
-Best candidates for formal checking:
-
-- illegal lifecycle transitions are unreachable
-- terminal states are sticky
-- `AppliedPendingConsumption -> Queued` is impossible
-- boundary metadata never appears before application
-
+### Scenarios
+- `queue-stage-apply-consume` — accepted input queues, stages, applies, and is consumed at a boundary
+- `supersede-coalesce` — queued input is terminalized by supersession or coalescing
+- `abandon` — input is abandoned cleanly during reset/destroy style terminalization

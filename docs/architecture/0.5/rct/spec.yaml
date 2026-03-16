@@ -219,19 +219,19 @@ reqs:
       - "meerkat_0_5_execution_plan.md#Phase 7. Final Deletions"
       - "meerkat_0_5_implementation_plan.md#Phase Closure Deletion Ledger"
   - id: REQ-023
-    text: "Every PureHandKernel machine shall expose one explicit pure kernel boundary with owner tests and TLC/profile verification wired through repo commands."
+    text: "Every richer canonical machine shall expose one explicit generated transition boundary with owner tests and TLC/profile verification wired through repo commands."
     priority: must
     decision_status: firm
     source_refs:
-      - "meerkat_machine_formalization_strategy.md#Additional gates for PureHandKernel"
-      - "meerkat_0_5_implementation_plan.md#PureHand Verification Harness Plan"
+      - "meerkat_machine_formalization_strategy.md#Additional gates for clearing SchemaExtension"
+      - "meerkat_0_5_implementation_plan.md#Advanced Machine-Authority Harness Plan"
   - id: REQ-024
-    text: "Every SchemaKernel machine shall derive its authoritative implementation from checked-in schema artifacts and forbid shell mutation of machine state outside the generated kernel."
+    text: "Every canonical machine shall derive its authoritative implementation from the checked-in Rust-native machine/composition catalog and forbid shell mutation of machine state outside the generated kernel."
     priority: must
     decision_status: firm
     source_refs:
       - "meerkat_machine_formalization_strategy.md#Additional gates for SchemaKernel"
-      - "meerkat_machine_schema_workflow_spec.md#Rust Output Shape"
+      - "meerkat_machine_schema_workflow_spec.md#Final Authority Model"
       - "meerkat_0_5_implementation_plan.md#First Concrete Slice"
   - id: REQ-025
     text: "Any public wire or SDK-affecting change shall update contracts, generated bindings, docs/examples, and changelog material in the same slice, with compatibility adapters surviving at most one implementation phase after the replacement lands."
@@ -248,12 +248,13 @@ types:
       - { name: contract_md, type: "Path" }
       - { name: model_tla, type: "Path" }
       - { name: ci_cfg, type: "Path" }
+      - { name: deep_cfg, type: "Path" }
       - { name: mapping_md, type: "Path" }
-      - { name: schema_yaml, type: "Option<Path>" }
+      - { name: generated_dir, type: "Path" }
   - id: TYPE-002
     text: "MachineMode enum"
     fields:
-      - { name: variant, type: "SchemaKernel | PureHandKernel | BoundaryRedesign" }
+      - { name: variant, type: "SchemaKernel | SchemaExtension | BoundaryRedesign" }
   - id: TYPE-003
     text: "Canonical runtime input family"
     fields:
@@ -355,7 +356,7 @@ types:
       - { name: verify, type: "cargo xtask machine-verify ..." }
       - { name: drift, type: "cargo xtask machine-check-drift ..." }
   - id: TYPE-020
-    text: "PureHand kernel boundary"
+    text: "Generated kernel boundary"
     fields:
       - { name: state, type: "Closed State enum" }
       - { name: input, type: "Closed Input enum" }
@@ -364,11 +365,11 @@ types:
 
 contracts:
   - id: CONTRACT-001
-    text: "Canonical machine artifact bundle contract: every machine carries contract.md, model.tla, ci.cfg, mapping.md, and schema.yaml where mode requires it."
+    text: "Canonical machine artifact bundle contract: every machine carries contract.md, model.tla, ci.cfg, deep.cfg, mapping.md, and generated authority output refreshed from the Rust-native catalog."
     boundary: "repo_artifact_layout"
     type_id: TYPE-001
   - id: CONTRACT-002
-    text: "Schema-to-generated-artifacts contract: schema.yaml is authoritative for SchemaKernel machines and regenerates Rust kernel, contract outputs, and TLA artifacts without drift."
+    text: "Catalog-to-generated-artifacts contract: the Rust-native machine/composition catalog is authoritative and regenerates Rust kernels, contract outputs, and TLA artifacts without drift."
     boundary: "schema_codegen"
     type_id: TYPE-001
   - id: CONTRACT-003
@@ -516,7 +517,7 @@ invariants:
   - id: INV-007
     text: "Mob-backed child work and background async operations share one authoritative ops-lifecycle owner."
   - id: INV-008
-    text: "Shell code may not mutate machine state outside the generated kernel for SchemaKernel machines or outside the pure kernel for PureHandKernel machines."
+    text: "Shell code may not mutate machine state outside the generated kernel sourced from the Rust-native authority catalog."
   - id: INV-009
     text: "Compatibility façades may remain only as early adapters and for at most one implementation phase after the runtime-backed replacement lands."
   - id: INV-010

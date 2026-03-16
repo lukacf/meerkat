@@ -63,3 +63,158 @@ Best candidates for Rust-side tests:
 - executor error propagation
 - completion registry resolution on shutdown
 - exact `RuntimeSessionAdapter` surface semantics
+
+<!-- GENERATED_COVERAGE_START -->
+## Generated Coverage
+This section is generated from the Rust machine catalog. Do not edit it by hand.
+
+### Machine
+- `RuntimeControlMachine`
+
+### Code Anchors
+- `runtime_state`: `meerkat-runtime/src/runtime_state.rs` — runtime lifecycle state precursor
+- `runtime_state_machine`: `meerkat-runtime/src/state_machine.rs` — runtime control reducer precursor
+- `runtime_loop`: `meerkat-runtime/src/runtime_loop.rs` — control-plane select loop and run coordination precursor
+
+### Scenarios
+- `control-preempts-ingress` — control commands preempt ordinary ingress work
+- `begin-run-complete` — runtime transitions idle to running to idle for a completed run
+- `retire-stop-destroy` — runtime transitions through retire/stop/destroy commands without reopening ordinary work
+
+### Transitions
+- `Initialize`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `control-preempts-ingress`
+- `BeginRunFromIdle`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `begin-run-complete`
+- `BeginRunFromRetired`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `retire-stop-destroy`
+- `RunCompleted`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `begin-run-complete`
+- `RunFailed`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `begin-run-complete`
+- `RunCancelled`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `begin-run-complete`
+- `RecoverRequestedFromIdle`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `retire-stop-destroy`
+- `RecoverRequestedFromRunning`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `retire-stop-destroy`
+- `RecoverySucceeded`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `retire-stop-destroy`
+- `RetireRequestedFromIdle`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `retire-stop-destroy`
+- `RetireRequestedFromRunning`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `retire-stop-destroy`
+- `ResetRequested`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `retire-stop-destroy`
+- `StopRequested`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `retire-stop-destroy`
+- `DestroyRequested`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `retire-stop-destroy`
+- `ResumeRequested`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `retire-stop-destroy`
+- `SubmitCandidateFromIdle`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `control-preempts-ingress`
+- `SubmitCandidateFromRunning`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `begin-run-complete`
+- `AdmissionAcceptedIdleNone`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `control-preempts-ingress`
+- `AdmissionAcceptedIdleWake`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `control-preempts-ingress`
+- `AdmissionAcceptedIdleProcess`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `control-preempts-ingress`
+- `AdmissionAcceptedIdleWakeAndProcess`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `control-preempts-ingress`
+- `AdmissionAcceptedRunningNone`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `begin-run-complete`
+- `AdmissionAcceptedRunningWake`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `begin-run-complete`
+- `AdmissionAcceptedRunningProcess`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `begin-run-complete`
+- `AdmissionAcceptedRunningWakeAndProcess`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `begin-run-complete`
+- `AdmissionRejectedIdle`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `control-preempts-ingress`
+- `AdmissionRejectedRunning`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `begin-run-complete`
+- `AdmissionDeduplicatedIdle`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `control-preempts-ingress`
+- `AdmissionDeduplicatedRunning`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `begin-run-complete`
+- `ExternalToolDeltaReceivedIdle`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `control-preempts-ingress`
+- `ExternalToolDeltaReceivedRunning`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `begin-run-complete`
+- `ExternalToolDeltaReceivedRecovering`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `retire-stop-destroy`
+- `ExternalToolDeltaReceivedRetired`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `retire-stop-destroy`
+
+### Effects
+- `ResolveAdmission`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `control-preempts-ingress`
+- `SubmitAdmittedIngressEffect`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `control-preempts-ingress`
+- `SubmitRunPrimitive`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `begin-run-complete`
+- `SignalWake`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `control-preempts-ingress`
+- `SignalImmediateProcess`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `control-preempts-ingress`
+- `EmitRuntimeNotice`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `begin-run-complete`
+- `ResolveCompletionAsTerminated`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `control-preempts-ingress`
+- `ApplyControlPlaneCommand`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `control-preempts-ingress`
+
+### Invariants
+- `running_implies_active_run`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `begin-run-complete`
+- `active_run_only_while_running_or_retired`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - scenarios: `retire-stop-destroy`
+
+
+<!-- GENERATED_COVERAGE_END -->

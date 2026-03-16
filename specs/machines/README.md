@@ -19,14 +19,16 @@ Each canonical machine lives under its own directory:
 Status:
 
 - these artifacts are normative for `0.5` machine semantics until a machine's
-  checked-in schema or explicit Rust kernel becomes the long-term semantic
+  Rust-native catalog definition in `meerkat-machine-schema` becomes the
+  long-term semantic
   authority
 - where current implementation diverges, `mapping.md` calls that out explicitly
 - the checked-in `ci.cfg` files are the bounded CI profiles for TLC
 
 Validation:
 
-- `./specs/machines/validate.sh`
+- `cargo xtask machine-verify --all`
+- `./specs/machines/validate.sh` (thin wrapper over the xtask command above)
 - or per machine:
   `tlc -metadir specs/machines/.tlc/<machine> -config specs/machines/<machine>/ci.cfg specs/machines/<machine>/model.tla`
 
@@ -46,10 +48,10 @@ Canonical machine set:
 Verification posture:
 
 - TLA+ models are model-checked and evolve with the implementation
-- schema-kernel machines eventually add checked-in `schema.yaml` plus generated
-  outputs under the same machine directory
-- PureHand machines keep the TLA+ model plus explicit Rust kernel tests in the
-  owning crate
+- Rust-native authority in `meerkat-machine-schema/src/catalog/*.rs` drives the
+  generated machine bundle
+- `xtask` is the authoritative generation/drift/verification entrypoint;
+  `validate.sh` is now only a convenience wrapper over that path
 
 Current bounded TLC snapshot:
 

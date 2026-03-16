@@ -1,225 +1,361 @@
 ---- MODULE model ----
-EXTENDS Naturals, TLC
+EXTENDS TLC, Naturals, Sequences, FiniteSets
 
-\* Abstract, architecture-level model of TurnExecutionMachine.
-\* This models one active run at a time and the internal LLM/tool/boundary loop.
+\* Generated semantic machine model for TurnExecutionMachine.
 
-CONSTANTS
-    RunIds,
-    NoRun,
-    MaxToolCalls,
-    MaxBoundaries
+CONSTANTS NatValues, RunIdValues
 
-ASSUME NoRun \notin RunIds
-ASSUME MaxToolCalls \in Nat
-ASSUME MaxBoundaries \in Nat
+None == [tag |-> "none", value |-> "none"]
+Some(v) == [tag |-> "some", value |-> v]
+MapLookup(map, key) == IF key \in DOMAIN map THEN map[key] ELSE None
+MapSet(map, key, value) == [x \in DOMAIN map \cup {key} |-> IF x = key THEN value ELSE map[x]]
+StartsWith(seq, prefix) == /\ Len(prefix) <= Len(seq) /\ SubSeq(seq, 1, Len(prefix)) = prefix
+SeqElements(seq) == {seq[i] : i \in 1..Len(seq)}
+RECURSIVE SeqRemove(_, _)
+SeqRemove(seq, value) == IF Len(seq) = 0 THEN <<>> ELSE IF Head(seq) = value THEN SeqRemove(Tail(seq), value) ELSE <<Head(seq)>> \o SeqRemove(Tail(seq), value)
+RECURSIVE SeqRemoveAll(_, _)
+SeqRemoveAll(seq, values) == IF Len(values) = 0 THEN seq ELSE SeqRemoveAll(SeqRemove(seq, Head(values)), Tail(values))
 
-ExecStates ==
-    {"ready", "applying_primitive", "calling_llm", "waiting_for_ops",
-     "draining_boundary", "error_recovery", "cancelling",
-     "completed", "failed", "cancelled"}
+VARIABLES phase, model_step_count, active_run, primitive_kind, tool_calls_pending, boundary_count, terminal_outcome
 
-PrimitiveKinds ==
-    {"none", "conversation_turn", "immediate_append", "immediate_context"}
-
-TerminalOutcomes == {"none", "completed", "failed", "cancelled"}
-
-VARIABLES
-    execState,
-    activeRun,
-    primitiveKind,
-    toolCallsPending,
-    boundaryCount,
-    terminalOutcome
-
-vars ==
-    << execState, activeRun, primitiveKind,
-       toolCallsPending, boundaryCount, terminalOutcome >>
+vars == << phase, model_step_count, active_run, primitive_kind, tool_calls_pending, boundary_count, terminal_outcome >>
 
 Init ==
-    /\ execState = "ready"
-    /\ activeRun = NoRun
-    /\ primitiveKind = "none"
-    /\ toolCallsPending = 0
-    /\ boundaryCount = 0
-    /\ terminalOutcome = "none"
+    /\ phase = "Ready"
+    /\ model_step_count = 0
+    /\ active_run = None
+    /\ primitive_kind = "None"
+    /\ tool_calls_pending = 0
+    /\ boundary_count = 0
+    /\ terminal_outcome = "None"
 
-StartConversationRun(r) ==
-    /\ r \in RunIds
-    /\ execState = "ready"
-    /\ activeRun = NoRun
-    /\ execState' = "applying_primitive"
-    /\ activeRun' = r
-    /\ primitiveKind' = "conversation_turn"
-    /\ toolCallsPending' = 0
-    /\ boundaryCount' = 0
-    /\ terminalOutcome' = "none"
+TerminalStutter ==
+    /\ phase = "Completed" \/ phase = "Failed" \/ phase = "Cancelled"
+    /\ UNCHANGED vars
 
-StartImmediateAppend(r) ==
-    /\ r \in RunIds
-    /\ execState = "ready"
-    /\ activeRun = NoRun
-    /\ execState' = "applying_primitive"
-    /\ activeRun' = r
-    /\ primitiveKind' = "immediate_append"
-    /\ toolCallsPending' = 0
-    /\ boundaryCount' = 0
-    /\ terminalOutcome' = "none"
+StartConversationRun(run_id) ==
+    /\ phase = "Ready"
+    /\ phase' = "ApplyingPrimitive"
+    /\ model_step_count' = model_step_count + 1
+    /\ active_run' = Some(run_id)
+    /\ primitive_kind' = "ConversationTurn"
+    /\ tool_calls_pending' = 0
+    /\ boundary_count' = 0
+    /\ terminal_outcome' = "None"
 
-StartImmediateContext(r) ==
-    /\ r \in RunIds
-    /\ execState = "ready"
-    /\ activeRun = NoRun
-    /\ execState' = "applying_primitive"
-    /\ activeRun' = r
-    /\ primitiveKind' = "immediate_context"
-    /\ toolCallsPending' = 0
-    /\ boundaryCount' = 0
-    /\ terminalOutcome' = "none"
 
-PrimitiveAppliedConversation ==
-    /\ execState = "applying_primitive"
-    /\ primitiveKind = "conversation_turn"
-    /\ activeRun # NoRun
-    /\ execState' = "calling_llm"
-    /\ UNCHANGED << activeRun, primitiveKind, toolCallsPending, boundaryCount, terminalOutcome >>
+StartImmediateAppend(run_id) ==
+    /\ phase = "Ready"
+    /\ phase' = "ApplyingPrimitive"
+    /\ model_step_count' = model_step_count + 1
+    /\ active_run' = Some(run_id)
+    /\ primitive_kind' = "ImmediateAppend"
+    /\ tool_calls_pending' = 0
+    /\ boundary_count' = 0
+    /\ terminal_outcome' = "None"
 
-PrimitiveAppliedImmediate ==
-    /\ execState = "applying_primitive"
-    /\ primitiveKind \in {"immediate_append", "immediate_context"}
-    /\ activeRun # NoRun
-    /\ boundaryCount < MaxBoundaries
-    /\ execState' = "completed"
-    /\ boundaryCount' = boundaryCount + 1
-    /\ terminalOutcome' = "completed"
-    /\ UNCHANGED << activeRun, primitiveKind, toolCallsPending >>
 
-LlmReturnedToolCalls(n) ==
-    /\ execState = "calling_llm"
-    /\ activeRun # NoRun
-    /\ n \in 1..MaxToolCalls
-    /\ execState' = "waiting_for_ops"
-    /\ toolCallsPending' = n
-    /\ UNCHANGED << activeRun, primitiveKind, boundaryCount, terminalOutcome >>
+StartImmediateContext(run_id) ==
+    /\ phase = "Ready"
+    /\ phase' = "ApplyingPrimitive"
+    /\ model_step_count' = model_step_count + 1
+    /\ active_run' = Some(run_id)
+    /\ primitive_kind' = "ImmediateContextAppend"
+    /\ tool_calls_pending' = 0
+    /\ boundary_count' = 0
+    /\ terminal_outcome' = "None"
 
-ToolCallsResolved ==
-    /\ execState = "waiting_for_ops"
-    /\ activeRun # NoRun
-    /\ toolCallsPending > 0
-    /\ boundaryCount < MaxBoundaries
-    /\ execState' = "draining_boundary"
-    /\ toolCallsPending' = 0
-    /\ boundaryCount' = boundaryCount + 1
-    /\ UNCHANGED << activeRun, primitiveKind, terminalOutcome >>
 
-LlmReturnedTerminal ==
-    /\ execState = "calling_llm"
-    /\ activeRun # NoRun
-    /\ boundaryCount < MaxBoundaries
-    /\ execState' = "draining_boundary"
-    /\ boundaryCount' = boundaryCount + 1
-    /\ UNCHANGED << activeRun, primitiveKind, toolCallsPending, terminalOutcome >>
+PrimitiveAppliedConversationTurn(run_id) ==
+    /\ phase = "ApplyingPrimitive"
+    /\ (active_run = Some(run_id))
+    /\ (primitive_kind = "ConversationTurn")
+    /\ phase' = "CallingLlm"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_run, primitive_kind, tool_calls_pending, boundary_count, terminal_outcome >>
 
-BoundaryContinue ==
-    /\ execState = "draining_boundary"
-    /\ activeRun # NoRun
-    /\ primitiveKind = "conversation_turn"
-    /\ execState' = "calling_llm"
-    /\ UNCHANGED << activeRun, primitiveKind, toolCallsPending, boundaryCount, terminalOutcome >>
 
-BoundaryComplete ==
-    /\ execState = "draining_boundary"
-    /\ activeRun # NoRun
-    /\ execState' = "completed"
-    /\ terminalOutcome' = "completed"
-    /\ UNCHANGED << activeRun, primitiveKind, toolCallsPending, boundaryCount >>
+PrimitiveAppliedImmediateAppend(run_id) ==
+    /\ phase = "ApplyingPrimitive"
+    /\ (active_run = Some(run_id))
+    /\ (primitive_kind = "ImmediateAppend")
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ boundary_count' = (boundary_count) + 1
+    /\ terminal_outcome' = "Completed"
+    /\ UNCHANGED << active_run, primitive_kind, tool_calls_pending >>
 
-RecoverableFailure ==
-    /\ execState \in {"calling_llm", "waiting_for_ops", "draining_boundary"}
-    /\ activeRun # NoRun
-    /\ execState' = "error_recovery"
-    /\ UNCHANGED << activeRun, primitiveKind, toolCallsPending, boundaryCount, terminalOutcome >>
 
-RetryRequested ==
-    /\ execState = "error_recovery"
-    /\ activeRun # NoRun
-    /\ execState' = "calling_llm"
-    /\ UNCHANGED << activeRun, primitiveKind, toolCallsPending, boundaryCount, terminalOutcome >>
+PrimitiveAppliedImmediateContext(run_id) ==
+    /\ phase = "ApplyingPrimitive"
+    /\ (active_run = Some(run_id))
+    /\ (primitive_kind = "ImmediateContextAppend")
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ boundary_count' = (boundary_count) + 1
+    /\ terminal_outcome' = "Completed"
+    /\ UNCHANGED << active_run, primitive_kind, tool_calls_pending >>
 
-FatalFailure ==
-    /\ execState \in {"applying_primitive", "calling_llm", "waiting_for_ops",
-                      "draining_boundary", "error_recovery"}
-    /\ activeRun # NoRun
-    /\ execState' = "failed"
-    /\ terminalOutcome' = "failed"
-    /\ UNCHANGED << activeRun, primitiveKind, toolCallsPending, boundaryCount >>
 
-CancelRequested ==
-    /\ execState \in {"applying_primitive", "calling_llm", "waiting_for_ops",
-                      "draining_boundary", "error_recovery"}
-    /\ activeRun # NoRun
-    /\ execState' = "cancelling"
-    /\ UNCHANGED << activeRun, primitiveKind, toolCallsPending, boundaryCount, terminalOutcome >>
+LlmReturnedToolCalls(run_id, tool_count) ==
+    /\ phase = "CallingLlm"
+    /\ (active_run = Some(run_id))
+    /\ (tool_count > 0)
+    /\ phase' = "WaitingForOps"
+    /\ model_step_count' = model_step_count + 1
+    /\ tool_calls_pending' = tool_count
+    /\ UNCHANGED << active_run, primitive_kind, boundary_count, terminal_outcome >>
 
-CancellationObserved ==
-    /\ execState = "cancelling"
-    /\ activeRun # NoRun
-    /\ execState' = "cancelled"
-    /\ terminalOutcome' = "cancelled"
-    /\ UNCHANGED << activeRun, primitiveKind, toolCallsPending, boundaryCount >>
 
-AcknowledgeTerminal ==
-    /\ execState \in {"completed", "failed", "cancelled"}
-    /\ activeRun # NoRun
-    /\ execState' = "ready"
-    /\ activeRun' = NoRun
-    /\ primitiveKind' = "none"
-    /\ toolCallsPending' = 0
-    /\ boundaryCount' = 0
-    /\ terminalOutcome' = "none"
+ToolCallsResolved(run_id) ==
+    /\ phase = "WaitingForOps"
+    /\ (active_run = Some(run_id))
+    /\ (tool_calls_pending > 0)
+    /\ phase' = "DrainingBoundary"
+    /\ model_step_count' = model_step_count + 1
+    /\ tool_calls_pending' = 0
+    /\ boundary_count' = (boundary_count) + 1
+    /\ UNCHANGED << active_run, primitive_kind, terminal_outcome >>
+
+
+LlmReturnedTerminal(run_id) ==
+    /\ phase = "CallingLlm"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "DrainingBoundary"
+    /\ model_step_count' = model_step_count + 1
+    /\ boundary_count' = (boundary_count) + 1
+    /\ UNCHANGED << active_run, primitive_kind, tool_calls_pending, terminal_outcome >>
+
+
+BoundaryContinue(run_id) ==
+    /\ phase = "DrainingBoundary"
+    /\ (active_run = Some(run_id))
+    /\ (primitive_kind = "ConversationTurn")
+    /\ phase' = "CallingLlm"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_run, primitive_kind, tool_calls_pending, boundary_count, terminal_outcome >>
+
+
+BoundaryComplete(run_id) ==
+    /\ phase = "DrainingBoundary"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ terminal_outcome' = "Completed"
+    /\ UNCHANGED << active_run, primitive_kind, tool_calls_pending, boundary_count >>
+
+
+RecoverableFailureFromCallingLlm(run_id) ==
+    /\ phase = "CallingLlm"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "ErrorRecovery"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_run, primitive_kind, tool_calls_pending, boundary_count, terminal_outcome >>
+
+
+RecoverableFailureFromWaitingForOps(run_id) ==
+    /\ phase = "WaitingForOps"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "ErrorRecovery"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_run, primitive_kind, tool_calls_pending, boundary_count, terminal_outcome >>
+
+
+RecoverableFailureFromDrainingBoundary(run_id) ==
+    /\ phase = "DrainingBoundary"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "ErrorRecovery"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_run, primitive_kind, tool_calls_pending, boundary_count, terminal_outcome >>
+
+
+RetryRequested(run_id) ==
+    /\ phase = "ErrorRecovery"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "CallingLlm"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_run, primitive_kind, tool_calls_pending, boundary_count, terminal_outcome >>
+
+
+FatalFailureFromApplyingPrimitive(run_id) ==
+    /\ phase = "ApplyingPrimitive"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Failed"
+    /\ model_step_count' = model_step_count + 1
+    /\ terminal_outcome' = "Failed"
+    /\ UNCHANGED << active_run, primitive_kind, tool_calls_pending, boundary_count >>
+
+
+FatalFailureFromCallingLlm(run_id) ==
+    /\ phase = "CallingLlm"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Failed"
+    /\ model_step_count' = model_step_count + 1
+    /\ terminal_outcome' = "Failed"
+    /\ UNCHANGED << active_run, primitive_kind, tool_calls_pending, boundary_count >>
+
+
+FatalFailureFromWaitingForOps(run_id) ==
+    /\ phase = "WaitingForOps"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Failed"
+    /\ model_step_count' = model_step_count + 1
+    /\ terminal_outcome' = "Failed"
+    /\ UNCHANGED << active_run, primitive_kind, tool_calls_pending, boundary_count >>
+
+
+FatalFailureFromDrainingBoundary(run_id) ==
+    /\ phase = "DrainingBoundary"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Failed"
+    /\ model_step_count' = model_step_count + 1
+    /\ terminal_outcome' = "Failed"
+    /\ UNCHANGED << active_run, primitive_kind, tool_calls_pending, boundary_count >>
+
+
+FatalFailureFromErrorRecovery(run_id) ==
+    /\ phase = "ErrorRecovery"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Failed"
+    /\ model_step_count' = model_step_count + 1
+    /\ terminal_outcome' = "Failed"
+    /\ UNCHANGED << active_run, primitive_kind, tool_calls_pending, boundary_count >>
+
+
+CancelRequestedFromApplyingPrimitive(run_id) ==
+    /\ phase = "ApplyingPrimitive"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Cancelling"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_run, primitive_kind, tool_calls_pending, boundary_count, terminal_outcome >>
+
+
+CancelRequestedFromCallingLlm(run_id) ==
+    /\ phase = "CallingLlm"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Cancelling"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_run, primitive_kind, tool_calls_pending, boundary_count, terminal_outcome >>
+
+
+CancelRequestedFromWaitingForOps(run_id) ==
+    /\ phase = "WaitingForOps"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Cancelling"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_run, primitive_kind, tool_calls_pending, boundary_count, terminal_outcome >>
+
+
+CancelRequestedFromDrainingBoundary(run_id) ==
+    /\ phase = "DrainingBoundary"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Cancelling"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_run, primitive_kind, tool_calls_pending, boundary_count, terminal_outcome >>
+
+
+CancelRequestedFromErrorRecovery(run_id) ==
+    /\ phase = "ErrorRecovery"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Cancelling"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_run, primitive_kind, tool_calls_pending, boundary_count, terminal_outcome >>
+
+
+CancellationObserved(run_id) ==
+    /\ phase = "Cancelling"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ terminal_outcome' = "Cancelled"
+    /\ UNCHANGED << active_run, primitive_kind, tool_calls_pending, boundary_count >>
+
+
+AcknowledgeTerminalFromCompleted(run_id) ==
+    /\ phase = "Completed"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ active_run' = None
+    /\ primitive_kind' = "None"
+    /\ tool_calls_pending' = 0
+    /\ boundary_count' = 0
+    /\ terminal_outcome' = "None"
+
+
+AcknowledgeTerminalFromFailed(run_id) ==
+    /\ phase = "Failed"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ active_run' = None
+    /\ primitive_kind' = "None"
+    /\ tool_calls_pending' = 0
+    /\ boundary_count' = 0
+    /\ terminal_outcome' = "None"
+
+
+AcknowledgeTerminalFromCancelled(run_id) ==
+    /\ phase = "Cancelled"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ active_run' = None
+    /\ primitive_kind' = "None"
+    /\ tool_calls_pending' = 0
+    /\ boundary_count' = 0
+    /\ terminal_outcome' = "None"
+
 
 Next ==
-    \/ \E r \in RunIds : StartConversationRun(r)
-    \/ \E r \in RunIds : StartImmediateAppend(r)
-    \/ \E r \in RunIds : StartImmediateContext(r)
-    \/ PrimitiveAppliedConversation
-    \/ PrimitiveAppliedImmediate
-    \/ \E n \in 1..MaxToolCalls : LlmReturnedToolCalls(n)
-    \/ ToolCallsResolved
-    \/ LlmReturnedTerminal
-    \/ BoundaryContinue
-    \/ BoundaryComplete
-    \/ RecoverableFailure
-    \/ RetryRequested
-    \/ FatalFailure
-    \/ CancelRequested
-    \/ CancellationObserved
-    \/ AcknowledgeTerminal
+    \/ \E run_id \in RunIdValues : StartConversationRun(run_id)
+    \/ \E run_id \in RunIdValues : StartImmediateAppend(run_id)
+    \/ \E run_id \in RunIdValues : StartImmediateContext(run_id)
+    \/ \E run_id \in RunIdValues : PrimitiveAppliedConversationTurn(run_id)
+    \/ \E run_id \in RunIdValues : PrimitiveAppliedImmediateAppend(run_id)
+    \/ \E run_id \in RunIdValues : PrimitiveAppliedImmediateContext(run_id)
+    \/ \E run_id \in RunIdValues : \E tool_count \in 0..2 : LlmReturnedToolCalls(run_id, tool_count)
+    \/ \E run_id \in RunIdValues : ToolCallsResolved(run_id)
+    \/ \E run_id \in RunIdValues : LlmReturnedTerminal(run_id)
+    \/ \E run_id \in RunIdValues : BoundaryContinue(run_id)
+    \/ \E run_id \in RunIdValues : BoundaryComplete(run_id)
+    \/ \E run_id \in RunIdValues : RecoverableFailureFromCallingLlm(run_id)
+    \/ \E run_id \in RunIdValues : RecoverableFailureFromWaitingForOps(run_id)
+    \/ \E run_id \in RunIdValues : RecoverableFailureFromDrainingBoundary(run_id)
+    \/ \E run_id \in RunIdValues : RetryRequested(run_id)
+    \/ \E run_id \in RunIdValues : FatalFailureFromApplyingPrimitive(run_id)
+    \/ \E run_id \in RunIdValues : FatalFailureFromCallingLlm(run_id)
+    \/ \E run_id \in RunIdValues : FatalFailureFromWaitingForOps(run_id)
+    \/ \E run_id \in RunIdValues : FatalFailureFromDrainingBoundary(run_id)
+    \/ \E run_id \in RunIdValues : FatalFailureFromErrorRecovery(run_id)
+    \/ \E run_id \in RunIdValues : CancelRequestedFromApplyingPrimitive(run_id)
+    \/ \E run_id \in RunIdValues : CancelRequestedFromCallingLlm(run_id)
+    \/ \E run_id \in RunIdValues : CancelRequestedFromWaitingForOps(run_id)
+    \/ \E run_id \in RunIdValues : CancelRequestedFromDrainingBoundary(run_id)
+    \/ \E run_id \in RunIdValues : CancelRequestedFromErrorRecovery(run_id)
+    \/ \E run_id \in RunIdValues : CancellationObserved(run_id)
+    \/ \E run_id \in RunIdValues : AcknowledgeTerminalFromCompleted(run_id)
+    \/ \E run_id \in RunIdValues : AcknowledgeTerminalFromFailed(run_id)
+    \/ \E run_id \in RunIdValues : AcknowledgeTerminalFromCancelled(run_id)
+    \/ TerminalStutter
 
-ReadyHasNoRun ==
-    (execState = "ready") <=> (activeRun = NoRun)
+ready_has_no_active_run == ((phase # "Ready") \/ (active_run = None))
+non_ready_has_active_run == ((phase = "Ready") \/ (active_run # None))
+waiting_for_ops_implies_pending_tools == ((phase # "WaitingForOps") \/ (tool_calls_pending > 0))
+immediate_primitives_skip_llm_and_recovery == ((primitive_kind = "ConversationTurn") \/ ((phase # "CallingLlm") /\ (phase # "WaitingForOps") /\ (phase # "ErrorRecovery")))
+terminal_states_match_terminal_outcome == (((phase # "Completed") \/ (terminal_outcome = "Completed")) /\ ((phase # "Failed") \/ (terminal_outcome = "Failed")) /\ ((phase # "Cancelled") \/ (terminal_outcome = "Cancelled")))
+completed_runs_have_seen_a_boundary == ((phase # "Completed") \/ (boundary_count > 0))
 
-WaitingHasPendingTools ==
-    execState = "waiting_for_ops" => toolCallsPending > 0
-
-ImmediateNeverEntersLlmOrOps ==
-    primitiveKind \in {"immediate_append", "immediate_context"} =>
-        execState \notin {"calling_llm", "waiting_for_ops", "error_recovery"}
-
-TerminalOutcomeMatchesState ==
-    /\ (execState = "completed") => terminalOutcome = "completed"
-    /\ (execState = "failed") => terminalOutcome = "failed"
-    /\ (execState = "cancelled") => terminalOutcome = "cancelled"
-
-CompletedRequiresBoundary ==
-    execState = "completed" => boundaryCount > 0
+CiStateConstraint == /\ model_step_count <= 6
+DeepStateConstraint == /\ model_step_count <= 8
 
 Spec == Init /\ [][Next]_vars
 
-THEOREM Spec => []ReadyHasNoRun
-THEOREM Spec => []WaitingHasPendingTools
-THEOREM Spec => []ImmediateNeverEntersLlmOrOps
-THEOREM Spec => []TerminalOutcomeMatchesState
-THEOREM Spec => []CompletedRequiresBoundary
+THEOREM Spec => []ready_has_no_active_run
+THEOREM Spec => []non_ready_has_active_run
+THEOREM Spec => []waiting_for_ops_implies_pending_tools
+THEOREM Spec => []immediate_primitives_skip_llm_and_recovery
+THEOREM Spec => []terminal_states_match_terminal_outcome
+THEOREM Spec => []completed_runs_have_seen_a_boundary
 
 =============================================================================

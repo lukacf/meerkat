@@ -104,7 +104,7 @@ phases:
   - id: 2
     title: "In-Repo Artifact Landing And Schema Bootstrap"
     gate: 2
-    goal: "Land the in-repo machine bundle, schema/codegen crates, xtask entrypoints, and the first honest generated machines without freezing unresolved runtime semantics too early."
+    goal: "Land the in-repo machine bundle, machine-authority/codegen crates, xtask entrypoints, and the first honest generated machines without freezing unresolved runtime semantics too early."
     dependencies: [0, 1]
     spec_ids:
       - REQ-001
@@ -189,9 +189,9 @@ phases:
     exit_gate: "Ordinary peer/event work reaches execution only through runtime admission, and Agent no longer owns long-lived host/runtime orchestration."
 
   - id: 6
-    title: "External Tool Contract And PureHand Harness"
+    title: "External Tool Contract And Machine-Authority Harness"
     gate: 2
-    goal: "Lock the external-tool outward contract and land the PureHand verification harness before PureHand extraction and surface cutovers depend on them."
+    goal: "Lock the external-tool outward contract and land the advanced machine-authority verification harness before richer generated-kernel convergence and surface cutovers depend on it."
     dependencies: [2, 3]
     spec_ids:
       - REQ-015
@@ -206,12 +206,12 @@ phases:
       execution_plan_phases: [5, 8]
       implementation_plan_workstreams: [F, H]
       note: "This deliberately pulls harness scaffolding earlier than the implementation-plan critical-path diagram."
-    exit_gate: "Typed outward tool-surface contract is explicit, transcript notices are derivative, and PureHand machines have a real repo verification harness."
+    exit_gate: "Typed outward tool-surface contract is explicit, transcript notices are derivative, and richer generated-kernel machines have a real repo verification harness."
 
   - id: 7
     title: "Mob Convergence And Kernel Extraction"
     gate: 2
-    goal: "Finish the mob owner split and land explicit lifecycle, flow, and orchestration boundaries on top of the shared substrates and PureHand harness."
+    goal: "Finish the mob owner split and land explicit lifecycle, flow, and orchestration boundaries on top of the shared substrates and the advanced machine-authority harness."
     dependencies: [4, 6]
     spec_ids:
       - REQ-013

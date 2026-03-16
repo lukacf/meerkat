@@ -1,374 +1,170 @@
 # OpsLifecycleMachine
 
-Status: normative `0.5` machine contract
+_Generated from the Rust machine catalog. Do not edit by hand._
 
-## Purpose
+- Version: `1`
+- Rust owner: `meerkat-runtime` / `machines::ops_lifecycle`
 
-`OpsLifecycleMachine` owns the shared async-operation lifecycle substrate for a
-single runtime/session instance.
+## State
+- Phase enum: `Active`
+- `known_operations`: `Set<OperationId>`
+- `operation_status`: `Map<OperationId, OperationStatus>`
+- `operation_kind`: `Map<OperationId, OperationKind>`
+- `peer_ready`: `Map<OperationId, Bool>`
+- `progress_count`: `Map<OperationId, u32>`
+- `watcher_count`: `Map<OperationId, u32>`
+- `terminal_outcome`: `Map<OperationId, OperationTerminalOutcome>`
+- `terminal_buffered`: `Map<OperationId, Bool>`
 
-It is the authoritative owner of:
-
-- operation registration/provisioning state
-- running vs terminal async-operation status
-- progress reporting
-- terminal outcome buffering
-- terminal watcher/completion resolution
-- typed lifecycle event emission across the runtime boundary
-
-It is **not** the owner of:
-
-- parent/child conversational peer traffic
-- runtime work admission itself
-- mob topology/flow policy
-- transcript or UI projection of completion
-- tool-local process or transport mechanics
-
-`0.5` does **not** keep a separate lightweight subagent mechanism.
-
-There are only two user-facing agent wiring levels:
-
-- `Comms`
-- `Mobs`
-
-Child-agent behavior therefore lives on the mob path, while background async
-tool work shares the same lifecycle substrate without becoming a third wiring
-level.
-
-## Scope Boundary
-
-This machine begins after a caller has decided to create or manage async work
-and has handed lifecycle ownership into the ops substrate.
-
-It ends at:
-
-- typed `OpEvent`
-- watcher resolution
-- retained lifecycle state for inspection
-
-Conversation with a mob-backed child remains in `PeerCommsMachine`.
-
-## Authoritative State Model
-
-For one owner/runtime instance, the machine state is the tuple:
-
-- `operation_status: Map<OperationId, OperationStatus>`
-- `operation_kind: Map<OperationId, OperationKind>`
-- `peer_ready: Map<OperationId, Bool>`
-- `progress_count: Map<OperationId, u32>`
-- `watcher_count: Map<OperationId, u32>`
-- `terminal_outcome: Map<OperationId, OperationTerminalOutcome>`
-- `terminal_buffered: Map<OperationId, Bool>`
-
-`OperationStatus` is the closed state set:
-
-- `Absent`
-- `Provisioning`
-- `Running`
-- `Retiring`
-- `Completed`
-- `Failed`
-- `Cancelled`
-- `Retired`
-- `Terminated`
-
-Terminal states:
-
-- `Completed`
-- `Failed`
-- `Cancelled`
-- `Retired`
-- `Terminated`
-
-`OperationKind` is:
-
-- `None`
-- `MobMemberChild`
-- `BackgroundToolOp`
-
-Shell jobs are a specialization of `BackgroundToolOp` in shell/runtime code,
-not a separate machine kind.
-
-`OperationTerminalOutcome` is:
-
-- `None`
-- `Completed`
-- `Failed`
-- `Cancelled`
-- `Retired`
-- `Terminated`
-
-## Input Alphabet
-
-The closed external input/command alphabet for this machine is:
-
-- `RegisterOperation(operation_id, operation_kind)`
-- `ProvisioningSucceeded(operation_id)`
-- `ProvisioningFailed(operation_id)`
-- `PeerReady(operation_id)`
-- `RegisterWatcher(operation_id)`
-- `ProgressReported(operation_id)`
-- `CompleteOperation(operation_id)`
-- `FailOperation(operation_id)`
-- `CancelOperation(operation_id)`
-- `RetireRequested(operation_id)`
-- `RetireCompleted(operation_id)`
-- `CollectTerminal(operation_id)`
+## Inputs
+- `RegisterOperation`(operation_id: OperationId, operation_kind: OperationKind)
+- `ProvisioningSucceeded`(operation_id: OperationId)
+- `ProvisioningFailed`(operation_id: OperationId)
+- `PeerReady`(operation_id: OperationId)
+- `RegisterWatcher`(operation_id: OperationId)
+- `ProgressReported`(operation_id: OperationId)
+- `CompleteOperation`(operation_id: OperationId)
+- `FailOperation`(operation_id: OperationId)
+- `CancelOperation`(operation_id: OperationId)
+- `RetireRequested`(operation_id: OperationId)
+- `RetireCompleted`(operation_id: OperationId)
+- `CollectTerminal`(operation_id: OperationId)
 - `OwnerTerminated`
 
-Notes:
-
-- child-agent operations are mob-backed and use `MobMemberChild`
-- background async tool work uses `BackgroundToolOp`
-- `PeerReady` only applies to operation kinds that actually participate in the
-  peer plane
-
-## Effect Family
-
-The closed machine-boundary effect family is:
-
-- `SubmitOpEvent(operation_id, event_kind)`
-- `NotifyOpWatcher(operation_id, terminal_outcome)`
-- `ExposeOperationPeer(operation_id)`
-- `RetainTerminalRecord(operation_id, terminal_outcome)`
-
-Architecture rule:
-
-- transcript/tool-return/UI delivery is a projection of these lifecycle effects
-  and typed `OperationInput`, not the authoritative lifecycle contract itself
-
-## Transition Relation
-
-### Registration and provisioning
-
-1. `RegisterOperation`
-
-Preconditions:
-
-- `operation_status[operation_id] = Absent`
-- `operation_kind != None`
-
-State updates:
-
-- `operation_status[operation_id] := Provisioning`
-- `operation_kind[operation_id] := operation_kind`
-- `peer_ready[operation_id] := FALSE`
-- `progress_count[operation_id] := 0`
-- `watcher_count[operation_id] := 0`
-- `terminal_outcome[operation_id] := None`
-- `terminal_buffered[operation_id] := FALSE`
-
-2. `ProvisioningSucceeded`
-
-Preconditions:
-
-- `operation_status[operation_id] = Provisioning`
-
-State updates:
-
-- `operation_status[operation_id] := Running`
-
-Effect:
-
-- `SubmitOpEvent(operation_id, Started)`
-
-3. `ProvisioningFailed`
-
-Preconditions:
-
-- `operation_status[operation_id] = Provisioning`
-
-State updates:
-
-- `operation_status[operation_id] := Failed`
-- `terminal_outcome[operation_id] := Failed`
-- `terminal_buffered[operation_id] := TRUE`
-
-Effects:
-
-- `SubmitOpEvent(operation_id, Failed)`
-- `NotifyOpWatcher(operation_id, Failed)`
-- `RetainTerminalRecord(operation_id, Failed)`
-
-### Nonterminal execution
-
-4. `PeerReady`
-
-Preconditions:
-
-- `operation_status[operation_id] ∈ {Running, Retiring}`
-- `operation_kind[operation_id] = MobMemberChild`
-
-State updates:
-
-- `peer_ready[operation_id] := TRUE`
-
-Effect:
-
-- `ExposeOperationPeer(operation_id)`
-
-5. `RegisterWatcher`
-
-Preconditions:
-
-- `operation_status[operation_id] != Absent`
-
-State updates:
-
-- `watcher_count[operation_id] += 1`
-
-6. `ProgressReported`
-
-Preconditions:
-
-- `operation_status[operation_id] ∈ {Running, Retiring}`
-
-State updates:
-
-- `progress_count[operation_id] += 1`
-
-Effect:
-
-- `SubmitOpEvent(operation_id, Progress)`
-
-### Terminalization
-
-7. `CompleteOperation`
-
-Preconditions:
-
-- `operation_status[operation_id] ∈ {Running, Retiring}`
-
-State updates:
-
-- `operation_status[operation_id] := Completed`
-- `terminal_outcome[operation_id] := Completed`
-- `terminal_buffered[operation_id] := TRUE`
-
-Effects:
-
-- `SubmitOpEvent(operation_id, Completed)`
-- `NotifyOpWatcher(operation_id, Completed)`
-- `RetainTerminalRecord(operation_id, Completed)`
-
-8. `FailOperation`
-
-Preconditions:
-
-- `operation_status[operation_id] ∈ {Provisioning, Running, Retiring}`
-
-State updates:
-
-- `operation_status[operation_id] := Failed`
-- `terminal_outcome[operation_id] := Failed`
-- `terminal_buffered[operation_id] := TRUE`
-
-Effects:
-
-- `SubmitOpEvent(operation_id, Failed)`
-- `NotifyOpWatcher(operation_id, Failed)`
-- `RetainTerminalRecord(operation_id, Failed)`
-
-9. `CancelOperation`
-
-Preconditions:
-
-- `operation_status[operation_id] ∈ {Provisioning, Running, Retiring}`
-
-State updates:
-
-- `operation_status[operation_id] := Cancelled`
-- `terminal_outcome[operation_id] := Cancelled`
-- `terminal_buffered[operation_id] := TRUE`
-
-Effects:
-
-- `SubmitOpEvent(operation_id, Cancelled)`
-- `NotifyOpWatcher(operation_id, Cancelled)`
-- `RetainTerminalRecord(operation_id, Cancelled)`
-
-### Retire path
-
-10. `RetireRequested`
-
-Preconditions:
-
-- `operation_status[operation_id] = Running`
-
-State updates:
-
-- `operation_status[operation_id] := Retiring`
-
-11. `RetireCompleted`
-
-Preconditions:
-
-- `operation_status[operation_id] = Retiring`
-
-State updates:
-
-- `operation_status[operation_id] := Retired`
-- `terminal_outcome[operation_id] := Retired`
-- `terminal_buffered[operation_id] := TRUE`
-
-Effects:
-
-- `SubmitOpEvent(operation_id, Retired)`
-- `NotifyOpWatcher(operation_id, Retired)`
-- `RetainTerminalRecord(operation_id, Retired)`
-
-### Buffer drain and shutdown
-
-12. `CollectTerminal`
-
-Preconditions:
-
-- `operation_status[operation_id] ∈ {Completed, Failed, Cancelled, Retired, Terminated}`
-- `terminal_buffered[operation_id] = TRUE`
-
-State updates:
-
-- `terminal_buffered[operation_id] := FALSE`
-
-13. `OwnerTerminated`
-
-State updates:
-
-- every operation in `Provisioning`, `Running`, or `Retiring` becomes
-  `Terminated`
-- each such operation gets:
-  - `terminal_outcome := Terminated`
-  - `terminal_buffered := TRUE`
-
-Effects:
-
-- `SubmitOpEvent(operation_id, Terminated)` for each affected operation
-- `NotifyOpWatcher(operation_id, Terminated)` for each affected operation
+## Effects
+- `SubmitOpEvent`(operation_id: OperationId, event_kind: OpEventKind)
+- `NotifyOpWatcher`(operation_id: OperationId, terminal_outcome: OperationTerminalOutcome)
+- `ExposeOperationPeer`(operation_id: OperationId)
+- `RetainTerminalRecord`(operation_id: OperationId, terminal_outcome: OperationTerminalOutcome)
+
+## Helpers
+- `status_of`(operation_id: OperationId) -> `OperationStatus`
+- `kind_of`(operation_id: OperationId) -> `OperationKind`
+- `peer_ready_of`(operation_id: OperationId) -> `Bool`
+- `watcher_count_of`(operation_id: OperationId) -> `u32`
+- `progress_count_of`(operation_id: OperationId) -> `u32`
+- `terminal_outcome_of`(operation_id: OperationId) -> `OperationTerminalOutcome`
+- `terminal_buffered_of`(operation_id: OperationId) -> `Bool`
+- `is_terminal_status`(status: OperationStatus) -> `Bool`
+- `is_owner_terminatable_status`(status: OperationStatus) -> `Bool`
+- `terminal_outcome_matches_status`(status: OperationStatus, terminal_outcome: OperationTerminalOutcome) -> `Bool`
 
 ## Invariants
+- `terminal_buffered_only_for_terminal_states`
+- `peer_ready_implies_mob_member_child`
+- `peer_ready_implies_present`
+- `present_operations_keep_kind_identity`
+- `terminal_statuses_have_matching_terminal_outcome`
+- `nonterminal_statuses_have_no_terminal_outcome`
 
-The machine must preserve:
+## Transitions
+### `RegisterOperation`
+- From: `Active`
+- On: `RegisterOperation`(operation_id, operation_kind)
+- Guards:
+  - `operation_absent`
+  - `kind_is_real`
+- To: `Active`
 
-1. only one terminal outcome per operation
-2. terminal states never transition back to nonterminal states
-3. `terminal_buffered = TRUE` only for terminal operation states
-4. `peer_ready = TRUE` implies `operation_kind = MobMemberChild`
-5. `peer_ready = TRUE` implies the operation is not `Absent`
-6. non-`Absent` operation IDs keep their kind identity
-7. watcher registration does not itself change lifecycle state
+### `ProvisioningSucceeded`
+- From: `Active`
+- On: `ProvisioningSucceeded`(operation_id)
+- Guards:
+  - `is_provisioning`
+- Emits: `SubmitOpEvent`
+- To: `Active`
 
-## Implementation Anchors
+### `ProvisioningFailed`
+- From: `Active`
+- On: `ProvisioningFailed`(operation_id)
+- Guards:
+  - `status_allows_terminalization`
+- Emits: `SubmitOpEvent`, `NotifyOpWatcher`, `RetainTerminalRecord`
+- To: `Active`
 
-Current `0.4` anchors include:
+### `PeerReady`
+- From: `Active`
+- On: `PeerReady`(operation_id)
+- Guards:
+  - `operation_running_or_retiring`
+  - `operation_is_mob_member_child`
+- Emits: `ExposeOperationPeer`
+- To: `Active`
 
-- `meerkat-core/src/ops.rs`
-- `meerkat-core/src/sub_agent.rs`
-- `meerkat-core/src/agent/runner.rs`
-- `meerkat-mob/src/runtime/actor.rs`
-- `meerkat-mob/src/runtime/provisioner.rs`
-- `meerkat-mob/src/roster.rs`
-- `meerkat-tools/src/builtin/shell/job_manager.rs`
+### `RegisterWatcher`
+- From: `Active`
+- On: `RegisterWatcher`(operation_id)
+- Guards:
+  - `operation_exists`
+- To: `Active`
 
-`0.5` turns these into one explicit lifecycle substrate rather than leaving
-mob-backed child work and background async operations as separate authoritative
-owners.
+### `ProgressReported`
+- From: `Active`
+- On: `ProgressReported`(operation_id)
+- Guards:
+  - `operation_running_or_retiring`
+- Emits: `SubmitOpEvent`
+- To: `Active`
+
+### `CompleteOperation`
+- From: `Active`
+- On: `CompleteOperation`(operation_id)
+- Guards:
+  - `status_allows_terminalization`
+- Emits: `SubmitOpEvent`, `NotifyOpWatcher`, `RetainTerminalRecord`
+- To: `Active`
+
+### `FailOperation`
+- From: `Active`
+- On: `FailOperation`(operation_id)
+- Guards:
+  - `status_allows_terminalization`
+- Emits: `SubmitOpEvent`, `NotifyOpWatcher`, `RetainTerminalRecord`
+- To: `Active`
+
+### `CancelOperation`
+- From: `Active`
+- On: `CancelOperation`(operation_id)
+- Guards:
+  - `status_allows_terminalization`
+- Emits: `SubmitOpEvent`, `NotifyOpWatcher`, `RetainTerminalRecord`
+- To: `Active`
+
+### `RetireRequested`
+- From: `Active`
+- On: `RetireRequested`(operation_id)
+- Guards:
+  - `operation_running`
+- To: `Active`
+
+### `RetireCompleted`
+- From: `Active`
+- On: `RetireCompleted`(operation_id)
+- Guards:
+  - `status_allows_terminalization`
+- Emits: `SubmitOpEvent`, `NotifyOpWatcher`, `RetainTerminalRecord`
+- To: `Active`
+
+### `CollectTerminal`
+- From: `Active`
+- On: `CollectTerminal`(operation_id)
+- Guards:
+  - `operation_is_terminal`
+  - `terminal_is_buffered`
+- To: `Active`
+
+### `OwnerTerminated`
+- From: `Active`
+- On: `OwnerTerminated`()
+- To: `Active`
+
+## Coverage
+### Code Anchors
+- `meerkat-core/src/ops.rs` — shared async-operation vocabulary precursor
+- `meerkat-mob/src/runtime/provisioner.rs` — mob-backed child lifecycle precursor
+- `meerkat-tools/src/builtin/shell/job_manager.rs` — background tool-operation lifecycle precursor
+
+### Scenarios
+- `register-progress-terminal` — async operation registers, reports progress, and reaches a terminal outcome
+- `peer-ready-handoff` — child operation hands off to peer comms at peer_ready
+- `cancel-and-watch` — async operation cancellation resolves watcher semantics exactly once

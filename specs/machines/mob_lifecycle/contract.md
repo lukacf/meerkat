@@ -1,230 +1,91 @@
 # MobLifecycleMachine
 
-Status: normative `0.5` machine contract, first formal-spec draft
-
-## Purpose
-
-`MobLifecycleMachine` owns top-level lifecycle transitions for one mob runtime
-instance.
-
-It is the authoritative owner of:
-
-- mob lifecycle phase
-- host/runtime activity gating at the mob level
-- top-level mob completion/destroy/reset semantics
-- lifecycle-visible cleanup of flow-tracker ownership
-
-It is **not** the owner of:
-
-- roster membership and wiring details
-- task-board mutation
-- spawn policy
-- per-run flow semantics
-- child-agent conversational traffic
-
-## Scope Boundary
-
-This machine begins when a mob runtime is created and ends when it is
-destroyed.
-
-It coordinates top-level lifecycle semantics for the mob owner; lower-level
-member topology, task board, and flow execution are separate owners in `0.5`.
-
-## Authoritative State Model
-
-For one mob runtime instance, the machine state is the tuple:
-
-- `mob_state: MobLifecycleState`
-- `host_runtime_active: Bool`
-- `mcp_surface_active: Bool`
-- `tracked_flow_count: u32`
-
-`MobLifecycleState` is the closed state set:
-
-- `Creating`
-- `Running`
-- `Stopped`
-- `Completed`
-- `Destroyed`
-
-Terminal state:
-
-- `Destroyed`
-
-## Input Alphabet
-
-The closed external input/command alphabet for this machine is:
-
-- `EnterRunning`
-- `TrackFlow`
-- `ReleaseTrackedFlow`
-- `StopMob`
-- `ResumeMob`
-- `CompleteMob`
-- `DestroyMob`
-- `ResetMob`
-- `ShutdownMob`
-
-Notes:
-
-- `TrackFlow` and `ReleaseTrackedFlow` do not model full flow semantics; they
-  model the lifecycle owner's obligation to know whether active flow work is
-  still attached to the mob
-- `ShutdownMob` is a lifecycle-authority path that converges on destruction
-
-## Effect Family
-
-The closed machine-boundary effect family is:
-
-- `StartHostRuntime`
-- `StopHostRuntime`
-- `StartMcpSurface`
-- `StopMcpSurface`
-- `EmitMobLifecycleNotice(new_state)`
-- `ClearTrackedFlowOwnership`
-
-## Transition Relation
-
-### Startup and steady-state
-
-1. `EnterRunning`
-
-Preconditions:
-
-- `mob_state = Creating`
-
-State updates:
-
-- `Creating -> Running`
-- `host_runtime_active := TRUE`
-- `mcp_surface_active := TRUE`
-
-Effects:
-
-- `StartHostRuntime`
-- `StartMcpSurface`
-
-2. `TrackFlow`
-
-Preconditions:
-
-- `mob_state = Running`
-
-State updates:
-
-- `tracked_flow_count += 1`
-
-3. `ReleaseTrackedFlow`
-
-Preconditions:
-
-- `tracked_flow_count > 0`
-
-State updates:
-
-- `tracked_flow_count -= 1`
-
-### Lifecycle control
-
-4. `StopMob`
-
-Preconditions:
-
-- `mob_state = Running`
-
-State updates:
-
-- `Running -> Stopped`
-- `host_runtime_active := FALSE`
-- `mcp_surface_active := FALSE`
-- `tracked_flow_count := 0`
-
-Effects:
-
-- `StopHostRuntime`
-- `StopMcpSurface`
-- `ClearTrackedFlowOwnership`
-
-5. `ResumeMob`
-
-Preconditions:
-
-- `mob_state = Stopped`
-
-State updates:
-
-- `Stopped -> Running`
-- `host_runtime_active := TRUE`
-- `mcp_surface_active := TRUE`
-
-6. `CompleteMob`
-
-Preconditions:
-
-- `mob_state = Running`
-- `tracked_flow_count = 0`
-
-State updates:
-
-- `Running -> Completed`
-- `host_runtime_active := FALSE`
-- `mcp_surface_active := FALSE`
-
-7. `DestroyMob` / `ShutdownMob`
-
-Preconditions:
-
-- `mob_state ∈ {Creating, Running, Stopped, Completed}`
-
-State updates:
-
-- `-> Destroyed`
-- `host_runtime_active := FALSE`
-- `mcp_surface_active := FALSE`
-- `tracked_flow_count := 0`
-
-8. `ResetMob`
-
-Preconditions:
-
-- `mob_state ∈ {Running, Stopped, Completed}`
-
-State updates:
-
-- `-> Running`
-- `host_runtime_active := TRUE`
-- `mcp_surface_active := TRUE`
-- `tracked_flow_count := 0`
-
-Hard rule:
-
-- `Destroyed` rejects all further transitions
+_Generated from the Rust machine catalog. Do not edit by hand._
+
+- Version: `1`
+- Rust owner: `meerkat-mob` / `machines::mob_lifecycle`
+
+## State
+- Phase enum: `Creating | Running | Stopped | Completed | Destroyed`
+- `active_run_count`: `u32`
+- `cleanup_pending`: `Bool`
+
+## Inputs
+- `Start`
+- `Stop`
+- `Resume`
+- `MarkCompleted`
+- `Destroy`
+- `StartRun`
+- `FinishRun`
+- `BeginCleanup`
+- `FinishCleanup`
+
+## Effects
+- `EmitLifecycleNotice`
+- `RequestCleanup`
 
 ## Invariants
+- `destroyed_has_no_active_runs`
+- `completed_has_no_active_runs`
 
-The machine must maintain:
+## Transitions
+### `Start`
+- From: `Creating`, `Stopped`
+- On: `Start`()
+- To: `Running`
 
-1. destroyed mobs are drained
+### `Stop`
+- From: `Running`
+- On: `Stop`()
+- To: `Stopped`
 
-- `Destroyed` implies no host runtime, no MCP surface, and no tracked flows
+### `Resume`
+- From: `Stopped`
+- On: `Resume`()
+- To: `Running`
 
-2. running implies active mob infrastructure
+### `MarkCompleted`
+- From: `Running`, `Stopped`
+- On: `MarkCompleted`()
+- Guards:
+  - `no_active_runs`
+- To: `Completed`
 
-- `Running` implies host/runtime activity and MCP surface activity
+### `Destroy`
+- From: `Creating`, `Running`, `Stopped`, `Completed`
+- On: `Destroy`()
+- Emits: `EmitLifecycleNotice`
+- To: `Destroyed`
 
-3. tracked flows only exist while running
+### `StartRun`
+- From: `Running`
+- On: `StartRun`()
+- To: `Running`
 
-- `tracked_flow_count > 0` implies `mob_state = Running`
+### `FinishRun`
+- From: `Running`, `Stopped`
+- On: `FinishRun`()
+- To: `Running`
 
-4. completed mobs do not retain active flow ownership
+### `BeginCleanup`
+- From: `Stopped`, `Completed`
+- On: `BeginCleanup`()
+- Emits: `RequestCleanup`
+- To: `Stopped`
 
-- `Completed` implies `tracked_flow_count = 0`
+### `FinishCleanup`
+- From: `Stopped`, `Completed`
+- On: `FinishCleanup`()
+- To: `Stopped`
 
-## Model-check candidates
+## Coverage
+### Code Anchors
+- `meerkat-mob/src/runtime/state.rs` — mob lifecycle state precursor
+- `meerkat-mob/src/runtime/actor.rs` — serialized lifecycle owner precursor
+- `meerkat-mob/src/runtime/handle.rs` — public lifecycle handle precursor
 
-Best candidates for formal checking:
-
-- destruction clears all tracked lifecycle-owned resources
-- stopped/completed states do not retain active flow trackers
-- host/MCP activity does not survive destruction or stop
-
+### Scenarios
+- `start-stop-resume` — mob lifecycle transitions through start/stop/resume cleanly
+- `run-count-and-cleanup` — active run count and cleanup semantics stay consistent
+- `complete-destroy` — completed/destroyed lifecycle phases stay terminal

@@ -52,7 +52,7 @@ phases:
         spec_id: TYPE-019
         related_spec_ids: [TYPE-020, CONTRACT-002, CONTRACT-003]
         owner: impl
-        text: "Prove the schema/codegen/xtask contract, CI entrypoints, and PureHand verification shape from the outside before any behavior work depends on them."
+        text: "Prove the machine-authority/codegen/xtask contract, CI entrypoints, and advanced machine-authority verification shape from the outside before any behavior work depends on them."
         done: false
         done_when: "Generation, verification, and drift commands execute through the repo entrypoints and fail/succeed for the right reasons under deliberate drift."
         touched_files:
@@ -362,7 +362,7 @@ phases:
       - id: TASK-022
         spec_id: REQ-024
         owner: impl
-        text: "Generate the first honest schema-owned machines whose semantics are already closed enough: InputLifecycleMachine and MobLifecycleMachine."
+        text: "Generate the first honest catalog-owned machines whose semantics are already closed enough: InputLifecycleMachine and MobLifecycleMachine."
         done: false
         done_when: "Generated owners for InputLifecycleMachine and MobLifecycleMachine compile and their owner tests pass without shell-side state mutation."
         touched_files:
@@ -378,14 +378,14 @@ phases:
         owner: impl
         text: "Add shell-conformance checks that generated machine state changes happen only through the generated kernel boundary."
         done: false
-        done_when: "Conformance tests or lints prove the shell does not mutate schema-owned machine state outside generated transition calls."
+        done_when: "Conformance tests or lints prove the shell does not mutate catalog-owned machine state outside generated transition calls."
         touched_files:
           - "xtask/src/machines.rs"
           - "meerkat-runtime/src/machines/*"
           - "meerkat-mob/src/machines/*"
         verification_gate: "schema-shell conformance suite"
         real_entrypoint: "cargo xtask machine-verify --all"
-        deletion_checkpoint: "schema-owned shell mutation loopholes are closed"
+        deletion_checkpoint: "catalog-owned shell mutation loopholes are closed"
     gate_results:
       updated_at: ""
       stage: ""
@@ -651,7 +651,7 @@ phases:
       verdicts: []
 
   - id: 6
-    title: "External Tool Contract And PureHand Harness"
+    title: "External Tool Contract And Machine-Authority Harness"
     status: pending
     reviewers:
       - spec-compliance
@@ -666,19 +666,19 @@ phases:
         spec_id: REQ-023
         related_spec_ids: [INV-008]
         owner: impl
-        text: "Add the PureHand kernel verification contract to xtask and make machine-verify able to run TLC plus crate-local kernel suites for non-generated machines."
+        text: "Add the advanced machine-authority verification contract to xtask and make machine-verify able to run TLC plus crate-local owner-test suites for richer generated machines."
         done: false
-        done_when: "cargo xtask machine-verify --machine <purehand> executes TLC/profile plus kernel-focused Rust tests for each registered PureHand machine."
+        done_when: "cargo xtask machine-verify --machine <name> executes TLC/profile plus kernel-focused Rust tests for each richer generated machine registered in the catalog."
         touched_files:
           - "xtask/src/machines.rs"
           - "docs/architecture/0.5/rct/spec.yaml"
-        verification_gate: "PureHand harness execution"
+        verification_gate: "machine-authority harness execution"
         real_entrypoint: "cargo xtask machine-verify --machine peer_comms"
-        deletion_checkpoint: "PureHand verification is no longer an ad hoc manual convention"
+        deletion_checkpoint: "richer-machine verification is no longer an ad hoc manual convention"
       - id: TASK-041
         spec_id: REQ-023
         owner: impl
-        text: "Extract PeerCommsMachine as an explicit PureHand kernel with owner tests that cover reservations, inline-only work, trust snapshots, and no child-lifecycle leakage."
+        text: "Converge PeerCommsMachine into the Rust-native authority catalog and generated-kernel path, with owner tests that cover reservations, inline-only work, trust snapshots, and no child-lifecycle leakage."
         done: false
         done_when: "PeerCommsMachine kernel tests and TLC profile pass through the shared verify entrypoint."
         touched_files:
@@ -690,7 +690,7 @@ phases:
       - id: TASK-042
         spec_id: REQ-023
         owner: impl
-        text: "Extract TurnExecutionMachine as an explicit PureHand kernel with owner tests that cover run-local transitions, yield, failure, cancel, and immediate/context primitives."
+        text: "Converge TurnExecutionMachine into the Rust-native authority catalog and generated-kernel path, with owner tests that cover run-local transitions, yield, failure, cancel, and immediate/context primitives."
         done: false
         done_when: "TurnExecutionMachine kernel tests and TLC profile pass through the shared verify entrypoint."
         touched_files:
@@ -717,7 +717,7 @@ phases:
         spec_id: REQ-023
         related_spec_ids: [REQ-015]
         owner: impl
-        text: "Extract ExternalToolSurfaceMachine as an explicit PureHand kernel with owner tests for staged add/remove/reload, pending activation, remove-drain completion, and typed notice emission."
+        text: "Converge ExternalToolSurfaceMachine into the Rust-native authority catalog and generated-kernel path, with owner tests for staged add/remove/reload, pending activation, remove-drain completion, and typed notice emission."
         done: false
         done_when: "ExternalToolSurfaceMachine kernel tests and TLC profile pass through the shared verify entrypoint."
         touched_files:
@@ -803,13 +803,13 @@ phases:
       - id: TASK-049
         spec_id: REQ-023
         owner: impl
-        text: "Wire FlowRunMachine and MobOrchestratorMachine into the shared PureHand harness and verify them through the same entrypoint as the other PureHand machines."
+        text: "Wire FlowRunMachine and MobOrchestratorMachine into the shared machine-authority harness and verify them through the same entrypoint as the other richer generated machines."
         done: false
-        done_when: "Both mob PureHand machines verify cleanly through cargo xtask machine-verify with kernel tests plus TLC/profile execution."
+        done_when: "Both mob richer generated machines verify cleanly through cargo xtask machine-verify with kernel tests plus TLC/profile execution."
         touched_files:
           - "xtask/src/machines.rs"
           - "meerkat-mob/tests/*"
-        verification_gate: "mob purehand verify suite"
+        verification_gate: "mob advanced machine-authority verify suite"
         real_entrypoint: "cargo xtask machine-verify --machine flow_run && cargo xtask machine-verify --machine mob_orchestrator"
         deletion_checkpoint: "mob kernel verification is no longer a special case"
     gate_results:

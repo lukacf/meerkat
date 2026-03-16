@@ -21,7 +21,7 @@ The package is organized by role rather than by chronology:
 - [meerkat_machine_formalization_strategy.md](/Users/luka/src/meerkat/docs/architecture/0.5/meerkat_machine_formalization_strategy.md)
   machine truth / verification strategy
 - [meerkat_machine_schema_workflow_spec.md](/Users/luka/src/meerkat/docs/architecture/0.5/meerkat_machine_schema_workflow_spec.md)
-  schema/codegen workflow and CI contract
+  Rust-native authority/catalog workflow and CI contract
 - [meerkat_sm_nomenclature.md](/Users/luka/src/meerkat/docs/architecture/0.5/meerkat_sm_nomenclature.md)
   vocabulary and naming reference
 
@@ -29,8 +29,8 @@ Ground-truth rule:
 
 - during planning and migration, this package is the architecture source of
   truth for the branch
-- once a canonical machine lands in checked-in schema or explicit Rust kernel
-  form, that executable machine definition becomes the long-term semantic
+- once a canonical machine lands in the checked-in Rust-native authority
+  catalog and generated-kernel path, that executable machine definition becomes the long-term semantic
   source of truth for that machine
 
 Machine-spec home:

@@ -58,3 +58,73 @@ onto that boundary.
 - supersede/coalesce queue semantics exist in policy/runtime helpers but are
   not yet uniformly surfaced as first-class lifecycle operations everywhere
 
+<!-- GENERATED_COVERAGE_START -->
+## Generated Coverage
+This section is generated from the Rust machine catalog. Do not edit it by hand.
+
+### Machine
+- `InputLifecycleMachine`
+
+### Code Anchors
+- `input_state`: `meerkat-runtime/src/input_state.rs` — authoritative input lifecycle record shape
+- `input_machine`: `meerkat-runtime/src/input_machine.rs` — lifecycle transition validator/reducer precursor
+- `input_ledger`: `meerkat-runtime/src/input_ledger.rs` — runtime-owned lifecycle ledger precursor
+
+### Scenarios
+- `queue-stage-apply-consume` — accepted input queues, stages, applies, and is consumed at a boundary
+- `supersede-coalesce` — queued input is terminalized by supersession or coalescing
+- `abandon` — input is abandoned cleanly during reset/destroy style terminalization
+
+### Transitions
+- `QueueAccepted`
+  - anchors: `input_state`, `input_machine`, `input_ledger`
+  - scenarios: `queue-stage-apply-consume`
+- `StageForRun`
+  - anchors: `input_state`, `input_machine`, `input_ledger`
+  - scenarios: `queue-stage-apply-consume`
+- `RollbackStaged`
+  - anchors: `input_state`, `input_machine`, `input_ledger`
+  - scenarios: `queue-stage-apply-consume`
+- `MarkApplied`
+  - anchors: `input_state`, `input_machine`, `input_ledger`
+  - scenarios: `queue-stage-apply-consume`
+- `MarkAppliedPendingConsumption`
+  - anchors: `input_state`, `input_machine`, `input_ledger`
+  - scenarios: `queue-stage-apply-consume`
+- `Consume`
+  - anchors: `input_state`, `input_machine`, `input_ledger`
+  - scenarios: `queue-stage-apply-consume`
+- `Supersede`
+  - anchors: `input_state`, `input_machine`, `input_ledger`
+  - scenarios: `supersede-coalesce`
+- `Coalesce`
+  - anchors: `input_state`, `input_machine`, `input_ledger`
+  - scenarios: `supersede-coalesce`
+- `Abandon`
+  - anchors: `input_state`, `input_machine`, `input_ledger`
+  - scenarios: `abandon`
+
+### Effects
+- `InputLifecycleNotice`
+  - anchors: `input_state`, `input_machine`, `input_ledger`
+  - scenarios: `queue-stage-apply-consume`
+- `RecordTerminalOutcome`
+  - anchors: `input_state`, `input_machine`, `input_ledger`
+  - scenarios: `queue-stage-apply-consume`
+- `RecordRunAssociation`
+  - anchors: `input_state`, `input_machine`, `input_ledger`
+  - scenarios: `queue-stage-apply-consume`
+- `RecordBoundarySequence`
+  - anchors: `input_state`, `input_machine`, `input_ledger`
+  - scenarios: `queue-stage-apply-consume`
+
+### Invariants
+- `accepted_has_no_run_or_boundary_metadata`
+  - anchors: `input_state`, `input_machine`, `input_ledger`
+  - scenarios: `queue-stage-apply-consume`
+- `boundary_metadata_requires_application`
+  - anchors: `input_state`, `input_machine`, `input_ledger`
+  - scenarios: `queue-stage-apply-consume`
+
+
+<!-- GENERATED_COVERAGE_END -->

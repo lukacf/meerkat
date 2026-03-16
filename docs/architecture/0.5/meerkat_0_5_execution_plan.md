@@ -34,8 +34,9 @@ Meerkat `0.5` is complete only when all are true:
 3. all canonical machines are formally specified and model-checked
 4. every canonical machine has one explicit Rust owner and one explicit
    transition boundary
-5. schema-kernel machines use the checked-in schema/codegen workflow
-6. pure-hand machines use explicit pure kernels and aligned tests
+5. every canonical machine uses the checked-in Rust-native catalog/codegen
+   workflow
+6. every generated kernel has aligned owner tests and model-checking gates
 7. `OpsLifecycleMachine` is the shared async-operation substrate for
    mob-backed child work and background async operations
 8. `MobActor` is decomposed according to the firm ownership table
@@ -53,7 +54,7 @@ The program is split into six workstreams.
 Owns:
 
 - maintaining the in-repo checked-in machine bundle under `specs/machines/`
-- landing schema/codegen workflow for schema-kernel machines
+- landing the Rust-native catalog/codegen workflow for canonical machines
 - wiring verification into repo CI
 
 Primary companion docs:
@@ -316,8 +317,8 @@ Goal:
 Required work:
 
 1. all canonical machine models pass required TLC profiles
-2. schema-kernel machines generate cleanly with no drift
-3. pure kernels pass their explicit Rust test suites
+2. catalog-owned generated kernels generate cleanly with no drift
+3. generated kernels pass their explicit Rust test suites
 4. release checklist confirms no machine remains in `BoundaryRedesign`
 5. release checklist confirms every surface release gate is green
 

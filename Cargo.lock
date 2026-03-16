@@ -2619,6 +2619,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "meerkat-machine-codegen"
+version = "0.4.10"
+dependencies = [
+ "meerkat-machine-schema",
+]
+
+[[package]]
+name = "meerkat-machine-kernels"
+version = "0.4.10"
+dependencies = [
+ "meerkat-machine-schema",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "meerkat-machine-schema"
+version = "0.4.10"
+dependencies = [
+ "indexmap",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "meerkat-mcp"
 version = "0.4.11"
 dependencies = [
@@ -5214,6 +5238,18 @@ checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
 dependencies = [
  "libc",
  "rustix",
+]
+
+[[package]]
+name = "xtask"
+version = "0.4.10"
+dependencies = [
+ "anyhow",
+ "clap",
+ "meerkat-machine-codegen",
+ "meerkat-machine-schema",
+ "tempfile",
+ "which",
 ]
 
 [[package]]

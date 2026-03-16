@@ -1,0 +1,25 @@
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+which.workspace = true
+meerkat-machine-codegen = { path = "../meerkat-machine-codegen" }
+meerkat-machine-schema = { path = "../meerkat-machine-schema" }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

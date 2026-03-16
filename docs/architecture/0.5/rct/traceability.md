@@ -9,7 +9,7 @@ This package intentionally does not overclaim partial progress.
 | REQ-ID | Domain | Planned Phase | Runtime Caller / Entry Point | Primary Evidence Target | Initial Status |
 | --- | --- | --- | --- | --- | --- |
 | `REQ-001` | in-repo source of truth | `2` | repo CI / `cargo xtask machine-check-drift --all` | machine bundle import + CI failure proof | `MISSING` |
-| `REQ-002` | schema/codegen workflow | `2` | `cargo xtask machine-codegen --all` | drift and generation proof | `MISSING` |
+| `REQ-002` | machine-authority/codegen workflow | `2` | `cargo xtask machine-codegen --all` | drift and generation proof | `MISSING` |
 | `REQ-003` | machine final modes and owner map | `11` | full CI + release gate | final owner-map verification | `MISSING` |
 | `REQ-004` | closed runtime ingress taxonomy | `3` | runtime admission path | runtime ingress tests + no-Projected/no-SystemGenerated proof | `MISSING` |
 | `REQ-005` | contributor model and receipt semantics | `3` | persistent + ephemeral runtime recovery | replay/receipt tests | `MISSING` |
@@ -30,6 +30,6 @@ This package intentionally does not overclaim partial progress.
 | `REQ-020` | Python/TypeScript wrapper parity | `10` | SDK client/wrapper APIs | regenerated bindings + wrapper smoke | `MISSING` |
 | `REQ-021` | Rust docs/examples/API posture | `10` | docs/examples compile path | runtime-backed docs/examples proof | `MISSING` |
 | `REQ-022` | final deletion ledger complete | `11` | release gate | bypass deletion proof | `MISSING` |
-| `REQ-023` | PureHand harness and owner tests | `6` and `7` | `cargo xtask machine-verify --machine <name>` | harness + kernel tests | `MISSING` |
+| `REQ-023` | rich-machine authority harness and owner tests | `6` and `7` | `cargo xtask machine-verify --machine <name>` | advanced machine-authority harness + kernel tests | `MISSING` |
 | `REQ-024` | SchemaKernel by-construction workflow | `2` and `3` | generated owner crates | generated kernel no-drift proof | `MISSING` |
 | `REQ-025` | surface compatibility/versioning policy | `8` to `10` | public schemas + docs + bindings | change propagation proof | `MISSING` |

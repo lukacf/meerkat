@@ -5,8 +5,9 @@ checked into `docs/architecture/0.5/`.
 
 It does not supersede them during planning and migration. It turns them into
 an executable requirement and phase model. Once a canonical machine lands in
-checked-in schema or explicit Rust kernel form, that executable machine
-definition becomes the long-term semantic source of truth for that machine.
+Rust-native catalog form under `meerkat-machine-schema`, that executable
+machine or composition definition becomes the long-term semantic source of
+truth.
 
 ## Normative Inputs
 
@@ -18,8 +19,8 @@ definition becomes the long-term semantic source of truth for that machine.
 | `meerkat_host_mode_cutover_spec.md` | host-mode replacement contract and behavior preservation | source for peer/runtime bridge requirements, host-mode E2Es, and cutover chokepoints |
 | `meerkat_ops_lifecycle_seam_spec.md` | shared async-operation lifecycle seam | source for lifecycle types, registry contracts, and mob/background-op convergence tasks |
 | `meerkat_surface_cutover_matrix.md` | surface-specific bypass deletion and release gates | source for per-surface RCT phases, contracts, and E2Es |
-| `meerkat_machine_formalization_strategy.md` | machine implementation modes and honesty rules | source for `SchemaKernel` / `PureHandKernel` requirements and verification gates |
-| `meerkat_machine_schema_workflow_spec.md` | machine artifact layout, schema/codegen workflow, CI gates | source for tooling contracts and phase-0/phase-2 boundary validation |
+| `meerkat_machine_formalization_strategy.md` | machine implementation modes and honesty rules | source for `SchemaKernel` / `SchemaExtension` / `BoundaryRedesign` requirements and verification gates |
+| `meerkat_machine_schema_workflow_spec.md` | machine artifact layout, Rust-catalog/codegen workflow, CI gates | source for tooling contracts and machine-authority validation |
 | `meerkat_sm_nomenclature.md` | canonical naming and machine/non-machine vocabulary | source for term normalization and type names |
 
 ## Machine Artifact Home
@@ -43,8 +44,8 @@ Within `docs/architecture/0.5/rct/`:
 
 Long-term semantic authority after landing is:
 
-- checked-in schema for `SchemaKernel` machines
-- explicit Rust kernel for `PureHandKernel` machines
+- Rust-native machine and composition authority under
+  `meerkat-machine-schema/src/catalog/`
 - CI verification that rejects drift between machine authority and downstream
   code/docs
 

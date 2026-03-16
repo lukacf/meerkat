@@ -483,7 +483,7 @@ impl MobBuilder {
                 "You have been spawned as '{}' (role: {}) in mob '{}'.",
                 entry.meerkat_id, entry.profile, definition.id
             );
-            let req = build::to_create_session_request(&config, prompt);
+            let req = build::to_create_session_request(&config, prompt.into());
             let created = session_service.create_session(req).await?;
             let _ = roster.set_session_id(&entry.meerkat_id, created.session_id);
         }

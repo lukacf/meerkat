@@ -1844,7 +1844,7 @@ struct SpawnSpecInput {
     profile: String,
     meerkat_id: String,
     #[serde(default)]
-    initial_message: Option<String>,
+    initial_message: Option<meerkat_core::types::ContentInput>,
     #[serde(default)]
     runtime_mode: Option<meerkat_mob::MobRuntimeMode>,
     #[serde(default)]
@@ -2051,7 +2051,12 @@ pub async fn mob_send_message(
     let id = MobId::from(mob_id);
     let mid = MeerkatId::from(meerkat_id);
     let session_id = mob_state
-        .mob_send_message(&id, mid, message.to_string())
+        .mob_send_message(
+            &id,
+            mid,
+            serde_json::from_str::<meerkat_core::types::ContentInput>(message)
+                .unwrap_or_else(|_| message.into()),
+        )
         .await
         .map_err(err_mob)?;
     Ok(session_id.to_string())
@@ -2070,7 +2075,14 @@ pub async fn mob_respawn(
     let id = MobId::from(mob_id);
     let mid = MeerkatId::from(meerkat_id);
     mob_state
-        .mob_respawn(&id, mid, initial_message)
+        .mob_respawn(
+            &id,
+            mid,
+            initial_message.map(|m| {
+                serde_json::from_str::<meerkat_core::types::ContentInput>(&m)
+                    .unwrap_or_else(|_| m.into())
+            }),
+        )
         .await
         .map_err(err_mob)?;
     let result = serde_json::json!({

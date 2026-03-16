@@ -11,6 +11,7 @@ import type {
   MobEvent,
   AppendSystemContextOptions,
   MobAppendSystemContextResult,
+  ContentBlock,
 } from './types.js';
 
 // WASM function signatures (bound at construction)
@@ -100,13 +101,17 @@ export class Mob {
   }
 
   /** Send a message to a specific agent. */
-  async sendMessage(meerkatId: string, message: string): Promise<void> {
-    await this.bindings.mob_send_message(this.mobId, meerkatId, message);
+  async sendMessage(meerkatId: string, message: string | ContentBlock[]): Promise<void> {
+    const messageStr = typeof message === 'string' ? message : JSON.stringify(message);
+    await this.bindings.mob_send_message(this.mobId, meerkatId, messageStr);
   }
 
   /** Retire and re-spawn an agent with the same profile. */
-  async respawn(meerkatId: string, initialMessage?: string): Promise<void> {
-    await this.bindings.mob_respawn(this.mobId, meerkatId, initialMessage);
+  async respawn(meerkatId: string, initialMessage?: string | ContentBlock[]): Promise<void> {
+    const msg = initialMessage != null
+      ? (typeof initialMessage === 'string' ? initialMessage : JSON.stringify(initialMessage))
+      : undefined;
+    await this.bindings.mob_respawn(this.mobId, meerkatId, msg);
   }
 
   /** Get mob status. */

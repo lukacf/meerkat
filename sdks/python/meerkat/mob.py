@@ -24,7 +24,7 @@ class Mob:
         *,
         profile: str,
         meerkat_id: str,
-        initial_message: str | None = None,
+        initial_message: str | list[dict] | None = None,
         runtime_mode: str | None = None,
         backend: str | None = None,
         resume_session_id: str | None = None,
@@ -48,7 +48,7 @@ class Mob:
     async def retire(self, meerkat_id: str) -> None:
         await self._client.retire_mob_member(self.id, meerkat_id)
 
-    async def respawn(self, meerkat_id: str, initial_message: str | None = None) -> None:
+    async def respawn(self, meerkat_id: str, initial_message: str | list[dict] | None = None) -> None:
         await self._client.respawn_mob_member(self.id, meerkat_id, initial_message)
 
     async def wire(self, a: str, b: str) -> None:
@@ -60,7 +60,7 @@ class Mob:
     async def lifecycle(self, action: str) -> None:
         await self._client.mob_lifecycle(self.id, action)
 
-    async def send_message(self, meerkat_id: str, message: str) -> None:
+    async def send_message(self, meerkat_id: str, message: str | list[dict]) -> None:
         await self._client.send_mob_message(self.id, meerkat_id, message)
 
     async def append_system_context(

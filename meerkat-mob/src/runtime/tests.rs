@@ -6232,7 +6232,7 @@ async fn test_external_turn_addressable_succeeds() {
         .expect("spawn lead (external_addressable=true)");
 
     let result = handle
-        .send_message(MeerkatId::from("l-1"), "Hello from outside".into())
+        .send_message(MeerkatId::from("l-1"), "Hello from outside".to_string())
         .await;
     assert!(
         result.is_ok(),
@@ -6249,7 +6249,7 @@ async fn test_external_turn_not_addressable_fails() {
         .expect("spawn worker (external_addressable=false)");
 
     let result = handle
-        .send_message(MeerkatId::from("w-1"), "Hello from outside".into())
+        .send_message(MeerkatId::from("w-1"), "Hello from outside".to_string())
         .await;
     assert!(
         matches!(result, Err(MobError::NotExternallyAddressable(_))),
@@ -6261,7 +6261,7 @@ async fn test_external_turn_not_addressable_fails() {
 async fn test_external_turn_unknown_meerkat_fails() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
     let result = handle
-        .send_message(MeerkatId::from("nonexistent"), "Hello".into())
+        .send_message(MeerkatId::from("nonexistent"), "Hello".to_string())
         .await;
     assert!(matches!(result, Err(MobError::MeerkatNotFound(_))));
 }
@@ -6275,7 +6275,7 @@ async fn test_internal_turn_bypasses_external_addressable_check() {
         .expect("spawn worker");
 
     let result = handle
-        .internal_turn(MeerkatId::from("w-1"), "internal message".into())
+        .internal_turn(MeerkatId::from("w-1"), "internal message".to_string())
         .await;
     assert!(
         result.is_ok(),
@@ -6287,7 +6287,7 @@ async fn test_internal_turn_bypasses_external_addressable_check() {
 async fn test_internal_turn_unknown_meerkat_fails() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
     let result = handle
-        .internal_turn(MeerkatId::from("nonexistent"), "Hello".into())
+        .internal_turn(MeerkatId::from("nonexistent"), "Hello".to_string())
         .await;
     assert!(matches!(result, Err(MobError::MeerkatNotFound(_))));
 }
@@ -6312,7 +6312,7 @@ async fn test_external_turn_autonomous_mode_uses_injector_dispatch() {
         .expect("spawn autonomous lead");
 
     handle
-        .send_message(MeerkatId::from("l-autonomous"), "inject me".into())
+        .send_message(MeerkatId::from("l-autonomous"), "inject me".to_string())
         .await
         .expect("external turn should execute");
 
@@ -6346,7 +6346,7 @@ async fn test_external_turn_turn_driven_mode_uses_start_turn_dispatch() {
     handle
         .send_message(
             MeerkatId::from("l-turn-driven"),
-            "turn-driven message".into(),
+            "turn-driven message".to_string(),
         )
         .await
         .expect("external turn should execute");
@@ -6380,7 +6380,10 @@ async fn test_runtime_backed_turn_driven_dispatch_surfaces_start_turn_failure() 
     service.set_fail_start_turn(true);
 
     let result = handle
-        .send_message(MeerkatId::from("l-runtime-fail"), "turn should fail".into())
+        .send_message(
+            MeerkatId::from("l-runtime-fail"),
+            "turn should fail".to_string(),
+        )
         .await;
     let debug = format!("{result:?}");
 
@@ -6488,11 +6491,14 @@ async fn test_internal_turn_mode_routing_uses_injector_for_autonomous_and_start_
     let baseline_start_turn = service.start_turn_call_count();
 
     handle
-        .internal_turn(MeerkatId::from("l-auto"), "internal autonomous".into())
+        .internal_turn(MeerkatId::from("l-auto"), "internal autonomous".to_string())
         .await
         .expect("autonomous internal turn");
     handle
-        .internal_turn(MeerkatId::from("l-turn"), "internal turn-driven".into())
+        .internal_turn(
+            MeerkatId::from("l-turn"),
+            "internal turn-driven".to_string(),
+        )
         .await
         .expect("turn-driven internal turn");
 
@@ -6524,7 +6530,10 @@ async fn test_external_backend_turn_driven_mode_uses_start_turn_dispatch() {
     let baseline_start_turn = service.start_turn_call_count();
 
     handle
-        .send_message(MeerkatId::from("l-ext-turn"), "external turn-driven".into())
+        .send_message(
+            MeerkatId::from("l-ext-turn"),
+            "external turn-driven".to_string(),
+        )
         .await
         .expect("external turn should execute");
 
@@ -8689,7 +8698,7 @@ async fn test_spawn_with_custom_initial_message() {
         .spawn(
             ProfileName::from("lead"),
             MeerkatId::from("l-1"),
-            Some(custom_msg.to_string()),
+            Some(custom_msg.to_string().into()),
         )
         .await
         .expect("spawn with custom message");

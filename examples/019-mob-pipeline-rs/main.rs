@@ -189,7 +189,7 @@ content = "Execute deployment: build release, run smoke tests. Report pass/fail.
         .spawn(
             ProfileName::from("coordinator"),
             MeerkatId::from("coordinator-1"),
-            Some("You are the CI/CD pipeline coordinator.".to_string()),
+            Some("You are the CI/CD pipeline coordinator.".to_string().into()),
         )
         .await?;
     println!("  Spawned coordinator-1: {coord_ref:?}");
@@ -210,7 +210,7 @@ content = "Execute deployment: build release, run smoke tests. Report pass/fail.
             .spawn(
                 ProfileName::from(*profile),
                 MeerkatId::from(*id),
-                Some(msg.to_string()),
+                Some(msg.to_string().into()),
             )
             .await?;
         println!("  Spawned {id} ({profile}): {member_ref:?}");

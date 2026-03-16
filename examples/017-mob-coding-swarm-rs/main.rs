@@ -187,7 +187,7 @@ content = "Implement Rust services, APIs, and data models."
         .spawn(
             ProfileName::from("lead"),
             MeerkatId::from("lead-1"),
-            Some("You are the coding swarm orchestrator.".to_string()),
+            Some("You are the coding swarm orchestrator.".to_string().into()),
         )
         .await?;
     println!("  Spawned lead-1: {lead_ref:?}");
@@ -196,7 +196,7 @@ content = "Implement Rust services, APIs, and data models."
         .spawn(
             ProfileName::from("worker"),
             MeerkatId::from("worker-1"),
-            Some("You are a coding worker in the swarm.".to_string()),
+            Some("You are a coding worker in the swarm.".to_string().into()),
         )
         .await?;
     println!("  Spawned worker-1: {worker_ref:?}");

@@ -159,7 +159,7 @@ export interface MobDefinition {
 export interface SpawnSpec {
   readonly profile: string;
   readonly meerkatId: string;
-  readonly initialMessage?: string;
+  readonly initialMessage?: string | ContentBlock[];
   readonly runtimeMode?: "turn_driven" | "autonomous_host";
   readonly backend?: "subagent" | "external";
   readonly labels?: Record<string, string>;

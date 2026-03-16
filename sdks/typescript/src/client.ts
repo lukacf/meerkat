@@ -623,7 +623,7 @@ export class MeerkatClient {
     options: {
       profile: string;
       meerkatId: string;
-      initialMessage?: string;
+      initialMessage?: string | ContentBlock[];
       runtimeMode?: string;
       backend?: string;
       resumeSessionId?: string;
@@ -650,7 +650,7 @@ export class MeerkatClient {
     await this.request("mob/retire", { mob_id: mobId, meerkat_id: meerkatId });
   }
 
-  async respawnMobMember(mobId: string, meerkatId: string, initialMessage?: string): Promise<void> {
+  async respawnMobMember(mobId: string, meerkatId: string, initialMessage?: string | ContentBlock[]): Promise<void> {
     await this.request("mob/respawn", { mob_id: mobId, meerkat_id: meerkatId, initial_message: initialMessage });
   }
 
@@ -666,7 +666,7 @@ export class MeerkatClient {
     await this.request("mob/lifecycle", { mob_id: mobId, action });
   }
 
-  async sendMobMessage(mobId: string, meerkatId: string, message: string): Promise<void> {
+  async sendMobMessage(mobId: string, meerkatId: string, message: string | ContentBlock[]): Promise<void> {
     await this.request("mob/send", { mob_id: mobId, meerkat_id: meerkatId, message });
   }
 

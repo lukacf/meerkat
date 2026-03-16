@@ -72,7 +72,7 @@ pub(super) enum MobCommand {
     },
     Respawn {
         meerkat_id: MeerkatId,
-        initial_message: Option<String>,
+        initial_message: Option<ContentInput>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     RetireAll {
@@ -90,12 +90,12 @@ pub(super) enum MobCommand {
     },
     ExternalTurn {
         meerkat_id: MeerkatId,
-        message: String,
+        content: ContentInput,
         reply_tx: oneshot::Sender<Result<SessionId, MobError>>,
     },
     InternalTurn {
         meerkat_id: MeerkatId,
-        message: String,
+        content: ContentInput,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     RunFlow {

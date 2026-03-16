@@ -10,7 +10,7 @@ use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 use meerkat_core::service::AppendSystemContextRequest;
-use meerkat_core::types::SessionId;
+use meerkat_core::types::{ContentInput, SessionId};
 use meerkat_mob::{
     FlowId, MeerkatId, MobBackendKind, MobDefinition, MobId, MobRuntimeMode, Prefab, RunId,
     SpawnMemberSpec,
@@ -203,7 +203,7 @@ pub struct MobSpawnParams {
     pub profile: String,
     pub meerkat_id: String,
     #[serde(default)]
-    pub initial_message: Option<String>,
+    pub initial_message: Option<ContentInput>,
     #[serde(default)]
     pub runtime_mode: Option<MobRuntimeMode>,
     #[serde(default)]
@@ -276,7 +276,7 @@ pub struct MobSpawnSpecParams {
     pub profile: String,
     pub meerkat_id: String,
     #[serde(default)]
-    pub initial_message: Option<String>,
+    pub initial_message: Option<ContentInput>,
     #[serde(default)]
     pub runtime_mode: Option<MobRuntimeMode>,
     #[serde(default)]
@@ -402,7 +402,7 @@ pub struct MobRespawnParams {
     pub mob_id: String,
     pub meerkat_id: String,
     #[serde(default)]
-    pub initial_message: Option<String>,
+    pub initial_message: Option<ContentInput>,
 }
 
 pub async fn handle_respawn(
@@ -530,7 +530,7 @@ pub async fn handle_lifecycle(
 pub struct MobSendParams {
     pub mob_id: String,
     pub meerkat_id: String,
-    pub message: String,
+    pub message: ContentInput,
 }
 
 pub async fn handle_send(

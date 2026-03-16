@@ -26,7 +26,7 @@ pub(super) struct McpServerEntry {
 pub(super) struct PendingSpawn {
     profile_name: ProfileName,
     meerkat_id: MeerkatId,
-    prompt: String,
+    prompt: ContentInput,
     runtime_mode: crate::MobRuntimeMode,
     labels: std::collections::BTreeMap<String, String>,
     reply_tx: oneshot::Sender<Result<MemberRef, MobError>>,
@@ -313,7 +313,7 @@ impl MobActor {
         &self,
         meerkat_id: &MeerkatId,
         member_ref: &MemberRef,
-        prompt: String,
+        prompt: ContentInput,
     ) -> Result<(), MobError> {
         {
             let mut loops = self.autonomous_host_loops.lock().await;
@@ -334,7 +334,7 @@ impl MobActor {
                 .start_turn(
                     &member_ref_cloned,
                     meerkat_core::service::StartTurnRequest {
-                        prompt: prompt.into(),
+                        prompt,
                         event_tx: None,
                         host_mode: true,
                         skill_references: None,
@@ -557,7 +557,8 @@ impl MobActor {
         self.start_autonomous_host_loop(
             &entry.meerkat_id,
             &entry.member_ref,
-            self.resume_host_loop_prompt(&entry.profile, &entry.meerkat_id),
+            self.resume_host_loop_prompt(&entry.profile, &entry.meerkat_id)
+                .into(),
         )
         .await
     }
@@ -712,24 +713,24 @@ impl MobActor {
                 }
                 MobCommand::ExternalTurn {
                     meerkat_id,
-                    message,
+                    content,
                     reply_tx,
                 } => {
                     let result = match self.require_state(&[MobState::Running, MobState::Creating])
                     {
-                        Ok(()) => self.handle_external_turn(meerkat_id, message).await,
+                        Ok(()) => self.handle_external_turn(meerkat_id, content).await,
                         Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::InternalTurn {
                     meerkat_id,
-                    message,
+                    content,
                     reply_tx,
                 } => {
                     let result = match self.require_state(&[MobState::Running, MobState::Creating])
                     {
-                        Ok(()) => self.handle_internal_turn(meerkat_id, message).await,
+                        Ok(()) => self.handle_internal_turn(meerkat_id, content).await,
                         Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);
@@ -1082,9 +1083,9 @@ impl MobActor {
                     )));
                 }
 
-                let prompt = initial_message
-                    .clone()
-                    .unwrap_or_else(|| self.fallback_spawn_prompt(&profile_name, &meerkat_id));
+                let prompt = initial_message.clone().unwrap_or_else(|| {
+                    ContentInput::from(self.fallback_spawn_prompt(&profile_name, &meerkat_id))
+                });
                 let resolved_labels = labels.unwrap_or_default();
 
                 return Ok((
@@ -1116,9 +1117,9 @@ impl MobActor {
                 config.llm_client_override = Some(client.clone());
             }
 
-            let prompt = initial_message
-                .clone()
-                .unwrap_or_else(|| self.fallback_spawn_prompt(&profile_name, &meerkat_id));
+            let prompt = initial_message.clone().unwrap_or_else(|| {
+                ContentInput::from(self.fallback_spawn_prompt(&profile_name, &meerkat_id))
+            });
             let req = build::to_create_session_request(&config, prompt.clone());
             let selected_backend = backend
                 .or(profile.backend)
@@ -1351,7 +1352,7 @@ impl MobActor {
         profile_name: &ProfileName,
         meerkat_id: &MeerkatId,
         runtime_mode: crate::MobRuntimeMode,
-        prompt: String,
+        prompt: ContentInput,
         labels: std::collections::BTreeMap<String, String>,
         provision: PendingProvision,
     ) -> Result<MemberRef, MobError> {
@@ -1564,7 +1565,7 @@ impl MobActor {
     async fn handle_respawn(
         &mut self,
         meerkat_id: MeerkatId,
-        initial_message: Option<String>,
+        initial_message: Option<ContentInput>,
     ) -> Result<(), MobError> {
         let entry = {
             let roster = self.roster.read().await;
@@ -1582,8 +1583,9 @@ impl MobActor {
         self.provisioner.reset_member(&entry.member_ref).await?;
 
         if entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost {
-            let prompt = initial_message
-                .unwrap_or_else(|| self.fallback_spawn_prompt(&entry.profile, &meerkat_id));
+            let prompt = initial_message.unwrap_or_else(|| {
+                ContentInput::from(self.fallback_spawn_prompt(&entry.profile, &meerkat_id))
+            });
             self.start_autonomous_host_loop(&meerkat_id, &entry.member_ref, prompt)
                 .await?;
         }
@@ -2177,7 +2179,7 @@ impl MobActor {
     async fn handle_external_turn(
         &mut self,
         meerkat_id: MeerkatId,
-        message: String,
+        content: ContentInput,
     ) -> Result<SessionId, MobError> {
         // Look up the entry
         let entry = {
@@ -2225,7 +2227,7 @@ impl MobActor {
                         let _ = command_tx
                             .send(MobCommand::ExternalTurn {
                                 meerkat_id: target_id.clone(),
-                                message,
+                                content,
                                 reply_tx,
                             })
                             .await;
@@ -2263,14 +2265,14 @@ impl MobActor {
             return Err(MobError::NotExternallyAddressable(meerkat_id));
         }
 
-        self.dispatch_member_turn(&entry, message).await
+        self.dispatch_member_turn(&entry, content).await
     }
 
     /// Internal-turn path bypasses external_addressable checks.
     async fn handle_internal_turn(
         &self,
         meerkat_id: MeerkatId,
-        message: String,
+        content: ContentInput,
     ) -> Result<(), MobError> {
         let entry = {
             let roster = self.roster.read().await;
@@ -2283,13 +2285,13 @@ impl MobActor {
             return Err(MobError::MeerkatNotFound(meerkat_id));
         }
 
-        self.dispatch_member_turn(&entry, message).await.map(|_| ())
+        self.dispatch_member_turn(&entry, content).await.map(|_| ())
     }
 
     async fn dispatch_member_turn(
         &self,
         entry: &RosterEntry,
-        message: String,
+        content: ContentInput,
     ) -> Result<SessionId, MobError> {
         match entry.runtime_mode {
             crate::MobRuntimeMode::AutonomousHost => {
@@ -2310,8 +2312,11 @@ impl MobActor {
                         ))
                     })?;
                 let session_id = session_id.clone();
+                // EventInjector accepts String — extract text content.
+                // Multimodal blocks are not supported in the autonomous host
+                // injection path; this is a known limitation of EventInjector.
                 injector
-                    .inject(message, meerkat_core::PlainEventSource::Rpc)
+                    .inject(content.text_content(), meerkat_core::PlainEventSource::Rpc)
                     .map_err(|error| {
                         MobError::Internal(format!(
                             "autonomous dispatch inject failed for '{}': {}",
@@ -2328,7 +2333,7 @@ impl MobActor {
                     ))
                 })?;
                 let req = meerkat_core::service::StartTurnRequest {
-                    prompt: message.into(),
+                    prompt: content,
                     event_tx: None,
                     host_mode: false,
                     skill_references: None,

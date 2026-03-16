@@ -2,6 +2,7 @@ import { EventSubscription } from "./subscription.js";
 import type {
   AgentEventEnvelope,
   AttributedMobEvent,
+  ContentBlock,
   MobFlowStatus,
   MobLifecycleAction,
   MobMember,
@@ -36,7 +37,7 @@ export class Mob {
     await this.client.retireMobMember(this.mobId, meerkatId);
   }
 
-  async respawn(meerkatId: string, initialMessage?: string): Promise<void> {
+  async respawn(meerkatId: string, initialMessage?: string | ContentBlock[]): Promise<void> {
     await this.client.respawnMobMember(this.mobId, meerkatId, initialMessage);
   }
 
@@ -52,7 +53,7 @@ export class Mob {
     return this.client.listMobMembers(this.mobId);
   }
 
-  async sendMessage(meerkatId: string, message: string): Promise<void> {
+  async sendMessage(meerkatId: string, message: string | ContentBlock[]): Promise<void> {
     await this.client.sendMobMessage(this.mobId, meerkatId, message);
   }
 

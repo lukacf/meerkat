@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.13] - 2026-03-16
+
+### Fixed
+
+- **Mob multimodal content silently discarded** — `MobHandle::send_message` took `String`, flattening multimodal `ContentInput` (images + text) to plain text before it reached the session service. Threaded `ContentInput` end-to-end through `MobHandle`, `MobCommand`, actor dispatch, `SpawnMemberSpec`, and `to_create_session_request`. TurnDriven mode now passes `ContentInput` directly to `StartTurnRequest`; AutonomousHost mode extracts text at the `EventInjector` boundary (known limitation).
+- **Wire boundaries blocked multimodal mob content** — JSON-RPC mob param structs (`MobSpawnParams`, `MobSendParams`, `MobRespawnParams`) accepted `String` instead of `ContentInput`. Updated to accept `ContentInput` directly via serde untagged deserialization (backward compatible — plain strings still work). WASM bindings now parse incoming strings as `ContentInput` JSON with text fallback. Python SDK mob methods widened to `str | list[dict]`, TypeScript/Web SDK mob methods widened to `string | ContentBlock[]`.
+
 ## [0.4.12] - 2026-03-16
 
 ### Added

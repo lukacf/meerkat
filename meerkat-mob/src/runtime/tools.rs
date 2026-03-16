@@ -326,7 +326,7 @@ impl AgentToolDispatcher for MobToolDispatcher {
                     .spawn_with_options(
                         ProfileName::from(args.profile),
                         MeerkatId::from(args.meerkat_id),
-                        args.initial_message,
+                        args.initial_message.map(ContentInput::from),
                         args.runtime_mode,
                         args.backend,
                     )

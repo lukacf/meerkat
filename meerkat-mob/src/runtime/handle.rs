@@ -36,7 +36,7 @@ pub struct MobEventsView {
 pub struct SpawnMemberSpec {
     pub profile_name: ProfileName,
     pub meerkat_id: MeerkatId,
-    pub initial_message: Option<String>,
+    pub initial_message: Option<ContentInput>,
     pub runtime_mode: Option<crate::MobRuntimeMode>,
     pub backend: Option<MobBackendKind>,
     /// Opaque application context passed through to the agent build pipeline.
@@ -72,8 +72,8 @@ impl SpawnMemberSpec {
         self
     }
 
-    pub fn with_initial_message(mut self, message: String) -> Self {
-        self.initial_message = Some(message);
+    pub fn with_initial_message(mut self, message: impl Into<ContentInput>) -> Self {
+        self.initial_message = Some(message.into());
         self
     }
 
@@ -115,7 +115,7 @@ impl SpawnMemberSpec {
         backend: Option<MobBackendKind>,
     ) -> Self {
         let mut spec = Self::new(profile, meerkat_id);
-        spec.initial_message = initial_message;
+        spec.initial_message = initial_message.map(ContentInput::from);
         spec.runtime_mode = runtime_mode;
         spec.backend = backend;
         spec
@@ -351,7 +351,7 @@ impl MobHandle {
         &self,
         profile_name: ProfileName,
         meerkat_id: MeerkatId,
-        initial_message: Option<String>,
+        initial_message: Option<ContentInput>,
     ) -> Result<MemberRef, MobError> {
         self.spawn_with_options(profile_name, meerkat_id, initial_message, None, None)
             .await
@@ -362,7 +362,7 @@ impl MobHandle {
         &self,
         profile_name: ProfileName,
         meerkat_id: MeerkatId,
-        initial_message: Option<String>,
+        initial_message: Option<ContentInput>,
         backend: Option<MobBackendKind>,
     ) -> Result<MemberRef, MobError> {
         self.spawn_with_options(profile_name, meerkat_id, initial_message, None, backend)
@@ -374,7 +374,7 @@ impl MobHandle {
         &self,
         profile_name: ProfileName,
         meerkat_id: MeerkatId,
-        initial_message: Option<String>,
+        initial_message: Option<ContentInput>,
         runtime_mode: Option<crate::MobRuntimeMode>,
         backend: Option<MobBackendKind>,
     ) -> Result<MemberRef, MobError> {
@@ -429,7 +429,7 @@ impl MobHandle {
     pub async fn respawn(
         &self,
         meerkat_id: MeerkatId,
-        initial_message: Option<String>,
+        initial_message: Option<ContentInput>,
     ) -> Result<(), MobError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
@@ -488,13 +488,14 @@ impl MobHandle {
     pub async fn send_message(
         &self,
         meerkat_id: MeerkatId,
-        message: String,
+        message: impl Into<ContentInput>,
     ) -> Result<meerkat_core::types::SessionId, MobError> {
+        let content = message.into();
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(MobCommand::ExternalTurn {
                 meerkat_id,
-                message,
+                content,
                 reply_tx,
             })
             .await
@@ -508,13 +509,14 @@ impl MobHandle {
     pub async fn internal_turn(
         &self,
         meerkat_id: MeerkatId,
-        message: String,
+        message: impl Into<ContentInput>,
     ) -> Result<(), MobError> {
+        let content = message.into();
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(MobCommand::InternalTurn {
                 meerkat_id,
-                message,
+                content,
                 reply_tx,
             })
             .await

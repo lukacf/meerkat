@@ -209,7 +209,7 @@ export interface SpawnSpec {
   profile: string;
   meerkat_id: string;
   runtime_mode?: 'turn_driven' | 'autonomous_host';
-  initial_message?: string;
+  initial_message?: string | ContentBlock[];
   labels?: Record<string, string>;
 }
 

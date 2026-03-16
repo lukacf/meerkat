@@ -672,7 +672,7 @@ class MeerkatClient:
         *,
         profile: str,
         meerkat_id: str,
-        initial_message: str | None = None,
+        initial_message: str | list[dict] | None = None,
         runtime_mode: str | None = None,
         backend: str | None = None,
         resume_session_id: str | None = None,
@@ -696,7 +696,7 @@ class MeerkatClient:
     async def retire_mob_member(self, mob_id: str, meerkat_id: str) -> None:
         await self._request("mob/retire", {"mob_id": mob_id, "meerkat_id": meerkat_id})
 
-    async def respawn_mob_member(self, mob_id: str, meerkat_id: str, initial_message: str | None = None) -> None:
+    async def respawn_mob_member(self, mob_id: str, meerkat_id: str, initial_message: str | list[dict] | None = None) -> None:
         await self._request("mob/respawn", {"mob_id": mob_id, "meerkat_id": meerkat_id, "initial_message": initial_message})
 
     async def wire_mob_members(self, mob_id: str, a: str, b: str) -> None:
@@ -708,7 +708,7 @@ class MeerkatClient:
     async def mob_lifecycle(self, mob_id: str, action: str) -> None:
         await self._request("mob/lifecycle", {"mob_id": mob_id, "action": action})
 
-    async def send_mob_message(self, mob_id: str, meerkat_id: str, message: str) -> None:
+    async def send_mob_message(self, mob_id: str, meerkat_id: str, message: str | list[dict]) -> None:
         await self._request("mob/send", {"mob_id": mob_id, "meerkat_id": meerkat_id, "message": message})
 
     async def append_mob_system_context(

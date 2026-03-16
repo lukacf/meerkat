@@ -391,7 +391,7 @@ impl MobMcpState {
         &self,
         mob_id: &MobId,
         meerkat_id: MeerkatId,
-        message: String,
+        message: impl Into<meerkat_core::types::ContentInput>,
     ) -> Result<SessionId, MobError> {
         self.handle_for(mob_id)
             .await?
@@ -459,7 +459,7 @@ impl MobMcpState {
         &self,
         mob_id: &MobId,
         meerkat_id: MeerkatId,
-        initial_message: Option<String>,
+        initial_message: Option<meerkat_core::types::ContentInput>,
     ) -> Result<(), MobError> {
         self.handle_for(mob_id)
             .await?
@@ -1324,7 +1324,9 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                             })
                             .transpose()?;
                         let mut s = SpawnMemberSpec::new(spec.profile, spec.meerkat_id);
-                        s.initial_message = spec.initial_message;
+                        s.initial_message = spec
+                            .initial_message
+                            .map(meerkat_core::types::ContentInput::from);
                         s.runtime_mode = spec.runtime_mode;
                         s.backend = spec.backend;
                         s.context = spec.context;
@@ -1444,7 +1446,8 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .mob_respawn(
                         &MobId::from(args.mob_id),
                         MeerkatId::from(meerkat_id_str.as_str()),
-                        args.initial_message,
+                        args.initial_message
+                            .map(meerkat_core::types::ContentInput::from),
                     )
                     .await
                     .map_err(|e| map_mob_err(call, e))?;

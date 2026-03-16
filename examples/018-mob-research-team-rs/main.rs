@@ -189,7 +189,11 @@ content = "Evaluate technical feasibility, architecture options, scalability con
         .spawn(
             ProfileName::from("lead-analyst"),
             MeerkatId::from("lead-1"),
-            Some("You are the lead analyst coordinating this research team.".to_string()),
+            Some(
+                "You are the lead analyst coordinating this research team."
+                    .to_string()
+                    .into(),
+            ),
         )
         .await?;
     println!("  Spawned lead-1 (lead-analyst): {lead_ref:?}");
@@ -198,7 +202,11 @@ content = "Evaluate technical feasibility, architecture options, scalability con
         .spawn(
             ProfileName::from("market-researcher"),
             MeerkatId::from("market-1"),
-            Some("You are a market researcher on this team.".to_string()),
+            Some(
+                "You are a market researcher on this team."
+                    .to_string()
+                    .into(),
+            ),
         )
         .await?;
     println!("  Spawned market-1 (market-researcher): {market_ref:?}");
@@ -207,7 +215,11 @@ content = "Evaluate technical feasibility, architecture options, scalability con
         .spawn(
             ProfileName::from("tech-researcher"),
             MeerkatId::from("tech-1"),
-            Some("You are a technology researcher on this team.".to_string()),
+            Some(
+                "You are a technology researcher on this team."
+                    .to_string()
+                    .into(),
+            ),
         )
         .await?;
     println!("  Spawned tech-1 (tech-researcher): {tech_ref:?}");

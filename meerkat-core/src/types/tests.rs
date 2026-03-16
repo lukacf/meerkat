@@ -1139,13 +1139,45 @@ mod content_block_tests {
         let block = ContentBlock::Image {
             media_type: "image/png".to_string(),
             data: "iVBOR".to_string(),
-            source_path: Some("/tmp/test.png".to_string()),
+            source_path: None,
         };
         let json = serde_json::to_value(&block).unwrap();
         assert_eq!(json["type"], "image");
         assert_eq!(json["media_type"], "image/png");
         let parsed: ContentBlock = serde_json::from_value(json).unwrap();
         assert_eq!(parsed, block);
+    }
+
+    #[test]
+    fn image_block_never_serializes_source_path() {
+        let block = ContentBlock::Image {
+            media_type: "image/png".to_string(),
+            data: "abc".to_string(),
+            source_path: Some("/secret/path".to_string()),
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        assert!(
+            !json.contains("source_path"),
+            "source_path key leaked: {json}"
+        );
+        assert!(
+            !json.contains("/secret/path"),
+            "source_path value leaked: {json}"
+        );
+    }
+
+    #[test]
+    fn image_block_deserializes_legacy_source_path() {
+        // Old persisted data that has source_path should still deserialize
+        let json =
+            r#"{"type":"image","media_type":"image/png","data":"abc","source_path":"/old/path"}"#;
+        let block: ContentBlock = serde_json::from_str(json).unwrap();
+        match block {
+            ContentBlock::Image { source_path, .. } => {
+                assert_eq!(source_path.as_deref(), Some("/old/path"));
+            }
+            other => panic!("expected Image block, got {other:?}"),
+        }
     }
 
     #[test]

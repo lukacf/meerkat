@@ -1831,6 +1831,7 @@ impl AgentFactory {
         if let Some(schema) = build_config.output_schema {
             builder = builder.output_schema(schema);
         }
+        let is_resumed = build_config.resume_session.is_some();
         if let Some(session) = build_config.resume_session {
             builder = builder.resume_session(session);
         }
@@ -1940,6 +1941,18 @@ impl AgentFactory {
                 meerkat_runtime::comms_sink::RuntimeCommsInputSink::new(adapter, session_id),
             );
             agent.set_runtime_input_sink(sink);
+        }
+
+        // 13c. Stage initial external filter to hide view_image when the model
+        // cannot process image blocks in tool results. For resumed sessions,
+        // the persisted filter is already restored by the builder — only gate
+        // fresh sessions.
+        if !image_tool_results && !is_resumed {
+            let deny = std::collections::HashSet::from(["view_image".to_string()]);
+            if let Err(err) = agent.stage_external_tool_filter(meerkat_core::ToolFilter::Deny(deny))
+            {
+                tracing::warn!(error = %err, "failed to stage initial view_image deny filter");
+            }
         }
 
         // 14. Set SessionMetadata

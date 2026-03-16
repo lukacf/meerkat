@@ -682,16 +682,9 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                     prefix.push_str("]\n\n");
                 }
                 if req.prompt.has_images() {
-                    // Preserve image blocks; prepend instructions as a text block.
-                    let mut blocks = vec![meerkat_core::types::ContentBlock::Text {
-                        text: prefix + &req.prompt.text_content(),
-                    }];
-                    // Append non-text blocks (images) from the original input.
-                    for block in req.prompt.clone().into_blocks() {
-                        if !matches!(block, meerkat_core::types::ContentBlock::Text { .. }) {
-                            blocks.push(block);
-                        }
-                    }
+                    // Preserve original block ordering; prepend instructions as a leading text block.
+                    let mut blocks = vec![meerkat_core::types::ContentBlock::Text { text: prefix }];
+                    blocks.extend(req.prompt.clone().into_blocks());
                     meerkat_core::types::ContentInput::Blocks(blocks)
                 } else {
                     prefix.push_str(&req.prompt.text_content());

@@ -61,7 +61,7 @@ impl CompositeDispatcher {
         shell_config: Option<ShellConfig>,
         external: Option<Arc<dyn AgentToolDispatcher>>,
         session_id: Option<String>,
-        image_tool_results: bool,
+        _image_tool_results: bool,
     ) -> Result<Self, CompositeDispatcherError> {
         let mut builtin_tools: Vec<Arc<dyn BuiltinTool>> = Vec::new();
         let project_root = project_root
@@ -123,10 +123,9 @@ impl CompositeDispatcher {
             }
         }
 
-        // Hide view_image when the model cannot process image blocks in tool results.
-        if !image_tool_results {
-            allowed_tools.remove("view_image");
-        }
+        // NOTE: view_image is always kept in allowed_tools regardless of image_tool_results.
+        // Visibility gating for non-image models is handled at the factory level via
+        // ToolScope external filters, enabling hot-swap to reveal view_image later.
 
         Ok(Self {
             builtin_tools,
@@ -697,46 +696,28 @@ mod tests {
     }
 
     #[test]
-    fn view_image_hidden_when_image_tool_results_false() {
-        let store = Arc::new(MemoryTaskStore::new());
-        let dispatcher = CompositeDispatcher::new(
-            store,
-            &BuiltinToolConfig::default(),
-            None,
-            None,
-            None,
-            None,
-            false, // image_tool_results = false
-        )
-        .expect("composite dispatcher should build");
+    fn view_image_always_in_base_tool_set() {
+        // view_image is always registered regardless of image_tool_results flag.
+        // Visibility gating is handled at the factory/ToolScope level via external filters.
+        for image_tool_results in [false, true] {
+            let store = Arc::new(MemoryTaskStore::new());
+            let dispatcher = CompositeDispatcher::new(
+                store,
+                &BuiltinToolConfig::default(),
+                None,
+                None,
+                None,
+                None,
+                image_tool_results,
+            )
+            .expect("composite dispatcher should build");
 
-        let tools = dispatcher.tools();
-        let tool_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
-        assert!(
-            !tool_names.contains(&"view_image".to_string()),
-            "view_image should be hidden when image_tool_results is false, but found: {tool_names:?}"
-        );
-    }
-
-    #[test]
-    fn view_image_visible_when_image_tool_results_true() {
-        let store = Arc::new(MemoryTaskStore::new());
-        let dispatcher = CompositeDispatcher::new(
-            store,
-            &BuiltinToolConfig::default(),
-            None,
-            None,
-            None,
-            None,
-            true, // image_tool_results = true
-        )
-        .expect("composite dispatcher should build");
-
-        let tools = dispatcher.tools();
-        let tool_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
-        assert!(
-            tool_names.contains(&"view_image".to_string()),
-            "view_image should be visible when image_tool_results is true, but found: {tool_names:?}"
-        );
+            let tools = dispatcher.tools();
+            let tool_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
+            assert!(
+                tool_names.contains(&"view_image".to_string()),
+                "view_image should always be in base tool set (image_tool_results={image_tool_results}), but found: {tool_names:?}"
+            );
+        }
     }
 }

@@ -119,7 +119,7 @@ impl BuiltinTool for ViewImageTool {
 
         let user_path = PathBuf::from(&args.path);
 
-        // Resolve and sandbox the path.
+        // Resolve and sandbox the path (lexical check first).
         let resolved = resolve_image_path(&self.project_root, &user_path)?;
 
         // Validate extension.
@@ -138,6 +138,20 @@ impl BuiltinTool for ViewImageTool {
         let metadata = tokio::fs::metadata(&resolved).await.map_err(|e| {
             BuiltinToolError::execution_failed(format!("cannot read '{}': {e}", resolved.display()))
         })?;
+
+        // Canonicalize to resolve symlinks, then re-check sandbox.
+        // This must happen after the existence check (canonicalize requires the file to exist).
+        let canonical_root = self.project_root.canonicalize().map_err(|e| {
+            BuiltinToolError::execution_failed(format!("cannot resolve project root: {e}"))
+        })?;
+        let canonical_path = resolved
+            .canonicalize()
+            .map_err(|e| BuiltinToolError::execution_failed(format!("cannot resolve path: {e}")))?;
+        if !canonical_path.starts_with(&canonical_root) {
+            return Err(BuiltinToolError::invalid_args(
+                "path escapes project root (symlink detected)",
+            ));
+        }
 
         if metadata.len() > MAX_IMAGE_SIZE {
             return Err(BuiltinToolError::invalid_args(format!(
@@ -375,6 +389,33 @@ mod tests {
                 other => panic!("expected Image block, got {other:?}"),
             },
             other => panic!("expected Blocks output, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn view_image_rejects_symlink_escape() {
+        let dir = tempdir().unwrap();
+        // Create a file outside the project root
+        let outside_dir = tempdir().unwrap();
+        let outside_img = outside_dir.path().join("secret.png");
+        std::fs::write(&outside_img, minimal_png()).unwrap();
+
+        // Create a symlink inside project root pointing outside
+        let link_path = dir.path().join("escape.png");
+        std::os::unix::fs::symlink(&outside_img, &link_path).unwrap();
+
+        let tool = ViewImageTool::new(dir.path().to_path_buf());
+        let result = tool.call(serde_json::json!({"path": "escape.png"})).await;
+
+        match result {
+            Err(BuiltinToolError::InvalidArgs(msg)) => {
+                assert!(
+                    msg.contains("symlink detected"),
+                    "unexpected error message: {msg}"
+                );
+            }
+            other => panic!("expected InvalidArgs error for symlink escape, got {other:?}"),
         }
     }
 

@@ -30,9 +30,9 @@ pub enum ContentBlock {
         media_type: String,
         /// Base64-encoded image data.
         data: String,
-        /// Optional filesystem path the image was read from.
-        /// Used by compaction to emit re-readable placeholders.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        /// Internal-only source path for re-reading after compaction.
+        /// Never serialized — only used in-memory.
+        #[serde(default, skip_serializing)]
         source_path: Option<String>,
     },
 }

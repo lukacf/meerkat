@@ -581,12 +581,16 @@ impl SessionRuntime {
         // visible to the agent before the turn starts.
         #[cfg(feature = "mcp")]
         {
-            let mut mcp_text = prompt.text_content();
+            let mut mcp_text = String::new();
             self.apply_mcp_boundary(session_id, &event_tx, &mut mcp_text)
                 .await?;
-            // If the MCP boundary appended notices, update the prompt.
-            if mcp_text != prompt.text_content() {
-                prompt = ContentInput::Text(mcp_text);
+            if !mcp_text.is_empty() {
+                let mut blocks = prompt.into_blocks();
+                blocks.insert(
+                    0,
+                    meerkat_core::types::ContentBlock::Text { text: mcp_text },
+                );
+                prompt = ContentInput::Blocks(blocks);
             }
         }
 
@@ -687,7 +691,7 @@ impl SessionRuntime {
         session_id: &SessionId,
         run_id: RunId,
         primitive: &RunPrimitive,
-        prompt: String,
+        prompt: ContentInput,
         event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
         flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
@@ -780,7 +784,7 @@ impl SessionRuntime {
             }
 
             let req = StartTurnRequest {
-                prompt: prompt.clone().into(),
+                prompt: prompt.clone(),
                 event_tx: Some(event_tx.clone()),
                 host_mode,
                 skill_references: skill_references.clone(),
@@ -811,7 +815,7 @@ impl SessionRuntime {
         if let Some((mut build_config, labels, deferred_prompt, created_at_secs, updated_at_secs)) =
             pending_session
         {
-            let mut runtime_prompt: ContentInput = prompt.clone().into();
+            let mut runtime_prompt: ContentInput = prompt.clone();
             let saved_deferred_prompt = deferred_prompt.clone();
             if let Some(deferred) = deferred_prompt {
                 runtime_prompt = merge_content_inputs(deferred, runtime_prompt);
@@ -1055,7 +1059,7 @@ impl SessionRuntime {
                         ),
                         data: None,
                     })?,
-                prompt: prompt.clone().into(),
+                prompt: prompt.clone(),
                 system_prompt: overrides.as_ref().and_then(|ov| ov.system_prompt.clone()),
                 max_tokens: overrides
                     .as_ref()
@@ -1076,7 +1080,7 @@ impl SessionRuntime {
                 session_id,
                 run_id,
                 StartTurnRequest {
-                    prompt: prompt.into(),
+                    prompt,
                     event_tx: Some(event_tx),
                     host_mode,
                     skill_references,
@@ -1195,11 +1199,16 @@ impl SessionRuntime {
         let mut turn_prompt = prompt;
         #[cfg(feature = "mcp")]
         {
-            let mut mcp_text = turn_prompt.text_content();
+            let mut mcp_text = String::new();
             self.apply_mcp_boundary(session_id, &event_tx, &mut mcp_text)
                 .await?;
-            if mcp_text != turn_prompt.text_content() {
-                turn_prompt = ContentInput::Text(mcp_text);
+            if !mcp_text.is_empty() {
+                let mut blocks = turn_prompt.into_blocks();
+                blocks.insert(
+                    0,
+                    meerkat_core::types::ContentBlock::Text { text: mcp_text },
+                );
+                turn_prompt = ContentInput::Blocks(blocks);
             }
         }
 

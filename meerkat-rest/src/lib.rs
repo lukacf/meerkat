@@ -2208,11 +2208,17 @@ async fn continue_session(
     let mut turn_prompt = req.prompt.clone();
     #[cfg(feature = "mcp")]
     {
-        let mut mcp_text = turn_prompt.text_content();
+        let mut mcp_text = String::new();
         apply_mcp_boundary(&state, &session_id, &caller_event_tx, &mut mcp_text).await?;
-        // If the MCP boundary appended notices, update the prompt.
-        if mcp_text != turn_prompt.text_content() {
-            turn_prompt = ContentInput::Text(mcp_text);
+        // If the MCP boundary appended notices, prepend as a text block
+        // to preserve any multimodal content in the original prompt.
+        if !mcp_text.is_empty() {
+            let mut blocks = turn_prompt.into_blocks();
+            blocks.insert(
+                0,
+                meerkat_core::types::ContentBlock::Text { text: mcp_text },
+            );
+            turn_prompt = ContentInput::Blocks(blocks);
         }
     }
 

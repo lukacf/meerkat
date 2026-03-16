@@ -51,8 +51,9 @@ pub struct CompositeDispatcher {
 impl CompositeDispatcher {
     /// Create a new composite dispatcher with builtin tools.
     ///
-    /// `image_tool_results` controls whether the `view_image` tool is visible.
-    /// When `false`, the tool is registered but excluded from `allowed_tools`.
+    /// `image_tool_results` is accepted for API compatibility but no longer used
+    /// for filtering — view_image is always registered. Visibility is controlled
+    /// at the factory level via `ToolScope` external filters.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn new(
         task_store: Arc<dyn TaskStore>,

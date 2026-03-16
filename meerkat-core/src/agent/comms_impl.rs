@@ -470,15 +470,13 @@ where
                                 None => false,
                             };
 
+                            // Build ContentInput from the interaction, preserving
+                            // multimodal blocks when present.
+                            let prompt = interaction_to_content_input(&interaction);
+
                             let run_result = match &event_tx {
-                                Some(tx) => {
-                                    self.run_with_events(
-                                        interaction.rendered_text.into(),
-                                        tx.clone(),
-                                    )
-                                    .await
-                                }
-                                None => self.run(interaction.rendered_text.into()).await,
+                                Some(tx) => self.run_with_events(prompt, tx.clone()).await,
+                                None => self.run(prompt).await,
                             };
                             match run_result {
                                 Ok(result) => {
@@ -726,12 +724,11 @@ where
                         None => false,
                     };
 
+                    let prompt = interaction_to_content_input(&interaction);
+
                     let run_result = match &event_tx {
-                        Some(tx) => {
-                            self.run_with_events(interaction.rendered_text.into(), tx.clone())
-                                .await
-                        }
-                        None => self.run(interaction.rendered_text.into()).await,
+                        Some(tx) => self.run_with_events(prompt, tx.clone()).await,
+                        None => self.run(prompt).await,
                     };
 
                     match run_result {
@@ -878,6 +875,22 @@ fn inject_response_into_session(session: &mut Session, interaction: &InboxIntera
     session.push(Message::User(UserMessage::text(
         interaction.rendered_text.clone(),
     )));
+}
+
+/// Build a `ContentInput` from an inbox interaction, preserving multimodal
+/// blocks from `InteractionContent::Message { blocks }` when present.
+fn interaction_to_content_input(
+    interaction: &crate::interaction::InboxInteraction,
+) -> crate::types::ContentInput {
+    if let crate::interaction::InteractionContent::Message {
+        blocks: Some(blocks),
+        ..
+    } = &interaction.content
+        && !blocks.is_empty()
+    {
+        return crate::types::ContentInput::Blocks(blocks.clone());
+    }
+    crate::types::ContentInput::Text(interaction.rendered_text.clone())
 }
 
 fn render_named_list(mut names: Vec<String>) -> String {

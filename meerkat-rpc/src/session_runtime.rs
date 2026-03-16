@@ -414,7 +414,7 @@ impl SessionRuntime {
         let view_image = "view_image".to_string();
         let filter = if profile.image_tool_results {
             // New model supports image tool results — remove view_image from
-            // existing deny set (if present), keeping other denied tools.
+            // existing deny set, or add it to existing allow set.
             match current_filter {
                 meerkat_core::ToolFilter::Deny(mut denied) => {
                     denied.remove(&view_image);
@@ -423,6 +423,10 @@ impl SessionRuntime {
                     } else {
                         meerkat_core::ToolFilter::Deny(denied)
                     }
+                }
+                meerkat_core::ToolFilter::Allow(mut allowed) => {
+                    allowed.insert(view_image);
+                    meerkat_core::ToolFilter::Allow(allowed)
                 }
                 other => other,
             }

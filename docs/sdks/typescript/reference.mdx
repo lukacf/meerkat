@@ -31,6 +31,7 @@ import type {
   Usage,
   SessionInfo,
   SessionOptions,
+  ContentBlock,
   Capability,
   SkillKey,
   SkillRef,
@@ -130,6 +131,29 @@ interface Capability {
 ```
 
 Status values may be emitted as externally-tagged Rust enum objects (e.g. `{ DisabledByPolicy: { ... } }`). The SDK normalizes these to the key string automatically.
+
+### ContentBlock
+
+Content blocks are used in multimodal prompts and tool results. Both `createSession()` and `session.turn()` accept `string | ContentBlock[]` as the prompt parameter.
+
+```typescript
+type ContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; mediaType: string; data: string };
+```
+
+| Variant | Fields | Description |
+|---------|--------|-------------|
+| `text` | `text: string` | Plain text content |
+| `image` | `mediaType: string`, `data: string` | Base64-encoded image with MIME type (e.g. `"image/png"`) |
+
+```typescript
+// Multimodal prompt example
+const session = await client.createSession([
+  { type: "text", text: "Describe this image" },
+  { type: "image", mediaType: "image/png", data: base64Data },
+]);
+```
 
 ### SchemaWarning
 

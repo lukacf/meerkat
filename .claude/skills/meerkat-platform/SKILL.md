@@ -333,6 +333,24 @@ On materialized sessions, the LLM client is hot-swapped for the remainder of the
 
 ## Core features
 
+### Multimodal content (v0.4.12)
+
+Prompts and tool results support multimodal content (text + images). The `ContentInput` type (`Text(String)` or `Blocks(Vec<ContentBlock>)`) is used for all prompt parameters across surfaces.
+
+**SDK prompt types:**
+- Python: `prompt: str | list[dict]` — dicts with `{"type": "text", "text": "..."}` or `{"type": "image", "media_type": "...", "data": "<base64>"}`
+- TypeScript: `prompt: string | ContentBlock[]` — `{type: "text", text: "..."}` or `{type: "image", mediaType: "...", data: "<base64>"}`
+- Rust: `prompt: ContentInput` — `ContentInput::Text(s)` or `ContentInput::Blocks(vec![...])`; implements `From<&str>` and `From<String>`
+
+**view_image builtin tool:** Reads images from disk (PNG/JPEG/GIF/WebP/SVG), returns base64 `ContentBlock::Image`. Path sandboxed to project root. 5 MB limit. Hidden on non-vision-capable models via `ToolScope` based on `ModelProfile.vision` and `ModelProfile.image_tool_results`.
+
+**Provider capabilities:**
+| Provider | `vision` | `image_tool_results` |
+|----------|----------|---------------------|
+| Anthropic | Yes | Yes |
+| OpenAI | Yes | No |
+| Gemini | Yes | Yes |
+
 ### Sessions
 
 Sessions are realm-scoped and surface-neutral. Visibility depends on `realm_id` matching.

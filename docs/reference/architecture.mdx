@@ -147,7 +147,7 @@ Consumed by `meerkat-core` (config defaults), `meerkat-client` (adapter rules), 
 The heart of Meerkat. Contains:
 
 - **Agent**: the main execution engine
-- **Types**: `Message`, `Session`, `ToolCall`, `ToolResult`, `Usage`, `ToolCallView`, etc.
+- **Types**: `Message`, `Session`, `ToolCall`, `ToolResult`, `Usage`, `ToolCallView`, `ContentBlock`, `ContentInput`, `ToolOutput`, etc.
 - **Trait contracts**: `AgentLlmClient`, `AgentToolDispatcher`, `AgentSessionStore`, `SessionService`, `Compactor`, `MemoryStore`, `HookEngine`, `SkillEngine`, `SkillSource`
 - **Service types**: `SessionError`, `CreateSessionRequest`, `StartTurnRequest`, `SessionView`, `SessionInfo`, `SessionUsage`
 - **Budget**: resource tracking and enforcement
@@ -279,7 +279,7 @@ Feature-gated behind `comms`.
 <Accordion title="meerkat-contracts">
 Canonical wire types and capability model shared across all surfaces:
 
-- **Wire types**: `WireRunResult`, `WireSessionInfo`, `WireEvent`, `WireUsage`, `WireError`
+- **Wire types**: `WireRunResult`, `WireSessionInfo`, `WireEvent`, `WireUsage`, `WireError`, `WireContentBlock`, `WireContentInput`, `WireToolResultContent`
 - **Capabilities**: `CapabilityId`, `CapabilityStatus`, `CapabilityRegistration`, `CapabilitiesResponse`
 - **Error codes**: `ErrorCode` with stable projections to JSON-RPC codes, HTTP status, and CLI exit codes
 - **Contract version**: semver versioning for API compatibility (`0.4.1`)

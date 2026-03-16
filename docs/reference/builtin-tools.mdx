@@ -25,6 +25,7 @@ icon: "wrench"
 | `wait` | Utility | Yes | -- | Pause execution |
 | `datetime` | Utility | Yes | -- | Get current date/time |
 | `apply_patch` | Utility | Yes | -- | Apply structured file patches inside the project root |
+| `view_image` | Utility | Yes | vision | Read an image file and return base64 content |
 | `send` | Comms | Yes | `comms` | Send message/request/response to a peer |
 | `peers` | Comms | Yes | `comms` | List discoverable peers (trusted + inproc) |
 
@@ -70,7 +71,7 @@ Individual tools can be enabled or disabled via `ToolPolicyLayer` in `BuiltinToo
 <Accordion title="Capability registrations">
 Capabilities are registered via the `inventory` crate in `meerkat-tools/src/lib.rs`:
 
-- **Builtins** (`CapabilityId::Builtins`): `task_list`, `task_create`, `task_get`, `task_update`, `wait`, `datetime`, `apply_patch`. Controlled by `config.tools.builtins_enabled`.
+- **Builtins** (`CapabilityId::Builtins`): `task_list`, `task_create`, `task_get`, `task_update`, `wait`, `datetime`, `apply_patch`, `view_image`. Controlled by `config.tools.builtins_enabled`.
 - **Shell** (`CapabilityId::Shell`): `shell`, `shell_jobs`, `shell_job_status`, `shell_job_cancel`. Controlled by `config.tools.shell_enabled`.
 - **SubAgents** (`CapabilityId::SubAgents`): `agent_spawn`, `agent_fork`, `agent_status`, `agent_cancel`, `agent_list`. Requires `sub-agents` feature.
 </Accordion>
@@ -735,6 +736,26 @@ Get the current date and time. Returns ISO 8601 formatted datetime and Unix time
 ```
 
 **Source:** `meerkat-tools/src/builtin/utility/datetime.rs`
+</Accordion>
+
+<Accordion title="view_image">
+Read an image file from the project directory and return its contents as a base64-encoded `ContentBlock::Image`. This enables vision-capable models to analyze images from disk during tool use.
+
+**Default enabled:** Yes (when builtins are on and model supports vision)
+
+<ParamField body="path" type="String" required>
+  Path to the image file, relative to the project root.
+</ParamField>
+
+**Supported formats:** PNG, JPEG, GIF, WebP, SVG.
+
+**Size limit:** 5 MB. Files exceeding this limit return an error.
+
+**Capability gating:** `view_image` is automatically hidden via `ToolScope` when the active model does not support vision (i.e., `ModelProfile.vision == false`). It is also hidden when the model does not support image content in tool results (`ModelProfile.image_tool_results == false`). This means the tool never appears in the tool list sent to models that cannot process image content.
+
+**Returns:** A `ToolOutput::Blocks` containing a single `ContentBlock::Image` with the base64-encoded image data and detected media type. The `source_path` field is set on the domain type but stripped from the wire representation (`WireContentBlock`).
+
+**Source:** `meerkat-tools/src/builtin/utility/view_image.rs`
 </Accordion>
 
 ## Comms tools

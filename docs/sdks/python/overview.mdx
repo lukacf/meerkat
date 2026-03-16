@@ -179,7 +179,7 @@ Sends `SIGTERM` and waits up to 5 seconds; falls back to `SIGKILL` on timeout.
 ```python
 async def create_session(
     self,
-    prompt: str,
+    prompt: str | list[dict],
     *,
     model: str | None = None,
     provider: str | None = None,
@@ -211,7 +211,7 @@ Creates a new session and runs the first turn. Returns a `Session` whose conveni
 ```python
 def create_session_streaming(
     self,
-    prompt: str,
+    prompt: str | list[dict],
     *,
     # same keyword arguments as create_session()
 ) -> EventStream
@@ -283,7 +283,7 @@ session.last_result      # RunResult — full result object from the last turn
 ```python
 async def turn(
     self,
-    prompt: str,
+    prompt: str | list[dict],
     *,
     skill_refs: list[SkillRef] | None = None,
     skill_references: list[str] | None = None,
@@ -297,7 +297,7 @@ Runs another turn on this session (non-streaming). Updates `last_result` and ret
 ```python
 def stream(
     self,
-    prompt: str,
+    prompt: str | list[dict],
     *,
     skill_refs: list[SkillRef] | None = None,
     skill_references: list[str] | None = None,
@@ -521,6 +521,33 @@ async def main():
         )
         print(f"Response: {session.text}")
         print(f"Tool calls made: {session.tool_calls}")
+        await session.archive()
+
+asyncio.run(main())
+```
+</Accordion>
+
+<Accordion title="Multimodal prompt (image input)">
+```python
+import asyncio
+import base64
+from meerkat import MeerkatClient
+
+async def main():
+    async with MeerkatClient() as client:
+        # Read an image and encode as base64
+        with open("screenshot.png", "rb") as f:
+            image_data = base64.b64encode(f.read()).decode()
+
+        # Send a multimodal prompt with text and image blocks
+        session = await client.create_session(
+            [
+                {"type": "text", "text": "What do you see in this image?"},
+                {"type": "image", "media_type": "image/png", "data": image_data},
+            ],
+            model="claude-sonnet-4-5",
+        )
+        print(session.text)
         await session.archive()
 
 asyncio.run(main())

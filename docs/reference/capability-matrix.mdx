@@ -69,6 +69,21 @@ meerkat = { version = "0.4", default-features = false, features = ["anthropic", 
 meerkat = { version = "0.4", features = ["all-providers", "session-store", "session-compaction", "comms", "mcp"] }
 ```
 
+## Model capabilities
+
+`ModelProfile` describes per-model capabilities used for feature gating and tool visibility. Two fields are relevant to multimodal content support:
+
+| Capability | Description | Anthropic | OpenAI | Gemini |
+|------------|-------------|-----------|--------|--------|
+| `vision` | Model can process image content in user messages | Yes | Yes | Yes |
+| `image_tool_results` | Model can process image content in tool results | Yes | No | Yes |
+
+These fields are set in the model catalog (`meerkat-models`) and exposed via `ModelProfile`. They control:
+
+- **`view_image` tool visibility** -- hidden via `ToolScope` when either `vision` or `image_tool_results` is `false`.
+- **`ContentBlock::Image` in tool results** -- providers that do not support `image_tool_results` will receive image content blocks converted to text descriptions.
+- **`ContentBlock::Image` in user messages** -- providers that do not support `vision` will not receive image content blocks in user messages.
+
 ## MCP server loading
 
 MCP server connections are **non-blocking across all surfaces**. Servers connect in parallel in the background after `apply_staged()`. The agent loop polls `poll_external_updates()` at each `CallingLlm` boundary and injects a `[MCP_PENDING]` system notice while servers are still connecting. Tools become visible as each server completes its handshake.

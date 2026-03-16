@@ -37,7 +37,7 @@ Surface binaries:
 | Trait | Purpose | Implementors |
 |-------|---------|-------------|
 | `AgentLlmClient` | LLM provider abstraction | `LlmClientAdapter` (meerkat-client) |
-| `AgentToolDispatcher` | Tool routing (incl. `bind_wait_interrupt`, `supports_wait_interrupt`) | `CompositeDispatcher` (meerkat-tools), `ToolGateway` (meerkat-core), `EmptyToolDispatcher` (meerkat-tools) |
+| `AgentToolDispatcher` | Tool routing (incl. `bind_wait_interrupt`, `supports_wait_interrupt`); dispatch returns `ToolResult` with `content: Vec<ContentBlock>` | `CompositeDispatcher` (meerkat-tools), `ToolGateway` (meerkat-core), `EmptyToolDispatcher` (meerkat-tools) |
 | `AgentSessionStore` | Session persistence | `StoreAdapter<S>` (meerkat-store), no-op stores |
 | `SessionService` | Full session lifecycle (incl. `set_session_client`) | `EphemeralSessionService<B>` (meerkat-session), `PersistentSessionService<B>` (meerkat-session) |
 | `CommsRuntime` | Inter-agent communication | `meerkat_comms::CommsRuntime` |
@@ -60,6 +60,22 @@ Surface binaries:
 | `MobSessionService` | Session service + comms access for mobs | `EphemeralSessionService<B>`, `PersistentSessionService<B>` |
 | `MobProvisioner` | Member spawn/retire/turn | `MultiBackendProvisioner`, `SubagentBackend` |
 | `MobEventStore` | Mob structural events | `InMemoryMobEventStore`, `RedbMobEventStore` |
+
+### Multimodal types (defined in meerkat-core)
+
+| Type | Purpose |
+|------|---------|
+| `ContentBlock` | Text or Image content unit. `Text { text }` or `Image { media_type, data, source_path? }` |
+| `ContentInput` | Prompt type for session requests. `Text(String)` or `Blocks(Vec<ContentBlock>)` |
+| `ToolOutput` | Return type for `BuiltinTool::call()`. `Json(Value)` or `Blocks(Vec<ContentBlock>)` (defined in meerkat-tools) |
+
+### Wire types for multimodal (defined in meerkat-contracts)
+
+| Type | Purpose |
+|------|---------|
+| `WireContentBlock` | Wire-safe content block (no `source_path`) |
+| `WireContentInput` | Wire-safe prompt input |
+| `WireToolResultContent` | Wire-safe tool result content |
 
 ## Agent Loop State Machine
 

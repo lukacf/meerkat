@@ -99,6 +99,29 @@ MobBuilder::new(definition, storage)
 
 **Flows:** DAG of steps. Each step has a role, message, depends_on. `FlowEngine` dispatches turns to members via provisioner. Turn-driven mode: explicit `start_turn()`. Autonomous mode: inject via `event_injector`.
 
+## Multimodal Content
+
+`ContentBlock` (meerkat-core) is the unit of rich content. Two variants:
+- `ContentBlock::Text { text }` — plain text.
+- `ContentBlock::Image { media_type, data, source_path }` — base64-encoded image. `source_path` is domain-only (stripped from wire).
+
+`ContentInput` (meerkat-core) is the prompt type for `CreateSessionRequest.prompt` and `StartTurnRequest.prompt`:
+- `ContentInput::Text(String)` — plain text (implements `From<&str>` and `From<String>`).
+- `ContentInput::Blocks(Vec<ContentBlock>)` — multimodal content blocks.
+
+`ToolOutput` (meerkat-tools) is the return type for `BuiltinTool::call()`:
+- `ToolOutput::Json(Value)` — standard JSON result, serialized to text.
+- `ToolOutput::Blocks(Vec<ContentBlock>)` — rich content blocks injected into `ToolResult.content`.
+
+`ToolResult.content` is `Vec<ContentBlock>` (replacing the former single-string model).
+`UserMessage.content` is `Vec<ContentBlock>`.
+
+**Capability gating:** `ModelProfile` has `vision: bool` and `image_tool_results: bool`. The `view_image` builtin tool is hidden via `ToolScope` when either is false. Per-provider: Anthropic (both true), OpenAI (vision true, image_tool_results false), Gemini (both true).
+
+**Wire types:** `WireContentBlock` (no `source_path`), `WireContentInput`, `WireToolResultContent` in meerkat-contracts.
+
+**Comms:** `MessageKind`, `CommsContent`, `InteractionContent` have `blocks: Option<Vec<ContentBlock>>` alongside `body: String`.
+
 ## Tool Scoping
 
 `ToolScope` (meerkat-core) manages runtime tool visibility with staged-then-applied semantics:

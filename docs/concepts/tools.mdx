@@ -62,7 +62,7 @@ Meerkat ships with tool categories you enable per-agent. Nothing is on by defaul
 
 | Category | Tools | Enable with |
 |----------|-------|-------------|
-| Builtins | `task_create`, `task_list`, `task_get`, `task_update`, `wait`, `datetime`, `apply_patch` | `enable_builtins` |
+| Builtins | `task_create`, `task_list`, `task_get`, `task_update`, `wait`, `datetime`, `apply_patch`, `view_image` | `enable_builtins` |
 | Shell | `shell`, `shell_jobs`, `shell_job_status`, `shell_job_cancel` | `enable_shell` |
 | Sub-agents | `agent_spawn`, `agent_fork`, `agent_status`, `agent_cancel`, `agent_list` | `enable_subagents` |
 | Memory | `memory_search` | `enable_memory` |
@@ -111,6 +111,22 @@ All mutations are staged and applied at the next turn boundary. Set `persisted: 
 | REST | Route stubs registered | -- |
 
 See the [built-in tools reference](/reference/builtin-tools) for the mechanical details of factory flags and per-build overrides.
+
+## Multimodal tool results
+
+Tools can return rich content beyond plain text. The `ToolOutput` enum controls what gets injected into the conversation as a tool result:
+
+- **`ToolOutput::Json(Value)`** -- the standard path. The JSON value is serialized to a text `ContentBlock` in the tool result.
+- **`ToolOutput::Blocks(Vec<ContentBlock>)`** -- returns one or more content blocks directly, including images. Used by tools like `view_image` to pass image data to vision-capable models.
+
+`ContentBlock` has two variants:
+
+- `ContentBlock::Text { text }` -- plain text content.
+- `ContentBlock::Image { media_type, data, source_path }` -- base64-encoded image with MIME type. The `source_path` field is domain-only metadata (stripped from wire types).
+
+The built-in `view_image` tool reads an image file from disk and returns a `ToolOutput::Blocks` containing a single `ContentBlock::Image`. It supports PNG, JPEG, GIF, WebP, and SVG formats up to 5 MB. The tool is automatically hidden from models that lack vision support via `ToolScope` capability gating based on `ModelProfile.vision` and `ModelProfile.image_tool_results`.
+
+Custom tools can return multimodal content by implementing `BuiltinTool::call()` and returning `ToolOutput::Blocks(...)` with the appropriate content blocks.
 
 ## Composition
 

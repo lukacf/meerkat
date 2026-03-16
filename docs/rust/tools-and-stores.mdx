@@ -100,6 +100,32 @@ let tools = registry.tools();
 ```
 </Accordion>
 
+### Multimodal tool results
+
+Built-in tools return `ToolOutput`, which supports both JSON and multimodal content:
+
+```rust
+use meerkat::ToolOutput;
+use meerkat::ContentBlock;
+
+// Standard JSON result
+let output = ToolOutput::Json(json!({"status": "ok", "count": 42}));
+
+// Multimodal result with image content
+let output = ToolOutput::Blocks(vec![
+    ContentBlock::Text { text: "Screenshot captured:".to_string() },
+    ContentBlock::Image {
+        media_type: "image/png".to_string(),
+        data: base64_encoded_png,
+        source_path: Some("/path/to/screenshot.png".into()),
+    },
+]);
+```
+
+`ToolOutput::Json` is serialized into a text content block in the tool result. `ToolOutput::Blocks` passes content blocks directly into `ToolResult.content`, enabling tools to return images and other rich content to vision-capable models.
+
+The built-in `view_image` tool uses this mechanism to read image files from disk and return them as `ContentBlock::Image` blocks. It is automatically hidden from models that lack vision or image tool result support.
+
 ---
 
 ## Session stores

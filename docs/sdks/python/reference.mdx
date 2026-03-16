@@ -113,6 +113,34 @@ Wherever a skill reference is accepted (e.g. `session.invoke_skill()`, `turn(ski
 
 ---
 
+## Multimodal prompts
+
+All prompt parameters (`create_session`, `turn`, `stream`, `create_session_streaming`) accept `str | list[dict]`:
+
+- **`str`** -- plain text prompt (backwards compatible).
+- **`list[dict]`** -- a list of content blocks for multimodal input. Each block is a dict with a `"type"` key:
+  - `{"type": "text", "text": "..."}` -- text content.
+  - `{"type": "image", "media_type": "image/png", "data": "<base64>"}` -- base64-encoded image content.
+
+```python
+# Text-only (unchanged)
+session = await client.create_session("Describe this project")
+
+# Multimodal with image
+session = await client.create_session([
+    {"type": "text", "text": "What is in this screenshot?"},
+    {"type": "image", "media_type": "image/png", "data": base64_png},
+])
+
+# Multimodal turn
+result = await session.turn([
+    {"type": "text", "text": "Now analyze this second image:"},
+    {"type": "image", "media_type": "image/jpeg", "data": base64_jpg},
+])
+```
+
+---
+
 ## Diagnostic types
 
 ### SchemaWarning

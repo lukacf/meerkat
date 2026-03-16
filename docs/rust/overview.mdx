@@ -182,7 +182,7 @@ match service.start_turn(&id, req).await {
 ### Basic run
 
 ```rust
-let result = agent.run("What is 2 + 2?".to_string()).await?;
+let result = agent.run("What is 2 + 2?".into()).await?;
 println!("Answer: {}", result.text);
 ```
 
@@ -209,15 +209,15 @@ tokio::spawn(async move {
     }
 });
 
-let result = agent.run_with_events("Tell me a story".to_string(), tx).await?;
+let result = agent.run_with_events("Tell me a story".into(), tx).await?;
 ```
 
 ### Agent methods
 
 | Method | Description |
 |--------|-------------|
-| `run(prompt)` | Run agent with user input |
-| `run_with_events(prompt, tx)` | Run with event streaming |
+| `run(prompt)` | Run agent with a `ContentInput` prompt (text or multimodal) |
+| `run_with_events(prompt, tx)` | Run with event streaming; prompt is `ContentInput` |
 | `session()` | Get current session (read-only) |
 | `budget()` | Get current budget tracker |
 | `state()` | Get current loop state |
@@ -228,7 +228,7 @@ let result = agent.run_with_events("Tell me a story".to_string(), tx).await?;
 ```rust
 use meerkat::AgentError;
 
-match agent.run("prompt".to_string()).await {
+match agent.run("prompt".into()).await {
     Ok(result) => println!("Success: {}", result.text),
     Err(AgentError::LlmError(msg)) => println!("LLM error: {}", msg),
     Err(AgentError::TokenBudgetExceeded { used, limit }) => {
@@ -307,13 +307,49 @@ match event {
 
 ## Core types
 
-### Message
+### Message and ContentBlock
 
 ```rust
 use meerkat::{Message, UserMessage, AssistantMessage, SystemMessage, ToolResult};
+use meerkat::ContentBlock;
 
 let system = Message::System(SystemMessage { content: "You are helpful.".to_string() });
-let user = Message::User(UserMessage { content: "Hello!".to_string() });
+
+// Text-only user message (convenience)
+let user = Message::User(UserMessage::text("Hello!"));
+
+// Multimodal user message with text and image
+let user = Message::User(UserMessage {
+    content: vec![
+        ContentBlock::Text { text: "What is in this image?".to_string() },
+        ContentBlock::Image {
+            media_type: "image/png".to_string(),
+            data: base64_data,
+            source_path: None,
+        },
+    ],
+});
+```
+
+### ContentInput
+
+`ContentInput` is the prompt type accepted by `CreateSessionRequest` and `StartTurnRequest`. It supports both text-only and multimodal prompts:
+
+```rust
+use meerkat::ContentInput;
+
+// Text-only (most common) — implements From<&str> and From<String>
+let prompt: ContentInput = "What is Rust?".into();
+
+// Multimodal — blocks with mixed content types
+let prompt = ContentInput::Blocks(vec![
+    ContentBlock::Text { text: "Describe this image.".to_string() },
+    ContentBlock::Image {
+        media_type: "image/jpeg".to_string(),
+        data: base64_data,
+        source_path: None,
+    },
+]);
 ```
 
 ### ToolCall and ToolResult
@@ -334,7 +370,7 @@ let error = ToolResult::error("tc_123", "City not found");
 ### RunResult
 
 ```rust
-let result: RunResult = agent.run("Hello".to_string()).await?;
+let result: RunResult = agent.run("Hello".into()).await?;
 
 println!("Response: {}", result.text);
 println!("Session: {}", result.session_id);

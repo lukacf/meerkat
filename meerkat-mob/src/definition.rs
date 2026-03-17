@@ -8,6 +8,7 @@ use crate::MobBackendKind;
 use crate::ids::{BranchId, FlowId, MobId, ProfileName, StepId};
 use crate::profile::Profile;
 use indexmap::IndexMap;
+use meerkat_core::types::ContentInput;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -163,7 +164,7 @@ pub enum ConditionExpr {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FlowStepSpec {
     pub role: ProfileName,
-    pub message: String,
+    pub message: ContentInput,
     #[serde(default)]
     pub depends_on: Vec<StepId>,
     #[serde(default)]

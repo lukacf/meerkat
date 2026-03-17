@@ -6,6 +6,9 @@ use serde_json::value::RawValue;
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
+use meerkat_core::types::{
+    ContentInput, HandlingMode, RenderClass, RenderMetadata, RenderSalience,
+};
 
 use super::{parse_params, parse_session_id_for_runtime};
 
@@ -58,7 +61,15 @@ pub async fn handle_push(
     };
 
     // Inject the event
-    match injector.inject(body, meerkat_core::PlainEventSource::Rpc) {
+    match injector.inject(
+        ContentInput::Text(body),
+        meerkat_core::PlainEventSource::Rpc,
+        HandlingMode::Queue,
+        Some(RenderMetadata {
+            class: RenderClass::ExternalEvent,
+            salience: RenderSalience::Normal,
+        }),
+    ) {
         Ok(()) => RpcResponse::success(id, serde_json::json!({"queued": true})),
         Err(meerkat_core::EventInjectorError::Full) => {
             RpcResponse::error(id, error::INTERNAL_ERROR, "Event inbox is full")

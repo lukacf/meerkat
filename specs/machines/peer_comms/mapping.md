@@ -102,6 +102,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `queued_items_are_classified`
   - anchors: `peer_classify`, `peer_inbox`, `peer_runtime`
   - scenarios: `trust-normalize-submit`, `untrusted-drop`
+- `queued_items_preserve_content_shape`
+  - anchors: `peer_classify`, `peer_inbox`, `peer_runtime`
+  - scenarios: `trust-normalize-submit`, `untrusted-drop`
+- `queued_items_preserve_text_projection`
+  - anchors: `peer_classify`, `peer_inbox`, `peer_runtime`
+  - scenarios: `trust-normalize-submit`, `untrusted-drop`
+- `queued_items_preserve_correlation_slots`
+  - anchors: `peer_classify`, `peer_inbox`, `peer_runtime`
+  - scenarios: `trust-normalize-submit`, `untrusted-drop`
 
 
 <!-- GENERATED_COVERAGE_END -->

@@ -435,6 +435,8 @@ async fn apply_runtime_turn(
 
     let svc_req = SvcStartTurnRequest {
         prompt: prompt.clone(),
+        render_metadata: None,
+        handling_mode: meerkat_core::types::HandlingMode::Queue,
         event_tx: Some(event_tx.clone()),
         host_mode,
         skill_references: primitive
@@ -547,6 +549,7 @@ async fn apply_runtime_turn(
                     |meta| meta.model.clone(),
                 ),
                 prompt,
+                render_metadata: None,
                 system_prompt: None,
                 max_tokens: Some(
                     stored_metadata
@@ -569,6 +572,8 @@ async fn apply_runtime_turn(
                     run_id,
                     SvcStartTurnRequest {
                         prompt: extract_runtime_prompt(primitive),
+                        render_metadata: None,
+                        handling_mode: meerkat_core::types::HandlingMode::Queue,
                         event_tx: Some(event_tx.clone()),
                         host_mode: primitive
                             .turn_metadata()
@@ -1402,6 +1407,7 @@ fn build_comms_command(
         source: req.source.clone(),
         stream: req.stream.clone(),
         allow_self_session: req.allow_self_session,
+        handling_mode: None,
     };
 
     request.parse(session_id).map_err(|errors| {
@@ -1519,7 +1525,15 @@ async fn push_event(
     let body = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string());
 
     // Inject the event
-    match injector.inject(body, meerkat_core::PlainEventSource::Webhook) {
+    match injector.inject(
+        meerkat_core::ContentInput::Text(body),
+        meerkat_core::PlainEventSource::Webhook,
+        meerkat_core::HandlingMode::Queue,
+        Some(meerkat_core::types::RenderMetadata {
+            class: meerkat_core::types::RenderClass::ExternalEvent,
+            salience: meerkat_core::types::RenderSalience::Normal,
+        }),
+    ) {
         Ok(()) => Ok((StatusCode::ACCEPTED, Json(json!({"queued": true})))),
         Err(meerkat_core::EventInjectorError::Full) => Err(ApiError::ServiceUnavailable(
             "Event inbox is full — try again later".to_string(),
@@ -1900,6 +1914,7 @@ async fn create_session(
     let svc_req = SvcCreateSessionRequest {
         model: model.to_string(),
         prompt: req.prompt.clone(),
+        render_metadata: None,
         system_prompt: req.system_prompt,
         max_tokens: Some(max_tokens),
         event_tx: Some(caller_event_tx.clone()),
@@ -2243,6 +2258,8 @@ async fn continue_session(
     // First, try to start a turn on a live session in the service.
     let svc_req = SvcStartTurnRequest {
         prompt: turn_prompt.clone(),
+        render_metadata: None,
+        handling_mode: meerkat_core::types::HandlingMode::Queue,
         event_tx: Some(caller_event_tx.clone()),
         host_mode,
         skill_references: skill_references.clone(),
@@ -3006,6 +3023,7 @@ mod tests {
             .create_session(SvcCreateSessionRequest {
                 model: state.default_model.to_string(),
                 prompt: "Hello".to_string().into(),
+                render_metadata: None,
                 system_prompt: None,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
@@ -3077,6 +3095,7 @@ mod tests {
             .create_session(SvcCreateSessionRequest {
                 model: state.default_model.to_string(),
                 prompt: "Hello".to_string().into(),
+                render_metadata: None,
                 system_prompt: None,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
@@ -3144,6 +3163,7 @@ mod tests {
             .create_session(SvcCreateSessionRequest {
                 model: state.default_model.to_string(),
                 prompt: "Hello".to_string().into(),
+                render_metadata: None,
                 system_prompt: None,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
@@ -3197,6 +3217,7 @@ mod tests {
             .create_session(SvcCreateSessionRequest {
                 model: state.default_model.to_string(),
                 prompt: "Hello".to_string().into(),
+                render_metadata: None,
                 system_prompt: None,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
@@ -3221,6 +3242,8 @@ mod tests {
                 &created.session_id,
                 meerkat_core::service::StartTurnRequest {
                     prompt: "Follow up".to_string().into(),
+                    render_metadata: None,
+                    handling_mode: meerkat_core::types::HandlingMode::Queue,
                     event_tx: None,
                     host_mode: false,
                     skill_references: None,

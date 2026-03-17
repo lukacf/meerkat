@@ -265,11 +265,17 @@ async fn test_phase2_external_turn_routing_by_runtime_mode() {
     let inject_before = service.inject_calls.load(Ordering::Relaxed);
 
     handle
-        .send_message(MeerkatId::from("lead-auto"), "auto".to_string())
+        .member(&MeerkatId::from("lead-auto"))
+        .await
+        .expect("member auto")
+        .send("auto".to_string(), meerkat_core::types::HandlingMode::Queue)
         .await
         .expect("external autonomous");
     handle
-        .send_message(MeerkatId::from("lead-turn"), "turn".to_string())
+        .member(&MeerkatId::from("lead-turn"))
+        .await
+        .expect("member turn")
+        .send("turn".to_string(), meerkat_core::types::HandlingMode::Queue)
         .await
         .expect("external turn-driven");
 

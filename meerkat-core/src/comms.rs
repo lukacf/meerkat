@@ -6,7 +6,7 @@
 
 use crate::event::{AgentEvent, EventEnvelope};
 use crate::interaction::{InteractionId, ResponseStatus};
-use crate::types::ContentBlock;
+use crate::types::{ContentBlock, HandlingMode};
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -70,6 +70,7 @@ pub struct CommsCommandRequest {
     pub source: Option<String>,
     pub stream: Option<String>,
     pub allow_self_session: Option<bool>,
+    pub handling_mode: Option<String>,
 }
 
 /// Validation failure for one command field.
@@ -156,6 +157,18 @@ impl CommsCommandRequest {
                     session_id: session_id.clone(),
                     body,
                     blocks: self.blocks.clone(),
+                    handling_mode: match self.handling_mode.as_deref() {
+                        Some("steer") => HandlingMode::Steer,
+                        Some("queue") | None => HandlingMode::Queue,
+                        Some(other) => {
+                            errors.push(CommsCommandValidationError::new(
+                                "handling_mode",
+                                "invalid_value",
+                                Some(other.to_string()),
+                            ));
+                            return Err(errors);
+                        }
+                    },
                     source,
                     stream,
                     allow_self_session: self.allow_self_session.unwrap_or(false),
@@ -359,6 +372,7 @@ pub enum CommsCommand {
         session_id: crate::types::SessionId,
         body: String,
         blocks: Option<Vec<ContentBlock>>,
+        handling_mode: HandlingMode,
         source: InputSource,
         stream: InputStreamMode,
         allow_self_session: bool,

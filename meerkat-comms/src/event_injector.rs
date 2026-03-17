@@ -6,6 +6,7 @@ use crate::tokio;
 use crate::types::InboxItem;
 use meerkat_core::PlainEventSource;
 use meerkat_core::event_injector::{EventInjector, EventInjectorError};
+use meerkat_core::types::{ContentInput, HandlingMode, RenderMetadata};
 
 /// Shared subscriber registry for interaction-scoped event streaming.
 ///
@@ -44,13 +45,26 @@ impl CommsEventInjector {
 }
 
 impl EventInjector for CommsEventInjector {
-    fn inject(&self, body: String, source: PlainEventSource) -> Result<(), EventInjectorError> {
+    fn inject(
+        &self,
+        content: ContentInput,
+        source: PlainEventSource,
+        handling_mode: HandlingMode,
+        render_metadata: Option<RenderMetadata>,
+    ) -> Result<(), EventInjectorError> {
+        let body = content.text_content();
+        let blocks = match content {
+            ContentInput::Text(_) => None,
+            ContentInput::Blocks(blocks) => Some(blocks),
+        };
         self.sender
             .send_classified(InboxItem::PlainEvent {
                 body,
                 source,
+                handling_mode,
                 interaction_id: None,
-                blocks: None,
+                blocks,
+                render_metadata,
             })
             .map_err(|e| match e {
                 InboxError::Full => EventInjectorError::Full,
@@ -62,11 +76,18 @@ impl EventInjector for CommsEventInjector {
 impl meerkat_core::event_injector::SubscribableInjector for CommsEventInjector {
     fn inject_with_subscription(
         &self,
-        body: String,
+        content: ContentInput,
         source: PlainEventSource,
+        handling_mode: HandlingMode,
+        render_metadata: Option<RenderMetadata>,
     ) -> Result<meerkat_core::event_injector::InteractionSubscription, EventInjectorError> {
         let id = uuid::Uuid::new_v4();
         let (tx, rx) = tokio::sync::mpsc::channel(4096);
+        let body = content.text_content();
+        let blocks = match content {
+            ContentInput::Text(_) => None,
+            ContentInput::Blocks(blocks) => Some(blocks),
+        };
 
         // Store subscriber in registry
         self.subscriber_registry.lock().insert(id, tx);
@@ -75,8 +96,10 @@ impl meerkat_core::event_injector::SubscribableInjector for CommsEventInjector {
         if let Err(e) = self.sender.send_classified(InboxItem::PlainEvent {
             body,
             source,
+            handling_mode,
             interaction_id: Some(id),
-            blocks: None,
+            blocks,
+            render_metadata,
         }) {
             // Clean up subscriber on send failure
             self.subscriber_registry.lock().remove(&id);
@@ -105,7 +128,12 @@ mod tests {
         let injector = CommsEventInjector::new(sender, new_subscriber_registry());
 
         injector
-            .inject("hello".to_string(), PlainEventSource::Tcp)
+            .inject(
+                "hello".to_string().into(),
+                PlainEventSource::Tcp,
+                HandlingMode::Queue,
+                None,
+            )
             .unwrap();
 
         let items = inbox.try_drain();
@@ -127,11 +155,21 @@ mod tests {
 
         // First should succeed
         injector
-            .inject("first".to_string(), PlainEventSource::Tcp)
+            .inject(
+                "first".to_string().into(),
+                PlainEventSource::Tcp,
+                HandlingMode::Queue,
+                None,
+            )
             .unwrap();
 
         // Second should fail with Full
-        let result = injector.inject("second".to_string(), PlainEventSource::Tcp);
+        let result = injector.inject(
+            "second".to_string().into(),
+            PlainEventSource::Tcp,
+            HandlingMode::Queue,
+            None,
+        );
         assert!(
             matches!(result, Err(EventInjectorError::Full)),
             "Expected Full error"
@@ -147,7 +185,12 @@ mod tests {
             Arc::new(CommsEventInjector::new(sender, new_subscriber_registry()));
 
         injector
-            .inject("via dyn".to_string(), PlainEventSource::Webhook)
+            .inject(
+                "via dyn".to_string().into(),
+                PlainEventSource::Webhook,
+                HandlingMode::Queue,
+                None,
+            )
             .unwrap();
 
         let items = inbox.try_drain();
@@ -163,7 +206,12 @@ mod tests {
         let injector = CommsEventInjector::new(sender, registry.clone());
 
         let sub = injector
-            .inject_with_subscription("tracked".to_string(), PlainEventSource::Rpc)
+            .inject_with_subscription(
+                "tracked".to_string().into(),
+                PlainEventSource::Rpc,
+                HandlingMode::Queue,
+                None,
+            )
             .unwrap();
 
         // Verify item in inbox has interaction_id
@@ -195,11 +243,21 @@ mod tests {
 
         // Fill the inbox
         injector
-            .inject("first".to_string(), PlainEventSource::Tcp)
+            .inject(
+                "first".to_string().into(),
+                PlainEventSource::Tcp,
+                HandlingMode::Queue,
+                None,
+            )
             .unwrap();
 
         // This should fail and clean up registry
-        let result = injector.inject_with_subscription("second".to_string(), PlainEventSource::Tcp);
+        let result = injector.inject_with_subscription(
+            "second".to_string().into(),
+            PlainEventSource::Tcp,
+            HandlingMode::Queue,
+            None,
+        );
         assert!(matches!(result, Err(EventInjectorError::Full)));
 
         // Registry should be empty (cleaned up)
@@ -215,7 +273,12 @@ mod tests {
         drop(inbox); // close receiver
 
         let injector = CommsEventInjector::new(sender, registry.clone());
-        let result = injector.inject_with_subscription("closed".to_string(), PlainEventSource::Tcp);
+        let result = injector.inject_with_subscription(
+            "closed".to_string().into(),
+            PlainEventSource::Tcp,
+            HandlingMode::Queue,
+            None,
+        );
 
         assert!(matches!(result, Err(EventInjectorError::Closed)));
         assert!(registry.lock().is_empty(), "registry should be cleaned up");

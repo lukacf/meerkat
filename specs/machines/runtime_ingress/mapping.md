@@ -29,7 +29,7 @@ The model keeps only the semantics that matter to the machine contract:
 - queued order
 - runtime-authored staged contributor batches
 - terminalization
-- wake/process intent
+- handling-mode semantics and the runtime-owned steer-drain trigger state they derive
 
 ## Important semantic choices now reflected in the model
 
@@ -103,16 +103,10 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `recover-retire-reset-destroy` — recovery and lifecycle terminalization preserve contributor legality
 
 ### Transitions
-- `AdmitQueuedNone`
+- `AdmitQueuedQueue`
   - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
   - scenarios: `admit-and-stage-prefix`
-- `AdmitQueuedWake`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
-  - scenarios: `admit-and-stage-prefix`
-- `AdmitQueuedProcess`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
-  - scenarios: `admit-and-stage-prefix`
-- `AdmitQueuedWakeAndProcess`
+- `AdmitQueuedSteer`
   - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
   - scenarios: `admit-and-stage-prefix`
 - `AdmitConsumedOnAccept`
@@ -183,6 +177,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 
 ### Invariants
 - `queue_entries_are_queued`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - scenarios: `admit-and-stage-prefix`
+- `queued_inputs_preserve_content_shape`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - scenarios: `admit-and-stage-prefix`
+- `admitted_inputs_preserve_correlation_slots`
   - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
   - scenarios: `admit-and-stage-prefix`
 - `terminal_inputs_do_not_appear_in_queue`

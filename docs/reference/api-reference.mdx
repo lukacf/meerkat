@@ -92,7 +92,7 @@ Mob runtime APIs live primarily in:
 | `spawn_with_options(...).await` | Spawn member with runtime mode and backend overrides |
 | `retire(...).await` | Retire member |
 | `wire(...).await` / `unwire(...).await` | Peer graph mutation |
-| `send_message(...).await` / `internal_turn(...).await` | Turn dispatch |
+| `member(...).send(...).await` / `internal_turn(...).await` | Turn dispatch |
 | `stop().await` / `resume().await` / `complete().await` / `destroy().await` | Lifecycle transitions |
 | `list_flows()` / `run_flow(...).await` / `flow_status(...).await` / `cancel_flow(...).await` | Flow runtime control |
 | `task_create(...).await` / `task_update(...).await` / `task_list().await` | Shared task board |
@@ -102,6 +102,7 @@ Mob runtime APIs live primarily in:
 
 ```rust
 use std::sync::Arc;
+use meerkat_core::types::HandlingMode;
 use meerkat_mob::{
     FlowId, MeerkatId, MobBuilder, MobDefinition, MobSessionService, MobStorage, ProfileName,
 };
@@ -127,9 +128,8 @@ async fn orchestrate(
     handle
         .wire(MeerkatId::from("lead-1"), MeerkatId::from("worker-1"))
         .await?;
-    handle
-        .send_message(MeerkatId::from("lead-1"), "Coordinate work.".to_string())
-        .await?;
+    let lead = handle.member(&MeerkatId::from("lead-1")).await?;
+    lead.send("Coordinate work.", HandlingMode::Queue, None).await?;
 
     let run_id = handle
         .run_flow(FlowId::from("release_flow"), serde_json::json!({"severity":"critical"}))

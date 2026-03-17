@@ -251,7 +251,8 @@ In addition to tool-driven orchestration (where an agent calls mob tools), there
     ```python
     mob = await client.create_mob(definition={"id": "my-mob", "profiles": {...}})
     await mob.spawn(profile="lead", meerkat_id="lead-1")
-    await mob.send_message("lead-1", "Coordinate the release triage.")
+    lead = mob.member("lead-1")
+    await lead.send("Coordinate the release triage.")
     events = await mob.subscribe_member("lead-1")
     ```
   </Tab>
@@ -259,7 +260,8 @@ In addition to tool-driven orchestration (where an agent calls mob tools), there
     ```typescript
     const mob = await client.createMob({ definition: { id: "my-mob", profiles: {...} } });
     await mob.spawn({ profile: "lead", meerkatId: "lead-1" });
-    await mob.sendMessage("lead-1", "Coordinate the release triage.");
+    const lead = mob.member("lead-1");
+    await lead.send("Coordinate the release triage.");
     const events = await mob.subscribeMemberEvents("lead-1");
     ```
   </Tab>

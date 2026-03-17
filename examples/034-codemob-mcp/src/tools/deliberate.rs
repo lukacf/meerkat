@@ -268,7 +268,13 @@ async fn run_comms(
     // Kick off the discussion by sending the task to the orchestrator
     state
         .mob_state
-        .mob_send_message(mob_id, MeerkatId::from(orchestrator), task.to_string())
+        .mob_member_send(
+            mob_id,
+            MeerkatId::from(orchestrator),
+            task.to_string().into(),
+            meerkat_core::types::HandlingMode::Queue,
+            None,
+        )
         .await
         .map_err(|e| ToolCallError::internal(format!("Failed to trigger {orchestrator}: {e}")))?;
 

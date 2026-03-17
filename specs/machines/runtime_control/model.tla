@@ -3,10 +3,14 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for RuntimeControlMachine.
 
-CONSTANTS AdmissionEffectValues, BooleanValues, CandidateIdValues, InputIdValues, InputKindValues, RunIdValues, StringValues
+CONSTANTS AdmissionEffectValues, ContentShapeValues, HandlingModeValues, RequestIdValues, ReservationKeyValues, RunIdValues, StringValues, WorkIdValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
+
+OptionRequestIdValues == {None} \cup {Some(x) : x \in RequestIdValues}
+OptionReservationKeyValues == {None} \cup {Some(x) : x \in ReservationKeyValues}
+
 MapLookup(map, key) == IF key \in DOMAIN map THEN map[key] ELSE None
 MapSet(map, key, value) == [x \in DOMAIN map \cup {key} |-> IF x = key THEN value ELSE map[x]]
 StartsWith(seq, prefix) == /\ Len(prefix) <= Len(seq) /\ SubSeq(seq, 1, Len(prefix)) = prefix
@@ -167,35 +171,23 @@ ResumeRequested ==
     /\ UNCHANGED << current_run_id, pre_run_state, wake_pending, process_pending >>
 
 
-SubmitCandidateFromIdle(candidate_id, candidate_kind) ==
+SubmitWorkFromIdle(work_id, content_shape, handling_mode, request_id, reservation_key) ==
     /\ phase = "Idle"
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << current_run_id, pre_run_state, wake_pending, process_pending >>
 
 
-SubmitCandidateFromRunning(candidate_id, candidate_kind) ==
+SubmitWorkFromRunning(work_id, content_shape, handling_mode, request_id, reservation_key) ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << current_run_id, pre_run_state, wake_pending, process_pending >>
 
 
-AdmissionAcceptedIdleNone(candidate_id, candidate_kind, admission_effect, wake, process) ==
+AdmissionAcceptedIdleQueue(work_id, content_shape, handling_mode, request_id, reservation_key, admission_effect) ==
     /\ phase = "Idle"
-    /\ (wake = FALSE)
-    /\ (process = FALSE)
-    /\ phase' = "Idle"
-    /\ model_step_count' = model_step_count + 1
-    /\ wake_pending' = wake
-    /\ process_pending' = process
-    /\ UNCHANGED << current_run_id, pre_run_state >>
-
-
-AdmissionAcceptedIdleWake(candidate_id, candidate_kind, admission_effect, wake, process) ==
-    /\ phase = "Idle"
-    /\ (wake = TRUE)
-    /\ (process = FALSE)
+    /\ (handling_mode = "Queue")
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ wake_pending' = TRUE
@@ -203,21 +195,9 @@ AdmissionAcceptedIdleWake(candidate_id, candidate_kind, admission_effect, wake, 
     /\ UNCHANGED << current_run_id, pre_run_state >>
 
 
-AdmissionAcceptedIdleProcess(candidate_id, candidate_kind, admission_effect, wake, process) ==
+AdmissionAcceptedIdleSteer(work_id, content_shape, handling_mode, request_id, reservation_key, admission_effect) ==
     /\ phase = "Idle"
-    /\ (wake = FALSE)
-    /\ (process = TRUE)
-    /\ phase' = "Idle"
-    /\ model_step_count' = model_step_count + 1
-    /\ wake_pending' = FALSE
-    /\ process_pending' = TRUE
-    /\ UNCHANGED << current_run_id, pre_run_state >>
-
-
-AdmissionAcceptedIdleWakeAndProcess(candidate_id, candidate_kind, admission_effect, wake, process) ==
-    /\ phase = "Idle"
-    /\ (wake = TRUE)
-    /\ (process = TRUE)
+    /\ (handling_mode = "Steer")
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ wake_pending' = TRUE
@@ -225,10 +205,9 @@ AdmissionAcceptedIdleWakeAndProcess(candidate_id, candidate_kind, admission_effe
     /\ UNCHANGED << current_run_id, pre_run_state >>
 
 
-AdmissionAcceptedRunningNone(candidate_id, candidate_kind, admission_effect, wake, process) ==
+AdmissionAcceptedRunningQueue(work_id, content_shape, handling_mode, request_id, reservation_key, admission_effect) ==
     /\ phase = "Running"
-    /\ (wake = FALSE)
-    /\ (process = FALSE)
+    /\ (handling_mode = "Queue")
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ wake_pending' = FALSE
@@ -236,32 +215,9 @@ AdmissionAcceptedRunningNone(candidate_id, candidate_kind, admission_effect, wak
     /\ UNCHANGED << current_run_id, pre_run_state >>
 
 
-AdmissionAcceptedRunningWake(candidate_id, candidate_kind, admission_effect, wake, process) ==
+AdmissionAcceptedRunningSteer(work_id, content_shape, handling_mode, request_id, reservation_key, admission_effect) ==
     /\ phase = "Running"
-    /\ (wake = TRUE)
-    /\ (process = FALSE)
-    /\ phase' = "Running"
-    /\ model_step_count' = model_step_count + 1
-    /\ wake_pending' = TRUE
-    /\ process_pending' = FALSE
-    /\ UNCHANGED << current_run_id, pre_run_state >>
-
-
-AdmissionAcceptedRunningProcess(candidate_id, candidate_kind, admission_effect, wake, process) ==
-    /\ phase = "Running"
-    /\ (wake = FALSE)
-    /\ (process = TRUE)
-    /\ phase' = "Running"
-    /\ model_step_count' = model_step_count + 1
-    /\ wake_pending' = FALSE
-    /\ process_pending' = TRUE
-    /\ UNCHANGED << current_run_id, pre_run_state >>
-
-
-AdmissionAcceptedRunningWakeAndProcess(candidate_id, candidate_kind, admission_effect, wake, process) ==
-    /\ phase = "Running"
-    /\ (wake = TRUE)
-    /\ (process = TRUE)
+    /\ (handling_mode = "Steer")
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ wake_pending' = TRUE
@@ -269,28 +225,28 @@ AdmissionAcceptedRunningWakeAndProcess(candidate_id, candidate_kind, admission_e
     /\ UNCHANGED << current_run_id, pre_run_state >>
 
 
-AdmissionRejectedIdle(candidate_id, reason) ==
+AdmissionRejectedIdle(work_id, reason) ==
     /\ phase = "Idle"
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << current_run_id, pre_run_state, wake_pending, process_pending >>
 
 
-AdmissionRejectedRunning(candidate_id, reason) ==
+AdmissionRejectedRunning(work_id, reason) ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << current_run_id, pre_run_state, wake_pending, process_pending >>
 
 
-AdmissionDeduplicatedIdle(candidate_id, existing_input_id) ==
+AdmissionDeduplicatedIdle(work_id, existing_work_id) ==
     /\ phase = "Idle"
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << current_run_id, pre_run_state, wake_pending, process_pending >>
 
 
-AdmissionDeduplicatedRunning(candidate_id, existing_input_id) ==
+AdmissionDeduplicatedRunning(work_id, existing_work_id) ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
@@ -341,20 +297,16 @@ Next ==
     \/ StopRequested
     \/ DestroyRequested
     \/ ResumeRequested
-    \/ \E candidate_id \in CandidateIdValues : \E candidate_kind \in InputKindValues : SubmitCandidateFromIdle(candidate_id, candidate_kind)
-    \/ \E candidate_id \in CandidateIdValues : \E candidate_kind \in InputKindValues : SubmitCandidateFromRunning(candidate_id, candidate_kind)
-    \/ \E candidate_id \in CandidateIdValues : \E candidate_kind \in InputKindValues : \E admission_effect \in AdmissionEffectValues : \E wake \in BOOLEAN : \E process \in BOOLEAN : AdmissionAcceptedIdleNone(candidate_id, candidate_kind, admission_effect, wake, process)
-    \/ \E candidate_id \in CandidateIdValues : \E candidate_kind \in InputKindValues : \E admission_effect \in AdmissionEffectValues : \E wake \in BOOLEAN : \E process \in BOOLEAN : AdmissionAcceptedIdleWake(candidate_id, candidate_kind, admission_effect, wake, process)
-    \/ \E candidate_id \in CandidateIdValues : \E candidate_kind \in InputKindValues : \E admission_effect \in AdmissionEffectValues : \E wake \in BOOLEAN : \E process \in BOOLEAN : AdmissionAcceptedIdleProcess(candidate_id, candidate_kind, admission_effect, wake, process)
-    \/ \E candidate_id \in CandidateIdValues : \E candidate_kind \in InputKindValues : \E admission_effect \in AdmissionEffectValues : \E wake \in BOOLEAN : \E process \in BOOLEAN : AdmissionAcceptedIdleWakeAndProcess(candidate_id, candidate_kind, admission_effect, wake, process)
-    \/ \E candidate_id \in CandidateIdValues : \E candidate_kind \in InputKindValues : \E admission_effect \in AdmissionEffectValues : \E wake \in BOOLEAN : \E process \in BOOLEAN : AdmissionAcceptedRunningNone(candidate_id, candidate_kind, admission_effect, wake, process)
-    \/ \E candidate_id \in CandidateIdValues : \E candidate_kind \in InputKindValues : \E admission_effect \in AdmissionEffectValues : \E wake \in BOOLEAN : \E process \in BOOLEAN : AdmissionAcceptedRunningWake(candidate_id, candidate_kind, admission_effect, wake, process)
-    \/ \E candidate_id \in CandidateIdValues : \E candidate_kind \in InputKindValues : \E admission_effect \in AdmissionEffectValues : \E wake \in BOOLEAN : \E process \in BOOLEAN : AdmissionAcceptedRunningProcess(candidate_id, candidate_kind, admission_effect, wake, process)
-    \/ \E candidate_id \in CandidateIdValues : \E candidate_kind \in InputKindValues : \E admission_effect \in AdmissionEffectValues : \E wake \in BOOLEAN : \E process \in BOOLEAN : AdmissionAcceptedRunningWakeAndProcess(candidate_id, candidate_kind, admission_effect, wake, process)
-    \/ \E candidate_id \in CandidateIdValues : \E reason \in {"alpha", "beta"} : AdmissionRejectedIdle(candidate_id, reason)
-    \/ \E candidate_id \in CandidateIdValues : \E reason \in {"alpha", "beta"} : AdmissionRejectedRunning(candidate_id, reason)
-    \/ \E candidate_id \in CandidateIdValues : \E existing_input_id \in InputIdValues : AdmissionDeduplicatedIdle(candidate_id, existing_input_id)
-    \/ \E candidate_id \in CandidateIdValues : \E existing_input_id \in InputIdValues : AdmissionDeduplicatedRunning(candidate_id, existing_input_id)
+    \/ \E work_id \in WorkIdValues : \E content_shape \in ContentShapeValues : \E handling_mode \in HandlingModeValues : \E request_id \in RequestIdValues : \E reservation_key \in ReservationKeyValues : SubmitWorkFromIdle(work_id, content_shape, handling_mode, request_id, reservation_key)
+    \/ \E work_id \in WorkIdValues : \E content_shape \in ContentShapeValues : \E handling_mode \in HandlingModeValues : \E request_id \in RequestIdValues : \E reservation_key \in ReservationKeyValues : SubmitWorkFromRunning(work_id, content_shape, handling_mode, request_id, reservation_key)
+    \/ \E work_id \in WorkIdValues : \E content_shape \in ContentShapeValues : \E handling_mode \in HandlingModeValues : \E request_id \in RequestIdValues : \E reservation_key \in ReservationKeyValues : \E admission_effect \in AdmissionEffectValues : AdmissionAcceptedIdleQueue(work_id, content_shape, handling_mode, request_id, reservation_key, admission_effect)
+    \/ \E work_id \in WorkIdValues : \E content_shape \in ContentShapeValues : \E handling_mode \in HandlingModeValues : \E request_id \in RequestIdValues : \E reservation_key \in ReservationKeyValues : \E admission_effect \in AdmissionEffectValues : AdmissionAcceptedIdleSteer(work_id, content_shape, handling_mode, request_id, reservation_key, admission_effect)
+    \/ \E work_id \in WorkIdValues : \E content_shape \in ContentShapeValues : \E handling_mode \in HandlingModeValues : \E request_id \in RequestIdValues : \E reservation_key \in ReservationKeyValues : \E admission_effect \in AdmissionEffectValues : AdmissionAcceptedRunningQueue(work_id, content_shape, handling_mode, request_id, reservation_key, admission_effect)
+    \/ \E work_id \in WorkIdValues : \E content_shape \in ContentShapeValues : \E handling_mode \in HandlingModeValues : \E request_id \in RequestIdValues : \E reservation_key \in ReservationKeyValues : \E admission_effect \in AdmissionEffectValues : AdmissionAcceptedRunningSteer(work_id, content_shape, handling_mode, request_id, reservation_key, admission_effect)
+    \/ \E work_id \in WorkIdValues : \E reason \in {"alpha", "beta"} : AdmissionRejectedIdle(work_id, reason)
+    \/ \E work_id \in WorkIdValues : \E reason \in {"alpha", "beta"} : AdmissionRejectedRunning(work_id, reason)
+    \/ \E work_id \in WorkIdValues : \E existing_work_id \in WorkIdValues : AdmissionDeduplicatedIdle(work_id, existing_work_id)
+    \/ \E work_id \in WorkIdValues : \E existing_work_id \in WorkIdValues : AdmissionDeduplicatedRunning(work_id, existing_work_id)
     \/ ExternalToolDeltaReceivedIdle
     \/ ExternalToolDeltaReceivedRunning
     \/ ExternalToolDeltaReceivedRecovering

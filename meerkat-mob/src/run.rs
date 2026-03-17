@@ -126,6 +126,7 @@ mod tests {
     };
     use crate::ids::{BranchId, ProfileName};
     use crate::profile::{Profile, ToolConfig};
+    use meerkat_core::types::ContentInput;
     use std::collections::BTreeMap;
 
     fn sample_definition() -> MobDefinition {
@@ -134,7 +135,7 @@ mod tests {
             StepId::from("s1"),
             FlowStepSpec {
                 role: ProfileName::from("worker"),
-                message: "do it".to_string(),
+                message: ContentInput::from("do it"),
                 depends_on: Vec::new(),
                 dispatch_mode: DispatchMode::FanOut,
                 collection_policy: crate::definition::CollectionPolicy::All,

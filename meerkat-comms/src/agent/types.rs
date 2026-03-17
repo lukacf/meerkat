@@ -6,7 +6,7 @@
 use crate::inproc::InprocRegistry;
 use crate::{InboxItem, MessageKind, PubKey, TrustedPeers};
 use meerkat_core::PlainEventSource;
-use meerkat_core::types::ContentBlock;
+use meerkat_core::types::{ContentBlock, HandlingMode, RenderMetadata};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::borrow::Cow;
@@ -21,8 +21,12 @@ pub struct PlainMessage {
     pub source: PlainEventSource,
     /// Optional interaction ID for subscription correlation.
     pub interaction_id: Option<uuid::Uuid>,
+    /// Handling mode for ordinary external/member submissions.
+    pub handling_mode: HandlingMode,
     /// Optional multimodal content blocks.
     pub blocks: Option<Vec<ContentBlock>>,
+    /// Optional normalized rendering metadata.
+    pub render_metadata: Option<RenderMetadata>,
 }
 
 impl PlainMessage {
@@ -64,13 +68,17 @@ pub fn drain_inbox_item(
         InboxItem::PlainEvent {
             body,
             source,
+            handling_mode,
             interaction_id,
             blocks,
+            render_metadata,
         } => Some(DrainedMessage::Plain(PlainMessage {
             body: body.clone(),
             source: *source,
+            handling_mode: *handling_mode,
             interaction_id: *interaction_id,
             blocks: blocks.clone(),
+            render_metadata: render_metadata.clone(),
         })),
         InboxItem::SubagentResult { .. } => None,
     }
@@ -905,8 +913,10 @@ mod tests {
         let item = InboxItem::PlainEvent {
             body: "New email arrived".to_string(),
             source: PlainEventSource::Tcp,
+            handling_mode: HandlingMode::Queue,
             interaction_id: None,
             blocks: None,
+            render_metadata: None,
         };
         let drained = drain_inbox_item(&item, &trusted, true);
 
@@ -928,8 +938,10 @@ mod tests {
         let msg = PlainMessage {
             body: "CPU > 95% on prod-3".to_string(),
             source: PlainEventSource::Webhook,
+            handling_mode: HandlingMode::Queue,
             interaction_id: None,
             blocks: None,
+            render_metadata: None,
         };
         let text = msg.to_user_message_text();
         assert_eq!(text, "[EVENT via webhook] CPU > 95% on prod-3");
@@ -949,8 +961,10 @@ mod tests {
             let msg = PlainMessage {
                 body: "test".to_string(),
                 source,
+                handling_mode: HandlingMode::Queue,
                 interaction_id: None,
                 blocks: None,
+                render_metadata: None,
             };
             assert!(
                 msg.to_user_message_text().contains(label),

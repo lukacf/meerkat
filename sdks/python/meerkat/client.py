@@ -708,8 +708,26 @@ class MeerkatClient:
     async def mob_lifecycle(self, mob_id: str, action: str) -> None:
         await self._request("mob/lifecycle", {"mob_id": mob_id, "action": action})
 
-    async def send_mob_message(self, mob_id: str, meerkat_id: str, message: str) -> None:
-        await self._request("mob/send", {"mob_id": mob_id, "meerkat_id": meerkat_id, "message": message})
+    async def send_mob_member_content(
+        self,
+        mob_id: str,
+        meerkat_id: str,
+        content: str | list[dict[str, Any]],
+        *,
+        handling_mode: str = "queue",
+        render_metadata: dict[str, Any] | None = None,
+    ) -> str:
+        result = await self._request(
+            "mob/send",
+            {
+                "mob_id": mob_id,
+                "meerkat_id": meerkat_id,
+                "content": content,
+                "handling_mode": handling_mode,
+                "render_metadata": render_metadata,
+            },
+        )
+        return str(result.get("session_id", ""))
 
     async def append_mob_system_context(
         self,

@@ -5,6 +5,7 @@ use crate::{
     EntryInput, Expr, MachineInstance, Route, RouteBindingSource, RouteDelivery, RouteFieldBinding,
     RouteTarget, SchedulerRule,
 };
+use std::collections::BTreeMap;
 
 pub fn runtime_pipeline_composition() -> CompositionSchema {
     CompositionSchema {
@@ -123,9 +124,14 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                 input_variant: "RetryRequested".into(),
             },
             EntryInput {
-                name: "cancel_requested".into(),
+                name: "cancel_now".into(),
                 machine: "turn_execution".into(),
-                input_variant: "CancelRequested".into(),
+                input_variant: "CancelNow".into(),
+            },
+            EntryInput {
+                name: "cancel_after_boundary".into(),
+                machine: "turn_execution".into(),
+                input_variant: "CancelAfterBoundary".into(),
             },
             EntryInput {
                 name: "cancellation_observed".into(),
@@ -149,36 +155,43 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                 },
                 bindings: vec![
                     RouteFieldBinding {
-                        to_field: "input_id".into(),
+                        to_field: "work_id".into(),
                         source: RouteBindingSource::Field {
-                            from_field: "candidate_id".into(),
+                            from_field: "work_id".into(),
                             allow_named_alias: true,
                         },
                     },
                     RouteFieldBinding {
-                        to_field: "input_kind".into(),
+                        to_field: "content_shape".into(),
                         source: RouteBindingSource::Field {
-                            from_field: "candidate_kind".into(),
+                            from_field: "content_shape".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "request_id".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "request_id".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "reservation_key".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "reservation_key".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "handling_mode".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "handling_mode".into(),
                             allow_named_alias: false,
                         },
                     },
                     RouteFieldBinding {
                         to_field: "policy".into(),
                         source: RouteBindingSource::Literal(Expr::String("PromptAdmission".into())),
-                    },
-                    RouteFieldBinding {
-                        to_field: "wake".into(),
-                        source: RouteBindingSource::Field {
-                            from_field: "wake".into(),
-                            allow_named_alias: false,
-                        },
-                    },
-                    RouteFieldBinding {
-                        to_field: "process".into(),
-                        source: RouteBindingSource::Field {
-                            from_field: "process".into(),
-                            allow_named_alias: false,
-                        },
                     },
                 ],
                 delivery: RouteDelivery::Immediate,
@@ -512,28 +525,13 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                     CompositionWitnessInput {
                         machine: "runtime_control".into(),
                         input_variant: "AdmissionAccepted".into(),
-                        fields: vec![
-                            CompositionWitnessField {
-                                field: "candidate_id".into(),
-                                expr: Expr::String("prompt_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "candidate_kind".into(),
-                                expr: Expr::String("WorkInput".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "admission_effect".into(),
-                                expr: Expr::String("SubmitAdmittedIngressEffect".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "wake".into(),
-                                expr: Expr::Bool(true),
-                            },
-                            CompositionWitnessField {
-                                field: "process".into(),
-                                expr: Expr::Bool(false),
-                            },
-                        ],
+                        fields: admission_accepted_fields(
+                            "prompt_1",
+                            "WorkInput",
+                            "TextOnly",
+                            true,
+                            false,
+                        ),
                     },
                 ],
                 expected_routes: vec!["admitted_work_enters_ingress".into()],
@@ -574,21 +572,21 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                 ],
                 expected_transitions: vec![
                     witness_transition("runtime_control", "Initialize"),
-                    witness_transition("runtime_control", "AdmissionAcceptedIdleWake"),
-                    witness_transition("runtime_ingress", "AdmitQueuedWake"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleQueue"),
+                    witness_transition("runtime_ingress", "AdmitQueuedQueue"),
                 ],
                 expected_transition_order: vec![
                     witness_transition_order(
                         "runtime_control",
                         "Initialize",
                         "runtime_control",
-                        "AdmissionAcceptedIdleWake",
+                        "AdmissionAcceptedIdleQueue",
                     ),
                     witness_transition_order(
                         "runtime_control",
-                        "AdmissionAcceptedIdleWake",
+                        "AdmissionAcceptedIdleQueue",
                         "runtime_ingress",
-                        "AdmitQueuedWake",
+                        "AdmitQueuedQueue",
                     ),
                 ],
                 state_limits: CompositionStateLimits {
@@ -613,28 +611,13 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                     CompositionWitnessInput {
                         machine: "runtime_control".into(),
                         input_variant: "AdmissionAccepted".into(),
-                        fields: vec![
-                            CompositionWitnessField {
-                                field: "candidate_id".into(),
-                                expr: Expr::String("prompt_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "candidate_kind".into(),
-                                expr: Expr::String("WorkInput".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "admission_effect".into(),
-                                expr: Expr::String("SubmitAdmittedIngressEffect".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "wake".into(),
-                                expr: Expr::Bool(true),
-                            },
-                            CompositionWitnessField {
-                                field: "process".into(),
-                                expr: Expr::Bool(true),
-                            },
-                        ],
+                        fields: admission_accepted_fields(
+                            "prompt_1",
+                            "WorkInput",
+                            "InlineImage",
+                            true,
+                            true,
+                        ),
                     },
                 ],
                 expected_routes: vec!["admitted_work_enters_ingress".into()],
@@ -675,21 +658,21 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                 ],
                 expected_transitions: vec![
                     witness_transition("runtime_control", "Initialize"),
-                    witness_transition("runtime_control", "AdmissionAcceptedIdleWakeAndProcess"),
-                    witness_transition("runtime_ingress", "AdmitQueuedWakeAndProcess"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
                 ],
                 expected_transition_order: vec![
                     witness_transition_order(
                         "runtime_control",
                         "Initialize",
                         "runtime_control",
-                        "AdmissionAcceptedIdleWakeAndProcess",
+                        "AdmissionAcceptedIdleSteer",
                     ),
                     witness_transition_order(
                         "runtime_control",
-                        "AdmissionAcceptedIdleWakeAndProcess",
+                        "AdmissionAcceptedIdleSteer",
                         "runtime_ingress",
-                        "AdmitQueuedWakeAndProcess",
+                        "AdmitQueuedSteer",
                     ),
                 ],
                 state_limits: CompositionStateLimits {
@@ -713,40 +696,43 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                     },
                     CompositionWitnessInput {
                         machine: "runtime_control".into(),
-                        input_variant: "BeginRun".into(),
-                        fields: vec![CompositionWitnessField {
-                            field: "run_id".into(),
-                            expr: Expr::String("runid_1".into()),
-                        }],
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "seed_1",
+                            "WorkInput",
+                            "TextOnly",
+                            true,
+                            false,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "StageDrainSnapshot".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "contributing_work_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("seed_1".into())]),
+                            },
+                        ],
                     },
                     CompositionWitnessInput {
                         machine: "runtime_control".into(),
                         input_variant: "AdmissionAccepted".into(),
-                        fields: vec![
-                            CompositionWitnessField {
-                                field: "candidate_id".into(),
-                                expr: Expr::String("prompt_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "candidate_kind".into(),
-                                expr: Expr::String("WorkInput".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "admission_effect".into(),
-                                expr: Expr::String("SubmitAdmittedIngressEffect".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "wake".into(),
-                                expr: Expr::Bool(false),
-                            },
-                            CompositionWitnessField {
-                                field: "process".into(),
-                                expr: Expr::Bool(false),
-                            },
-                        ],
+                        fields: admission_accepted_fields(
+                            "prompt_1",
+                            "WorkInput",
+                            "TextOnly",
+                            false,
+                            false,
+                        ),
                     },
                 ],
                 expected_routes: vec![
+                    "staged_run_notifies_control".into(),
                     "control_starts_execution".into(),
                     "admitted_work_enters_ingress".into(),
                 ],
@@ -788,12 +774,26 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                 ],
                 expected_transitions: vec![
                     witness_transition("runtime_control", "Initialize"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleQueue"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshot"),
                     witness_transition("runtime_control", "BeginRunFromIdle"),
                     witness_transition("turn_execution", "StartConversationRun"),
-                    witness_transition("runtime_control", "AdmissionAcceptedRunningNone"),
-                    witness_transition("runtime_ingress", "AdmitQueuedNone"),
+                    witness_transition("runtime_control", "AdmissionAcceptedRunningQueue"),
+                    witness_transition("runtime_ingress", "AdmitQueuedQueue"),
                 ],
                 expected_transition_order: vec![
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedIdleQueue",
+                        "runtime_ingress",
+                        "StageDrainSnapshot",
+                    ),
+                    witness_transition_order(
+                        "runtime_ingress",
+                        "StageDrainSnapshot",
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                    ),
                     witness_transition_order(
                         "runtime_control",
                         "BeginRunFromIdle",
@@ -804,24 +804,24 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                         "runtime_control",
                         "BeginRunFromIdle",
                         "runtime_control",
-                        "AdmissionAcceptedRunningNone",
+                        "AdmissionAcceptedRunningQueue",
                     ),
                     witness_transition_order(
                         "runtime_control",
-                        "AdmissionAcceptedRunningNone",
+                        "AdmissionAcceptedRunningQueue",
                         "runtime_ingress",
-                        "AdmitQueuedNone",
+                        "AdmitQueuedQueue",
                     ),
                 ],
                 state_limits: CompositionStateLimits {
-                    step_limit: 5,
-                    pending_input_limit: 3,
+                    step_limit: 8,
+                    pending_input_limit: 4,
                     pending_route_limit: 1,
-                    delivered_route_limit: 2,
-                    emitted_effect_limit: 3,
-                    seq_limit: 2,
-                    set_limit: 2,
-                    map_limit: 2,
+                    delivered_route_limit: 3,
+                    emitted_effect_limit: 5,
+                    seq_limit: 3,
+                    set_limit: 3,
+                    map_limit: 3,
                 },
             },
             CompositionWitness {
@@ -834,40 +834,43 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                     },
                     CompositionWitnessInput {
                         machine: "runtime_control".into(),
-                        input_variant: "BeginRun".into(),
-                        fields: vec![CompositionWitnessField {
-                            field: "run_id".into(),
-                            expr: Expr::String("runid_1".into()),
-                        }],
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "seed_1",
+                            "WorkInput",
+                            "TextOnly",
+                            true,
+                            false,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "StageDrainSnapshot".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "contributing_work_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("seed_1".into())]),
+                            },
+                        ],
                     },
                     CompositionWitnessInput {
                         machine: "runtime_control".into(),
                         input_variant: "AdmissionAccepted".into(),
-                        fields: vec![
-                            CompositionWitnessField {
-                                field: "candidate_id".into(),
-                                expr: Expr::String("prompt_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "candidate_kind".into(),
-                                expr: Expr::String("WorkInput".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "admission_effect".into(),
-                                expr: Expr::String("SubmitAdmittedIngressEffect".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "wake".into(),
-                                expr: Expr::Bool(true),
-                            },
-                            CompositionWitnessField {
-                                field: "process".into(),
-                                expr: Expr::Bool(true),
-                            },
-                        ],
+                        fields: admission_accepted_fields(
+                            "prompt_1",
+                            "WorkInput",
+                            "InlineImage",
+                            true,
+                            true,
+                        ),
                     },
                 ],
                 expected_routes: vec![
+                    "staged_run_notifies_control".into(),
                     "control_starts_execution".into(),
                     "admitted_work_enters_ingress".into(),
                 ],
@@ -909,12 +912,26 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                 ],
                 expected_transitions: vec![
                     witness_transition("runtime_control", "Initialize"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleQueue"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshot"),
                     witness_transition("runtime_control", "BeginRunFromIdle"),
                     witness_transition("turn_execution", "StartConversationRun"),
-                    witness_transition("runtime_control", "AdmissionAcceptedRunningWakeAndProcess"),
-                    witness_transition("runtime_ingress", "AdmitQueuedWakeAndProcess"),
+                    witness_transition("runtime_control", "AdmissionAcceptedRunningSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
                 ],
                 expected_transition_order: vec![
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedIdleQueue",
+                        "runtime_ingress",
+                        "StageDrainSnapshot",
+                    ),
+                    witness_transition_order(
+                        "runtime_ingress",
+                        "StageDrainSnapshot",
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                    ),
                     witness_transition_order(
                         "runtime_control",
                         "BeginRunFromIdle",
@@ -925,24 +942,165 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                         "runtime_control",
                         "BeginRunFromIdle",
                         "runtime_control",
-                        "AdmissionAcceptedRunningWakeAndProcess",
+                        "AdmissionAcceptedRunningSteer",
                     ),
                     witness_transition_order(
                         "runtime_control",
-                        "AdmissionAcceptedRunningWakeAndProcess",
+                        "AdmissionAcceptedRunningSteer",
                         "runtime_ingress",
-                        "AdmitQueuedWakeAndProcess",
+                        "AdmitQueuedSteer",
                     ),
                 ],
                 state_limits: CompositionStateLimits {
-                    step_limit: 5,
-                    pending_input_limit: 3,
+                    step_limit: 8,
+                    pending_input_limit: 4,
                     pending_route_limit: 1,
-                    delivered_route_limit: 2,
-                    emitted_effect_limit: 4,
-                    seq_limit: 2,
-                    set_limit: 2,
-                    map_limit: 2,
+                    delivered_route_limit: 3,
+                    emitted_effect_limit: 6,
+                    seq_limit: 3,
+                    set_limit: 3,
+                    map_limit: 3,
+                },
+            },
+            CompositionWitness {
+                name: "steer_batch_running".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "seed_1",
+                            "WorkInput",
+                            "TextOnly",
+                            true,
+                            false,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "prompt_1",
+                            "WorkInput",
+                            "TextOnly",
+                            false,
+                            true,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "prompt_2",
+                            "WorkInput",
+                            "InlineImage",
+                            false,
+                            true,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "StageDrainSnapshot".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "contributing_work_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("seed_1".into())]),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "StageDrainSnapshot".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_2".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "contributing_work_ids".into(),
+                                expr: Expr::SeqLiteral(vec![
+                                    Expr::String("prompt_1".into()),
+                                    Expr::String("prompt_2".into()),
+                                ]),
+                            },
+                        ],
+                    },
+                ],
+                expected_routes: vec![
+                    "control_starts_execution".into(),
+                    "admitted_work_enters_ingress".into(),
+                    "staged_run_notifies_control".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state(
+                        "runtime_ingress",
+                        Some("Active"),
+                        vec![
+                            CompositionWitnessField {
+                                field: "current_run".into(),
+                                expr: Expr::Some(Box::new(Expr::String("runid_2".into()))),
+                            },
+                            CompositionWitnessField {
+                                field: "current_run_contributors".into(),
+                                expr: Expr::SeqLiteral(vec![
+                                    Expr::String("prompt_1".into()),
+                                    Expr::String("prompt_2".into()),
+                                ]),
+                            },
+                            CompositionWitnessField {
+                                field: "queue".into(),
+                                expr: Expr::SeqLiteral(vec![]),
+                            },
+                        ],
+                    ),
+                ],
+                expected_transitions: vec![
+                    witness_transition("runtime_control", "Initialize"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleQueue"),
+                    witness_transition("runtime_control", "BeginRunFromIdle"),
+                    witness_transition("runtime_control", "AdmissionAcceptedRunningSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshot"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedIdleQueue",
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedRunningSteer",
+                        "runtime_ingress",
+                        "AdmitQueuedSteer",
+                    ),
+                    witness_transition_order(
+                        "runtime_ingress",
+                        "AdmitQueuedSteer",
+                        "runtime_ingress",
+                        "StageDrainSnapshot",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 10,
+                    pending_input_limit: 6,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 5,
+                    emitted_effect_limit: 8,
+                    seq_limit: 4,
+                    set_limit: 4,
+                    map_limit: 4,
                 },
             },
             CompositionWitness {
@@ -956,26 +1114,32 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                     CompositionWitnessInput {
                         machine: "runtime_ingress".into(),
                         input_variant: "AdmitQueued".into(),
-                        fields: vec![
-                            CompositionWitnessField { field: "input_id".into(), expr: Expr::String("inputid_1".into()) },
-                            CompositionWitnessField { field: "input_kind".into(), expr: Expr::String("WorkInput".into()) },
-                            CompositionWitnessField { field: "policy".into(), expr: Expr::String("policydecision_1".into()) },
-                            CompositionWitnessField { field: "wake".into(), expr: Expr::Bool(false) },
-                            CompositionWitnessField { field: "process".into(), expr: Expr::Bool(false) },
-                        ],
+                        fields: admit_queued_fields(
+                            "inputid_1",
+                            "WorkInput",
+                            "TextOnly",
+                            "policydecision_1",
+                            false,
+                            false,
+                        ),
                     },
                     CompositionWitnessInput {
                         machine: "runtime_ingress".into(),
                         input_variant: "StageDrainSnapshot".into(),
                         fields: vec![
                             CompositionWitnessField { field: "run_id".into(), expr: Expr::String("runid_1".into()) },
-                            CompositionWitnessField { field: "contributing_input_ids".into(), expr: Expr::SeqLiteral(vec![Expr::String("inputid_1".into())]) },
+                            CompositionWitnessField { field: "contributing_work_ids".into(), expr: Expr::SeqLiteral(vec![Expr::String("inputid_1".into())]) },
                         ],
                     },
                     CompositionWitnessInput {
                         machine: "turn_execution".into(),
                         input_variant: "PrimitiveApplied".into(),
-                        fields: vec![CompositionWitnessField { field: "run_id".into(), expr: Expr::String("runid_1".into()) }],
+                        fields: primitive_applied_fields(
+                            "runid_1",
+                            "TextOnly",
+                            false,
+                            false,
+                        ),
                     },
                     CompositionWitnessInput {
                         machine: "turn_execution".into(),
@@ -1063,20 +1227,21 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                     CompositionWitnessInput {
                         machine: "runtime_ingress".into(),
                         input_variant: "AdmitQueued".into(),
-                        fields: vec![
-                            CompositionWitnessField { field: "input_id".into(), expr: Expr::String("inputid_1".into()) },
-                            CompositionWitnessField { field: "input_kind".into(), expr: Expr::String("WorkInput".into()) },
-                            CompositionWitnessField { field: "policy".into(), expr: Expr::String("policydecision_1".into()) },
-                            CompositionWitnessField { field: "wake".into(), expr: Expr::Bool(false) },
-                            CompositionWitnessField { field: "process".into(), expr: Expr::Bool(false) },
-                        ],
+                        fields: admit_queued_fields(
+                            "inputid_1",
+                            "WorkInput",
+                            "TextOnly",
+                            "policydecision_1",
+                            false,
+                            false,
+                        ),
                     },
                     CompositionWitnessInput {
                         machine: "runtime_ingress".into(),
                         input_variant: "StageDrainSnapshot".into(),
                         fields: vec![
                             CompositionWitnessField { field: "run_id".into(), expr: Expr::String("runid_1".into()) },
-                            CompositionWitnessField { field: "contributing_input_ids".into(), expr: Expr::SeqLiteral(vec![Expr::String("inputid_1".into())]) },
+                            CompositionWitnessField { field: "contributing_work_ids".into(), expr: Expr::SeqLiteral(vec![Expr::String("inputid_1".into())]) },
                         ],
                     },
                     CompositionWitnessInput {
@@ -1159,25 +1324,26 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                     CompositionWitnessInput {
                         machine: "runtime_ingress".into(),
                         input_variant: "AdmitQueued".into(),
-                        fields: vec![
-                            CompositionWitnessField { field: "input_id".into(), expr: Expr::String("inputid_1".into()) },
-                            CompositionWitnessField { field: "input_kind".into(), expr: Expr::String("WorkInput".into()) },
-                            CompositionWitnessField { field: "policy".into(), expr: Expr::String("policydecision_1".into()) },
-                            CompositionWitnessField { field: "wake".into(), expr: Expr::Bool(false) },
-                            CompositionWitnessField { field: "process".into(), expr: Expr::Bool(false) },
-                        ],
+                        fields: admit_queued_fields(
+                            "inputid_1",
+                            "WorkInput",
+                            "TextOnly",
+                            "policydecision_1",
+                            false,
+                            false,
+                        ),
                     },
                     CompositionWitnessInput {
                         machine: "runtime_ingress".into(),
                         input_variant: "StageDrainSnapshot".into(),
                         fields: vec![
                             CompositionWitnessField { field: "run_id".into(), expr: Expr::String("runid_1".into()) },
-                            CompositionWitnessField { field: "contributing_input_ids".into(), expr: Expr::SeqLiteral(vec![Expr::String("inputid_1".into())]) },
+                            CompositionWitnessField { field: "contributing_work_ids".into(), expr: Expr::SeqLiteral(vec![Expr::String("inputid_1".into())]) },
                         ],
                     },
                     CompositionWitnessInput {
                         machine: "turn_execution".into(),
-                        input_variant: "CancelRequested".into(),
+                        input_variant: "CancelNow".into(),
                         fields: vec![CompositionWitnessField { field: "run_id".into(), expr: Expr::String("runid_1".into()) }],
                     },
                     CompositionWitnessInput {
@@ -1208,7 +1374,7 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                     witness_transition("runtime_ingress", "StageDrainSnapshot"),
                     witness_transition("runtime_control", "BeginRunFromIdle"),
                     witness_transition("turn_execution", "StartConversationRun"),
-                    witness_transition("turn_execution", "CancelRequestedFromApplyingPrimitive"),
+                    witness_transition("turn_execution", "CancelNowFromApplyingPrimitive"),
                     witness_transition("turn_execution", "CancellationObserved"),
                     witness_transition("runtime_ingress", "RunCancelled"),
                     witness_transition("runtime_control", "RunCancelled"),
@@ -1251,6 +1417,145 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                 },
             },
             CompositionWitness {
+                name: "cancel_after_boundary_path".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "AdmitQueued".into(),
+                        fields: admit_queued_fields(
+                            "inputid_1",
+                            "WorkInput",
+                            "TextOnly",
+                            "policydecision_1",
+                            false,
+                            false,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "StageDrainSnapshot".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "contributing_work_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("inputid_1".into())]),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "PrimitiveApplied".into(),
+                        fields: primitive_applied_fields("runid_1", "TextOnly", false, false),
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "CancelAfterBoundary".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "LlmReturnedTerminal".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "BoundaryComplete".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                ],
+                expected_routes: vec![
+                    "staged_run_notifies_control".into(),
+                    "control_starts_execution".into(),
+                    "execution_cancel_updates_ingress".into(),
+                    "execution_cancel_notifies_control".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state("runtime_control", Some("Idle"), vec![]),
+                    witness_state("runtime_ingress", Some("Active"), vec![CompositionWitnessField {
+                        field: "current_run".into(),
+                        expr: Expr::None,
+                    }]),
+                    witness_state("turn_execution", Some("Cancelled"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("runtime_ingress", "StageDrainSnapshot"),
+                    witness_transition("runtime_control", "BeginRunFromIdle"),
+                    witness_transition("turn_execution", "StartConversationRun"),
+                    witness_transition("turn_execution", "PrimitiveAppliedConversationTurn"),
+                    witness_transition("turn_execution", "CancelAfterBoundaryFromCallingLlm"),
+                    witness_transition("turn_execution", "LlmReturnedTerminal"),
+                    witness_transition("turn_execution", "BoundaryCompleteCancelsAfterBoundary"),
+                    witness_transition("runtime_ingress", "RunCancelled"),
+                    witness_transition("runtime_control", "RunCancelled"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "runtime_ingress",
+                        "StageDrainSnapshot",
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                        "turn_execution",
+                        "StartConversationRun",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "PrimitiveAppliedConversationTurn",
+                        "turn_execution",
+                        "CancelAfterBoundaryFromCallingLlm",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "CancelAfterBoundaryFromCallingLlm",
+                        "turn_execution",
+                        "BoundaryCompleteCancelsAfterBoundary",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "BoundaryCompleteCancelsAfterBoundary",
+                        "runtime_ingress",
+                        "RunCancelled",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "BoundaryCompleteCancelsAfterBoundary",
+                        "runtime_control",
+                        "RunCancelled",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 10,
+                    pending_input_limit: 7,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 6,
+                    emitted_effect_limit: 6,
+                    seq_limit: 5,
+                    set_limit: 5,
+                    map_limit: 3,
+                },
+            },
+            CompositionWitness {
                 name: "control_preemption".into(),
                 preload_inputs: vec![
                     CompositionWitnessInput {
@@ -1261,13 +1566,14 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                     CompositionWitnessInput {
                         machine: "runtime_ingress".into(),
                         input_variant: "AdmitQueued".into(),
-                        fields: vec![
-                            CompositionWitnessField { field: "input_id".into(), expr: Expr::String("inputid_1".into()) },
-                            CompositionWitnessField { field: "input_kind".into(), expr: Expr::String("WorkInput".into()) },
-                            CompositionWitnessField { field: "policy".into(), expr: Expr::String("policydecision_1".into()) },
-                            CompositionWitnessField { field: "wake".into(), expr: Expr::Bool(true) },
-                            CompositionWitnessField { field: "process".into(), expr: Expr::Bool(true) },
-                        ],
+                        fields: admit_queued_fields(
+                            "inputid_1",
+                            "WorkInput",
+                            "TextOnly",
+                            "policydecision_1",
+                            true,
+                            true,
+                        ),
                     },
                 ],
                 expected_routes: vec![],
@@ -1278,13 +1584,13 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                 expected_states: vec![witness_state("runtime_control", Some("Idle"), vec![])],
                 expected_transitions: vec![
                     witness_transition("runtime_control", "Initialize"),
-                    witness_transition("runtime_ingress", "AdmitQueuedWakeAndProcess"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
                 ],
                 expected_transition_order: vec![witness_transition_order(
                     "runtime_control",
                     "Initialize",
                     "runtime_ingress",
-                        "AdmitQueuedWakeAndProcess",
+                        "AdmitQueuedSteer",
                 )],
                 state_limits: CompositionStateLimits {
                     step_limit: 2,
@@ -1299,6 +1605,16 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
             },
         ],
         deep_domain_cardinality: 2,
+        deep_domain_overrides: BTreeMap::from([
+            ("ContentShapeValues".into(), 1),
+            ("HandlingModeValues".into(), 2),
+            ("PolicyDecisionValues".into(), 1),
+            ("RequestIdValues".into(), 1),
+            ("ReservationKeyValues".into(), 1),
+            ("RunIdValues".into(), 1),
+            ("StringValues".into(), 1),
+            ("WorkIdValues".into(), 2),
+        ]),
         witness_domain_cardinality: 1,
     }
 }
@@ -1507,10 +1823,12 @@ pub fn external_tool_bundle_composition() -> CompositionSchema {
                     CompositionWitnessInput {
                         machine: "turn_execution".into(),
                         input_variant: "PrimitiveApplied".into(),
-                        fields: vec![CompositionWitnessField {
-                            field: "run_id".into(),
-                            expr: Expr::String("runid_1".into()),
-                        }],
+                        fields: primitive_applied_fields(
+                            "runid_1",
+                            "TextOnly",
+                            false,
+                            false,
+                        ),
                     },
                     CompositionWitnessInput {
                         machine: "turn_execution".into(),
@@ -1607,10 +1925,12 @@ pub fn external_tool_bundle_composition() -> CompositionSchema {
                     CompositionWitnessInput {
                         machine: "turn_execution".into(),
                         input_variant: "PrimitiveApplied".into(),
-                        fields: vec![CompositionWitnessField {
-                            field: "run_id".into(),
-                            expr: Expr::String("runid_1".into()),
-                        }],
+                        fields: primitive_applied_fields(
+                            "runid_1",
+                            "TextOnly",
+                            false,
+                            false,
+                        ),
                     },
                     CompositionWitnessInput {
                         machine: "turn_execution".into(),
@@ -1723,6 +2043,7 @@ pub fn external_tool_bundle_composition() -> CompositionSchema {
             },
         ],
         deep_domain_cardinality: 2,
+        deep_domain_overrides: BTreeMap::new(),
         witness_domain_cardinality: 1,
     }
 }
@@ -1786,19 +2107,40 @@ pub fn peer_runtime_bundle_composition() -> CompositionSchema {
                 effect_variant: "SubmitPeerInputCandidate".into(),
                 to: RouteTarget {
                     machine: "runtime_control".into(),
-                    input_variant: "SubmitCandidate".into(),
+                    input_variant: "SubmitWork".into(),
                 },
                 bindings: vec![
                     RouteFieldBinding {
-                        to_field: "candidate_id".into(),
+                        to_field: "work_id".into(),
                         source: RouteBindingSource::Field {
                             from_field: "raw_item_id".into(),
                             allow_named_alias: true,
                         },
                     },
                     RouteFieldBinding {
-                        to_field: "candidate_kind".into(),
-                        source: RouteBindingSource::Literal(Expr::String("PeerInput".into())),
+                        to_field: "content_shape".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "content_shape".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "request_id".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "request_id".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "reservation_key".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "reservation_key".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "handling_mode".into(),
+                        source: RouteBindingSource::Literal(Expr::String("Steer".into())),
                     },
                 ],
                 delivery: RouteDelivery::Immediate,
@@ -1813,30 +2155,43 @@ pub fn peer_runtime_bundle_composition() -> CompositionSchema {
                 },
                 bindings: vec![
                     RouteFieldBinding {
-                        to_field: "input_id".into(),
+                        to_field: "work_id".into(),
                         source: RouteBindingSource::Field {
-                            from_field: "candidate_id".into(),
+                            from_field: "work_id".into(),
                             allow_named_alias: true,
                         },
                     },
                     RouteFieldBinding {
-                        to_field: "input_kind".into(),
+                        to_field: "content_shape".into(),
                         source: RouteBindingSource::Field {
-                            from_field: "candidate_kind".into(),
+                            from_field: "content_shape".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "request_id".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "request_id".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "reservation_key".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "reservation_key".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "handling_mode".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "handling_mode".into(),
                             allow_named_alias: false,
                         },
                     },
                     RouteFieldBinding {
                         to_field: "policy".into(),
                         source: RouteBindingSource::Literal(Expr::String("PeerQueued".into())),
-                    },
-                    RouteFieldBinding {
-                        to_field: "wake".into(),
-                        source: RouteBindingSource::Literal(Expr::Bool(true)),
-                    },
-                    RouteFieldBinding {
-                        to_field: "process".into(),
-                        source: RouteBindingSource::Literal(Expr::Bool(true)),
                     },
                 ],
                 delivery: RouteDelivery::Immediate,
@@ -1856,7 +2211,7 @@ pub fn peer_runtime_bundle_composition() -> CompositionSchema {
                 name: "peer_work_enters_runtime_via_canonical_admission".into(),
                 kind: CompositionInvariantKind::ObservedInputOriginatesFromEffect {
                     to_machine: "runtime_control".into(),
-                    input_variant: "SubmitCandidate".into(),
+                    input_variant: "SubmitWork".into(),
                     from_machine: "peer_comms".into(),
                     effect_variant: "SubmitPeerInputCandidate".into(),
                 },
@@ -1921,20 +2276,15 @@ pub fn peer_runtime_bundle_composition() -> CompositionSchema {
                     CompositionWitnessInput {
                         machine: "peer_comms".into(),
                         input_variant: "ReceivePeerEnvelope".into(),
-                        fields: vec![
-                            CompositionWitnessField {
-                                field: "raw_item_id".into(),
-                                expr: Expr::String("raw_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "peer_id".into(),
-                                expr: Expr::String("peer_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "raw_kind".into(),
-                                expr: Expr::String("Message".into()),
-                            },
-                        ],
+                        fields: peer_envelope_fields(
+                            "raw_1",
+                            "peer_1",
+                            "Message",
+                            "see attached diagram",
+                            "InlineImage",
+                            None,
+                            None,
+                        ),
                     },
                     CompositionWitnessInput {
                         machine: "peer_comms".into(),
@@ -1993,20 +2343,15 @@ pub fn peer_runtime_bundle_composition() -> CompositionSchema {
                     CompositionWitnessInput {
                         machine: "peer_comms".into(),
                         input_variant: "ReceivePeerEnvelope".into(),
-                        fields: vec![
-                            CompositionWitnessField {
-                                field: "raw_item_id".into(),
-                                expr: Expr::String("raw_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "peer_id".into(),
-                                expr: Expr::String("peer_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "raw_kind".into(),
-                                expr: Expr::String("Message".into()),
-                            },
-                        ],
+                        fields: peer_envelope_fields(
+                            "raw_1",
+                            "peer_1",
+                            "request",
+                            "inspect this inline image",
+                            "InlineImage",
+                            Some("req_1"),
+                            Some("resv_1"),
+                        ),
                     },
                     CompositionWitnessInput {
                         machine: "peer_comms".into(),
@@ -2019,28 +2364,13 @@ pub fn peer_runtime_bundle_composition() -> CompositionSchema {
                     CompositionWitnessInput {
                         machine: "runtime_control".into(),
                         input_variant: "AdmissionAccepted".into(),
-                        fields: vec![
-                            CompositionWitnessField {
-                                field: "candidate_id".into(),
-                                expr: Expr::String("raw_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "candidate_kind".into(),
-                                expr: Expr::String("PeerInput".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "admission_effect".into(),
-                                expr: Expr::String("SubmitAdmittedIngressEffect".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "wake".into(),
-                                expr: Expr::Bool(false),
-                            },
-                            CompositionWitnessField {
-                                field: "process".into(),
-                                expr: Expr::Bool(true),
-                            },
-                        ],
+                        fields: admission_accepted_fields(
+                            "raw_1",
+                            "PeerInput",
+                            "InlineImage",
+                            true,
+                            true,
+                        ),
                     },
                 ],
                 expected_routes: vec![
@@ -2054,21 +2384,21 @@ pub fn peer_runtime_bundle_composition() -> CompositionSchema {
                 ],
                 expected_transitions: vec![
                     witness_transition("peer_comms", "SubmitTypedPeerInputDelivered"),
-                    witness_transition("runtime_control", "AdmissionAcceptedIdleWakeAndProcess"),
-                    witness_transition("runtime_ingress", "AdmitQueuedWakeAndProcess"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
                 ],
                 expected_transition_order: vec![
                     witness_transition_order(
                         "peer_comms",
                         "SubmitTypedPeerInputDelivered",
                         "runtime_control",
-                        "AdmissionAcceptedIdleWakeAndProcess",
+                        "AdmissionAcceptedIdleSteer",
                     ),
                     witness_transition_order(
                         "runtime_control",
-                        "AdmissionAcceptedIdleWakeAndProcess",
+                        "AdmissionAcceptedIdleSteer",
                         "runtime_ingress",
-                        "AdmitQueuedWakeAndProcess",
+                        "AdmitQueuedSteer",
                     ),
                 ],
                 state_limits: CompositionStateLimits {
@@ -2101,20 +2431,15 @@ pub fn peer_runtime_bundle_composition() -> CompositionSchema {
                     CompositionWitnessInput {
                         machine: "peer_comms".into(),
                         input_variant: "ReceivePeerEnvelope".into(),
-                        fields: vec![
-                            CompositionWitnessField {
-                                field: "raw_item_id".into(),
-                                expr: Expr::String("raw_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "peer_id".into(),
-                                expr: Expr::String("peer_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "raw_kind".into(),
-                                expr: Expr::String("Message".into()),
-                            },
-                        ],
+                        fields: peer_envelope_fields(
+                            "raw_1",
+                            "peer_1",
+                            "Message",
+                            "priority handoff",
+                            "TextOnly",
+                            None,
+                            None,
+                        ),
                     },
                 ],
                 expected_routes: vec![],
@@ -2146,6 +2471,7 @@ pub fn peer_runtime_bundle_composition() -> CompositionSchema {
             },
         ],
         deep_domain_cardinality: 2,
+        deep_domain_overrides: BTreeMap::new(),
         witness_domain_cardinality: 1,
     }
 }
@@ -2272,9 +2598,14 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                 input_variant: "FatalFailure".into(),
             },
             EntryInput {
-                name: "turn_cancel_requested".into(),
+                name: "turn_cancel_now".into(),
                 machine: "turn_execution".into(),
-                input_variant: "CancelRequested".into(),
+                input_variant: "CancelNow".into(),
+            },
+            EntryInput {
+                name: "turn_cancel_after_boundary".into(),
+                machine: "turn_execution".into(),
+                input_variant: "CancelAfterBoundary".into(),
             },
             EntryInput {
                 name: "turn_cancellation_observed".into(),
@@ -2289,19 +2620,19 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                 effect_variant: "SubmitOpEvent".into(),
                 to: RouteTarget {
                     machine: "runtime_control".into(),
-                    input_variant: "SubmitCandidate".into(),
+                    input_variant: "SubmitWork".into(),
                 },
                 bindings: vec![
                     RouteFieldBinding {
-                        to_field: "candidate_id".into(),
+                        to_field: "work_id".into(),
                         source: RouteBindingSource::Field {
                             from_field: "operation_id".into(),
                             allow_named_alias: true,
                         },
                     },
                     RouteFieldBinding {
-                        to_field: "candidate_kind".into(),
-                        source: RouteBindingSource::Literal(Expr::String("OperationInput".into())),
+                        to_field: "handling_mode".into(),
+                        source: RouteBindingSource::Literal(Expr::String("Steer".into())),
                     },
                 ],
                 delivery: RouteDelivery::Immediate,
@@ -2316,30 +2647,22 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                 },
                 bindings: vec![
                     RouteFieldBinding {
-                        to_field: "input_id".into(),
+                        to_field: "work_id".into(),
                         source: RouteBindingSource::Field {
-                            from_field: "candidate_id".into(),
+                            from_field: "work_id".into(),
                             allow_named_alias: true,
                         },
                     },
                     RouteFieldBinding {
-                        to_field: "input_kind".into(),
+                        to_field: "handling_mode".into(),
                         source: RouteBindingSource::Field {
-                            from_field: "candidate_kind".into(),
+                            from_field: "handling_mode".into(),
                             allow_named_alias: false,
                         },
                     },
                     RouteFieldBinding {
                         to_field: "policy".into(),
                         source: RouteBindingSource::Literal(Expr::String("OperationQueued".into())),
-                    },
-                    RouteFieldBinding {
-                        to_field: "wake".into(),
-                        source: RouteBindingSource::Literal(Expr::Bool(true)),
-                    },
-                    RouteFieldBinding {
-                        to_field: "process".into(),
-                        source: RouteBindingSource::Literal(Expr::Bool(true)),
                     },
                 ],
                 delivery: RouteDelivery::Immediate,
@@ -2521,7 +2844,7 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                 name: "async_op_events_reenter_runtime_via_operation_input".into(),
                 kind: CompositionInvariantKind::ObservedInputOriginatesFromEffect {
                     to_machine: "runtime_control".into(),
-                    input_variant: "SubmitCandidate".into(),
+                    input_variant: "SubmitWork".into(),
                     from_machine: "ops_lifecycle".into(),
                     effect_variant: "SubmitOpEvent".into(),
                 },
@@ -2648,28 +2971,13 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                     CompositionWitnessInput {
                         machine: "runtime_control".into(),
                         input_variant: "AdmissionAccepted".into(),
-                        fields: vec![
-                            CompositionWitnessField {
-                                field: "candidate_id".into(),
-                                expr: Expr::String("op_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "candidate_kind".into(),
-                                expr: Expr::String("OperationInput".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "admission_effect".into(),
-                                expr: Expr::String("SubmitAdmittedIngressEffect".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "wake".into(),
-                                expr: Expr::Bool(true),
-                            },
-                            CompositionWitnessField {
-                                field: "process".into(),
-                                expr: Expr::Bool(true),
-                            },
-                        ],
+                        fields: admission_accepted_fields(
+                            "op_1",
+                            "OperationInput",
+                            "TextOnly",
+                            true,
+                            true,
+                        ),
                     },
                     CompositionWitnessInput {
                         machine: "runtime_ingress".into(),
@@ -2680,7 +2988,7 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                                 expr: Expr::String("runid_1".into()),
                             },
                             CompositionWitnessField {
-                                field: "contributing_input_ids".into(),
+                                field: "contributing_work_ids".into(),
                                 expr: Expr::SeqLiteral(vec![Expr::String("op_1".into())]),
                             },
                         ],
@@ -2688,10 +2996,12 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                     CompositionWitnessInput {
                         machine: "turn_execution".into(),
                         input_variant: "PrimitiveApplied".into(),
-                        fields: vec![CompositionWitnessField {
-                            field: "run_id".into(),
-                            expr: Expr::String("runid_1".into()),
-                        }],
+                        fields: primitive_applied_fields(
+                            "runid_1",
+                            "TextOnly",
+                            false,
+                            false,
+                        ),
                     },
                     CompositionWitnessInput {
                         machine: "turn_execution".into(),
@@ -2729,8 +3039,8 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                 expected_transitions: vec![
                     witness_transition("ops_lifecycle", "RegisterOperation"),
                     witness_transition("ops_lifecycle", "ProvisioningSucceeded"),
-                    witness_transition("runtime_control", "AdmissionAcceptedIdleWakeAndProcess"),
-                    witness_transition("runtime_ingress", "AdmitQueuedWakeAndProcess"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
                     witness_transition("runtime_ingress", "StageDrainSnapshot"),
                     witness_transition("runtime_control", "BeginRunFromIdle"),
                     witness_transition("turn_execution", "StartConversationRun"),
@@ -2743,13 +3053,13 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                         "ops_lifecycle",
                         "ProvisioningSucceeded",
                         "runtime_control",
-                        "AdmissionAcceptedIdleWakeAndProcess",
+                        "AdmissionAcceptedIdleSteer",
                     ),
                     witness_transition_order(
                         "runtime_control",
-                        "AdmissionAcceptedIdleWakeAndProcess",
+                        "AdmissionAcceptedIdleSteer",
                         "runtime_ingress",
-                        "AdmitQueuedWakeAndProcess",
+                        "AdmitQueuedSteer",
                     ),
                     witness_transition_order(
                         "runtime_ingress",
@@ -2808,28 +3118,13 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                     CompositionWitnessInput {
                         machine: "runtime_control".into(),
                         input_variant: "AdmissionAccepted".into(),
-                        fields: vec![
-                            CompositionWitnessField {
-                                field: "candidate_id".into(),
-                                expr: Expr::String("op_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "candidate_kind".into(),
-                                expr: Expr::String("OperationInput".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "admission_effect".into(),
-                                expr: Expr::String("SubmitAdmittedIngressEffect".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "wake".into(),
-                                expr: Expr::Bool(true),
-                            },
-                            CompositionWitnessField {
-                                field: "process".into(),
-                                expr: Expr::Bool(true),
-                            },
-                        ],
+                        fields: admission_accepted_fields(
+                            "op_1",
+                            "OperationInput",
+                            "TextOnly",
+                            true,
+                            true,
+                        ),
                     },
                     CompositionWitnessInput {
                         machine: "runtime_ingress".into(),
@@ -2840,7 +3135,7 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                                 expr: Expr::String("runid_1".into()),
                             },
                             CompositionWitnessField {
-                                field: "contributing_input_ids".into(),
+                                field: "contributing_work_ids".into(),
                                 expr: Expr::SeqLiteral(vec![Expr::String("op_1".into())]),
                             },
                         ],
@@ -2870,8 +3165,8 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                 ],
                 expected_transitions: vec![
                     witness_transition("ops_lifecycle", "ProvisioningSucceeded"),
-                    witness_transition("runtime_control", "AdmissionAcceptedIdleWakeAndProcess"),
-                    witness_transition("runtime_ingress", "AdmitQueuedWakeAndProcess"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
                     witness_transition("runtime_ingress", "StageDrainSnapshot"),
                     witness_transition("runtime_control", "BeginRunFromIdle"),
                     witness_transition("turn_execution", "StartConversationRun"),
@@ -2943,28 +3238,13 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                     CompositionWitnessInput {
                         machine: "runtime_control".into(),
                         input_variant: "AdmissionAccepted".into(),
-                        fields: vec![
-                            CompositionWitnessField {
-                                field: "candidate_id".into(),
-                                expr: Expr::String("op_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "candidate_kind".into(),
-                                expr: Expr::String("OperationInput".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "admission_effect".into(),
-                                expr: Expr::String("SubmitAdmittedIngressEffect".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "wake".into(),
-                                expr: Expr::Bool(true),
-                            },
-                            CompositionWitnessField {
-                                field: "process".into(),
-                                expr: Expr::Bool(true),
-                            },
-                        ],
+                        fields: admission_accepted_fields(
+                            "op_1",
+                            "OperationInput",
+                            "TextOnly",
+                            true,
+                            true,
+                        ),
                     },
                     CompositionWitnessInput {
                         machine: "runtime_ingress".into(),
@@ -2975,14 +3255,14 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                                 expr: Expr::String("runid_1".into()),
                             },
                             CompositionWitnessField {
-                                field: "contributing_input_ids".into(),
+                                field: "contributing_work_ids".into(),
                                 expr: Expr::SeqLiteral(vec![Expr::String("op_1".into())]),
                             },
                         ],
                     },
                     CompositionWitnessInput {
                         machine: "turn_execution".into(),
-                        input_variant: "CancelRequested".into(),
+                        input_variant: "CancelNow".into(),
                         fields: vec![CompositionWitnessField {
                             field: "run_id".into(),
                             expr: Expr::String("runid_1".into()),
@@ -3013,12 +3293,12 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                 ],
                 expected_transitions: vec![
                     witness_transition("ops_lifecycle", "ProvisioningSucceeded"),
-                    witness_transition("runtime_control", "AdmissionAcceptedIdleWakeAndProcess"),
-                    witness_transition("runtime_ingress", "AdmitQueuedWakeAndProcess"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
                     witness_transition("runtime_ingress", "StageDrainSnapshot"),
                     witness_transition("runtime_control", "BeginRunFromIdle"),
                     witness_transition("turn_execution", "StartConversationRun"),
-                    witness_transition("turn_execution", "CancelRequestedFromApplyingPrimitive"),
+                    witness_transition("turn_execution", "CancelNowFromApplyingPrimitive"),
                     witness_transition("turn_execution", "CancellationObserved"),
                     witness_transition("runtime_ingress", "RunCancelled"),
                     witness_transition("runtime_control", "RunCancelled"),
@@ -3065,54 +3345,24 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                     CompositionWitnessInput {
                         machine: "runtime_control".into(),
                         input_variant: "AdmissionAccepted".into(),
-                        fields: vec![
-                            CompositionWitnessField {
-                                field: "candidate_id".into(),
-                                expr: Expr::String("op_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "candidate_kind".into(),
-                                expr: Expr::String("OperationInput".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "admission_effect".into(),
-                                expr: Expr::String("SubmitAdmittedIngressEffect".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "wake".into(),
-                                expr: Expr::Bool(true),
-                            },
-                            CompositionWitnessField {
-                                field: "process".into(),
-                                expr: Expr::Bool(true),
-                            },
-                        ],
+                        fields: admission_accepted_fields(
+                            "op_1",
+                            "OperationInput",
+                            "TextOnly",
+                            true,
+                            true,
+                        ),
                     },
                     CompositionWitnessInput {
                         machine: "runtime_control".into(),
                         input_variant: "AdmissionAccepted".into(),
-                        fields: vec![
-                            CompositionWitnessField {
-                                field: "candidate_id".into(),
-                                expr: Expr::String("op_2".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "candidate_kind".into(),
-                                expr: Expr::String("OperationInput".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "admission_effect".into(),
-                                expr: Expr::String("SubmitAdmittedIngressEffect".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "wake".into(),
-                                expr: Expr::Bool(true),
-                            },
-                            CompositionWitnessField {
-                                field: "process".into(),
-                                expr: Expr::Bool(true),
-                            },
-                        ],
+                        fields: admission_accepted_fields(
+                            "op_2",
+                            "OperationInput",
+                            "TextOnly",
+                            true,
+                            true,
+                        ),
                     },
                 ],
                 expected_routes: vec!["admitted_op_work_enters_ingress".into()],
@@ -3123,28 +3373,21 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                 expected_states: vec![witness_state("runtime_control", Some("Idle"), vec![])],
                 expected_transitions: vec![
                     witness_transition("runtime_control", "Initialize"),
-                    witness_transition("runtime_control", "AdmissionAcceptedIdleWakeAndProcess"),
-                    witness_transition("runtime_control", "AdmissionAcceptedIdleProcess"),
-                    witness_transition("runtime_ingress", "AdmitQueuedWakeAndProcess"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
                 ],
                 expected_transition_order: vec![
                     witness_transition_order(
                         "runtime_control",
                         "Initialize",
                         "runtime_control",
-                        "AdmissionAcceptedIdleWakeAndProcess",
+                        "AdmissionAcceptedIdleSteer",
                     ),
                     witness_transition_order(
                         "runtime_control",
-                        "AdmissionAcceptedIdleWakeAndProcess",
-                        "runtime_control",
-                        "AdmissionAcceptedIdleProcess",
-                    ),
-                    witness_transition_order(
-                        "runtime_control",
-                        "AdmissionAcceptedIdleProcess",
+                        "AdmissionAcceptedIdleSteer",
                         "runtime_ingress",
-                        "AdmitQueuedWakeAndProcess",
+                        "AdmitQueuedSteer",
                     ),
                 ],
                 state_limits: CompositionStateLimits {
@@ -3160,6 +3403,7 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
             },
         ],
         deep_domain_cardinality: 2,
+        deep_domain_overrides: BTreeMap::new(),
         witness_domain_cardinality: 1,
     }
 }
@@ -3193,7 +3437,7 @@ pub fn surface_event_runtime_bundle_composition() -> CompositionSchema {
             EntryInput {
                 name: "surface_submit_candidate".into(),
                 machine: "runtime_control".into(),
-                input_variant: "SubmitCandidate".into(),
+                input_variant: "SubmitWork".into(),
             },
             EntryInput {
                 name: "runtime_admission_accepted".into(),
@@ -3237,16 +3481,37 @@ pub fn surface_event_runtime_bundle_composition() -> CompositionSchema {
                 },
                 bindings: vec![
                     RouteFieldBinding {
-                        to_field: "input_id".into(),
+                        to_field: "work_id".into(),
                         source: RouteBindingSource::Field {
-                            from_field: "candidate_id".into(),
+                            from_field: "work_id".into(),
                             allow_named_alias: true,
                         },
                     },
                     RouteFieldBinding {
-                        to_field: "input_kind".into(),
+                        to_field: "content_shape".into(),
                         source: RouteBindingSource::Field {
-                            from_field: "candidate_kind".into(),
+                            from_field: "content_shape".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "handling_mode".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "handling_mode".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "request_id".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "request_id".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "reservation_key".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "reservation_key".into(),
                             allow_named_alias: false,
                         },
                     },
@@ -3255,14 +3520,6 @@ pub fn surface_event_runtime_bundle_composition() -> CompositionSchema {
                         source: RouteBindingSource::Literal(Expr::String(
                             "ExternalEventQueued".into(),
                         )),
-                    },
-                    RouteFieldBinding {
-                        to_field: "wake".into(),
-                        source: RouteBindingSource::Literal(Expr::Bool(true)),
-                    },
-                    RouteFieldBinding {
-                        to_field: "process".into(),
-                        source: RouteBindingSource::Literal(Expr::Bool(true)),
                     },
                 ],
                 delivery: RouteDelivery::Immediate,
@@ -3514,43 +3771,23 @@ pub fn surface_event_runtime_bundle_composition() -> CompositionSchema {
                     },
                     CompositionWitnessInput {
                         machine: "runtime_control".into(),
-                        input_variant: "SubmitCandidate".into(),
-                        fields: vec![
-                            CompositionWitnessField {
-                                field: "candidate_id".into(),
-                                expr: Expr::String("external_evt_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "candidate_kind".into(),
-                                expr: Expr::String("WorkInput".into()),
-                            },
-                        ],
+                        input_variant: "SubmitWork".into(),
+                        fields: submit_candidate_fields(
+                            "external_evt_1",
+                            "WorkInput",
+                            "TextOnly",
+                        ),
                     },
                     CompositionWitnessInput {
                         machine: "runtime_control".into(),
                         input_variant: "AdmissionAccepted".into(),
-                        fields: vec![
-                            CompositionWitnessField {
-                                field: "candidate_id".into(),
-                                expr: Expr::String("external_evt_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "candidate_kind".into(),
-                                expr: Expr::String("WorkInput".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "admission_effect".into(),
-                                expr: Expr::String("SubmitAdmittedIngressEffect".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "wake".into(),
-                                expr: Expr::Bool(true),
-                            },
-                            CompositionWitnessField {
-                                field: "process".into(),
-                                expr: Expr::Bool(true),
-                            },
-                        ],
+                        fields: admission_accepted_fields(
+                            "external_evt_1",
+                            "WorkInput",
+                            "TextOnly",
+                            true,
+                            false,
+                        ),
                     },
                     CompositionWitnessInput {
                         machine: "runtime_ingress".into(),
@@ -3561,7 +3798,7 @@ pub fn surface_event_runtime_bundle_composition() -> CompositionSchema {
                                 expr: Expr::String("runid_surface_1".into()),
                             },
                             CompositionWitnessField {
-                                field: "contributing_input_ids".into(),
+                                field: "contributing_work_ids".into(),
                                 expr: Expr::SeqLiteral(vec![Expr::String("external_evt_1".into())]),
                             },
                         ],
@@ -3569,10 +3806,12 @@ pub fn surface_event_runtime_bundle_composition() -> CompositionSchema {
                     CompositionWitnessInput {
                         machine: "turn_execution".into(),
                         input_variant: "PrimitiveApplied".into(),
-                        fields: vec![CompositionWitnessField {
-                            field: "run_id".into(),
-                            expr: Expr::String("runid_surface_1".into()),
-                        }],
+                        fields: primitive_applied_fields(
+                            "runid_surface_1",
+                            "TextOnly",
+                            false,
+                            false,
+                        ),
                     },
                     CompositionWitnessInput {
                         machine: "turn_execution".into(),
@@ -3621,8 +3860,8 @@ pub fn surface_event_runtime_bundle_composition() -> CompositionSchema {
                 ],
                 expected_transitions: vec![
                     witness_transition("runtime_control", "Initialize"),
-                    witness_transition("runtime_control", "AdmissionAcceptedIdleWakeAndProcess"),
-                    witness_transition("runtime_ingress", "AdmitQueuedWakeAndProcess"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleQueue"),
+                    witness_transition("runtime_ingress", "AdmitQueuedQueue"),
                     witness_transition("runtime_ingress", "StageDrainSnapshot"),
                     witness_transition("runtime_control", "BeginRunFromIdle"),
                     witness_transition("turn_execution", "StartConversationRun"),
@@ -3633,9 +3872,160 @@ pub fn surface_event_runtime_bundle_composition() -> CompositionSchema {
                 expected_transition_order: vec![
                     witness_transition_order(
                         "runtime_control",
-                        "AdmissionAcceptedIdleWakeAndProcess",
+                        "AdmissionAcceptedIdleQueue",
                         "runtime_ingress",
-                        "AdmitQueuedWakeAndProcess",
+                        "AdmitQueuedQueue",
+                    ),
+                    witness_transition_order(
+                        "runtime_ingress",
+                        "StageDrainSnapshot",
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                        "turn_execution",
+                        "StartConversationRun",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "BoundaryComplete",
+                        "runtime_ingress",
+                        "RunCompleted",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "BoundaryComplete",
+                        "runtime_control",
+                        "RunCompleted",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 10,
+                    pending_input_limit: 7,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 7,
+                    emitted_effect_limit: 7,
+                    seq_limit: 7,
+                    set_limit: 7,
+                    map_limit: 4,
+                },
+            },
+            CompositionWitness {
+                name: "surface_event_inline_image_success_path".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "SubmitWork".into(),
+                        fields: submit_candidate_fields(
+                            "external_evt_1",
+                            "WorkInput",
+                            "InlineImage",
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "external_evt_1",
+                            "WorkInput",
+                            "InlineImage",
+                            true,
+                            false,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "StageDrainSnapshot".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_surface_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "contributing_work_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("external_evt_1".into())]),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "PrimitiveApplied".into(),
+                        fields: primitive_applied_fields(
+                            "runid_surface_1",
+                            "InlineImage",
+                            false,
+                            false,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "LlmReturnedTerminal".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_surface_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "BoundaryComplete".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_surface_1".into()),
+                        }],
+                    },
+                ],
+                expected_routes: vec![
+                    "surface_event_enters_ingress".into(),
+                    "surface_ingress_ready_starts_runtime_control".into(),
+                    "surface_runtime_control_starts_execution".into(),
+                    "surface_execution_boundary_updates_ingress".into(),
+                    "surface_execution_completion_updates_ingress".into(),
+                    "surface_execution_completion_notifies_control".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state(
+                        "runtime_control",
+                        Some("Idle"),
+                        vec![CompositionWitnessField {
+                            field: "current_run_id".into(),
+                            expr: Expr::None,
+                        }],
+                    ),
+                    witness_state(
+                        "runtime_ingress",
+                        Some("Active"),
+                        vec![CompositionWitnessField {
+                            field: "current_run".into(),
+                            expr: Expr::None,
+                        }],
+                    ),
+                    witness_state("turn_execution", Some("Completed"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("runtime_control", "Initialize"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleQueue"),
+                    witness_transition("runtime_ingress", "AdmitQueuedQueue"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshot"),
+                    witness_transition("runtime_control", "BeginRunFromIdle"),
+                    witness_transition("turn_execution", "StartConversationRun"),
+                    witness_transition("turn_execution", "BoundaryComplete"),
+                    witness_transition("runtime_ingress", "RunCompleted"),
+                    witness_transition("runtime_control", "RunCompleted"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedIdleQueue",
+                        "runtime_ingress",
+                        "AdmitQueuedQueue",
                     ),
                     witness_transition_order(
                         "runtime_ingress",
@@ -3683,43 +4073,23 @@ pub fn surface_event_runtime_bundle_composition() -> CompositionSchema {
                     },
                     CompositionWitnessInput {
                         machine: "runtime_control".into(),
-                        input_variant: "SubmitCandidate".into(),
-                        fields: vec![
-                            CompositionWitnessField {
-                                field: "candidate_id".into(),
-                                expr: Expr::String("external_evt_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "candidate_kind".into(),
-                                expr: Expr::String("WorkInput".into()),
-                            },
-                        ],
+                        input_variant: "SubmitWork".into(),
+                        fields: submit_candidate_fields(
+                            "external_evt_1",
+                            "WorkInput",
+                            "TextOnly",
+                        ),
                     },
                     CompositionWitnessInput {
                         machine: "runtime_control".into(),
                         input_variant: "AdmissionAccepted".into(),
-                        fields: vec![
-                            CompositionWitnessField {
-                                field: "candidate_id".into(),
-                                expr: Expr::String("external_evt_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "candidate_kind".into(),
-                                expr: Expr::String("WorkInput".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "admission_effect".into(),
-                                expr: Expr::String("SubmitAdmittedIngressEffect".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "wake".into(),
-                                expr: Expr::Bool(true),
-                            },
-                            CompositionWitnessField {
-                                field: "process".into(),
-                                expr: Expr::Bool(true),
-                            },
-                        ],
+                        fields: admission_accepted_fields(
+                            "external_evt_1",
+                            "WorkInput",
+                            "TextOnly",
+                            true,
+                            false,
+                        ),
                     },
                     CompositionWitnessInput {
                         machine: "runtime_ingress".into(),
@@ -3730,7 +4100,7 @@ pub fn surface_event_runtime_bundle_composition() -> CompositionSchema {
                                 expr: Expr::String("runid_surface_1".into()),
                             },
                             CompositionWitnessField {
-                                field: "contributing_input_ids".into(),
+                                field: "contributing_work_ids".into(),
                                 expr: Expr::SeqLiteral(vec![Expr::String("external_evt_1".into())]),
                             },
                         ],
@@ -3765,8 +4135,8 @@ pub fn surface_event_runtime_bundle_composition() -> CompositionSchema {
                     witness_state("turn_execution", Some("Failed"), vec![]),
                 ],
                 expected_transitions: vec![
-                    witness_transition("runtime_control", "AdmissionAcceptedIdleWakeAndProcess"),
-                    witness_transition("runtime_ingress", "AdmitQueuedWakeAndProcess"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleQueue"),
+                    witness_transition("runtime_ingress", "AdmitQueuedQueue"),
                     witness_transition("runtime_ingress", "StageDrainSnapshot"),
                     witness_transition("runtime_control", "BeginRunFromIdle"),
                     witness_transition("turn_execution", "StartConversationRun"),
@@ -3777,9 +4147,9 @@ pub fn surface_event_runtime_bundle_composition() -> CompositionSchema {
                 expected_transition_order: vec![
                     witness_transition_order(
                         "runtime_control",
-                        "AdmissionAcceptedIdleWakeAndProcess",
+                        "AdmissionAcceptedIdleQueue",
                         "runtime_ingress",
-                        "AdmitQueuedWakeAndProcess",
+                        "AdmitQueuedQueue",
                     ),
                     witness_transition_order(
                         "runtime_ingress",
@@ -3827,43 +4197,23 @@ pub fn surface_event_runtime_bundle_composition() -> CompositionSchema {
                     },
                     CompositionWitnessInput {
                         machine: "runtime_control".into(),
-                        input_variant: "SubmitCandidate".into(),
-                        fields: vec![
-                            CompositionWitnessField {
-                                field: "candidate_id".into(),
-                                expr: Expr::String("external_evt_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "candidate_kind".into(),
-                                expr: Expr::String("WorkInput".into()),
-                            },
-                        ],
+                        input_variant: "SubmitWork".into(),
+                        fields: submit_candidate_fields(
+                            "external_evt_1",
+                            "WorkInput",
+                            "TextOnly",
+                        ),
                     },
                     CompositionWitnessInput {
                         machine: "runtime_control".into(),
                         input_variant: "AdmissionAccepted".into(),
-                        fields: vec![
-                            CompositionWitnessField {
-                                field: "candidate_id".into(),
-                                expr: Expr::String("external_evt_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "candidate_kind".into(),
-                                expr: Expr::String("WorkInput".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "admission_effect".into(),
-                                expr: Expr::String("SubmitAdmittedIngressEffect".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "wake".into(),
-                                expr: Expr::Bool(true),
-                            },
-                            CompositionWitnessField {
-                                field: "process".into(),
-                                expr: Expr::Bool(true),
-                            },
-                        ],
+                        fields: admission_accepted_fields(
+                            "external_evt_1",
+                            "WorkInput",
+                            "TextOnly",
+                            true,
+                            true,
+                        ),
                     },
                 ],
                 expected_routes: vec!["surface_event_enters_ingress".into()],
@@ -3874,21 +4224,21 @@ pub fn surface_event_runtime_bundle_composition() -> CompositionSchema {
                 expected_states: vec![witness_state("runtime_control", Some("Idle"), vec![])],
                 expected_transitions: vec![
                     witness_transition("runtime_control", "Initialize"),
-                    witness_transition("runtime_control", "AdmissionAcceptedIdleWakeAndProcess"),
-                    witness_transition("runtime_ingress", "AdmitQueuedWakeAndProcess"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
                 ],
                 expected_transition_order: vec![
                     witness_transition_order(
                         "runtime_control",
                         "Initialize",
                         "runtime_control",
-                        "AdmissionAcceptedIdleWakeAndProcess",
+                        "AdmissionAcceptedIdleSteer",
                     ),
                     witness_transition_order(
                         "runtime_control",
-                        "AdmissionAcceptedIdleWakeAndProcess",
+                        "AdmissionAcceptedIdleSteer",
                         "runtime_ingress",
-                        "AdmitQueuedWakeAndProcess",
+                        "AdmitQueuedSteer",
                     ),
                 ],
                 state_limits: CompositionStateLimits {
@@ -3904,6 +4254,7 @@ pub fn surface_event_runtime_bundle_composition() -> CompositionSchema {
             },
         ],
         deep_domain_cardinality: 2,
+        deep_domain_overrides: BTreeMap::new(),
         witness_domain_cardinality: 1,
     }
 }
@@ -3937,7 +4288,7 @@ pub fn continuation_runtime_bundle_composition() -> CompositionSchema {
             EntryInput {
                 name: "continuation_submit_candidate".into(),
                 machine: "runtime_control".into(),
-                input_variant: "SubmitCandidate".into(),
+                input_variant: "SubmitWork".into(),
             },
             EntryInput {
                 name: "runtime_admission_accepted".into(),
@@ -3976,32 +4327,21 @@ pub fn continuation_runtime_bundle_composition() -> CompositionSchema {
                 },
                 bindings: vec![
                     RouteFieldBinding {
-                        to_field: "input_id".into(),
+                        to_field: "work_id".into(),
                         source: RouteBindingSource::Field {
-                            from_field: "candidate_id".into(),
+                            from_field: "work_id".into(),
                             allow_named_alias: true,
                         },
                     },
                     RouteFieldBinding {
-                        to_field: "input_kind".into(),
-                        source: RouteBindingSource::Field {
-                            from_field: "candidate_kind".into(),
-                            allow_named_alias: false,
-                        },
+                        to_field: "handling_mode".into(),
+                        source: RouteBindingSource::Literal(Expr::String("Steer".into())),
                     },
                     RouteFieldBinding {
                         to_field: "policy".into(),
                         source: RouteBindingSource::Literal(Expr::String(
                             "ContinuationQueued".into(),
                         )),
-                    },
-                    RouteFieldBinding {
-                        to_field: "wake".into(),
-                        source: RouteBindingSource::Literal(Expr::Bool(true)),
-                    },
-                    RouteFieldBinding {
-                        to_field: "process".into(),
-                        source: RouteBindingSource::Literal(Expr::Bool(true)),
                     },
                 ],
                 delivery: RouteDelivery::Immediate,
@@ -4164,43 +4504,23 @@ pub fn continuation_runtime_bundle_composition() -> CompositionSchema {
                     },
                     CompositionWitnessInput {
                         machine: "runtime_control".into(),
-                        input_variant: "SubmitCandidate".into(),
-                        fields: vec![
-                            CompositionWitnessField {
-                                field: "candidate_id".into(),
-                                expr: Expr::String("continuation_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "candidate_kind".into(),
-                                expr: Expr::String("ContinuationInput".into()),
-                            },
-                        ],
+                        input_variant: "SubmitWork".into(),
+                        fields: submit_candidate_fields(
+                            "continuation_1",
+                            "ContinuationInput",
+                            "TextOnly",
+                        ),
                     },
                     CompositionWitnessInput {
                         machine: "runtime_control".into(),
                         input_variant: "AdmissionAccepted".into(),
-                        fields: vec![
-                            CompositionWitnessField {
-                                field: "candidate_id".into(),
-                                expr: Expr::String("continuation_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "candidate_kind".into(),
-                                expr: Expr::String("ContinuationInput".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "admission_effect".into(),
-                                expr: Expr::String("SubmitAdmittedIngressEffect".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "wake".into(),
-                                expr: Expr::Bool(true),
-                            },
-                            CompositionWitnessField {
-                                field: "process".into(),
-                                expr: Expr::Bool(true),
-                            },
-                        ],
+                        fields: admission_accepted_fields(
+                            "continuation_1",
+                            "ContinuationInput",
+                            "TextOnly",
+                            true,
+                            true,
+                        ),
                     },
                     CompositionWitnessInput {
                         machine: "runtime_ingress".into(),
@@ -4211,7 +4531,7 @@ pub fn continuation_runtime_bundle_composition() -> CompositionSchema {
                                 expr: Expr::String("runid_cont_1".into()),
                             },
                             CompositionWitnessField {
-                                field: "contributing_input_ids".into(),
+                                field: "contributing_work_ids".into(),
                                 expr: Expr::SeqLiteral(vec![Expr::String("continuation_1".into())]),
                             },
                         ],
@@ -4219,10 +4539,12 @@ pub fn continuation_runtime_bundle_composition() -> CompositionSchema {
                     CompositionWitnessInput {
                         machine: "turn_execution".into(),
                         input_variant: "PrimitiveApplied".into(),
-                        fields: vec![CompositionWitnessField {
-                            field: "run_id".into(),
-                            expr: Expr::String("runid_cont_1".into()),
-                        }],
+                        fields: primitive_applied_fields(
+                            "runid_cont_1",
+                            "TextOnly",
+                            false,
+                            false,
+                        ),
                     },
                     CompositionWitnessInput {
                         machine: "turn_execution".into(),
@@ -4262,8 +4584,8 @@ pub fn continuation_runtime_bundle_composition() -> CompositionSchema {
                     witness_state("turn_execution", Some("Completed"), vec![]),
                 ],
                 expected_transitions: vec![
-                    witness_transition("runtime_control", "AdmissionAcceptedIdleWakeAndProcess"),
-                    witness_transition("runtime_ingress", "AdmitQueuedWakeAndProcess"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
                     witness_transition("runtime_ingress", "StageDrainSnapshot"),
                     witness_transition("runtime_control", "BeginRunFromIdle"),
                     witness_transition("turn_execution", "StartConversationRun"),
@@ -4274,9 +4596,9 @@ pub fn continuation_runtime_bundle_composition() -> CompositionSchema {
                 expected_transition_order: vec![
                     witness_transition_order(
                         "runtime_control",
-                        "AdmissionAcceptedIdleWakeAndProcess",
+                        "AdmissionAcceptedIdleSteer",
                         "runtime_ingress",
-                        "AdmitQueuedWakeAndProcess",
+                        "AdmitQueuedSteer",
                     ),
                     witness_transition_order(
                         "runtime_ingress",
@@ -4324,43 +4646,23 @@ pub fn continuation_runtime_bundle_composition() -> CompositionSchema {
                     },
                     CompositionWitnessInput {
                         machine: "runtime_control".into(),
-                        input_variant: "SubmitCandidate".into(),
-                        fields: vec![
-                            CompositionWitnessField {
-                                field: "candidate_id".into(),
-                                expr: Expr::String("host_continuation_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "candidate_kind".into(),
-                                expr: Expr::String("ContinuationInput".into()),
-                            },
-                        ],
+                        input_variant: "SubmitWork".into(),
+                        fields: submit_candidate_fields(
+                            "host_continuation_1",
+                            "ContinuationInput",
+                            "TextOnly",
+                        ),
                     },
                     CompositionWitnessInput {
                         machine: "runtime_control".into(),
                         input_variant: "AdmissionAccepted".into(),
-                        fields: vec![
-                            CompositionWitnessField {
-                                field: "candidate_id".into(),
-                                expr: Expr::String("host_continuation_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "candidate_kind".into(),
-                                expr: Expr::String("ContinuationInput".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "admission_effect".into(),
-                                expr: Expr::String("SubmitAdmittedIngressEffect".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "wake".into(),
-                                expr: Expr::Bool(true),
-                            },
-                            CompositionWitnessField {
-                                field: "process".into(),
-                                expr: Expr::Bool(true),
-                            },
-                        ],
+                        fields: admission_accepted_fields(
+                            "host_continuation_1",
+                            "ContinuationInput",
+                            "TextOnly",
+                            true,
+                            true,
+                        ),
                     },
                     CompositionWitnessInput {
                         machine: "runtime_ingress".into(),
@@ -4371,7 +4673,7 @@ pub fn continuation_runtime_bundle_composition() -> CompositionSchema {
                                 expr: Expr::String("runid_host_cont_1".into()),
                             },
                             CompositionWitnessField {
-                                field: "contributing_input_ids".into(),
+                                field: "contributing_work_ids".into(),
                                 expr: Expr::SeqLiteral(vec![Expr::String("host_continuation_1".into())]),
                             },
                         ],
@@ -4379,10 +4681,12 @@ pub fn continuation_runtime_bundle_composition() -> CompositionSchema {
                     CompositionWitnessInput {
                         machine: "turn_execution".into(),
                         input_variant: "PrimitiveApplied".into(),
-                        fields: vec![CompositionWitnessField {
-                            field: "run_id".into(),
-                            expr: Expr::String("runid_host_cont_1".into()),
-                        }],
+                        fields: primitive_applied_fields(
+                            "runid_host_cont_1",
+                            "TextOnly",
+                            false,
+                            false,
+                        ),
                     },
                     CompositionWitnessInput {
                         machine: "turn_execution".into(),
@@ -4422,8 +4726,8 @@ pub fn continuation_runtime_bundle_composition() -> CompositionSchema {
                     witness_state("turn_execution", Some("Completed"), vec![]),
                 ],
                 expected_transitions: vec![
-                    witness_transition("runtime_control", "AdmissionAcceptedIdleWakeAndProcess"),
-                    witness_transition("runtime_ingress", "AdmitQueuedWakeAndProcess"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
                     witness_transition("runtime_ingress", "StageDrainSnapshot"),
                     witness_transition("runtime_control", "BeginRunFromIdle"),
                     witness_transition("turn_execution", "StartConversationRun"),
@@ -4434,9 +4738,9 @@ pub fn continuation_runtime_bundle_composition() -> CompositionSchema {
                 expected_transition_order: vec![
                     witness_transition_order(
                         "runtime_control",
-                        "AdmissionAcceptedIdleWakeAndProcess",
+                        "AdmissionAcceptedIdleSteer",
                         "runtime_ingress",
-                        "AdmitQueuedWakeAndProcess",
+                        "AdmitQueuedSteer",
                     ),
                     witness_transition_order(
                         "runtime_ingress",
@@ -4484,43 +4788,23 @@ pub fn continuation_runtime_bundle_composition() -> CompositionSchema {
                     },
                     CompositionWitnessInput {
                         machine: "runtime_control".into(),
-                        input_variant: "SubmitCandidate".into(),
-                        fields: vec![
-                            CompositionWitnessField {
-                                field: "candidate_id".into(),
-                                expr: Expr::String("continuation_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "candidate_kind".into(),
-                                expr: Expr::String("ContinuationInput".into()),
-                            },
-                        ],
+                        input_variant: "SubmitWork".into(),
+                        fields: submit_candidate_fields(
+                            "continuation_1",
+                            "ContinuationInput",
+                            "TextOnly",
+                        ),
                     },
                     CompositionWitnessInput {
                         machine: "runtime_control".into(),
                         input_variant: "AdmissionAccepted".into(),
-                        fields: vec![
-                            CompositionWitnessField {
-                                field: "candidate_id".into(),
-                                expr: Expr::String("continuation_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "candidate_kind".into(),
-                                expr: Expr::String("ContinuationInput".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "admission_effect".into(),
-                                expr: Expr::String("SubmitAdmittedIngressEffect".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "wake".into(),
-                                expr: Expr::Bool(true),
-                            },
-                            CompositionWitnessField {
-                                field: "process".into(),
-                                expr: Expr::Bool(true),
-                            },
-                        ],
+                        fields: admission_accepted_fields(
+                            "continuation_1",
+                            "ContinuationInput",
+                            "TextOnly",
+                            true,
+                            true,
+                        ),
                     },
                 ],
                 expected_routes: vec!["continuation_enters_ingress".into()],
@@ -4531,21 +4815,21 @@ pub fn continuation_runtime_bundle_composition() -> CompositionSchema {
                 expected_states: vec![witness_state("runtime_control", Some("Idle"), vec![])],
                 expected_transitions: vec![
                     witness_transition("runtime_control", "Initialize"),
-                    witness_transition("runtime_control", "AdmissionAcceptedIdleWakeAndProcess"),
-                    witness_transition("runtime_ingress", "AdmitQueuedWakeAndProcess"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
                 ],
                 expected_transition_order: vec![
                     witness_transition_order(
                         "runtime_control",
                         "Initialize",
                         "runtime_control",
-                        "AdmissionAcceptedIdleWakeAndProcess",
+                        "AdmissionAcceptedIdleSteer",
                     ),
                     witness_transition_order(
                         "runtime_control",
-                        "AdmissionAcceptedIdleWakeAndProcess",
+                        "AdmissionAcceptedIdleSteer",
                         "runtime_ingress",
-                        "AdmitQueuedWakeAndProcess",
+                        "AdmitQueuedSteer",
                     ),
                 ],
                 state_limits: CompositionStateLimits {
@@ -4561,6 +4845,7 @@ pub fn continuation_runtime_bundle_composition() -> CompositionSchema {
             },
         ],
         deep_domain_cardinality: 2,
+        deep_domain_overrides: BTreeMap::new(),
         witness_domain_cardinality: 1,
     }
 }
@@ -4644,7 +4929,8 @@ pub fn mob_bundle_composition() -> CompositionSchema {
             EntryInput { name: "turn_primitive_applied".into(), machine: "turn_execution".into(), input_variant: "PrimitiveApplied".into() },
             EntryInput { name: "turn_llm_returned_terminal".into(), machine: "turn_execution".into(), input_variant: "LlmReturnedTerminal".into() },
             EntryInput { name: "turn_fatal_failure".into(), machine: "turn_execution".into(), input_variant: "FatalFailure".into() },
-            EntryInput { name: "turn_cancel_requested".into(), machine: "turn_execution".into(), input_variant: "CancelRequested".into() },
+            EntryInput { name: "turn_cancel_now".into(), machine: "turn_execution".into(), input_variant: "CancelNow".into() },
+            EntryInput { name: "turn_cancel_after_boundary".into(), machine: "turn_execution".into(), input_variant: "CancelAfterBoundary".into() },
             EntryInput { name: "turn_cancellation_observed".into(), machine: "turn_execution".into(), input_variant: "CancellationObserved".into() },
         ],
         routes: vec![
@@ -4652,10 +4938,10 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 name: "flow_step_dispatch_enters_runtime_admission".into(),
                 from_machine: "flow_run".into(),
                 effect_variant: "AdmitStepWork".into(),
-                to: RouteTarget { machine: "runtime_control".into(), input_variant: "SubmitCandidate".into() },
+                to: RouteTarget { machine: "runtime_control".into(), input_variant: "SubmitWork".into() },
                 bindings: vec![
-                    RouteFieldBinding { to_field: "candidate_id".into(), source: RouteBindingSource::Field { from_field: "step_id".into(), allow_named_alias: true } },
-                    RouteFieldBinding { to_field: "candidate_kind".into(), source: RouteBindingSource::Literal(Expr::String("WorkInput".into())) },
+                    RouteFieldBinding { to_field: "work_id".into(), source: RouteBindingSource::Field { from_field: "step_id".into(), allow_named_alias: true } },
+                    RouteFieldBinding { to_field: "handling_mode".into(), source: RouteBindingSource::Literal(Expr::String("Queue".into())) },
                 ],
                 delivery: RouteDelivery::Immediate,
             },
@@ -4663,10 +4949,10 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 name: "mob_async_op_event_enters_runtime_admission".into(),
                 from_machine: "ops_lifecycle".into(),
                 effect_variant: "SubmitOpEvent".into(),
-                to: RouteTarget { machine: "runtime_control".into(), input_variant: "SubmitCandidate".into() },
+                to: RouteTarget { machine: "runtime_control".into(), input_variant: "SubmitWork".into() },
                 bindings: vec![
-                    RouteFieldBinding { to_field: "candidate_id".into(), source: RouteBindingSource::Field { from_field: "operation_id".into(), allow_named_alias: true } },
-                    RouteFieldBinding { to_field: "candidate_kind".into(), source: RouteBindingSource::Literal(Expr::String("OperationInput".into())) },
+                    RouteFieldBinding { to_field: "work_id".into(), source: RouteBindingSource::Field { from_field: "operation_id".into(), allow_named_alias: true } },
+                    RouteFieldBinding { to_field: "handling_mode".into(), source: RouteBindingSource::Literal(Expr::String("Steer".into())) },
                 ],
                 delivery: RouteDelivery::Immediate,
             },
@@ -4674,10 +4960,10 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 name: "mob_peer_candidate_enters_runtime_admission".into(),
                 from_machine: "peer_comms".into(),
                 effect_variant: "SubmitPeerInputCandidate".into(),
-                to: RouteTarget { machine: "runtime_control".into(), input_variant: "SubmitCandidate".into() },
+                to: RouteTarget { machine: "runtime_control".into(), input_variant: "SubmitWork".into() },
                 bindings: vec![
-                    RouteFieldBinding { to_field: "candidate_id".into(), source: RouteBindingSource::Field { from_field: "raw_item_id".into(), allow_named_alias: true } },
-                    RouteFieldBinding { to_field: "candidate_kind".into(), source: RouteBindingSource::Literal(Expr::String("PeerInput".into())) },
+                    RouteFieldBinding { to_field: "work_id".into(), source: RouteBindingSource::Field { from_field: "raw_item_id".into(), allow_named_alias: true } },
+                    RouteFieldBinding { to_field: "handling_mode".into(), source: RouteBindingSource::Literal(Expr::String("Steer".into())) },
                 ],
                 delivery: RouteDelivery::Immediate,
             },
@@ -4687,11 +4973,9 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 effect_variant: "SubmitAdmittedIngressEffect".into(),
                 to: RouteTarget { machine: "runtime_ingress".into(), input_variant: "AdmitQueued".into() },
                 bindings: vec![
-                    RouteFieldBinding { to_field: "input_id".into(), source: RouteBindingSource::Field { from_field: "candidate_id".into(), allow_named_alias: true } },
-                    RouteFieldBinding { to_field: "input_kind".into(), source: RouteBindingSource::Field { from_field: "candidate_kind".into(), allow_named_alias: false } },
+                    RouteFieldBinding { to_field: "work_id".into(), source: RouteBindingSource::Field { from_field: "work_id".into(), allow_named_alias: true } },
+                    RouteFieldBinding { to_field: "handling_mode".into(), source: RouteBindingSource::Field { from_field: "handling_mode".into(), allow_named_alias: false } },
                     RouteFieldBinding { to_field: "policy".into(), source: RouteBindingSource::Literal(Expr::String("MobQueued".into())) },
-                    RouteFieldBinding { to_field: "wake".into(), source: RouteBindingSource::Literal(Expr::Bool(true)) },
-                    RouteFieldBinding { to_field: "process".into(), source: RouteBindingSource::Literal(Expr::Bool(true)) },
                 ],
                 delivery: RouteDelivery::Immediate,
             },
@@ -4786,7 +5070,7 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
                     route_name: "flow_step_dispatch_enters_runtime_admission".into(),
                     to_machine: "runtime_control".into(),
-                    input_variant: "SubmitCandidate".into(),
+                    input_variant: "SubmitWork".into(),
                     from_machine: "flow_run".into(),
                     effect_variant: "AdmitStepWork".into(),
                 },
@@ -4800,7 +5084,7 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
                     route_name: "mob_async_op_event_enters_runtime_admission".into(),
                     to_machine: "runtime_control".into(),
-                    input_variant: "SubmitCandidate".into(),
+                    input_variant: "SubmitWork".into(),
                     from_machine: "ops_lifecycle".into(),
                     effect_variant: "SubmitOpEvent".into(),
                 },
@@ -4814,7 +5098,7 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
                     route_name: "mob_peer_candidate_enters_runtime_admission".into(),
                     to_machine: "runtime_control".into(),
-                    input_variant: "SubmitCandidate".into(),
+                    input_variant: "SubmitWork".into(),
                     from_machine: "peer_comms".into(),
                     effect_variant: "SubmitPeerInputCandidate".into(),
                 },
@@ -4956,28 +5240,13 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     CompositionWitnessInput {
                         machine: "runtime_control".into(),
                         input_variant: "AdmissionAccepted".into(),
-                        fields: vec![
-                            CompositionWitnessField {
-                                field: "candidate_id".into(),
-                                expr: Expr::String("step_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "candidate_kind".into(),
-                                expr: Expr::String("WorkInput".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "admission_effect".into(),
-                                expr: Expr::String("SubmitAdmittedIngressEffect".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "wake".into(),
-                                expr: Expr::Bool(true),
-                            },
-                            CompositionWitnessField {
-                                field: "process".into(),
-                                expr: Expr::Bool(true),
-                            },
-                        ],
+                        fields: admission_accepted_fields(
+                            "step_1",
+                            "WorkInput",
+                            "TextOnly",
+                            true,
+                            true,
+                        ),
                     },
                     CompositionWitnessInput {
                         machine: "runtime_ingress".into(),
@@ -4988,7 +5257,7 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                                 expr: Expr::String("runid_1".into()),
                             },
                             CompositionWitnessField {
-                                field: "contributing_input_ids".into(),
+                                field: "contributing_work_ids".into(),
                                 expr: Expr::SeqLiteral(vec![Expr::String("step_1".into())]),
                             },
                         ],
@@ -4996,10 +5265,12 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     CompositionWitnessInput {
                         machine: "turn_execution".into(),
                         input_variant: "PrimitiveApplied".into(),
-                        fields: vec![CompositionWitnessField {
-                            field: "run_id".into(),
-                            expr: Expr::String("runid_1".into()),
-                        }],
+                        fields: primitive_applied_fields(
+                            "runid_1",
+                            "TextOnly",
+                            false,
+                            false,
+                        ),
                     },
                     CompositionWitnessInput {
                         machine: "turn_execution".into(),
@@ -5069,8 +5340,8 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     witness_transition("flow_run", "CreateRun"),
                     witness_transition("flow_run", "StartRun"),
                     witness_transition("flow_run", "DispatchStep"),
-                    witness_transition("runtime_control", "AdmissionAcceptedIdleWakeAndProcess"),
-                    witness_transition("runtime_ingress", "AdmitQueuedWakeAndProcess"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
                     witness_transition("runtime_ingress", "StageDrainSnapshot"),
                     witness_transition("runtime_control", "BeginRunFromIdle"),
                     witness_transition("turn_execution", "StartConversationRun"),
@@ -5095,13 +5366,13 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                         "flow_run",
                         "DispatchStep",
                         "runtime_control",
-                        "AdmissionAcceptedIdleWakeAndProcess",
+                        "AdmissionAcceptedIdleSteer",
                     ),
                     witness_transition_order(
                         "runtime_control",
-                        "AdmissionAcceptedIdleWakeAndProcess",
+                        "AdmissionAcceptedIdleSteer",
                         "runtime_ingress",
-                        "AdmitQueuedWakeAndProcess",
+                        "AdmitQueuedSteer",
                     ),
                     witness_transition_order(
                         "runtime_ingress",
@@ -5172,28 +5443,13 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     CompositionWitnessInput {
                         machine: "runtime_control".into(),
                         input_variant: "AdmissionAccepted".into(),
-                        fields: vec![
-                            CompositionWitnessField {
-                                field: "candidate_id".into(),
-                                expr: Expr::String("op_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "candidate_kind".into(),
-                                expr: Expr::String("OperationInput".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "admission_effect".into(),
-                                expr: Expr::String("SubmitAdmittedIngressEffect".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "wake".into(),
-                                expr: Expr::Bool(true),
-                            },
-                            CompositionWitnessField {
-                                field: "process".into(),
-                                expr: Expr::Bool(true),
-                            },
-                        ],
+                        fields: admission_accepted_fields(
+                            "op_1",
+                            "OperationInput",
+                            "TextOnly",
+                            true,
+                            true,
+                        ),
                     },
                 ],
                 expected_routes: vec![
@@ -5209,21 +5465,21 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 expected_transitions: vec![
                     witness_transition("ops_lifecycle", "RegisterOperation"),
                     witness_transition("ops_lifecycle", "ProvisioningSucceeded"),
-                    witness_transition("runtime_control", "AdmissionAcceptedIdleWakeAndProcess"),
-                    witness_transition("runtime_ingress", "AdmitQueuedWakeAndProcess"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
                 ],
                 expected_transition_order: vec![
                     witness_transition_order(
                         "ops_lifecycle",
                         "ProvisioningSucceeded",
                         "runtime_control",
-                        "AdmissionAcceptedIdleWakeAndProcess",
+                        "AdmissionAcceptedIdleSteer",
                     ),
                     witness_transition_order(
                         "runtime_control",
-                        "AdmissionAcceptedIdleWakeAndProcess",
+                        "AdmissionAcceptedIdleSteer",
                         "runtime_ingress",
-                        "AdmitQueuedWakeAndProcess",
+                        "AdmitQueuedSteer",
                     ),
                 ],
                 state_limits: CompositionStateLimits {
@@ -5256,20 +5512,15 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     CompositionWitnessInput {
                         machine: "peer_comms".into(),
                         input_variant: "ReceivePeerEnvelope".into(),
-                        fields: vec![
-                            CompositionWitnessField {
-                                field: "raw_item_id".into(),
-                                expr: Expr::String("raw_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "peer_id".into(),
-                                expr: Expr::String("peer_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "raw_kind".into(),
-                                expr: Expr::String("Message".into()),
-                            },
-                        ],
+                        fields: peer_envelope_fields(
+                            "raw_1",
+                            "peer_1",
+                            "Message",
+                            "mob peer handoff",
+                            "InlineImage",
+                            None,
+                            None,
+                        ),
                     },
                     CompositionWitnessInput {
                         machine: "peer_comms".into(),
@@ -5282,28 +5533,13 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     CompositionWitnessInput {
                         machine: "runtime_control".into(),
                         input_variant: "AdmissionAccepted".into(),
-                        fields: vec![
-                            CompositionWitnessField {
-                                field: "candidate_id".into(),
-                                expr: Expr::String("raw_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "candidate_kind".into(),
-                                expr: Expr::String("PeerInput".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "admission_effect".into(),
-                                expr: Expr::String("SubmitAdmittedIngressEffect".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "wake".into(),
-                                expr: Expr::Bool(true),
-                            },
-                            CompositionWitnessField {
-                                field: "process".into(),
-                                expr: Expr::Bool(true),
-                            },
-                        ],
+                        fields: admission_accepted_fields(
+                            "raw_1",
+                            "PeerInput",
+                            "InlineImage",
+                            true,
+                            true,
+                        ),
                     },
                 ],
                 expected_routes: vec![
@@ -5320,8 +5556,8 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     witness_transition("peer_comms", "TrustPeer"),
                     witness_transition("peer_comms", "ReceiveTrustedPeerEnvelope"),
                     witness_transition("peer_comms", "SubmitTypedPeerInputDelivered"),
-                    witness_transition("runtime_control", "AdmissionAcceptedIdleWakeAndProcess"),
-                    witness_transition("runtime_ingress", "AdmitQueuedWakeAndProcess"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
                 ],
                 expected_transition_order: vec![
                     witness_transition_order(
@@ -5334,13 +5570,13 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                         "peer_comms",
                         "SubmitTypedPeerInputDelivered",
                         "runtime_control",
-                        "AdmissionAcceptedIdleWakeAndProcess",
+                        "AdmissionAcceptedIdleSteer",
                     ),
                     witness_transition_order(
                         "runtime_control",
-                        "AdmissionAcceptedIdleWakeAndProcess",
+                        "AdmissionAcceptedIdleSteer",
                         "runtime_ingress",
-                        "AdmitQueuedWakeAndProcess",
+                        "AdmitQueuedSteer",
                     ),
                 ],
                 state_limits: CompositionStateLimits {
@@ -5386,28 +5622,13 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     CompositionWitnessInput {
                         machine: "runtime_control".into(),
                         input_variant: "AdmissionAccepted".into(),
-                        fields: vec![
-                            CompositionWitnessField {
-                                field: "candidate_id".into(),
-                                expr: Expr::String("step_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "candidate_kind".into(),
-                                expr: Expr::String("WorkInput".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "admission_effect".into(),
-                                expr: Expr::String("SubmitAdmittedIngressEffect".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "wake".into(),
-                                expr: Expr::Bool(true),
-                            },
-                            CompositionWitnessField {
-                                field: "process".into(),
-                                expr: Expr::Bool(true),
-                            },
-                        ],
+                        fields: admission_accepted_fields(
+                            "step_1",
+                            "WorkInput",
+                            "TextOnly",
+                            true,
+                            true,
+                        ),
                     },
                     CompositionWitnessInput {
                         machine: "runtime_ingress".into(),
@@ -5418,7 +5639,7 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                                 expr: Expr::String("runid_1".into()),
                             },
                             CompositionWitnessField {
-                                field: "contributing_input_ids".into(),
+                                field: "contributing_work_ids".into(),
                                 expr: Expr::SeqLiteral(vec![Expr::String("step_1".into())]),
                             },
                         ],
@@ -5455,8 +5676,8 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 ],
                 expected_transitions: vec![
                     witness_transition("flow_run", "DispatchStep"),
-                    witness_transition("runtime_control", "AdmissionAcceptedIdleWakeAndProcess"),
-                    witness_transition("runtime_ingress", "AdmitQueuedWakeAndProcess"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
                     witness_transition("runtime_ingress", "StageDrainSnapshot"),
                     witness_transition("runtime_control", "BeginRunFromIdle"),
                     witness_transition("turn_execution", "StartConversationRun"),
@@ -5469,13 +5690,13 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                         "flow_run",
                         "DispatchStep",
                         "runtime_control",
-                        "AdmissionAcceptedIdleWakeAndProcess",
+                        "AdmissionAcceptedIdleSteer",
                     ),
                     witness_transition_order(
                         "runtime_control",
-                        "AdmissionAcceptedIdleWakeAndProcess",
+                        "AdmissionAcceptedIdleSteer",
                         "runtime_ingress",
-                        "AdmitQueuedWakeAndProcess",
+                        "AdmitQueuedSteer",
                     ),
                     witness_transition_order(
                         "runtime_ingress",
@@ -5545,28 +5766,13 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     CompositionWitnessInput {
                         machine: "runtime_control".into(),
                         input_variant: "AdmissionAccepted".into(),
-                        fields: vec![
-                            CompositionWitnessField {
-                                field: "candidate_id".into(),
-                                expr: Expr::String("step_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "candidate_kind".into(),
-                                expr: Expr::String("WorkInput".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "admission_effect".into(),
-                                expr: Expr::String("SubmitAdmittedIngressEffect".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "wake".into(),
-                                expr: Expr::Bool(true),
-                            },
-                            CompositionWitnessField {
-                                field: "process".into(),
-                                expr: Expr::Bool(true),
-                            },
-                        ],
+                        fields: admission_accepted_fields(
+                            "step_1",
+                            "WorkInput",
+                            "TextOnly",
+                            true,
+                            true,
+                        ),
                     },
                     CompositionWitnessInput {
                         machine: "runtime_ingress".into(),
@@ -5577,14 +5783,14 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                                 expr: Expr::String("runid_1".into()),
                             },
                             CompositionWitnessField {
-                                field: "contributing_input_ids".into(),
+                                field: "contributing_work_ids".into(),
                                 expr: Expr::SeqLiteral(vec![Expr::String("step_1".into())]),
                             },
                         ],
                     },
                     CompositionWitnessInput {
                         machine: "turn_execution".into(),
-                        input_variant: "CancelRequested".into(),
+                        input_variant: "CancelNow".into(),
                         fields: vec![CompositionWitnessField {
                             field: "run_id".into(),
                             expr: Expr::String("runid_1".into()),
@@ -5622,12 +5828,12 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 ],
                 expected_transitions: vec![
                     witness_transition("flow_run", "DispatchStep"),
-                    witness_transition("runtime_control", "AdmissionAcceptedIdleWakeAndProcess"),
-                    witness_transition("runtime_ingress", "AdmitQueuedWakeAndProcess"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
                     witness_transition("runtime_ingress", "StageDrainSnapshot"),
                     witness_transition("runtime_control", "BeginRunFromIdle"),
                     witness_transition("turn_execution", "StartConversationRun"),
-                    witness_transition("turn_execution", "CancelRequestedFromApplyingPrimitive"),
+                    witness_transition("turn_execution", "CancelNowFromApplyingPrimitive"),
                     witness_transition("turn_execution", "CancellationObserved"),
                     witness_transition("runtime_ingress", "RunCancelled"),
                     witness_transition("runtime_control", "RunCancelled"),
@@ -5637,13 +5843,13 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                         "flow_run",
                         "DispatchStep",
                         "runtime_control",
-                        "AdmissionAcceptedIdleWakeAndProcess",
+                        "AdmissionAcceptedIdleSteer",
                     ),
                     witness_transition_order(
                         "runtime_control",
-                        "AdmissionAcceptedIdleWakeAndProcess",
+                        "AdmissionAcceptedIdleSteer",
                         "runtime_ingress",
-                        "AdmitQueuedWakeAndProcess",
+                        "AdmitQueuedSteer",
                     ),
                     witness_transition_order(
                         "runtime_ingress",
@@ -5659,7 +5865,7 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     ),
                     witness_transition_order(
                         "turn_execution",
-                        "CancelRequestedFromApplyingPrimitive",
+                        "CancelNowFromApplyingPrimitive",
                         "turn_execution",
                         "CancellationObserved",
                     ),
@@ -5698,28 +5904,14 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     CompositionWitnessInput {
                         machine: "runtime_ingress".into(),
                         input_variant: "AdmitQueued".into(),
-                        fields: vec![
-                            CompositionWitnessField {
-                                field: "input_id".into(),
-                                expr: Expr::String("step_1".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "input_kind".into(),
-                                expr: Expr::String("WorkInput".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "policy".into(),
-                                expr: Expr::String("MobQueued".into()),
-                            },
-                            CompositionWitnessField {
-                                field: "wake".into(),
-                                expr: Expr::Bool(true),
-                            },
-                            CompositionWitnessField {
-                                field: "process".into(),
-                                expr: Expr::Bool(true),
-                            },
-                        ],
+                        fields: admit_queued_fields(
+                            "step_1",
+                            "WorkInput",
+                            "TextOnly",
+                            "MobQueued",
+                            true,
+                            true,
+                        ),
                     },
                 ],
                 expected_routes: vec![],
@@ -5730,13 +5922,13 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 expected_states: vec![witness_state("runtime_control", Some("Idle"), vec![])],
                 expected_transitions: vec![
                     witness_transition("runtime_control", "Initialize"),
-                    witness_transition("runtime_ingress", "AdmitQueuedWakeAndProcess"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
                 ],
                 expected_transition_order: vec![witness_transition_order(
                     "runtime_control",
                     "Initialize",
                     "runtime_ingress",
-                        "AdmitQueuedWakeAndProcess",
+                        "AdmitQueuedSteer",
                 )],
                 state_limits: CompositionStateLimits {
                     step_limit: 3,
@@ -5751,6 +5943,7 @@ pub fn mob_bundle_composition() -> CompositionSchema {
             },
         ],
         deep_domain_cardinality: 1,
+        deep_domain_overrides: BTreeMap::new(),
         witness_domain_cardinality: 1,
     }
 }
@@ -5784,4 +5977,177 @@ fn witness_transition_order(
         earlier: witness_transition(earlier_machine, earlier_transition),
         later: witness_transition(later_machine, later_transition),
     }
+}
+
+fn submit_candidate_fields(
+    work_id: &str,
+    _work_kind: &str,
+    content_shape: &str,
+) -> Vec<CompositionWitnessField> {
+    vec![
+        CompositionWitnessField {
+            field: "work_id".into(),
+            expr: Expr::String(work_id.into()),
+        },
+        CompositionWitnessField {
+            field: "content_shape".into(),
+            expr: Expr::String(content_shape.into()),
+        },
+        CompositionWitnessField {
+            field: "handling_mode".into(),
+            expr: Expr::String("Queue".into()),
+        },
+        CompositionWitnessField {
+            field: "request_id".into(),
+            expr: Expr::None,
+        },
+        CompositionWitnessField {
+            field: "reservation_key".into(),
+            expr: Expr::None,
+        },
+    ]
+}
+
+fn admission_accepted_fields(
+    work_id: &str,
+    _work_kind: &str,
+    content_shape: &str,
+    _wake: bool,
+    process: bool,
+) -> Vec<CompositionWitnessField> {
+    let handling_mode = if process { "Steer" } else { "Queue" };
+    vec![
+        CompositionWitnessField {
+            field: "work_id".into(),
+            expr: Expr::String(work_id.into()),
+        },
+        CompositionWitnessField {
+            field: "content_shape".into(),
+            expr: Expr::String(content_shape.into()),
+        },
+        CompositionWitnessField {
+            field: "handling_mode".into(),
+            expr: Expr::String(handling_mode.into()),
+        },
+        CompositionWitnessField {
+            field: "request_id".into(),
+            expr: Expr::None,
+        },
+        CompositionWitnessField {
+            field: "reservation_key".into(),
+            expr: Expr::None,
+        },
+        CompositionWitnessField {
+            field: "admission_effect".into(),
+            expr: Expr::String("SubmitAdmittedIngressEffect".into()),
+        },
+    ]
+}
+
+fn admit_queued_fields(
+    work_id: &str,
+    _work_kind: &str,
+    content_shape: &str,
+    policy: &str,
+    _wake: bool,
+    process: bool,
+) -> Vec<CompositionWitnessField> {
+    let handling_mode = if process { "Steer" } else { "Queue" };
+    vec![
+        CompositionWitnessField {
+            field: "work_id".into(),
+            expr: Expr::String(work_id.into()),
+        },
+        CompositionWitnessField {
+            field: "content_shape".into(),
+            expr: Expr::String(content_shape.into()),
+        },
+        CompositionWitnessField {
+            field: "handling_mode".into(),
+            expr: Expr::String(handling_mode.into()),
+        },
+        CompositionWitnessField {
+            field: "request_id".into(),
+            expr: Expr::None,
+        },
+        CompositionWitnessField {
+            field: "reservation_key".into(),
+            expr: Expr::None,
+        },
+        CompositionWitnessField {
+            field: "policy".into(),
+            expr: Expr::String(policy.into()),
+        },
+    ]
+}
+
+fn primitive_applied_fields(
+    run_id: &str,
+    admitted_content_shape: &str,
+    vision_enabled: bool,
+    image_tool_results_enabled: bool,
+) -> Vec<CompositionWitnessField> {
+    vec![
+        CompositionWitnessField {
+            field: "run_id".into(),
+            expr: Expr::String(run_id.into()),
+        },
+        CompositionWitnessField {
+            field: "admitted_content_shape".into(),
+            expr: Expr::String(admitted_content_shape.into()),
+        },
+        CompositionWitnessField {
+            field: "vision_enabled".into(),
+            expr: Expr::Bool(vision_enabled),
+        },
+        CompositionWitnessField {
+            field: "image_tool_results_enabled".into(),
+            expr: Expr::Bool(image_tool_results_enabled),
+        },
+    ]
+}
+
+fn peer_envelope_fields(
+    raw_item_id: &str,
+    peer_id: &str,
+    raw_kind: &str,
+    text_projection: &str,
+    content_shape: &str,
+    request_id: Option<&str>,
+    reservation_key: Option<&str>,
+) -> Vec<CompositionWitnessField> {
+    vec![
+        CompositionWitnessField {
+            field: "raw_item_id".into(),
+            expr: Expr::String(raw_item_id.into()),
+        },
+        CompositionWitnessField {
+            field: "peer_id".into(),
+            expr: Expr::String(peer_id.into()),
+        },
+        CompositionWitnessField {
+            field: "raw_kind".into(),
+            expr: Expr::String(raw_kind.into()),
+        },
+        CompositionWitnessField {
+            field: "text_projection".into(),
+            expr: Expr::String(text_projection.into()),
+        },
+        CompositionWitnessField {
+            field: "content_shape".into(),
+            expr: Expr::String(content_shape.into()),
+        },
+        CompositionWitnessField {
+            field: "request_id".into(),
+            expr: request_id
+                .map(|value| Expr::Some(Box::new(Expr::String(value.into()))))
+                .unwrap_or(Expr::None),
+        },
+        CompositionWitnessField {
+            field: "reservation_key".into(),
+            expr: reservation_key
+                .map(|value| Expr::Some(Box::new(Expr::String(value.into()))))
+                .unwrap_or(Expr::None),
+        },
+    ]
 }

@@ -3,12 +3,15 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for RuntimeIngressMachine.
 
-CONSTANTS BooleanValues, InputIdValues, InputKindValues, NatValues, PolicyDecisionValues, RunIdValues
-
-SeqOfInputIdValues == {<<>>} \cup {<<x>> : x \in InputIdValues} \cup {<<x, y>> : x \in InputIdValues, y \in InputIdValues}
+CONSTANTS ContentShapeValues, HandlingModeValues, NatValues, PolicyDecisionValues, RequestIdValues, ReservationKeyValues, RunIdValues, WorkIdValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
+
+OptionRequestIdValues == {None} \cup {Some(x) : x \in RequestIdValues}
+OptionReservationKeyValues == {None} \cup {Some(x) : x \in ReservationKeyValues}
+SeqOfWorkIdValues == {<<>>} \cup {<<x>> : x \in WorkIdValues} \cup {<<x, y>> : x \in WorkIdValues, y \in WorkIdValues}
+
 MapLookup(map, key) == IF key \in DOMAIN map THEN map[key] ELSE None
 MapSet(map, key, value) == [x \in DOMAIN map \cup {key} |-> IF x = key THEN value ELSE map[x]]
 StartsWith(seq, prefix) == /\ Len(prefix) <= Len(seq) /\ SubSeq(seq, 1, Len(prefix)) = prefix
@@ -18,16 +21,18 @@ SeqRemove(seq, value) == IF Len(seq) = 0 THEN <<>> ELSE IF Head(seq) = value THE
 RECURSIVE SeqRemoveAll(_, _)
 SeqRemoveAll(seq, values) == IF Len(values) = 0 THEN seq ELSE SeqRemoveAll(SeqRemove(seq, Head(values)), Tail(values))
 
-VARIABLES phase, model_step_count, admitted_inputs, admission_order, input_kind, policy_snapshot, lifecycle, terminal_outcome, queue, current_run, current_run_contributors, last_run, last_boundary_sequence, wake_requested, process_requested
+VARIABLES phase, model_step_count, admitted_inputs, admission_order, content_shape, request_id, reservation_key, policy_snapshot, lifecycle, terminal_outcome, queue, current_run, current_run_contributors, last_run, last_boundary_sequence, wake_requested, process_requested
 
-vars == << phase, model_step_count, admitted_inputs, admission_order, input_kind, policy_snapshot, lifecycle, terminal_outcome, queue, current_run, current_run_contributors, last_run, last_boundary_sequence, wake_requested, process_requested >>
+vars == << phase, model_step_count, admitted_inputs, admission_order, content_shape, request_id, reservation_key, policy_snapshot, lifecycle, terminal_outcome, queue, current_run, current_run_contributors, last_run, last_boundary_sequence, wake_requested, process_requested >>
 
 Init ==
     /\ phase = "Active"
     /\ model_step_count = 0
     /\ admitted_inputs = {}
     /\ admission_order = <<>>
-    /\ input_kind = [x \in {} |-> None]
+    /\ content_shape = [x \in {} |-> None]
+    /\ request_id = [x \in {} |-> None]
+    /\ reservation_key = [x \in {} |-> None]
     /\ policy_snapshot = [x \in {} |-> None]
     /\ lifecycle = [x \in {} |-> None]
     /\ terminal_outcome = [x \in {} |-> None]
@@ -44,223 +49,185 @@ TerminalStutter ==
     /\ UNCHANGED vars
 
 RECURSIVE StageDrainSnapshot_ForEach0_last_run(_, _, _)
-StageDrainSnapshot_ForEach0_last_run(acc, items, outer_run_id) == IF Len(items) = 0 THEN acc ELSE LET input_id == Head(items) IN LET next_acc == MapSet(acc, input_id, Some(outer_run_id)) IN StageDrainSnapshot_ForEach0_last_run(next_acc, Tail(items), outer_run_id)
+StageDrainSnapshot_ForEach0_last_run(acc, items, outer_run_id) == IF Len(items) = 0 THEN acc ELSE LET work_id == Head(items) IN LET next_acc == MapSet(acc, work_id, Some(outer_run_id)) IN StageDrainSnapshot_ForEach0_last_run(next_acc, Tail(items), outer_run_id)
 
 RECURSIVE StageDrainSnapshot_ForEach0_lifecycle(_, _, _)
-StageDrainSnapshot_ForEach0_lifecycle(acc, items, outer_run_id) == IF Len(items) = 0 THEN acc ELSE LET input_id == Head(items) IN LET next_acc == MapSet(acc, input_id, "Staged") IN StageDrainSnapshot_ForEach0_lifecycle(next_acc, Tail(items), outer_run_id)
+StageDrainSnapshot_ForEach0_lifecycle(acc, items, outer_run_id) == IF Len(items) = 0 THEN acc ELSE LET work_id == Head(items) IN LET next_acc == MapSet(acc, work_id, "Staged") IN StageDrainSnapshot_ForEach0_lifecycle(next_acc, Tail(items), outer_run_id)
 
 RECURSIVE BoundaryApplied_ForEach1_last_boundary_sequence(_, _, _)
-BoundaryApplied_ForEach1_last_boundary_sequence(acc, items, outer_boundary_sequence) == IF Len(items) = 0 THEN acc ELSE LET input_id == Head(items) IN LET next_acc == MapSet(acc, input_id, Some(outer_boundary_sequence)) IN BoundaryApplied_ForEach1_last_boundary_sequence(next_acc, Tail(items), outer_boundary_sequence)
+BoundaryApplied_ForEach1_last_boundary_sequence(acc, items, outer_boundary_sequence) == IF Len(items) = 0 THEN acc ELSE LET work_id == Head(items) IN LET next_acc == MapSet(acc, work_id, Some(outer_boundary_sequence)) IN BoundaryApplied_ForEach1_last_boundary_sequence(next_acc, Tail(items), outer_boundary_sequence)
 
 RECURSIVE BoundaryApplied_ForEach1_lifecycle(_, _, _)
-BoundaryApplied_ForEach1_lifecycle(acc, items, outer_boundary_sequence) == IF Len(items) = 0 THEN acc ELSE LET input_id == Head(items) IN LET next_acc == MapSet(acc, input_id, "AppliedPendingConsumption") IN BoundaryApplied_ForEach1_lifecycle(next_acc, Tail(items), outer_boundary_sequence)
+BoundaryApplied_ForEach1_lifecycle(acc, items, outer_boundary_sequence) == IF Len(items) = 0 THEN acc ELSE LET work_id == Head(items) IN LET next_acc == MapSet(acc, work_id, "AppliedPendingConsumption") IN BoundaryApplied_ForEach1_lifecycle(next_acc, Tail(items), outer_boundary_sequence)
 
 RECURSIVE RunCompleted_ForEach2_lifecycle(_, _)
-RunCompleted_ForEach2_lifecycle(acc, items) == IF Len(items) = 0 THEN acc ELSE LET input_id == Head(items) IN LET next_acc == MapSet(acc, input_id, "Consumed") IN RunCompleted_ForEach2_lifecycle(next_acc, Tail(items))
+RunCompleted_ForEach2_lifecycle(acc, items) == IF Len(items) = 0 THEN acc ELSE LET work_id == Head(items) IN LET next_acc == MapSet(acc, work_id, "Consumed") IN RunCompleted_ForEach2_lifecycle(next_acc, Tail(items))
 
 RECURSIVE RunCompleted_ForEach2_terminal_outcome(_, _)
-RunCompleted_ForEach2_terminal_outcome(acc, items) == IF Len(items) = 0 THEN acc ELSE LET input_id == Head(items) IN LET next_acc == MapSet(acc, input_id, Some("Consumed")) IN RunCompleted_ForEach2_terminal_outcome(next_acc, Tail(items))
+RunCompleted_ForEach2_terminal_outcome(acc, items) == IF Len(items) = 0 THEN acc ELSE LET work_id == Head(items) IN LET next_acc == MapSet(acc, work_id, Some("Consumed")) IN RunCompleted_ForEach2_terminal_outcome(next_acc, Tail(items))
 
 RECURSIVE RunFailed_ForEach3_lifecycle(_, _)
-RunFailed_ForEach3_lifecycle(acc, items) == IF Len(items) = 0 THEN acc ELSE LET input_id == Head(items) IN LET next_acc == MapSet(acc, input_id, "Queued") IN RunFailed_ForEach3_lifecycle(next_acc, Tail(items))
+RunFailed_ForEach3_lifecycle(acc, items) == IF Len(items) = 0 THEN acc ELSE LET work_id == Head(items) IN LET next_acc == MapSet(acc, work_id, "Queued") IN RunFailed_ForEach3_lifecycle(next_acc, Tail(items))
 
 RECURSIVE RunCancelled_ForEach4_lifecycle(_, _)
-RunCancelled_ForEach4_lifecycle(acc, items) == IF Len(items) = 0 THEN acc ELSE LET input_id == Head(items) IN LET next_acc == MapSet(acc, input_id, "Queued") IN RunCancelled_ForEach4_lifecycle(next_acc, Tail(items))
+RunCancelled_ForEach4_lifecycle(acc, items) == IF Len(items) = 0 THEN acc ELSE LET work_id == Head(items) IN LET next_acc == MapSet(acc, work_id, "Queued") IN RunCancelled_ForEach4_lifecycle(next_acc, Tail(items))
 
 RECURSIVE CoalesceQueuedInputs_ForEach5_lifecycle(_, _)
-CoalesceQueuedInputs_ForEach5_lifecycle(acc, items) == IF Len(items) = 0 THEN acc ELSE LET input_id == Head(items) IN LET next_acc == MapSet(acc, input_id, "Coalesced") IN CoalesceQueuedInputs_ForEach5_lifecycle(next_acc, Tail(items))
+CoalesceQueuedInputs_ForEach5_lifecycle(acc, items) == IF Len(items) = 0 THEN acc ELSE LET work_id == Head(items) IN LET next_acc == MapSet(acc, work_id, "Coalesced") IN CoalesceQueuedInputs_ForEach5_lifecycle(next_acc, Tail(items))
 
 RECURSIVE CoalesceQueuedInputs_ForEach5_terminal_outcome(_, _)
-CoalesceQueuedInputs_ForEach5_terminal_outcome(acc, items) == IF Len(items) = 0 THEN acc ELSE LET input_id == Head(items) IN LET next_acc == MapSet(acc, input_id, Some("Coalesced")) IN CoalesceQueuedInputs_ForEach5_terminal_outcome(next_acc, Tail(items))
+CoalesceQueuedInputs_ForEach5_terminal_outcome(acc, items) == IF Len(items) = 0 THEN acc ELSE LET work_id == Head(items) IN LET next_acc == MapSet(acc, work_id, Some("Coalesced")) IN CoalesceQueuedInputs_ForEach5_terminal_outcome(next_acc, Tail(items))
 
 RECURSIVE ResetFromActive_ForEach6_lifecycle(_, _)
-ResetFromActive_ForEach6_lifecycle(acc, items) == IF Len(items) = 0 THEN acc ELSE LET input_id == Head(items) IN LET next_acc == MapSet(acc, input_id, "Abandoned") IN ResetFromActive_ForEach6_lifecycle(next_acc, Tail(items))
+ResetFromActive_ForEach6_lifecycle(acc, items) == IF Len(items) = 0 THEN acc ELSE LET work_id == Head(items) IN LET next_acc == MapSet(acc, work_id, "Abandoned") IN ResetFromActive_ForEach6_lifecycle(next_acc, Tail(items))
 
 RECURSIVE ResetFromActive_ForEach6_terminal_outcome(_, _)
-ResetFromActive_ForEach6_terminal_outcome(acc, items) == IF Len(items) = 0 THEN acc ELSE LET input_id == Head(items) IN LET next_acc == MapSet(acc, input_id, Some("AbandonedReset")) IN ResetFromActive_ForEach6_terminal_outcome(next_acc, Tail(items))
+ResetFromActive_ForEach6_terminal_outcome(acc, items) == IF Len(items) = 0 THEN acc ELSE LET work_id == Head(items) IN LET next_acc == MapSet(acc, work_id, Some("AbandonedReset")) IN ResetFromActive_ForEach6_terminal_outcome(next_acc, Tail(items))
 
 RECURSIVE ResetFromActive_ForEach7_lifecycle(_, _)
-ResetFromActive_ForEach7_lifecycle(acc, items) == IF Len(items) = 0 THEN acc ELSE LET input_id == Head(items) IN LET next_acc == MapSet(acc, input_id, "Abandoned") IN ResetFromActive_ForEach7_lifecycle(next_acc, Tail(items))
+ResetFromActive_ForEach7_lifecycle(acc, items) == IF Len(items) = 0 THEN acc ELSE LET work_id == Head(items) IN LET next_acc == MapSet(acc, work_id, "Abandoned") IN ResetFromActive_ForEach7_lifecycle(next_acc, Tail(items))
 
 RECURSIVE ResetFromActive_ForEach7_terminal_outcome(_, _)
-ResetFromActive_ForEach7_terminal_outcome(acc, items) == IF Len(items) = 0 THEN acc ELSE LET input_id == Head(items) IN LET next_acc == MapSet(acc, input_id, Some("AbandonedReset")) IN ResetFromActive_ForEach7_terminal_outcome(next_acc, Tail(items))
+ResetFromActive_ForEach7_terminal_outcome(acc, items) == IF Len(items) = 0 THEN acc ELSE LET work_id == Head(items) IN LET next_acc == MapSet(acc, work_id, Some("AbandonedReset")) IN ResetFromActive_ForEach7_terminal_outcome(next_acc, Tail(items))
 
 RECURSIVE ResetFromRetired_ForEach8_lifecycle(_, _)
-ResetFromRetired_ForEach8_lifecycle(acc, items) == IF Len(items) = 0 THEN acc ELSE LET input_id == Head(items) IN LET next_acc == MapSet(acc, input_id, "Abandoned") IN ResetFromRetired_ForEach8_lifecycle(next_acc, Tail(items))
+ResetFromRetired_ForEach8_lifecycle(acc, items) == IF Len(items) = 0 THEN acc ELSE LET work_id == Head(items) IN LET next_acc == MapSet(acc, work_id, "Abandoned") IN ResetFromRetired_ForEach8_lifecycle(next_acc, Tail(items))
 
 RECURSIVE ResetFromRetired_ForEach8_terminal_outcome(_, _)
-ResetFromRetired_ForEach8_terminal_outcome(acc, items) == IF Len(items) = 0 THEN acc ELSE LET input_id == Head(items) IN LET next_acc == MapSet(acc, input_id, Some("AbandonedReset")) IN ResetFromRetired_ForEach8_terminal_outcome(next_acc, Tail(items))
+ResetFromRetired_ForEach8_terminal_outcome(acc, items) == IF Len(items) = 0 THEN acc ELSE LET work_id == Head(items) IN LET next_acc == MapSet(acc, work_id, Some("AbandonedReset")) IN ResetFromRetired_ForEach8_terminal_outcome(next_acc, Tail(items))
 
 RECURSIVE ResetFromRetired_ForEach9_lifecycle(_, _)
-ResetFromRetired_ForEach9_lifecycle(acc, items) == IF Len(items) = 0 THEN acc ELSE LET input_id == Head(items) IN LET next_acc == MapSet(acc, input_id, "Abandoned") IN ResetFromRetired_ForEach9_lifecycle(next_acc, Tail(items))
+ResetFromRetired_ForEach9_lifecycle(acc, items) == IF Len(items) = 0 THEN acc ELSE LET work_id == Head(items) IN LET next_acc == MapSet(acc, work_id, "Abandoned") IN ResetFromRetired_ForEach9_lifecycle(next_acc, Tail(items))
 
 RECURSIVE ResetFromRetired_ForEach9_terminal_outcome(_, _)
-ResetFromRetired_ForEach9_terminal_outcome(acc, items) == IF Len(items) = 0 THEN acc ELSE LET input_id == Head(items) IN LET next_acc == MapSet(acc, input_id, Some("AbandonedReset")) IN ResetFromRetired_ForEach9_terminal_outcome(next_acc, Tail(items))
+ResetFromRetired_ForEach9_terminal_outcome(acc, items) == IF Len(items) = 0 THEN acc ELSE LET work_id == Head(items) IN LET next_acc == MapSet(acc, work_id, Some("AbandonedReset")) IN ResetFromRetired_ForEach9_terminal_outcome(next_acc, Tail(items))
 
 RECURSIVE Destroy_ForEach10_lifecycle(_, _)
-Destroy_ForEach10_lifecycle(acc, items) == IF Len(items) = 0 THEN acc ELSE LET input_id == Head(items) IN LET next_acc == MapSet(acc, input_id, "Abandoned") IN Destroy_ForEach10_lifecycle(next_acc, Tail(items))
+Destroy_ForEach10_lifecycle(acc, items) == IF Len(items) = 0 THEN acc ELSE LET work_id == Head(items) IN LET next_acc == MapSet(acc, work_id, "Abandoned") IN Destroy_ForEach10_lifecycle(next_acc, Tail(items))
 
 RECURSIVE Destroy_ForEach10_terminal_outcome(_, _)
-Destroy_ForEach10_terminal_outcome(acc, items) == IF Len(items) = 0 THEN acc ELSE LET input_id == Head(items) IN LET next_acc == MapSet(acc, input_id, Some("AbandonedDestroyed")) IN Destroy_ForEach10_terminal_outcome(next_acc, Tail(items))
+Destroy_ForEach10_terminal_outcome(acc, items) == IF Len(items) = 0 THEN acc ELSE LET work_id == Head(items) IN LET next_acc == MapSet(acc, work_id, Some("AbandonedDestroyed")) IN Destroy_ForEach10_terminal_outcome(next_acc, Tail(items))
 
 RECURSIVE Destroy_ForEach11_lifecycle(_, _)
-Destroy_ForEach11_lifecycle(acc, items) == IF Len(items) = 0 THEN acc ELSE LET input_id == Head(items) IN LET next_acc == MapSet(acc, input_id, "Abandoned") IN Destroy_ForEach11_lifecycle(next_acc, Tail(items))
+Destroy_ForEach11_lifecycle(acc, items) == IF Len(items) = 0 THEN acc ELSE LET work_id == Head(items) IN LET next_acc == MapSet(acc, work_id, "Abandoned") IN Destroy_ForEach11_lifecycle(next_acc, Tail(items))
 
 RECURSIVE Destroy_ForEach11_terminal_outcome(_, _)
-Destroy_ForEach11_terminal_outcome(acc, items) == IF Len(items) = 0 THEN acc ELSE LET input_id == Head(items) IN LET next_acc == MapSet(acc, input_id, Some("AbandonedDestroyed")) IN Destroy_ForEach11_terminal_outcome(next_acc, Tail(items))
+Destroy_ForEach11_terminal_outcome(acc, items) == IF Len(items) = 0 THEN acc ELSE LET work_id == Head(items) IN LET next_acc == MapSet(acc, work_id, Some("AbandonedDestroyed")) IN Destroy_ForEach11_terminal_outcome(next_acc, Tail(items))
 
 RECURSIVE RecoverFromActive_ForEach12_lifecycle(_, _)
-RecoverFromActive_ForEach12_lifecycle(acc, items) == IF Len(items) = 0 THEN acc ELSE LET input_id == Head(items) IN LET next_acc == MapSet(acc, input_id, "Queued") IN RecoverFromActive_ForEach12_lifecycle(next_acc, Tail(items))
+RecoverFromActive_ForEach12_lifecycle(acc, items) == IF Len(items) = 0 THEN acc ELSE LET work_id == Head(items) IN LET next_acc == MapSet(acc, work_id, "Queued") IN RecoverFromActive_ForEach12_lifecycle(next_acc, Tail(items))
 
 RECURSIVE RecoverFromRetired_ForEach13_lifecycle(_, _)
-RecoverFromRetired_ForEach13_lifecycle(acc, items) == IF Len(items) = 0 THEN acc ELSE LET input_id == Head(items) IN LET next_acc == MapSet(acc, input_id, "Queued") IN RecoverFromRetired_ForEach13_lifecycle(next_acc, Tail(items))
+RecoverFromRetired_ForEach13_lifecycle(acc, items) == IF Len(items) = 0 THEN acc ELSE LET work_id == Head(items) IN LET next_acc == MapSet(acc, work_id, "Queued") IN RecoverFromRetired_ForEach13_lifecycle(next_acc, Tail(items))
 
-AdmitQueuedNone(input_id, arg_input_kind, policy, wake, process) ==
+AdmitQueuedQueue(work_id, arg_content_shape, handling_mode, arg_request_id, arg_reservation_key, policy) ==
     /\ phase = "Active"
-    /\ ~((input_id \in admitted_inputs))
-    /\ (wake = FALSE)
-    /\ (process = FALSE)
+    /\ ~((work_id \in admitted_inputs))
+    /\ (handling_mode = "Queue")
     /\ phase' = "Active"
     /\ model_step_count' = model_step_count + 1
-    /\ admitted_inputs' = (admitted_inputs \cup {input_id})
-    /\ admission_order' = Append(admission_order, input_id)
-    /\ input_kind' = MapSet(input_kind, input_id, arg_input_kind)
-    /\ policy_snapshot' = MapSet(policy_snapshot, input_id, policy)
-    /\ lifecycle' = MapSet(lifecycle, input_id, "Queued")
-    /\ terminal_outcome' = MapSet(terminal_outcome, input_id, None)
-    /\ queue' = Append(queue, input_id)
-    /\ last_run' = MapSet(last_run, input_id, None)
-    /\ last_boundary_sequence' = MapSet(last_boundary_sequence, input_id, None)
-    /\ wake_requested' = (wake_requested \/ wake)
-    /\ process_requested' = (process_requested \/ process)
+    /\ admitted_inputs' = (admitted_inputs \cup {work_id})
+    /\ admission_order' = Append(admission_order, work_id)
+    /\ content_shape' = MapSet(content_shape, work_id, arg_content_shape)
+    /\ request_id' = MapSet(request_id, work_id, arg_request_id)
+    /\ reservation_key' = MapSet(reservation_key, work_id, arg_reservation_key)
+    /\ policy_snapshot' = MapSet(policy_snapshot, work_id, policy)
+    /\ lifecycle' = MapSet(lifecycle, work_id, "Queued")
+    /\ terminal_outcome' = MapSet(terminal_outcome, work_id, None)
+    /\ queue' = Append(queue, work_id)
+    /\ last_run' = MapSet(last_run, work_id, None)
+    /\ last_boundary_sequence' = MapSet(last_boundary_sequence, work_id, None)
+    /\ wake_requested' = (wake_requested \/ FALSE)
+    /\ process_requested' = (process_requested \/ FALSE)
     /\ UNCHANGED << current_run, current_run_contributors >>
 
 
-AdmitQueuedWake(input_id, arg_input_kind, policy, wake, process) ==
+AdmitQueuedSteer(work_id, arg_content_shape, handling_mode, arg_request_id, arg_reservation_key, policy) ==
     /\ phase = "Active"
-    /\ ~((input_id \in admitted_inputs))
-    /\ (wake = TRUE)
-    /\ (process = FALSE)
+    /\ ~((work_id \in admitted_inputs))
+    /\ (handling_mode = "Steer")
     /\ phase' = "Active"
     /\ model_step_count' = model_step_count + 1
-    /\ admitted_inputs' = (admitted_inputs \cup {input_id})
-    /\ admission_order' = Append(admission_order, input_id)
-    /\ input_kind' = MapSet(input_kind, input_id, arg_input_kind)
-    /\ policy_snapshot' = MapSet(policy_snapshot, input_id, policy)
-    /\ lifecycle' = MapSet(lifecycle, input_id, "Queued")
-    /\ terminal_outcome' = MapSet(terminal_outcome, input_id, None)
-    /\ queue' = Append(queue, input_id)
-    /\ last_run' = MapSet(last_run, input_id, None)
-    /\ last_boundary_sequence' = MapSet(last_boundary_sequence, input_id, None)
-    /\ wake_requested' = (wake_requested \/ wake)
-    /\ process_requested' = (process_requested \/ process)
+    /\ admitted_inputs' = (admitted_inputs \cup {work_id})
+    /\ admission_order' = Append(admission_order, work_id)
+    /\ content_shape' = MapSet(content_shape, work_id, arg_content_shape)
+    /\ request_id' = MapSet(request_id, work_id, arg_request_id)
+    /\ reservation_key' = MapSet(reservation_key, work_id, arg_reservation_key)
+    /\ policy_snapshot' = MapSet(policy_snapshot, work_id, policy)
+    /\ lifecycle' = MapSet(lifecycle, work_id, "Queued")
+    /\ terminal_outcome' = MapSet(terminal_outcome, work_id, None)
+    /\ queue' = Append(queue, work_id)
+    /\ last_run' = MapSet(last_run, work_id, None)
+    /\ last_boundary_sequence' = MapSet(last_boundary_sequence, work_id, None)
+    /\ wake_requested' = (wake_requested \/ TRUE)
+    /\ process_requested' = (process_requested \/ TRUE)
     /\ UNCHANGED << current_run, current_run_contributors >>
 
 
-AdmitQueuedProcess(input_id, arg_input_kind, policy, wake, process) ==
+AdmitConsumedOnAccept(work_id, arg_content_shape, arg_request_id, arg_reservation_key, policy) ==
     /\ phase = "Active"
-    /\ ~((input_id \in admitted_inputs))
-    /\ (wake = FALSE)
-    /\ (process = TRUE)
+    /\ ~((work_id \in admitted_inputs))
     /\ phase' = "Active"
     /\ model_step_count' = model_step_count + 1
-    /\ admitted_inputs' = (admitted_inputs \cup {input_id})
-    /\ admission_order' = Append(admission_order, input_id)
-    /\ input_kind' = MapSet(input_kind, input_id, arg_input_kind)
-    /\ policy_snapshot' = MapSet(policy_snapshot, input_id, policy)
-    /\ lifecycle' = MapSet(lifecycle, input_id, "Queued")
-    /\ terminal_outcome' = MapSet(terminal_outcome, input_id, None)
-    /\ queue' = Append(queue, input_id)
-    /\ last_run' = MapSet(last_run, input_id, None)
-    /\ last_boundary_sequence' = MapSet(last_boundary_sequence, input_id, None)
-    /\ wake_requested' = (wake_requested \/ wake)
-    /\ process_requested' = (process_requested \/ process)
-    /\ UNCHANGED << current_run, current_run_contributors >>
-
-
-AdmitQueuedWakeAndProcess(input_id, arg_input_kind, policy, wake, process) ==
-    /\ phase = "Active"
-    /\ ~((input_id \in admitted_inputs))
-    /\ (wake = TRUE)
-    /\ (process = TRUE)
-    /\ phase' = "Active"
-    /\ model_step_count' = model_step_count + 1
-    /\ admitted_inputs' = (admitted_inputs \cup {input_id})
-    /\ admission_order' = Append(admission_order, input_id)
-    /\ input_kind' = MapSet(input_kind, input_id, arg_input_kind)
-    /\ policy_snapshot' = MapSet(policy_snapshot, input_id, policy)
-    /\ lifecycle' = MapSet(lifecycle, input_id, "Queued")
-    /\ terminal_outcome' = MapSet(terminal_outcome, input_id, None)
-    /\ queue' = Append(queue, input_id)
-    /\ last_run' = MapSet(last_run, input_id, None)
-    /\ last_boundary_sequence' = MapSet(last_boundary_sequence, input_id, None)
-    /\ wake_requested' = (wake_requested \/ wake)
-    /\ process_requested' = (process_requested \/ process)
-    /\ UNCHANGED << current_run, current_run_contributors >>
-
-
-AdmitConsumedOnAccept(input_id, arg_input_kind, policy) ==
-    /\ phase = "Active"
-    /\ ~((input_id \in admitted_inputs))
-    /\ phase' = "Active"
-    /\ model_step_count' = model_step_count + 1
-    /\ admitted_inputs' = (admitted_inputs \cup {input_id})
-    /\ admission_order' = Append(admission_order, input_id)
-    /\ input_kind' = MapSet(input_kind, input_id, arg_input_kind)
-    /\ policy_snapshot' = MapSet(policy_snapshot, input_id, policy)
-    /\ lifecycle' = MapSet(lifecycle, input_id, "Consumed")
-    /\ terminal_outcome' = MapSet(terminal_outcome, input_id, Some("Consumed"))
-    /\ last_run' = MapSet(last_run, input_id, None)
-    /\ last_boundary_sequence' = MapSet(last_boundary_sequence, input_id, None)
+    /\ admitted_inputs' = (admitted_inputs \cup {work_id})
+    /\ admission_order' = Append(admission_order, work_id)
+    /\ content_shape' = MapSet(content_shape, work_id, arg_content_shape)
+    /\ request_id' = MapSet(request_id, work_id, arg_request_id)
+    /\ reservation_key' = MapSet(reservation_key, work_id, arg_reservation_key)
+    /\ policy_snapshot' = MapSet(policy_snapshot, work_id, policy)
+    /\ lifecycle' = MapSet(lifecycle, work_id, "Consumed")
+    /\ terminal_outcome' = MapSet(terminal_outcome, work_id, Some("Consumed"))
+    /\ last_run' = MapSet(last_run, work_id, None)
+    /\ last_boundary_sequence' = MapSet(last_boundary_sequence, work_id, None)
     /\ UNCHANGED << queue, current_run, current_run_contributors, wake_requested, process_requested >>
 
 
-StageDrainSnapshot(run_id, contributing_input_ids) ==
+StageDrainSnapshot(run_id, contributing_work_ids) ==
     /\ phase = "Active" \/ phase = "Retired"
     /\ (current_run = None)
-    /\ (Len(contributing_input_ids) > 0)
-    /\ StartsWith(queue, contributing_input_ids)
-    /\ \A input_id \in SeqElements(contributing_input_ids) : ((IF input_id \in DOMAIN lifecycle THEN lifecycle[input_id] ELSE "None") = "Queued")
+    /\ (Len(contributing_work_ids) > 0)
+    /\ StartsWith(queue, contributing_work_ids)
+    /\ \A work_id \in SeqElements(contributing_work_ids) : ((IF work_id \in DOMAIN lifecycle THEN lifecycle[work_id] ELSE "None") = "Queued")
     /\ phase' = "Active"
     /\ model_step_count' = model_step_count + 1
-    /\ lifecycle' = StageDrainSnapshot_ForEach0_lifecycle(lifecycle, contributing_input_ids, run_id)
-    /\ queue' = SeqRemoveAll(queue, contributing_input_ids)
+    /\ lifecycle' = StageDrainSnapshot_ForEach0_lifecycle(lifecycle, contributing_work_ids, run_id)
+    /\ queue' = SeqRemoveAll(queue, contributing_work_ids)
     /\ current_run' = Some(run_id)
-    /\ current_run_contributors' = contributing_input_ids
-    /\ last_run' = StageDrainSnapshot_ForEach0_last_run(last_run, contributing_input_ids, run_id)
+    /\ current_run_contributors' = contributing_work_ids
+    /\ last_run' = StageDrainSnapshot_ForEach0_last_run(last_run, contributing_work_ids, run_id)
     /\ wake_requested' = FALSE
     /\ process_requested' = FALSE
-    /\ UNCHANGED << admitted_inputs, admission_order, input_kind, policy_snapshot, terminal_outcome, last_boundary_sequence >>
+    /\ UNCHANGED << admitted_inputs, admission_order, content_shape, request_id, reservation_key, policy_snapshot, terminal_outcome, last_boundary_sequence >>
 
 
 BoundaryApplied(run_id, boundary_sequence) ==
     /\ phase = "Active" \/ phase = "Retired"
     /\ (current_run = Some(run_id))
-    /\ \A input_id \in SeqElements(current_run_contributors) : ((IF input_id \in DOMAIN lifecycle THEN lifecycle[input_id] ELSE "None") = "Staged")
+    /\ \A work_id \in SeqElements(current_run_contributors) : ((IF work_id \in DOMAIN lifecycle THEN lifecycle[work_id] ELSE "None") = "Staged")
     /\ phase' = "Active"
     /\ model_step_count' = model_step_count + 1
     /\ lifecycle' = BoundaryApplied_ForEach1_lifecycle(lifecycle, current_run_contributors, boundary_sequence)
     /\ last_boundary_sequence' = BoundaryApplied_ForEach1_last_boundary_sequence(last_boundary_sequence, current_run_contributors, boundary_sequence)
-    /\ UNCHANGED << admitted_inputs, admission_order, input_kind, policy_snapshot, terminal_outcome, queue, current_run, current_run_contributors, last_run, wake_requested, process_requested >>
+    /\ UNCHANGED << admitted_inputs, admission_order, content_shape, request_id, reservation_key, policy_snapshot, terminal_outcome, queue, current_run, current_run_contributors, last_run, wake_requested, process_requested >>
 
 
 RunCompleted(run_id) ==
     /\ phase = "Active" \/ phase = "Retired"
     /\ (current_run = Some(run_id))
-    /\ \A input_id \in SeqElements(current_run_contributors) : ((IF input_id \in DOMAIN lifecycle THEN lifecycle[input_id] ELSE "None") = "AppliedPendingConsumption")
+    /\ \A work_id \in SeqElements(current_run_contributors) : ((IF work_id \in DOMAIN lifecycle THEN lifecycle[work_id] ELSE "None") = "AppliedPendingConsumption")
     /\ phase' = "Active"
     /\ model_step_count' = model_step_count + 1
     /\ lifecycle' = RunCompleted_ForEach2_lifecycle(lifecycle, current_run_contributors)
     /\ terminal_outcome' = RunCompleted_ForEach2_terminal_outcome(terminal_outcome, current_run_contributors)
     /\ current_run' = None
     /\ current_run_contributors' = <<>>
-    /\ UNCHANGED << admitted_inputs, admission_order, input_kind, policy_snapshot, queue, last_run, last_boundary_sequence, wake_requested, process_requested >>
+    /\ UNCHANGED << admitted_inputs, admission_order, content_shape, request_id, reservation_key, policy_snapshot, queue, last_run, last_boundary_sequence, wake_requested, process_requested >>
 
 
 RunFailed(run_id) ==
     /\ phase = "Active" \/ phase = "Retired"
     /\ (current_run = Some(run_id))
-    /\ \A input_id \in SeqElements(current_run_contributors) : ((IF input_id \in DOMAIN lifecycle THEN lifecycle[input_id] ELSE "None") = "Staged")
+    /\ \A work_id \in SeqElements(current_run_contributors) : ((IF work_id \in DOMAIN lifecycle THEN lifecycle[work_id] ELSE "None") = "Staged")
     /\ phase' = "Active"
     /\ model_step_count' = model_step_count + 1
     /\ lifecycle' = RunFailed_ForEach3_lifecycle(lifecycle, current_run_contributors)
@@ -268,13 +235,13 @@ RunFailed(run_id) ==
     /\ current_run' = None
     /\ current_run_contributors' = <<>>
     /\ wake_requested' = IF (Len(current_run_contributors) > 0) THEN TRUE ELSE wake_requested
-    /\ UNCHANGED << admitted_inputs, admission_order, input_kind, policy_snapshot, terminal_outcome, last_run, last_boundary_sequence, process_requested >>
+    /\ UNCHANGED << admitted_inputs, admission_order, content_shape, request_id, reservation_key, policy_snapshot, terminal_outcome, last_run, last_boundary_sequence, process_requested >>
 
 
 RunCancelled(run_id) ==
     /\ phase = "Active" \/ phase = "Retired"
     /\ (current_run = Some(run_id))
-    /\ \A input_id \in SeqElements(current_run_contributors) : ((IF input_id \in DOMAIN lifecycle THEN lifecycle[input_id] ELSE "None") = "Staged")
+    /\ \A work_id \in SeqElements(current_run_contributors) : ((IF work_id \in DOMAIN lifecycle THEN lifecycle[work_id] ELSE "None") = "Staged")
     /\ phase' = "Active"
     /\ model_step_count' = model_step_count + 1
     /\ lifecycle' = RunCancelled_ForEach4_lifecycle(lifecycle, current_run_contributors)
@@ -282,39 +249,39 @@ RunCancelled(run_id) ==
     /\ current_run' = None
     /\ current_run_contributors' = <<>>
     /\ wake_requested' = IF (Len(current_run_contributors) > 0) THEN TRUE ELSE wake_requested
-    /\ UNCHANGED << admitted_inputs, admission_order, input_kind, policy_snapshot, terminal_outcome, last_run, last_boundary_sequence, process_requested >>
+    /\ UNCHANGED << admitted_inputs, admission_order, content_shape, request_id, reservation_key, policy_snapshot, terminal_outcome, last_run, last_boundary_sequence, process_requested >>
 
 
-SupersedeQueuedInput(new_input_id, old_input_id) ==
+SupersedeQueuedInput(new_work_id, old_work_id) ==
     /\ phase = "Active"
-    /\ (new_input_id \in admitted_inputs)
-    /\ ((IF old_input_id \in DOMAIN lifecycle THEN lifecycle[old_input_id] ELSE "None") = "Queued")
+    /\ (new_work_id \in admitted_inputs)
+    /\ ((IF old_work_id \in DOMAIN lifecycle THEN lifecycle[old_work_id] ELSE "None") = "Queued")
     /\ phase' = "Active"
     /\ model_step_count' = model_step_count + 1
-    /\ lifecycle' = MapSet(lifecycle, old_input_id, "Superseded")
-    /\ terminal_outcome' = MapSet(terminal_outcome, old_input_id, Some("Superseded"))
-    /\ queue' = SeqRemove(queue, old_input_id)
-    /\ UNCHANGED << admitted_inputs, admission_order, input_kind, policy_snapshot, current_run, current_run_contributors, last_run, last_boundary_sequence, wake_requested, process_requested >>
+    /\ lifecycle' = MapSet(lifecycle, old_work_id, "Superseded")
+    /\ terminal_outcome' = MapSet(terminal_outcome, old_work_id, Some("Superseded"))
+    /\ queue' = SeqRemove(queue, old_work_id)
+    /\ UNCHANGED << admitted_inputs, admission_order, content_shape, request_id, reservation_key, policy_snapshot, current_run, current_run_contributors, last_run, last_boundary_sequence, wake_requested, process_requested >>
 
 
-CoalesceQueuedInputs(aggregate_input_id, source_input_ids) ==
+CoalesceQueuedInputs(aggregate_work_id, source_work_ids) ==
     /\ phase = "Active"
-    /\ (aggregate_input_id \in admitted_inputs)
-    /\ (Len(source_input_ids) > 0)
-    /\ \A input_id \in SeqElements(source_input_ids) : ((IF input_id \in DOMAIN lifecycle THEN lifecycle[input_id] ELSE "None") = "Queued")
+    /\ (aggregate_work_id \in admitted_inputs)
+    /\ (Len(source_work_ids) > 0)
+    /\ \A work_id \in SeqElements(source_work_ids) : ((IF work_id \in DOMAIN lifecycle THEN lifecycle[work_id] ELSE "None") = "Queued")
     /\ phase' = "Active"
     /\ model_step_count' = model_step_count + 1
-    /\ lifecycle' = CoalesceQueuedInputs_ForEach5_lifecycle(lifecycle, source_input_ids)
-    /\ terminal_outcome' = CoalesceQueuedInputs_ForEach5_terminal_outcome(terminal_outcome, source_input_ids)
-    /\ queue' = SeqRemoveAll(queue, source_input_ids)
-    /\ UNCHANGED << admitted_inputs, admission_order, input_kind, policy_snapshot, current_run, current_run_contributors, last_run, last_boundary_sequence, wake_requested, process_requested >>
+    /\ lifecycle' = CoalesceQueuedInputs_ForEach5_lifecycle(lifecycle, source_work_ids)
+    /\ terminal_outcome' = CoalesceQueuedInputs_ForEach5_terminal_outcome(terminal_outcome, source_work_ids)
+    /\ queue' = SeqRemoveAll(queue, source_work_ids)
+    /\ UNCHANGED << admitted_inputs, admission_order, content_shape, request_id, reservation_key, policy_snapshot, current_run, current_run_contributors, last_run, last_boundary_sequence, wake_requested, process_requested >>
 
 
 Retire ==
     /\ phase = "Active"
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << admitted_inputs, admission_order, input_kind, policy_snapshot, lifecycle, terminal_outcome, queue, current_run, current_run_contributors, last_run, last_boundary_sequence, wake_requested, process_requested >>
+    /\ UNCHANGED << admitted_inputs, admission_order, content_shape, request_id, reservation_key, policy_snapshot, lifecycle, terminal_outcome, queue, current_run, current_run_contributors, last_run, last_boundary_sequence, wake_requested, process_requested >>
 
 
 ResetFromActive ==
@@ -328,7 +295,7 @@ ResetFromActive ==
     /\ current_run_contributors' = <<>>
     /\ wake_requested' = FALSE
     /\ process_requested' = FALSE
-    /\ UNCHANGED << admitted_inputs, admission_order, input_kind, policy_snapshot, last_run, last_boundary_sequence >>
+    /\ UNCHANGED << admitted_inputs, admission_order, content_shape, request_id, reservation_key, policy_snapshot, last_run, last_boundary_sequence >>
 
 
 ResetFromRetired ==
@@ -342,7 +309,7 @@ ResetFromRetired ==
     /\ current_run_contributors' = <<>>
     /\ wake_requested' = FALSE
     /\ process_requested' = FALSE
-    /\ UNCHANGED << admitted_inputs, admission_order, input_kind, policy_snapshot, last_run, last_boundary_sequence >>
+    /\ UNCHANGED << admitted_inputs, admission_order, content_shape, request_id, reservation_key, policy_snapshot, last_run, last_boundary_sequence >>
 
 
 Destroy ==
@@ -356,7 +323,7 @@ Destroy ==
     /\ current_run_contributors' = <<>>
     /\ wake_requested' = FALSE
     /\ process_requested' = FALSE
-    /\ UNCHANGED << admitted_inputs, admission_order, input_kind, policy_snapshot, last_run, last_boundary_sequence >>
+    /\ UNCHANGED << admitted_inputs, admission_order, content_shape, request_id, reservation_key, policy_snapshot, last_run, last_boundary_sequence >>
 
 
 RecoverFromActive ==
@@ -368,7 +335,7 @@ RecoverFromActive ==
     /\ current_run' = None
     /\ current_run_contributors' = <<>>
     /\ wake_requested' = IF (Len(current_run_contributors) > 0) THEN TRUE ELSE wake_requested
-    /\ UNCHANGED << admitted_inputs, admission_order, input_kind, policy_snapshot, terminal_outcome, last_run, last_boundary_sequence, process_requested >>
+    /\ UNCHANGED << admitted_inputs, admission_order, content_shape, request_id, reservation_key, policy_snapshot, terminal_outcome, last_run, last_boundary_sequence, process_requested >>
 
 
 RecoverFromRetired ==
@@ -380,22 +347,20 @@ RecoverFromRetired ==
     /\ current_run' = None
     /\ current_run_contributors' = <<>>
     /\ wake_requested' = IF (Len(current_run_contributors) > 0) THEN TRUE ELSE wake_requested
-    /\ UNCHANGED << admitted_inputs, admission_order, input_kind, policy_snapshot, terminal_outcome, last_run, last_boundary_sequence, process_requested >>
+    /\ UNCHANGED << admitted_inputs, admission_order, content_shape, request_id, reservation_key, policy_snapshot, terminal_outcome, last_run, last_boundary_sequence, process_requested >>
 
 
 Next ==
-    \/ \E input_id \in InputIdValues : \E arg_input_kind \in InputKindValues : \E policy \in PolicyDecisionValues : \E wake \in BOOLEAN : \E process \in BOOLEAN : AdmitQueuedNone(input_id, arg_input_kind, policy, wake, process)
-    \/ \E input_id \in InputIdValues : \E arg_input_kind \in InputKindValues : \E policy \in PolicyDecisionValues : \E wake \in BOOLEAN : \E process \in BOOLEAN : AdmitQueuedWake(input_id, arg_input_kind, policy, wake, process)
-    \/ \E input_id \in InputIdValues : \E arg_input_kind \in InputKindValues : \E policy \in PolicyDecisionValues : \E wake \in BOOLEAN : \E process \in BOOLEAN : AdmitQueuedProcess(input_id, arg_input_kind, policy, wake, process)
-    \/ \E input_id \in InputIdValues : \E arg_input_kind \in InputKindValues : \E policy \in PolicyDecisionValues : \E wake \in BOOLEAN : \E process \in BOOLEAN : AdmitQueuedWakeAndProcess(input_id, arg_input_kind, policy, wake, process)
-    \/ \E input_id \in InputIdValues : \E arg_input_kind \in InputKindValues : \E policy \in PolicyDecisionValues : AdmitConsumedOnAccept(input_id, arg_input_kind, policy)
-    \/ \E run_id \in RunIdValues : \E contributing_input_ids \in SeqOfInputIdValues : StageDrainSnapshot(run_id, contributing_input_ids)
+    \/ \E work_id \in WorkIdValues : \E arg_content_shape \in ContentShapeValues : \E handling_mode \in HandlingModeValues : \E arg_request_id \in RequestIdValues : \E arg_reservation_key \in ReservationKeyValues : \E policy \in PolicyDecisionValues : AdmitQueuedQueue(work_id, arg_content_shape, handling_mode, arg_request_id, arg_reservation_key, policy)
+    \/ \E work_id \in WorkIdValues : \E arg_content_shape \in ContentShapeValues : \E handling_mode \in HandlingModeValues : \E arg_request_id \in RequestIdValues : \E arg_reservation_key \in ReservationKeyValues : \E policy \in PolicyDecisionValues : AdmitQueuedSteer(work_id, arg_content_shape, handling_mode, arg_request_id, arg_reservation_key, policy)
+    \/ \E work_id \in WorkIdValues : \E arg_content_shape \in ContentShapeValues : \E arg_request_id \in RequestIdValues : \E arg_reservation_key \in ReservationKeyValues : \E policy \in PolicyDecisionValues : AdmitConsumedOnAccept(work_id, arg_content_shape, arg_request_id, arg_reservation_key, policy)
+    \/ \E run_id \in RunIdValues : \E contributing_work_ids \in SeqOfWorkIdValues : StageDrainSnapshot(run_id, contributing_work_ids)
     \/ \E run_id \in RunIdValues : \E boundary_sequence \in 0..2 : BoundaryApplied(run_id, boundary_sequence)
     \/ \E run_id \in RunIdValues : RunCompleted(run_id)
     \/ \E run_id \in RunIdValues : RunFailed(run_id)
     \/ \E run_id \in RunIdValues : RunCancelled(run_id)
-    \/ \E new_input_id \in InputIdValues : \E old_input_id \in InputIdValues : SupersedeQueuedInput(new_input_id, old_input_id)
-    \/ \E aggregate_input_id \in InputIdValues : \E source_input_ids \in SeqOfInputIdValues : CoalesceQueuedInputs(aggregate_input_id, source_input_ids)
+    \/ \E new_work_id \in WorkIdValues : \E old_work_id \in WorkIdValues : SupersedeQueuedInput(new_work_id, old_work_id)
+    \/ \E aggregate_work_id \in WorkIdValues : \E source_work_ids \in SeqOfWorkIdValues : CoalesceQueuedInputs(aggregate_work_id, source_work_ids)
     \/ Retire
     \/ ResetFromActive
     \/ ResetFromRetired
@@ -404,18 +369,22 @@ Next ==
     \/ RecoverFromRetired
     \/ TerminalStutter
 
-queue_entries_are_queued == \A input_id \in SeqElements(queue) : ((IF input_id \in DOMAIN lifecycle THEN lifecycle[input_id] ELSE "None") = "Queued")
-terminal_inputs_do_not_appear_in_queue == \A input_id \in SeqElements(queue) : (((IF input_id \in DOMAIN lifecycle THEN lifecycle[input_id] ELSE "None") # "Consumed") /\ ((IF input_id \in DOMAIN lifecycle THEN lifecycle[input_id] ELSE "None") # "Superseded") /\ ((IF input_id \in DOMAIN lifecycle THEN lifecycle[input_id] ELSE "None") # "Coalesced") /\ ((IF input_id \in DOMAIN lifecycle THEN lifecycle[input_id] ELSE "None") # "Abandoned"))
+queue_entries_are_queued == \A work_id \in SeqElements(queue) : ((IF work_id \in DOMAIN lifecycle THEN lifecycle[work_id] ELSE "None") = "Queued")
+queued_inputs_preserve_content_shape == \A work_id \in SeqElements(queue) : (work_id \in DOMAIN content_shape)
+admitted_inputs_preserve_correlation_slots == \A work_id \in admitted_inputs : ((work_id \in DOMAIN request_id) /\ (work_id \in DOMAIN reservation_key))
+terminal_inputs_do_not_appear_in_queue == \A work_id \in SeqElements(queue) : (((IF work_id \in DOMAIN lifecycle THEN lifecycle[work_id] ELSE "None") # "Consumed") /\ ((IF work_id \in DOMAIN lifecycle THEN lifecycle[work_id] ELSE "None") # "Superseded") /\ ((IF work_id \in DOMAIN lifecycle THEN lifecycle[work_id] ELSE "None") # "Coalesced") /\ ((IF work_id \in DOMAIN lifecycle THEN lifecycle[work_id] ELSE "None") # "Abandoned"))
 current_run_matches_contributor_presence == ((current_run = None) = (Len(current_run_contributors) = 0))
-staged_contributors_are_not_queued == \A input_id \in SeqElements(current_run_contributors) : ~((input_id \in SeqElements(queue)))
-applied_pending_consumption_has_last_run == \A input_id \in admitted_inputs : (((IF input_id \in DOMAIN lifecycle THEN lifecycle[input_id] ELSE "None") # "AppliedPendingConsumption") \/ ((IF input_id \in DOMAIN last_run THEN last_run[input_id] ELSE None) # None))
+staged_contributors_are_not_queued == \A work_id \in SeqElements(current_run_contributors) : ~((work_id \in SeqElements(queue)))
+applied_pending_consumption_has_last_run == \A work_id \in admitted_inputs : (((IF work_id \in DOMAIN lifecycle THEN lifecycle[work_id] ELSE "None") # "AppliedPendingConsumption") \/ ((IF work_id \in DOMAIN last_run THEN last_run[work_id] ELSE None) # None))
 
-CiStateConstraint == /\ model_step_count <= 6 /\ Cardinality(admitted_inputs) <= 1 /\ Len(admission_order) <= 1 /\ Cardinality(DOMAIN input_kind) <= 1 /\ Cardinality(DOMAIN policy_snapshot) <= 1 /\ Cardinality(DOMAIN lifecycle) <= 1 /\ Cardinality(DOMAIN terminal_outcome) <= 1 /\ Len(queue) <= 1 /\ Len(current_run_contributors) <= 1 /\ Cardinality(DOMAIN last_run) <= 1 /\ Cardinality(DOMAIN last_boundary_sequence) <= 1
-DeepStateConstraint == /\ model_step_count <= 8 /\ Cardinality(admitted_inputs) <= 2 /\ Len(admission_order) <= 2 /\ Cardinality(DOMAIN input_kind) <= 2 /\ Cardinality(DOMAIN policy_snapshot) <= 2 /\ Cardinality(DOMAIN lifecycle) <= 2 /\ Cardinality(DOMAIN terminal_outcome) <= 2 /\ Len(queue) <= 2 /\ Len(current_run_contributors) <= 2 /\ Cardinality(DOMAIN last_run) <= 2 /\ Cardinality(DOMAIN last_boundary_sequence) <= 2
+CiStateConstraint == /\ model_step_count <= 6 /\ Cardinality(admitted_inputs) <= 1 /\ Len(admission_order) <= 1 /\ Cardinality(DOMAIN content_shape) <= 1 /\ Cardinality(DOMAIN request_id) <= 1 /\ Cardinality(DOMAIN reservation_key) <= 1 /\ Cardinality(DOMAIN policy_snapshot) <= 1 /\ Cardinality(DOMAIN lifecycle) <= 1 /\ Cardinality(DOMAIN terminal_outcome) <= 1 /\ Len(queue) <= 1 /\ Len(current_run_contributors) <= 1 /\ Cardinality(DOMAIN last_run) <= 1 /\ Cardinality(DOMAIN last_boundary_sequence) <= 1
+DeepStateConstraint == /\ model_step_count <= 8 /\ Cardinality(admitted_inputs) <= 2 /\ Len(admission_order) <= 2 /\ Cardinality(DOMAIN content_shape) <= 2 /\ Cardinality(DOMAIN request_id) <= 2 /\ Cardinality(DOMAIN reservation_key) <= 2 /\ Cardinality(DOMAIN policy_snapshot) <= 2 /\ Cardinality(DOMAIN lifecycle) <= 2 /\ Cardinality(DOMAIN terminal_outcome) <= 2 /\ Len(queue) <= 2 /\ Len(current_run_contributors) <= 2 /\ Cardinality(DOMAIN last_run) <= 2 /\ Cardinality(DOMAIN last_boundary_sequence) <= 2
 
 Spec == Init /\ [][Next]_vars
 
 THEOREM Spec => []queue_entries_are_queued
+THEOREM Spec => []queued_inputs_preserve_content_shape
+THEOREM Spec => []admitted_inputs_preserve_correlation_slots
 THEOREM Spec => []terminal_inputs_do_not_appear_in_queue
 THEOREM Spec => []current_run_matches_contributor_presence
 THEOREM Spec => []staged_contributors_are_not_queued

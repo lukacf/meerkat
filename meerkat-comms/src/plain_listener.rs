@@ -42,8 +42,10 @@ pub async fn handle_plain_connection<S>(
                 match inbox_sender.send_classified(InboxItem::PlainEvent {
                     body,
                     source,
+                    handling_mode: meerkat_core::types::HandlingMode::Queue,
                     interaction_id: None,
                     blocks: None,
+                    render_metadata: None,
                 }) {
                     Ok(()) => {}
                     Err(InboxError::Full) => {

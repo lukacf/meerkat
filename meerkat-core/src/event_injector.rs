@@ -5,9 +5,12 @@
 //! `meerkat-comms` provides the concrete implementation (`CommsEventInjector`)
 //! that wraps `InboxSender`.
 
-use crate::PlainEventSource;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
+use crate::{
+    PlainEventSource,
+    types::{ContentInput, HandlingMode, RenderMetadata},
+};
 
 /// Error returned when event injection fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,7 +41,13 @@ pub trait EventInjector: Send + Sync {
     ///
     /// Returns `Ok(())` on success, `Err(Full)` if the inbox is at capacity,
     /// or `Err(Closed)` if the agent has shut down.
-    fn inject(&self, body: String, source: PlainEventSource) -> Result<(), EventInjectorError>;
+    fn inject(
+        &self,
+        content: ContentInput,
+        source: PlainEventSource,
+        handling_mode: HandlingMode,
+        render_metadata: Option<RenderMetadata>,
+    ) -> Result<(), EventInjectorError>;
 }
 
 /// Internal runtime handle for an interaction-scoped event stream.
@@ -70,8 +79,10 @@ pub trait SubscribableInjector: EventInjector {
     /// On inbox send failure: removes the subscriber from the registry and returns the error.
     fn inject_with_subscription(
         &self,
-        body: String,
+        content: ContentInput,
         source: PlainEventSource,
+        handling_mode: HandlingMode,
+        render_metadata: Option<RenderMetadata>,
     ) -> Result<InteractionSubscription, EventInjectorError>;
 }
 
@@ -84,7 +95,14 @@ mod tests {
 
     /// Mock EventInjector for testing — records injected events.
     struct MockEventInjector {
-        events: Mutex<Vec<(String, PlainEventSource)>>,
+        events: Mutex<
+            Vec<(
+                ContentInput,
+                PlainEventSource,
+                HandlingMode,
+                Option<RenderMetadata>,
+            )>,
+        >,
     }
 
     impl MockEventInjector {
@@ -96,8 +114,17 @@ mod tests {
     }
 
     impl EventInjector for MockEventInjector {
-        fn inject(&self, body: String, source: PlainEventSource) -> Result<(), EventInjectorError> {
-            self.events.lock().unwrap().push((body, source));
+        fn inject(
+            &self,
+            content: ContentInput,
+            source: PlainEventSource,
+            handling_mode: HandlingMode,
+            render_metadata: Option<RenderMetadata>,
+        ) -> Result<(), EventInjectorError> {
+            self.events
+                .lock()
+                .unwrap()
+                .push((content, source, handling_mode, render_metadata));
             Ok(())
         }
     }
@@ -106,20 +133,32 @@ mod tests {
     fn test_event_injector_trait_compiles() {
         let injector = MockEventInjector::new();
         injector
-            .inject("hello".to_string(), PlainEventSource::Tcp)
+            .inject(
+                "hello".to_string().into(),
+                PlainEventSource::Tcp,
+                HandlingMode::Queue,
+                None,
+            )
             .unwrap();
 
         let events = injector.events.lock().unwrap();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].0, "hello");
+        assert_eq!(events[0].0, ContentInput::Text("hello".to_string()));
         assert_eq!(events[0].1, PlainEventSource::Tcp);
+        assert_eq!(events[0].2, HandlingMode::Queue);
+        assert_eq!(events[0].3, None);
     }
 
     #[test]
     fn test_event_injector_as_dyn_trait() {
         let injector: Arc<dyn EventInjector> = Arc::new(MockEventInjector::new());
         injector
-            .inject("test".to_string(), PlainEventSource::Webhook)
+            .inject(
+                "test".to_string().into(),
+                PlainEventSource::Webhook,
+                HandlingMode::Queue,
+                None,
+            )
             .unwrap();
     }
 

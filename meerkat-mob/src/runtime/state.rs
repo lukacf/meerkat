@@ -90,12 +90,14 @@ pub(super) enum MobCommand {
     },
     ExternalTurn {
         meerkat_id: MeerkatId,
-        message: String,
+        message: meerkat_core::types::ContentInput,
+        handling_mode: meerkat_core::types::HandlingMode,
+        render_metadata: Option<meerkat_core::types::RenderMetadata>,
         reply_tx: oneshot::Sender<Result<SessionId, MobError>>,
     },
     InternalTurn {
         meerkat_id: MeerkatId,
-        message: String,
+        message: meerkat_core::types::ContentInput,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     RunFlow {

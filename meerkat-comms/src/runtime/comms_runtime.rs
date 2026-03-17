@@ -274,7 +274,8 @@ impl CoreCommsRuntime for CommsRuntime {
                 stream,
                 allow_self_session,
                 session_id: _,
-                blocks: _,
+                blocks,
+                handling_mode,
             } => {
                 // Self-input guard: when allow_self_session is false, this runtime's
                 // inbox is the target, which is a self-loop. Reject unless explicitly
@@ -290,8 +291,12 @@ impl CoreCommsRuntime for CommsRuntime {
                         let injector = CoreCommsRuntime::event_injector(self).ok_or_else(|| {
                             SendError::Unsupported("event injector unavailable".into())
                         })?;
+                        let content = match blocks {
+                            Some(blocks) => meerkat_core::types::ContentInput::Blocks(blocks),
+                            None => meerkat_core::types::ContentInput::Text(body),
+                        };
                         injector
-                            .inject(body, PlainEventSource::from(source))
+                            .inject(content, PlainEventSource::from(source), handling_mode, None)
                             .map_err(map_event_injector_error)?;
                         Ok(SendReceipt::InputAccepted {
                             interaction_id: meerkat_core::InteractionId(Uuid::new_v4()),
@@ -300,7 +305,13 @@ impl CoreCommsRuntime for CommsRuntime {
                     }
                     InputStreamMode::ReserveInteraction => {
                         let interaction_id = Uuid::new_v4();
-                        self.register_interaction_stream(interaction_id, body, source)?;
+                        self.register_interaction_stream(
+                            interaction_id,
+                            body,
+                            blocks,
+                            source,
+                            handling_mode,
+                        )?;
                         Ok(SendReceipt::InputAccepted {
                             interaction_id: meerkat_core::InteractionId(interaction_id),
                             stream_reserved: true,
@@ -405,7 +416,8 @@ impl CoreCommsRuntime for CommsRuntime {
                 stream: InputStreamMode::ReserveInteraction,
                 allow_self_session,
                 session_id: _,
-                blocks: _,
+                blocks,
+                handling_mode,
             } => {
                 if !allow_self_session {
                     return Err(SendAndStreamError::Send(SendError::Validation(
@@ -414,7 +426,13 @@ impl CoreCommsRuntime for CommsRuntime {
                     )));
                 }
                 let interaction_id = Uuid::new_v4();
-                self.register_interaction_stream(interaction_id, body, source)?;
+                self.register_interaction_stream(
+                    interaction_id,
+                    body,
+                    blocks,
+                    source,
+                    handling_mode,
+                )?;
                 let receipt = SendReceipt::InputAccepted {
                     interaction_id: meerkat_core::InteractionId(interaction_id),
                     stream_reserved: true,
@@ -668,8 +686,10 @@ impl CoreCommsRuntime for CommsRuntime {
                     crate::types::InboxItem::PlainEvent {
                         body,
                         source,
+                        handling_mode: _,
                         interaction_id,
                         blocks,
+                        ..
                     } => {
                         let rendered = format!("[EVENT via {source}] {body}");
                         Some(meerkat_core::ClassifiedInboxInteraction {
@@ -1269,7 +1289,9 @@ impl CommsRuntime {
         &self,
         interaction_id: Uuid,
         body: String,
+        blocks: Option<Vec<meerkat_core::types::ContentBlock>>,
         source: meerkat_core::InputSource,
+        handling_mode: meerkat_core::types::HandlingMode,
     ) -> Result<(), SendError> {
         let (sender, receiver) = mpsc::channel::<meerkat_core::AgentEvent>(4096);
         self.subscriber_registry
@@ -1286,8 +1308,10 @@ impl CommsRuntime {
                 .send_classified(crate::types::InboxItem::PlainEvent {
                     body,
                     source: PlainEventSource::from(source),
+                    handling_mode,
                     interaction_id: Some(interaction_id),
-                    blocks: None,
+                    blocks,
+                    render_metadata: None,
                 })
         {
             self.interaction_stream_registry
@@ -1746,7 +1770,12 @@ mod tests {
             runtime.subscriber_registry.clone(),
         );
         let sub = injector
-            .inject_with_subscription("tracked".to_string(), meerkat_core::PlainEventSource::Rpc)
+            .inject_with_subscription(
+                "tracked".to_string().into(),
+                meerkat_core::PlainEventSource::Rpc,
+                meerkat_core::types::HandlingMode::Queue,
+                None,
+            )
             .unwrap();
         let tracked_id = sub.id;
 
@@ -1758,6 +1787,53 @@ mod tests {
         assert!(first.is_some(), "subscriber should be found");
         let second = CoreCommsRuntime::interaction_subscriber(&runtime, &tracked_id);
         assert!(second.is_none(), "subscriber should be one-shot");
+    }
+
+    #[tokio::test]
+    async fn test_subscription_correlation_preserves_inline_blocks() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = test_runtime_config("subscription-blocks", &tmp);
+        let runtime = CommsRuntime::new(config).await.unwrap();
+
+        let injector = CommsEventInjector::new(
+            runtime.router.inbox_sender().clone(),
+            runtime.subscriber_registry.clone(),
+        );
+        let sub = injector
+            .inject_with_subscription(
+                meerkat_core::types::ContentInput::Blocks(vec![
+                    meerkat_core::types::ContentBlock::Text {
+                        text: "tracked".to_string(),
+                    },
+                    meerkat_core::types::ContentBlock::Image {
+                        media_type: "image/png".to_string(),
+                        data: "aGVsbG8=".to_string(),
+                        source_path: None,
+                    },
+                ]),
+                meerkat_core::PlainEventSource::Rpc,
+                meerkat_core::types::HandlingMode::Queue,
+                None,
+            )
+            .unwrap();
+        let tracked_id = sub.id;
+
+        let interactions = CoreCommsRuntime::drain_inbox_interactions(&runtime).await;
+        assert_eq!(interactions.len(), 1);
+        assert_eq!(interactions[0].id, tracked_id);
+        match &interactions[0].content {
+            meerkat_core::InteractionContent::Message { blocks, .. } => {
+                let blocks = blocks.as_ref().expect("blocks preserved");
+                assert!(
+                    blocks.iter().any(|block| matches!(
+                        block,
+                        meerkat_core::types::ContentBlock::Image { .. }
+                    )),
+                    "expected inline image block to survive into drained interaction"
+                );
+            }
+            other => panic!("expected message interaction, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -1774,7 +1850,9 @@ mod tests {
                 blocks: None,
                 body: "evt".to_string(),
                 source: meerkat_core::PlainEventSource::Tcp,
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
                 interaction_id: Some(interaction_id),
+                render_metadata: None,
             })
             .unwrap();
 
@@ -1800,6 +1878,7 @@ mod tests {
             blocks: None,
             session_id: SessionId::new(),
             body: "standalone test input".to_string(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
             source: InputSource::Rpc,
             stream: InputStreamMode::None,
             allow_self_session: true,
@@ -1833,6 +1912,7 @@ mod tests {
             blocks: None,
             session_id: SessionId::new(),
             body: "streaming input".to_string(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
             source: InputSource::Rpc,
             stream: InputStreamMode::ReserveInteraction,
             allow_self_session: true,
@@ -1871,6 +1951,7 @@ mod tests {
             blocks: None,
             session_id: SessionId::new(),
             body: "duplicate stream test".to_string(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
             source: InputSource::Rpc,
             stream: InputStreamMode::ReserveInteraction,
             allow_self_session: true,
@@ -1913,6 +1994,7 @@ mod tests {
             blocks: None,
             session_id: SessionId::new(),
             body: "send before stream attach".to_string(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
             source: InputSource::Rpc,
             stream: InputStreamMode::ReserveInteraction,
             allow_self_session: true,
@@ -1941,6 +2023,7 @@ mod tests {
             blocks: None,
             session_id: SessionId::new(),
             body: "stream-first".to_string(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
             source: InputSource::Rpc,
             stream: InputStreamMode::ReserveInteraction,
             allow_self_session: true,
@@ -2332,6 +2415,7 @@ mod tests {
             blocks: None,
             session_id: session_id.clone(),
             body: "hello".to_string(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
             source: meerkat_core::InputSource::Rpc,
             stream: InputStreamMode::ReserveInteraction,
             allow_self_session: true,
@@ -2361,6 +2445,7 @@ mod tests {
             blocks: None,
             session_id: session_id.clone(),
             body: "hello".to_string(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
             source: meerkat_core::InputSource::Rpc,
             stream: InputStreamMode::ReserveInteraction,
             allow_self_session: true,
@@ -2466,6 +2551,7 @@ mod tests {
             blocks: None,
             session_id: session_id.clone(),
             body: "no stream".to_string(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
             source: meerkat_core::InputSource::Rpc,
             stream: InputStreamMode::None,
             allow_self_session: true,
@@ -2500,6 +2586,7 @@ mod tests {
             blocks: None,
             session_id: session_id.clone(),
             body: "hello".to_string(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
             source: meerkat_core::InputSource::Rpc,
             stream: InputStreamMode::ReserveInteraction,
             allow_self_session: true,
@@ -2532,6 +2619,7 @@ mod tests {
             blocks: None,
             session_id: meerkat_core::SessionId::new(),
             body: "blocked".to_string(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
             source: meerkat_core::InputSource::Rpc,
             stream: InputStreamMode::None,
             allow_self_session: false,

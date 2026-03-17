@@ -9,15 +9,19 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Phase enum: `Ready | ApplyingPrimitive | CallingLlm | WaitingForOps | DrainingBoundary | ErrorRecovery | Cancelling | Completed | Failed | Cancelled`
 - `active_run`: `Option<RunId>`
 - `primitive_kind`: `TurnPrimitiveKind`
+- `admitted_content_shape`: `Option<ContentShape>`
+- `vision_enabled`: `Bool`
+- `image_tool_results_enabled`: `Bool`
 - `tool_calls_pending`: `u32`
 - `boundary_count`: `u32`
+- `cancel_after_boundary`: `Bool`
 - `terminal_outcome`: `TurnTerminalOutcome`
 
 ## Inputs
 - `StartConversationRun`(run_id: RunId)
 - `StartImmediateAppend`(run_id: RunId)
 - `StartImmediateContext`(run_id: RunId)
-- `PrimitiveApplied`(run_id: RunId)
+- `PrimitiveApplied`(run_id: RunId, admitted_content_shape: ContentShape, vision_enabled: Bool, image_tool_results_enabled: Bool)
 - `LlmReturnedToolCalls`(run_id: RunId, tool_count: u32)
 - `LlmReturnedTerminal`(run_id: RunId)
 - `ToolCallsResolved`(run_id: RunId)
@@ -26,7 +30,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecoverableFailure`(run_id: RunId)
 - `FatalFailure`(run_id: RunId)
 - `RetryRequested`(run_id: RunId)
-- `CancelRequested`(run_id: RunId)
+- `CancelNow`(run_id: RunId)
+- `CancelAfterBoundary`(run_id: RunId)
 - `CancellationObserved`(run_id: RunId)
 - `AcknowledgeTerminal`(run_id: RunId)
 - `RunCompleted`(run_id: RunId)
@@ -42,8 +47,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Invariants
 - `ready_has_no_active_run`
+- `ready_has_no_admitted_content`
 - `non_ready_has_active_run`
 - `waiting_for_ops_implies_pending_tools`
+- `ready_has_no_boundary_cancel_request`
 - `immediate_primitives_skip_llm_and_recovery`
 - `terminal_states_match_terminal_outcome`
 - `completed_runs_have_seen_a_boundary`
@@ -69,7 +76,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PrimitiveAppliedConversationTurn`
 - From: `ApplyingPrimitive`
-- On: `PrimitiveApplied`(run_id)
+- On: `PrimitiveApplied`(run_id, admitted_content_shape, vision_enabled, image_tool_results_enabled)
 - Guards:
   - `run_matches_active`
   - `conversation_turn`
@@ -77,21 +84,43 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PrimitiveAppliedImmediateAppend`
 - From: `ApplyingPrimitive`
-- On: `PrimitiveApplied`(run_id)
+- On: `PrimitiveApplied`(run_id, admitted_content_shape, vision_enabled, image_tool_results_enabled)
 - Guards:
   - `run_matches_active`
   - `immediate_append`
+  - `cancel_after_boundary_not_requested`
 - Emits: `BoundaryApplied`, `RunCompleted`
 - To: `Completed`
 
+### `PrimitiveAppliedImmediateAppendCancelsAfterBoundary`
+- From: `ApplyingPrimitive`
+- On: `PrimitiveApplied`(run_id, admitted_content_shape, vision_enabled, image_tool_results_enabled)
+- Guards:
+  - `run_matches_active`
+  - `immediate_append`
+  - `boundary_cancel_requested`
+- Emits: `BoundaryApplied`, `RunCancelled`
+- To: `Cancelled`
+
 ### `PrimitiveAppliedImmediateContext`
 - From: `ApplyingPrimitive`
-- On: `PrimitiveApplied`(run_id)
+- On: `PrimitiveApplied`(run_id, admitted_content_shape, vision_enabled, image_tool_results_enabled)
 - Guards:
   - `run_matches_active`
   - `immediate_context`
+  - `cancel_after_boundary_not_requested`
 - Emits: `BoundaryApplied`, `RunCompleted`
 - To: `Completed`
+
+### `PrimitiveAppliedImmediateContextCancelsAfterBoundary`
+- From: `ApplyingPrimitive`
+- On: `PrimitiveApplied`(run_id, admitted_content_shape, vision_enabled, image_tool_results_enabled)
+- Guards:
+  - `run_matches_active`
+  - `immediate_context`
+  - `boundary_cancel_requested`
+- Emits: `BoundaryApplied`, `RunCancelled`
+- To: `Cancelled`
 
 ### `LlmReturnedToolCalls`
 - From: `CallingLlm`
@@ -124,15 +153,35 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `run_matches_active`
   - `conversation_turn`
+  - `cancel_after_boundary_not_requested`
 - To: `CallingLlm`
+
+### `BoundaryContinueCancelsAfterBoundary`
+- From: `DrainingBoundary`
+- On: `BoundaryContinue`(run_id)
+- Guards:
+  - `run_matches_active`
+  - `boundary_cancel_requested`
+- Emits: `RunCancelled`
+- To: `Cancelled`
 
 ### `BoundaryComplete`
 - From: `DrainingBoundary`
 - On: `BoundaryComplete`(run_id)
 - Guards:
   - `run_matches_active`
+  - `cancel_after_boundary_not_requested`
 - Emits: `RunCompleted`
 - To: `Completed`
+
+### `BoundaryCompleteCancelsAfterBoundary`
+- From: `DrainingBoundary`
+- On: `BoundaryComplete`(run_id)
+- Guards:
+  - `run_matches_active`
+  - `boundary_cancel_requested`
+- Emits: `RunCancelled`
+- To: `Cancelled`
 
 ### `RecoverableFailureFromCallingLlm`
 - From: `CallingLlm`
@@ -202,40 +251,75 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `RunFailed`
 - To: `Failed`
 
-### `CancelRequestedFromApplyingPrimitive`
+### `CancelNowFromApplyingPrimitive`
 - From: `ApplyingPrimitive`
-- On: `CancelRequested`(run_id)
+- On: `CancelNow`(run_id)
 - Guards:
   - `run_matches_active`
 - To: `Cancelling`
 
-### `CancelRequestedFromCallingLlm`
+### `CancelNowFromCallingLlm`
 - From: `CallingLlm`
-- On: `CancelRequested`(run_id)
+- On: `CancelNow`(run_id)
 - Guards:
   - `run_matches_active`
 - To: `Cancelling`
 
-### `CancelRequestedFromWaitingForOps`
+### `CancelNowFromWaitingForOps`
 - From: `WaitingForOps`
-- On: `CancelRequested`(run_id)
+- On: `CancelNow`(run_id)
 - Guards:
   - `run_matches_active`
 - To: `Cancelling`
 
-### `CancelRequestedFromDrainingBoundary`
+### `CancelNowFromDrainingBoundary`
 - From: `DrainingBoundary`
-- On: `CancelRequested`(run_id)
+- On: `CancelNow`(run_id)
 - Guards:
   - `run_matches_active`
 - To: `Cancelling`
 
-### `CancelRequestedFromErrorRecovery`
+### `CancelNowFromErrorRecovery`
 - From: `ErrorRecovery`
-- On: `CancelRequested`(run_id)
+- On: `CancelNow`(run_id)
 - Guards:
   - `run_matches_active`
 - To: `Cancelling`
+
+### `CancelAfterBoundaryFromApplyingPrimitive`
+- From: `ApplyingPrimitive`
+- On: `CancelAfterBoundary`(run_id)
+- Guards:
+  - `run_matches_active`
+- To: `ApplyingPrimitive`
+
+### `CancelAfterBoundaryFromCallingLlm`
+- From: `CallingLlm`
+- On: `CancelAfterBoundary`(run_id)
+- Guards:
+  - `run_matches_active`
+- To: `CallingLlm`
+
+### `CancelAfterBoundaryFromWaitingForOps`
+- From: `WaitingForOps`
+- On: `CancelAfterBoundary`(run_id)
+- Guards:
+  - `run_matches_active`
+- To: `WaitingForOps`
+
+### `CancelAfterBoundaryFromDrainingBoundary`
+- From: `DrainingBoundary`
+- On: `CancelAfterBoundary`(run_id)
+- Guards:
+  - `run_matches_active`
+- To: `DrainingBoundary`
+
+### `CancelAfterBoundaryFromErrorRecovery`
+- From: `ErrorRecovery`
+- On: `CancelAfterBoundary`(run_id)
+- Guards:
+  - `run_matches_active`
+- To: `ErrorRecovery`
 
 ### `CancellationObserved`
 - From: `Cancelling`

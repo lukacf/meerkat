@@ -532,8 +532,10 @@ mod tests {
             .send_classified(InboxItem::PlainEvent {
                 body: "event".to_string(),
                 source: meerkat_core::PlainEventSource::Tcp,
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
                 interaction_id: None,
                 blocks: None,
+                render_metadata: None,
             })
             .unwrap();
 

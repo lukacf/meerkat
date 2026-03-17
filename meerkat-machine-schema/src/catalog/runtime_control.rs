@@ -55,34 +55,50 @@ pub fn runtime_control_machine() -> MachineSchema {
             variants: vec![
                 variant("Initialize"),
                 VariantSchema {
-                    name: "SubmitCandidate".into(),
+                    name: "SubmitWork".into(),
                     fields: vec![
-                        field("candidate_id", TypeRef::Named("CandidateId".into())),
-                        field("candidate_kind", TypeRef::Named("InputKind".into())),
+                        field("work_id", TypeRef::Named("WorkId".into())),
+                        field("content_shape", TypeRef::Named("ContentShape".into())),
+                        field("handling_mode", TypeRef::Named("HandlingMode".into())),
+                        field(
+                            "request_id",
+                            TypeRef::Option(Box::new(TypeRef::Named("RequestId".into()))),
+                        ),
+                        field(
+                            "reservation_key",
+                            TypeRef::Option(Box::new(TypeRef::Named("ReservationKey".into()))),
+                        ),
                     ],
                 },
                 VariantSchema {
                     name: "AdmissionAccepted".into(),
                     fields: vec![
-                        field("candidate_id", TypeRef::Named("CandidateId".into())),
-                        field("candidate_kind", TypeRef::Named("InputKind".into())),
+                        field("work_id", TypeRef::Named("WorkId".into())),
+                        field("content_shape", TypeRef::Named("ContentShape".into())),
+                        field("handling_mode", TypeRef::Named("HandlingMode".into())),
+                        field(
+                            "request_id",
+                            TypeRef::Option(Box::new(TypeRef::Named("RequestId".into()))),
+                        ),
+                        field(
+                            "reservation_key",
+                            TypeRef::Option(Box::new(TypeRef::Named("ReservationKey".into()))),
+                        ),
                         field("admission_effect", TypeRef::Named("AdmissionEffect".into())),
-                        field("wake", TypeRef::Bool),
-                        field("process", TypeRef::Bool),
                     ],
                 },
                 VariantSchema {
                     name: "AdmissionRejected".into(),
                     fields: vec![
-                        field("candidate_id", TypeRef::Named("CandidateId".into())),
+                        field("work_id", TypeRef::Named("WorkId".into())),
                         field("reason", TypeRef::String),
                     ],
                 },
                 VariantSchema {
                     name: "AdmissionDeduplicated".into(),
                     fields: vec![
-                        field("candidate_id", TypeRef::Named("CandidateId".into())),
-                        field("existing_input_id", TypeRef::Named("InputId".into())),
+                        field("work_id", TypeRef::Named("WorkId".into())),
+                        field("existing_work_id", TypeRef::Named("WorkId".into())),
                     ],
                 },
                 VariantSchema {
@@ -116,16 +132,23 @@ pub fn runtime_control_machine() -> MachineSchema {
             variants: vec![
                 VariantSchema {
                     name: "ResolveAdmission".into(),
-                    fields: vec![field("candidate_id", TypeRef::Named("CandidateId".into()))],
+                    fields: vec![field("work_id", TypeRef::Named("WorkId".into()))],
                 },
                 VariantSchema {
                     name: "SubmitAdmittedIngressEffect".into(),
                     fields: vec![
-                        field("candidate_id", TypeRef::Named("CandidateId".into())),
-                        field("candidate_kind", TypeRef::Named("InputKind".into())),
+                        field("work_id", TypeRef::Named("WorkId".into())),
+                        field("content_shape", TypeRef::Named("ContentShape".into())),
+                        field("handling_mode", TypeRef::Named("HandlingMode".into())),
+                        field(
+                            "request_id",
+                            TypeRef::Option(Box::new(TypeRef::Named("RequestId".into()))),
+                        ),
+                        field(
+                            "reservation_key",
+                            TypeRef::Option(Box::new(TypeRef::Named("ReservationKey".into()))),
+                        ),
                         field("admission_effect", TypeRef::Named("AdmissionEffect".into())),
-                        field("wake", TypeRef::Bool),
-                        field("process", TypeRef::Bool),
                     ],
                 },
                 VariantSchema {
@@ -561,547 +584,65 @@ pub fn runtime_control_machine() -> MachineSchema {
                 emit: vec![],
             },
             TransitionSchema {
-                name: "SubmitCandidateFromIdle".into(),
+                name: "SubmitWorkFromIdle".into(),
                 from: vec!["Idle".into()],
                 on: InputMatch {
-                    variant: "SubmitCandidate".into(),
-                    bindings: vec!["candidate_id".into(), "candidate_kind".into()],
+                    variant: "SubmitWork".into(),
+                    bindings: vec![
+                        "work_id".into(),
+                        "content_shape".into(),
+                        "handling_mode".into(),
+                        "request_id".into(),
+                        "reservation_key".into(),
+                    ],
                 },
                 guards: vec![],
                 updates: vec![],
                 to: "Idle".into(),
                 emit: vec![EffectEmit {
                     variant: "ResolveAdmission".into(),
-                    fields: IndexMap::from([(
-                        "candidate_id".into(),
-                        Expr::Binding("candidate_id".into()),
-                    )]),
+                    fields: IndexMap::from([("work_id".into(), Expr::Binding("work_id".into()))]),
                 }],
             },
             TransitionSchema {
-                name: "SubmitCandidateFromRunning".into(),
+                name: "SubmitWorkFromRunning".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
-                    variant: "SubmitCandidate".into(),
-                    bindings: vec!["candidate_id".into(), "candidate_kind".into()],
+                    variant: "SubmitWork".into(),
+                    bindings: vec![
+                        "work_id".into(),
+                        "content_shape".into(),
+                        "handling_mode".into(),
+                        "request_id".into(),
+                        "reservation_key".into(),
+                    ],
                 },
                 guards: vec![],
                 updates: vec![],
                 to: "Running".into(),
                 emit: vec![EffectEmit {
                     variant: "ResolveAdmission".into(),
-                    fields: IndexMap::from([(
-                        "candidate_id".into(),
-                        Expr::Binding("candidate_id".into()),
-                    )]),
+                    fields: IndexMap::from([("work_id".into(), Expr::Binding("work_id".into()))]),
                 }],
             },
-            TransitionSchema {
-                name: "AdmissionAcceptedIdleNone".into(),
-                from: vec!["Idle".into()],
-                on: InputMatch {
-                    variant: "AdmissionAccepted".into(),
-                    bindings: vec![
-                        "candidate_id".into(),
-                        "candidate_kind".into(),
-                        "admission_effect".into(),
-                        "wake".into(),
-                        "process".into(),
-                    ],
-                },
-                guards: vec![
-                    Guard {
-                        name: "wake_is_false".into(),
-                        expr: Expr::Eq(
-                            Box::new(Expr::Binding("wake".into())),
-                            Box::new(Expr::Bool(false)),
-                        ),
-                    },
-                    Guard {
-                        name: "process_is_false".into(),
-                        expr: Expr::Eq(
-                            Box::new(Expr::Binding("process".into())),
-                            Box::new(Expr::Bool(false)),
-                        ),
-                    },
-                ],
-                updates: vec![
-                    Update::Assign {
-                        field: "wake_pending".into(),
-                        expr: Expr::Binding("wake".into()),
-                    },
-                    Update::Assign {
-                        field: "process_pending".into(),
-                        expr: Expr::Binding("process".into()),
-                    },
-                ],
-                to: "Idle".into(),
-                emit: vec![EffectEmit {
-                    variant: "SubmitAdmittedIngressEffect".into(),
-                    fields: IndexMap::from([
-                        ("candidate_id".into(), Expr::Binding("candidate_id".into())),
-                        (
-                            "candidate_kind".into(),
-                            Expr::Binding("candidate_kind".into()),
-                        ),
-                        (
-                            "admission_effect".into(),
-                            Expr::Binding("admission_effect".into()),
-                        ),
-                        ("wake".into(), Expr::Binding("wake".into())),
-                        ("process".into(), Expr::Binding("process".into())),
-                    ]),
-                }],
-            },
-            TransitionSchema {
-                name: "AdmissionAcceptedIdleWake".into(),
-                from: vec!["Idle".into()],
-                on: InputMatch {
-                    variant: "AdmissionAccepted".into(),
-                    bindings: vec![
-                        "candidate_id".into(),
-                        "candidate_kind".into(),
-                        "admission_effect".into(),
-                        "wake".into(),
-                        "process".into(),
-                    ],
-                },
-                guards: vec![
-                    Guard {
-                        name: "wake_is_true".into(),
-                        expr: Expr::Eq(
-                            Box::new(Expr::Binding("wake".into())),
-                            Box::new(Expr::Bool(true)),
-                        ),
-                    },
-                    Guard {
-                        name: "process_is_false".into(),
-                        expr: Expr::Eq(
-                            Box::new(Expr::Binding("process".into())),
-                            Box::new(Expr::Bool(false)),
-                        ),
-                    },
-                ],
-                updates: vec![
-                    Update::Assign {
-                        field: "wake_pending".into(),
-                        expr: Expr::Bool(true),
-                    },
-                    Update::Assign {
-                        field: "process_pending".into(),
-                        expr: Expr::Bool(false),
-                    },
-                ],
-                to: "Idle".into(),
-                emit: vec![
-                    EffectEmit {
-                        variant: "SubmitAdmittedIngressEffect".into(),
-                        fields: IndexMap::from([
-                            ("candidate_id".into(), Expr::Binding("candidate_id".into())),
-                            (
-                                "candidate_kind".into(),
-                                Expr::Binding("candidate_kind".into()),
-                            ),
-                            (
-                                "admission_effect".into(),
-                                Expr::Binding("admission_effect".into()),
-                            ),
-                            ("wake".into(), Expr::Binding("wake".into())),
-                            ("process".into(), Expr::Binding("process".into())),
-                        ]),
-                    },
-                    EffectEmit {
-                        variant: "SignalWake".into(),
-                        fields: IndexMap::new(),
-                    },
-                ],
-            },
-            TransitionSchema {
-                name: "AdmissionAcceptedIdleProcess".into(),
-                from: vec!["Idle".into()],
-                on: InputMatch {
-                    variant: "AdmissionAccepted".into(),
-                    bindings: vec![
-                        "candidate_id".into(),
-                        "candidate_kind".into(),
-                        "admission_effect".into(),
-                        "wake".into(),
-                        "process".into(),
-                    ],
-                },
-                guards: vec![
-                    Guard {
-                        name: "wake_is_false".into(),
-                        expr: Expr::Eq(
-                            Box::new(Expr::Binding("wake".into())),
-                            Box::new(Expr::Bool(false)),
-                        ),
-                    },
-                    Guard {
-                        name: "process_is_true".into(),
-                        expr: Expr::Eq(
-                            Box::new(Expr::Binding("process".into())),
-                            Box::new(Expr::Bool(true)),
-                        ),
-                    },
-                ],
-                updates: vec![
-                    Update::Assign {
-                        field: "wake_pending".into(),
-                        expr: Expr::Bool(false),
-                    },
-                    Update::Assign {
-                        field: "process_pending".into(),
-                        expr: Expr::Bool(true),
-                    },
-                ],
-                to: "Idle".into(),
-                emit: vec![
-                    EffectEmit {
-                        variant: "SubmitAdmittedIngressEffect".into(),
-                        fields: IndexMap::from([
-                            ("candidate_id".into(), Expr::Binding("candidate_id".into())),
-                            (
-                                "candidate_kind".into(),
-                                Expr::Binding("candidate_kind".into()),
-                            ),
-                            (
-                                "admission_effect".into(),
-                                Expr::Binding("admission_effect".into()),
-                            ),
-                            ("wake".into(), Expr::Binding("wake".into())),
-                            ("process".into(), Expr::Binding("process".into())),
-                        ]),
-                    },
-                    EffectEmit {
-                        variant: "SignalImmediateProcess".into(),
-                        fields: IndexMap::new(),
-                    },
-                ],
-            },
-            TransitionSchema {
-                name: "AdmissionAcceptedIdleWakeAndProcess".into(),
-                from: vec!["Idle".into()],
-                on: InputMatch {
-                    variant: "AdmissionAccepted".into(),
-                    bindings: vec![
-                        "candidate_id".into(),
-                        "candidate_kind".into(),
-                        "admission_effect".into(),
-                        "wake".into(),
-                        "process".into(),
-                    ],
-                },
-                guards: vec![
-                    Guard {
-                        name: "wake_is_true".into(),
-                        expr: Expr::Eq(
-                            Box::new(Expr::Binding("wake".into())),
-                            Box::new(Expr::Bool(true)),
-                        ),
-                    },
-                    Guard {
-                        name: "process_is_true".into(),
-                        expr: Expr::Eq(
-                            Box::new(Expr::Binding("process".into())),
-                            Box::new(Expr::Bool(true)),
-                        ),
-                    },
-                ],
-                updates: vec![
-                    Update::Assign {
-                        field: "wake_pending".into(),
-                        expr: Expr::Bool(true),
-                    },
-                    Update::Assign {
-                        field: "process_pending".into(),
-                        expr: Expr::Bool(true),
-                    },
-                ],
-                to: "Idle".into(),
-                emit: vec![
-                    EffectEmit {
-                        variant: "SubmitAdmittedIngressEffect".into(),
-                        fields: IndexMap::from([
-                            ("candidate_id".into(), Expr::Binding("candidate_id".into())),
-                            (
-                                "candidate_kind".into(),
-                                Expr::Binding("candidate_kind".into()),
-                            ),
-                            (
-                                "admission_effect".into(),
-                                Expr::Binding("admission_effect".into()),
-                            ),
-                            ("wake".into(), Expr::Binding("wake".into())),
-                            ("process".into(), Expr::Binding("process".into())),
-                        ]),
-                    },
-                    EffectEmit {
-                        variant: "SignalWake".into(),
-                        fields: IndexMap::new(),
-                    },
-                    EffectEmit {
-                        variant: "SignalImmediateProcess".into(),
-                        fields: IndexMap::new(),
-                    },
-                ],
-            },
-            TransitionSchema {
-                name: "AdmissionAcceptedRunningNone".into(),
-                from: vec!["Running".into()],
-                on: InputMatch {
-                    variant: "AdmissionAccepted".into(),
-                    bindings: vec![
-                        "candidate_id".into(),
-                        "candidate_kind".into(),
-                        "admission_effect".into(),
-                        "wake".into(),
-                        "process".into(),
-                    ],
-                },
-                guards: vec![
-                    Guard {
-                        name: "wake_is_false".into(),
-                        expr: Expr::Eq(
-                            Box::new(Expr::Binding("wake".into())),
-                            Box::new(Expr::Bool(false)),
-                        ),
-                    },
-                    Guard {
-                        name: "process_is_false".into(),
-                        expr: Expr::Eq(
-                            Box::new(Expr::Binding("process".into())),
-                            Box::new(Expr::Bool(false)),
-                        ),
-                    },
-                ],
-                updates: vec![
-                    Update::Assign {
-                        field: "wake_pending".into(),
-                        expr: Expr::Bool(false),
-                    },
-                    Update::Assign {
-                        field: "process_pending".into(),
-                        expr: Expr::Bool(false),
-                    },
-                ],
-                to: "Running".into(),
-                emit: vec![EffectEmit {
-                    variant: "SubmitAdmittedIngressEffect".into(),
-                    fields: IndexMap::from([
-                        ("candidate_id".into(), Expr::Binding("candidate_id".into())),
-                        (
-                            "candidate_kind".into(),
-                            Expr::Binding("candidate_kind".into()),
-                        ),
-                        (
-                            "admission_effect".into(),
-                            Expr::Binding("admission_effect".into()),
-                        ),
-                        ("wake".into(), Expr::Binding("wake".into())),
-                        ("process".into(), Expr::Binding("process".into())),
-                    ]),
-                }],
-            },
-            TransitionSchema {
-                name: "AdmissionAcceptedRunningWake".into(),
-                from: vec!["Running".into()],
-                on: InputMatch {
-                    variant: "AdmissionAccepted".into(),
-                    bindings: vec![
-                        "candidate_id".into(),
-                        "candidate_kind".into(),
-                        "admission_effect".into(),
-                        "wake".into(),
-                        "process".into(),
-                    ],
-                },
-                guards: vec![
-                    Guard {
-                        name: "wake_is_true".into(),
-                        expr: Expr::Eq(
-                            Box::new(Expr::Binding("wake".into())),
-                            Box::new(Expr::Bool(true)),
-                        ),
-                    },
-                    Guard {
-                        name: "process_is_false".into(),
-                        expr: Expr::Eq(
-                            Box::new(Expr::Binding("process".into())),
-                            Box::new(Expr::Bool(false)),
-                        ),
-                    },
-                ],
-                updates: vec![
-                    Update::Assign {
-                        field: "wake_pending".into(),
-                        expr: Expr::Bool(true),
-                    },
-                    Update::Assign {
-                        field: "process_pending".into(),
-                        expr: Expr::Bool(false),
-                    },
-                ],
-                to: "Running".into(),
-                emit: vec![
-                    EffectEmit {
-                        variant: "SubmitAdmittedIngressEffect".into(),
-                        fields: IndexMap::from([
-                            ("candidate_id".into(), Expr::Binding("candidate_id".into())),
-                            (
-                                "candidate_kind".into(),
-                                Expr::Binding("candidate_kind".into()),
-                            ),
-                            (
-                                "admission_effect".into(),
-                                Expr::Binding("admission_effect".into()),
-                            ),
-                            ("wake".into(), Expr::Binding("wake".into())),
-                            ("process".into(), Expr::Binding("process".into())),
-                        ]),
-                    },
-                    EffectEmit {
-                        variant: "SignalWake".into(),
-                        fields: IndexMap::new(),
-                    },
-                ],
-            },
-            TransitionSchema {
-                name: "AdmissionAcceptedRunningProcess".into(),
-                from: vec!["Running".into()],
-                on: InputMatch {
-                    variant: "AdmissionAccepted".into(),
-                    bindings: vec![
-                        "candidate_id".into(),
-                        "candidate_kind".into(),
-                        "admission_effect".into(),
-                        "wake".into(),
-                        "process".into(),
-                    ],
-                },
-                guards: vec![
-                    Guard {
-                        name: "wake_is_false".into(),
-                        expr: Expr::Eq(
-                            Box::new(Expr::Binding("wake".into())),
-                            Box::new(Expr::Bool(false)),
-                        ),
-                    },
-                    Guard {
-                        name: "process_is_true".into(),
-                        expr: Expr::Eq(
-                            Box::new(Expr::Binding("process".into())),
-                            Box::new(Expr::Bool(true)),
-                        ),
-                    },
-                ],
-                updates: vec![
-                    Update::Assign {
-                        field: "wake_pending".into(),
-                        expr: Expr::Bool(false),
-                    },
-                    Update::Assign {
-                        field: "process_pending".into(),
-                        expr: Expr::Bool(true),
-                    },
-                ],
-                to: "Running".into(),
-                emit: vec![
-                    EffectEmit {
-                        variant: "SubmitAdmittedIngressEffect".into(),
-                        fields: IndexMap::from([
-                            ("candidate_id".into(), Expr::Binding("candidate_id".into())),
-                            (
-                                "candidate_kind".into(),
-                                Expr::Binding("candidate_kind".into()),
-                            ),
-                            (
-                                "admission_effect".into(),
-                                Expr::Binding("admission_effect".into()),
-                            ),
-                            ("wake".into(), Expr::Binding("wake".into())),
-                            ("process".into(), Expr::Binding("process".into())),
-                        ]),
-                    },
-                    EffectEmit {
-                        variant: "SignalImmediateProcess".into(),
-                        fields: IndexMap::new(),
-                    },
-                ],
-            },
-            TransitionSchema {
-                name: "AdmissionAcceptedRunningWakeAndProcess".into(),
-                from: vec!["Running".into()],
-                on: InputMatch {
-                    variant: "AdmissionAccepted".into(),
-                    bindings: vec![
-                        "candidate_id".into(),
-                        "candidate_kind".into(),
-                        "admission_effect".into(),
-                        "wake".into(),
-                        "process".into(),
-                    ],
-                },
-                guards: vec![
-                    Guard {
-                        name: "wake_is_true".into(),
-                        expr: Expr::Eq(
-                            Box::new(Expr::Binding("wake".into())),
-                            Box::new(Expr::Bool(true)),
-                        ),
-                    },
-                    Guard {
-                        name: "process_is_true".into(),
-                        expr: Expr::Eq(
-                            Box::new(Expr::Binding("process".into())),
-                            Box::new(Expr::Bool(true)),
-                        ),
-                    },
-                ],
-                updates: vec![
-                    Update::Assign {
-                        field: "wake_pending".into(),
-                        expr: Expr::Bool(true),
-                    },
-                    Update::Assign {
-                        field: "process_pending".into(),
-                        expr: Expr::Bool(true),
-                    },
-                ],
-                to: "Running".into(),
-                emit: vec![
-                    EffectEmit {
-                        variant: "SubmitAdmittedIngressEffect".into(),
-                        fields: IndexMap::from([
-                            ("candidate_id".into(), Expr::Binding("candidate_id".into())),
-                            (
-                                "candidate_kind".into(),
-                                Expr::Binding("candidate_kind".into()),
-                            ),
-                            (
-                                "admission_effect".into(),
-                                Expr::Binding("admission_effect".into()),
-                            ),
-                            ("wake".into(), Expr::Binding("wake".into())),
-                            ("process".into(), Expr::Binding("process".into())),
-                        ]),
-                    },
-                    EffectEmit {
-                        variant: "SignalWake".into(),
-                        fields: IndexMap::new(),
-                    },
-                    EffectEmit {
-                        variant: "SignalImmediateProcess".into(),
-                        fields: IndexMap::new(),
-                    },
-                ],
-            },
+            runtime_control_admission_transition("AdmissionAcceptedIdleQueue", "Idle", "Queue"),
+            runtime_control_admission_transition("AdmissionAcceptedIdleSteer", "Idle", "Steer"),
+            runtime_control_admission_transition(
+                "AdmissionAcceptedRunningQueue",
+                "Running",
+                "Queue",
+            ),
+            runtime_control_admission_transition(
+                "AdmissionAcceptedRunningSteer",
+                "Running",
+                "Steer",
+            ),
             TransitionSchema {
                 name: "AdmissionRejectedIdle".into(),
                 from: vec!["Idle".into()],
                 on: InputMatch {
                     variant: "AdmissionRejected".into(),
-                    bindings: vec!["candidate_id".into(), "reason".into()],
+                    bindings: vec!["work_id".into(), "reason".into()],
                 },
                 guards: vec![],
                 updates: vec![],
@@ -1119,7 +660,7 @@ pub fn runtime_control_machine() -> MachineSchema {
                 from: vec!["Running".into()],
                 on: InputMatch {
                     variant: "AdmissionRejected".into(),
-                    bindings: vec!["candidate_id".into(), "reason".into()],
+                    bindings: vec!["work_id".into(), "reason".into()],
                 },
                 guards: vec![],
                 updates: vec![],
@@ -1137,7 +678,7 @@ pub fn runtime_control_machine() -> MachineSchema {
                 from: vec!["Idle".into()],
                 on: InputMatch {
                     variant: "AdmissionDeduplicated".into(),
-                    bindings: vec!["candidate_id".into(), "existing_input_id".into()],
+                    bindings: vec!["work_id".into(), "existing_work_id".into()],
                 },
                 guards: vec![],
                 updates: vec![],
@@ -1155,7 +696,7 @@ pub fn runtime_control_machine() -> MachineSchema {
                 from: vec!["Running".into()],
                 on: InputMatch {
                     variant: "AdmissionDeduplicated".into(),
-                    bindings: vec!["candidate_id".into(), "existing_input_id".into()],
+                    bindings: vec!["work_id".into(), "existing_work_id".into()],
                 },
                 guards: vec![],
                 updates: vec![],
@@ -1262,5 +803,91 @@ fn variant(name: &str) -> VariantSchema {
     VariantSchema {
         name: name.into(),
         fields: vec![],
+    }
+}
+
+fn submit_admitted_ingress_effect_fields() -> IndexMap<String, Expr> {
+    IndexMap::from([
+        ("work_id".into(), Expr::Binding("work_id".into())),
+        (
+            "content_shape".into(),
+            Expr::Binding("content_shape".into()),
+        ),
+        (
+            "handling_mode".into(),
+            Expr::Binding("handling_mode".into()),
+        ),
+        ("request_id".into(), Expr::Binding("request_id".into())),
+        (
+            "reservation_key".into(),
+            Expr::Binding("reservation_key".into()),
+        ),
+        (
+            "admission_effect".into(),
+            Expr::Binding("admission_effect".into()),
+        ),
+    ])
+}
+
+fn runtime_control_admission_transition(
+    name: &str,
+    from_phase: &str,
+    handling_mode: &str,
+) -> TransitionSchema {
+    let wake_when_idle = from_phase == "Idle";
+    let process_immediately = handling_mode == "Steer";
+
+    let mut emit = vec![EffectEmit {
+        variant: "SubmitAdmittedIngressEffect".into(),
+        fields: submit_admitted_ingress_effect_fields(),
+    }];
+
+    if wake_when_idle || process_immediately {
+        emit.push(EffectEmit {
+            variant: "SignalWake".into(),
+            fields: IndexMap::new(),
+        });
+    }
+
+    if process_immediately {
+        emit.push(EffectEmit {
+            variant: "SignalImmediateProcess".into(),
+            fields: IndexMap::new(),
+        });
+    }
+
+    TransitionSchema {
+        name: name.into(),
+        from: vec![from_phase.into()],
+        on: InputMatch {
+            variant: "AdmissionAccepted".into(),
+            bindings: vec![
+                "work_id".into(),
+                "content_shape".into(),
+                "handling_mode".into(),
+                "request_id".into(),
+                "reservation_key".into(),
+                "admission_effect".into(),
+            ],
+        },
+        guards: vec![Guard {
+            name: format!("handling_mode_is_{}", handling_mode.to_lowercase()),
+            expr: Expr::Eq(
+                Box::new(Expr::Binding("handling_mode".into())),
+                Box::new(Expr::String(handling_mode.into())),
+            ),
+        }],
+        updates: vec![
+            Update::Assign {
+                field: "wake_pending".into(),
+                expr: Expr::Bool(wake_when_idle || process_immediately),
+            },
+            Update::Assign {
+                field: "process_pending".into(),
+                expr: Expr::Bool(process_immediately),
+            },
+        ],
+        to: from_phase.into(),
+        emit,
     }
 }

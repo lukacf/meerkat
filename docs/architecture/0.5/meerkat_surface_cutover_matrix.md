@@ -11,6 +11,9 @@ Every public surface must satisfy the same core rule:
 
 - convenience APIs may remain
 - independent ordinary execution paths may not
+- canonical multimodal content shape must stay versioned and surface-parity
+  complete; no wrapper/SDK/WASM/MCP surface may silently flatten a canonical
+  typed content contract into text-only semantics
 
 ## Shared Cutover Rule
 
@@ -20,6 +23,8 @@ For every surface:
 2. add an early adapter into the canonical runtime path when needed
 3. keep compatibility façades only when they have zero independent semantics
 4. delete the bypass before `0.5` is declared complete
+5. when a canonical content shape changes, bump the relevant contract version
+   and regenerate every wrapper/surface that claims parity
 
 ## Core Checkpoints
 

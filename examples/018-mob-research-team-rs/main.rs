@@ -248,12 +248,14 @@ content = "Evaluate technical feasibility, architecture options, scalability con
     // Send a research question to the lead analyst (live LLM call).
     println!("\nSending research question to lead analyst (live LLM call)...");
     handle
-        .send_message(
-            MeerkatId::from("lead-1"),
+        .member(&MeerkatId::from("lead-1"))
+        .await?
+        .send(
             "Briefly outline 3 key research questions about the market for AI code assistants. \
              Keep your response to 3-4 sentences total. Do NOT use any tools -- \
              just provide the questions in plain text."
                 .to_string(),
+            meerkat_core::types::HandlingMode::Queue,
         )
         .await?;
 

@@ -210,7 +210,7 @@ async function send() {
   setRunning(true);
 
   try {
-    // Inject user message into the orchestrator mob member via mob_send_message
+    // Inject user message into the orchestrator mob member via mob_member_send
     await mob.sendToOrchestrator(text);
   } catch (err: any) {
     mainStream?.appendError(err.message);

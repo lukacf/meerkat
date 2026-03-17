@@ -346,7 +346,9 @@ mod tests {
             blocks: None,
             body: "event".to_string(),
             source: meerkat_core::PlainEventSource::Tcp,
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
             interaction_id: None,
+            render_metadata: None,
         };
         let result = ctx.classify(&item).expect("should classify");
         assert_eq!(result.class, PeerInputClass::PlainEvent);

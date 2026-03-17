@@ -5,6 +5,32 @@ from typing import Any
 from .streaming import EventSubscription
 
 
+class Member:
+    """Capability-bearing mob member handle."""
+
+    def __init__(self, mob: "Mob", meerkat_id: str):
+        self._mob = mob
+        self.meerkat_id = meerkat_id
+
+    async def send(
+        self,
+        content: str | list[dict[str, Any]],
+        *,
+        handling_mode: str = "queue",
+        render_metadata: dict[str, Any] | None = None,
+    ) -> str:
+        return await self._mob._client.send_mob_member_content(
+            self._mob.id,
+            self.meerkat_id,
+            content,
+            handling_mode=handling_mode,
+            render_metadata=render_metadata,
+        )
+
+    async def subscribe_events(self) -> EventSubscription:
+        return await self._mob.subscribe_member_events(self.meerkat_id)
+
+
 class Mob:
     """First-class mob handle backed by explicit RPC methods."""
 
@@ -60,8 +86,8 @@ class Mob:
     async def lifecycle(self, action: str) -> None:
         await self._client.mob_lifecycle(self.id, action)
 
-    async def send_message(self, meerkat_id: str, message: str) -> None:
-        await self._client.send_mob_message(self.id, meerkat_id, message)
+    def member(self, meerkat_id: str) -> Member:
+        return Member(self, meerkat_id)
 
     async def append_system_context(
         self,

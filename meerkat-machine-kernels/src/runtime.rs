@@ -882,8 +882,14 @@ mod tests {
             .transition(
                 &state,
                 &KernelInput {
-                    variant: "SubmitCandidate".into(),
-                    fields: BTreeMap::from([("kind".into(), KernelValue::U64(99))]),
+                    variant: "SubmitWork".into(),
+                    fields: BTreeMap::from([
+                        ("work_id".into(), KernelValue::String("work-1".into())),
+                        ("content_shape".into(), KernelValue::U64(99)),
+                        ("handling_mode".into(), KernelValue::String("Queue".into())),
+                        ("request_id".into(), KernelValue::None),
+                        ("reservation_key".into(), KernelValue::None),
+                    ]),
                 },
             )
             .expect_err("typed payload mismatch should fail");

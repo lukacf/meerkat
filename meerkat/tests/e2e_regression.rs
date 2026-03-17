@@ -77,6 +77,7 @@ mod scenario_22_session_service_lifecycle {
             .create_session(CreateSessionRequest {
                 model: smoke_model(),
                 prompt: "I am EphBot. Remember this name.".to_string().into(),
+                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
@@ -107,6 +108,8 @@ mod scenario_22_session_service_lifecycle {
                 &session_id,
                 StartTurnRequest {
                     prompt: "What is my name? Reply in one sentence.".to_string().into(),
+                    render_metadata: None,
+                    handling_mode: meerkat_core::types::HandlingMode::Queue,
                     event_tx: None,
                     host_mode: false,
                     skill_references: None,

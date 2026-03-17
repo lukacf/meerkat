@@ -99,9 +99,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `PrimitiveAppliedImmediateAppend`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `conversation-run`
+- `PrimitiveAppliedImmediateAppendCancelsAfterBoundary`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `cancel-and-fail`
 - `PrimitiveAppliedImmediateContext`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `conversation-run`
+- `PrimitiveAppliedImmediateContextCancelsAfterBoundary`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `cancel-and-fail`
 - `LlmReturnedToolCalls`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `tool-and-retry-loop`
@@ -114,9 +120,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `BoundaryContinue`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `conversation-run`
+- `BoundaryContinueCancelsAfterBoundary`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `cancel-and-fail`
 - `BoundaryComplete`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `conversation-run`
+- `BoundaryCompleteCancelsAfterBoundary`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `cancel-and-fail`
 - `RecoverableFailureFromCallingLlm`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `tool-and-retry-loop`
@@ -144,19 +156,34 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `FatalFailureFromErrorRecovery`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `conversation-run`
-- `CancelRequestedFromApplyingPrimitive`
+- `CancelNowFromApplyingPrimitive`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `cancel-and-fail`
-- `CancelRequestedFromCallingLlm`
+- `CancelNowFromCallingLlm`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `cancel-and-fail`
-- `CancelRequestedFromWaitingForOps`
+- `CancelNowFromWaitingForOps`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `cancel-and-fail`
-- `CancelRequestedFromDrainingBoundary`
+- `CancelNowFromDrainingBoundary`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `cancel-and-fail`
-- `CancelRequestedFromErrorRecovery`
+- `CancelNowFromErrorRecovery`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `cancel-and-fail`
+- `CancelAfterBoundaryFromApplyingPrimitive`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `cancel-and-fail`
+- `CancelAfterBoundaryFromCallingLlm`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `cancel-and-fail`
+- `CancelAfterBoundaryFromWaitingForOps`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `cancel-and-fail`
+- `CancelAfterBoundaryFromDrainingBoundary`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `cancel-and-fail`
+- `CancelAfterBoundaryFromErrorRecovery`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `cancel-and-fail`
 - `CancellationObserved`
@@ -193,12 +220,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ready_has_no_active_run`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `conversation-run`
+- `ready_has_no_admitted_content`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
 - `non_ready_has_active_run`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `conversation-run`
 - `waiting_for_ops_implies_pending_tools`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `tool-and-retry-loop`
+- `ready_has_no_boundary_cancel_request`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `cancel-and-fail`
 - `immediate_primitives_skip_llm_and_recovery`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `conversation-run`

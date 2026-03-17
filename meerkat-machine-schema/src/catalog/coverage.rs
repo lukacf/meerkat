@@ -120,11 +120,11 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 ),
                 scenario(
                     "prompt-queue",
-                    "queued user prompt sets wake/process flags conservatively and waits for the next ordinary drain",
+                    "queued ordinary work waits for the next outer-loop turn without modifying the current run",
                 ),
                 scenario(
                     "prompt-steer",
-                    "steering user prompt requests ASAP processing at the earliest admissible boundary",
+                    "steered ordinary work drains into the active run at the earliest admissible boundary",
                 ),
                 scenario(
                     "begin-run-complete",
@@ -683,6 +683,11 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
                     "mob orchestration precursor",
                 ),
                 anchor(
+                    "mob_member_handle",
+                    "meerkat-mob/src/runtime/handle.rs",
+                    "member-directed delivery capability",
+                ),
+                anchor(
                     "flow_runtime",
                     "meerkat-mob/src/runtime/flow.rs",
                     "flow dispatch precursor",
@@ -719,7 +724,7 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
                 ),
                 scenario(
                     "mob-peer-orchestration",
-                    "member communication and orchestration stay inside the mob stack",
+                    "member-directed communication and orchestration stay inside the mob stack",
                 ),
                 scenario(
                     "wasm-mob-examples",

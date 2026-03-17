@@ -8,7 +8,7 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 - `runtime_ingress`: `RuntimeIngressMachine` @ actor `ordinary_ingress`
 
 ## Routes
-- `peer_candidate_enters_runtime_admission`: `peer_comms`.`SubmitPeerInputCandidate` -> `runtime_control`.`SubmitCandidate` [Immediate]
+- `peer_candidate_enters_runtime_admission`: `peer_comms`.`SubmitPeerInputCandidate` -> `runtime_control`.`SubmitWork` [Immediate]
 - `admitted_peer_work_enters_ingress`: `runtime_control`.`SubmitAdmittedIngressEffect` -> `runtime_ingress`.`AdmitQueued` [Immediate]
 
 ## Scheduler Rules

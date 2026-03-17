@@ -4,6 +4,7 @@ use crate::ids::{MeerkatId, RunId, StepId};
 use crate::tokio;
 use async_trait::async_trait;
 use meerkat_core::service::TurnToolOverlay;
+use meerkat_core::types::ContentInput;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -50,7 +51,7 @@ pub trait FlowTurnExecutor: Send + Sync {
         run_id: &RunId,
         step_id: &StepId,
         target: &MeerkatId,
-        message: String,
+        message: ContentInput,
         flow_tool_overlay: Option<TurnToolOverlay>,
     ) -> Result<FlowTurnTicket, MobError>;
 

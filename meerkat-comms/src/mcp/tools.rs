@@ -124,6 +124,7 @@ async fn handle_send(ctx: &ToolContext, input: SendInput) -> Result<Value, Strin
         source: None,
         stream: None,
         allow_self_session: None,
+        handling_mode: None,
     };
     let command = request
         .parse(&meerkat_core::SessionId::new())

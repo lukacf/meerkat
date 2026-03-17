@@ -587,6 +587,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     .map(|meta| meta.model.clone())
                     .ok_or_else(|| SessionError::NotFound { id: id.clone() })?,
                 prompt: String::new().into(),
+                render_metadata: None,
                 system_prompt: None,
                 max_tokens: Some(
                     stored_metadata

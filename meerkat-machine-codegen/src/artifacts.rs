@@ -237,7 +237,7 @@ pub fn render_machine_ci_cfg(schema: &MachineSchema, deep: bool) -> String {
     if !domains.is_empty() {
         writeln!(&mut out, "CONSTANTS").expect("write to string");
         for (name, ty) in domains {
-            if matches!(ty, TypeRef::Seq(_)) {
+            if matches!(ty, TypeRef::Seq(_) | TypeRef::Option(_)) {
                 continue;
             }
             writeln!(
@@ -315,22 +315,23 @@ pub fn render_composition_ci_cfg(schema: &CompositionSchema, deep: bool) -> Stri
     if !domains.is_empty() {
         writeln!(&mut out, "CONSTANTS").expect("write to string");
         for (name, ty) in domains {
-            if matches!(ty, TypeRef::Seq(_)) {
+            if matches!(ty, TypeRef::Seq(_) | TypeRef::Option(_)) {
                 continue;
             }
+            let cardinality = if deep {
+                schema
+                    .deep_domain_overrides
+                    .get(name.as_str())
+                    .copied()
+                    .unwrap_or(schema.deep_domain_cardinality)
+            } else {
+                default_sample_cardinality(false)
+            };
             writeln!(
                 &mut out,
                 "  {} = {}",
                 name,
-                render_default_domain_assignment(
-                    &ty,
-                    if deep {
-                        schema.deep_domain_cardinality
-                    } else {
-                        default_sample_cardinality(false)
-                    },
-                    &named_samples,
-                )
+                render_default_domain_assignment(&ty, cardinality, &named_samples,)
             )
             .expect("write to string");
         }
@@ -392,6 +393,9 @@ pub fn render_composition_witness_cfg(
     let domains = collect_composition_binding_domains(schema, &machine_by_instance);
     let named_samples =
         collect_composition_witness_named_type_samples(schema, witness, &machine_by_instance);
+    let witness_sample_cardinality = schema
+        .witness_domain_cardinality
+        .max(max_named_sample_cardinality(&named_samples));
     let mut instance_invariants = Vec::new();
 
     for instance in &schema.machines {
@@ -417,18 +421,14 @@ pub fn render_composition_witness_cfg(
     if !domains.is_empty() {
         writeln!(&mut out, "CONSTANTS").expect("write to string");
         for (name, ty) in domains {
-            if matches!(ty, TypeRef::Seq(_)) {
+            if matches!(ty, TypeRef::Seq(_) | TypeRef::Option(_)) {
                 continue;
             }
             writeln!(
                 &mut out,
                 "  {} = {}",
                 name,
-                render_default_domain_assignment(
-                    &ty,
-                    schema.witness_domain_cardinality,
-                    &named_samples,
-                )
+                render_default_domain_assignment(&ty, witness_sample_cardinality, &named_samples,)
             )
             .expect("write to string");
         }
@@ -520,6 +520,10 @@ pub fn composition_scheduler_coverage_operator_name(rule: &SchedulerRule) -> Str
             tla_ident(lower)
         ),
     }
+}
+
+fn max_named_sample_cardinality(named_samples: &BTreeMap<String, BTreeSet<String>>) -> usize {
+    named_samples.values().map(BTreeSet::len).max().unwrap_or(1)
 }
 
 pub fn composition_witness_cfg_name(name: &str) -> String {
@@ -663,8 +667,7 @@ fn collect_binding_domains(schema: &MachineSchema) -> BTreeMap<String, TypeRef> 
         {
             for binding in &transition.on.bindings {
                 if let Some(field) = variant.fields.iter().find(|field| field.name == *binding) {
-                    let name = domain_constant_name(&field.ty);
-                    domains.entry(name).or_insert_with(|| field.ty.clone());
+                    collect_type_domains(&field.ty, &mut domains);
                 }
             }
         }
@@ -695,12 +698,26 @@ fn collect_composition_binding_domains(
             .variant_named(&entry_input.input_variant)
             .expect("entry-input variant");
         for field in &variant.fields {
-            let name = domain_constant_name(&field.ty);
-            domains.entry(name).or_insert_with(|| field.ty.clone());
+            collect_type_domains(&field.ty, &mut domains);
         }
     }
 
     domains
+}
+
+fn collect_type_domains(ty: &TypeRef, domains: &mut BTreeMap<String, TypeRef>) {
+    let name = domain_constant_name(ty);
+    domains.entry(name).or_insert_with(|| ty.clone());
+    match ty {
+        TypeRef::Option(inner) | TypeRef::Seq(inner) | TypeRef::Set(inner) => {
+            collect_type_domains(inner, domains);
+        }
+        TypeRef::Map(key, value) => {
+            collect_type_domains(key, domains);
+            collect_type_domains(value, domains);
+        }
+        TypeRef::Bool | TypeRef::U32 | TypeRef::U64 | TypeRef::String | TypeRef::Named(_) => {}
+    }
 }
 
 fn collect_machine_named_type_samples(
@@ -1619,7 +1636,24 @@ fn render_default_domain_assignment(
             }
         }
         TypeRef::Option(inner) => {
-            render_default_domain_assignment(inner, sample_cardinality, named_samples)
+            let samples = sample_values(inner, sample_cardinality, named_samples)
+                .into_iter()
+                .map(|sample| format!("[tag |-> {}, value |-> {}]", tla_string("some"), sample))
+                .collect::<Vec<_>>();
+            if samples.is_empty() {
+                format!(
+                    "{{[tag |-> {}, value |-> {}]}}",
+                    tla_string("none"),
+                    tla_string("none")
+                )
+            } else {
+                format!(
+                    "{{[tag |-> {}, value |-> {}], {}}}",
+                    tla_string("none"),
+                    tla_string("none"),
+                    samples.join(", ")
+                )
+            }
         }
         TypeRef::Map(_, _) => "{}".into(),
     }
@@ -1686,7 +1720,21 @@ fn sample_values(
                 .map(|idx| tla_string(&format!("{}_{}", tla_ident(name).to_lowercase(), idx)))
                 .collect()
         }
-        TypeRef::Option(inner) => sample_values(inner, sample_cardinality, named_samples),
+        TypeRef::Option(inner) => {
+            let mut values = vec![format!(
+                "[tag |-> {}, value |-> {}]",
+                tla_string("none"),
+                tla_string("none")
+            )];
+            values.extend(
+                sample_values(inner, sample_cardinality, named_samples)
+                    .into_iter()
+                    .map(|sample| {
+                        format!("[tag |-> {}, value |-> {}]", tla_string("some"), sample)
+                    }),
+            );
+            values
+        }
         TypeRef::Seq(inner) => sample_values(inner, sample_cardinality, named_samples),
         TypeRef::Set(inner) => sample_values(inner, sample_cardinality, named_samples),
         TypeRef::Map(_, _) => vec![],
@@ -1694,17 +1742,27 @@ fn sample_values(
 }
 
 fn render_sequence_domain_definition(inner: &TypeRef) -> String {
-    let inner_domain = match inner {
-        TypeRef::Bool => "BOOLEAN".into(),
-        TypeRef::U32 | TypeRef::U64 => "NatValues".into(),
-        TypeRef::String => "StringValues".into(),
-        TypeRef::Named(_) | TypeRef::Set(_) | TypeRef::Seq(_) => domain_constant_name(inner),
-        TypeRef::Option(nested) => render_sequence_domain_definition(nested),
-        TypeRef::Map(_, _) => "{}".into(),
-    };
+    let inner_domain = render_type_domain_expr(inner);
     format!(
         "{{<<>>}} \\cup {{<<x>> : x \\in {inner_domain}}} \\cup {{<<x, y>> : x \\in {inner_domain}, y \\in {inner_domain}}}"
     )
+}
+
+fn render_option_domain_definition(inner: &TypeRef) -> String {
+    let inner_domain = render_type_domain_expr(inner);
+    format!("{{None}} \\cup {{Some(x) : x \\in {inner_domain}}}")
+}
+
+fn render_type_domain_expr(ty: &TypeRef) -> String {
+    match ty {
+        TypeRef::Bool => "BOOLEAN".into(),
+        TypeRef::U32 | TypeRef::U64 => "NatValues".into(),
+        TypeRef::String => "StringValues".into(),
+        TypeRef::Named(_) | TypeRef::Set(_) | TypeRef::Seq(_) | TypeRef::Option(_) => {
+            domain_constant_name(ty)
+        }
+        TypeRef::Map(_, _) => "{}".into(),
+    }
 }
 
 fn domain_constant_name(ty: &TypeRef) -> String {
@@ -1715,7 +1773,7 @@ fn domain_constant_name(ty: &TypeRef) -> String {
         TypeRef::String => "StringValues".into(),
         TypeRef::Bool => "BooleanValues".into(),
         TypeRef::U32 | TypeRef::U64 => "NatValues".into(),
-        TypeRef::Option(inner) => domain_constant_name(inner),
+        TypeRef::Option(inner) => format!("Option{}Values", tla_ident(&type_ref_name(inner))),
         TypeRef::Map(_, _) => "MapValues".into(),
     }
 }
@@ -1789,7 +1847,7 @@ impl<'a> CompositionTlaCompiler<'a> {
 
         let model_constants = constants
             .iter()
-            .filter(|(_, ty)| !matches!(ty, TypeRef::Seq(_)))
+            .filter(|(_, ty)| !matches!(ty, TypeRef::Seq(_) | TypeRef::Option(_)))
             .map(|(name, _)| name.clone())
             .collect::<Vec<_>>();
         if !model_constants.is_empty() {
@@ -1798,24 +1856,39 @@ impl<'a> CompositionTlaCompiler<'a> {
             writeln!(&mut out).expect("write to string");
         }
 
-        for (name, ty) in &constants {
-            if let TypeRef::Seq(inner) = ty {
-                writeln!(
-                    &mut out,
-                    "{} == {}",
-                    name,
-                    render_sequence_domain_definition(inner)
-                )
-                .expect("write to string");
-            }
-        }
-        if constants.values().any(|ty| matches!(ty, TypeRef::Seq(_))) {
-            writeln!(&mut out).expect("write to string");
-        }
-
         writeln!(&mut out, "None == [tag |-> \"none\", value |-> \"none\"]")
             .expect("write to string");
         writeln!(&mut out, "Some(v) == [tag |-> \"some\", value |-> v]").expect("write to string");
+        writeln!(&mut out).expect("write to string");
+        for (name, ty) in &constants {
+            match ty {
+                TypeRef::Seq(inner) => {
+                    writeln!(
+                        &mut out,
+                        "{} == {}",
+                        name,
+                        render_sequence_domain_definition(inner)
+                    )
+                    .expect("write to string");
+                }
+                TypeRef::Option(inner) => {
+                    writeln!(
+                        &mut out,
+                        "{} == {}",
+                        name,
+                        render_option_domain_definition(inner)
+                    )
+                    .expect("write to string");
+                }
+                _ => {}
+            }
+        }
+        if constants
+            .values()
+            .any(|ty| matches!(ty, TypeRef::Seq(_) | TypeRef::Option(_)))
+        {
+            writeln!(&mut out).expect("write to string");
+        }
         writeln!(
             &mut out,
             "MapLookup(map, key) == IF key \\in DOMAIN map THEN map[key] ELSE None"
@@ -2316,7 +2389,7 @@ impl<'a> CompositionTlaCompiler<'a> {
             TypeRef::U32 | TypeRef::U64 => "0..2".into(),
             TypeRef::String => "{\"alpha\", \"beta\"}".into(),
             TypeRef::Named(_) | TypeRef::Seq(_) | TypeRef::Set(_) => domain_constant_name(ty),
-            TypeRef::Option(inner) => self.binding_domain_for_type(inner),
+            TypeRef::Option(_) => domain_constant_name(ty),
             TypeRef::Map(_, _) => "{}".into(),
         }
     }
@@ -2974,6 +3047,7 @@ impl<'a> CompositionTlaCompiler<'a> {
             Expr::U64(value) => value.to_string(),
             Expr::String(value) => tla_string(value),
             Expr::None => "None".into(),
+            Expr::Some(inner) => format!("Some({})", self.render_literal_expr(inner)),
             Expr::SeqLiteral(items) => {
                 let rendered = items
                     .iter()
@@ -3526,7 +3600,7 @@ impl<'a> MachineTlaCompiler<'a> {
 
         let model_constants = constants
             .iter()
-            .filter(|(_, ty)| !matches!(ty, TypeRef::Seq(_)))
+            .filter(|(_, ty)| !matches!(ty, TypeRef::Seq(_) | TypeRef::Option(_)))
             .map(|(name, _)| name.clone())
             .collect::<Vec<_>>();
         if !model_constants.is_empty() {
@@ -3535,24 +3609,39 @@ impl<'a> MachineTlaCompiler<'a> {
             writeln!(&mut out).expect("write to string");
         }
 
-        for (name, ty) in &constants {
-            if let TypeRef::Seq(inner) = ty {
-                writeln!(
-                    &mut out,
-                    "{} == {}",
-                    name,
-                    render_sequence_domain_definition(inner)
-                )
-                .expect("write to string");
-            }
-        }
-        if constants.values().any(|ty| matches!(ty, TypeRef::Seq(_))) {
-            writeln!(&mut out).expect("write to string");
-        }
-
         writeln!(&mut out, "None == [tag |-> \"none\", value |-> \"none\"]")
             .expect("write to string");
         writeln!(&mut out, "Some(v) == [tag |-> \"some\", value |-> v]").expect("write to string");
+        writeln!(&mut out).expect("write to string");
+        for (name, ty) in &constants {
+            match ty {
+                TypeRef::Seq(inner) => {
+                    writeln!(
+                        &mut out,
+                        "{} == {}",
+                        name,
+                        render_sequence_domain_definition(inner)
+                    )
+                    .expect("write to string");
+                }
+                TypeRef::Option(inner) => {
+                    writeln!(
+                        &mut out,
+                        "{} == {}",
+                        name,
+                        render_option_domain_definition(inner)
+                    )
+                    .expect("write to string");
+                }
+                _ => {}
+            }
+        }
+        if constants
+            .values()
+            .any(|ty| matches!(ty, TypeRef::Seq(_) | TypeRef::Option(_)))
+        {
+            writeln!(&mut out).expect("write to string");
+        }
         writeln!(
             &mut out,
             "MapLookup(map, key) == IF key \\in DOMAIN map THEN map[key] ELSE None"

@@ -126,7 +126,7 @@ client = MeerkatClient(rkat_path="/path/to/rkat-rpc")
 | `await mob.wire(a, b)` | Wire two members for comms |
 | `await mob.unwire(a, b)` | Remove comms wiring |
 | `await mob.members()` | List mob members |
-| `await mob.send_message(meerkat_id, message)` | Send work to a member |
+| `await mob.member(meerkat_id).send(content, handling_mode=...)` | Send work to a member |
 | `await mob.flows()` | List available flows |
 | `await mob.run_flow(flow_id, params)` | Start a flow run |
 | `await mob.flow_status(run_id)` | Get flow run status |

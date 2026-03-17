@@ -372,7 +372,10 @@ Send a message directly to a specific mob member, triggering an LLM turn.
   </Tab>
   <Tab title="Rust">
     ```rust
-    handle.send_message("lead-1".into(), "Decompose the task and assign to workers.".into()).await?;
+    use meerkat_core::types::HandlingMode;
+
+    let lead = handle.member(&"lead-1".into()).await?;
+    lead.send("Decompose the task and assign to workers.", HandlingMode::Queue, None).await?;
     ```
   </Tab>
 </Tabs>

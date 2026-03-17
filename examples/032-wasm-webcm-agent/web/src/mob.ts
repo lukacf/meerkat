@@ -37,7 +37,7 @@ export interface MobRuntime {
   mob_spawn(mob_id: string, specs_json: string): Promise<string>;
   mob_wire(mob_id: string, a: string, b: string): Promise<void>;
   mob_member_subscribe(mob_id: string, meerkat_id: string): Promise<number>;
-  mob_send_message(mob_id: string, meerkat_id: string, message: string): Promise<void>;
+  mob_member_send(mob_id: string, meerkat_id: string, request_json: string): Promise<string>;
   poll_subscription(handle: number): string;
 }
 
@@ -295,7 +295,11 @@ export class MobOrchestrator {
 
   /** Send a user message to the orchestrator mob member. */
   async sendToOrchestrator(message: string): Promise<void> {
-    await this.runtime.mob_send_message(this.mobId, "orchestrator", message);
+    await this.runtime.mob_member_send(
+      this.mobId,
+      "orchestrator",
+      JSON.stringify({ content: message, handling_mode: "queue" }),
+    );
   }
 
   /** Start background polling for sub-agent events. */
@@ -388,7 +392,7 @@ export class MobOrchestrator {
       case "run_started": {
         // Show the incoming prompt as a collapsed card.
         // Comms messages contain peer addresses (e.g. "dev-team/planner/planner").
-        // User messages (via mob_send_message) are raw text — already shown as ❯ line.
+        // User messages (via member send) are raw text — already shown as ❯ line.
         const isComms = ev.prompt && ev.prompt.includes(`${this.mobId}/`);
         if (ev.prompt && (agent !== "orchestrator" || isComms)) {
           const card = panel.stream.beginToolCall("message received", { text: ev.prompt });

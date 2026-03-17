@@ -161,7 +161,12 @@ impl MobActor {
                         return;
                     };
                     injector
-                        .inject(message, meerkat_core::PlainEventSource::Rpc)
+                        .inject(
+                            message.into(),
+                            meerkat_core::PlainEventSource::Rpc,
+                            meerkat_core::types::HandlingMode::Queue,
+                            None,
+                        )
                         .map_err(|error| {
                             MobError::Internal(format!(
                                 "orchestrator lifecycle inject failed for '{meerkat_id}': {error}"
@@ -174,6 +179,8 @@ impl MobActor {
                             &member_ref,
                             meerkat_core::service::StartTurnRequest {
                                 prompt: message.into(),
+                                render_metadata: None,
+                                handling_mode: meerkat_core::types::HandlingMode::Queue,
                                 event_tx: None,
                                 host_mode: false,
                                 skill_references: None,
@@ -335,6 +342,8 @@ impl MobActor {
                     &member_ref_cloned,
                     meerkat_core::service::StartTurnRequest {
                         prompt: prompt.into(),
+                        render_metadata: None,
+                        handling_mode: meerkat_core::types::HandlingMode::Queue,
                         event_tx: None,
                         host_mode: true,
                         skill_references: None,
@@ -713,11 +722,21 @@ impl MobActor {
                 MobCommand::ExternalTurn {
                     meerkat_id,
                     message,
+                    handling_mode,
+                    render_metadata,
                     reply_tx,
                 } => {
                     let result = match self.require_state(&[MobState::Running, MobState::Creating])
                     {
-                        Ok(()) => self.handle_external_turn(meerkat_id, message).await,
+                        Ok(()) => {
+                            self.handle_external_turn(
+                                meerkat_id,
+                                message,
+                                handling_mode,
+                                render_metadata,
+                            )
+                            .await
+                        }
                         Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);
@@ -2177,7 +2196,9 @@ impl MobActor {
     async fn handle_external_turn(
         &mut self,
         meerkat_id: MeerkatId,
-        message: String,
+        message: meerkat_core::types::ContentInput,
+        handling_mode: meerkat_core::types::HandlingMode,
+        render_metadata: Option<meerkat_core::types::RenderMetadata>,
     ) -> Result<SessionId, MobError> {
         // Look up the entry
         let entry = {
@@ -2226,6 +2247,8 @@ impl MobActor {
                             .send(MobCommand::ExternalTurn {
                                 meerkat_id: target_id.clone(),
                                 message,
+                                handling_mode,
+                                render_metadata: None,
                                 reply_tx,
                             })
                             .await;
@@ -2263,14 +2286,15 @@ impl MobActor {
             return Err(MobError::NotExternallyAddressable(meerkat_id));
         }
 
-        self.dispatch_member_turn(&entry, message).await
+        self.dispatch_member_turn(&entry, message, handling_mode, render_metadata)
+            .await
     }
 
     /// Internal-turn path bypasses external_addressable checks.
     async fn handle_internal_turn(
         &self,
         meerkat_id: MeerkatId,
-        message: String,
+        message: meerkat_core::types::ContentInput,
     ) -> Result<(), MobError> {
         let entry = {
             let roster = self.roster.read().await;
@@ -2283,13 +2307,22 @@ impl MobActor {
             return Err(MobError::MeerkatNotFound(meerkat_id));
         }
 
-        self.dispatch_member_turn(&entry, message).await.map(|_| ())
+        self.dispatch_member_turn(
+            &entry,
+            message,
+            meerkat_core::types::HandlingMode::Queue,
+            None,
+        )
+        .await
+        .map(|_| ())
     }
 
     async fn dispatch_member_turn(
         &self,
         entry: &RosterEntry,
-        message: String,
+        message: meerkat_core::types::ContentInput,
+        handling_mode: meerkat_core::types::HandlingMode,
+        render_metadata: Option<meerkat_core::types::RenderMetadata>,
     ) -> Result<SessionId, MobError> {
         match entry.runtime_mode {
             crate::MobRuntimeMode::AutonomousHost => {
@@ -2311,7 +2344,12 @@ impl MobActor {
                     })?;
                 let session_id = session_id.clone();
                 injector
-                    .inject(message, meerkat_core::PlainEventSource::Rpc)
+                    .inject(
+                        message,
+                        meerkat_core::PlainEventSource::Rpc,
+                        handling_mode,
+                        render_metadata,
+                    )
                     .map_err(|error| {
                         MobError::Internal(format!(
                             "autonomous dispatch inject failed for '{}': {}",
@@ -2328,7 +2366,9 @@ impl MobActor {
                     ))
                 })?;
                 let req = meerkat_core::service::StartTurnRequest {
-                    prompt: message.into(),
+                    prompt: message,
+                    render_metadata,
+                    handling_mode,
                     event_tx: None,
                     host_mode: false,
                     skill_references: None,

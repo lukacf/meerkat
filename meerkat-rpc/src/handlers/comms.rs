@@ -195,6 +195,7 @@ pub(crate) fn build_comms_command(
         source: params.source.clone(),
         stream: params.stream.clone(),
         allow_self_session: params.allow_self_session,
+        handling_mode: None,
     };
     request.parse(session_id)
 }

@@ -23,7 +23,7 @@ The model keeps:
 
 - runtime lifecycle state
 - run ownership
-- wake/process scheduling intent
+- handling-mode scheduling intent and the runtime admission behavior derived from it
 - admission/control sequencing
 - preemption rules
 
@@ -78,8 +78,8 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 
 ### Scenarios
 - `control-preempts-ingress` — control commands preempt ordinary ingress work
-- `prompt-queue` — queued user prompt sets wake/process flags conservatively and waits for the next ordinary drain
-- `prompt-steer` — steering user prompt requests ASAP processing at the earliest admissible boundary
+- `prompt-queue` — queued ordinary work waits for the next outer-loop turn without modifying the current run
+- `prompt-steer` — steered ordinary work drains into the active run at the earliest admissible boundary
 - `begin-run-complete` — runtime transitions idle to running to idle for a completed run
 - `retire-stop-destroy` — runtime transitions through retire/stop/destroy commands without reopening ordinary work
 
@@ -129,34 +129,22 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResumeRequested`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
   - scenarios: `retire-stop-destroy`
-- `SubmitCandidateFromIdle`
+- `SubmitWorkFromIdle`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
   - scenarios: `control-preempts-ingress`
-- `SubmitCandidateFromRunning`
+- `SubmitWorkFromRunning`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
   - scenarios: `begin-run-complete`
-- `AdmissionAcceptedIdleNone`
+- `AdmissionAcceptedIdleQueue`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
   - scenarios: `control-preempts-ingress`
-- `AdmissionAcceptedIdleWake`
+- `AdmissionAcceptedIdleSteer`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
   - scenarios: `control-preempts-ingress`
-- `AdmissionAcceptedIdleProcess`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
-  - scenarios: `control-preempts-ingress`
-- `AdmissionAcceptedIdleWakeAndProcess`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
-  - scenarios: `control-preempts-ingress`
-- `AdmissionAcceptedRunningNone`
+- `AdmissionAcceptedRunningQueue`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
   - scenarios: `begin-run-complete`
-- `AdmissionAcceptedRunningWake`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
-  - scenarios: `begin-run-complete`
-- `AdmissionAcceptedRunningProcess`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
-  - scenarios: `begin-run-complete`
-- `AdmissionAcceptedRunningWakeAndProcess`
+- `AdmissionAcceptedRunningSteer`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
   - scenarios: `begin-run-complete`
 - `AdmissionRejectedIdle`

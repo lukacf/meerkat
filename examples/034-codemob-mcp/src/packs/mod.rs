@@ -11,7 +11,7 @@
 //!
 //! - **Comms-based** (`flow_step_count() == 0`): Autonomous agents communicate
 //!   freely via peer messaging. The deliberate handler injects the task via
-//!   `mob_send_message` and monitors the event stream for quiescence.
+//!   `mob_member_send` and monitors the event stream for quiescence.
 
 pub mod advisor;
 pub mod architect;

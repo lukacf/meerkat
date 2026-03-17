@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::identity::{Keypair, PubKey, Signature};
 use ciborium::value::{CanonicalValue, Value};
-use meerkat_core::types::ContentBlock;
+use meerkat_core::types::{ContentBlock, HandlingMode, RenderMetadata};
 
 /// Response status for Request messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -148,6 +148,8 @@ pub enum InboxItem {
     PlainEvent {
         body: String,
         source: meerkat_core::PlainEventSource,
+        #[serde(default)]
+        handling_mode: HandlingMode,
         /// Optional interaction ID for subscription correlation.
         /// Set by `inject_with_subscription`, `None` for untracked events.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -155,6 +157,9 @@ pub enum InboxItem {
         /// Optional multimodal content blocks.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         blocks: Option<Vec<ContentBlock>>,
+        /// Optional normalized rendering metadata.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        render_metadata: Option<RenderMetadata>,
     },
 }
 
@@ -474,8 +479,10 @@ mod tests {
         let item = InboxItem::PlainEvent {
             body: "New email from john@example.com".to_string(),
             source: PlainEventSource::Tcp,
+            handling_mode: HandlingMode::Queue,
             interaction_id: None,
             blocks: None,
+            render_metadata: None,
         };
 
         // JSON round-trip
@@ -498,26 +505,34 @@ mod tests {
             InboxItem::PlainEvent {
                 body: "hello".to_string(),
                 source: PlainEventSource::Tcp,
+                handling_mode: HandlingMode::Queue,
                 interaction_id: None,
                 blocks: None,
+                render_metadata: None,
             },
             InboxItem::PlainEvent {
                 body: r#"{"event":"email"}"#.to_string(),
                 source: PlainEventSource::Stdin,
+                handling_mode: HandlingMode::Queue,
                 interaction_id: None,
                 blocks: None,
+                render_metadata: None,
             },
             InboxItem::PlainEvent {
                 body: "webhook payload".to_string(),
                 source: PlainEventSource::Webhook,
+                handling_mode: HandlingMode::Queue,
                 interaction_id: None,
                 blocks: None,
+                render_metadata: None,
             },
             InboxItem::PlainEvent {
                 body: "rpc event".to_string(),
                 source: PlainEventSource::Rpc,
+                handling_mode: HandlingMode::Queue,
                 interaction_id: None,
                 blocks: None,
+                render_metadata: None,
             },
         ];
         for item in items {
@@ -537,13 +552,16 @@ mod tests {
             InboxItem::PlainEvent {
                 body,
                 source,
+                handling_mode: _,
                 interaction_id,
                 blocks,
+                render_metadata,
             } => {
                 assert_eq!(body, "hello");
                 assert_eq!(source, meerkat_core::PlainEventSource::Tcp);
                 assert_eq!(interaction_id, None);
                 assert_eq!(blocks, None);
+                assert_eq!(render_metadata, None);
             }
             other => panic!("Expected PlainEvent, got {other:?}"),
         }
@@ -555,8 +573,10 @@ mod tests {
         let item = InboxItem::PlainEvent {
             body: "tracked event".to_string(),
             source: meerkat_core::PlainEventSource::Rpc,
+            handling_mode: HandlingMode::Queue,
             interaction_id: Some(id),
             blocks: None,
+            render_metadata: None,
         };
 
         let json = serde_json::to_string(&item).unwrap();
@@ -574,8 +594,10 @@ mod tests {
         let item = InboxItem::PlainEvent {
             body: "tracked event".to_string(),
             source: meerkat_core::PlainEventSource::Rpc,
+            handling_mode: HandlingMode::Queue,
             interaction_id: Some(id),
             blocks: None,
+            render_metadata: None,
         };
 
         let mut buf = Vec::new();
@@ -589,8 +611,10 @@ mod tests {
         let item = InboxItem::PlainEvent {
             body: "untracked".to_string(),
             source: meerkat_core::PlainEventSource::Tcp,
+            handling_mode: HandlingMode::Queue,
             interaction_id: None,
             blocks: None,
+            render_metadata: None,
         };
 
         let json = serde_json::to_string(&item).unwrap();

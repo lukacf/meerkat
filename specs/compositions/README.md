@@ -29,9 +29,16 @@ Status:
 
 Validation:
 
+- `make machine-codegen`
+- `make machine-check-drift`
+- `make machine-verify`
 - `cargo xtask machine-codegen --all`
 - `cargo xtask machine-check-drift --all`
 - `cargo xtask machine-verify --all`
+
+When the workspace is busy, prefer the `make machine-*` targets. They build
+`xtask` into an isolated target dir and then run the binary directly, which
+avoids confusing `cargo run` lock waits.
 
 Canonical composition set:
 

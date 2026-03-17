@@ -143,7 +143,13 @@ async function tick(): Promise<void> {
     for (const f of session.factions) {
       const stateStr = serializeState(f.team, session.state);
       const prompt = `=== TURN ${turn} GAME STATE ===\n${stateStr}\n\nBegin: message your operator to discuss strategy, then brief your ambassador.`;
-      try { await mod.mob_send_message(f.mobId, `${f.team}-planner`, prompt); }
+      try {
+        await mod.mob_member_send(
+          f.mobId,
+          `${f.team}-planner`,
+          JSON.stringify({ content: prompt, handling_mode: "queue" }),
+        );
+      }
       catch (e) { console.warn(`Failed to trigger ${f.team} planner:`, e); }
     }
 
@@ -195,11 +201,18 @@ async function tick(): Promise<void> {
       const validTargets = session.state.regions.filter(r => r.controller !== f.team).map(r => r.id);
       const plannerAddr = `diplomacy-${f.team}/planner/${f.team}-planner`;
       try {
-        await mod.mob_send_message(f.mobId, `${f.team}-operator`,
-          `TIME IS UP. Send your final order to your planner NOW using send_message. ` +
-          `Valid targets: ${validTargets.join(", ")}. ` +
-          `Your message MUST contain: FINAL ORDER: target=<region-id> aggression=<0-100>. ` +
-          `Send it to: ${plannerAddr}`);
+        await mod.mob_member_send(
+          f.mobId,
+          `${f.team}-operator`,
+          JSON.stringify({
+            content:
+              `TIME IS UP. Send your final order to your planner NOW using send_message. ` +
+              `Valid targets: ${validTargets.join(", ")}. ` +
+              `Your message MUST contain: FINAL ORDER: target=<region-id> aggression=<0-100>. ` +
+              `Send it to: ${plannerAddr}`,
+            handling_mode: "queue",
+          }),
+        );
       } catch (e) { console.warn(`Failed to prompt ${f.team} operator for order:`, e); }
     }
     const extractDeadline = Date.now() + 20_000;

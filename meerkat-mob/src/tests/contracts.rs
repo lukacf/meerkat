@@ -591,6 +591,7 @@ fn host_mode_req(comms_name: &str) -> CreateSessionRequest {
     CreateSessionRequest {
         model: "contract-mock".to_string(),
         prompt: "hello".to_string().into(),
+        render_metadata: None,
         system_prompt: None,
         max_tokens: None,
         event_tx: None,
@@ -674,6 +675,8 @@ async fn contract_mob_001_host_mode_session_stays_alive() {
             &sid_a,
             StartTurnRequest {
                 prompt: "follow up".to_string().into(),
+                render_metadata: None,
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: None,
                 host_mode: true,
                 skill_references: None,
@@ -745,6 +748,8 @@ async fn contract_mob_007_session_archive_removes_from_active_list() {
             &sid,
             StartTurnRequest {
                 prompt: "should fail".to_string().into(),
+                render_metadata: None,
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: None,
                 host_mode: false,
                 skill_references: None,

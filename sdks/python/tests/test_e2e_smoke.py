@@ -328,8 +328,7 @@ if include_scenario(40):
             assert append["status"] in {"staged", "duplicate"}
 
             async with await mob.subscribe_member_events("reviewer-1") as subscription:
-                await mob.send_message(
-                    "reviewer-1",
+                await mob.member("reviewer-1").send(
                     "Reply with REVIEWER_READY_40 and include [PY-SWARM-40].",
                 )
                 observed = await next_subscription_event(subscription)
@@ -375,8 +374,7 @@ if include_scenario(40):
                 broken_session_id = broken["session_id"]
                 assert broken_session_id
                 with pytest.raises(MeerkatError):
-                    await mob.send_message(
-                        "broken-1",
+                    await mob.member("broken-1").send(
                         "This turn must fail because the member model is invalid.",
                     )
                 broken_state = await client.read_session(broken_session_id)
@@ -412,8 +410,7 @@ if include_scenario(40):
                 lambda payload: payload.get("state") == "idle",
                 timeout_secs=120.0,
             )
-            await mob.send_message(
-                "reviewer-1",
+            await mob.member("reviewer-1").send(
                 "Reply with REVIEWER_RESPAWN_40.",
             )
             respawned_state = await wait_for(

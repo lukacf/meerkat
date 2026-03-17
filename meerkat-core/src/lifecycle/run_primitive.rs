@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use super::identifiers::InputId;
 use crate::service::TurnToolOverlay;
 use crate::skills::SkillKey;
+use crate::types::HandlingMode;
 
 /// When to apply a conversation mutation relative to the run lifecycle.
 #[non_exhaustive]
@@ -77,6 +78,9 @@ pub struct ConversationContextAppend {
 /// An input staged for application at a run boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RuntimeTurnMetadata {
+    /// Handling mode for staged ordinary work when admitted through runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handling_mode: Option<HandlingMode>,
     /// `None` = use session default; `Some(true)` = force host mode; `Some(false)` = force non-host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_mode: Option<bool>,

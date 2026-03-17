@@ -27,10 +27,16 @@ Status:
 
 Validation:
 
+- `make machine-check-drift`
+- `make machine-verify`
 - `cargo xtask machine-verify --all`
 - `./specs/machines/validate.sh` (thin wrapper over the xtask command above)
 - or per machine:
   `tlc -metadir specs/machines/.tlc/<machine> -config specs/machines/<machine>/ci.cfg specs/machines/<machine>/model.tla`
+
+When the workspace is busy, prefer the `make machine-*` targets. They build
+`xtask` into an isolated target dir and then run the binary directly, which
+avoids confusing `cargo run` lock waits.
 
 Canonical machine set:
 

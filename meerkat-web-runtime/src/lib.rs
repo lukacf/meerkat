@@ -31,7 +31,7 @@
 //! - `mob_unwire(mob_id, a, b)`
 //! - `mob_list_members(mob_id)` → JSON
 //! - `mob_append_system_context(mob_id, meerkat_id, request_json)` → JSON
-//! - `mob_send_message(mob_id, meerkat_id, message)`
+//! - `mob_member_send(mob_id, meerkat_id, request_json)` → session id
 //! - `mob_respawn(mob_id, meerkat_id, initial_message?)` — retire + re-spawn same profile
 //! - `mob_run_flow(mob_id, flow_id, params_json)` → run_id
 //! - `mob_flow_status(mob_id, run_id)` → JSON
@@ -834,7 +834,7 @@ pub fn register_tool_callback(
 ///
 /// The host should watch `ToolCallRequested` events in the event stream to
 /// capture the tool call arguments and act on them asynchronously. Any
-/// response (e.g. human approval) should be sent back via `mob_send_message`.
+/// response (e.g. human approval) should be sent back via `mob_member_send`.
 ///
 /// Example (JS):
 /// ```js
@@ -2038,20 +2038,37 @@ pub async fn wire_cross_mob(
     Ok(())
 }
 
-/// Send an external message to a spawned meerkat.
+#[derive(Debug, serde::Deserialize)]
+struct MobMemberSendOptions {
+    content: meerkat_core::types::ContentInput,
+    #[serde(default)]
+    handling_mode: meerkat_core::types::HandlingMode,
+    #[serde(default)]
+    render_metadata: Option<meerkat_core::types::RenderMetadata>,
+}
+
+/// Send external work to a spawned meerkat through the canonical member path.
 ///
 /// Returns the session ID of the session that handled the turn.
 #[wasm_bindgen]
-pub async fn mob_send_message(
+pub async fn mob_member_send(
     mob_id: &str,
     meerkat_id: &str,
-    message: &str,
+    request_json: &str,
 ) -> Result<String, JsValue> {
+    let req: MobMemberSendOptions =
+        serde_json::from_str(request_json).map_err(|e| err_str("invalid_request", e))?;
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
     let mid = MeerkatId::from(meerkat_id);
     let session_id = mob_state
-        .mob_send_message(&id, mid, message.to_string())
+        .mob_member_send(
+            &id,
+            mid,
+            req.content,
+            req.handling_mode,
+            req.render_metadata,
+        )
         .await
         .map_err(err_mob)?;
     Ok(session_id.to_string())

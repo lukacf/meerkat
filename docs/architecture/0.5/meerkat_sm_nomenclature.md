@@ -484,9 +484,9 @@ Assignment:
 is a runtime-owned wake decision, not a side effect inferred later from
 post-drain routing.
 
-### `PromptPriorityMode`
+### `HandlingMode`
 
-The admission-priority mode attached to an ordinary user prompt.
+The handling mode attached to ordinary content-bearing work.
 
 Examples:
 
@@ -495,16 +495,16 @@ Examples:
 
 Meaning:
 
-- `Queue`: admit the prompt as ordinary queued work that waits for the next
-  ordinary admissible boundary when a run is already in progress
-- `Steer`: admit the prompt as ordinary queued work that requests ASAP
-  handling at the earliest admissible cooperative boundary
+- `Queue`: submit the work to the outer loop; if a run is already in progress,
+  leave the current run untouched and handle the work on the next turn
+- `Steer`: submit the work to the inner loop; inject it at the earliest
+  admissible cooperative boundary of the active run
 
 Important:
-`PromptPriorityMode` is not a control-plane override.
+`HandlingMode` is not a control-plane override.
 
 - it does not turn a user prompt into authority work
-- it only changes how ordinary prompt work is scheduled once admitted
+- it only changes how ordinary content-bearing work is scheduled once admitted
 
 `0.5` runtime-policy mapping:
 
@@ -516,8 +516,13 @@ Important:
   - running: `wake=true`, `process=true`
 
 Assignment:
-`PromptPriorityMode` is chosen at the user-prompt boundary and preserved
-through runtime admission. It must not be reconstructed later from heuristics.
+`HandlingMode` is chosen at the ordinary-work boundary and preserved through
+runtime admission. It must not be reconstructed later from heuristics.
+
+Drain rule:
+when the runtime reaches an admissible inner boundary, it must drain the full
+currently eligible `Steer` set as one ordered batch. `Steer` work is not doled
+out one item per inner turn.
 
 ### `ControlPlane`
 

@@ -36,8 +36,15 @@ pub fn turn_execution_machine() -> MachineSchema {
                     TypeRef::Option(Box::new(TypeRef::Named("RunId".into()))),
                 ),
                 field("primitive_kind", TypeRef::Named("TurnPrimitiveKind".into())),
+                field(
+                    "admitted_content_shape",
+                    TypeRef::Option(Box::new(TypeRef::Named("ContentShape".into()))),
+                ),
+                field("vision_enabled", TypeRef::Bool),
+                field("image_tool_results_enabled", TypeRef::Bool),
                 field("tool_calls_pending", TypeRef::U32),
                 field("boundary_count", TypeRef::U32),
+                field("cancel_after_boundary", TypeRef::Bool),
                 field(
                     "terminal_outcome",
                     TypeRef::Named("TurnTerminalOutcome".into()),
@@ -48,8 +55,12 @@ pub fn turn_execution_machine() -> MachineSchema {
                 fields: vec![
                     init("active_run", Expr::None),
                     init("primitive_kind", Expr::String("None".into())),
+                    init("admitted_content_shape", Expr::None),
+                    init("vision_enabled", Expr::Bool(false)),
+                    init("image_tool_results_enabled", Expr::Bool(false)),
                     init("tool_calls_pending", Expr::U64(0)),
                     init("boundary_count", Expr::U64(0)),
+                    init("cancel_after_boundary", Expr::Bool(false)),
                     init("terminal_outcome", Expr::String("None".into())),
                 ],
             },
@@ -72,7 +83,15 @@ pub fn turn_execution_machine() -> MachineSchema {
                 },
                 VariantSchema {
                     name: "PrimitiveApplied".into(),
-                    fields: vec![field("run_id", TypeRef::Named("RunId".into()))],
+                    fields: vec![
+                        field("run_id", TypeRef::Named("RunId".into())),
+                        field(
+                            "admitted_content_shape",
+                            TypeRef::Named("ContentShape".into()),
+                        ),
+                        field("vision_enabled", TypeRef::Bool),
+                        field("image_tool_results_enabled", TypeRef::Bool),
+                    ],
                 },
                 VariantSchema {
                     name: "LlmReturnedToolCalls".into(),
@@ -110,7 +129,11 @@ pub fn turn_execution_machine() -> MachineSchema {
                     fields: vec![field("run_id", TypeRef::Named("RunId".into()))],
                 },
                 VariantSchema {
-                    name: "CancelRequested".into(),
+                    name: "CancelNow".into(),
+                    fields: vec![field("run_id", TypeRef::Named("RunId".into()))],
+                },
+                VariantSchema {
+                    name: "CancelAfterBoundary".into(),
                     fields: vec![field("run_id", TypeRef::Named("RunId".into()))],
                 },
                 VariantSchema {
@@ -180,6 +203,19 @@ pub fn turn_execution_machine() -> MachineSchema {
                 ]),
             },
             InvariantSchema {
+                name: "ready_has_no_admitted_content".into(),
+                expr: Expr::Or(vec![
+                    Expr::Neq(
+                        Box::new(Expr::CurrentPhase),
+                        Box::new(Expr::Phase("Ready".into())),
+                    ),
+                    Expr::Eq(
+                        Box::new(Expr::Field("admitted_content_shape".into())),
+                        Box::new(Expr::None),
+                    ),
+                ]),
+            },
+            InvariantSchema {
                 name: "non_ready_has_active_run".into(),
                 expr: Expr::Or(vec![
                     Expr::Eq(
@@ -202,6 +238,19 @@ pub fn turn_execution_machine() -> MachineSchema {
                     Expr::Gt(
                         Box::new(Expr::Field("tool_calls_pending".into())),
                         Box::new(Expr::U64(0)),
+                    ),
+                ]),
+            },
+            InvariantSchema {
+                name: "ready_has_no_boundary_cancel_request".into(),
+                expr: Expr::Or(vec![
+                    Expr::Neq(
+                        Box::new(Expr::CurrentPhase),
+                        Box::new(Expr::Phase("Ready".into())),
+                    ),
+                    Expr::Eq(
+                        Box::new(Expr::Field("cancel_after_boundary".into())),
+                        Box::new(Expr::Bool(false)),
                     ),
                 ]),
             },
@@ -300,8 +349,24 @@ pub fn turn_execution_machine() -> MachineSchema {
                         expr: Expr::U64(0),
                     },
                     Update::Assign {
+                        field: "admitted_content_shape".into(),
+                        expr: Expr::None,
+                    },
+                    Update::Assign {
+                        field: "vision_enabled".into(),
+                        expr: Expr::Bool(false),
+                    },
+                    Update::Assign {
+                        field: "image_tool_results_enabled".into(),
+                        expr: Expr::Bool(false),
+                    },
+                    Update::Assign {
                         field: "boundary_count".into(),
                         expr: Expr::U64(0),
+                    },
+                    Update::Assign {
+                        field: "cancel_after_boundary".into(),
+                        expr: Expr::Bool(false),
                     },
                     Update::Assign {
                         field: "terminal_outcome".into(),
@@ -336,8 +401,24 @@ pub fn turn_execution_machine() -> MachineSchema {
                         expr: Expr::U64(0),
                     },
                     Update::Assign {
+                        field: "admitted_content_shape".into(),
+                        expr: Expr::None,
+                    },
+                    Update::Assign {
+                        field: "vision_enabled".into(),
+                        expr: Expr::Bool(false),
+                    },
+                    Update::Assign {
+                        field: "image_tool_results_enabled".into(),
+                        expr: Expr::Bool(false),
+                    },
+                    Update::Assign {
                         field: "boundary_count".into(),
                         expr: Expr::U64(0),
+                    },
+                    Update::Assign {
+                        field: "cancel_after_boundary".into(),
+                        expr: Expr::Bool(false),
                     },
                     Update::Assign {
                         field: "terminal_outcome".into(),
@@ -372,8 +453,24 @@ pub fn turn_execution_machine() -> MachineSchema {
                         expr: Expr::U64(0),
                     },
                     Update::Assign {
+                        field: "admitted_content_shape".into(),
+                        expr: Expr::None,
+                    },
+                    Update::Assign {
+                        field: "vision_enabled".into(),
+                        expr: Expr::Bool(false),
+                    },
+                    Update::Assign {
+                        field: "image_tool_results_enabled".into(),
+                        expr: Expr::Bool(false),
+                    },
+                    Update::Assign {
                         field: "boundary_count".into(),
                         expr: Expr::U64(0),
+                    },
+                    Update::Assign {
+                        field: "cancel_after_boundary".into(),
+                        expr: Expr::Bool(false),
                     },
                     Update::Assign {
                         field: "terminal_outcome".into(),
@@ -391,7 +488,12 @@ pub fn turn_execution_machine() -> MachineSchema {
                 from: vec!["ApplyingPrimitive".into()],
                 on: InputMatch {
                     variant: "PrimitiveApplied".into(),
-                    bindings: vec!["run_id".into()],
+                    bindings: vec![
+                        "run_id".into(),
+                        "admitted_content_shape".into(),
+                        "vision_enabled".into(),
+                        "image_tool_results_enabled".into(),
+                    ],
                 },
                 guards: vec![
                     Guard {
@@ -409,7 +511,20 @@ pub fn turn_execution_machine() -> MachineSchema {
                         ),
                     },
                 ],
-                updates: vec![],
+                updates: vec![
+                    Update::Assign {
+                        field: "admitted_content_shape".into(),
+                        expr: Expr::Some(Box::new(Expr::Binding("admitted_content_shape".into()))),
+                    },
+                    Update::Assign {
+                        field: "vision_enabled".into(),
+                        expr: Expr::Binding("vision_enabled".into()),
+                    },
+                    Update::Assign {
+                        field: "image_tool_results_enabled".into(),
+                        expr: Expr::Binding("image_tool_results_enabled".into()),
+                    },
+                ],
                 to: "CallingLlm".into(),
                 emit: vec![],
             },
@@ -418,7 +533,12 @@ pub fn turn_execution_machine() -> MachineSchema {
                 from: vec!["ApplyingPrimitive".into()],
                 on: InputMatch {
                     variant: "PrimitiveApplied".into(),
-                    bindings: vec!["run_id".into()],
+                    bindings: vec![
+                        "run_id".into(),
+                        "admitted_content_shape".into(),
+                        "vision_enabled".into(),
+                        "image_tool_results_enabled".into(),
+                    ],
                 },
                 guards: vec![
                     Guard {
@@ -435,8 +555,27 @@ pub fn turn_execution_machine() -> MachineSchema {
                             Box::new(Expr::String("ImmediateAppend".into())),
                         ),
                     },
+                    Guard {
+                        name: "cancel_after_boundary_not_requested".into(),
+                        expr: Expr::Eq(
+                            Box::new(Expr::Field("cancel_after_boundary".into())),
+                            Box::new(Expr::Bool(false)),
+                        ),
+                    },
                 ],
                 updates: vec![
+                    Update::Assign {
+                        field: "admitted_content_shape".into(),
+                        expr: Expr::Some(Box::new(Expr::Binding("admitted_content_shape".into()))),
+                    },
+                    Update::Assign {
+                        field: "vision_enabled".into(),
+                        expr: Expr::Binding("vision_enabled".into()),
+                    },
+                    Update::Assign {
+                        field: "image_tool_results_enabled".into(),
+                        expr: Expr::Binding("image_tool_results_enabled".into()),
+                    },
                     Update::Increment {
                         field: "boundary_count".into(),
                         amount: 1,
@@ -468,11 +607,98 @@ pub fn turn_execution_machine() -> MachineSchema {
                 ],
             },
             TransitionSchema {
+                name: "PrimitiveAppliedImmediateAppendCancelsAfterBoundary".into(),
+                from: vec!["ApplyingPrimitive".into()],
+                on: InputMatch {
+                    variant: "PrimitiveApplied".into(),
+                    bindings: vec![
+                        "run_id".into(),
+                        "admitted_content_shape".into(),
+                        "vision_enabled".into(),
+                        "image_tool_results_enabled".into(),
+                    ],
+                },
+                guards: vec![
+                    Guard {
+                        name: "run_matches_active".into(),
+                        expr: Expr::Eq(
+                            Box::new(Expr::Field("active_run".into())),
+                            Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                        ),
+                    },
+                    Guard {
+                        name: "immediate_append".into(),
+                        expr: Expr::Eq(
+                            Box::new(Expr::Field("primitive_kind".into())),
+                            Box::new(Expr::String("ImmediateAppend".into())),
+                        ),
+                    },
+                    Guard {
+                        name: "boundary_cancel_requested".into(),
+                        expr: Expr::Eq(
+                            Box::new(Expr::Field("cancel_after_boundary".into())),
+                            Box::new(Expr::Bool(true)),
+                        ),
+                    },
+                ],
+                updates: vec![
+                    Update::Assign {
+                        field: "admitted_content_shape".into(),
+                        expr: Expr::Some(Box::new(Expr::Binding("admitted_content_shape".into()))),
+                    },
+                    Update::Assign {
+                        field: "vision_enabled".into(),
+                        expr: Expr::Binding("vision_enabled".into()),
+                    },
+                    Update::Assign {
+                        field: "image_tool_results_enabled".into(),
+                        expr: Expr::Binding("image_tool_results_enabled".into()),
+                    },
+                    Update::Increment {
+                        field: "boundary_count".into(),
+                        amount: 1,
+                    },
+                    Update::Assign {
+                        field: "cancel_after_boundary".into(),
+                        expr: Expr::Bool(false),
+                    },
+                    Update::Assign {
+                        field: "terminal_outcome".into(),
+                        expr: Expr::String("Cancelled".into()),
+                    },
+                ],
+                to: "Cancelled".into(),
+                emit: vec![
+                    EffectEmit {
+                        variant: "BoundaryApplied".into(),
+                        fields: IndexMap::from([
+                            ("run_id".into(), Expr::Binding("run_id".into())),
+                            (
+                                "boundary_sequence".into(),
+                                Expr::Add(
+                                    Box::new(Expr::Field("boundary_count".into())),
+                                    Box::new(Expr::U64(1)),
+                                ),
+                            ),
+                        ]),
+                    },
+                    EffectEmit {
+                        variant: "RunCancelled".into(),
+                        fields: IndexMap::from([("run_id".into(), Expr::Binding("run_id".into()))]),
+                    },
+                ],
+            },
+            TransitionSchema {
                 name: "PrimitiveAppliedImmediateContext".into(),
                 from: vec!["ApplyingPrimitive".into()],
                 on: InputMatch {
                     variant: "PrimitiveApplied".into(),
-                    bindings: vec!["run_id".into()],
+                    bindings: vec![
+                        "run_id".into(),
+                        "admitted_content_shape".into(),
+                        "vision_enabled".into(),
+                        "image_tool_results_enabled".into(),
+                    ],
                 },
                 guards: vec![
                     Guard {
@@ -489,8 +715,27 @@ pub fn turn_execution_machine() -> MachineSchema {
                             Box::new(Expr::String("ImmediateContextAppend".into())),
                         ),
                     },
+                    Guard {
+                        name: "cancel_after_boundary_not_requested".into(),
+                        expr: Expr::Eq(
+                            Box::new(Expr::Field("cancel_after_boundary".into())),
+                            Box::new(Expr::Bool(false)),
+                        ),
+                    },
                 ],
                 updates: vec![
+                    Update::Assign {
+                        field: "admitted_content_shape".into(),
+                        expr: Expr::Some(Box::new(Expr::Binding("admitted_content_shape".into()))),
+                    },
+                    Update::Assign {
+                        field: "vision_enabled".into(),
+                        expr: Expr::Binding("vision_enabled".into()),
+                    },
+                    Update::Assign {
+                        field: "image_tool_results_enabled".into(),
+                        expr: Expr::Binding("image_tool_results_enabled".into()),
+                    },
                     Update::Increment {
                         field: "boundary_count".into(),
                         amount: 1,
@@ -517,6 +762,88 @@ pub fn turn_execution_machine() -> MachineSchema {
                     },
                     EffectEmit {
                         variant: "RunCompleted".into(),
+                        fields: IndexMap::from([("run_id".into(), Expr::Binding("run_id".into()))]),
+                    },
+                ],
+            },
+            TransitionSchema {
+                name: "PrimitiveAppliedImmediateContextCancelsAfterBoundary".into(),
+                from: vec!["ApplyingPrimitive".into()],
+                on: InputMatch {
+                    variant: "PrimitiveApplied".into(),
+                    bindings: vec![
+                        "run_id".into(),
+                        "admitted_content_shape".into(),
+                        "vision_enabled".into(),
+                        "image_tool_results_enabled".into(),
+                    ],
+                },
+                guards: vec![
+                    Guard {
+                        name: "run_matches_active".into(),
+                        expr: Expr::Eq(
+                            Box::new(Expr::Field("active_run".into())),
+                            Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                        ),
+                    },
+                    Guard {
+                        name: "immediate_context".into(),
+                        expr: Expr::Eq(
+                            Box::new(Expr::Field("primitive_kind".into())),
+                            Box::new(Expr::String("ImmediateContextAppend".into())),
+                        ),
+                    },
+                    Guard {
+                        name: "boundary_cancel_requested".into(),
+                        expr: Expr::Eq(
+                            Box::new(Expr::Field("cancel_after_boundary".into())),
+                            Box::new(Expr::Bool(true)),
+                        ),
+                    },
+                ],
+                updates: vec![
+                    Update::Assign {
+                        field: "admitted_content_shape".into(),
+                        expr: Expr::Some(Box::new(Expr::Binding("admitted_content_shape".into()))),
+                    },
+                    Update::Assign {
+                        field: "vision_enabled".into(),
+                        expr: Expr::Binding("vision_enabled".into()),
+                    },
+                    Update::Assign {
+                        field: "image_tool_results_enabled".into(),
+                        expr: Expr::Binding("image_tool_results_enabled".into()),
+                    },
+                    Update::Increment {
+                        field: "boundary_count".into(),
+                        amount: 1,
+                    },
+                    Update::Assign {
+                        field: "cancel_after_boundary".into(),
+                        expr: Expr::Bool(false),
+                    },
+                    Update::Assign {
+                        field: "terminal_outcome".into(),
+                        expr: Expr::String("Cancelled".into()),
+                    },
+                ],
+                to: "Cancelled".into(),
+                emit: vec![
+                    EffectEmit {
+                        variant: "BoundaryApplied".into(),
+                        fields: IndexMap::from([
+                            ("run_id".into(), Expr::Binding("run_id".into())),
+                            (
+                                "boundary_sequence".into(),
+                                Expr::Add(
+                                    Box::new(Expr::Field("boundary_count".into())),
+                                    Box::new(Expr::U64(1)),
+                                ),
+                            ),
+                        ]),
+                    },
+                    EffectEmit {
+                        variant: "RunCancelled".into(),
                         fields: IndexMap::from([("run_id".into(), Expr::Binding("run_id".into()))]),
                     },
                 ],
@@ -654,10 +981,56 @@ pub fn turn_execution_machine() -> MachineSchema {
                             Box::new(Expr::String("ConversationTurn".into())),
                         ),
                     },
+                    Guard {
+                        name: "cancel_after_boundary_not_requested".into(),
+                        expr: Expr::Eq(
+                            Box::new(Expr::Field("cancel_after_boundary".into())),
+                            Box::new(Expr::Bool(false)),
+                        ),
+                    },
                 ],
                 updates: vec![],
                 to: "CallingLlm".into(),
                 emit: vec![],
+            },
+            TransitionSchema {
+                name: "BoundaryContinueCancelsAfterBoundary".into(),
+                from: vec!["DrainingBoundary".into()],
+                on: InputMatch {
+                    variant: "BoundaryContinue".into(),
+                    bindings: vec!["run_id".into()],
+                },
+                guards: vec![
+                    Guard {
+                        name: "run_matches_active".into(),
+                        expr: Expr::Eq(
+                            Box::new(Expr::Field("active_run".into())),
+                            Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                        ),
+                    },
+                    Guard {
+                        name: "boundary_cancel_requested".into(),
+                        expr: Expr::Eq(
+                            Box::new(Expr::Field("cancel_after_boundary".into())),
+                            Box::new(Expr::Bool(true)),
+                        ),
+                    },
+                ],
+                updates: vec![
+                    Update::Assign {
+                        field: "cancel_after_boundary".into(),
+                        expr: Expr::Bool(false),
+                    },
+                    Update::Assign {
+                        field: "terminal_outcome".into(),
+                        expr: Expr::String("Cancelled".into()),
+                    },
+                ],
+                to: "Cancelled".into(),
+                emit: vec![EffectEmit {
+                    variant: "RunCancelled".into(),
+                    fields: IndexMap::from([("run_id".into(), Expr::Binding("run_id".into()))]),
+                }],
             },
             TransitionSchema {
                 name: "BoundaryComplete".into(),
@@ -666,13 +1039,22 @@ pub fn turn_execution_machine() -> MachineSchema {
                     variant: "BoundaryComplete".into(),
                     bindings: vec!["run_id".into()],
                 },
-                guards: vec![Guard {
-                    name: "run_matches_active".into(),
-                    expr: Expr::Eq(
-                        Box::new(Expr::Field("active_run".into())),
-                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
-                    ),
-                }],
+                guards: vec![
+                    Guard {
+                        name: "run_matches_active".into(),
+                        expr: Expr::Eq(
+                            Box::new(Expr::Field("active_run".into())),
+                            Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                        ),
+                    },
+                    Guard {
+                        name: "cancel_after_boundary_not_requested".into(),
+                        expr: Expr::Eq(
+                            Box::new(Expr::Field("cancel_after_boundary".into())),
+                            Box::new(Expr::Bool(false)),
+                        ),
+                    },
+                ],
                 updates: vec![Update::Assign {
                     field: "terminal_outcome".into(),
                     expr: Expr::String("Completed".into()),
@@ -680,6 +1062,45 @@ pub fn turn_execution_machine() -> MachineSchema {
                 to: "Completed".into(),
                 emit: vec![EffectEmit {
                     variant: "RunCompleted".into(),
+                    fields: IndexMap::from([("run_id".into(), Expr::Binding("run_id".into()))]),
+                }],
+            },
+            TransitionSchema {
+                name: "BoundaryCompleteCancelsAfterBoundary".into(),
+                from: vec!["DrainingBoundary".into()],
+                on: InputMatch {
+                    variant: "BoundaryComplete".into(),
+                    bindings: vec!["run_id".into()],
+                },
+                guards: vec![
+                    Guard {
+                        name: "run_matches_active".into(),
+                        expr: Expr::Eq(
+                            Box::new(Expr::Field("active_run".into())),
+                            Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                        ),
+                    },
+                    Guard {
+                        name: "boundary_cancel_requested".into(),
+                        expr: Expr::Eq(
+                            Box::new(Expr::Field("cancel_after_boundary".into())),
+                            Box::new(Expr::Bool(true)),
+                        ),
+                    },
+                ],
+                updates: vec![
+                    Update::Assign {
+                        field: "cancel_after_boundary".into(),
+                        expr: Expr::Bool(false),
+                    },
+                    Update::Assign {
+                        field: "terminal_outcome".into(),
+                        expr: Expr::String("Cancelled".into()),
+                    },
+                ],
+                to: "Cancelled".into(),
+                emit: vec![EffectEmit {
+                    variant: "RunCancelled".into(),
                     fields: IndexMap::from([("run_id".into(), Expr::Binding("run_id".into()))]),
                 }],
             },
@@ -876,10 +1297,10 @@ pub fn turn_execution_machine() -> MachineSchema {
                 }],
             },
             TransitionSchema {
-                name: "CancelRequestedFromApplyingPrimitive".into(),
+                name: "CancelNowFromApplyingPrimitive".into(),
                 from: vec!["ApplyingPrimitive".into()],
                 on: InputMatch {
-                    variant: "CancelRequested".into(),
+                    variant: "CancelNow".into(),
                     bindings: vec!["run_id".into()],
                 },
                 guards: vec![Guard {
@@ -894,10 +1315,10 @@ pub fn turn_execution_machine() -> MachineSchema {
                 emit: vec![],
             },
             TransitionSchema {
-                name: "CancelRequestedFromCallingLlm".into(),
+                name: "CancelNowFromCallingLlm".into(),
                 from: vec!["CallingLlm".into()],
                 on: InputMatch {
-                    variant: "CancelRequested".into(),
+                    variant: "CancelNow".into(),
                     bindings: vec!["run_id".into()],
                 },
                 guards: vec![Guard {
@@ -912,10 +1333,10 @@ pub fn turn_execution_machine() -> MachineSchema {
                 emit: vec![],
             },
             TransitionSchema {
-                name: "CancelRequestedFromWaitingForOps".into(),
+                name: "CancelNowFromWaitingForOps".into(),
                 from: vec!["WaitingForOps".into()],
                 on: InputMatch {
-                    variant: "CancelRequested".into(),
+                    variant: "CancelNow".into(),
                     bindings: vec!["run_id".into()],
                 },
                 guards: vec![Guard {
@@ -930,10 +1351,10 @@ pub fn turn_execution_machine() -> MachineSchema {
                 emit: vec![],
             },
             TransitionSchema {
-                name: "CancelRequestedFromDrainingBoundary".into(),
+                name: "CancelNowFromDrainingBoundary".into(),
                 from: vec!["DrainingBoundary".into()],
                 on: InputMatch {
-                    variant: "CancelRequested".into(),
+                    variant: "CancelNow".into(),
                     bindings: vec!["run_id".into()],
                 },
                 guards: vec![Guard {
@@ -948,10 +1369,10 @@ pub fn turn_execution_machine() -> MachineSchema {
                 emit: vec![],
             },
             TransitionSchema {
-                name: "CancelRequestedFromErrorRecovery".into(),
+                name: "CancelNowFromErrorRecovery".into(),
                 from: vec!["ErrorRecovery".into()],
                 on: InputMatch {
-                    variant: "CancelRequested".into(),
+                    variant: "CancelNow".into(),
                     bindings: vec!["run_id".into()],
                 },
                 guards: vec![Guard {
@@ -963,6 +1384,111 @@ pub fn turn_execution_machine() -> MachineSchema {
                 }],
                 updates: vec![],
                 to: "Cancelling".into(),
+                emit: vec![],
+            },
+            TransitionSchema {
+                name: "CancelAfterBoundaryFromApplyingPrimitive".into(),
+                from: vec!["ApplyingPrimitive".into()],
+                on: InputMatch {
+                    variant: "CancelAfterBoundary".into(),
+                    bindings: vec!["run_id".into()],
+                },
+                guards: vec![Guard {
+                    name: "run_matches_active".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("active_run".into())),
+                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                    ),
+                }],
+                updates: vec![Update::Assign {
+                    field: "cancel_after_boundary".into(),
+                    expr: Expr::Bool(true),
+                }],
+                to: "ApplyingPrimitive".into(),
+                emit: vec![],
+            },
+            TransitionSchema {
+                name: "CancelAfterBoundaryFromCallingLlm".into(),
+                from: vec!["CallingLlm".into()],
+                on: InputMatch {
+                    variant: "CancelAfterBoundary".into(),
+                    bindings: vec!["run_id".into()],
+                },
+                guards: vec![Guard {
+                    name: "run_matches_active".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("active_run".into())),
+                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                    ),
+                }],
+                updates: vec![Update::Assign {
+                    field: "cancel_after_boundary".into(),
+                    expr: Expr::Bool(true),
+                }],
+                to: "CallingLlm".into(),
+                emit: vec![],
+            },
+            TransitionSchema {
+                name: "CancelAfterBoundaryFromWaitingForOps".into(),
+                from: vec!["WaitingForOps".into()],
+                on: InputMatch {
+                    variant: "CancelAfterBoundary".into(),
+                    bindings: vec!["run_id".into()],
+                },
+                guards: vec![Guard {
+                    name: "run_matches_active".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("active_run".into())),
+                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                    ),
+                }],
+                updates: vec![Update::Assign {
+                    field: "cancel_after_boundary".into(),
+                    expr: Expr::Bool(true),
+                }],
+                to: "WaitingForOps".into(),
+                emit: vec![],
+            },
+            TransitionSchema {
+                name: "CancelAfterBoundaryFromDrainingBoundary".into(),
+                from: vec!["DrainingBoundary".into()],
+                on: InputMatch {
+                    variant: "CancelAfterBoundary".into(),
+                    bindings: vec!["run_id".into()],
+                },
+                guards: vec![Guard {
+                    name: "run_matches_active".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("active_run".into())),
+                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                    ),
+                }],
+                updates: vec![Update::Assign {
+                    field: "cancel_after_boundary".into(),
+                    expr: Expr::Bool(true),
+                }],
+                to: "DrainingBoundary".into(),
+                emit: vec![],
+            },
+            TransitionSchema {
+                name: "CancelAfterBoundaryFromErrorRecovery".into(),
+                from: vec!["ErrorRecovery".into()],
+                on: InputMatch {
+                    variant: "CancelAfterBoundary".into(),
+                    bindings: vec!["run_id".into()],
+                },
+                guards: vec![Guard {
+                    name: "run_matches_active".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("active_run".into())),
+                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                    ),
+                }],
+                updates: vec![Update::Assign {
+                    field: "cancel_after_boundary".into(),
+                    expr: Expr::Bool(true),
+                }],
+                to: "ErrorRecovery".into(),
                 emit: vec![],
             },
             TransitionSchema {
@@ -979,10 +1505,16 @@ pub fn turn_execution_machine() -> MachineSchema {
                         Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
                     ),
                 }],
-                updates: vec![Update::Assign {
-                    field: "terminal_outcome".into(),
-                    expr: Expr::String("Cancelled".into()),
-                }],
+                updates: vec![
+                    Update::Assign {
+                        field: "terminal_outcome".into(),
+                        expr: Expr::String("Cancelled".into()),
+                    },
+                    Update::Assign {
+                        field: "cancel_after_boundary".into(),
+                        expr: Expr::Bool(false),
+                    },
+                ],
                 to: "Cancelled".into(),
                 emit: vec![EffectEmit {
                     variant: "RunCancelled".into(),
@@ -1009,12 +1541,28 @@ pub fn turn_execution_machine() -> MachineSchema {
                         expr: Expr::None,
                     },
                     Update::Assign {
+                        field: "admitted_content_shape".into(),
+                        expr: Expr::None,
+                    },
+                    Update::Assign {
                         field: "primitive_kind".into(),
                         expr: Expr::String("None".into()),
                     },
                     Update::Assign {
+                        field: "vision_enabled".into(),
+                        expr: Expr::Bool(false),
+                    },
+                    Update::Assign {
+                        field: "image_tool_results_enabled".into(),
+                        expr: Expr::Bool(false),
+                    },
+                    Update::Assign {
                         field: "tool_calls_pending".into(),
                         expr: Expr::U64(0),
+                    },
+                    Update::Assign {
+                        field: "cancel_after_boundary".into(),
+                        expr: Expr::Bool(false),
                     },
                     Update::Assign {
                         field: "boundary_count".into(),
@@ -1048,12 +1596,28 @@ pub fn turn_execution_machine() -> MachineSchema {
                         expr: Expr::None,
                     },
                     Update::Assign {
+                        field: "admitted_content_shape".into(),
+                        expr: Expr::None,
+                    },
+                    Update::Assign {
                         field: "primitive_kind".into(),
                         expr: Expr::String("None".into()),
                     },
                     Update::Assign {
+                        field: "vision_enabled".into(),
+                        expr: Expr::Bool(false),
+                    },
+                    Update::Assign {
+                        field: "image_tool_results_enabled".into(),
+                        expr: Expr::Bool(false),
+                    },
+                    Update::Assign {
                         field: "tool_calls_pending".into(),
                         expr: Expr::U64(0),
+                    },
+                    Update::Assign {
+                        field: "cancel_after_boundary".into(),
+                        expr: Expr::Bool(false),
                     },
                     Update::Assign {
                         field: "boundary_count".into(),
@@ -1087,12 +1651,28 @@ pub fn turn_execution_machine() -> MachineSchema {
                         expr: Expr::None,
                     },
                     Update::Assign {
+                        field: "admitted_content_shape".into(),
+                        expr: Expr::None,
+                    },
+                    Update::Assign {
                         field: "primitive_kind".into(),
                         expr: Expr::String("None".into()),
                     },
                     Update::Assign {
+                        field: "vision_enabled".into(),
+                        expr: Expr::Bool(false),
+                    },
+                    Update::Assign {
+                        field: "image_tool_results_enabled".into(),
+                        expr: Expr::Bool(false),
+                    },
+                    Update::Assign {
                         field: "tool_calls_pending".into(),
                         expr: Expr::U64(0),
+                    },
+                    Update::Assign {
+                        field: "cancel_after_boundary".into(),
+                        expr: Expr::Bool(false),
                     },
                     Update::Assign {
                         field: "boundary_count".into(),

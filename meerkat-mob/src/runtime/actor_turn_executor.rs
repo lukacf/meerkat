@@ -12,6 +12,7 @@ use futures::FutureExt;
 use meerkat_core::EventEnvelope;
 use meerkat_core::event::{AgentEvent, ScopedAgentEvent, StreamScopeFrame};
 use meerkat_core::service::{StartTurnRequest, TurnToolOverlay};
+use meerkat_core::types::ContentInput;
 use std::collections::BTreeMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -274,7 +275,7 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
         run_id: &RunId,
         step_id: &StepId,
         target: &MeerkatId,
-        message: String,
+        message: ContentInput,
         flow_tool_overlay: Option<TurnToolOverlay>,
     ) -> Result<FlowTurnTicket, MobError> {
         let entry = self
@@ -317,7 +318,12 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                         ))
                     })?;
                 let subscription = injector
-                    .inject_with_subscription(message, meerkat_core::PlainEventSource::Rpc)
+                    .inject_with_subscription(
+                        message,
+                        meerkat_core::PlainEventSource::Rpc,
+                        meerkat_core::types::HandlingMode::Queue,
+                        None,
+                    )
                     .map_err(|error| {
                         MobError::Internal(format!(
                             "autonomous flow dispatch inject failed for '{target}': {error}"
@@ -346,7 +352,9 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                         run_id,
                         step_id,
                         StartTurnRequest {
-                            prompt: message.into(),
+                            prompt: message,
+                            render_metadata: None,
+                            handling_mode: meerkat_core::types::HandlingMode::Queue,
                             event_tx: Some(event_tx),
                             host_mode: false,
                             skill_references: None,

@@ -883,7 +883,7 @@ mod tests {
 
         assert!(rendered.starts_with("---- MODULE Composition_runtime_pipeline ----"));
         assert!(rendered.contains(
-            "ROUTES\n  staged_run_notifies_control == runtime_ingress.ReadyForRun -> runtime_control.BeginRun [Immediate]"
+            "staged_run_notifies_control == runtime_ingress.ReadyForRun -> runtime_control.BeginRun [Immediate]"
         ));
         assert!(
             rendered
@@ -899,8 +899,8 @@ mod tests {
 
         assert!(rendered.contains("TRANSITIONS\n  Initialize"));
         assert!(rendered.contains("BeginRunFromIdle"));
-        assert!(rendered.contains("AdmissionAcceptedIdleWakeAndProcess"));
-        assert!(rendered.contains("ApplyControlPlaneCommand([command |-> \"Retire\"])"));
+        assert!(rendered.contains("AdmissionAcceptedIdleSteer"));
+        assert!(rendered.contains("RetireRequestedFromIdle"));
     }
 
     #[test]
@@ -927,7 +927,7 @@ mod tests {
             render_composition_mapping_coverage(&peer_runtime_bundle_composition(), &coverage);
 
         assert!(rendered.contains(
-            "peer_candidate_enters_runtime_admission == peer_comms.SubmitPeerInputCandidate -> runtime_control.SubmitCandidate [Immediate]"
+            "peer_candidate_enters_runtime_admission == peer_comms.SubmitPeerInputCandidate -> runtime_control.SubmitWork [Immediate]"
         ));
         assert!(rendered.contains("raw_item_id ~> candidate_id"));
         assert!(rendered.contains("candidate_kind := \"PeerInput\""));

@@ -23,6 +23,7 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use indexmap::IndexMap;
 use meerkat_core::service::TurnToolOverlay;
 use meerkat_core::time_compat::{Duration, Instant};
+use meerkat_core::types::ContentInput;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
@@ -264,7 +265,7 @@ impl FlowEngine {
                     .await;
             }
 
-            let prompt = match render_template(&step.message, &context) {
+            let prompt = match render_content_input_template(&step.message, &context) {
                 Ok(prompt) => prompt,
                 Err(reason) => {
                     self.record_step_failed(&run_id, &step_id, reason.clone())
@@ -518,7 +519,7 @@ impl FlowEngine {
         run_id: &RunId,
         step_id: &StepId,
         target: &MeerkatId,
-        prompt: &str,
+        prompt: &ContentInput,
         flow_tool_overlay: Option<TurnToolOverlay>,
         output_format: StepOutputFormat,
         step_timeout: Duration,
@@ -547,7 +548,7 @@ impl FlowEngine {
                     run_id,
                     step_id,
                     target,
-                    prompt.to_string(),
+                    prompt.clone(),
                     flow_tool_overlay.clone(),
                 )
                 .await?;
@@ -1229,16 +1230,42 @@ fn render_template(template: &str, context: &FlowContext) -> Result<String, Stri
     Ok(rendered)
 }
 
+fn render_content_input_template(
+    template: &ContentInput,
+    context: &FlowContext,
+) -> Result<ContentInput, String> {
+    match template {
+        ContentInput::Text(text) => render_template(text, context).map(ContentInput::Text),
+        ContentInput::Blocks(blocks) => {
+            let mut rendered = Vec::with_capacity(blocks.len());
+            for block in blocks {
+                match block {
+                    meerkat_core::types::ContentBlock::Text { text } => {
+                        rendered.push(meerkat_core::types::ContentBlock::Text {
+                            text: render_template(text, context)?,
+                        });
+                    }
+                    other => rendered.push(other.clone()),
+                }
+            }
+            Ok(ContentInput::Blocks(rendered))
+        }
+    }
+}
+
 fn resolve_template_value<'a>(expression: &str, context: &'a FlowContext) -> Option<&'a Value> {
     resolve_context_path(context, expression)
 }
 
 #[cfg(test)]
 mod template_tests {
-    use super::{TemplateSyntaxKind, parse_template, render_template};
+    use super::{
+        TemplateSyntaxKind, parse_template, render_content_input_template, render_template,
+    };
     use crate::ids::{RunId, StepId};
     use crate::run::FlowContext;
     use indexmap::IndexMap;
+    use meerkat_core::types::{ContentBlock, ContentInput};
 
     fn sample_context() -> FlowContext {
         let mut step_outputs = IndexMap::new();
@@ -1272,6 +1299,44 @@ mod template_tests {
         let rendered = render_template("hello {{ params.user }}", &sample_context())
             .expect("valid template should render");
         assert_eq!(rendered, "hello luka");
+    }
+
+    #[test]
+    fn test_render_content_input_template_preserves_non_text_blocks() {
+        let rendered = render_content_input_template(
+            &ContentInput::Blocks(vec![
+                ContentBlock::Text {
+                    text: "hello {{ params.user }}".to_string(),
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: "abc".to_string(),
+                    source_path: Some("/tmp/source.png".to_string()),
+                },
+            ]),
+            &sample_context(),
+        )
+        .expect("valid multimodal template should render");
+
+        match rendered {
+            ContentInput::Blocks(blocks) => {
+                assert!(matches!(
+                    &blocks[0],
+                    ContentBlock::Text { text } if text == "hello luka"
+                ));
+                assert!(matches!(
+                    &blocks[1],
+                    ContentBlock::Image {
+                        media_type,
+                        data,
+                        source_path,
+                    } if media_type == "image/png"
+                        && data == "abc"
+                        && source_path.as_deref() == Some("/tmp/source.png")
+                ));
+            }
+            other => panic!("expected rendered blocks, got {other:?}"),
+        }
     }
 }
 

@@ -112,7 +112,7 @@ The TypeScript SDK (`@rkat/sdk`) lets you create sessions, run agent turns, stre
 | `mob.wire(a, b)` | Wire two members |
 | `mob.unwire(a, b)` | Remove wiring |
 | `mob.listMembers()` | List mob members |
-| `mob.sendMessage(meerkatId, message)` | Send work to a member |
+| `mob.member(meerkatId).send(content, handlingMode?)` | Send work to a member |
 | `mob.listFlows()` | List available flows |
 | `mob.runFlow(flowId, params)` | Start a flow run |
 | `mob.flowStatus(runId)` | Get flow run status |

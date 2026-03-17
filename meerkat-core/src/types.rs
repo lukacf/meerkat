@@ -175,6 +175,64 @@ impl From<&str> for ContentInput {
     }
 }
 
+/// Handling mode for ordinary content-bearing work.
+///
+/// `Queue` means outer-loop / next-turn handling and leaves the current run
+/// untouched.
+/// `Steer` means inner-loop handling and requests injection at the earliest
+/// admissible cooperative boundary, while remaining ordinary work rather than
+/// an out-of-band control-plane command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HandlingMode {
+    #[default]
+    Queue,
+    Steer,
+}
+
+/// Standardized rendering class for injected ordinary work.
+///
+/// This metadata is for normalization/injection rendering, not for core
+/// runtime scheduling. It lets the system consistently frame peer messages,
+/// external events, tool-scope notices, and similar inputs when they are
+/// rendered into model-visible context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RenderClass {
+    UserPrompt,
+    PeerMessage,
+    PeerRequest,
+    PeerResponse,
+    ExternalEvent,
+    FlowStep,
+    Continuation,
+    SystemNotice,
+    ToolScopeNotice,
+    OpsProgress,
+}
+
+/// Constrained salience metadata for injected ordinary work.
+///
+/// This is intentionally a small closed enum so call sites do not invent
+/// arbitrary free-text urgency language.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RenderSalience {
+    Background,
+    #[default]
+    Normal,
+    Important,
+    Urgent,
+}
+
+/// Optional rendering metadata carried alongside ordinary work content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenderMetadata {
+    pub class: RenderClass,
+    #[serde(default)]
+    pub salience: RenderSalience,
+}
+
 // ===========================================================================
 // New ordered transcript types (spec section 3.1)
 // ===========================================================================

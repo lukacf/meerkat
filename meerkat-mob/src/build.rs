@@ -155,6 +155,7 @@ pub fn to_create_session_request(
     CreateSessionRequest {
         model: config.model.clone(),
         prompt: prompt.into(),
+        render_metadata: None,
         system_prompt: config.system_prompt.clone(),
         max_tokens: config.max_tokens,
         event_tx: None,

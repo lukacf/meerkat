@@ -11,7 +11,9 @@ use crate::session::SystemContextStageError;
 use crate::time_compat::SystemTime;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
-use crate::types::{ContentInput, Message, RunResult, SessionId, Usage};
+use crate::types::{
+    ContentInput, HandlingMode, Message, RenderMetadata, RunResult, SessionId, Usage,
+};
 use crate::{
     AgentToolDispatcher, BudgetLimits, HookRunOverrides, OutputSchema, PeerMeta, Provider, Session,
 };
@@ -132,6 +134,8 @@ pub struct CreateSessionRequest {
     pub model: String,
     /// Initial user prompt (text or multimodal).
     pub prompt: ContentInput,
+    /// Optional normalized rendering metadata for the initial prompt.
+    pub render_metadata: Option<RenderMetadata>,
     /// Optional system prompt override.
     pub system_prompt: Option<String>,
     /// Max tokens per LLM turn.
@@ -295,6 +299,10 @@ impl std::fmt::Debug for SessionBuildOptions {
 pub struct StartTurnRequest {
     /// User prompt for this turn (text or multimodal).
     pub prompt: ContentInput,
+    /// Optional normalized rendering metadata for this turn prompt.
+    pub render_metadata: Option<RenderMetadata>,
+    /// Handling mode for this turn's ordinary content-bearing work.
+    pub handling_mode: HandlingMode,
     /// Channel for streaming events during the turn.
     pub event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
     /// Run this turn in host mode.

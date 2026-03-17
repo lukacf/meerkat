@@ -1,5 +1,7 @@
 import { EventSubscription } from './events.js';
 import type {
+  ContentInput,
+  HandlingMode,
   SpawnSpec,
   SpawnResult,
   MobMember,
@@ -11,6 +13,7 @@ import type {
   MobEvent,
   AppendSystemContextOptions,
   MobAppendSystemContextResult,
+  RenderMetadata,
 } from './types.js';
 
 // WASM function signatures (bound at construction)
@@ -25,7 +28,7 @@ interface MobWasmBindings {
     meerkatId: string,
     requestJson: string,
   ) => Promise<string>;
-  mob_send_message: (mobId: string, meerkatId: string, message: string) => Promise<void>;
+  mob_member_send: (mobId: string, meerkatId: string, requestJson: string) => Promise<string>;
   mob_respawn: (mobId: string, meerkatId: string, initialMessage?: string) => Promise<void>;
   mob_status: (mobId: string) => Promise<string>;
   mob_lifecycle: (mobId: string, action: string) => Promise<void>;
@@ -37,6 +40,44 @@ interface MobWasmBindings {
   mob_subscribe_events: (mobId: string) => Promise<number>;
   poll_subscription: (handle: number) => string;
   close_subscription: (handle: number) => void;
+}
+
+/** Capability-bearing handle for one mob member. */
+export class Member {
+  private mobId: string;
+  private meerkatId: string;
+  private bindings: MobWasmBindings;
+
+  constructor(mobId: string, meerkatId: string, bindings: MobWasmBindings) {
+    this.mobId = mobId;
+    this.meerkatId = meerkatId;
+    this.bindings = bindings;
+  }
+
+  async send(
+    content: ContentInput,
+    handlingMode: HandlingMode = 'queue',
+    renderMetadata?: RenderMetadata,
+  ): Promise<string> {
+    return this.bindings.mob_member_send(
+      this.mobId,
+      this.meerkatId,
+      JSON.stringify({
+        content,
+        handling_mode: handlingMode,
+        render_metadata: renderMetadata,
+      }),
+    );
+  }
+
+  async subscribe(): Promise<EventSubscription<EventEnvelope>> {
+    const handle = await this.bindings.mob_member_subscribe(this.mobId, this.meerkatId);
+    return new EventSubscription<EventEnvelope>(
+      () => this.bindings.poll_subscription(handle),
+      (raw) => Array.isArray(raw) ? (raw as EventEnvelope[]) : [],
+      () => this.bindings.close_subscription(handle),
+    );
+  }
 }
 
 /** A mob instance — a group of agents with shared orchestration. */
@@ -99,9 +140,9 @@ export class Mob {
     return JSON.parse(json) as MobAppendSystemContextResult;
   }
 
-  /** Send a message to a specific agent. */
-  async sendMessage(meerkatId: string, message: string): Promise<void> {
-    await this.bindings.mob_send_message(this.mobId, meerkatId, message);
+  /** Get a capability-bearing handle for one member. */
+  member(meerkatId: string): Member {
+    return new Member(this.mobId, meerkatId, this.bindings);
   }
 
   /** Retire and re-spawn an agent with the same profile. */

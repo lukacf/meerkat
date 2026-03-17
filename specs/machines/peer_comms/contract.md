@@ -11,22 +11,29 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `raw_item_peer`: `Map<RawItemId, PeerId>`
 - `raw_item_kind`: `Map<RawItemId, RawPeerKind>`
 - `classified_as`: `Map<RawItemId, PeerInputClass>`
+- `text_projection`: `Map<RawItemId, String>`
+- `content_shape`: `Map<RawItemId, ContentShape>`
+- `request_id`: `Map<RawItemId, Option<RequestId>>`
+- `reservation_key`: `Map<RawItemId, Option<ReservationKey>>`
 - `trusted_snapshot`: `Map<RawItemId, Bool>`
 - `submission_queue`: `Seq<RawItemId>`
 
 ## Inputs
 - `TrustPeer`(peer_id: PeerId)
-- `ReceivePeerEnvelope`(raw_item_id: RawItemId, peer_id: PeerId, raw_kind: RawPeerKind)
+- `ReceivePeerEnvelope`(raw_item_id: RawItemId, peer_id: PeerId, raw_kind: RawPeerKind, text_projection: String, content_shape: ContentShape, request_id: Option<RequestId>, reservation_key: Option<ReservationKey>)
 - `SubmitTypedPeerInput`(raw_item_id: RawItemId)
 
 ## Effects
-- `SubmitPeerInputCandidate`(raw_item_id: RawItemId, peer_input_class: PeerInputClass)
+- `SubmitPeerInputCandidate`(raw_item_id: RawItemId, peer_input_class: PeerInputClass, text_projection: String, content_shape: ContentShape, request_id: Option<RequestId>, reservation_key: Option<ReservationKey>)
 
 ## Helpers
 - `ClassFor`(raw_kind: RawPeerKind) -> `PeerInputClass`
 
 ## Invariants
 - `queued_items_are_classified`
+- `queued_items_preserve_content_shape`
+- `queued_items_preserve_text_projection`
+- `queued_items_preserve_correlation_slots`
 
 ## Transitions
 ### `TrustPeer`
@@ -36,14 +43,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ReceiveTrustedPeerEnvelope`
 - From: `Absent`, `Received`
-- On: `ReceivePeerEnvelope`(raw_item_id, peer_id, raw_kind)
+- On: `ReceivePeerEnvelope`(raw_item_id, peer_id, raw_kind, text_projection, content_shape, request_id, reservation_key)
 - Guards:
   - `peer_is_trusted`
 - To: `Received`
 
 ### `DropUntrustedPeerEnvelope`
 - From: `Absent`, `Received`
-- On: `ReceivePeerEnvelope`(raw_item_id, peer_id, raw_kind)
+- On: `ReceivePeerEnvelope`(raw_item_id, peer_id, raw_kind, text_projection, content_shape, request_id, reservation_key)
 - Guards:
   - `peer_is_not_trusted`
 - To: `Dropped`

@@ -601,6 +601,7 @@ impl SessionRuntime {
         // Build turn metadata from overrides
         let turn_metadata = Some(
             meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                handling_mode: None,
                 host_mode: overrides.as_ref().and_then(|ov| ov.host_mode),
                 skill_references,
                 flow_tool_overlay,
@@ -789,6 +790,8 @@ impl SessionRuntime {
 
             let req = StartTurnRequest {
                 prompt: prompt.clone(),
+                render_metadata: None,
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: Some(event_tx.clone()),
                 host_mode,
                 skill_references: skill_references.clone(),
@@ -900,6 +903,7 @@ impl SessionRuntime {
                 .create_session(CreateSessionRequest {
                     model: build_config.model.clone(),
                     prompt: runtime_prompt.clone(),
+                    render_metadata: None,
                     system_prompt: build_config.system_prompt.clone(),
                     max_tokens: build_config.max_tokens,
                     event_tx: None,
@@ -966,6 +970,8 @@ impl SessionRuntime {
                     run_id,
                     StartTurnRequest {
                         prompt: runtime_prompt,
+                        render_metadata: None,
+                        handling_mode: meerkat_core::types::HandlingMode::Queue,
                         event_tx: Some(event_tx),
                         host_mode: build_config.host_mode,
                         skill_references,
@@ -1064,6 +1070,7 @@ impl SessionRuntime {
                         data: None,
                     })?,
                 prompt: prompt.clone(),
+                render_metadata: None,
                 system_prompt: overrides.as_ref().and_then(|ov| ov.system_prompt.clone()),
                 max_tokens: overrides
                     .as_ref()
@@ -1085,6 +1092,8 @@ impl SessionRuntime {
                 run_id,
                 StartTurnRequest {
                     prompt,
+                    render_metadata: None,
+                    handling_mode: meerkat_core::types::HandlingMode::Queue,
                     event_tx: Some(event_tx),
                     host_mode,
                     skill_references,
@@ -1343,6 +1352,7 @@ impl SessionRuntime {
             let req = CreateSessionRequest {
                 model: build_config.model.clone(),
                 prompt: turn_prompt,
+                render_metadata: None,
                 system_prompt: build_config.system_prompt.clone(),
                 max_tokens: build_config.max_tokens,
                 event_tx: Some(event_tx),
@@ -1449,6 +1459,8 @@ impl SessionRuntime {
 
         let req = StartTurnRequest {
             prompt: turn_prompt.clone(),
+            render_metadata: None,
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
             event_tx: Some(event_tx.clone()),
             host_mode,
             skill_references: skill_references.clone(),

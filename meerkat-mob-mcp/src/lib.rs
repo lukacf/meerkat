@@ -19,7 +19,10 @@ use meerkat_core::service::{
     SessionServiceHistoryExt, SessionSummary, SessionUsage, SessionView, StartTurnRequest,
 };
 use meerkat_core::time_compat::{Instant, SystemTime};
-use meerkat_core::types::{RunResult, SessionId, ToolCallView, ToolDef, ToolResult, Usage};
+use meerkat_core::types::{
+    ContentInput, HandlingMode, RenderMetadata, RunResult, SessionId, ToolCallView, ToolDef,
+    ToolResult, Usage,
+};
 use meerkat_core::{AgentEvent, EventEnvelope, EventStream, StreamError};
 use meerkat_mob::{
     FlowId, MeerkatId, MobBackendKind, MobBuilder, MobDefinition, MobError, MobHandle, MobId,
@@ -387,15 +390,19 @@ impl MobMcpState {
         Ok((session_id, result))
     }
 
-    pub async fn mob_send_message(
+    pub async fn mob_member_send(
         &self,
         mob_id: &MobId,
         meerkat_id: MeerkatId,
-        message: String,
+        content: ContentInput,
+        handling_mode: HandlingMode,
+        render_metadata: Option<RenderMetadata>,
     ) -> Result<SessionId, MobError> {
         self.handle_for(mob_id)
             .await?
-            .send_message(meerkat_id, message)
+            .member(&meerkat_id)
+            .await?
+            .send_with_render_metadata(content, handling_mode, render_metadata)
             .await
     }
 
@@ -1018,8 +1025,74 @@ impl MobMcpDispatcher {
             ),
             tool(
                 "meerkat_message",
-                &format!("Send an external message to a spawned meerkat. Required: mob_id, meerkat_id, message. {COMMON}"),
-                json!({"type":"object","properties":{"mob_id":{"type":"string"},"meerkat_id":{"type":"string"},"message":{"type":"string"}},"required":["mob_id","meerkat_id","message"]}),
+                &format!(
+                    "Send typed external content to a spawned meerkat. Required: mob_id, meerkat_id, content. Optional: handling_mode, render_metadata. {COMMON}"
+                ),
+                json!({
+                    "type":"object",
+                    "properties":{
+                        "mob_id":{"type":"string"},
+                        "meerkat_id":{"type":"string"},
+                        "content":{
+                            "oneOf":[
+                                {"type":"string"},
+                                {
+                                    "type":"array",
+                                    "items":{
+                                        "oneOf":[
+                                            {
+                                                "type":"object",
+                                                "properties":{
+                                                    "type":{"const":"text"},
+                                                    "text":{"type":"string"}
+                                                },
+                                                "required":["type","text"]
+                                            },
+                                            {
+                                                "type":"object",
+                                                "properties":{
+                                                    "type":{"const":"image"},
+                                                    "media_type":{"type":"string"},
+                                                    "data":{"type":"string"}
+                                                },
+                                                "required":["type","media_type","data"]
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        },
+                        "handling_mode":{
+                            "type":"string",
+                            "enum":["queue","steer"]
+                        },
+                        "render_metadata":{
+                            "type":"object",
+                            "properties":{
+                                "class":{
+                                    "type":"string",
+                                    "enum":[
+                                        "user_prompt",
+                                        "peer_message",
+                                        "peer_request",
+                                        "peer_response",
+                                        "external_event",
+                                        "flow_step",
+                                        "continuation",
+                                        "system_notice",
+                                        "tool_scope_notice",
+                                        "ops_progress"
+                                    ]
+                                },
+                                "salience":{
+                                    "type":"string",
+                                    "enum":["background","normal","important","urgent"]
+                                }
+                            }
+                        }
+                    },
+                    "required":["mob_id","meerkat_id","content"]
+                }),
             ),
             tool(
                 "mob_respawn",
@@ -1111,7 +1184,12 @@ struct WireActionArgs {
 struct MessageArgs {
     mob_id: String,
     meerkat_id: String,
-    message: String,
+    #[serde(alias = "message")]
+    content: ContentInput,
+    #[serde(default)]
+    handling_mode: HandlingMode,
+    #[serde(default)]
+    render_metadata: Option<RenderMetadata>,
 }
 #[derive(Deserialize)]
 struct RunFlowArgs {
@@ -1426,10 +1504,12 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
                 let session_id = self
                     .state
-                    .mob_send_message(
+                    .mob_member_send(
                         &MobId::from(args.mob_id),
                         MeerkatId::from(args.meerkat_id),
-                        args.message,
+                        args.content,
+                        args.handling_mode,
+                        args.render_metadata,
                     )
                     .await
                     .map_err(|e| map_mob_err(call, e))?;
@@ -1575,8 +1655,10 @@ mod tests {
     impl EventInjector for MockInjector {
         fn inject(
             &self,
-            _body: String,
+            _body: ContentInput,
             _source: PlainEventSource,
+            _handling_mode: HandlingMode,
+            _render_metadata: Option<RenderMetadata>,
         ) -> Result<(), EventInjectorError> {
             Ok(())
         }
@@ -1585,10 +1667,12 @@ mod tests {
     impl SubscribableInjector for MockInjector {
         fn inject_with_subscription(
             &self,
-            body: String,
+            body: ContentInput,
             source: PlainEventSource,
+            handling_mode: HandlingMode,
+            render_metadata: Option<RenderMetadata>,
         ) -> Result<InteractionSubscription, EventInjectorError> {
-            self.inject(body, source)?;
+            self.inject(body, source, handling_mode, render_metadata)?;
             let (tx, rx) = tokio::sync::mpsc::channel(1);
             let interaction_id = InteractionId(uuid::Uuid::new_v4());
             let interaction_id_for_task = interaction_id;
@@ -1928,6 +2012,7 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "hello".to_string().into(),
+                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
@@ -1966,6 +2051,7 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "hello".to_string().into(),
+                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
@@ -2000,6 +2086,8 @@ mod tests {
                 &session_id,
                 StartTurnRequest {
                     prompt: "hello".to_string().into(),
+                    render_metadata: None,
+                    handling_mode: HandlingMode::Queue,
                     event_tx: None,
                     host_mode: false,
                     skill_references: None,
@@ -2030,6 +2118,7 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "hello".to_string().into(),
+                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
@@ -2073,6 +2162,7 @@ mod tests {
             .create_session(CreateSessionRequest {
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "hello".to_string().into(),
+                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
@@ -2095,6 +2185,8 @@ mod tests {
                 &session_id,
                 StartTurnRequest {
                     prompt: "hello".to_string().into(),
+                    render_metadata: None,
+                    handling_mode: HandlingMode::Queue,
                     event_tx: None,
                     host_mode: false,
                     skill_references: None,

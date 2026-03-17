@@ -5702,7 +5702,10 @@ async fn execute_mob_deploy_internal(
             let roster = handle.roster().await;
             if let Some(entry) = roster.by_profile(&orchestrator.profile).next() {
                 handle
-                    .send_message(entry.meerkat_id.clone(), prompt.to_string())
+                    .member(&entry.meerkat_id)
+                    .await
+                    .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?
+                    .send(prompt.to_string(), meerkat_core::types::HandlingMode::Queue)
                     .await
                     .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
             }
@@ -5961,7 +5964,10 @@ where
         let roster = handle.roster().await;
         if let Some(entry) = roster.by_profile(&orchestrator.profile).next() {
             handle
-                .send_message(entry.meerkat_id.clone(), prompt.to_string())
+                .member(&entry.meerkat_id)
+                .await
+                .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?
+                .send(prompt.to_string(), meerkat_core::types::HandlingMode::Queue)
                 .await
                 .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
         }

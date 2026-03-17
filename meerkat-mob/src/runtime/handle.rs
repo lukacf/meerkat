@@ -1,6 +1,7 @@
 use super::*;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
+use meerkat_core::types::{HandlingMode, RenderMetadata};
 
 // ---------------------------------------------------------------------------
 // MobHandle
@@ -23,6 +24,17 @@ pub struct MobHandle {
     pub(super) flow_streams:
         Arc<tokio::sync::Mutex<BTreeMap<RunId, mpsc::Sender<meerkat_core::ScopedAgentEvent>>>>,
     pub(super) session_service: Arc<dyn MobSessionService>,
+}
+
+/// Clone-cheap, capability-bearing handle for interacting with one mob member.
+///
+/// This is the target 0.5 API surface for message/turn submission. The mob
+/// handle remains orchestration/control-plane oriented, while member-directed
+/// delivery goes through this narrower capability.
+#[derive(Clone)]
+pub struct MemberHandle {
+    mob: MobHandle,
+    meerkat_id: MeerkatId,
 }
 
 #[derive(Clone)]
@@ -188,6 +200,21 @@ impl MobHandle {
     /// Get a specific member entry.
     pub async fn get_member(&self, meerkat_id: &MeerkatId) -> Option<RosterEntry> {
         self.roster.read().await.get(meerkat_id).cloned()
+    }
+
+    /// Acquire a capability-bearing handle for a specific active member.
+    pub async fn member(&self, meerkat_id: &MeerkatId) -> Result<MemberHandle, MobError> {
+        let entry = self
+            .get_member(meerkat_id)
+            .await
+            .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?;
+        if entry.state != crate::roster::MemberState::Active {
+            return Err(MobError::MeerkatNotFound(meerkat_id.clone()));
+        }
+        Ok(MemberHandle {
+            mob: self.clone(),
+            meerkat_id: meerkat_id.clone(),
+        })
     }
 
     /// Access a read-only events view for polling/replay.
@@ -481,20 +508,32 @@ impl MobHandle {
             .map_err(|_| MobError::Internal("actor reply dropped".into()))?
     }
 
-    /// Send a message to a member (enforces external_addressable).
+    /// Compatibility wrapper for internal-turn submission.
     ///
-    /// Returns the [`SessionId`] of the session that handled the turn,
-    /// enabling callers to correlate injection events with agent responses.
-    pub async fn send_message(
+    /// Prefer [`MobHandle::member`] plus [`MemberHandle::internal_turn`] for
+    /// the target 0.5 API shape.
+    pub async fn internal_turn(
         &self,
         meerkat_id: MeerkatId,
-        message: String,
+        message: impl Into<meerkat_core::types::ContentInput>,
+    ) -> Result<(), MobError> {
+        self.member(&meerkat_id).await?.internal_turn(message).await
+    }
+
+    pub(super) async fn external_turn_for_member(
+        &self,
+        meerkat_id: MeerkatId,
+        message: meerkat_core::types::ContentInput,
+        handling_mode: HandlingMode,
+        render_metadata: Option<RenderMetadata>,
     ) -> Result<meerkat_core::types::SessionId, MobError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(MobCommand::ExternalTurn {
                 meerkat_id,
                 message,
+                handling_mode,
+                render_metadata,
                 reply_tx,
             })
             .await
@@ -504,11 +543,10 @@ impl MobHandle {
             .map_err(|_| MobError::Internal("actor reply dropped".into()))?
     }
 
-    /// Send an internal turn to a member (no external_addressable check).
-    pub async fn internal_turn(
+    pub(super) async fn internal_turn_for_member(
         &self,
         meerkat_id: MeerkatId,
-        message: String,
+        message: meerkat_core::types::ContentInput,
     ) -> Result<(), MobError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
@@ -683,5 +721,54 @@ impl MobHandle {
             .await
             .map_err(|_| MobError::Internal("actor reply dropped".into()))??;
         Ok(())
+    }
+}
+
+impl MemberHandle {
+    /// Target member id for this capability.
+    pub fn meerkat_id(&self) -> &MeerkatId {
+        &self.meerkat_id
+    }
+
+    /// Submit external work to this member through the canonical runtime path.
+    pub async fn send(
+        &self,
+        content: impl Into<meerkat_core::types::ContentInput>,
+        handling_mode: HandlingMode,
+    ) -> Result<meerkat_core::types::SessionId, MobError> {
+        self.send_with_render_metadata(content, handling_mode, None)
+            .await
+    }
+
+    /// Submit external work with explicit normalized render metadata.
+    pub async fn send_with_render_metadata(
+        &self,
+        content: impl Into<meerkat_core::types::ContentInput>,
+        handling_mode: HandlingMode,
+        render_metadata: Option<RenderMetadata>,
+    ) -> Result<meerkat_core::types::SessionId, MobError> {
+        self.mob
+            .external_turn_for_member(
+                self.meerkat_id.clone(),
+                content.into(),
+                handling_mode,
+                render_metadata,
+            )
+            .await
+    }
+
+    /// Submit internal work to this member without external addressability checks.
+    pub async fn internal_turn(
+        &self,
+        content: impl Into<meerkat_core::types::ContentInput>,
+    ) -> Result<(), MobError> {
+        self.mob
+            .internal_turn_for_member(self.meerkat_id.clone(), content.into())
+            .await
+    }
+
+    /// Subscribe to this member's agent events.
+    pub async fn subscribe_events(&self) -> Result<EventStream, MobError> {
+        self.mob.subscribe_agent_events(&self.meerkat_id).await
     }
 }

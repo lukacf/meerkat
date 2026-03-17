@@ -14,10 +14,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Inputs
 - `Initialize`
-- `SubmitCandidate`(candidate_id: CandidateId, candidate_kind: InputKind)
-- `AdmissionAccepted`(candidate_id: CandidateId, candidate_kind: InputKind, admission_effect: AdmissionEffect, wake: Bool, process: Bool)
-- `AdmissionRejected`(candidate_id: CandidateId, reason: String)
-- `AdmissionDeduplicated`(candidate_id: CandidateId, existing_input_id: InputId)
+- `SubmitWork`(work_id: WorkId, content_shape: ContentShape, handling_mode: HandlingMode, request_id: Option<RequestId>, reservation_key: Option<ReservationKey>)
+- `AdmissionAccepted`(work_id: WorkId, content_shape: ContentShape, handling_mode: HandlingMode, request_id: Option<RequestId>, reservation_key: Option<ReservationKey>, admission_effect: AdmissionEffect)
+- `AdmissionRejected`(work_id: WorkId, reason: String)
+- `AdmissionDeduplicated`(work_id: WorkId, existing_work_id: WorkId)
 - `BeginRun`(run_id: RunId)
 - `RunCompleted`(run_id: RunId)
 - `RunFailed`(run_id: RunId)
@@ -32,8 +32,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ExternalToolDeltaReceived`
 
 ## Effects
-- `ResolveAdmission`(candidate_id: CandidateId)
-- `SubmitAdmittedIngressEffect`(candidate_id: CandidateId, candidate_kind: InputKind, admission_effect: AdmissionEffect, wake: Bool, process: Bool)
+- `ResolveAdmission`(work_id: WorkId)
+- `SubmitAdmittedIngressEffect`(work_id: WorkId, content_shape: ContentShape, handling_mode: HandlingMode, request_id: Option<RequestId>, reservation_key: Option<ReservationKey>, admission_effect: AdmissionEffect)
 - `SubmitRunPrimitive`(run_id: RunId)
 - `SignalWake`
 - `SignalImmediateProcess`
@@ -138,111 +138,71 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ResumeRequested`()
 - To: `Idle`
 
-### `SubmitCandidateFromIdle`
+### `SubmitWorkFromIdle`
 - From: `Idle`
-- On: `SubmitCandidate`(candidate_id, candidate_kind)
+- On: `SubmitWork`(work_id, content_shape, handling_mode, request_id, reservation_key)
 - Emits: `ResolveAdmission`
 - To: `Idle`
 
-### `SubmitCandidateFromRunning`
+### `SubmitWorkFromRunning`
 - From: `Running`
-- On: `SubmitCandidate`(candidate_id, candidate_kind)
+- On: `SubmitWork`(work_id, content_shape, handling_mode, request_id, reservation_key)
 - Emits: `ResolveAdmission`
 - To: `Running`
 
-### `AdmissionAcceptedIdleNone`
+### `AdmissionAcceptedIdleQueue`
 - From: `Idle`
-- On: `AdmissionAccepted`(candidate_id, candidate_kind, admission_effect, wake, process)
+- On: `AdmissionAccepted`(work_id, content_shape, handling_mode, request_id, reservation_key, admission_effect)
 - Guards:
-  - `wake_is_false`
-  - `process_is_false`
-- Emits: `SubmitAdmittedIngressEffect`
-- To: `Idle`
-
-### `AdmissionAcceptedIdleWake`
-- From: `Idle`
-- On: `AdmissionAccepted`(candidate_id, candidate_kind, admission_effect, wake, process)
-- Guards:
-  - `wake_is_true`
-  - `process_is_false`
+  - `handling_mode_is_queue`
 - Emits: `SubmitAdmittedIngressEffect`, `SignalWake`
 - To: `Idle`
 
-### `AdmissionAcceptedIdleProcess`
+### `AdmissionAcceptedIdleSteer`
 - From: `Idle`
-- On: `AdmissionAccepted`(candidate_id, candidate_kind, admission_effect, wake, process)
+- On: `AdmissionAccepted`(work_id, content_shape, handling_mode, request_id, reservation_key, admission_effect)
 - Guards:
-  - `wake_is_false`
-  - `process_is_true`
-- Emits: `SubmitAdmittedIngressEffect`, `SignalImmediateProcess`
-- To: `Idle`
-
-### `AdmissionAcceptedIdleWakeAndProcess`
-- From: `Idle`
-- On: `AdmissionAccepted`(candidate_id, candidate_kind, admission_effect, wake, process)
-- Guards:
-  - `wake_is_true`
-  - `process_is_true`
+  - `handling_mode_is_steer`
 - Emits: `SubmitAdmittedIngressEffect`, `SignalWake`, `SignalImmediateProcess`
 - To: `Idle`
 
-### `AdmissionAcceptedRunningNone`
+### `AdmissionAcceptedRunningQueue`
 - From: `Running`
-- On: `AdmissionAccepted`(candidate_id, candidate_kind, admission_effect, wake, process)
+- On: `AdmissionAccepted`(work_id, content_shape, handling_mode, request_id, reservation_key, admission_effect)
 - Guards:
-  - `wake_is_false`
-  - `process_is_false`
+  - `handling_mode_is_queue`
 - Emits: `SubmitAdmittedIngressEffect`
 - To: `Running`
 
-### `AdmissionAcceptedRunningWake`
+### `AdmissionAcceptedRunningSteer`
 - From: `Running`
-- On: `AdmissionAccepted`(candidate_id, candidate_kind, admission_effect, wake, process)
+- On: `AdmissionAccepted`(work_id, content_shape, handling_mode, request_id, reservation_key, admission_effect)
 - Guards:
-  - `wake_is_true`
-  - `process_is_false`
-- Emits: `SubmitAdmittedIngressEffect`, `SignalWake`
-- To: `Running`
-
-### `AdmissionAcceptedRunningProcess`
-- From: `Running`
-- On: `AdmissionAccepted`(candidate_id, candidate_kind, admission_effect, wake, process)
-- Guards:
-  - `wake_is_false`
-  - `process_is_true`
-- Emits: `SubmitAdmittedIngressEffect`, `SignalImmediateProcess`
-- To: `Running`
-
-### `AdmissionAcceptedRunningWakeAndProcess`
-- From: `Running`
-- On: `AdmissionAccepted`(candidate_id, candidate_kind, admission_effect, wake, process)
-- Guards:
-  - `wake_is_true`
-  - `process_is_true`
+  - `handling_mode_is_steer`
 - Emits: `SubmitAdmittedIngressEffect`, `SignalWake`, `SignalImmediateProcess`
 - To: `Running`
 
 ### `AdmissionRejectedIdle`
 - From: `Idle`
-- On: `AdmissionRejected`(candidate_id, reason)
+- On: `AdmissionRejected`(work_id, reason)
 - Emits: `EmitRuntimeNotice`
 - To: `Idle`
 
 ### `AdmissionRejectedRunning`
 - From: `Running`
-- On: `AdmissionRejected`(candidate_id, reason)
+- On: `AdmissionRejected`(work_id, reason)
 - Emits: `EmitRuntimeNotice`
 - To: `Running`
 
 ### `AdmissionDeduplicatedIdle`
 - From: `Idle`
-- On: `AdmissionDeduplicated`(candidate_id, existing_input_id)
+- On: `AdmissionDeduplicated`(work_id, existing_work_id)
 - Emits: `EmitRuntimeNotice`
 - To: `Idle`
 
 ### `AdmissionDeduplicatedRunning`
 - From: `Running`
-- On: `AdmissionDeduplicated`(candidate_id, existing_input_id)
+- On: `AdmissionDeduplicated`(work_id, existing_work_id)
 - Emits: `EmitRuntimeNotice`
 - To: `Running`
 
@@ -278,7 +238,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### Scenarios
 - `control-preempts-ingress` — control commands preempt ordinary ingress work
-- `prompt-queue` — queued user prompt sets wake/process flags conservatively and waits for the next ordinary drain
-- `prompt-steer` — steering user prompt requests ASAP processing at the earliest admissible boundary
+- `prompt-queue` — queued ordinary work waits for the next outer-loop turn without modifying the current run
+- `prompt-steer` — steered ordinary work drains into the active run at the earliest admissible boundary
 - `begin-run-complete` — runtime transitions idle to running to idle for a completed run
 - `retire-stop-destroy` — runtime transitions through retire/stop/destroy commands without reopening ordinary work

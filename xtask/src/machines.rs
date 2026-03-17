@@ -62,6 +62,11 @@ pub fn machine_codegen(args: SelectionArgs) -> Result<()> {
 
     let selection = registry.select(&args)?;
     let root = repo_root()?;
+    println!(
+        "machine-codegen: {} machine(s), {} composition(s)",
+        selection.machines.len(),
+        selection.compositions.len()
+    );
     machine_codegen_at_root(&root, &selection)
 }
 
@@ -72,6 +77,13 @@ pub fn machine_verify(args: VerifyArgs) -> Result<()> {
     let selection = registry.select(&args.selection)?;
     let root = repo_root()?;
     let workers = resolve_tlc_workers(args.workers)?;
+    println!(
+        "machine-verify ({:?}): {} machine(s), {} composition(s), tlc={}",
+        args.profile,
+        selection.machines.len(),
+        selection.compositions.len(),
+        !args.skip_tlc
+    );
     machine_verify_at_root(&root, &selection, !args.skip_tlc, args.profile, workers)
 }
 
@@ -81,6 +93,11 @@ pub fn machine_check_drift(args: SelectionArgs) -> Result<()> {
 
     let selection = registry.select(&args)?;
     let root = repo_root()?;
+    println!(
+        "machine-check-drift: checking {} machine(s), {} composition(s)",
+        selection.machines.len(),
+        selection.compositions.len()
+    );
     let mut mismatches = collect_drift_mismatches(&root, &selection)?;
     mismatches.extend(collect_coverage_anchor_mismatches(&root, &selection));
     mismatches.extend(collect_authority_language_mismatches(&root)?);

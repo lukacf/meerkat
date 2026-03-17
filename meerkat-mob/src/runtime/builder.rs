@@ -558,7 +558,12 @@ impl MobBuilder {
                         ))
                     })?;
                     injector
-                        .inject(resume_message, meerkat_core::PlainEventSource::Rpc)
+                        .inject(
+                            resume_message.into(),
+                            meerkat_core::PlainEventSource::Rpc,
+                            meerkat_core::types::HandlingMode::Queue,
+                            None,
+                        )
                         .map_err(|error| {
                             MobError::Internal(format!(
                                 "orchestrator resume inject failed for '{}': {}",
@@ -572,6 +577,8 @@ impl MobBuilder {
                             &orchestrator_entry.member_ref,
                             meerkat_core::service::StartTurnRequest {
                                 prompt: resume_message.into(),
+                                render_metadata: None,
+                                handling_mode: meerkat_core::types::HandlingMode::Queue,
                                 event_tx: None,
                                 host_mode: false,
                                 skill_references: None,

@@ -6,7 +6,7 @@
 //!
 //! The deliberate handler detects `flow_step_count() == 0` and routes to
 //! `run_comms()` instead of `run_flow()`. The task is injected via
-//! `mob_send_message` to the moderator (not baked into a flow step), which
+//! `mob_member_send` to the moderator (not baked into a flow step), which
 //! is why `_task` and `_context` are unused in `definition()`.
 
 use std::collections::BTreeMap;

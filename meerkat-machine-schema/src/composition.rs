@@ -1,6 +1,7 @@
 use crate::{Expr, MachineSchema, TypeRef, machine::MachineSchemaError};
 use indexmap::IndexSet;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -14,6 +15,8 @@ pub struct CompositionSchema {
     pub invariants: Vec<CompositionInvariant>,
     pub witnesses: Vec<CompositionWitness>,
     pub deep_domain_cardinality: usize,
+    #[serde(default)]
+    pub deep_domain_overrides: BTreeMap<String, usize>,
     pub witness_domain_cardinality: usize,
 }
 
@@ -112,6 +115,14 @@ impl CompositionSchema {
             return Err(CompositionSchemaError::InvalidDomainCardinality {
                 scope: "witness".into(),
             });
+        }
+        for (domain, cardinality) in &self.deep_domain_overrides {
+            if *cardinality == 0 {
+                return Err(CompositionSchemaError::InvalidNamedDomainCardinality {
+                    scope: "deep".into(),
+                    domain: domain.clone(),
+                });
+            }
         }
 
         let machine_ids = unique_names(
@@ -990,6 +1001,8 @@ pub enum CompositionSchemaError {
     MissingWitnessSchedulerCoverage { rule: SchedulerRule },
     #[error("invalid composition {scope} domain cardinality (must be >= 1)")]
     InvalidDomainCardinality { scope: String },
+    #[error("invalid composition {scope} domain cardinality for `{domain}` (must be >= 1)")]
+    InvalidNamedDomainCardinality { scope: String, domain: String },
     #[error(transparent)]
     MachineSchema(#[from] MachineSchemaError),
 }
@@ -997,6 +1010,7 @@ pub enum CompositionSchemaError {
 fn route_literal_expr_allowed(expr: &Expr) -> bool {
     match expr {
         Expr::Bool(_) | Expr::U64(_) | Expr::String(_) | Expr::None => true,
+        Expr::Some(inner) => route_literal_expr_allowed(inner),
         Expr::SeqLiteral(items) => items.iter().all(route_literal_expr_allowed),
         _ => false,
     }
@@ -1008,6 +1022,7 @@ fn literal_matches_type(expr: &Expr, ty: &TypeRef) -> bool {
         (Expr::U64(_), TypeRef::U32 | TypeRef::U64) => true,
         (Expr::String(_), TypeRef::String | TypeRef::Named(_)) => true,
         (Expr::None, TypeRef::Option(_)) => true,
+        (Expr::Some(inner), TypeRef::Option(inner_ty)) => literal_matches_type(inner, inner_ty),
         (Expr::SeqLiteral(items), TypeRef::Seq(inner)) => {
             items.iter().all(|item| literal_matches_type(item, inner))
         }
@@ -1050,6 +1065,8 @@ fn validate_witness_transition_ref(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use crate::RouteDelivery;
     use crate::catalog::{
         flow_run_machine, mob_bundle_composition, mob_lifecycle_machine, mob_orchestrator_machine,
@@ -1147,6 +1164,18 @@ mod tests {
         assert!(matches!(
             result,
             Err(CompositionSchemaError::MissingRequiredSchedulerRule { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_zero_deep_domain_override() {
+        let mut composition = runtime_pipeline_composition();
+        composition.deep_domain_overrides = BTreeMap::from([("WorkIdValues".into(), 0)]);
+
+        let result = composition.validate();
+        assert!(matches!(
+            result,
+            Err(CompositionSchemaError::InvalidNamedDomainCardinality { .. })
         ));
     }
 

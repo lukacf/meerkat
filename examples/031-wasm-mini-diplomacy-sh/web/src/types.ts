@@ -53,7 +53,7 @@ export interface RuntimeModule {
   mob_spawn: (mobId: string, specsJson: string) => Promise<unknown>;
   mob_wire: (mobId: string, a: string, b: string) => Promise<void>;
   wire_cross_mob: (mobA: string, meerkatA: string, mobB: string, meerkatB: string) => Promise<void>;
-  mob_send_message: (mobId: string, meerkatId: string, message: string) => Promise<void>;
+  mob_member_send: (mobId: string, meerkatId: string, requestJson: string) => Promise<string>;
   mob_run_flow: (mobId: string, flowId: string, paramsJson: string) => Promise<unknown>;
   mob_flow_status: (mobId: string, runId: string) => Promise<unknown>;
   mob_list_members: (mobId: string) => Promise<unknown>;

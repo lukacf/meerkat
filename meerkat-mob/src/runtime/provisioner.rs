@@ -176,6 +176,11 @@ impl SubagentBackend {
             let meta = extract_turn_metadata(&input);
             state.queued_turns.lock().await.push_back(StartTurnRequest {
                 prompt: prompt.into(),
+                render_metadata: None,
+                handling_mode: meta
+                    .as_ref()
+                    .and_then(|m| m.handling_mode)
+                    .unwrap_or(meerkat_core::types::HandlingMode::Queue),
                 event_tx,
                 host_mode: meta.as_ref().and_then(|m| m.host_mode).unwrap_or(false),
                 skill_references: meta.as_ref().and_then(|m| m.skill_references.clone()),
@@ -299,6 +304,11 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             let mut queued_turns = self.state.queued_turns.lock().await;
             queued_turns.pop_front().unwrap_or(StartTurnRequest {
                 prompt: extract_prompt(&primitive).into(),
+                render_metadata: None,
+                handling_mode: primitive
+                    .turn_metadata()
+                    .and_then(|meta| meta.handling_mode)
+                    .unwrap_or(meerkat_core::types::HandlingMode::Queue),
                 event_tx: None,
                 host_mode: primitive
                     .turn_metadata()

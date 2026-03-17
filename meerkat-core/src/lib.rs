@@ -151,8 +151,8 @@ pub use tool_scope::{
 pub use turn_boundary::{TurnBoundaryHook, TurnBoundaryMessage};
 pub use types::{
     ArtifactRef, AssistantBlock, AssistantMessage, BlockAssistantMessage, ContentBlock,
-    ContentInput, Message, OutputSchema, ProviderMeta, RunResult, SecurityMode, SessionId,
-    StopReason, SystemMessage, ToolCall, ToolCallIter, ToolCallView, ToolDef, ToolResult, Usage,
-    UserMessage, has_images,
+    ContentInput, HandlingMode, Message, OutputSchema, ProviderMeta, RunResult, SecurityMode,
+    SessionId, StopReason, SystemMessage, ToolCall, ToolCallIter, ToolCallView, ToolDef,
+    ToolResult, Usage, UserMessage, has_images,
 };
 pub use wait_interrupt::{WaitInterrupt, WaitInterruptBindError, WaitInterruptReceiver};

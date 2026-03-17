@@ -2,6 +2,8 @@
 # Single source of truth for all build, test, and lint commands
 
 CRATE_NAME := meerkat
+XTASK_TARGET_DIR ?= /tmp/meerkat-xtask-target
+XTASK_BIN := $(XTASK_TARGET_DIR)/debug/xtask
 
 # Colors for terminal output
 GREEN := \033[0;32m
@@ -9,7 +11,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: all build test test-unit test-int test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity lint lint-feature-matrix fmt fmt-check audit ci ci-smoke release-preflight release-preflight-smoke publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory verify-version-parity verify-schema-freshness bump-sdk-versions
+.PHONY: all build test test-unit test-int test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity lint lint-feature-matrix fmt fmt-check audit ci ci-smoke release-preflight release-preflight-smoke publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory verify-version-parity verify-schema-freshness bump-sdk-versions xtask-build machine-codegen machine-verify machine-check-drift
 
 # Default target
 all: ci
@@ -174,6 +176,27 @@ legacy-surface-inventory:
 check:
 	@echo "$(GREEN)Running cargo check...$(NC)"
 	cargo check --workspace --all-targets --all-features
+
+# Build xtask in an isolated target dir so machine-authority commands do not
+# block behind unrelated workspace cargo activity.
+xtask-build:
+	@echo "$(GREEN)Building xtask in $(XTASK_TARGET_DIR)...$(NC)"
+	CARGO_TARGET_DIR="$(XTASK_TARGET_DIR)" cargo build -p xtask
+
+# Generate all machine/composition authority artifacts.
+machine-codegen: xtask-build
+	@echo "$(GREEN)Running machine-codegen...$(NC)"
+	$(XTASK_BIN) machine-codegen --all
+
+# Verify all machine/composition authority artifacts.
+machine-verify: xtask-build
+	@echo "$(GREEN)Running machine-verify...$(NC)"
+	$(XTASK_BIN) machine-verify --all
+
+# Check generated machine/composition authority artifacts for drift.
+machine-check-drift: xtask-build
+	@echo "$(GREEN)Running machine-check-drift...$(NC)"
+	$(XTASK_BIN) machine-check-drift --all
 
 # Generate documentation
 doc:

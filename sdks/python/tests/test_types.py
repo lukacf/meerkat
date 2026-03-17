@@ -727,6 +727,8 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
             return {"run_id": "run-1"}
         if method == "mob/flow_status":
             return {"run": {"status": "running"}}
+        if method == "mob/send":
+            return {"session_id": "session-1"}
         return {}
 
     client._request = fake_request  # type: ignore[method-assign]
@@ -743,7 +745,10 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
     await client.wire_mob_members("mob-1", "a", "b")
     await client.unwire_mob_members("mob-1", "a", "b")
     await client.mob_lifecycle("mob-1", "start")
-    await client.send_mob_message("mob-1", "agent-a", "hello")
+    assert (
+        await client.send_mob_member_content("mob-1", "agent-a", "hello")
+        == "session-1"
+    )
     await client.append_mob_system_context("mob-1", "agent-a", "context")
     assert await client.list_mob_flows("mob-1") == ["incident"]
     assert await client.run_mob_flow("mob-1", "incident") == "run-1"

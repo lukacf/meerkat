@@ -383,6 +383,7 @@ mod tests {
             body: "hello".to_string(),
             blocks: None,
             source: InputSource::Rpc,
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
             stream,
             allow_self_session: true,
         }
@@ -423,6 +424,7 @@ mod tests {
         let req = CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "ignored".to_string().into(),
+            render_metadata: None,
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
@@ -459,6 +461,7 @@ mod tests {
         CreateSessionRequest {
             model: model.to_string(),
             prompt: "test".to_string().into(),
+            render_metadata: None,
             system_prompt: None,
             max_tokens: None,
             event_tx: None,

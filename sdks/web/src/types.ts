@@ -69,6 +69,21 @@ export type ContentBlock =
   | { type: 'text'; text: string }
   | { type: 'image'; media_type: string; data: string };
 
+/** Canonical ordinary content input. */
+export type ContentInput = string | ContentBlock[];
+
+/** Runtime handling mode for ordinary work. */
+export type HandlingMode = 'queue' | 'steer';
+
+/** Normalized rendering salience for injected work. */
+export type RenderSalience = 'background' | 'normal' | 'important' | 'urgent';
+
+/** Normalized rendering metadata for injected work. */
+export interface RenderMetadata {
+  renderClass?: string;
+  salience?: RenderSalience;
+}
+
 /** Options for a single turn. */
 export interface TurnOptions {
   /** Additional instructions for this turn only. */

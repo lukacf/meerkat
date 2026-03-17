@@ -10,7 +10,7 @@ use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 use meerkat_core::service::AppendSystemContextRequest;
-use meerkat_core::types::SessionId;
+use meerkat_core::types::{ContentInput, HandlingMode, RenderMetadata, SessionId};
 use meerkat_mob::{
     FlowId, MeerkatId, MobBackendKind, MobDefinition, MobId, MobRuntimeMode, Prefab, RunId,
     SpawnMemberSpec,
@@ -530,7 +530,12 @@ pub async fn handle_lifecycle(
 pub struct MobSendParams {
     pub mob_id: String,
     pub meerkat_id: String,
-    pub message: String,
+    #[serde(alias = "message")]
+    pub content: ContentInput,
+    #[serde(default)]
+    pub handling_mode: HandlingMode,
+    #[serde(default)]
+    pub render_metadata: Option<RenderMetadata>,
 }
 
 pub async fn handle_send(
@@ -547,10 +552,12 @@ pub async fn handle_send(
         Err(resp) => return resp,
     };
     match state
-        .mob_send_message(
+        .mob_member_send(
             &mob_id,
             MeerkatId::from(params.meerkat_id.as_str()),
-            params.message,
+            params.content,
+            params.handling_mode,
+            params.render_metadata,
         )
         .await
     {

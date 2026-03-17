@@ -890,7 +890,13 @@ struct CountingInjector {
 }
 
 impl EventInjector for CountingInjector {
-    fn inject(&self, _body: String, _source: PlainEventSource) -> Result<(), EventInjectorError> {
+    fn inject(
+        &self,
+        _content: meerkat_core::types::ContentInput,
+        _source: PlainEventSource,
+        _handling_mode: meerkat_core::types::HandlingMode,
+        _render_metadata: Option<meerkat_core::types::RenderMetadata>,
+    ) -> Result<(), EventInjectorError> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -899,10 +905,12 @@ impl EventInjector for CountingInjector {
 impl SubscribableInjector for CountingInjector {
     fn inject_with_subscription(
         &self,
-        body: String,
+        body: meerkat_core::types::ContentInput,
         source: PlainEventSource,
+        handling_mode: meerkat_core::types::HandlingMode,
+        render_metadata: Option<meerkat_core::types::RenderMetadata>,
     ) -> Result<InteractionSubscription, EventInjectorError> {
-        self.inject(body, source)?;
+        self.inject(body, source, handling_mode, render_metadata)?;
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         let interaction_id = InteractionId(uuid::Uuid::new_v4());
         let delay_ms = self.delay_ms;
@@ -1513,7 +1521,7 @@ fn sample_definition_with_mcp_servers() -> MobDefinition {
 fn flow_step(role: impl Into<crate::ids::ProfileName>, message: &str) -> FlowStepSpec {
     FlowStepSpec {
         role: role.into(),
-        message: message.to_string(),
+        message: meerkat_core::types::ContentInput::from(message),
         depends_on: Vec::new(),
         dispatch_mode: DispatchMode::FanOut,
         collection_policy: CollectionPolicy::All,
@@ -1804,7 +1812,7 @@ fn sample_definition_with_template_message(template: &str) -> MobDefinition {
         .get_mut(&flow_id("demo"))
         .and_then(|flow| flow.steps.get_mut(&step_id("start")))
         .expect("demo.start step exists");
-    step.message = template.to_string();
+    step.message = template.to_string().into();
     def
 }
 
@@ -3199,6 +3207,8 @@ async fn test_flow_step_tool_overlay_is_step_scoped() {
             &sid,
             StartTurnRequest {
                 prompt: "non-flow turn".to_string().into(),
+                render_metadata: None,
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: None,
                 host_mode: false,
                 skill_references: None,
@@ -3643,6 +3653,7 @@ async fn test_resume_reconciles_orphaned_sessions() {
         .create_session(CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "orphan".to_string().into(),
+            render_metadata: None,
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
@@ -6232,11 +6243,52 @@ async fn test_external_turn_addressable_succeeds() {
         .expect("spawn lead (external_addressable=true)");
 
     let result = handle
-        .send_message(MeerkatId::from("l-1"), "Hello from outside".into())
+        .member(&MeerkatId::from("l-1"))
+        .await
+        .expect("member handle")
+        .send(
+            "Hello from outside",
+            meerkat_core::types::HandlingMode::Queue,
+        )
         .await;
     assert!(
         result.is_ok(),
         "external_turn to addressable meerkat should succeed"
+    );
+}
+
+#[tokio::test]
+async fn test_member_handle_send_accepts_multimodal_content() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead (external_addressable=true)");
+
+    let member = handle
+        .member(&MeerkatId::from("l-1"))
+        .await
+        .expect("member handle");
+
+    let result = member
+        .send(
+            meerkat_core::types::ContentInput::Blocks(vec![
+                meerkat_core::types::ContentBlock::Text {
+                    text: "look at this".to_string(),
+                },
+                meerkat_core::types::ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: "aGVsbG8=".to_string(),
+                    source_path: None,
+                },
+            ]),
+            meerkat_core::types::HandlingMode::Queue,
+        )
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "member-directed send should accept multimodal content"
     );
 }
 
@@ -6249,7 +6301,13 @@ async fn test_external_turn_not_addressable_fails() {
         .expect("spawn worker (external_addressable=false)");
 
     let result = handle
-        .send_message(MeerkatId::from("w-1"), "Hello from outside".into())
+        .member(&MeerkatId::from("w-1"))
+        .await
+        .expect("member handle")
+        .send(
+            "Hello from outside",
+            meerkat_core::types::HandlingMode::Queue,
+        )
         .await;
     assert!(
         matches!(result, Err(MobError::NotExternallyAddressable(_))),
@@ -6260,9 +6318,7 @@ async fn test_external_turn_not_addressable_fails() {
 #[tokio::test]
 async fn test_external_turn_unknown_meerkat_fails() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
-    let result = handle
-        .send_message(MeerkatId::from("nonexistent"), "Hello".into())
-        .await;
+    let result = handle.member(&MeerkatId::from("nonexistent")).await;
     assert!(matches!(result, Err(MobError::MeerkatNotFound(_))));
 }
 
@@ -6275,7 +6331,7 @@ async fn test_internal_turn_bypasses_external_addressable_check() {
         .expect("spawn worker");
 
     let result = handle
-        .internal_turn(MeerkatId::from("w-1"), "internal message".into())
+        .internal_turn(MeerkatId::from("w-1"), "internal message")
         .await;
     assert!(
         result.is_ok(),
@@ -6287,7 +6343,7 @@ async fn test_internal_turn_bypasses_external_addressable_check() {
 async fn test_internal_turn_unknown_meerkat_fails() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
     let result = handle
-        .internal_turn(MeerkatId::from("nonexistent"), "Hello".into())
+        .internal_turn(MeerkatId::from("nonexistent"), "Hello")
         .await;
     assert!(matches!(result, Err(MobError::MeerkatNotFound(_))));
 }
@@ -6312,7 +6368,10 @@ async fn test_external_turn_autonomous_mode_uses_injector_dispatch() {
         .expect("spawn autonomous lead");
 
     handle
-        .send_message(MeerkatId::from("l-autonomous"), "inject me".into())
+        .member(&MeerkatId::from("l-autonomous"))
+        .await
+        .expect("member handle")
+        .send("inject me", meerkat_core::types::HandlingMode::Queue)
         .await
         .expect("external turn should execute");
 
@@ -6344,9 +6403,12 @@ async fn test_external_turn_turn_driven_mode_uses_start_turn_dispatch() {
     let baseline_start_turn_calls = service.start_turn_call_count();
 
     handle
-        .send_message(
-            MeerkatId::from("l-turn-driven"),
-            "turn-driven message".into(),
+        .member(&MeerkatId::from("l-turn-driven"))
+        .await
+        .expect("member handle")
+        .send(
+            "turn-driven message",
+            meerkat_core::types::HandlingMode::Queue,
         )
         .await
         .expect("external turn should execute");
@@ -6380,7 +6442,10 @@ async fn test_runtime_backed_turn_driven_dispatch_surfaces_start_turn_failure() 
     service.set_fail_start_turn(true);
 
     let result = handle
-        .send_message(MeerkatId::from("l-runtime-fail"), "turn should fail".into())
+        .member(&MeerkatId::from("l-runtime-fail"))
+        .await
+        .expect("member handle")
+        .send("turn should fail", meerkat_core::types::HandlingMode::Queue)
         .await;
     let debug = format!("{result:?}");
 
@@ -6488,11 +6553,11 @@ async fn test_internal_turn_mode_routing_uses_injector_for_autonomous_and_start_
     let baseline_start_turn = service.start_turn_call_count();
 
     handle
-        .internal_turn(MeerkatId::from("l-auto"), "internal autonomous".into())
+        .internal_turn(MeerkatId::from("l-auto"), "internal autonomous")
         .await
         .expect("autonomous internal turn");
     handle
-        .internal_turn(MeerkatId::from("l-turn"), "internal turn-driven".into())
+        .internal_turn(MeerkatId::from("l-turn"), "internal turn-driven")
         .await
         .expect("turn-driven internal turn");
 
@@ -6524,7 +6589,13 @@ async fn test_external_backend_turn_driven_mode_uses_start_turn_dispatch() {
     let baseline_start_turn = service.start_turn_call_count();
 
     handle
-        .send_message(MeerkatId::from("l-ext-turn"), "external turn-driven".into())
+        .member(&MeerkatId::from("l-ext-turn"))
+        .await
+        .expect("member handle")
+        .send(
+            "external turn-driven",
+            meerkat_core::types::HandlingMode::Queue,
+        )
         .await
         .expect("external turn should execute");
 
@@ -6624,11 +6695,23 @@ async fn test_external_backend_lifecycle_and_turn_policy() {
         .expect("unwire external members");
 
     handle
-        .send_message(MeerkatId::from("l-ext"), "outside hello".to_string())
+        .member(&MeerkatId::from("l-ext"))
+        .await
+        .expect("member handle")
+        .send(
+            "outside hello".to_string(),
+            meerkat_core::types::HandlingMode::Queue,
+        )
         .await
         .expect("external lead should accept external turns");
     let denied = handle
-        .send_message(MeerkatId::from("w-ext"), "outside hello".to_string())
+        .member(&MeerkatId::from("w-ext"))
+        .await
+        .expect("member handle")
+        .send(
+            "outside hello".to_string(),
+            meerkat_core::types::HandlingMode::Queue,
+        )
         .await
         .expect_err("worker external turn should be denied by profile policy");
     assert!(matches!(denied, MobError::NotExternallyAddressable(_)));
@@ -6864,11 +6947,8 @@ async fn test_retiring_member_is_not_routable_before_disposal_completes() {
     assert_eq!(all_members[0].state, crate::roster::MemberState::Retiring);
 
     let start_turn_calls_before = service.start_turn_call_count();
-    let external_turn = handle
-        .send_message(MeerkatId::from("w-1"), "still there?".to_string())
-        .await
-        .expect_err("retiring member must reject new external work");
-    assert!(matches!(external_turn, MobError::MeerkatNotFound(id) if id.as_str() == "w-1"));
+    let external_turn = handle.member(&MeerkatId::from("w-1")).await;
+    assert!(matches!(external_turn, Err(MobError::MeerkatNotFound(id)) if id.as_str() == "w-1"));
 
     let internal_turn = handle
         .internal_turn(MeerkatId::from("w-1"), "still there?".to_string())

@@ -1115,7 +1115,7 @@ The current `MobActor` command set should decompose as follows.
 | `Stop`, `ResumeLifecycle`, `Complete`, `Destroy`, `Reset`, `Shutdown` | `MobLifecycleMachine` | machine |
 | `RunFlow`, `CancelFlow`, `FlowStatus`, `FlowFinished` | `FlowRunMachine` | machine |
 | `Spawn`, `SpawnProvisioned`, `Retire`, `Respawn`, `RetireAll`, `Wire`, `Unwire` | `MobTopologyService` | service |
-| `ExternalTurn`, `InternalTurn` | runtime admission seam via `WorkInput` | cross-machine admission path |
+| `ExternalTurn`, `InternalTurn` | member-directed runtime admission seam via `MemberHandle::{send, internal_turn}` over `WorkInput` | cross-machine admission path |
 | `TaskCreate`, `TaskUpdate` | `MobTaskBoardService` | service |
 | `SetSpawnPolicy` | `MobSpawnPolicyReducer` | reducer/policy |
 | supervision / host monitoring / escalation | `MobSupervisorService` | service |
@@ -1125,8 +1125,10 @@ Firm rules:
 - lifecycle transitions belong to `MobLifecycleMachine`
 - flow/run-step orchestration belongs to `FlowRunMachine`
 - roster membership and peer wiring belong to `MobTopologyService`
+- `MobHandle` remains orchestration/control-plane oriented; member-directed
+  delivery belongs on `MemberHandle`
 - turn dispatch crosses into runtime through ordinary admission, not a mob-local
-  execution loop
+  execution loop and not a mob-actor courier path
 - task board mutation is a service concern, not a lifecycle machine
 - spawn policy is policy/reducer-shaped, not a machine
 - supervision is a service concern, not a lifecycle machine
@@ -1386,6 +1388,15 @@ Current-to-target direction:
 - current comms `PlainEvent` / external event-listener input -> `WorkInput::Event`
   even if it enters through comms infrastructure today
 
+Content authority note:
+
+- canonical admitted prompt/peer content in `0.5` is `ContentInput`
+- canonical transferable multimodal content in `0.5` is inline only
+- `source_path` is local/private metadata only and is never transport,
+  persistence, replay, or peer-delivery authority
+- hook payloads, assistant-text previews, and compacted placeholder history are
+  projections, not canonical content authority
+
 Peer lifecycle note:
 
 - lifecycle-like peer notices can remain `PeerInput` when they arrive through
@@ -1409,12 +1420,12 @@ semantics explicit as `InterruptPolicy`, `DrainPolicy`,
 
 Current baseline:
 
-- `PromptQueue`
+- `HandlingMode::Queue`
   `ApplyMode::StageRunStart`; `WakeMode::WakeIfIdle` when idle and
   `WakeMode::None` when already running; `QueueMode::Fifo`;
   `ConsumePoint::OnRunComplete`
-- `PromptSteer`
-  `ApplyMode::StageRunStart`; `WakeMode::WakeIfIdle` when idle and
+- `HandlingMode::Steer`
+  `ApplyMode::StageRunBoundary`; `WakeMode::WakeIfIdle` when idle and
   `WakeMode::InterruptYielding` when already running; `QueueMode::Fifo`;
   `ConsumePoint::OnRunComplete`
 - `PeerConvention::Message`
@@ -1451,25 +1462,30 @@ The conceptual terms in this document map onto that implementation roughly as:
 - `InterruptPolicy` aligns primarily with `WakeMode::InterruptYielding`
 - `DrainPolicy` aligns primarily with wake/apply timing concerns
 
-`0.5` must treat these prompt modes as explicit runtime admission semantics,
+`0.5` must treat these handling modes as explicit runtime admission semantics,
 not as UI sugar:
 
-- `PromptQueue` is the default queued user prompt path. When the runtime is
-  already running it does not force immediate processing; it waits for the
-  next ordinary admissible boundary.
-- `PromptSteer` is a steering prompt path. It is still ordinary runtime work,
-  not control-plane authority, but it must request ASAP handling at the
+- `HandlingMode::Queue` is the default outer-loop path. When the runtime is
+  already running it does not alter the current run; the work is handled on the
+  next turn.
+- `HandlingMode::Steer` is the inner-loop path. It is still ordinary runtime
+  work, not control-plane authority, but it must request injection at the
   earliest admissible cooperative boundary.
 
-Operationally, the machine-authority path for `0.5` maps those prompt modes to
+Operationally, the machine-authority path for `0.5` maps those handling modes to
 runtime admission as follows:
 
-- `PromptQueue`
+- `HandlingMode::Queue`
   - idle admission: `wake=true`, `process=false`
   - already-running admission: `wake=false`, `process=false`
-- `PromptSteer`
+- `HandlingMode::Steer`
   - idle admission: `wake=true`, `process=true`
   - already-running admission: `wake=true`, `process=true`
+
+Steer drain rule:
+at each admissible inner boundary, the runtime drains the full currently
+eligible `Steer` set as one ordered batch. `Steer` work is not applied one
+item per inner turn.
 
 This is a hard `0.5` rule so the distinction survives rebases and later
 surface work.

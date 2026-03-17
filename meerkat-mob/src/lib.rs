@@ -71,8 +71,8 @@ pub use run::{
 };
 pub use runtime::{FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition};
 pub use runtime::{
-    MobBuilder, MobEventRouterConfig, MobEventRouterHandle, MobHandle, MobSessionService, MobState,
-    SpawnMemberSpec, SpawnPolicy, SpawnSpec,
+    MemberHandle, MobBuilder, MobEventRouterConfig, MobEventRouterHandle, MobHandle,
+    MobSessionService, MobState, SpawnMemberSpec, SpawnPolicy, SpawnSpec,
 };
 pub use runtime_mode::MobRuntimeMode;
 pub use spec::SpecValidator;

@@ -295,6 +295,17 @@ impl AgentError {
             _ => false,
         }
     }
+
+    /// Extract the server's retry-after hint, if this is a rate-limit error.
+    pub fn retry_after_hint(&self) -> Option<std::time::Duration> {
+        match self {
+            Self::Llm {
+                reason: LlmFailureReason::RateLimited { retry_after },
+                ..
+            } => *retry_after,
+            _ => None,
+        }
+    }
 }
 
 pub fn store_error(err: impl std::fmt::Display) -> AgentError {

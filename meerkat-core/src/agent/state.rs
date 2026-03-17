@@ -38,12 +38,6 @@ where
         let mut attempt = 0u32;
 
         loop {
-            // Wait for retry delay if not first attempt
-            if attempt > 0 {
-                let delay = self.retry_policy.delay_for_attempt(attempt);
-                tokio::time::sleep(delay).await;
-            }
-
             match self
                 .client
                 .stream_response(messages, tools, max_tokens, temperature, provider_params)
@@ -53,12 +47,23 @@ where
                 Err(e) => {
                     // Check if we should retry
                     if e.is_recoverable() && self.retry_policy.should_retry(attempt) {
+                        // Use server's retry-after hint if available and longer
+                        // than our computed backoff delay.
+                        let hint = e.retry_after_hint();
+                        let computed = self.retry_policy.delay_for_attempt(attempt + 1);
+                        let delay = match hint {
+                            Some(h) if h > computed => h,
+                            _ => computed,
+                        };
                         tracing::warn!(
-                            "LLM call failed (attempt {}), retrying: {}",
+                            "LLM call failed (attempt {}), retrying in {}ms: {}",
                             attempt + 1,
+                            delay.as_millis(),
                             e
                         );
                         attempt += 1;
+                        // Apply the delay here instead of at loop top.
+                        tokio::time::sleep(delay).await;
                         continue;
                     }
                     return Err(e);

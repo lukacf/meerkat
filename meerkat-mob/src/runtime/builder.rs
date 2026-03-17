@@ -445,14 +445,11 @@ impl MobBuilder {
                 return Err(error.into());
             }
         }
-        // Recreate missing sessions referenced by MeerkatSpawned events.
+        // Reactivate or recreate sessions referenced by MeerkatSpawned events.
+        // Note: we cannot skip entries whose session_id is in active_ids because
+        // PersistentSessionService::list() includes persisted-but-not-live sessions.
+        // Instead we try reactivate_session for each entry and skip on Busy (already live).
         for entry in &roster_entries {
-            if entry
-                .session_id()
-                .is_some_and(|session_id| active_ids.contains(session_id))
-            {
-                continue;
-            }
             let profile = definition
                 .profiles
                 .get(&entry.profile)
@@ -474,14 +471,53 @@ impl MobBuilder {
                 shell_env: None,
             })
             .await?;
-            // Resume reconciliation needs live comms runtimes, but this path is
-            // infrastructure restoration and should not consume provider quota.
-            // If no explicit override is configured, use the local test client
-            // for deterministic, no-network bootstrap turns.
             let reconcile_client: Arc<dyn LlmClient> = default_llm_client
                 .clone()
                 .unwrap_or_else(|| Arc::new(meerkat_client::TestClient::default()));
             config.llm_client_override = Some(reconcile_client);
+
+            // Try to reactivate the persisted session (preserves ID and history).
+            if let Some(session_id) = entry.session_id() {
+                let mut build_options = config.to_session_build_options();
+                // Type-erase the LLM client override for the service layer.
+                build_options.llm_client_override = config
+                    .llm_client_override
+                    .clone()
+                    .map(|c| Arc::new(c) as Arc<dyn std::any::Any + Send + Sync>);
+                let req = meerkat_core::service::ReactivateSessionRequest {
+                    model: config.model.clone(),
+                    system_prompt: config.system_prompt.clone(),
+                    max_tokens: config.max_tokens,
+                    build: Some(build_options),
+                    labels: None,
+                };
+                match session_service.reactivate_session(session_id, req).await {
+                    Ok(_) => {
+                        tracing::info!(
+                            mob_id = %definition.id,
+                            meerkat_id = %entry.meerkat_id,
+                            session_id = %session_id,
+                            "reactivated persisted session"
+                        );
+                        continue;
+                    }
+                    Err(meerkat_core::service::SessionError::Busy { .. }) => {
+                        // Session is already live — nothing to do.
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            mob_id = %definition.id,
+                            meerkat_id = %entry.meerkat_id,
+                            session_id = %session_id,
+                            error = %e,
+                            "failed to reactivate session, creating fresh"
+                        );
+                    }
+                }
+            }
+
+            // Fallback: create a fresh session.
             let prompt = format!(
                 "You have been spawned as '{}' (role: {}) in mob '{}'.",
                 entry.meerkat_id, entry.profile, definition.id

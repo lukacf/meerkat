@@ -151,6 +151,25 @@ pub struct CreateSessionRequest {
     pub labels: Option<BTreeMap<String, String>>,
 }
 
+/// Request to reactivate a persisted session by rebuilding a live agent.
+///
+/// The session is loaded from persistent storage and a new agent is built
+/// with the full conversation history and original session ID preserved.
+/// No initial turn is executed.
+#[derive(Debug)]
+pub struct ReactivateSessionRequest {
+    /// Model name (e.g. "claude-opus-4-6").
+    pub model: String,
+    /// Optional system prompt override.
+    pub system_prompt: Option<String>,
+    /// Max tokens per LLM turn.
+    pub max_tokens: Option<u32>,
+    /// Optional extended build options for factory-backed builders.
+    pub build: Option<SessionBuildOptions>,
+    /// Optional key-value labels attached to the reactivated session.
+    pub labels: Option<BTreeMap<String, String>>,
+}
+
 /// Optional build-time options used by factory-backed session builders.
 #[derive(Clone)]
 pub struct SessionBuildOptions {
@@ -465,6 +484,21 @@ impl SessionHistoryPage {
 pub trait SessionService: Send + Sync {
     /// Create a new session and run the first turn.
     async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError>;
+
+    /// Reactivate a persisted session, rebuilding a live agent from it.
+    ///
+    /// Loads the session from persistent storage, rebuilds the agent with
+    /// full comms/tool/hook wiring, and registers it as a live session.
+    /// The original session ID is preserved. No initial turn is executed.
+    async fn reactivate_session(
+        &self,
+        _id: &SessionId,
+        _req: ReactivateSessionRequest,
+    ) -> Result<RunResult, SessionError> {
+        Err(SessionError::NotFound {
+            id: SessionId::new(),
+        })
+    }
 
     /// Start a new turn on an existing session.
     async fn start_turn(

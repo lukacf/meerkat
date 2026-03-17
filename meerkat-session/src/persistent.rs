@@ -677,6 +677,52 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         Ok(result)
     }
 
+    async fn reactivate_session(
+        &self,
+        id: &SessionId,
+        mut req: meerkat_core::service::ReactivateSessionRequest,
+    ) -> Result<RunResult, SessionError> {
+        // Reject if already live.
+        if self.inner.read(id).await.is_ok() {
+            return Err(SessionError::Busy { id: id.clone() });
+        }
+
+        // Load from persistent store.
+        let session = self
+            .store
+            .load(id)
+            .await
+            .map_err(|e| SessionError::Store(Box::new(e)))?
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+
+        // Inject checkpointer (same pattern as create_session).
+        let message_count = session.messages().len();
+        let gate = Arc::new(CheckpointerGate {
+            cancelled: Mutex::new(false),
+        });
+        let checkpointer = Arc::new(StoreCheckpointer {
+            store: Arc::clone(&self.store),
+            gate: Arc::clone(&gate),
+            last_saved_len: std::sync::atomic::AtomicUsize::new(message_count),
+            enabled: self.runtime_store.is_none(),
+        });
+        let build = req.build.get_or_insert_with(Default::default);
+        build.checkpointer = Some(checkpointer);
+
+        // Delegate to inner ephemeral service.
+        let result = self
+            .inner
+            .register_reactivated_session(session, req)
+            .await?;
+
+        self.checkpointer_gates
+            .lock()
+            .await
+            .insert(result.session_id.clone(), gate);
+
+        Ok(result)
+    }
+
     async fn start_turn(
         &self,
         id: &SessionId,

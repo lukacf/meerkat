@@ -9,10 +9,10 @@ use indexmap::IndexMap;
 use meerkat_core::event::{AgentEvent, EventEnvelope};
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
-    SessionControlError, SessionError, SessionHistoryPage, SessionHistoryQuery, SessionInfo,
-    SessionQuery, SessionService, SessionServiceCommsExt, SessionServiceControlExt,
-    SessionServiceHistoryExt, SessionSummary, SessionUsage, SessionView, StartTurnRequest,
-    TurnToolOverlay,
+    InitialTurnPolicy, ReactivateSessionRequest, SessionControlError, SessionError,
+    SessionHistoryPage, SessionHistoryQuery, SessionInfo, SessionQuery, SessionService,
+    SessionServiceCommsExt, SessionServiceControlExt, SessionServiceHistoryExt, SessionSummary,
+    SessionUsage, SessionView, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::time_compat::SystemTime;
 use meerkat_core::types::{RunResult, SessionId, Usage};
@@ -490,6 +490,34 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             Ok(_) => Ok(()),
             Err(_) => Err(SessionError::Busy { id: id.clone() }),
         }
+    }
+
+    /// Reactivate a persisted session by building a new agent with its
+    /// conversation history and original session ID. The session is passed
+    /// through `SessionBuildOptions.resume_session` so the agent builder
+    /// uses it instead of creating a fresh session. No initial turn is run.
+    pub async fn register_reactivated_session(
+        &self,
+        session: meerkat_core::Session,
+        req: ReactivateSessionRequest,
+    ) -> Result<RunResult, SessionError> {
+        let mut build_options = req.build.unwrap_or_default();
+        build_options.resume_session = Some(session);
+
+        let create_req = CreateSessionRequest {
+            model: req.model,
+            prompt: meerkat_core::types::ContentInput::Text(String::new()),
+            system_prompt: req.system_prompt,
+            max_tokens: req.max_tokens,
+            event_tx: None,
+            host_mode: false,
+            skill_references: None,
+            initial_turn: InitialTurnPolicy::Defer,
+            build: Some(build_options),
+            labels: req.labels,
+        };
+
+        self.create_session(create_req).await
     }
 }
 

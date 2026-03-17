@@ -205,12 +205,12 @@ Next ==
     \/ \E operation_id \in OperationIdValues : CollectTerminal(operation_id)
     \/ OwnerTerminated
 
-terminal_buffered_only_for_terminal_states == \A operation_id \in known_operations : (~(terminal_buffered_of(operation_id)) \/ is_terminal_status(status_of(operation_id)))
-peer_ready_implies_mob_member_child == \A operation_id \in known_operations : (~(peer_ready_of(operation_id)) \/ (kind_of(operation_id) = "MobMemberChild"))
-peer_ready_implies_present == \A operation_id \in known_operations : (~(peer_ready_of(operation_id)) \/ (status_of(operation_id) # "Absent"))
-present_operations_keep_kind_identity == \A operation_id \in known_operations : ((status_of(operation_id) # "Absent") /\ (kind_of(operation_id) # "None"))
-terminal_statuses_have_matching_terminal_outcome == \A operation_id \in known_operations : (~(is_terminal_status(status_of(operation_id))) \/ terminal_outcome_matches_status(status_of(operation_id), terminal_outcome_of(operation_id)))
-nonterminal_statuses_have_no_terminal_outcome == \A operation_id \in known_operations : (is_terminal_status(status_of(operation_id)) \/ (terminal_outcome_of(operation_id) = "None"))
+terminal_buffered_only_for_terminal_states == (\A operation_id \in known_operations : (~(terminal_buffered_of(operation_id)) \/ is_terminal_status(status_of(operation_id))))
+peer_ready_implies_mob_member_child == (\A operation_id \in known_operations : (~(peer_ready_of(operation_id)) \/ (kind_of(operation_id) = "MobMemberChild")))
+peer_ready_implies_present == (\A operation_id \in known_operations : (~(peer_ready_of(operation_id)) \/ (status_of(operation_id) # "Absent")))
+present_operations_keep_kind_identity == (\A operation_id \in known_operations : ((status_of(operation_id) # "Absent") /\ (kind_of(operation_id) # "None")))
+terminal_statuses_have_matching_terminal_outcome == (\A operation_id \in known_operations : (~(is_terminal_status(status_of(operation_id))) \/ terminal_outcome_matches_status(status_of(operation_id), terminal_outcome_of(operation_id))))
+nonterminal_statuses_have_no_terminal_outcome == (\A operation_id \in known_operations : (is_terminal_status(status_of(operation_id)) \/ (terminal_outcome_of(operation_id) = "None")))
 
 CiStateConstraint == /\ model_step_count <= 6 /\ Cardinality(known_operations) <= 1 /\ Cardinality(DOMAIN operation_status) <= 1 /\ Cardinality(DOMAIN operation_kind) <= 1 /\ Cardinality(DOMAIN peer_ready) <= 1 /\ Cardinality(DOMAIN progress_count) <= 1 /\ Cardinality(DOMAIN watcher_count) <= 1 /\ Cardinality(DOMAIN terminal_outcome) <= 1 /\ Cardinality(DOMAIN terminal_buffered) <= 1
 DeepStateConstraint == /\ model_step_count <= 8 /\ Cardinality(known_operations) <= 2 /\ Cardinality(DOMAIN operation_status) <= 2 /\ Cardinality(DOMAIN operation_kind) <= 2 /\ Cardinality(DOMAIN peer_ready) <= 2 /\ Cardinality(DOMAIN progress_count) <= 2 /\ Cardinality(DOMAIN watcher_count) <= 2 /\ Cardinality(DOMAIN terminal_outcome) <= 2 /\ Cardinality(DOMAIN terminal_buffered) <= 2

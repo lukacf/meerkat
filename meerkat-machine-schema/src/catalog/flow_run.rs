@@ -124,6 +124,10 @@ pub fn flow_run_machine() -> MachineSchema {
                     name: "AdmitStepWork".into(),
                     fields: vec![field("step_id", TypeRef::Named("StepId".into()))],
                 },
+                VariantSchema {
+                    name: "FlowTerminalized".into(),
+                    fields: vec![field("run_status", TypeRef::Named("FlowRunStatus".into()))],
+                },
             ],
         },
         helpers: vec![
@@ -529,7 +533,16 @@ pub fn flow_run_machine() -> MachineSchema {
                 }],
                 updates: vec![],
                 to: "Completed".into(),
-                emit: vec![flow_run_notice("Completed")],
+                emit: vec![
+                    flow_run_notice("Completed"),
+                    EffectEmit {
+                        variant: "FlowTerminalized".into(),
+                        fields: IndexMap::from([(
+                            "run_status".into(),
+                            Expr::String("Completed".into()),
+                        )]),
+                    },
+                ],
             },
             TransitionSchema {
                 name: "TerminalizeFailed".into(),
@@ -556,7 +569,16 @@ pub fn flow_run_machine() -> MachineSchema {
                 ],
                 updates: vec![],
                 to: "Failed".into(),
-                emit: vec![flow_run_notice("Failed")],
+                emit: vec![
+                    flow_run_notice("Failed"),
+                    EffectEmit {
+                        variant: "FlowTerminalized".into(),
+                        fields: IndexMap::from([(
+                            "run_status".into(),
+                            Expr::String("Failed".into()),
+                        )]),
+                    },
+                ],
             },
             TransitionSchema {
                 name: "TerminalizeCanceled".into(),
@@ -583,7 +605,16 @@ pub fn flow_run_machine() -> MachineSchema {
                 ],
                 updates: vec![],
                 to: "Canceled".into(),
-                emit: vec![flow_run_notice("Canceled")],
+                emit: vec![
+                    flow_run_notice("Canceled"),
+                    EffectEmit {
+                        variant: "FlowTerminalized".into(),
+                        fields: IndexMap::from([(
+                            "run_status".into(),
+                            Expr::String("Canceled".into()),
+                        )]),
+                    },
+                ],
             },
         ],
     }

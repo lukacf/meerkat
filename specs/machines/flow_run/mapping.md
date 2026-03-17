@@ -116,6 +116,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AdmitStepWork`
   - anchors: `flow_run_aggregate`, `flow_runtime`, `flow_terminalization`
   - scenarios: `create-dispatch-complete`
+- `FlowTerminalized`
+  - anchors: `flow_run_aggregate`, `flow_runtime`, `flow_terminalization`
+  - scenarios: `create-dispatch-complete`
 
 ### Invariants
 - `output_only_follows_completed_steps`

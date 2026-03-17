@@ -297,14 +297,14 @@ Next ==
     \/ Shutdown
     \/ TerminalStutter
 
-removing_or_removed_surfaces_are_not_visible == \A surface_id \in known_surfaces : (((SurfaceBase(surface_id) = "Removing") /\ ~(IsVisible(surface_id))) \/ ((SurfaceBase(surface_id) = "Removed") /\ ~(IsVisible(surface_id))) \/ ((SurfaceBase(surface_id) # "Removing") /\ (SurfaceBase(surface_id) # "Removed")))
-visible_membership_matches_active_base_state == \A surface_id \in known_surfaces : (IsVisible(surface_id) = (SurfaceBase(surface_id) = "Active"))
-removing_surfaces_have_no_pending_add_or_reload == \A surface_id \in known_surfaces : ((SurfaceBase(surface_id) # "Removing") \/ (PendingOp(surface_id) = "None"))
-removed_surfaces_only_allow_pending_none_or_add == \A surface_id \in known_surfaces : ((SurfaceBase(surface_id) # "Removed") \/ ((PendingOp(surface_id) = "None") \/ (PendingOp(surface_id) = "Add")))
-inflight_calls_only_exist_for_active_or_removing_surfaces == \A surface_id \in known_surfaces : ((InflightCallCount(surface_id) = 0) \/ ((SurfaceBase(surface_id) = "Active") \/ (SurfaceBase(surface_id) = "Removing")))
-reload_pending_requires_active_base_state == \A surface_id \in known_surfaces : ((PendingOp(surface_id) # "Reload") \/ (SurfaceBase(surface_id) = "Active"))
-removed_surfaces_have_zero_inflight_calls == \A surface_id \in known_surfaces : ((SurfaceBase(surface_id) # "Removed") \/ (InflightCallCount(surface_id) = 0))
-forced_delta_phase_is_always_a_remove_delta == \A surface_id \in known_surfaces : ((LastDeltaPhase(surface_id) # "Forced") \/ (LastDeltaOperation(surface_id) = "Remove"))
+removing_or_removed_surfaces_are_not_visible == (\A surface_id \in known_surfaces : (((SurfaceBase(surface_id) = "Removing") /\ ~(IsVisible(surface_id))) \/ ((SurfaceBase(surface_id) = "Removed") /\ ~(IsVisible(surface_id))) \/ ((SurfaceBase(surface_id) # "Removing") /\ (SurfaceBase(surface_id) # "Removed"))))
+visible_membership_matches_active_base_state == (\A surface_id \in known_surfaces : (IsVisible(surface_id) = (SurfaceBase(surface_id) = "Active")))
+removing_surfaces_have_no_pending_add_or_reload == (\A surface_id \in known_surfaces : ((SurfaceBase(surface_id) # "Removing") \/ (PendingOp(surface_id) = "None")))
+removed_surfaces_only_allow_pending_none_or_add == (\A surface_id \in known_surfaces : ((SurfaceBase(surface_id) # "Removed") \/ ((PendingOp(surface_id) = "None") \/ (PendingOp(surface_id) = "Add"))))
+inflight_calls_only_exist_for_active_or_removing_surfaces == (\A surface_id \in known_surfaces : ((InflightCallCount(surface_id) = 0) \/ ((SurfaceBase(surface_id) = "Active") \/ (SurfaceBase(surface_id) = "Removing"))))
+reload_pending_requires_active_base_state == (\A surface_id \in known_surfaces : ((PendingOp(surface_id) # "Reload") \/ (SurfaceBase(surface_id) = "Active")))
+removed_surfaces_have_zero_inflight_calls == (\A surface_id \in known_surfaces : ((SurfaceBase(surface_id) # "Removed") \/ (InflightCallCount(surface_id) = 0)))
+forced_delta_phase_is_always_a_remove_delta == (\A surface_id \in known_surfaces : ((LastDeltaPhase(surface_id) # "Forced") \/ (LastDeltaOperation(surface_id) = "Remove")))
 
 CiStateConstraint == /\ model_step_count <= 6 /\ Cardinality(known_surfaces) <= 1 /\ Cardinality(visible_surfaces) <= 1 /\ Cardinality(DOMAIN base_state) <= 1 /\ Cardinality(DOMAIN pending_op) <= 1 /\ Cardinality(DOMAIN staged_op) <= 1 /\ Cardinality(DOMAIN inflight_calls) <= 1 /\ Cardinality(DOMAIN last_delta_operation) <= 1 /\ Cardinality(DOMAIN last_delta_phase) <= 1
 DeepStateConstraint == /\ model_step_count <= 8 /\ Cardinality(known_surfaces) <= 2 /\ Cardinality(visible_surfaces) <= 2 /\ Cardinality(DOMAIN base_state) <= 2 /\ Cardinality(DOMAIN pending_op) <= 2 /\ Cardinality(DOMAIN staged_op) <= 2 /\ Cardinality(DOMAIN inflight_calls) <= 2 /\ Cardinality(DOMAIN last_delta_operation) <= 2 /\ Cardinality(DOMAIN last_delta_phase) <= 2

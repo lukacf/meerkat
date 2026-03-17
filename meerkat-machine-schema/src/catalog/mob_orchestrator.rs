@@ -65,6 +65,8 @@ pub fn mob_orchestrator_machine() -> MachineSchema {
             variants: vec![
                 variant("ActivateSupervisor"),
                 variant("DeactivateSupervisor"),
+                variant("FlowActivated"),
+                variant("FlowDeactivated"),
                 variant("EmitOrchestratorNotice"),
             ],
         },
@@ -250,10 +252,16 @@ pub fn mob_orchestrator_machine() -> MachineSchema {
                     amount: 1,
                 }],
                 to: "Running".into(),
-                emit: vec![EffectEmit {
-                    variant: "EmitOrchestratorNotice".into(),
-                    fields: IndexMap::new(),
-                }],
+                emit: vec![
+                    EffectEmit {
+                        variant: "FlowActivated".into(),
+                        fields: IndexMap::new(),
+                    },
+                    EffectEmit {
+                        variant: "EmitOrchestratorNotice".into(),
+                        fields: IndexMap::new(),
+                    },
+                ],
             },
             TransitionSchema {
                 name: "CompleteFlow".into(),
@@ -274,10 +282,16 @@ pub fn mob_orchestrator_machine() -> MachineSchema {
                     amount: 1,
                 }],
                 to: "Running".into(),
-                emit: vec![EffectEmit {
-                    variant: "EmitOrchestratorNotice".into(),
-                    fields: IndexMap::new(),
-                }],
+                emit: vec![
+                    EffectEmit {
+                        variant: "FlowDeactivated".into(),
+                        fields: IndexMap::new(),
+                    },
+                    EffectEmit {
+                        variant: "EmitOrchestratorNotice".into(),
+                        fields: IndexMap::new(),
+                    },
+                ],
             },
             TransitionSchema {
                 name: "StopOrchestrator".into(),

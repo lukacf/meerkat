@@ -108,16 +108,16 @@ SubmitTypedPeerInputContinue(raw_item_id) ==
 
 Next ==
     \/ \E peer_id \in PeerIdValues : TrustPeer(peer_id)
-    \/ \E raw_item_id \in RawItemIdValues : \E peer_id \in PeerIdValues : \E raw_kind \in RawPeerKindValues : \E arg_text_projection \in {"alpha", "beta"} : \E arg_content_shape \in ContentShapeValues : \E arg_request_id \in RequestIdValues : \E arg_reservation_key \in ReservationKeyValues : ReceiveTrustedPeerEnvelope(raw_item_id, peer_id, raw_kind, arg_text_projection, arg_content_shape, arg_request_id, arg_reservation_key)
-    \/ \E raw_item_id \in RawItemIdValues : \E peer_id \in PeerIdValues : \E raw_kind \in RawPeerKindValues : \E arg_text_projection \in {"alpha", "beta"} : \E arg_content_shape \in ContentShapeValues : \E arg_request_id \in RequestIdValues : \E arg_reservation_key \in ReservationKeyValues : DropUntrustedPeerEnvelope(raw_item_id, peer_id, raw_kind, arg_text_projection, arg_content_shape, arg_request_id, arg_reservation_key)
+    \/ \E raw_item_id \in RawItemIdValues : \E peer_id \in PeerIdValues : \E raw_kind \in RawPeerKindValues : \E arg_text_projection \in {"alpha", "beta"} : \E arg_content_shape \in ContentShapeValues : \E arg_request_id \in OptionRequestIdValues : \E arg_reservation_key \in OptionReservationKeyValues : ReceiveTrustedPeerEnvelope(raw_item_id, peer_id, raw_kind, arg_text_projection, arg_content_shape, arg_request_id, arg_reservation_key)
+    \/ \E raw_item_id \in RawItemIdValues : \E peer_id \in PeerIdValues : \E raw_kind \in RawPeerKindValues : \E arg_text_projection \in {"alpha", "beta"} : \E arg_content_shape \in ContentShapeValues : \E arg_request_id \in OptionRequestIdValues : \E arg_reservation_key \in OptionReservationKeyValues : DropUntrustedPeerEnvelope(raw_item_id, peer_id, raw_kind, arg_text_projection, arg_content_shape, arg_request_id, arg_reservation_key)
     \/ \E raw_item_id \in RawItemIdValues : SubmitTypedPeerInputDelivered(raw_item_id)
     \/ \E raw_item_id \in RawItemIdValues : SubmitTypedPeerInputContinue(raw_item_id)
     \/ TerminalStutter
 
-queued_items_are_classified == \A raw_item_id \in SeqElements(submission_queue) : (raw_item_id \in DOMAIN classified_as)
-queued_items_preserve_content_shape == \A raw_item_id \in SeqElements(submission_queue) : (raw_item_id \in DOMAIN content_shape)
-queued_items_preserve_text_projection == \A raw_item_id \in SeqElements(submission_queue) : (raw_item_id \in DOMAIN text_projection)
-queued_items_preserve_correlation_slots == \A raw_item_id \in SeqElements(submission_queue) : ((raw_item_id \in DOMAIN request_id) /\ (raw_item_id \in DOMAIN reservation_key))
+queued_items_are_classified == (\A raw_item_id \in SeqElements(submission_queue) : (raw_item_id \in DOMAIN classified_as))
+queued_items_preserve_content_shape == (\A raw_item_id \in SeqElements(submission_queue) : (raw_item_id \in DOMAIN content_shape))
+queued_items_preserve_text_projection == (\A raw_item_id \in SeqElements(submission_queue) : (raw_item_id \in DOMAIN text_projection))
+queued_items_preserve_correlation_slots == (\A raw_item_id \in SeqElements(submission_queue) : ((raw_item_id \in DOMAIN request_id) /\ (raw_item_id \in DOMAIN reservation_key)))
 
 CiStateConstraint == /\ model_step_count <= 6 /\ Cardinality(trusted_peers) <= 1 /\ Cardinality(DOMAIN raw_item_peer) <= 1 /\ Cardinality(DOMAIN raw_item_kind) <= 1 /\ Cardinality(DOMAIN classified_as) <= 1 /\ Cardinality(DOMAIN text_projection) <= 1 /\ Cardinality(DOMAIN content_shape) <= 1 /\ Cardinality(DOMAIN request_id) <= 1 /\ Cardinality(DOMAIN reservation_key) <= 1 /\ Cardinality(DOMAIN trusted_snapshot) <= 1 /\ Len(submission_queue) <= 1
 DeepStateConstraint == /\ model_step_count <= 8 /\ Cardinality(trusted_peers) <= 2 /\ Cardinality(DOMAIN raw_item_peer) <= 2 /\ Cardinality(DOMAIN raw_item_kind) <= 2 /\ Cardinality(DOMAIN classified_as) <= 2 /\ Cardinality(DOMAIN text_projection) <= 2 /\ Cardinality(DOMAIN content_shape) <= 2 /\ Cardinality(DOMAIN request_id) <= 2 /\ Cardinality(DOMAIN reservation_key) <= 2 /\ Cardinality(DOMAIN trusted_snapshot) <= 2 /\ Len(submission_queue) <= 2

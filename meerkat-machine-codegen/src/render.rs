@@ -695,7 +695,7 @@ fn render_expr(expr: &Expr) -> String {
                 Quantifier::All => "\\A",
             };
             format!(
-                "{} {} \\in {} : {}",
+                "({} {} \\in {} : {})",
                 keyword,
                 binding,
                 render_expr(over),
@@ -929,8 +929,8 @@ mod tests {
         assert!(rendered.contains(
             "peer_candidate_enters_runtime_admission == peer_comms.SubmitPeerInputCandidate -> runtime_control.SubmitWork [Immediate]"
         ));
-        assert!(rendered.contains("raw_item_id ~> candidate_id"));
-        assert!(rendered.contains("candidate_kind := \"PeerInput\""));
+        assert!(rendered.contains("raw_item_id ~> work_id"));
+        assert!(rendered.contains("handling_mode := \"Steer\""));
         assert!(mapping.contains("### Code Anchors"));
         assert!(mapping.contains("peer-message-admission"));
     }

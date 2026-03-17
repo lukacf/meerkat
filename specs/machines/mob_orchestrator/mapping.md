@@ -113,6 +113,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `DeactivateSupervisor`
   - anchors: `mob_runtime_actor`, `mob_runtime_builder`, `mob_definition`
   - scenarios: `coordinator-bind-and-supervise`, `topology-revision`
+- `FlowActivated`
+  - anchors: `mob_runtime_actor`, `mob_runtime_builder`, `mob_definition`
+  - scenarios: `coordinator-bind-and-supervise`
+- `FlowDeactivated`
+  - anchors: `mob_runtime_actor`, `mob_runtime_builder`, `mob_definition`
+  - scenarios: `coordinator-bind-and-supervise`
 - `EmitOrchestratorNotice`
   - anchors: `mob_runtime_actor`, `mob_runtime_builder`, `mob_definition`
   - scenarios: `coordinator-bind-and-supervise`, `topology-revision`

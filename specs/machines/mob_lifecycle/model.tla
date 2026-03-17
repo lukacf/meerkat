@@ -76,6 +76,7 @@ StartRun ==
 
 FinishRun ==
     /\ phase = "Running" \/ phase = "Stopped"
+    /\ (active_run_count > 0)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = (active_run_count) - 1

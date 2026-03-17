@@ -1,7 +1,7 @@
 # Meerkat 0.5 RCT Package
 
 This directory is the docs-local `.rct` package for the full Meerkat `0.5`
-implementation program.
+implementation/cutover program.
 
 It is intentionally stored under `docs/architecture/0.5/rct/` instead of the
 repo root so the `0.5` planning package stays colocated with the architecture
@@ -17,8 +17,8 @@ This package does four things:
    implementation plans
 3. records the resolved semantic decisions and their execution consequences
    instead of burying them in task prose
-4. provides the spec/plan/checklist artifacts needed to run a full RCT program
-   manually or to promote later into a repo-root `.rct/` workspace
+4. provides the spec/plan/checklist artifacts needed to run a full
+   `rct-development` Luka Loop from a repo-root `.rct/` workspace
 
 ## Files
 
@@ -42,43 +42,50 @@ This package does four things:
 - `gaps-and-contradictions.md`
   resolved contradiction ledger and decision-closure record for this package
 - `reviewer-manifest.yaml`
-  reviewer IDs and prompt sources for a manual `rct-lite` execution mode
+  reviewer IDs, prompt sources, and gate policy for the repo's
+  `rct-development` execution mode
 - `blockers.yaml`
   empty initial blocker ledger
 
 ## Deliberate Omissions
 
-This is a docs-only planning package, not a live Luka Loop workspace yet.
+This package is the docs-local source for a live Luka Loop workspace.
 
-It intentionally omits:
+The docs-local package still intentionally omits:
 
 - `scripts/`
 - `prompts/`
 - `outputs/`
 - copied reviewer prompt files under `agents/`
 
-If the team later wants to run the automated Luka Loop, those can be scaffolded
-from the `rct-development` skill and pointed at the already-authored
-`spec.yaml`, `plan.yaml`, and `checklist.yaml`.
+The repo-local scaffold under `.claude/skills/rct-methodology/` is expected to
+materialize those files into a repo-root `.rct/` workspace and then carry
+forward this package's `spec.yaml`, `plan.yaml`, and `checklist.yaml`.
 
 ## Authority Rule
 
-Within this folder:
+Within this folder during planning and setup:
 
 - `spec.yaml` is the authoritative inventory of what `0.5` must implement
 - `plan.yaml` is the authoritative phase model for RCT execution
 - `checklist.yaml` is the authoritative task-status source of truth
 
 These files do **not** replace the normative architecture docs during
-planning/migration. They trace and operationalize them. Once a canonical
-machine lands in checked-in schema or explicit Rust kernel form, that
-executable machine definition becomes the long-term semantic source of truth
-for that machine. See `source-of-truth.md`.
+planning/migration. They trace and operationalize them. The validated target
+machine/composition catalog is now the semantic source of truth; this package
+exists to drive the cutover from the current implementation to that target.
+See `source-of-truth.md`.
 
 ## Normalization Rule
 
 Where the `0.5` docs disagreed or left sequencing ambiguous, this package
 records the final package stance and propagates it into the requirement,
-phase, and checklist layers.
+phase, and checklist layers. For execution, the repo's Luka Loop uses one
+repo-specific gate rule:
+
+- build/check/test gate first
+- reviewer gates second
+- reviewer gates may inspect build artifacts/logs but may not run cargo
+  build/check/test themselves
 
 That closure ledger lives in `gaps-and-contradictions.md`.

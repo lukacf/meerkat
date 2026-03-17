@@ -45,5 +45,7 @@ Canonical composition set:
 - `runtime_pipeline`
 - `peer_runtime_bundle`
 - `ops_runtime_bundle`
+- `surface_event_runtime_bundle`
+- `continuation_runtime_bundle`
 - `external_tool_bundle`
 - `mob_bundle`

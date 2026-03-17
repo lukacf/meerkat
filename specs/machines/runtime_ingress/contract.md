@@ -13,9 +13,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `request_id`: `Map<WorkId, Option<RequestId>>`
 - `reservation_key`: `Map<WorkId, Option<ReservationKey>>`
 - `policy_snapshot`: `Map<WorkId, PolicyDecision>`
+- `handling_mode`: `Map<WorkId, HandlingMode>`
 - `lifecycle`: `Map<WorkId, InputLifecycleState>`
 - `terminal_outcome`: `Map<WorkId, Option<InputTerminalOutcome>>`
 - `queue`: `Seq<WorkId>`
+- `steer_queue`: `Seq<WorkId>`
 - `current_run`: `Option<RunId>`
 - `current_run_contributors`: `Seq<WorkId>`
 - `last_run`: `Map<WorkId, Option<RunId>>`
@@ -49,8 +51,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Invariants
 - `queue_entries_are_queued`
-- `queued_inputs_preserve_content_shape`
+- `steer_entries_are_queued`
+- `pending_inputs_preserve_content_shape`
 - `admitted_inputs_preserve_correlation_slots`
+- `queue_entries_preserve_handling_mode`
+- `steer_entries_preserve_handling_mode`
+- `pending_queues_do_not_overlap`
 - `terminal_inputs_do_not_appear_in_queue`
 - `current_run_matches_contributor_presence`
 - `staged_contributors_are_not_queued`
@@ -89,7 +95,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `no_current_run`
   - `contributors_non_empty`
-  - `contributors_are_queue_prefix`
+  - `contributors_match_current_drain_source`
   - `all_contributors_are_queued`
 - Emits: `ReadyForRun`
 - To: `Active`

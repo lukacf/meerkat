@@ -13,12 +13,17 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 - `turn_execution`: `TurnExecutionMachine` @ actor `turn_executor`
 
 ## Routes
+- `mob_supervisor_activation_starts_lifecycle`: `mob_orchestrator`.`ActivateSupervisor` -> `mob_lifecycle`.`Start` [Immediate]
 - `flow_step_dispatch_enters_runtime_admission`: `flow_run`.`AdmitStepWork` -> `runtime_control`.`SubmitWork` [Immediate]
+- `mob_flow_activation_starts_flow_run`: `mob_orchestrator`.`FlowActivated` -> `flow_run`.`StartRun` [Immediate]
+- `mob_flow_activation_marks_lifecycle_run`: `mob_orchestrator`.`FlowActivated` -> `mob_lifecycle`.`StartRun` [Immediate]
 - `mob_async_op_event_enters_runtime_admission`: `ops_lifecycle`.`SubmitOpEvent` -> `runtime_control`.`SubmitWork` [Immediate]
 - `mob_peer_candidate_enters_runtime_admission`: `peer_comms`.`SubmitPeerInputCandidate` -> `runtime_control`.`SubmitWork` [Immediate]
 - `mob_admitted_work_enters_ingress`: `runtime_control`.`SubmitAdmittedIngressEffect` -> `runtime_ingress`.`AdmitQueued` [Immediate]
 - `mob_ingress_ready_starts_runtime_control`: `runtime_ingress`.`ReadyForRun` -> `runtime_control`.`BeginRun` [Immediate]
 - `mob_runtime_control_starts_execution`: `runtime_control`.`SubmitRunPrimitive` -> `turn_execution`.`StartConversationRun` [Immediate]
+- `mob_flow_terminalization_completes_orchestrator`: `flow_run`.`FlowTerminalized` -> `mob_orchestrator`.`CompleteFlow` [Immediate]
+- `mob_flow_deactivation_finishes_lifecycle_run`: `mob_orchestrator`.`FlowDeactivated` -> `mob_lifecycle`.`FinishRun` [Immediate]
 - `mob_execution_boundary_updates_ingress`: `turn_execution`.`BoundaryApplied` -> `runtime_ingress`.`BoundaryApplied` [Immediate]
 - `mob_execution_completion_updates_ingress`: `turn_execution`.`RunCompleted` -> `runtime_ingress`.`RunCompleted` [Immediate]
 - `mob_execution_completion_notifies_control`: `turn_execution`.`RunCompleted` -> `runtime_control`.`RunCompleted` [Immediate]
@@ -34,10 +39,15 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 - `control_preempts_mob_ingress` — runtime control outranks mob-side ingress work when both are ready
 
 ## Behavioral Invariants
+- `mob_supervisor_activation_starts_lifecycle` — mob-orchestrator supervisor activation starts the lifecycle substrate through an explicit route
+- `mob_flow_activation_starts_flow_run` — mob-orchestrator flow activation starts the flow-run machine through an explicit route
+- `mob_flow_activation_marks_lifecycle_run` — mob-orchestrator flow activation increments lifecycle run ownership through an explicit route
 - `flow_dispatch_uses_canonical_runtime_admission` — flow-run step dispatch reaches runtime only through the runtime-control admission surface
 - `mob_async_lifecycle_events_use_operation_input` — mob-backed async lifecycle events re-enter runtime through the operation-input admission path
 - `mob_peer_work_uses_canonical_runtime_admission` — member peer communication enters runtime only through canonical admission
 - `mob_runtime_work_flows_into_ingress` — mob-originated admitted work is handed into canonical ingress ownership
+- `mob_flow_terminalization_completes_orchestrator` — flow terminalization closes the orchestrator-side active flow through an explicit route
+- `mob_flow_deactivation_finishes_lifecycle_run` — orchestrator flow deactivation closes the lifecycle run count through an explicit route
 - `mob_execution_failure_is_handled` — mob turn-execution failure is handled by both ingress and runtime control
 - `mob_execution_cancel_is_handled` — mob turn-execution cancellation is handled by both ingress and runtime control
 

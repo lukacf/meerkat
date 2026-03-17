@@ -18,10 +18,10 @@ Each canonical machine lives under its own directory:
 
 Status:
 
-- these artifacts are normative for `0.5` machine semantics until a machine's
-  Rust-native catalog definition in `meerkat-machine-schema` becomes the
-  long-term semantic
-  authority
+- the Rust-native catalog under `meerkat-machine-schema/src/catalog/*.rs` is
+  the long-term semantic authority for the `0.5` target
+- the checked-in machine artifacts in `specs/machines/` are generated,
+  reviewable proof artifacts derived from that authority
 - where current implementation diverges, `mapping.md` calls that out explicitly
 - the checked-in `ci.cfg` files are the bounded CI profiles for TLC
 
@@ -61,13 +61,13 @@ Verification posture:
 
 Current bounded TLC snapshot:
 
-- `runtime_ingress`: `12,127` distinct states
-- `runtime_control`: `84`
-- `input_lifecycle`: `17`
-- `peer_comms`: `13,672`
-- `external_tool_surface`: `7,056`
-- `turn_execution`: `53`
-- `ops_lifecycle`: `49,729`
-- `mob_orchestrator`: `32`
-- `mob_lifecycle`: `6`
-- `flow_run`: `80`
+- `runtime_ingress`: `1,007` distinct states
+- `runtime_control`: `90`
+- `input_lifecycle`: `25`
+- `peer_comms`: `119`
+- `external_tool_surface`: `123`
+- `turn_execution`: `674`
+- `ops_lifecycle`: `335`
+- `mob_orchestrator`: `143`
+- `mob_lifecycle`: `62`
+- `flow_run`: `16`

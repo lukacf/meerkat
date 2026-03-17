@@ -147,7 +147,13 @@ pub fn mob_lifecycle_machine() -> MachineSchema {
                     variant: "FinishRun".into(),
                     bindings: vec![],
                 },
-                guards: vec![],
+                guards: vec![crate::Guard {
+                    name: "has_active_runs".into(),
+                    expr: crate::Expr::Gt(
+                        Box::new(crate::Expr::Field("active_run_count".into())),
+                        Box::new(crate::Expr::U64(0)),
+                    ),
+                }],
                 updates: vec![Update::Decrement {
                     field: "active_run_count".into(),
                     amount: 1,

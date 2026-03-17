@@ -2,8 +2,8 @@
 
 This is the local methodology note for the `0.5` RCT package.
 
-It is a condensed working copy of the RCT rules used by the `rct-lite` and
-`rct-development` skills, adapted for a docs-local planning package.
+It is a condensed working copy of the `rct-development` rules, adapted for the
+docs-local package and the repo's build-first Luka Loop policy.
 
 ## Core Rule
 
@@ -24,6 +24,18 @@ implement.
 - Gate 1: target definition written and fully wired, red only at behavior level
 - Gate 2: behavior implementation turning integration green
 - Gate 3: full release closure, no stubs or deferred MUST scope
+
+## Repo-Specific Gate Ordering
+
+For this repo's implementation cutover, gate ordering is:
+
+1. quick compile sanity check
+2. build/test/phase verification gate
+3. independent reviewer gates
+
+Reviewer gates may inspect files, generated artifacts, logs, and test output,
+but they may not run cargo build/check/test themselves. This avoids cargo-lock
+contention and keeps reviewer work focused on semantic and integration review.
 
 ## Planning Rules
 
@@ -100,14 +112,21 @@ the shipped path relevant to that phase:
 
 ## Review Discipline
 
-The manual reviewer set for this package follows `rct-lite`:
+The reviewer set for this package follows `rct-development`:
 
-- `spec-compliance`
-- `integration-correctness`
-- `code-quality`
+- `spec-auditor`
+- `integration-sheriff`
+- `rct-guardian`
+- `performance-gate`
+
+The final closure gate may additionally include:
+
+- `methodology-integrity`
 
 Reviewers must discover state independently.
 They should never be fed claimed results as ground truth.
+They also should not re-run cargo build/check/test work that already belongs to
+the build gate.
 
 ## Evidence Bundle Rule
 

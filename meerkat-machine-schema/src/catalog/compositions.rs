@@ -4935,6 +4935,17 @@ pub fn mob_bundle_composition() -> CompositionSchema {
         ],
         routes: vec![
             Route {
+                name: "mob_supervisor_activation_starts_lifecycle".into(),
+                from_machine: "mob_orchestrator".into(),
+                effect_variant: "ActivateSupervisor".into(),
+                to: RouteTarget {
+                    machine: "mob_lifecycle".into(),
+                    input_variant: "Start".into(),
+                },
+                bindings: vec![],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
                 name: "flow_step_dispatch_enters_runtime_admission".into(),
                 from_machine: "flow_run".into(),
                 effect_variant: "AdmitStepWork".into(),
@@ -4943,6 +4954,28 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     RouteFieldBinding { to_field: "work_id".into(), source: RouteBindingSource::Field { from_field: "step_id".into(), allow_named_alias: true } },
                     RouteFieldBinding { to_field: "handling_mode".into(), source: RouteBindingSource::Literal(Expr::String("Queue".into())) },
                 ],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_flow_activation_starts_flow_run".into(),
+                from_machine: "mob_orchestrator".into(),
+                effect_variant: "FlowActivated".into(),
+                to: RouteTarget {
+                    machine: "flow_run".into(),
+                    input_variant: "StartRun".into(),
+                },
+                bindings: vec![],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_flow_activation_marks_lifecycle_run".into(),
+                from_machine: "mob_orchestrator".into(),
+                effect_variant: "FlowActivated".into(),
+                to: RouteTarget {
+                    machine: "mob_lifecycle".into(),
+                    input_variant: "StartRun".into(),
+                },
+                bindings: vec![],
                 delivery: RouteDelivery::Immediate,
             },
             Route {
@@ -4993,6 +5026,28 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 effect_variant: "SubmitRunPrimitive".into(),
                 to: RouteTarget { machine: "turn_execution".into(), input_variant: "StartConversationRun".into() },
                 bindings: vec![RouteFieldBinding { to_field: "run_id".into(), source: RouteBindingSource::Field { from_field: "run_id".into(), allow_named_alias: false } }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_flow_terminalization_completes_orchestrator".into(),
+                from_machine: "flow_run".into(),
+                effect_variant: "FlowTerminalized".into(),
+                to: RouteTarget {
+                    machine: "mob_orchestrator".into(),
+                    input_variant: "CompleteFlow".into(),
+                },
+                bindings: vec![],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_flow_deactivation_finishes_lifecycle_run".into(),
+                from_machine: "mob_orchestrator".into(),
+                effect_variant: "FlowDeactivated".into(),
+                to: RouteTarget {
+                    machine: "mob_lifecycle".into(),
+                    input_variant: "FinishRun".into(),
+                },
+                bindings: vec![],
                 delivery: RouteDelivery::Immediate,
             },
             Route {
@@ -5066,6 +5121,48 @@ pub fn mob_bundle_composition() -> CompositionSchema {
         }],
         invariants: vec![
             CompositionInvariant {
+                name: "mob_supervisor_activation_starts_lifecycle".into(),
+                kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+                    route_name: "mob_supervisor_activation_starts_lifecycle".into(),
+                    to_machine: "mob_lifecycle".into(),
+                    input_variant: "Start".into(),
+                    from_machine: "mob_orchestrator".into(),
+                    effect_variant: "ActivateSupervisor".into(),
+                },
+                statement:
+                    "mob-orchestrator supervisor activation starts the lifecycle substrate through an explicit route".into(),
+                references_machines: vec!["mob_orchestrator".into(), "mob_lifecycle".into()],
+                references_actors: vec!["mob_orchestrator_actor".into(), "mob_lifecycle_actor".into()],
+            },
+            CompositionInvariant {
+                name: "mob_flow_activation_starts_flow_run".into(),
+                kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+                    route_name: "mob_flow_activation_starts_flow_run".into(),
+                    to_machine: "flow_run".into(),
+                    input_variant: "StartRun".into(),
+                    from_machine: "mob_orchestrator".into(),
+                    effect_variant: "FlowActivated".into(),
+                },
+                statement:
+                    "mob-orchestrator flow activation starts the flow-run machine through an explicit route".into(),
+                references_machines: vec!["mob_orchestrator".into(), "flow_run".into()],
+                references_actors: vec!["mob_orchestrator_actor".into(), "flow_engine".into()],
+            },
+            CompositionInvariant {
+                name: "mob_flow_activation_marks_lifecycle_run".into(),
+                kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+                    route_name: "mob_flow_activation_marks_lifecycle_run".into(),
+                    to_machine: "mob_lifecycle".into(),
+                    input_variant: "StartRun".into(),
+                    from_machine: "mob_orchestrator".into(),
+                    effect_variant: "FlowActivated".into(),
+                },
+                statement:
+                    "mob-orchestrator flow activation increments lifecycle run ownership through an explicit route".into(),
+                references_machines: vec!["mob_orchestrator".into(), "mob_lifecycle".into()],
+                references_actors: vec!["mob_orchestrator_actor".into(), "mob_lifecycle_actor".into()],
+            },
+            CompositionInvariant {
                 name: "flow_dispatch_uses_canonical_runtime_admission".into(),
                 kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
                     route_name: "flow_step_dispatch_enters_runtime_admission".into(),
@@ -5132,6 +5229,34 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     "ops_plane".into(),
                     "peer_plane".into(),
                 ],
+            },
+            CompositionInvariant {
+                name: "mob_flow_terminalization_completes_orchestrator".into(),
+                kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+                    route_name: "mob_flow_terminalization_completes_orchestrator".into(),
+                    to_machine: "mob_orchestrator".into(),
+                    input_variant: "CompleteFlow".into(),
+                    from_machine: "flow_run".into(),
+                    effect_variant: "FlowTerminalized".into(),
+                },
+                statement:
+                    "flow terminalization closes the orchestrator-side active flow through an explicit route".into(),
+                references_machines: vec!["flow_run".into(), "mob_orchestrator".into()],
+                references_actors: vec!["flow_engine".into(), "mob_orchestrator_actor".into()],
+            },
+            CompositionInvariant {
+                name: "mob_flow_deactivation_finishes_lifecycle_run".into(),
+                kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+                    route_name: "mob_flow_deactivation_finishes_lifecycle_run".into(),
+                    to_machine: "mob_lifecycle".into(),
+                    input_variant: "FinishRun".into(),
+                    from_machine: "mob_orchestrator".into(),
+                    effect_variant: "FlowDeactivated".into(),
+                },
+                statement:
+                    "orchestrator flow deactivation closes the lifecycle run count through an explicit route".into(),
+                references_machines: vec!["mob_orchestrator".into(), "mob_lifecycle".into()],
+                references_actors: vec!["mob_orchestrator_actor".into(), "mob_lifecycle_actor".into()],
             },
             CompositionInvariant {
                 name: "mob_execution_failure_is_handled".into(),
@@ -5226,11 +5351,6 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     },
                     CompositionWitnessInput {
                         machine: "flow_run".into(),
-                        input_variant: "StartRun".into(),
-                        fields: vec![],
-                    },
-                    CompositionWitnessInput {
-                        machine: "flow_run".into(),
                         input_variant: "DispatchStep".into(),
                         fields: vec![CompositionWitnessField {
                             field: "step_id".into(),
@@ -5288,8 +5408,32 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                             expr: Expr::String("runid_1".into()),
                         }],
                     },
+                    CompositionWitnessInput {
+                        machine: "flow_run".into(),
+                        input_variant: "CompleteStep".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "step_id".into(),
+                            expr: Expr::String("step_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "flow_run".into(),
+                        input_variant: "RecordStepOutput".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "step_id".into(),
+                            expr: Expr::String("step_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "flow_run".into(),
+                        input_variant: "TerminalizeCompleted".into(),
+                        fields: vec![],
+                    },
                 ],
                 expected_routes: vec![
+                    "mob_supervisor_activation_starts_lifecycle".into(),
+                    "mob_flow_activation_starts_flow_run".into(),
+                    "mob_flow_activation_marks_lifecycle_run".into(),
                     "flow_step_dispatch_enters_runtime_admission".into(),
                     "mob_admitted_work_enters_ingress".into(),
                     "mob_ingress_ready_starts_runtime_control".into(),
@@ -5297,6 +5441,8 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     "mob_execution_boundary_updates_ingress".into(),
                     "mob_execution_completion_updates_ingress".into(),
                     "mob_execution_completion_notifies_control".into(),
+                    "mob_flow_terminalization_completes_orchestrator".into(),
+                    "mob_flow_deactivation_finishes_lifecycle_run".into(),
                 ],
                 expected_scheduler_rules: vec![],
                 expected_states: vec![
@@ -5310,11 +5456,19 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                             },
                             CompositionWitnessField {
                                 field: "active_flow_count".into(),
-                                expr: Expr::U64(1),
+                                expr: Expr::U64(0),
                             },
                         ],
                     ),
-                    witness_state("flow_run", Some("Running"), vec![]),
+                    witness_state(
+                        "mob_lifecycle",
+                        Some("Running"),
+                        vec![CompositionWitnessField {
+                            field: "active_run_count".into(),
+                            expr: Expr::U64(0),
+                        }],
+                    ),
+                    witness_state("flow_run", Some("Completed"), vec![]),
                     witness_state(
                         "runtime_control",
                         Some("Idle"),
@@ -5335,10 +5489,12 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 ],
                 expected_transitions: vec![
                     witness_transition("mob_orchestrator", "InitializeOrchestrator"),
+                    witness_transition("mob_lifecycle", "Start"),
                     witness_transition("mob_orchestrator", "BindCoordinator"),
                     witness_transition("mob_orchestrator", "StartFlow"),
                     witness_transition("flow_run", "CreateRun"),
                     witness_transition("flow_run", "StartRun"),
+                    witness_transition("mob_lifecycle", "StartRun"),
                     witness_transition("flow_run", "DispatchStep"),
                     witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
                     witness_transition("runtime_ingress", "AdmitQueuedSteer"),
@@ -5348,11 +5504,22 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     witness_transition("turn_execution", "BoundaryComplete"),
                     witness_transition("runtime_ingress", "RunCompleted"),
                     witness_transition("runtime_control", "RunCompleted"),
+                    witness_transition("flow_run", "CompleteStep"),
+                    witness_transition("flow_run", "RecordStepOutput"),
+                    witness_transition("flow_run", "TerminalizeCompleted"),
+                    witness_transition("mob_orchestrator", "CompleteFlow"),
+                    witness_transition("mob_lifecycle", "FinishRun"),
                 ],
                 expected_transition_order: vec![
                     witness_transition_order(
                         "mob_orchestrator",
                         "InitializeOrchestrator",
+                        "mob_lifecycle",
+                        "Start",
+                    ),
+                    witness_transition_order(
+                        "mob_lifecycle",
+                        "Start",
                         "mob_orchestrator",
                         "BindCoordinator",
                     ),
@@ -5361,6 +5528,18 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                         "BindCoordinator",
                         "mob_orchestrator",
                         "StartFlow",
+                    ),
+                    witness_transition_order(
+                        "mob_orchestrator",
+                        "StartFlow",
+                        "flow_run",
+                        "StartRun",
+                    ),
+                    witness_transition_order(
+                        "mob_orchestrator",
+                        "StartFlow",
+                        "mob_lifecycle",
+                        "StartRun",
                     ),
                     witness_transition_order(
                         "flow_run",
@@ -5398,13 +5577,25 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                         "runtime_control",
                         "RunCompleted",
                     ),
+                    witness_transition_order(
+                        "flow_run",
+                        "TerminalizeCompleted",
+                        "mob_orchestrator",
+                        "CompleteFlow",
+                    ),
+                    witness_transition_order(
+                        "mob_orchestrator",
+                        "CompleteFlow",
+                        "mob_lifecycle",
+                        "FinishRun",
+                    ),
                 ],
                 state_limits: CompositionStateLimits {
-                    step_limit: 14,
+                    step_limit: 18,
                     pending_input_limit: 10,
-                    pending_route_limit: 2,
-                    delivered_route_limit: 10,
-                    emitted_effect_limit: 10,
+                    pending_route_limit: 3,
+                    delivered_route_limit: 14,
+                    emitted_effect_limit: 14,
                     seq_limit: 8,
                     set_limit: 8,
                     map_limit: 4,

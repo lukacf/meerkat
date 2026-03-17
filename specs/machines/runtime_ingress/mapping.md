@@ -179,10 +179,22 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `queue_entries_are_queued`
   - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
   - scenarios: `admit-and-stage-prefix`
-- `queued_inputs_preserve_content_shape`
+- `steer_entries_are_queued`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - scenarios: `admit-and-stage-prefix`
+- `pending_inputs_preserve_content_shape`
   - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
   - scenarios: `admit-and-stage-prefix`
 - `admitted_inputs_preserve_correlation_slots`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - scenarios: `admit-and-stage-prefix`
+- `queue_entries_preserve_handling_mode`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - scenarios: `admit-and-stage-prefix`
+- `steer_entries_preserve_handling_mode`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - scenarios: `admit-and-stage-prefix`
+- `pending_queues_do_not_overlap`
   - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
   - scenarios: `admit-and-stage-prefix`
 - `terminal_inputs_do_not_appear_in_queue`

@@ -61,6 +61,13 @@ pub fn runtime_ingress_machine() -> MachineSchema {
                     ),
                 ),
                 field(
+                    "handling_mode",
+                    TypeRef::Map(
+                        Box::new(TypeRef::Named("WorkId".into())),
+                        Box::new(TypeRef::Named("HandlingMode".into())),
+                    ),
+                ),
+                field(
                     "lifecycle",
                     TypeRef::Map(
                         Box::new(TypeRef::Named("WorkId".into())),
@@ -78,6 +85,10 @@ pub fn runtime_ingress_machine() -> MachineSchema {
                 ),
                 field(
                     "queue",
+                    TypeRef::Seq(Box::new(TypeRef::Named("WorkId".into()))),
+                ),
+                field(
+                    "steer_queue",
                     TypeRef::Seq(Box::new(TypeRef::Named("WorkId".into()))),
                 ),
                 field(
@@ -116,9 +127,11 @@ pub fn runtime_ingress_machine() -> MachineSchema {
                     init("request_id", Expr::EmptyMap),
                     init("reservation_key", Expr::EmptyMap),
                     init("policy_snapshot", Expr::EmptyMap),
+                    init("handling_mode", Expr::EmptyMap),
                     init("lifecycle", Expr::EmptyMap),
                     init("terminal_outcome", Expr::EmptyMap),
                     init("queue", Expr::SeqLiteral(vec![])),
+                    init("steer_queue", Expr::SeqLiteral(vec![])),
                     init("current_run", Expr::None),
                     init("current_run_contributors", Expr::SeqLiteral(vec![])),
                     init("last_run", Expr::EmptyMap),
@@ -278,18 +291,45 @@ pub fn runtime_ingress_machine() -> MachineSchema {
                 },
             },
             InvariantSchema {
-                name: "queued_inputs_preserve_content_shape".into(),
+                name: "steer_entries_are_queued".into(),
                 expr: Expr::Quantified {
                     quantifier: Quantifier::All,
                     binding: "work_id".into(),
-                    over: Box::new(Expr::Field("queue".into())),
+                    over: Box::new(Expr::Field("steer_queue".into())),
                     body: Box::new(Expr::Contains {
                         collection: Box::new(Expr::MapKeys(Box::new(Expr::Field(
-                            "content_shape".into(),
+                            "lifecycle".into(),
                         )))),
                         value: Box::new(Expr::Binding("work_id".into())),
                     }),
                 },
+            },
+            InvariantSchema {
+                name: "pending_inputs_preserve_content_shape".into(),
+                expr: Expr::And(vec![
+                    Expr::Quantified {
+                        quantifier: Quantifier::All,
+                        binding: "work_id".into(),
+                        over: Box::new(Expr::Field("queue".into())),
+                        body: Box::new(Expr::Contains {
+                            collection: Box::new(Expr::MapKeys(Box::new(Expr::Field(
+                                "content_shape".into(),
+                            )))),
+                            value: Box::new(Expr::Binding("work_id".into())),
+                        }),
+                    },
+                    Expr::Quantified {
+                        quantifier: Quantifier::All,
+                        binding: "work_id".into(),
+                        over: Box::new(Expr::Field("steer_queue".into())),
+                        body: Box::new(Expr::Contains {
+                            collection: Box::new(Expr::MapKeys(Box::new(Expr::Field(
+                                "content_shape".into(),
+                            )))),
+                            value: Box::new(Expr::Binding("work_id".into())),
+                        }),
+                    },
+                ]),
             },
             InvariantSchema {
                 name: "admitted_inputs_preserve_correlation_slots".into(),
@@ -314,42 +354,63 @@ pub fn runtime_ingress_machine() -> MachineSchema {
                 },
             },
             InvariantSchema {
-                name: "terminal_inputs_do_not_appear_in_queue".into(),
+                name: "queue_entries_preserve_handling_mode".into(),
                 expr: Expr::Quantified {
                     quantifier: Quantifier::All,
                     binding: "work_id".into(),
                     over: Box::new(Expr::Field("queue".into())),
-                    body: Box::new(Expr::And(vec![
-                        Expr::Neq(
-                            Box::new(Expr::MapGet {
-                                map: Box::new(Expr::Field("lifecycle".into())),
-                                key: Box::new(Expr::Binding("work_id".into())),
-                            }),
-                            Box::new(Expr::String("Consumed".into())),
-                        ),
-                        Expr::Neq(
-                            Box::new(Expr::MapGet {
-                                map: Box::new(Expr::Field("lifecycle".into())),
-                                key: Box::new(Expr::Binding("work_id".into())),
-                            }),
-                            Box::new(Expr::String("Superseded".into())),
-                        ),
-                        Expr::Neq(
-                            Box::new(Expr::MapGet {
-                                map: Box::new(Expr::Field("lifecycle".into())),
-                                key: Box::new(Expr::Binding("work_id".into())),
-                            }),
-                            Box::new(Expr::String("Coalesced".into())),
-                        ),
-                        Expr::Neq(
-                            Box::new(Expr::MapGet {
-                                map: Box::new(Expr::Field("lifecycle".into())),
-                                key: Box::new(Expr::Binding("work_id".into())),
-                            }),
-                            Box::new(Expr::String("Abandoned".into())),
-                        ),
-                    ])),
+                    body: Box::new(Expr::Eq(
+                        Box::new(Expr::MapGet {
+                            map: Box::new(Expr::Field("handling_mode".into())),
+                            key: Box::new(Expr::Binding("work_id".into())),
+                        }),
+                        Box::new(Expr::String("Queue".into())),
+                    )),
                 },
+            },
+            InvariantSchema {
+                name: "steer_entries_preserve_handling_mode".into(),
+                expr: Expr::Quantified {
+                    quantifier: Quantifier::All,
+                    binding: "work_id".into(),
+                    over: Box::new(Expr::Field("steer_queue".into())),
+                    body: Box::new(Expr::Eq(
+                        Box::new(Expr::MapGet {
+                            map: Box::new(Expr::Field("handling_mode".into())),
+                            key: Box::new(Expr::Binding("work_id".into())),
+                        }),
+                        Box::new(Expr::String("Steer".into())),
+                    )),
+                },
+            },
+            InvariantSchema {
+                name: "pending_queues_do_not_overlap".into(),
+                expr: Expr::Quantified {
+                    quantifier: Quantifier::All,
+                    binding: "work_id".into(),
+                    over: Box::new(Expr::Field("steer_queue".into())),
+                    body: Box::new(Expr::Not(Box::new(Expr::Contains {
+                        collection: Box::new(Expr::Field("queue".into())),
+                        value: Box::new(Expr::Binding("work_id".into())),
+                    }))),
+                },
+            },
+            InvariantSchema {
+                name: "terminal_inputs_do_not_appear_in_queue".into(),
+                expr: Expr::And(vec![
+                    Expr::Quantified {
+                        quantifier: Quantifier::All,
+                        binding: "work_id".into(),
+                        over: Box::new(Expr::Field("queue".into())),
+                        body: Box::new(non_terminal_lifecycle_expr("work_id")),
+                    },
+                    Expr::Quantified {
+                        quantifier: Quantifier::All,
+                        binding: "work_id".into(),
+                        over: Box::new(Expr::Field("steer_queue".into())),
+                        body: Box::new(non_terminal_lifecycle_expr("work_id")),
+                    },
+                ]),
             },
             InvariantSchema {
                 name: "current_run_matches_contributor_presence".into(),
@@ -372,10 +433,16 @@ pub fn runtime_ingress_machine() -> MachineSchema {
                     quantifier: Quantifier::All,
                     binding: "work_id".into(),
                     over: Box::new(Expr::Field("current_run_contributors".into())),
-                    body: Box::new(Expr::Not(Box::new(Expr::Contains {
-                        collection: Box::new(Expr::Field("queue".into())),
-                        value: Box::new(Expr::Binding("work_id".into())),
-                    }))),
+                    body: Box::new(Expr::And(vec![
+                        Expr::Not(Box::new(Expr::Contains {
+                            collection: Box::new(Expr::Field("queue".into())),
+                            value: Box::new(Expr::Binding("work_id".into())),
+                        })),
+                        Expr::Not(Box::new(Expr::Contains {
+                            collection: Box::new(Expr::Field("steer_queue".into())),
+                            value: Box::new(Expr::Binding("work_id".into())),
+                        })),
+                    ])),
                 },
             },
             InvariantSchema {
@@ -526,11 +593,33 @@ pub fn runtime_ingress_machine() -> MachineSchema {
                         ),
                     },
                     Guard {
-                        name: "contributors_are_queue_prefix".into(),
-                        expr: Expr::SeqStartsWith {
-                            seq: Box::new(Expr::Field("queue".into())),
-                            prefix: Box::new(Expr::Binding("contributing_work_ids".into())),
-                        },
+                        name: "contributors_match_current_drain_source".into(),
+                        expr: Expr::Or(vec![
+                            Expr::And(vec![
+                                Expr::Gt(
+                                    Box::new(Expr::Len(Box::new(Expr::Field(
+                                        "steer_queue".into(),
+                                    )))),
+                                    Box::new(Expr::U64(0)),
+                                ),
+                                Expr::Eq(
+                                    Box::new(Expr::Binding("contributing_work_ids".into())),
+                                    Box::new(Expr::Field("steer_queue".into())),
+                                ),
+                            ]),
+                            Expr::And(vec![
+                                Expr::Eq(
+                                    Box::new(Expr::Len(Box::new(Expr::Field(
+                                        "steer_queue".into(),
+                                    )))),
+                                    Box::new(Expr::U64(0)),
+                                ),
+                                Expr::SeqStartsWith {
+                                    seq: Box::new(Expr::Field("queue".into())),
+                                    prefix: Box::new(Expr::Binding("contributing_work_ids".into())),
+                                },
+                            ]),
+                        ]),
                     },
                     Guard {
                         name: "all_contributors_are_queued".into(),
@@ -549,9 +638,19 @@ pub fn runtime_ingress_machine() -> MachineSchema {
                     },
                 ],
                 updates: vec![
-                    Update::SeqRemoveAll {
-                        field: "queue".into(),
-                        values: Expr::Binding("contributing_work_ids".into()),
+                    Update::Conditional {
+                        condition: Expr::Gt(
+                            Box::new(Expr::Len(Box::new(Expr::Field("steer_queue".into())))),
+                            Box::new(Expr::U64(0)),
+                        ),
+                        then_updates: vec![Update::Assign {
+                            field: "steer_queue".into(),
+                            expr: Expr::SeqLiteral(vec![]),
+                        }],
+                        else_updates: vec![Update::SeqRemoveAll {
+                            field: "queue".into(),
+                            values: Expr::Binding("contributing_work_ids".into()),
+                        }],
                     },
                     Update::Assign {
                         field: "current_run".into(),
@@ -924,6 +1023,10 @@ pub fn runtime_ingress_machine() -> MachineSchema {
                         field: "queue".into(),
                         value: Expr::Binding("old_work_id".into()),
                     },
+                    Update::SeqRemoveValue {
+                        field: "steer_queue".into(),
+                        value: Expr::Binding("old_work_id".into()),
+                    },
                     Update::MapInsert {
                         field: "lifecycle".into(),
                         key: Expr::Binding("old_work_id".into()),
@@ -988,6 +1091,10 @@ pub fn runtime_ingress_machine() -> MachineSchema {
                 updates: vec![
                     Update::SeqRemoveAll {
                         field: "queue".into(),
+                        values: Expr::Binding("source_work_ids".into()),
+                    },
+                    Update::SeqRemoveAll {
+                        field: "steer_queue".into(),
                         values: Expr::Binding("source_work_ids".into()),
                     },
                     Update::ForEach {
@@ -1064,6 +1171,22 @@ pub fn runtime_ingress_machine() -> MachineSchema {
                     },
                     Update::ForEach {
                         binding: "work_id".into(),
+                        over: Expr::Field("steer_queue".into()),
+                        updates: vec![
+                            Update::MapInsert {
+                                field: "lifecycle".into(),
+                                key: Expr::Binding("work_id".into()),
+                                value: Expr::String("Abandoned".into()),
+                            },
+                            Update::MapInsert {
+                                field: "terminal_outcome".into(),
+                                key: Expr::Binding("work_id".into()),
+                                value: Expr::Some(Box::new(Expr::String("AbandonedReset".into()))),
+                            },
+                        ],
+                    },
+                    Update::ForEach {
+                        binding: "work_id".into(),
                         over: Expr::Field("current_run_contributors".into()),
                         updates: vec![
                             Update::MapInsert {
@@ -1080,6 +1203,10 @@ pub fn runtime_ingress_machine() -> MachineSchema {
                     },
                     Update::Assign {
                         field: "queue".into(),
+                        expr: Expr::SeqLiteral(vec![]),
+                    },
+                    Update::Assign {
+                        field: "steer_queue".into(),
                         expr: Expr::SeqLiteral(vec![]),
                     },
                     Update::Assign {
@@ -1138,6 +1265,22 @@ pub fn runtime_ingress_machine() -> MachineSchema {
                     },
                     Update::ForEach {
                         binding: "work_id".into(),
+                        over: Expr::Field("steer_queue".into()),
+                        updates: vec![
+                            Update::MapInsert {
+                                field: "lifecycle".into(),
+                                key: Expr::Binding("work_id".into()),
+                                value: Expr::String("Abandoned".into()),
+                            },
+                            Update::MapInsert {
+                                field: "terminal_outcome".into(),
+                                key: Expr::Binding("work_id".into()),
+                                value: Expr::Some(Box::new(Expr::String("AbandonedReset".into()))),
+                            },
+                        ],
+                    },
+                    Update::ForEach {
+                        binding: "work_id".into(),
                         over: Expr::Field("current_run_contributors".into()),
                         updates: vec![
                             Update::MapInsert {
@@ -1154,6 +1297,10 @@ pub fn runtime_ingress_machine() -> MachineSchema {
                     },
                     Update::Assign {
                         field: "queue".into(),
+                        expr: Expr::SeqLiteral(vec![]),
+                    },
+                    Update::Assign {
+                        field: "steer_queue".into(),
                         expr: Expr::SeqLiteral(vec![]),
                     },
                     Update::Assign {
@@ -1214,6 +1361,24 @@ pub fn runtime_ingress_machine() -> MachineSchema {
                     },
                     Update::ForEach {
                         binding: "work_id".into(),
+                        over: Expr::Field("steer_queue".into()),
+                        updates: vec![
+                            Update::MapInsert {
+                                field: "lifecycle".into(),
+                                key: Expr::Binding("work_id".into()),
+                                value: Expr::String("Abandoned".into()),
+                            },
+                            Update::MapInsert {
+                                field: "terminal_outcome".into(),
+                                key: Expr::Binding("work_id".into()),
+                                value: Expr::Some(Box::new(Expr::String(
+                                    "AbandonedDestroyed".into(),
+                                ))),
+                            },
+                        ],
+                    },
+                    Update::ForEach {
+                        binding: "work_id".into(),
                         over: Expr::Field("current_run_contributors".into()),
                         updates: vec![
                             Update::MapInsert {
@@ -1232,6 +1397,10 @@ pub fn runtime_ingress_machine() -> MachineSchema {
                     },
                     Update::Assign {
                         field: "queue".into(),
+                        expr: Expr::SeqLiteral(vec![]),
+                    },
+                    Update::Assign {
+                        field: "steer_queue".into(),
                         expr: Expr::SeqLiteral(vec![]),
                     },
                     Update::Assign {
@@ -1466,6 +1635,11 @@ fn runtime_ingress_admit_queued_transition(name: &str, handling_mode: &str) -> T
                 value: Expr::Binding("policy".into()),
             },
             Update::MapInsert {
+                field: "handling_mode".into(),
+                key: Expr::Binding("work_id".into()),
+                value: Expr::Binding("handling_mode".into()),
+            },
+            Update::MapInsert {
                 field: "lifecycle".into(),
                 key: Expr::Binding("work_id".into()),
                 value: Expr::String("Queued".into()),
@@ -1486,7 +1660,11 @@ fn runtime_ingress_admit_queued_transition(name: &str, handling_mode: &str) -> T
                 value: Expr::None,
             },
             Update::SeqAppend {
-                field: "queue".into(),
+                field: if is_steer {
+                    "steer_queue".into()
+                } else {
+                    "queue".into()
+                },
                 value: Expr::Binding("work_id".into()),
             },
             Update::Assign {
@@ -1521,6 +1699,46 @@ fn field(name: &str, ty: TypeRef) -> FieldSchema {
         name: name.into(),
         ty,
     }
+}
+
+fn non_terminal_lifecycle_expr(binding: &str) -> Expr {
+    Expr::And(vec![
+        Expr::Eq(
+            Box::new(Expr::MapGet {
+                map: Box::new(Expr::Field("terminal_outcome".into())),
+                key: Box::new(Expr::Binding(binding.into())),
+            }),
+            Box::new(Expr::None),
+        ),
+        Expr::Neq(
+            Box::new(Expr::MapGet {
+                map: Box::new(Expr::Field("lifecycle".into())),
+                key: Box::new(Expr::Binding(binding.into())),
+            }),
+            Box::new(Expr::String("Consumed".into())),
+        ),
+        Expr::Neq(
+            Box::new(Expr::MapGet {
+                map: Box::new(Expr::Field("lifecycle".into())),
+                key: Box::new(Expr::Binding(binding.into())),
+            }),
+            Box::new(Expr::String("Superseded".into())),
+        ),
+        Expr::Neq(
+            Box::new(Expr::MapGet {
+                map: Box::new(Expr::Field("lifecycle".into())),
+                key: Box::new(Expr::Binding(binding.into())),
+            }),
+            Box::new(Expr::String("Coalesced".into())),
+        ),
+        Expr::Neq(
+            Box::new(Expr::MapGet {
+                map: Box::new(Expr::Field("lifecycle".into())),
+                key: Box::new(Expr::Binding(binding.into())),
+            }),
+            Box::new(Expr::String("Abandoned".into())),
+        ),
+    ])
 }
 
 fn init(field: &str, expr: Expr) -> FieldInit {

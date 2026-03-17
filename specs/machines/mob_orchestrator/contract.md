@@ -29,6 +29,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Effects
 - `ActivateSupervisor`
 - `DeactivateSupervisor`
+- `FlowActivated`
+- `FlowDeactivated`
 - `EmitOrchestratorNotice`
 
 ## Invariants
@@ -79,7 +81,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `StartFlow`()
 - Guards:
   - `coordinator_is_bound`
-- Emits: `EmitOrchestratorNotice`
+- Emits: `FlowActivated`, `EmitOrchestratorNotice`
 - To: `Running`
 
 ### `CompleteFlow`
@@ -87,7 +89,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `CompleteFlow`()
 - Guards:
   - `has_active_flows`
-- Emits: `EmitOrchestratorNotice`
+- Emits: `FlowDeactivated`, `EmitOrchestratorNotice`
 - To: `Running`
 
 ### `StopOrchestrator`

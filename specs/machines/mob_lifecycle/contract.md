@@ -66,6 +66,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `FinishRun`
 - From: `Running`, `Stopped`
 - On: `FinishRun`()
+- Guards:
+  - `has_active_runs`
 - To: `Running`
 
 ### `BeginCleanup`

@@ -31,6 +31,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AppendFailureLedger`(step_id: StepId)
 - `PersistStepOutput`(step_id: StepId)
 - `AdmitStepWork`(step_id: StepId)
+- `FlowTerminalized`(run_status: FlowRunStatus)
 
 ## Helpers
 - `RunIsTerminal`() -> `Bool`
@@ -123,7 +124,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `TerminalizeCompleted`()
 - Guards:
   - `all_steps_are_completed_or_skipped`
-- Emits: `EmitFlowRunNotice`
+- Emits: `EmitFlowRunNotice`, `FlowTerminalized`
 - To: `Completed`
 
 ### `TerminalizeFailed`
@@ -132,7 +133,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `no_step_remains_dispatched`
   - `at_least_one_step_failed`
-- Emits: `EmitFlowRunNotice`
+- Emits: `EmitFlowRunNotice`, `FlowTerminalized`
 - To: `Failed`
 
 ### `TerminalizeCanceled`
@@ -141,7 +142,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `no_step_remains_dispatched`
   - `at_least_one_step_canceled`
-- Emits: `EmitFlowRunNotice`
+- Emits: `EmitFlowRunNotice`, `FlowTerminalized`
 - To: `Canceled`
 
 ## Coverage

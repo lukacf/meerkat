@@ -1,6 +1,6 @@
 project: "Meerkat 0.5"
 last_updated: "2026-03-17"
-package_location: "docs/architecture/0.5/rct"
+package_location: ".rct"
 execution_form: "rct-development-build-first"
 validated_target_baseline_commit: "4e350279"
 authority_note: "This plan is the authoritative RCT phase model for the docs-local 0.5 package. It uses the validated target machine/composition baseline as a prerequisite reference and applies the repo-specific build-first Luka Loop ordering to the implementation cutover."

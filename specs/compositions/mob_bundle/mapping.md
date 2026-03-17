@@ -23,7 +23,16 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 - `wasm-mob-examples` — browser mob examples continue to fit the canonical mob/comms/runtime model
 
 ### Routes
+- `mob_supervisor_activation_starts_lifecycle`
+  - anchors: `mob_runtime_actor`, `mob_member_handle`, `flow_runtime`, `peer_runtime`, `wasm_example_031`, `wasm_example_032`, `wasm_example_033`
+  - scenarios: `mob-peer-orchestration`, `wasm-mob-examples`
 - `flow_step_dispatch_enters_runtime_admission`
+  - anchors: `mob_runtime_actor`, `mob_member_handle`, `flow_runtime`, `peer_runtime`, `wasm_example_031`, `wasm_example_032`, `wasm_example_033`
+  - scenarios: `mob-flow-dispatch`, `wasm-mob-examples`
+- `mob_flow_activation_starts_flow_run`
+  - anchors: `mob_runtime_actor`, `mob_member_handle`, `flow_runtime`, `peer_runtime`, `wasm_example_031`, `wasm_example_032`, `wasm_example_033`
+  - scenarios: `mob-flow-dispatch`, `wasm-mob-examples`
+- `mob_flow_activation_marks_lifecycle_run`
   - anchors: `mob_runtime_actor`, `mob_member_handle`, `flow_runtime`, `peer_runtime`, `wasm_example_031`, `wasm_example_032`, `wasm_example_033`
   - scenarios: `mob-flow-dispatch`, `wasm-mob-examples`
 - `mob_async_op_event_enters_runtime_admission`
@@ -41,6 +50,12 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 - `mob_runtime_control_starts_execution`
   - anchors: `mob_runtime_actor`, `mob_member_handle`, `flow_runtime`, `peer_runtime`, `wasm_example_031`, `wasm_example_032`, `wasm_example_033`
   - scenarios: `mob-peer-orchestration`, `wasm-mob-examples`
+- `mob_flow_terminalization_completes_orchestrator`
+  - anchors: `mob_runtime_actor`, `mob_member_handle`, `flow_runtime`, `peer_runtime`, `wasm_example_031`, `wasm_example_032`, `wasm_example_033`
+  - scenarios: `mob-flow-dispatch`, `wasm-mob-examples`
+- `mob_flow_deactivation_finishes_lifecycle_run`
+  - anchors: `mob_runtime_actor`, `mob_member_handle`, `flow_runtime`, `peer_runtime`, `wasm_example_031`, `wasm_example_032`, `wasm_example_033`
+  - scenarios: `mob-flow-dispatch`, `wasm-mob-examples`
 - `mob_execution_boundary_updates_ingress`
   - anchors: `mob_runtime_actor`, `mob_member_handle`, `flow_runtime`, `peer_runtime`, `wasm_example_031`, `wasm_example_032`, `wasm_example_033`
   - scenarios: `mob-peer-orchestration`, `wasm-mob-examples`
@@ -69,6 +84,15 @@ This section is generated from the Rust composition catalog. Do not edit it by h
   - scenarios: `mob-peer-orchestration`
 
 ### Invariants
+- `mob_supervisor_activation_starts_lifecycle`
+  - anchors: `mob_runtime_actor`, `mob_member_handle`, `flow_runtime`, `peer_runtime`, `wasm_example_031`, `wasm_example_032`, `wasm_example_033`
+  - scenarios: `mob-peer-orchestration`, `wasm-mob-examples`
+- `mob_flow_activation_starts_flow_run`
+  - anchors: `mob_runtime_actor`, `mob_member_handle`, `flow_runtime`, `peer_runtime`, `wasm_example_031`, `wasm_example_032`, `wasm_example_033`
+  - scenarios: `mob-flow-dispatch`, `wasm-mob-examples`
+- `mob_flow_activation_marks_lifecycle_run`
+  - anchors: `mob_runtime_actor`, `mob_member_handle`, `flow_runtime`, `peer_runtime`, `wasm_example_031`, `wasm_example_032`, `wasm_example_033`
+  - scenarios: `mob-flow-dispatch`, `wasm-mob-examples`
 - `flow_dispatch_uses_canonical_runtime_admission`
   - anchors: `mob_runtime_actor`, `mob_member_handle`, `flow_runtime`, `peer_runtime`, `wasm_example_031`, `wasm_example_032`, `wasm_example_033`
   - scenarios: `mob-flow-dispatch`, `wasm-mob-examples`
@@ -79,6 +103,12 @@ This section is generated from the Rust composition catalog. Do not edit it by h
   - anchors: `mob_runtime_actor`, `mob_member_handle`, `flow_runtime`, `peer_runtime`, `wasm_example_031`, `wasm_example_032`, `wasm_example_033`
   - scenarios: `mob-peer-orchestration`, `wasm-mob-examples`
 - `mob_runtime_work_flows_into_ingress`
+  - anchors: `mob_runtime_actor`, `mob_member_handle`, `flow_runtime`, `peer_runtime`, `wasm_example_031`, `wasm_example_032`, `wasm_example_033`
+  - scenarios: `mob-flow-dispatch`, `wasm-mob-examples`
+- `mob_flow_terminalization_completes_orchestrator`
+  - anchors: `mob_runtime_actor`, `mob_member_handle`, `flow_runtime`, `peer_runtime`, `wasm_example_031`, `wasm_example_032`, `wasm_example_033`
+  - scenarios: `mob-flow-dispatch`, `wasm-mob-examples`
+- `mob_flow_deactivation_finishes_lifecycle_run`
   - anchors: `mob_runtime_actor`, `mob_member_handle`, `flow_runtime`, `peer_runtime`, `wasm_example_031`, `wasm_example_032`, `wasm_example_033`
   - scenarios: `mob-flow-dispatch`, `wasm-mob-examples`
 - `mob_execution_failure_is_handled`

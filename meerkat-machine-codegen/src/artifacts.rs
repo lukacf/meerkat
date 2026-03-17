@@ -4048,7 +4048,7 @@ impl<'a> MachineTlaCompiler<'a> {
             TypeRef::U32 | TypeRef::U64 => "0..2".into(),
             TypeRef::String => "{\"alpha\", \"beta\"}".into(),
             TypeRef::Named(_) | TypeRef::Seq(_) | TypeRef::Set(_) => domain_constant_name(ty),
-            TypeRef::Option(inner) => self.binding_domain_for_type(inner),
+            TypeRef::Option(_) => domain_constant_name(ty),
             TypeRef::Map(_, _) => "{}".into(),
         }
     }
@@ -4633,7 +4633,7 @@ impl<'a> MachineTlaCompiler<'a> {
                     nested_binding_types.insert(binding.clone(), item_ty);
                 }
                 format!(
-                    "{} {} \\in {} : {}",
+                    "({} {} \\in {} : {})",
                     keyword,
                     binding,
                     self.render_collection_domain(over, env, binding_env, binding_types),
@@ -5449,4 +5449,28 @@ fn tla_ident(value: &str) -> String {
 
 fn tla_string(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\\\""))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_machine_semantic_model;
+    use meerkat_machine_schema::catalog::{peer_comms_machine, runtime_ingress_machine};
+
+    #[test]
+    fn machine_semantic_model_keeps_optional_request_id_domains() {
+        let rendered = render_machine_semantic_model(&runtime_ingress_machine());
+
+        assert!(rendered.contains("\\E arg_request_id \\in OptionRequestIdValues :"));
+        assert!(rendered.contains("\\E arg_reservation_key \\in OptionReservationKeyValues :"));
+    }
+
+    #[test]
+    fn machine_semantic_model_keeps_optional_domains_in_other_machines() {
+        let peer_rendered = render_machine_semantic_model(&peer_comms_machine());
+
+        assert!(peer_rendered.contains("\\E arg_request_id \\in OptionRequestIdValues :"));
+        assert!(
+            peer_rendered.contains("\\E arg_reservation_key \\in OptionReservationKeyValues :")
+        );
+    }
 }

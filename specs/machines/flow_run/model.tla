@@ -27,9 +27,9 @@ RunIsTerminal == ((phase = "Completed") \/ (phase = "Failed") \/ (phase = "Cance
 StepIsTracked(step_id) == (step_id \in tracked_steps)
 StepStatusIs(step_id, expected_status) == ((IF step_id \in DOMAIN step_status THEN step_status[step_id] ELSE "None") = expected_status)
 StepOutputRecordedIs(step_id, expected) == ((IF step_id \in DOMAIN output_recorded THEN output_recorded[step_id] ELSE FALSE) = expected)
-AllTrackedStepsInAllowedStatuses(allowed_statuses) == \A step_id \in tracked_steps : ((IF step_id \in DOMAIN step_status THEN step_status[step_id] ELSE "None") \in SeqElements(allowed_statuses))
-NoTrackedStepInStatus(status) == \A step_id \in tracked_steps : ((IF step_id \in DOMAIN step_status THEN step_status[step_id] ELSE "None") # status)
-AnyTrackedStepInStatus(status) == \E step_id \in tracked_steps : ((IF step_id \in DOMAIN step_status THEN step_status[step_id] ELSE "None") = status)
+AllTrackedStepsInAllowedStatuses(allowed_statuses) == (\A step_id \in tracked_steps : ((IF step_id \in DOMAIN step_status THEN step_status[step_id] ELSE "None") \in SeqElements(allowed_statuses)))
+NoTrackedStepInStatus(status) == (\A step_id \in tracked_steps : ((IF step_id \in DOMAIN step_status THEN step_status[step_id] ELSE "None") # status))
+AnyTrackedStepInStatus(status) == (\E step_id \in tracked_steps : ((IF step_id \in DOMAIN step_status THEN step_status[step_id] ELSE "None") = status))
 
 Init ==
     /\ phase = "Absent"
@@ -172,7 +172,7 @@ Next ==
     \/ TerminalizeCanceled
     \/ TerminalStutter
 
-output_only_follows_completed_steps == \A step_id \in tracked_steps : (~(StepOutputRecordedIs(step_id, TRUE)) \/ StepStatusIs(step_id, "Completed"))
+output_only_follows_completed_steps == (\A step_id \in tracked_steps : (~(StepOutputRecordedIs(step_id, TRUE)) \/ StepStatusIs(step_id, "Completed")))
 terminal_runs_have_no_dispatched_steps == (~(RunIsTerminal) \/ NoTrackedStepInStatus("Dispatched"))
 completed_runs_contain_only_completed_or_skipped_steps == ((phase # "Completed") \/ AllTrackedStepsInAllowedStatuses(<<"Completed", "Skipped">>))
 failed_step_presence_requires_failure_count == (~(AnyTrackedStepInStatus("Failed")) \/ (failure_count >= 1))

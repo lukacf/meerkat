@@ -1,11 +1,11 @@
 project: "Meerkat 0.5"
 last_updated: "2026-03-17"
-package_location: "docs/architecture/0.5/rct"
+package_location: ".rct"
 execution_form: "rct-development-build-first"
 validated_target_baseline_commit: "4e350279"
 
 harness_config:
-  reviewer_manifest: "docs/architecture/0.5/rct/reviewer-manifest.yaml"
+  reviewer_manifest: ".rct/reviewer-manifest.yaml"
   default_impl:
     cli: codex
     model: gpt-5.2

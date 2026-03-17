@@ -1,6 +1,6 @@
 project: "Meerkat 0.5"
 last_updated: "2026-03-17"
-package_location: "docs/architecture/0.5/rct"
+package_location: ".rct"
 execution_mode: "docs-local-rct-development-package"
 source_docs:
   - "docs/architecture/0.5/meerkat_0_5_architecture_outline.md"

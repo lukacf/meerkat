@@ -305,8 +305,13 @@ pub fn build_persistent_service(
     max_sessions: usize,
     persistence: PersistenceBundle,
 ) -> meerkat_session::PersistentSessionService<FactoryAgentBuilder> {
-    let builder = FactoryAgentBuilder::new(factory, config);
+    let mut builder = FactoryAgentBuilder::new(factory, config);
     let (store, runtime_store) = persistence.into_parts();
+    // Inject the persistence store into agent builds so the factory reuses it
+    // instead of creating an independent JsonlStore (which would open a
+    // conflicting session_index.redb in the same directory).
+    builder.default_session_store =
+        Some(Arc::new(meerkat_store::StoreAdapter::new(Arc::clone(&store))));
     meerkat_session::PersistentSessionService::new(builder, max_sessions, store, runtime_store)
 }
 

@@ -1,11 +1,11 @@
 ---
 name: meerkat-architecture
-description: "Internal architecture guide for the Meerkat agent platform. This skill should be used when understanding crate ownership, trait contracts, the agent construction pipeline, session service lifecycle, mob orchestration internals, comms wiring, or making cross-cutting architectural changes. Oriented toward AI agents and developers working on meerkat internals, not end users."
+description: "Internal architecture guide for the Meerkat agent platform. This skill should be used when understanding crate ownership, trait contracts, the agent construction pipeline, session service lifecycle, runtime control plane, mob orchestration internals, machine authority, comms wiring, or making cross-cutting architectural changes. Oriented toward AI agents and developers working on meerkat internals, not end users."
 ---
 
 # Meerkat Internal Architecture
 
-Meerkat is a library-first agent runtime. The execution pipeline is shared across all surfaces. Understanding crate ownership, trait contracts, and the agent construction pipeline is essential for making changes that don't break architectural invariants.
+Meerkat is a library-first agent runtime. The execution pipeline is shared across all surfaces. Understanding crate ownership, trait contracts, the runtime control plane, and the agent construction pipeline is essential for making changes that don't break architectural invariants.
 
 ## Core Principles
 
@@ -13,28 +13,44 @@ Meerkat is a library-first agent runtime. The execution pipeline is shared acros
 2. **Trait contracts own the architecture** — `meerkat-core` defines contracts; implementations live in satellite crates.
 3. **Surfaces are interchangeable skins** — CLI, REST, RPC, MCP, WASM all route through `SessionService` → `AgentFactory::build_agent()`.
 4. **Composition over configuration** — optional components are `Option<Arc<dyn Trait>>`, not feature-flagged defaults.
-5. **Override-first resource injection** — `AgentBuildConfig` overrides take precedence over factory/config/filesystem resolution.
+5. **Runtime conforms to machines** — the runtime must follow the verified machine model, not the other way around.
+6. **Mob is the only multi-agent path** — there is no sub-agent system. All delegated/forked/helper work routes through mob orchestration.
+7. **Override-first resource injection** — `AgentBuildConfig` overrides take precedence over factory/config/filesystem resolution.
 
 ## Crate Ownership
 
 | Crate | Owns | Key Trait |
 |-------|------|-----------|
 | `meerkat-models` | Model catalog, provider profiles, parameter schemas (leaf crate, no meerkat deps) | — |
-| `meerkat-core` | Agent loop, types, budget, retry, state machine, ALL trait contracts | `AgentLlmClient`, `AgentToolDispatcher` (incl. `bind_wait_interrupt`, `supports_wait_interrupt`), `AgentSessionStore`, `SessionService` (incl. `set_session_client`), `SessionAgent` (incl. `replace_client`), `CommsRuntime`, `HookEngine` |
-| `meerkat-client` | LLM providers (Anthropic, OpenAI, Gemini) | Implements `AgentLlmClient` (via `LlmClientAdapter`) |
+| `meerkat-core` | Agent loop, types, budget, retry, state machine, ALL trait contracts | `AgentLlmClient`, `AgentToolDispatcher`, `AgentSessionStore`, `SessionService`, `CommsRuntime`, `HookEngine`, `OpsLifecycleRegistry` |
+| `meerkat-client` | LLM providers (Anthropic, OpenAI, Gemini) | Implements `AgentLlmClient` |
 | `meerkat-store` | Session persistence (SQLite, Jsonl, Memory, Redb) | Implements `SessionStore` |
-| `meerkat-tools` | Tool registry, dispatch, builtins (task tools, utility helpers like `apply_patch`, shell/comms/delegated-work compatibility surfaces) | Implements `AgentToolDispatcher` |
+| `meerkat-tools` | Tool registry, dispatch, builtins (task tools, utility helpers, shell) | Implements `AgentToolDispatcher` |
 | `meerkat-session` | Session orchestration (Ephemeral, Persistent) | Implements `SessionService` |
-| `meerkat-comms` | Inter-agent messaging (inproc, TCP, UDS) | Implements `CommsRuntime` |
-| `meerkat-mob` | Multi-agent orchestration (MobBuilder, FlowEngine) | `MobSessionService`, `MobProvisioner` (mob-local traits) |
+| `meerkat-runtime` | Runtime control plane, input lifecycle, policy engine, drivers (ephemeral/persistent), silent intent override | `RuntimeControlPlane`, `RuntimeDriver`, `RuntimeSessionAdapter` |
+| `meerkat-comms` | Inter-agent messaging (inproc, TCP, UDS, Ed25519) | Implements `CommsRuntime` |
+| `meerkat-mob` | Multi-agent orchestration (MobBuilder, MobActor, FlowEngine, member provisioning) | `MobSessionService`, `MobProvisioner` |
 | `meerkat-mob-pack` | Mobpack archive format, signing, trust policies, validation | — |
 | `meerkat-mob-mcp` | Expose mob tools as MCP interface | `MobMcpState`, `MobMcpDispatcher` |
 | `meerkat-web-runtime` | WASM browser deployment (wasm_bindgen exports) | — |
 | `meerkat-hooks` | Hook runtimes (in-process, command, HTTP) | Implements `HookEngine` |
 | `meerkat-skills` | Skill loading (filesystem, git, HTTP, embedded) | Implements `SkillEngine` |
+| `meerkat-machine-schema` | Rust-native machine/composition catalog (10 machines, 7 compositions) — the formal authority | — |
+| `meerkat-machine-kernels` | Generated kernel interpreter for all machines | `GeneratedMachineKernel` |
+| `meerkat-machine-codegen` | TLA+ model generation, TLC verification, drift detection | — |
 | `meerkat` (facade) | AgentFactory, FactoryAgentBuilder, build_ephemeral_service, re-exports | Wires everything together |
 
 **Rule: meerkat-core has zero I/O dependencies.** All I/O happens in satellite crates.
+
+## Machine Authority
+
+The system is formally modeled as 10 state machines with 7 compositions, verified by TLC/TLA+.
+
+**Design rule:** centralized `meerkat-machine-kernels` is the enforced layout. Owner crates do NOT have `machines/mod.rs` re-export modules. The xtask verification explicitly rejects parallel owner modules.
+
+**Machines:** InputLifecycleMachine, RuntimeControlMachine, RuntimeIngressMachine, OpsLifecycleMachine, PeerCommsMachine, ExternalToolSurfaceMachine, TurnExecutionMachine, MobLifecycleMachine, FlowRunMachine, MobOrchestratorMachine.
+
+**Verification:** `cargo xtask machine-codegen --all` (regenerate), `cargo xtask machine-check-drift --all` (detect stale artifacts), `cargo xtask machine-verify --all` (TLC model checking + owner tests).
 
 ## Agent Construction Pipeline
 
@@ -45,17 +61,47 @@ Meerkat is a library-first agent runtime. The execution pipeline is shared acros
 3. Create LLM client (override > factory credentials > config)
 4. Create LLM adapter (with event channel and event tap)
 5. Resolve max_tokens
-6a. Build skill engine (override > factory > config > filesystem)
-6b. Build tool dispatcher (override > factory builtin builder); create comms runtime (if comms_name set; inproc on wasm32); wire delegated child-session comms inheritance for legacy compatibility only
+6. Build skill engine and tool dispatcher
 7. Create session store (override > factory custom_store > feature-flag default)
-9. Compose tools with comms (add send/list_peers tools)
-10. Resolve hooks (override > filesystem layered config)
-11. Generate skill inventory
-12. Build system prompt + AgentBuilder + wire memory/compactor/skill-engine/event-tap/checkpointer
-13. Build agent
-14. Set SessionMetadata
+8. Compose tools with comms (add send/list_peers tools)
+9. Resolve hooks (override > filesystem layered config)
+10. Build system prompt + AgentBuilder + wire memory/compactor/skill-engine/ops-lifecycle/event-tap/checkpointer
+11. Build agent, set SessionMetadata
 
 **Precedence at every step:** `build_config override > factory field > config resolution > default`
+
+## Agent Loop State Machine
+
+`CallingLlm` → `WaitingForOps` → `DrainingEvents` → `Completed`
+
+With branches: `ErrorRecovery`, `Cancelling`
+
+**WaitingForOps is real.** The agent state owns a `pending_ops` set. Tool dispatch registers each tool call as an operation in `OpsLifecycleRegistry` and adds its ID to the pending set. The loop transitions to WaitingForOps and awaits completions. This is an **all-complete barrier** — the loop stays in WaitingForOps until every pending operation reaches terminal state. No incremental partial re-entry. Progress events can be forwarded while waiting.
+
+## Runtime Control Plane
+
+`RuntimeSessionAdapter` implements the `RuntimeControlPlane` trait with per-session `RuntimeDriver` instances (ephemeral or persistent).
+
+**Key operations:**
+- `ingest` — admit an input through policy resolution
+- `retire` — graceful drain (process queue, reject new input)
+- `respawn` — retire old session, spawn fresh with same identity/spec/wiring, new session ID
+- `reset` — abandon pending, return to Idle
+- `recover` — replay from store for crash recovery
+- `destroy` — terminal state, no recovery
+- `runtime_state` — query current state (Initializing/Idle/Running/Recovering/Retired/Stopped/Destroyed)
+
+**Policy engine:** `DefaultPolicyTable` resolves `PolicyDecision` per input kind × runtime state. 9 input kinds (prompt, peer_message, peer_request, peer_response_progress, peer_response_terminal, flow_step, external_event, continuation, operation) × 2 states (idle, running). Each cell specifies ApplyMode, WakeMode, QueueMode, ConsumePoint, InterruptPolicy, DrainPolicy, RoutingDisposition.
+
+**Silent intent override:** If an incoming peer intent matches the session's `silent_comms_intents` list, the policy is overridden to `ApplyMode::Ignore`, `WakeMode::None` — no LLM turn triggered. This is canonical runtime-owned behavior.
+
+**Respawn semantics:** Same member identity (MeerkatId), spec, and peer wiring — **new session ID**. Old session archived. Used for "agent is confused, restart it" recovery.
+
+## OpsLifecycleRegistry
+
+Trait in `meerkat-core/src/ops_lifecycle.rs`, concrete impl (`RuntimeOpsLifecycleRegistry`) in `meerkat-runtime/src/ops_lifecycle.rs`.
+
+**Capabilities:** register/complete/fail/cancel/retire operations, `wait_all`, `collect_completed`, bounded completed-operation retention (FIFO eviction, default 256), multi-listener completion observation, peer info in snapshots, wall-clock timestamps (`created_at_ms`, `completed_at_ms`, `elapsed_ms` from SystemTime anchor), per-parent concurrency enforcement (`max_concurrent`).
 
 ## Session Service
 
@@ -73,115 +119,133 @@ Two implementations:
 
 `FactoryAgentBuilder` bridges `AgentFactory` into `SessionAgentBuilder`.
 
-## Persistence pairing
+## Persistence Pairing
 
 Persistent realm opening is backend-owned in the `meerkat` facade through `PersistenceBundle`.
 
 - Surfaces open a realm bundle, not a raw session store plus ad hoc runtime companion.
 - The bundle carries the paired `SessionStore`, optional `RuntimeStore`, and matching `RuntimeSessionAdapter`.
 - SQLite is now the default persistent realm backend when compiled; redb remains explicit.
-- Backend-specific pairing logic should stay in the persistence seam, not in `SessionStore` and not in `meerkat-runtime`.
 
 ## Mob Orchestration
+
+**There is no sub-agent system.** All multi-agent work routes through mobs.
 
 ```
 MobBuilder::new(definition, storage)
   .with_session_service(service)
-  .allow_ephemeral_sessions(true)  // for non-persistent services
+  .allow_ephemeral_sessions(true)
   .create() → MobHandle
 ```
 
 `MobHandle` is clone-cheap (Arc-shared state). Sends commands to `MobActor` via channel.
 
-**Provisioning:** `MobActor` → `MobProvisioner` → session-backed provisioner (`SubagentBackend` in the current code) → `session_service.create_session(req)`. Members are real sessions.
+### Member Launch Modes
 
-**Wiring:** Definition has `WiringRules` with `role_wiring: [{a, b}]`. At spawn time, `MobActor::spawn_wiring_targets()` computes peers, `do_wire()` establishes bidirectional trust via comms.
+`MemberLaunchMode` (in `meerkat-mob/src/launch.rs`):
+- `Fresh` — new session (default)
+- `Resume { session_id }` — resume existing session
+- `Fork { source_member_id, fork_context }` — fork from another member's history
 
-**Flows:** DAG of steps. Each step has a role, message, depends_on. `FlowEngine` dispatches turns to members via provisioner. Turn-driven mode: explicit `start_turn()`. Autonomous mode: inject via `event_injector`.
+`ForkContext`:
+- `FullHistory` — `Session::fork()` (O(1) CoW)
+- `LastMessages { count }` — `source.last_n(n).to_vec()` (shallow copy)
+
+### Spawn Policies
+
+`SpawnMemberSpec` carries: `launch_mode`, `tool_access_policy` (inherit/allow-list/deny-list), `budget_split_policy` (Equal/Proportional/Remaining/Fixed), `auto_wire_parent` (bool).
+
+Budget splitting: orchestrator reads remaining budget, computes share per policy, decrements own budget, seeds child `BudgetLimits`.
+
+### Helper Convenience
+
+- `MobHandle::spawn_helper(prompt, opts)` — synthesize ephemeral mob, spawn, wait, return result, teardown
+- `MobHandle::fork_helper(source_id, prompt, opts)` — same but with Fork launch mode
+
+Profile source rule: agent-internal surfaces inherit from caller config. Non-agent surfaces (REST/RPC/CLI/MCP) require explicit config source — never silent defaults.
+
+### Lifecycle Control
+
+- `retire_member(id)` — archive session, remove from roster
+- `force_cancel_member(id)` — cancel in-flight turn (distinct from retire)
+- `respawn(id, initial_message)` — retire old session → enqueue spawn with same identity/profile/wiring/labels → new session ID
+- `member_status(id)` → `MemberExecutionSnapshot` (status, output, error, timestamps, tokens, is_final, peer_metadata)
+- `wait_one(id)`, `wait_all(ids)`, `collect_completed()`
+
+### Provisioning
+
+`MobActor` → `MobProvisioner` → session-backed provisioner → `session_service.create_session(req)`. Members are real sessions.
+
+### Wiring
+
+Definition has `WiringRules` with `role_wiring: [{a, b}]`. At spawn time, `MobActor` computes wiring targets and establishes bidirectional trust via comms.
+
+### Flows
+
+DAG of steps. Each step has a role, message, depends_on. `FlowEngine` dispatches turns to members via provisioner. Turn-driven mode: explicit `start_turn()`. Autonomous mode: inject via `event_injector`.
+
+### Actor Decomposition
+
+MobActor is composed of narrowly-scoped service objects:
+- `MobLifecycleOwner` — state transitions (lock-free AtomicU8)
+- `MobOrchestratorKernel` — coordinator binding, spawn/flow tracking
+- `FlowRunKernel` — flow run creation and terminalization
+- `SpawnPolicyService` — runtime policy swap (RwLock)
+- `MobOpsAdapter` — bridges to `OpsLifecycleRegistry`
+- `MobTaskBoardService` — task board validation and persistence
 
 ## Multimodal Content
 
-`ContentBlock` (meerkat-core) is the unit of rich content. Two variants:
-- `ContentBlock::Text { text }` — plain text.
-- `ContentBlock::Image { media_type, data, source_path }` — base64-encoded image. `source_path` is domain-only (stripped from wire).
-
-`ContentInput` (meerkat-core) is the prompt type for `CreateSessionRequest.prompt` and `StartTurnRequest.prompt`:
-- `ContentInput::Text(String)` — plain text (implements `From<&str>` and `From<String>`).
-- `ContentInput::Blocks(Vec<ContentBlock>)` — multimodal content blocks.
-
-`ToolOutput` (meerkat-tools) is the return type for `BuiltinTool::call()`:
-- `ToolOutput::Json(Value)` — standard JSON result, serialized to text.
-- `ToolOutput::Blocks(Vec<ContentBlock>)` — rich content blocks injected into `ToolResult.content`.
-
-`ToolResult.content` is `Vec<ContentBlock>` (replacing the former single-string model).
-`UserMessage.content` is `Vec<ContentBlock>`.
-
-**Capability gating:** `ModelProfile` has `vision: bool` and `image_tool_results: bool`. The `view_image` builtin tool is hidden via `ToolScope` when either is false. Per-provider: Anthropic (both true), OpenAI (vision true, image_tool_results false), Gemini (both true).
-
-**Wire types:** `WireContentBlock` (no `source_path`), `WireContentInput`, `WireToolResultContent` in meerkat-contracts.
-
-**Comms:** `MessageKind`, `CommsContent`, `InteractionContent` have `blocks: Option<Vec<ContentBlock>>` alongside `body: String`.
+`ContentBlock` (meerkat-core): `Text { text }` or `Image { media_type, data, source_path }`.
+`ContentInput` (meerkat-core): `Text(String)` or `Blocks(Vec<ContentBlock>)`.
+`ToolOutput` (meerkat-tools): `Json(Value)` or `Blocks(Vec<ContentBlock>)`.
 
 ## Tool Scoping
 
-`ToolScope` (meerkat-core) manages runtime tool visibility with staged-then-applied semantics:
-
-- **External filters** — staged via `ToolScopeHandle`, applied atomically at `CallingLlm` boundary. Persisted in session metadata.
-- **Per-turn overlays** — `TurnToolOverlay` set by mob flow engine for step-scoped restrictions. Ephemeral, not staged.
-- **Live MCP mutation** — `McpRouter` has a staging queue (`stage_add/remove/reload`), applied at turn boundary. Servers in removal go through `Active → Removing (draining) → Removed`.
-- **Composition rule** — most-restrictive wins: allow-lists intersect, deny-lists union, deny beats allow.
-- **Agent loop integration** — `tool_scope.apply_staged()` called at top of each `CallingLlm` iteration before `stream_response()`. Emits `ToolConfigChanged` event and `[SYSTEM NOTICE]` user message on change.
-
-**Key files:** `meerkat-core/src/tool_scope.rs`, `meerkat-core/src/agent/state.rs` (boundary apply), `meerkat-mcp/src/router.rs` (staged MCP ops).
-
-### Non-blocking MCP loading pipeline
-
-MCP servers connect in parallel via `stage_add()` + `apply_staged()` which spawns background tasks per server. Completions flow through a pending channel pattern:
-
-1. **`McpRouter`** — `pending_tx`/`pending_rx` channel, `pending_servers` map, generation-based staleness detection.
-2. **`McpRouterAdapter`** — bridges to `AgentToolDispatcher`. `has_pending` `AtomicBool` (Acquire/Release) gates fast-path skip of write lock in `poll_external_updates()`.
-3. **Agent loop** — `CallingLlm` calls `tools.poll_external_updates()` before tool capture. Returns `ExternalToolUpdate { notices, pending }`. Emits `ToolConfigChanged` for each notice. Manages `[MCP_PENDING]` synthetic user message lifecycle (strip + re-add on every iteration).
-4. **Forwarding** — `poll_external_updates()` forwarded through `CompositeDispatcher` → `ToolGateway` (aggregates + deduplicates by `(server, operation, status)`) → `FilteredToolDispatcher` (passthrough).
-5. **`wait_until_ready(timeout)`** — poll loop on `McpRouterAdapter` for surfaces that need blocking (CLI `--wait-for-mcp`, SDK `AgentBuildConfig.wait_for_mcp`).
-
-**Key files:** `meerkat-mcp/src/router.rs`, `meerkat-mcp/src/adapter.rs`, `meerkat-core/src/agent/state.rs` (CallingLlm boundary), `meerkat-core/src/gateway.rs` (ToolGateway dedup).
+`ToolScope` manages runtime tool visibility with staged-then-applied semantics:
+- **External filters** — staged via `ToolScopeHandle`, applied atomically at `CallingLlm` boundary.
+- **Per-turn overlays** — `TurnToolOverlay` for mob flow step-scoped restrictions.
+- **Live MCP mutation** — `McpRouter` staging queue, applied at turn boundary.
+- **Composition rule** — most-restrictive wins.
 
 ## Comms Model
 
-- **InprocRegistry** — process-global peer discovery. All sessions in the same process share it.
-- **CommsRuntime** — per-session. Created by `AgentFactory::build_agent()` when `comms_name` is set.
-- **Wiring** — bidirectional trust. Each peer has a `TrustedPeerSpec` with name, public key, address.
-- **Unified trust state** — single `Arc<parking_lot::RwLock<TrustedPeers>>` shared by Router, `IngressClassificationContext`, and `trusted_peers_shared()` callers. Mutations through any handle are immediately visible to classification.
-- **Ingress classification** — single-pass classification via `IngressClassificationContext`. Untrusted items dropped at ingress (snapshot semantics). `actionable_input_notify` fires only for `ActionableMessage`/`ActionableRequest`, preventing false wakes from acks, lifecycle traffic, and plain events.
+- **InprocRegistry** — process-global peer discovery.
+- **CommsRuntime** — per-session, created by `AgentFactory::build_agent()` when `comms_name` is set.
+- **Wiring** — bidirectional trust. Each peer has `TrustedPeerSpec`.
+- **Unified trust state** — single `Arc<parking_lot::RwLock<TrustedPeers>>`.
 - **Not all mob members are peers.** Wiring rules control which members can communicate.
-- **Cross-mob communication** — agents with `external_addressable: true` are visible in InprocRegistry to agents in other mobs.
-
-## Mid-Session Model Hot-Swap
-
-- `Agent::replace_client(&mut self, client)` swaps the LLM client on a live agent without rebuilding.
-- `SessionAgent::replace_client()` trait method (default no-op) bridges into the session layer.
-- `SessionService::set_session_client(session_id, client)` routes through the session service (default returns `SessionError::Unsupported`).
-- `SessionError::Unsupported(String)` — new error variant for capability negotiation. Ephemeral sessions reject hot-swap; persistent sessions support it.
-- RPC `turn/start` accepts `model`/`provider`/`provider_params` on materialized sessions, builds a new client via `AgentFactory::build_llm_adapter()`, and hot-swaps before the turn.
 
 ## Key Architectural Invariants
 
 1. **Never bypass build_agent()** — all agent construction goes through this pipeline.
 2. **Never import implementations in business logic** — use traits from meerkat-core.
-3. **Errors separate mechanism from policy** — `ToolError → AgentError → SessionError`.
-4. **Wire types ≠ domain types** — `meerkat-contracts` owns wire format; `meerkat-core` owns domain types.
-5. **Sessions are first-class, persistence is optional** — Ephemeral and Persistent share the same trait.
-6. **Capability negotiation via `Unsupported`** — optional service methods default to `Err(SessionError::Unsupported(...))`. Callers probe before committing.
-7. **Platform differences are overrides, not cfg-gates in business logic** — if you need `#[cfg(wasm32)]` inside `build_agent()`, the abstraction is wrong.
+3. **No sub-agent system** — all multi-agent work goes through mobs. No SubAgentManager, no agent_spawn/agent_fork.
+4. **Runtime conforms to machines** — runtime behavior must match verified machine schemas. No owner-crate `machines/mod.rs` re-exports; centralized `meerkat-machine-kernels` is the enforced design.
+5. **Errors separate mechanism from policy** — `ToolError → AgentError → SessionError`.
+6. **Wire types ≠ domain types** — `meerkat-contracts` owns wire format; `meerkat-core` owns domain types.
+7. **Sessions are first-class, persistence is optional** — Ephemeral and Persistent share the same trait.
+8. **No backward compatibility aliases** — 0.5 is a clean cut. No serde aliases for old names.
+9. **No `.unwrap()`/`.expect()`/`panic!()` in library code** — use `?` propagation or explicit error handling.
 
 ## Key Files
 
-For detailed crate-by-crate reference, load: `references/crate_map.md`.
-
 - `meerkat-core/src/agent.rs` — agent loop state machine
+- `meerkat-core/src/agent/state.rs` — run_loop, WaitingForOps dispatch
+- `meerkat-core/src/ops_lifecycle.rs` — OpsLifecycleRegistry trait
 - `meerkat/src/factory.rs` — `AgentFactory::build_agent()` (the pipeline)
-- `meerkat/src/service_factory.rs` — `FactoryAgentBuilder` (bridges factory to session service)
-- `meerkat-session/src/ephemeral.rs` — `EphemeralSessionService`
-- `meerkat-mob/src/runtime/actor.rs` — mob actor (spawn, wire, flow dispatch)
-- `meerkat-mob/src/definition.rs` — `MobDefinition`, `WiringRules`, `FlowSpec`
-- `meerkat-comms/src/runtime/comms_runtime.rs` — `CommsRuntime`
+- `meerkat/src/service_factory.rs` — `FactoryAgentBuilder`
+- `meerkat-runtime/src/session_adapter.rs` — RuntimeSessionAdapter, RuntimeControlPlane impl
+- `meerkat-runtime/src/policy_table.rs` — DefaultPolicyTable (policy matrix)
+- `meerkat-runtime/src/ops_lifecycle.rs` — RuntimeOpsLifecycleRegistry
+- `meerkat-runtime/src/silent_intent.rs` — silent intent override
+- `meerkat-session/src/ephemeral.rs` — EphemeralSessionService
+- `meerkat-mob/src/launch.rs` — MemberLaunchMode, ForkContext, BudgetSplitPolicy
+- `meerkat-mob/src/runtime/handle.rs` — MobHandle, SpawnMemberSpec, MemberExecutionSnapshot
+- `meerkat-mob/src/runtime/actor.rs` — MobActor (spawn, wire, flow, respawn)
+- `meerkat-mob/src/runtime/tools.rs` — mob tool definitions
+- `meerkat-machine-schema/src/catalog/` — machine definitions (10 machines)
+- `meerkat-machine-kernels/src/runtime.rs` — GeneratedMachineKernel interpreter
+- `meerkat-comms/src/runtime/comms_runtime.rs` — CommsRuntime
+
+For detailed crate-by-crate reference, load: `references/crate_map.md`.

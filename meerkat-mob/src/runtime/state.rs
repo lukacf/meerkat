@@ -1,7 +1,11 @@
+#[cfg(test)]
+use super::orchestrator_kernel::MobOrchestratorSnapshot;
 use super::*;
 use crate::run::MobRun;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 // ---------------------------------------------------------------------------
 // MobState
@@ -49,6 +53,73 @@ impl MobState {
 impl std::fmt::Display for MobState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+/// Narrow lifecycle owner for top-level mob state and tracked flow cleanup.
+#[derive(Clone)]
+pub(super) struct MobLifecycleOwner {
+    state: Arc<AtomicU8>,
+    tracked_flows: Arc<AtomicUsize>,
+}
+
+impl MobLifecycleOwner {
+    pub(super) fn new(state: Arc<AtomicU8>) -> Self {
+        Self {
+            state,
+            tracked_flows: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    pub(super) fn state(&self) -> MobState {
+        MobState::from_u8(self.state.load(Ordering::Acquire))
+    }
+
+    pub(super) fn expect_transition(
+        &self,
+        expected: &[MobState],
+        to: MobState,
+    ) -> Result<(), MobError> {
+        let current = self.state();
+        if !expected.contains(&current) {
+            return Err(MobError::InvalidTransition { from: current, to });
+        }
+        Ok(())
+    }
+
+    pub(super) fn require_state(&self, allowed: &[MobState]) -> Result<(), MobError> {
+        let current = self.state();
+        if !allowed.contains(&current) {
+            return Err(MobError::InvalidTransition {
+                from: current,
+                to: allowed[0],
+            });
+        }
+        Ok(())
+    }
+
+    pub(super) fn set_state(&self, next: MobState) {
+        self.state.store(next as u8, Ordering::Release);
+    }
+
+    pub(super) fn register_tracked_flow(&self) {
+        self.tracked_flows.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub(super) fn finish_tracked_flow(&self) {
+        let _ = self
+            .tracked_flows
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                Some(count.saturating_sub(1))
+            });
+    }
+
+    pub(super) fn clear_tracked_flows(&self) {
+        self.tracked_flows.store(0, Ordering::Release);
+    }
+
+    pub(super) fn tracked_flow_count(&self) -> usize {
+        self.tracked_flows.load(Ordering::Acquire)
     }
 }
 
@@ -121,6 +192,10 @@ pub(super) enum MobCommand {
     FlowTrackerCounts {
         reply_tx: oneshot::Sender<(usize, usize)>,
     },
+    #[cfg(test)]
+    OrchestratorSnapshot {
+        reply_tx: oneshot::Sender<MobOrchestratorSnapshot>,
+    },
     Stop {
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
@@ -155,4 +230,37 @@ pub(super) enum MobCommand {
     Shutdown {
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lifecycle_owner_rejects_invalid_transition() {
+        let owner = MobLifecycleOwner::new(Arc::new(AtomicU8::new(MobState::Running as u8)));
+        let err = owner
+            .expect_transition(&[MobState::Stopped], MobState::Running)
+            .expect_err("running should not satisfy stopped-only transition");
+        assert!(matches!(
+            err,
+            MobError::InvalidTransition {
+                from: MobState::Running,
+                to: MobState::Running
+            }
+        ));
+    }
+
+    #[test]
+    fn lifecycle_owner_tracks_flows_without_underflow() {
+        let owner = MobLifecycleOwner::new(Arc::new(AtomicU8::new(MobState::Running as u8)));
+        owner.register_tracked_flow();
+        owner.register_tracked_flow();
+        assert_eq!(owner.tracked_flow_count(), 2);
+
+        owner.finish_tracked_flow();
+        owner.finish_tracked_flow();
+        owner.finish_tracked_flow();
+        assert_eq!(owner.tracked_flow_count(), 0);
+    }
 }

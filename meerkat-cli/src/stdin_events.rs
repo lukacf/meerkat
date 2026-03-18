@@ -1,14 +1,14 @@
-//! Stdin event reader for CLI host mode.
+//! Stdin event reader for runtime-backed CLI sessions.
 //!
 //! Reads newline-delimited lines from stdin, auto-detects JSON/text,
-//! and injects them as `PlainEvent` items via the `EventInjector` trait.
+//! and admits them as runtime-backed `ExternalEvent` inputs.
 
-use meerkat_core::EventInjector;
-use meerkat_core::PlainEventSource;
-use meerkat_core::event_injector::EventInjectorError;
 use std::sync::Arc;
 use tokio::io::AsyncBufReadExt;
 use tokio::task::JoinHandle;
+
+use meerkat_core::SessionId;
+use meerkat_runtime::SessionServiceRuntimeExt as _;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StdinLineFormat {
@@ -26,12 +26,32 @@ pub fn parse_stdin_line(line: &str, format: StdinLineFormat) -> String {
     }
 }
 
-/// Spawn a background task that reads lines from stdin and injects them as events.
+fn make_stdin_external_event_input(body: String) -> meerkat_runtime::Input {
+    meerkat_runtime::Input::ExternalEvent(meerkat_runtime::ExternalEventInput {
+        header: meerkat_runtime::InputHeader {
+            id: meerkat_core::lifecycle::InputId::new(),
+            timestamp: chrono::Utc::now(),
+            source: meerkat_runtime::InputOrigin::External {
+                source_name: "stdin".to_string(),
+            },
+            durability: meerkat_runtime::InputDurability::Durable,
+            visibility: meerkat_runtime::InputVisibility::default(),
+            idempotency_key: None,
+            supersession_key: None,
+            correlation_id: None,
+        },
+        event_type: "stdin".to_string(),
+        payload: serde_json::json!({ "body": body }),
+    })
+}
+
+/// Spawn a background task that reads lines from stdin and admits them through
+/// the runtime-backed external-event path.
 ///
-/// The task exits cleanly on EOF or when the injector's inbox is closed.
-/// On inbox full, it logs a warning and drops the line (backpressure).
+/// The task exits cleanly on EOF or when the runtime stops accepting input.
 pub fn spawn_stdin_reader(
-    injector: Arc<dyn EventInjector>,
+    runtime_adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
+    session_id: SessionId,
     format: StdinLineFormat,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -44,13 +64,32 @@ pub fn spawn_stdin_reader(
             if body.is_empty() {
                 continue;
             }
-            match injector.inject(body, PlainEventSource::Stdin) {
-                Ok(()) => {}
-                Err(EventInjectorError::Full) => {
-                    tracing::warn!("Stdin reader: inbox full, dropping event");
+            match runtime_adapter
+                .accept_input(&session_id, make_stdin_external_event_input(body))
+                .await
+            {
+                Ok(meerkat_runtime::AcceptOutcome::Accepted { .. })
+                | Ok(meerkat_runtime::AcceptOutcome::Deduplicated { .. }) => {}
+                Ok(meerkat_runtime::AcceptOutcome::Rejected { reason }) => {
+                    tracing::warn!("Stdin reader: runtime rejected stdin event: {reason}");
                 }
-                Err(EventInjectorError::Closed) => {
-                    tracing::debug!("Stdin reader: inbox closed, exiting");
+                Ok(outcome) => {
+                    tracing::warn!(
+                        "Stdin reader: unexpected runtime accept outcome, exiting: {outcome:?}"
+                    );
+                    return;
+                }
+                Err(meerkat_runtime::RuntimeDriverError::Destroyed) => {
+                    tracing::debug!("Stdin reader: runtime destroyed, exiting");
+                    return;
+                }
+                Err(meerkat_runtime::RuntimeDriverError::NotReady { state }) => {
+                    tracing::warn!(
+                        "Stdin reader: runtime not ready for stdin event while in state {state}"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!("Stdin reader: runtime admission failed: {err}");
                     return;
                 }
             }
@@ -90,5 +129,19 @@ mod tests {
     #[test]
     fn test_parse_stdin_line_empty() {
         assert_eq!(parse_stdin_line("", StdinLineFormat::Text), "");
+    }
+
+    #[test]
+    fn test_make_stdin_external_event_input_uses_runtime_external_event_shape() {
+        let input = make_stdin_external_event_input("hello".to_string());
+        let meerkat_runtime::Input::ExternalEvent(event) = input else {
+            panic!("expected external event input");
+        };
+        assert_eq!(event.event_type, "stdin");
+        assert_eq!(event.payload["body"], "hello");
+        assert!(matches!(
+            event.header.source,
+            meerkat_runtime::InputOrigin::External { ref source_name } if source_name == "stdin"
+        ));
     }
 }

@@ -20,12 +20,12 @@ use crate::comms::{
 };
 use crate::config::{AgentConfig, HookRunOverrides};
 use crate::error::AgentError;
+use crate::event::ExternalToolDelta;
 use crate::hooks::HookEngine;
 use crate::retry::RetryPolicy;
 use crate::schema::{CompiledSchema, SchemaError};
 use crate::session::Session;
 use crate::state::LoopState;
-use crate::sub_agent::SubAgentManager;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use crate::tool_scope::ToolScope;
@@ -120,28 +120,13 @@ impl LlmStreamResult {
     }
 }
 
-/// A notice about an externally-completed tool configuration change.
-///
-/// Produced by background MCP connection tasks and consumed by the agent loop.
-#[derive(Debug, Clone)]
-pub struct ExternalToolNotice {
-    /// Server or source name.
-    pub server: String,
-    /// What kind of operation completed.
-    pub operation: crate::event::ToolConfigChangeOperation,
-    /// Human-readable status (e.g. "activated", "failed").
-    pub status: String,
-    /// Number of tools provided (on success).
-    pub tool_count: Option<usize>,
-}
-
 /// Result of polling for external tool updates.
 ///
 /// Returned by [`AgentToolDispatcher::poll_external_updates`].
 #[derive(Debug, Clone, Default)]
 pub struct ExternalToolUpdate {
     /// Notices about completed background operations since last poll.
-    pub notices: Vec<ExternalToolNotice>,
+    pub notices: Vec<ExternalToolDelta>,
     /// Names of servers still connecting in the background.
     pub pending: Vec<String>,
 }
@@ -494,7 +479,6 @@ where
     budget: Budget,
     retry_policy: RetryPolicy,
     state: LoopState,
-    sub_agent_manager: Arc<SubAgentManager>,
     depth: u32,
     pub(super) comms_runtime: Option<Arc<dyn CommsRuntime>>,
     pub(super) hook_engine: Option<Arc<dyn HookEngine>>,
@@ -537,13 +521,13 @@ where
     /// Whether peer lifecycle updates are currently suppressed due to threshold policy.
     /// Used to inject suppression notice only on transition into suppressed mode.
     pub(crate) peer_notification_suppression_active: bool,
-    /// When true, the host loop owns the inbox drain cycle.
+    /// When true, the host-mode compatibility loop owns the inbox drain cycle.
     /// `drain_comms_inbox()` becomes a no-op to avoid stealing
-    /// interaction-scoped messages through the legacy path.
+    /// interaction-scoped messages through the compatibility path.
     pub(crate) host_drain_active: bool,
-    /// Optional sink for routing host-mode new-run work through the runtime.
-    /// When set, passthrough interactions and continuation runs use the sink
-    /// instead of calling `self.run()` directly.
+    /// Optional bridge for routing host-mode peer/event work through the runtime.
+    /// When set, ordinary comms execution stays runtime-backed instead of
+    /// calling `self.run()` directly from the host loop.
     pub(crate) runtime_input_sink: Option<Arc<dyn RuntimeInputSink>>,
     /// True after the agentic loop completes when `output_schema` is set.
     /// Causes the next `CallingLlm` iteration to use extraction parameters

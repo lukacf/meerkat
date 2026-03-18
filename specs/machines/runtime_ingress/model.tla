@@ -208,13 +208,13 @@ StageDrainSnapshot(run_id, contributing_work_ids) ==
     /\ phase = "Active" \/ phase = "Retired"
     /\ (current_run = None)
     /\ (Len(contributing_work_ids) > 0)
-    /\ (((Len(steer_queue) > 0) /\ (contributing_work_ids = steer_queue)) \/ ((Len(steer_queue) = 0) /\ StartsWith(queue, contributing_work_ids)))
+    /\ (((Len(steer_queue) > 0) /\ StartsWith(steer_queue, contributing_work_ids)) \/ ((Len(steer_queue) = 0) /\ StartsWith(queue, contributing_work_ids)))
     /\ (\A work_id \in SeqElements(contributing_work_ids) : ((IF work_id \in DOMAIN lifecycle THEN lifecycle[work_id] ELSE "None") = "Queued"))
     /\ phase' = "Active"
     /\ model_step_count' = model_step_count + 1
     /\ lifecycle' = StageDrainSnapshot_ForEach0_lifecycle(lifecycle, contributing_work_ids, run_id)
     /\ queue' = IF (Len(steer_queue) > 0) THEN queue ELSE SeqRemoveAll(queue, contributing_work_ids)
-    /\ steer_queue' = IF (Len(steer_queue) > 0) THEN <<>> ELSE steer_queue
+    /\ steer_queue' = IF (Len(steer_queue) > 0) THEN SeqRemoveAll(steer_queue, contributing_work_ids) ELSE steer_queue
     /\ current_run' = Some(run_id)
     /\ current_run_contributors' = contributing_work_ids
     /\ last_run' = StageDrainSnapshot_ForEach0_last_run(last_run, contributing_work_ids, run_id)

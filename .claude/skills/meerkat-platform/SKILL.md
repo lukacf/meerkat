@@ -246,15 +246,15 @@ import { MeerkatClient } from "@rkat/sdk";
 
 const client = new MeerkatClient();
 await client.connect({ realmId: "team-alpha" });
-const result = await client.createSession({ prompt: "What is Rust?" });
+const session = await client.createSession("What is Rust?");
 await client.close();
 ```
 
 ### Rust SDK
 
 ```rust
-use meerkat::{AgentFactory, AgentBuildConfig};
-use meerkat_core::Config;
+use meerkat::{AgentFactory, Config, CreateSessionRequest, SessionService, build_ephemeral_service};
+use meerkat_core::service::InitialTurnPolicy;
 use meerkat_store;
 
 let config = Config::load().await?;
@@ -263,9 +263,19 @@ let factory = AgentFactory::new(realm.root.clone())
     .runtime_root(realm.root)
     .builtins(true)
     .shell(true);
-let build = AgentBuildConfig::new("claude-sonnet-4-5");
-let mut agent = factory.build_agent(build, &config).await?;
-let result = agent.run("What is Rust?".into()).await?;
+let service = build_ephemeral_service(factory, config, 64);
+let result = service.create_session(CreateSessionRequest {
+    model: "claude-sonnet-4-5".into(),
+    prompt: "What is Rust?".into(),
+    system_prompt: None,
+    max_tokens: None,
+    event_tx: None,
+    host_mode: false,
+    skill_references: None,
+    initial_turn: InitialTurnPolicy::RunImmediately,
+    build: None,
+    labels: None,
+}).await?;
 ```
 
 ## Configuration

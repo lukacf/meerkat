@@ -3,7 +3,8 @@
 use async_trait::async_trait;
 use meerkat_core::error::ToolError;
 use meerkat_core::{
-    ExternalToolUpdate, ToolCallView, ToolDef, ToolResult, agent::AgentToolDispatcher,
+    ExternalToolDelta, ExternalToolUpdate, ToolCallView, ToolDef, ToolResult,
+    agent::AgentToolDispatcher,
 };
 use serde_json::Value;
 use std::sync::Arc;
@@ -116,6 +117,23 @@ impl McpRouterAdapter {
         Ok(result)
     }
 
+    /// Drain background lifecycle completions as canonical MCP lifecycle actions.
+    pub async fn poll_lifecycle_actions(&self) -> Result<Vec<crate::McpLifecycleAction>, String> {
+        let mut router = self.router.write().await;
+        let router = router
+            .as_mut()
+            .ok_or_else(|| "MCP router has been shut down".to_string())?;
+        let actions = router.take_lifecycle_actions();
+        if !actions.is_empty() {
+            let tools: Arc<[Arc<ToolDef>]> = router.list_tools().to_vec().into();
+            let mut cached = self.cached_tools.write().await;
+            *cached = tools;
+        }
+        self.has_pending
+            .store(router.has_pending_or_notices(), Ordering::Release);
+        Ok(actions)
+    }
+
     /// Progress only Removing server finalization (drain/timeout) without applying staged ops.
     pub async fn progress_removals(&self) -> Result<crate::McpApplyDelta, String> {
         let mut router = self.router.write().await;
@@ -143,10 +161,7 @@ impl McpRouterAdapter {
     /// Returns notices for completed/failed servers. Useful for CLI `--wait-for-mcp`
     /// and SDK `wait_for_mcp` workflows where the caller needs tools to be available
     /// before the first agent turn.
-    pub async fn wait_until_ready(
-        &self,
-        timeout: std::time::Duration,
-    ) -> Vec<meerkat_core::ExternalToolNotice> {
+    pub async fn wait_until_ready(&self, timeout: std::time::Duration) -> Vec<ExternalToolDelta> {
         let mut all_notices = Vec::new();
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
@@ -310,7 +325,7 @@ mod tests {
             "expected at least one notice from the connecting server"
         );
         assert!(
-            notices.iter().any(|n| n.server == "test-srv"),
+            notices.iter().any(|n| n.target == "test-srv"),
             "notice should reference the staged server"
         );
 

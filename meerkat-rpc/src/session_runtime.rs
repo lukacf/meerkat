@@ -24,6 +24,8 @@ use meerkat::{
 use meerkat_client::LlmClient;
 use meerkat_core::EventEnvelope;
 use meerkat_core::RunId;
+#[cfg(all(test, feature = "mcp"))]
+use meerkat_core::ToolConfigChangedPayload;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
 use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
@@ -39,15 +41,18 @@ use meerkat_core::{AgentToolDispatcher, ToolGateway};
 use meerkat_core::{
     Config, ConfigStore, ContentInput, HookRunOverrides, Session, SessionSystemContextState,
 };
-#[cfg(all(test, feature = "mcp"))]
-use meerkat_core::{ToolConfigChangeOperation, ToolConfigChangedPayload};
-use meerkat_runtime::RuntimeSessionAdapter;
+use meerkat_runtime::{RuntimeSessionAdapter, SessionServiceRuntimeExt};
 use tokio::sync::{RwLock, mpsc};
 
 use crate::error;
 use crate::protocol::RpcError;
 #[cfg(feature = "mcp")]
-use meerkat::{McpLifecycleAction, McpReloadTarget, McpRouter, McpRouterAdapter, McpServerConfig};
+use meerkat::{
+    McpLifecycleAction, McpLifecyclePhase, McpReloadTarget, McpRouter, McpRouterAdapter,
+    McpServerConfig,
+};
+#[cfg(feature = "mcp")]
+use meerkat_core::ToolConfigChangeOperation;
 
 #[derive(Clone)]
 struct SkillIdentityRegistryState {
@@ -547,6 +552,38 @@ impl SessionRuntime {
         }
     }
 
+    async fn ensure_runtime_executor(
+        self: &Arc<Self>,
+        session_id: &SessionId,
+    ) -> Result<(), RpcError> {
+        if !self.runtime_adapter.contains_session(session_id).await {
+            let session_exists = self.pending.read().await.contains_key(session_id)
+                || self.service.read(session_id).await.is_ok()
+                || self
+                    .load_persisted_session(session_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some();
+            if !session_exists {
+                return Err(RpcError {
+                    code: error::SESSION_NOT_FOUND,
+                    message: format!("session not found: {session_id}"),
+                    data: None,
+                });
+            }
+            let executor = Box::new(crate::session_executor::SessionRuntimeExecutor::new(
+                Arc::clone(self),
+                session_id.clone(),
+                self.notification_sink.clone(),
+            ));
+            self.runtime_adapter
+                .ensure_session_with_executor(session_id.clone(), executor)
+                .await;
+        }
+        Ok(())
+    }
+
     /// Start a turn by routing through the runtime input/completion waiter path.
     ///
     /// Instead of calling `SessionService::start_turn()` directly, this method:
@@ -614,34 +651,7 @@ impl SessionRuntime {
 
         let input = Input::Prompt(PromptInput::from_content_input(prompt, turn_metadata));
 
-        // Lazy-register executor if not already registered.
-        if !self.runtime_adapter.contains_session(session_id).await {
-            // Verify the session exists before registering to avoid creating
-            // dead executors for nonexistent sessions.
-            let session_exists = self.pending.read().await.contains_key(session_id)
-                || self.service.read(session_id).await.is_ok()
-                || self
-                    .load_persisted_session(session_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .is_some();
-            if !session_exists {
-                return Err(RpcError {
-                    code: error::SESSION_NOT_FOUND,
-                    message: format!("session not found: {session_id}"),
-                    data: None,
-                });
-            }
-            let executor = Box::new(crate::session_executor::SessionRuntimeExecutor::new(
-                Arc::clone(self),
-                session_id.clone(),
-                self.notification_sink.clone(),
-            ));
-            self.runtime_adapter
-                .ensure_session_with_executor(session_id.clone(), executor)
-                .await;
-        }
+        self.ensure_runtime_executor(session_id).await?;
 
         let (outcome, handle) = self
             .runtime_adapter
@@ -688,6 +698,51 @@ impl SessionRuntime {
                 data: None,
             }),
         }
+    }
+
+    /// Admit a canonical external event through the runtime-backed path.
+    pub async fn accept_external_event_via_runtime(
+        self: &Arc<Self>,
+        session_id: &SessionId,
+        payload: serde_json::Value,
+        source_name: String,
+    ) -> Result<meerkat_runtime::AcceptOutcome, RpcError> {
+        use meerkat_runtime::input::{
+            ExternalEventInput, Input, InputDurability, InputHeader, InputOrigin, InputVisibility,
+        };
+
+        if self.live_session_is_stale(session_id).await? {
+            let _ = self.service.discard_live_session(session_id).await;
+            self.runtime_adapter.unregister_session(session_id).await;
+        }
+
+        self.ensure_runtime_executor(session_id).await?;
+
+        let input = Input::ExternalEvent(ExternalEventInput {
+            header: InputHeader {
+                id: meerkat_core::lifecycle::InputId::new(),
+                timestamp: chrono::Utc::now(),
+                source: InputOrigin::External {
+                    source_name: source_name.clone(),
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            event_type: source_name,
+            payload,
+        });
+
+        self.runtime_adapter
+            .accept_input(session_id, input)
+            .await
+            .map_err(|e| RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!("runtime accept failed: {e}"),
+                data: None,
+            })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2326,12 +2381,10 @@ impl SessionRuntime {
             data: None,
         })?;
 
-        if result
-            .delta
-            .lifecycle_actions
-            .iter()
-            .any(|action| matches!(action, McpLifecycleAction::RemovingStarted { .. }))
-        {
+        if result.delta.lifecycle_actions.iter().any(|action| {
+            action.operation == ToolConfigChangeOperation::Remove
+                && action.phase == McpLifecyclePhase::Draining
+        }) {
             Self::spawn_mcp_drain_task_if_needed(adapter.clone(), drain_task_running, lifecycle_tx);
         }
 

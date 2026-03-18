@@ -3,12 +3,12 @@
 //! These tests verify that background jobs spawned via the `shell` tool are visible
 //! to the `shell_jobs`, `shell_job_status`, and `shell_job_cancel` tools.
 
-#![cfg(feature = "integration-real-tests")]
 #![allow(clippy::panic, clippy::unwrap_used)]
 
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::ToolCallView;
 use meerkat_core::error::ToolError;
+use meerkat_core::ops_lifecycle::OperationStatus;
 use meerkat_tools::builtin::shell::ShellConfig;
 use meerkat_tools::builtin::{
     BuiltinToolConfig, CompositeDispatcher, MemoryTaskStore, ToolPolicyLayer,
@@ -249,6 +249,77 @@ async fn integration_real_multiple_background_jobs_tracked()
     for job_id in &job_ids {
         let _ = dispatch_json(&dispatcher, "shell_job_cancel", json!({ "job_id": job_id })).await;
     }
+
+    Ok(())
+}
+
+/// Phase 1 red-ok background-op target for the shared lifecycle seam.
+#[tokio::test]
+async fn ops_registry_integration_red_ok_background_job_visibility_survives_until_cancel()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = TempDir::new()?;
+    let dispatcher = create_dispatcher_with_shell(&temp_dir)?;
+    let job_manager = dispatcher
+        .shell_job_manager()
+        .ok_or("shell job manager should be available when shell tools are enabled")?;
+
+    let job_id = job_manager
+        .register_synthetic_running_job("synthetic-background-op", None, 30)
+        .await?
+        .to_string();
+
+    let listed = dispatch_json(&dispatcher, "shell_jobs", json!({})).await?;
+    let jobs = listed
+        .as_array()
+        .ok_or("shell_jobs should return an array")?;
+    assert!(
+        jobs.iter()
+            .any(|job| job.get("id").and_then(|value| value.as_str()) == Some(job_id.as_str())),
+        "synthetic background op should remain visible through shell_jobs"
+    );
+
+    let before_cancel =
+        dispatch_json(&dispatcher, "shell_job_status", json!({ "job_id": job_id })).await?;
+    assert!(
+        before_cancel.get("status").is_some(),
+        "background op should remain observable while in flight"
+    );
+    let running_snapshot = job_manager
+        .ops_lifecycle_snapshot(&meerkat_tools::builtin::shell::JobId::from_string(
+            before_cancel["id"]
+                .as_str()
+                .ok_or("status response should include job id")?,
+        ))
+        .await
+        .ok_or("background job should register shared lifecycle state")?;
+    assert_eq!(running_snapshot.status, OperationStatus::Running);
+
+    dispatch_json(
+        &dispatcher,
+        "shell_job_cancel",
+        json!({ "job_id": before_cancel["id"].clone() }),
+    )
+    .await?;
+
+    let after_cancel = dispatch_json(
+        &dispatcher,
+        "shell_job_status",
+        json!({ "job_id": before_cancel["id"].clone() }),
+    )
+    .await?;
+    assert!(
+        after_cancel.to_string().to_lowercase().contains("cancel"),
+        "background op should surface a terminal cancelled state"
+    );
+    let cancelled_snapshot = job_manager
+        .ops_lifecycle_snapshot(&meerkat_tools::builtin::shell::JobId::from_string(
+            after_cancel["id"]
+                .as_str()
+                .ok_or("cancelled status response should include job id")?,
+        ))
+        .await
+        .ok_or("cancelled job should retain shared lifecycle snapshot")?;
+    assert_eq!(cancelled_snapshot.status, OperationStatus::Cancelled);
 
     Ok(())
 }

@@ -57,10 +57,10 @@ If `--realm` is omitted, the server creates a new isolated opaque realm (`realm-
 | `GET` | `/sessions/{id}` | Fetch session metadata and usage |
 | `GET` | `/sessions/{id}/history` | Fetch committed session transcript messages |
 | `POST` | `/sessions/{id}/messages` | Continue an existing session |
+| `POST` | `/sessions/{id}/external-events` | Queue a runtime-backed external event |
 | `POST` | `/sessions/{id}/interrupt` | Interrupt an in-flight turn |
 | `DELETE` | `/sessions/{id}` | Archive (remove) a session |
 | `GET` | `/sessions/{id}/events` | SSE stream for real-time updates |
-| `POST` | `/sessions/{id}/event` | Push an external event into a session (legacy) |
 | `POST` | `/sessions/{id}/mcp/add` | Stage live MCP server addition (mcp feature) |
 | `POST` | `/sessions/{id}/mcp/remove` | Stage live MCP server removal (mcp feature) |
 | `POST` | `/sessions/{id}/mcp/reload` | Reload MCP server(s) (mcp feature) |
@@ -154,7 +154,6 @@ Create and run a new session.
   "hooks_override": null,
   "enable_builtins": null,
   "enable_shell": null,
-  "enable_subagents": null,
   "enable_memory": null
 }
 ```
@@ -258,10 +257,6 @@ History is returned oldest-to-newest and reflects the last committed session sna
 
 <ParamField body="enable_shell" type="bool | null" default="null (factory default)">
   Enable shell tool (requires `enable_builtins`). Omit to use factory defaults.
-</ParamField>
-
-<ParamField body="enable_subagents" type="bool | null" default="null (factory default)">
-  Enable sub-agent tools. Omit to use factory defaults.
 </ParamField>
 
 <ParamField body="enable_memory" type="bool | null" default="null (factory default)">
@@ -495,19 +490,19 @@ Archive (remove) a session.
 
 Returns `404` if the session is not found.
 
-### POST /sessions/\{id\}/event
+### POST /sessions/\{id\}/external-events
 
-Push an external event into a running session's inbox. The event is queued and processed at the next turn boundary.
+Queue an external event through the runtime-backed admission path.
 
 <CodeGroup>
 ```bash Without auth (localhost only)
-curl -X POST http://localhost:8080/sessions/sid_abc/event \
+curl -X POST http://localhost:8080/sessions/sid_abc/external-events \
   -H "Content-Type: application/json" \
   -d '{"alert": "CPU spike", "host": "web-03"}'
 ```
 
 ```bash With webhook secret
-curl -X POST http://localhost:8080/sessions/sid_abc/event \
+curl -X POST http://localhost:8080/sessions/sid_abc/external-events \
   -H "Content-Type: application/json" \
   -H "X-Webhook-Secret: my-secret" \
   -d '{"alert": "deployment failed"}'
@@ -517,6 +512,12 @@ curl -X POST http://localhost:8080/sessions/sid_abc/event \
 {"queued": true}
 ```
 </CodeGroup>
+
+<Note>
+This route keeps the optional `RKAT_WEBHOOK_SECRET` header auth used for webhook
+delivery, but the admitted event now flows through runtime input acceptance
+instead of a surface-local injector path.
+</Note>
 
 <ParamField body="(body)" type="any JSON" required>
   Any JSON payload. Pretty-printed and injected as an event into the agent's inbox.
@@ -792,9 +793,9 @@ Push a canonical comms command into a running session. Requires the `comms` feat
 </ParamField>
 
 <Note>
-Unlike `POST /sessions/{id}/event` (which uses `RKAT_WEBHOOK_SECRET` header auth),
-`/comms/send` has **no authentication**. It is intended for trusted internal callers
-that already know the session ID.
+Unlike `POST /sessions/{id}/external-events` (which uses `RKAT_WEBHOOK_SECRET`
+header auth), `/comms/send` has **no authentication**. It is intended for
+trusted internal callers that already know the session ID.
 </Note>
 
 ### GET /comms/peers

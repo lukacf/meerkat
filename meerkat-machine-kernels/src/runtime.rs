@@ -789,7 +789,9 @@ fn default_value_for_type(ty: &TypeRef) -> KernelValue {
     match ty {
         TypeRef::Bool => KernelValue::Bool(false),
         TypeRef::U32 | TypeRef::U64 => KernelValue::U64(0),
-        TypeRef::String | TypeRef::Named(_) => KernelValue::String(String::new()),
+        TypeRef::String => KernelValue::String(String::new()),
+        TypeRef::Named(name) if named_type_is_u64(name) => KernelValue::U64(0),
+        TypeRef::Named(_) => KernelValue::String(String::new()),
         TypeRef::Option(_) => KernelValue::None,
         TypeRef::Set(_) => KernelValue::Set(BTreeSet::new()),
         TypeRef::Seq(_) => KernelValue::Seq(Vec::new()),
@@ -801,7 +803,9 @@ fn value_matches_type(value: &KernelValue, ty: &TypeRef) -> bool {
     match (value, ty) {
         (KernelValue::Bool(_), TypeRef::Bool) => true,
         (KernelValue::U64(_), TypeRef::U32 | TypeRef::U64) => true,
-        (KernelValue::String(_), TypeRef::String | TypeRef::Named(_)) => true,
+        (KernelValue::String(_), TypeRef::String) => true,
+        (KernelValue::U64(_), TypeRef::Named(name)) if named_type_is_u64(name) => true,
+        (KernelValue::String(_), TypeRef::Named(name)) if !named_type_is_u64(name) => true,
         (KernelValue::None, TypeRef::Option(_)) => true,
         (inner, TypeRef::Option(inner_ty)) => value_matches_type(inner, inner_ty),
         (KernelValue::Set(values), TypeRef::Set(inner_ty)) => values
@@ -817,6 +821,10 @@ fn value_matches_type(value: &KernelValue, ty: &TypeRef) -> bool {
         }
         _ => false,
     }
+}
+
+fn named_type_is_u64(name: &str) -> bool {
+    matches!(name, "BoundarySequence" | "TurnNumber")
 }
 
 #[cfg(test)]
@@ -897,5 +905,86 @@ mod tests {
             refusal,
             TransitionRefusal::InvalidInputPayload { .. }
         ));
+    }
+
+    #[test]
+    fn named_numeric_aliases_accept_u64_payloads() {
+        use meerkat_machine_schema::{external_tool_surface_machine, input_lifecycle_machine};
+
+        let external_tool_kernel = GeneratedMachineKernel::new(external_tool_surface_machine());
+        let external_tool_state = external_tool_kernel.initial_state().expect("initial state");
+        let staged_add = external_tool_kernel
+            .transition(
+                &external_tool_state,
+                &KernelInput {
+                    variant: "StageAdd".into(),
+                    fields: BTreeMap::from([(
+                        "surface_id".into(),
+                        KernelValue::String("alpha".into()),
+                    )]),
+                },
+            )
+            .expect("stage add");
+        let applied = external_tool_kernel
+            .transition(
+                &staged_add.next_state,
+                &KernelInput {
+                    variant: "ApplyBoundary".into(),
+                    fields: BTreeMap::from([
+                        ("surface_id".into(), KernelValue::String("alpha".into())),
+                        ("applied_at_turn".into(), KernelValue::U64(7)),
+                    ]),
+                },
+            )
+            .expect("turn-number payload should be accepted");
+        assert_eq!(applied.transition, "ApplyBoundaryAdd");
+
+        let input_lifecycle_kernel = GeneratedMachineKernel::new(input_lifecycle_machine());
+        let input_lifecycle_state = input_lifecycle_kernel
+            .initial_state()
+            .expect("initial state");
+        let queued = input_lifecycle_kernel
+            .transition(
+                &input_lifecycle_state,
+                &KernelInput {
+                    variant: "QueueAccepted".into(),
+                    fields: BTreeMap::new(),
+                },
+            )
+            .expect("queue accepted");
+        let staged = input_lifecycle_kernel
+            .transition(
+                &queued.next_state,
+                &KernelInput {
+                    variant: "StageForRun".into(),
+                    fields: BTreeMap::from([(
+                        "run_id".into(),
+                        KernelValue::String("run-1".into()),
+                    )]),
+                },
+            )
+            .expect("stage for run");
+        let applied = input_lifecycle_kernel
+            .transition(
+                &staged.next_state,
+                &KernelInput {
+                    variant: "MarkApplied".into(),
+                    fields: BTreeMap::from([(
+                        "run_id".into(),
+                        KernelValue::String("run-1".into()),
+                    )]),
+                },
+            )
+            .expect("mark applied");
+        let boundary_marked = input_lifecycle_kernel
+            .transition(
+                &applied.next_state,
+                &KernelInput {
+                    variant: "MarkAppliedPendingConsumption".into(),
+                    fields: BTreeMap::from([("boundary_sequence".into(), KernelValue::U64(1))]),
+                },
+            )
+            .expect("boundary-sequence payload should be accepted");
+        assert_eq!(boundary_marked.transition, "MarkAppliedPendingConsumption");
     }
 }

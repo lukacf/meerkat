@@ -6,7 +6,7 @@
 //! - POST /comms/send - Send a canonical comms command
 //! - GET /comms/peers - List peers visible to a session
 //! - GET /mob/prefabs - List built-in mob prefab templates
-//! - POST /sessions/:id/event - (legacy) Push an external event to a session
+//! - POST /sessions/:id/external-events - Push an external event to a session
 //! - GET /sessions/:id - Get session details
 //! - GET /sessions/:id/events - SSE stream for agent events
 //!
@@ -62,8 +62,11 @@ use tokio::sync::{broadcast, mpsc};
 
 #[cfg(feature = "mcp")]
 use meerkat::{
-    AgentToolDispatcher, McpLifecycleAction, McpReloadTarget, McpRouter, McpRouterAdapter,
+    AgentToolDispatcher, McpLifecycleAction, McpLifecyclePhase, McpReloadTarget, McpRouter,
+    McpRouterAdapter,
 };
+#[cfg(feature = "mcp")]
+use meerkat_core::ToolConfigChangeOperation;
 #[cfg(feature = "mcp")]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "mcp")]
@@ -905,11 +908,10 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}/interrupt", post(interrupt_session))
         .route("/sessions/{id}/system_context", post(append_system_context))
         .route("/sessions/{id}/messages", post(continue_session))
+        .route("/sessions/{id}/external-events", post(post_external_event))
         .route("/sessions/{id}/events", get(session_events))
         .route("/comms/send", post(comms_send))
         .route("/comms/peers", get(comms_peers))
-        // BRIDGE(M11→M12): Legacy event push endpoint.
-        .route("/sessions/{id}/event", post(push_event))
         .route(
             "/config",
             get(get_config).put(set_config).patch(patch_config),
@@ -1493,54 +1495,75 @@ async fn comms_peers(
     Ok(Json(json!({ "peers": entries })))
 }
 
-/// Push an external event to a session's inbox.
-///
-/// The event is queued for processing at the next turn boundary — it does NOT
-/// trigger an immediate LLM call. Returns 202 Accepted on success.
+fn make_runtime_external_event_input(
+    source_name: &str,
+    event_type: &str,
+    payload: Value,
+) -> meerkat_runtime::Input {
+    meerkat_runtime::Input::ExternalEvent(meerkat_runtime::ExternalEventInput {
+        header: meerkat_runtime::InputHeader {
+            id: meerkat_core::lifecycle::InputId::new(),
+            timestamp: chrono::Utc::now(),
+            source: meerkat_runtime::InputOrigin::External {
+                source_name: source_name.to_string(),
+            },
+            durability: meerkat_runtime::InputDurability::Durable,
+            visibility: meerkat_runtime::InputVisibility::default(),
+            idempotency_key: None,
+            supersession_key: None,
+            correlation_id: None,
+        },
+        event_type: event_type.to_string(),
+        payload,
+    })
+}
+
+/// Admit an external event to a session through the runtime-backed path.
 ///
 /// Authentication is controlled by `RKAT_WEBHOOK_SECRET` env var:
 /// - If not set: no authentication (suitable for localhost/dev)
 /// - If set: requires `X-Webhook-Secret` header with matching value
-async fn push_event(
+async fn post_external_event(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: axum::http::HeaderMap,
     Json(payload): Json<Value>,
-) -> Result<(StatusCode, Json<Value>), ApiError> {
+) -> Result<(StatusCode, Json<Value>), Response> {
     // Webhook auth resolved once at startup, stored in AppState.
     webhook::verify_webhook(&headers, &state.webhook_auth)
-        .map_err(|msg| ApiError::Unauthorized(msg.to_string()))?;
+        .map_err(|msg| ApiError::Unauthorized(msg.to_string()).into_response())?;
 
-    // Validate session ID
-    let session_id = resolve_session_id_for_state(&id, &state)?;
+    let session_id =
+        resolve_session_id_for_state(&id, &state).map_err(IntoResponse::into_response)?;
+    ensure_runtime_session_registered(&state, &session_id).await?;
 
-    // Get event injector for this session
-    let injector = state
-        .session_service
-        .event_injector(&session_id)
-        .await
-        .ok_or_else(|| ApiError::NotFound(format!("Session not found: {session_id}")))?;
+    let input = make_runtime_external_event_input("webhook", "webhook", payload);
 
-    // Format payload as pretty JSON for the agent
-    let body = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string());
-
-    // Inject the event
-    match injector.inject(
-        meerkat_core::ContentInput::Text(body),
-        meerkat_core::PlainEventSource::Webhook,
-        meerkat_core::HandlingMode::Queue,
-        Some(meerkat_core::types::RenderMetadata {
-            class: meerkat_core::types::RenderClass::ExternalEvent,
-            salience: meerkat_core::types::RenderSalience::Normal,
-        }),
-    ) {
-        Ok(()) => Ok((StatusCode::ACCEPTED, Json(json!({"queued": true})))),
-        Err(meerkat_core::EventInjectorError::Full) => Err(ApiError::ServiceUnavailable(
-            "Event inbox is full — try again later".to_string(),
-        )),
-        Err(meerkat_core::EventInjectorError::Closed) => {
-            Err(ApiError::Gone("Session has been shut down".to_string()))
+    match state.runtime_adapter.accept_input(&session_id, input).await {
+        Ok(meerkat_runtime::AcceptOutcome::Accepted { .. })
+        | Ok(meerkat_runtime::AcceptOutcome::Deduplicated { .. }) => {
+            Ok((StatusCode::ACCEPTED, Json(json!({"queued": true}))))
         }
+        Ok(meerkat_runtime::AcceptOutcome::Rejected { reason }) => {
+            Err((StatusCode::CONFLICT, Json(json!({"error": reason}))).into_response())
+        }
+        Ok(outcome) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": format!("unexpected runtime accept outcome: {outcome:?}"),
+            })),
+        )
+            .into_response()),
+        Err(meerkat_runtime::RuntimeDriverError::NotReady { state }) => Err((
+            StatusCode::CONFLICT,
+            Json(json!({"error": format!("runtime not accepting input while in state: {state}")})),
+        )
+            .into_response()),
+        Err(err) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": err.to_string()})),
+        )
+            .into_response()),
     }
 }
 
@@ -2462,12 +2485,10 @@ async fn apply_mcp_boundary(
         .map_err(|e| ApiError::Internal(format!("failed to apply staged MCP operations: {e}")))?;
 
     // Spawn drain task if any removals started.
-    if result
-        .delta
-        .lifecycle_actions
-        .iter()
-        .any(|a| matches!(a, McpLifecycleAction::RemovingStarted { .. }))
-    {
+    if result.delta.lifecycle_actions.iter().any(|action| {
+        action.operation == ToolConfigChangeOperation::Remove
+            && action.phase == McpLifecyclePhase::Draining
+    }) {
         spawn_mcp_drain_task(adapter, drain_task_running, lifecycle_tx);
     }
 

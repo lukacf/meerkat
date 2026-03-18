@@ -127,7 +127,6 @@ fn spawn_scoped_event_handler(
 struct ToolPresetResolution {
     builtins: bool,
     shell: bool,
-    subagents: bool,
     memory: bool,
     mob: bool,
 }
@@ -138,28 +137,24 @@ fn resolve_tool_preset(preset: ToolPreset, yolo: bool) -> ToolPresetResolution {
         ToolPreset::Safe => ToolPresetResolution {
             builtins: true,
             shell: false,
-            subagents: true,
             memory: false,
             mob: false,
         },
         ToolPreset::Workspace => ToolPresetResolution {
             builtins: true,
             shell: true,
-            subagents: true,
             memory: false,
             mob: false,
         },
         ToolPreset::Full => ToolPresetResolution {
             builtins: true,
             shell: true,
-            subagents: true,
             memory: true,
             mob: true,
         },
         ToolPreset::None => ToolPresetResolution {
             builtins: false,
             shell: false,
-            subagents: false,
             memory: false,
             mob: false,
         },
@@ -1317,7 +1312,6 @@ async fn handle_run_command(
                 CommsOverrides::default(),
                 tooling.builtins,
                 tooling.shell,
-                tooling.subagents,
                 tooling.memory,
                 tooling.mob,
                 wait_for_mcp,
@@ -2127,10 +2121,11 @@ async fn create_mcp_tools(
 
         let notices = adapter.wait_until_ready(total_timeout).await;
         for notice in &notices {
-            if notice.status.starts_with("failed") {
+            if notice.status_text().starts_with("failed") {
                 eprintln!(
                     "Warning: MCP server '{}' failed: {}",
-                    notice.server, notice.status
+                    notice.target,
+                    notice.status_text()
                 );
             }
         }
@@ -2255,6 +2250,8 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
         let prompt = extract_cli_prompt(&primitive);
         let turn_req = StartTurnRequest {
             prompt: prompt.into(),
+            render_metadata: None,
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
             event_tx: None,
             host_mode: primitive
                 .turn_metadata()
@@ -2874,7 +2871,6 @@ async fn run_agent(
     comms_overrides: CommsOverrides,
     enable_builtins: bool,
     enable_shell: bool,
-    enable_subagents: bool,
     enable_memory: bool,
     enable_mob: bool,
     wait_for_mcp: bool,
@@ -2977,7 +2973,7 @@ async fn run_agent(
         .project_root(project_root)
         .builtins(enable_builtins)
         .shell(enable_shell)
-        .subagents(enable_subagents);
+        .subagents(false);
     if let Some(context_root) = scope.context_root.clone() {
         factory = factory.context_root(context_root);
     }
@@ -3077,6 +3073,7 @@ async fn run_agent(
     let create_req = CreateSessionRequest {
         model: model.to_string(),
         prompt: prompt.to_string().into(),
+        render_metadata: None,
         system_prompt,
         max_tokens: Some(max_tokens),
         event_tx: event_tx.clone(),
@@ -3098,75 +3095,17 @@ async fn run_agent(
         eprintln!("Warning: --stdin has no effect without --host");
     }
 
-    // If --stdin is enabled with --host, spawn create_session in the background
-    // so we can start the stdin reader concurrently. The session is registered
-    // (and the EventInjector is available) before the first turn blocks.
+    // `create_session` always defers the initial turn in this path, so we can
+    // register the runtime executor and start stdin admission before the first
+    // prompt enters the runtime.
     #[cfg(feature = "comms")]
     let mut stdin_reader_handle: Option<tokio::task::JoinHandle<()>> = None;
 
     #[cfg(feature = "comms")]
-    let create_result = if stdin_events && host_mode && run_initial_turn_during_create {
-        // Register for notification BEFORE spawning create_session to avoid
-        // a race where the session registers before we start waiting.
-        let notified = service.wait_session_registered();
-
-        let svc = service.clone();
-        let session_task = tokio::spawn(async move { svc.create_session(create_req).await });
-
-        // Wait for the session handle to be stored (no polling, no timeout).
-        // The notification fires when EphemeralSessionService inserts the handle,
-        // which happens before the first turn command is sent.
-        notified.await;
-
-        // Now grab the event injector from the registered session.
-        let sessions = service
-            .list(meerkat_core::service::SessionQuery::default())
-            .await
-            .unwrap_or_default();
-        stdin_reader_handle = if let Some(info) = sessions.first() {
-            service
-                .event_injector(&info.session_id)
-                .await
-                .map(|injector| {
-                    stdin_events::spawn_stdin_reader(
-                        injector,
-                        match line_format {
-                            LineFormat::Text => stdin_events::StdinLineFormat::Text,
-                            LineFormat::Json => stdin_events::StdinLineFormat::Json,
-                        },
-                    )
-                })
-        } else {
-            tracing::warn!("--stdin: session registered but not found in list");
-            None
-        };
-
-        session_task
-            .await
-            .map_err(|e| anyhow::anyhow!("Session task panicked: {e}"))?
-            .map_err(session_err_to_anyhow)?
-    } else {
-        let created = service
-            .create_session(create_req)
-            .await
-            .map_err(session_err_to_anyhow)?;
-        if stdin_events && host_mode && !run_initial_turn_during_create {
-            stdin_reader_handle =
-                service
-                    .event_injector(&created.session_id)
-                    .await
-                    .map(|injector| {
-                        stdin_events::spawn_stdin_reader(
-                            injector,
-                            match line_format {
-                                LineFormat::Text => stdin_events::StdinLineFormat::Text,
-                                LineFormat::Json => stdin_events::StdinLineFormat::Json,
-                            },
-                        )
-                    });
-        }
-        created
-    };
+    let create_result = service
+        .create_session(create_req)
+        .await
+        .map_err(session_err_to_anyhow)?;
 
     #[cfg(not(feature = "comms"))]
     let create_result = {
@@ -3188,6 +3127,18 @@ async fn run_agent(
     runtime_adapter
         .register_session_with_executor(session_id.clone(), executor)
         .await;
+
+    #[cfg(feature = "comms")]
+    if stdin_events && host_mode {
+        stdin_reader_handle = Some(stdin_events::spawn_stdin_reader(
+            runtime_adapter.clone(),
+            session_id.clone(),
+            match line_format {
+                LineFormat::Text => stdin_events::StdinLineFormat::Text,
+                LineFormat::Json => stdin_events::StdinLineFormat::Json,
+            },
+        ));
+    }
 
     let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
         prompt.to_string(),
@@ -3639,6 +3590,7 @@ async fn resume_session_with_llm_override(
         .create_session(CreateSessionRequest {
             model,
             prompt: prompt.to_string().into(),
+            render_metadata: None,
             system_prompt,
             max_tokens: Some(max_tokens),
             event_tx: event_tx.clone(),
@@ -4258,6 +4210,7 @@ fn parse_comms_send_payload(
         source: req.source,
         stream: req.stream,
         allow_self_session: req.allow_self_session,
+        handling_mode: None,
     };
 
     request.parse(session_id).map_err(|errors| {
@@ -6735,6 +6688,7 @@ mod tests {
             stream,
             allow_self_session,
             blocks: _,
+            handling_mode: _,
         } = cmd
         else {
             return Err("unexpected command parsed for input payload".into());
@@ -8359,6 +8313,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
         let req = CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "list tools".to_string().into(),
+            render_metadata: None,
             system_prompt: None,
             max_tokens: Some(32),
             event_tx: None,
@@ -8823,227 +8778,6 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
 
         assert!(tool_names.contains(&"send"));
         assert!(tool_names.contains(&"peers"));
-    }
-
-    // === Tests for sub-agent flag behavior ===
-
-    /// Test that sub-agents are enabled by default (need_composite should be true)
-    #[test]
-    fn test_subagent_enabled_by_default() {
-        // Simulate default flag values
-        let enable_builtins = false;
-        let no_subagents = false; // default
-        let enable_subagents = !no_subagents;
-
-        // This is the logic from run_agent
-        let need_composite = enable_builtins || enable_subagents;
-
-        assert!(
-            need_composite,
-            "CompositeDispatcher should be used when subagents are enabled by default"
-        );
-        assert!(enable_subagents, "Sub-agents should be enabled by default");
-    }
-
-    /// Test that --no-subagents disables sub-agent tools
-    #[test]
-    fn test_no_subagents_flag_disables_subagents() {
-        // Simulate --no-subagents flag
-        let enable_builtins = false;
-        let no_subagents = true;
-        let enable_subagents = !no_subagents;
-
-        let need_composite = enable_builtins || enable_subagents;
-
-        assert!(
-            !enable_subagents,
-            "Sub-agents should be disabled when --no-subagents is passed"
-        );
-        assert!(
-            !need_composite,
-            "CompositeDispatcher should NOT be used when both builtins and subagents are disabled"
-        );
-    }
-
-    /// Test that --enable-builtins alone enables builtins but not subagents (when --no-subagents)
-    #[test]
-    fn test_enable_builtins_with_no_subagents() {
-        let enable_builtins = true;
-        let no_subagents = true;
-        let enable_subagents = !no_subagents;
-
-        let need_composite = enable_builtins || enable_subagents;
-
-        assert!(
-            need_composite,
-            "CompositeDispatcher should be used when builtins are enabled"
-        );
-        assert!(!enable_subagents, "Sub-agents should be disabled");
-    }
-
-    /// Test that sub-agents work independently of --enable-builtins
-    #[test]
-    fn test_subagents_independent_of_builtins() {
-        // Without --enable-builtins but with default subagents (enabled)
-        let enable_builtins = false;
-        let no_subagents = false;
-        let enable_subagents = !no_subagents;
-
-        let need_composite = enable_builtins || enable_subagents;
-
-        assert!(
-            enable_subagents,
-            "Sub-agents should be enabled regardless of builtins"
-        );
-        assert!(
-            need_composite,
-            "CompositeDispatcher should be used for sub-agents even without builtins"
-        );
-    }
-
-    /// Test the enabled tools set when only subagents are enabled
-    #[test]
-    fn test_enabled_tools_subagents_only() {
-        use std::collections::HashSet;
-
-        let enable_builtins = false;
-        let enable_shell = false;
-        let enable_subagents = true;
-
-        // Replicate the logic from run_agent
-        let mut enabled_tools: HashSet<String> = HashSet::new();
-
-        if enable_builtins {
-            enabled_tools.extend(
-                [
-                    "task_list",
-                    "task_get",
-                    "task_create",
-                    "task_update",
-                    "wait",
-                    "datetime",
-                ]
-                .iter()
-                .map(std::string::ToString::to_string),
-            );
-        }
-
-        if enable_shell {
-            enabled_tools.extend([
-                "shell".to_string(),
-                "job_status".to_string(),
-                "jobs_list".to_string(),
-                "job_cancel".to_string(),
-            ]);
-        }
-
-        if enable_subagents {
-            enabled_tools.extend([
-                "agent_spawn".to_string(),
-                "agent_fork".to_string(),
-                "agent_status".to_string(),
-                "agent_cancel".to_string(),
-                "agent_list".to_string(),
-            ]);
-        }
-
-        // Verify only sub-agent tools are enabled
-        assert!(
-            enabled_tools.contains("agent_spawn"),
-            "agent_spawn should be enabled"
-        );
-        assert!(
-            enabled_tools.contains("agent_fork"),
-            "agent_fork should be enabled"
-        );
-        assert!(
-            enabled_tools.contains("agent_status"),
-            "agent_status should be enabled"
-        );
-        assert!(
-            enabled_tools.contains("agent_cancel"),
-            "agent_cancel should be enabled"
-        );
-        assert!(
-            enabled_tools.contains("agent_list"),
-            "agent_list should be enabled"
-        );
-
-        // Verify task tools are NOT enabled (since builtins is false)
-        assert!(
-            !enabled_tools.contains("task_list"),
-            "task_list should NOT be enabled without --enable-builtins"
-        );
-        assert!(
-            !enabled_tools.contains("wait"),
-            "wait should NOT be enabled without --enable-builtins"
-        );
-
-        // Verify exact count
-        assert_eq!(
-            enabled_tools.len(),
-            5,
-            "Should have exactly 5 sub-agent tools enabled"
-        );
-    }
-
-    /// Test the enabled tools set when both builtins and subagents are enabled
-    #[test]
-    fn test_enabled_tools_builtins_and_subagents() {
-        use std::collections::HashSet;
-
-        let enable_builtins = true;
-        let enable_shell = false;
-        let enable_subagents = true;
-
-        let mut enabled_tools: HashSet<String> = HashSet::new();
-
-        if enable_builtins {
-            enabled_tools.extend(
-                [
-                    "task_list",
-                    "task_get",
-                    "task_create",
-                    "task_update",
-                    "wait",
-                    "datetime",
-                ]
-                .iter()
-                .map(std::string::ToString::to_string),
-            );
-        }
-
-        if enable_shell {
-            enabled_tools.extend([
-                "shell".to_string(),
-                "job_status".to_string(),
-                "jobs_list".to_string(),
-                "job_cancel".to_string(),
-            ]);
-        }
-
-        if enable_subagents {
-            enabled_tools.extend([
-                "agent_spawn".to_string(),
-                "agent_fork".to_string(),
-                "agent_status".to_string(),
-                "agent_cancel".to_string(),
-                "agent_list".to_string(),
-            ]);
-        }
-
-        // Verify both task and sub-agent tools are enabled
-        assert!(enabled_tools.contains("task_list"));
-        assert!(enabled_tools.contains("wait"));
-        assert!(enabled_tools.contains("agent_spawn"));
-        assert!(enabled_tools.contains("agent_list"));
-
-        // 6 task/utility tools + 5 sub-agent tools = 11
-        assert_eq!(
-            enabled_tools.len(),
-            11,
-            "Should have 11 tools (6 task/utility + 5 sub-agent)"
-        );
     }
 
     #[tokio::test]

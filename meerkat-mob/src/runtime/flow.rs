@@ -1,13 +1,12 @@
 use super::conditions::evaluate_condition;
 use super::events::MobEventEmitter;
+use super::flow_run_kernel::FlowRunKernel;
 use super::flow_system_member_id;
 use super::handle::MobHandle;
 use super::path::resolve_context_path;
 use super::supervisor::Supervisor;
-use super::terminalization::{
-    FlowTerminalizationAuthority, TerminalizationOutcome, TerminalizationTarget,
-};
-use super::topology::{PolicyDecision, evaluate_topology};
+use super::terminalization::TerminalizationOutcome;
+use super::topology::{MobTopologyService, PolicyDecision};
 use super::turn_executor::{FlowTurnExecutor, FlowTurnOutcome, TimeoutDisposition};
 use crate::definition::{
     CollectionPolicy, DependencyMode, DispatchMode, FlowStepSpec, PolicyMode, StepOutputFormat,
@@ -35,7 +34,8 @@ pub struct FlowEngine {
     handle: MobHandle,
     run_store: Arc<dyn MobRunStore>,
     emitter: MobEventEmitter,
-    terminalization: FlowTerminalizationAuthority,
+    flow_kernel: FlowRunKernel,
+    topology: Arc<MobTopologyService>,
 }
 
 impl FlowEngine {
@@ -44,19 +44,17 @@ impl FlowEngine {
         handle: MobHandle,
         run_store: Arc<dyn MobRunStore>,
         event_store: Arc<dyn MobEventStore>,
+        topology: Arc<MobTopologyService>,
+        flow_kernel: FlowRunKernel,
     ) -> Self {
-        let terminalization = FlowTerminalizationAuthority::new(
-            run_store.clone(),
-            event_store.clone(),
-            handle.mob_id().clone(),
-        );
         let emitter = MobEventEmitter::new(event_store, handle.mob_id().clone());
         Self {
             executor,
             handle,
             run_store,
             emitter,
-            terminalization,
+            flow_kernel,
+            topology,
         }
     }
 
@@ -202,7 +200,7 @@ impl FlowEngine {
                     )
                 })?;
                 if matches!(
-                    evaluate_topology(&topology.rules, from_role, &step.role),
+                    self.topology.evaluate(from_role, &step.role),
                     PolicyDecision::Deny
                 ) {
                     if matches!(topology.mode, PolicyMode::Strict) {
@@ -435,8 +433,8 @@ impl FlowEngine {
         if canceled {
             let flow_id = config.flow_id;
             if let TerminalizationOutcome::Transitioned = self
-                .terminalization
-                .terminalize(run_id.clone(), flow_id, TerminalizationTarget::Canceled)
+                .flow_kernel
+                .terminalize_canceled(run_id.clone(), flow_id)
                 .await?
             {
                 tracing::debug!(run_id = %run_id, "flow canceled terminalization applied");
@@ -448,12 +446,8 @@ impl FlowEngine {
             let reason = "one or more flow steps failed".to_string();
             let flow_id = config.flow_id;
             if let TerminalizationOutcome::Transitioned = self
-                .terminalization
-                .terminalize(
-                    run_id.clone(),
-                    flow_id,
-                    TerminalizationTarget::Failed { reason },
-                )
+                .flow_kernel
+                .terminalize_failed(run_id.clone(), flow_id, reason)
                 .await?
             {
                 tracing::debug!(run_id = %run_id, "flow failed terminalization applied");
@@ -463,8 +457,8 @@ impl FlowEngine {
 
         let flow_id = config.flow_id;
         if let TerminalizationOutcome::Transitioned = self
-            .terminalization
-            .terminalize(run_id.clone(), flow_id, TerminalizationTarget::Completed)
+            .flow_kernel
+            .terminalize_completed(run_id.clone(), flow_id)
             .await?
         {
             tracing::debug!(run_id = %run_id, "flow completed terminalization applied");
@@ -480,12 +474,8 @@ impl FlowEngine {
         error: MobError,
     ) -> Result<(), MobError> {
         let reason = error.to_string();
-        self.terminalization
-            .terminalize(
-                run_id.clone(),
-                flow_id.clone(),
-                TerminalizationTarget::Failed { reason },
-            )
+        self.flow_kernel
+            .terminalize_failed(run_id.clone(), flow_id.clone(), reason)
             .await?;
         Err(error)
     }

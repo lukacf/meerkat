@@ -59,7 +59,6 @@ specs/machines/<machine>/
   ci.cfg
   deep.cfg
   mapping.md
-  generated/
 
 specs/compositions/<bundle>/
   contract.md
@@ -67,7 +66,9 @@ specs/compositions/<bundle>/
   ci.cfg
   deep.cfg
   mapping.md
-  generated/
+
+meerkat-machine-kernels/
+  src/generated/*.rs
 ```
 
 ## Artifact Rules
@@ -80,8 +81,9 @@ Every canonical machine must have:
 - `contract.md`
 - `model.tla`
 - `ci.cfg`
+- `deep.cfg`
 - `mapping.md`
-- generated authority output under `generated/`
+- a generated Rust kernel module under `meerkat-machine-kernels/src/generated/`
 
 ### Required for every canonical composition bundle
 
@@ -91,8 +93,9 @@ Every canonical composition must have:
 - `contract.md`
 - `model.tla`
 - `ci.cfg`
+- `deep.cfg`
 - `mapping.md`
-- generated authority output under `generated/`
+- witness configs when the composition declares bounded witness paths
 
 ### Interpretive rule
 

@@ -106,6 +106,19 @@ export interface AppendSystemContextResult {
   status: 'staged' | 'duplicate';
 }
 
+/** Runtime-backed state for a direct browser session façade. */
+export interface SessionState {
+  handle: number;
+  session_id: string;
+  mob_id: string;
+  model: string;
+  usage: Usage;
+  run_counter: number;
+  message_count: number;
+  is_active: boolean;
+  last_assistant_text?: string | null;
+}
+
 /** Result of appending runtime system context to a mob member session. */
 export interface MobAppendSystemContextResult {
   mob_id: string;
@@ -264,6 +277,15 @@ export interface EventEnvelope {
   cursor?: string | number;
   event: AgentEvent | { type: string; [key: string]: unknown };
 }
+
+/** Direct-session poll/subscribe event emitted by the browser runtime. */
+export interface SessionLaggedEvent {
+  type: 'lagged';
+  skipped: number;
+}
+
+/** Direct-session event item. */
+export type SessionEvent = AgentEvent | SessionLaggedEvent;
 
 /** Attributed mob-wide event from mob subscriptions. */
 export interface AttributedEvent {

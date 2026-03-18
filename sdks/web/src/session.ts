@@ -3,7 +3,8 @@ import type {
   ContentBlock,
   TurnOptions,
   TurnResult,
-  EventEnvelope,
+  SessionEvent,
+  SessionState,
   AppendSystemContextOptions,
   AppendSystemContextResult,
 } from './types.js';
@@ -20,7 +21,7 @@ type AppendSystemContextFn = (
 
 /** A direct (non-mob) agent session. */
 export class Session {
-  /** @internal — WASM session handle. */
+  /** @internal — browser-local façade handle, not the authoritative session ID. */
   readonly handle: number;
 
   private startTurnFn: StartTurnFn;
@@ -29,6 +30,7 @@ export class Session {
   private pollFn: PollEventsFn;
   private appendSystemContextFn: AppendSystemContextFn;
   private destroyed = false;
+  private cachedSessionId?: string;
 
   /** @internal — use MeerkatRuntime.createSession() instead. */
   constructor(
@@ -74,18 +76,26 @@ export class Session {
     } as TurnResult;
   }
 
-  /** Get the current session state. */
-  getState(): unknown {
+  /** Get the current runtime-backed session state. */
+  getState(): SessionState {
     if (this.destroyed) throw new Error('Session has been destroyed');
-    return JSON.parse(this.getStateFn(this.handle));
+    const state = JSON.parse(this.getStateFn(this.handle)) as SessionState;
+    this.cachedSessionId = state.session_id;
+    return state;
+  }
+
+  /** The authoritative runtime session ID behind this local browser handle. */
+  get sessionId(): string {
+    if (this.destroyed) throw new Error('Session has been destroyed');
+    return this.cachedSessionId ?? this.getState().session_id;
   }
 
   /** Poll buffered agent events from the last turn. */
-  pollEvents(): EventEnvelope[] {
+  pollEvents(): SessionEvent[] {
     if (this.destroyed) return [];
     const json = this.pollFn(this.handle);
     const parsed: unknown = JSON.parse(json);
-    return Array.isArray(parsed) ? (parsed as EventEnvelope[]) : [];
+    return Array.isArray(parsed) ? (parsed as SessionEvent[]) : [];
   }
 
   /**
@@ -95,9 +105,12 @@ export class Session {
    * the same underlying event buffer as `pollEvents()`, so callers should use
    * either `pollEvents()` or the returned subscription, not both at once.
    */
-  subscribe(): EventSubscription<EventEnvelope> {
+  subscribe(): EventSubscription<SessionEvent> {
     if (this.destroyed) throw new Error('Session has been destroyed');
-    return new EventSubscription<EventEnvelope>(() => (this.destroyed ? '[]' : this.pollFn(this.handle)), (raw) => Array.isArray(raw) ? (raw as EventEnvelope[]) : []);
+    return new EventSubscription<SessionEvent>(
+      () => (this.destroyed ? '[]' : this.pollFn(this.handle)),
+      (raw) => (Array.isArray(raw) ? (raw as SessionEvent[]) : []),
+    );
   }
 
   /** Stage runtime system context for application at the next LLM boundary. */

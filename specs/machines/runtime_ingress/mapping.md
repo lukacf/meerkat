@@ -94,6 +94,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `runtime_queue`: `meerkat-runtime/src/queue.rs` — ordered queue discipline precursor
 - `runtime_ephemeral_driver`: `meerkat-runtime/src/driver/ephemeral.rs` — ephemeral ingress mutation precursor
 - `runtime_persistent_driver`: `meerkat-runtime/src/driver/persistent.rs` — persistent ingress/recovery precursor
+- `runtime_loop`: `meerkat-runtime/src/runtime_loop.rs` — same-boundary contributor batching and staged run precursor
 
 ### Scenarios
 - `admit-and-stage-prefix` — individually admitted inputs form a runtime-authored staged prefix
@@ -104,110 +105,110 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 
 ### Transitions
 - `AdmitQueuedQueue`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
 - `AdmitQueuedSteer`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
 - `AdmitConsumedOnAccept`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
 - `StageDrainSnapshot`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
 - `BoundaryApplied`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
 - `RunCompleted`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
 - `RunFailed`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `rollback-on-failure`
 - `RunCancelled`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `rollback-on-failure`
 - `SupersedeQueuedInput`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
 - `CoalesceQueuedInputs`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
 - `Retire`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `recover-retire-reset-destroy`
 - `ResetFromActive`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `recover-retire-reset-destroy`
 - `ResetFromRetired`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `recover-retire-reset-destroy`
 - `Destroy`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `recover-retire-reset-destroy`
 - `RecoverFromActive`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `recover-retire-reset-destroy`
 - `RecoverFromRetired`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `recover-retire-reset-destroy`
 
 ### Effects
 - `IngressAccepted`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
 - `ReadyForRun`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
 - `InputLifecycleNotice`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
 - `WakeRuntime`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
 - `RequestImmediateProcessing`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
 - `CompletionResolved`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
 - `IngressNotice`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
 
 ### Invariants
 - `queue_entries_are_queued`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
 - `steer_entries_are_queued`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
 - `pending_inputs_preserve_content_shape`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
 - `admitted_inputs_preserve_correlation_slots`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
 - `queue_entries_preserve_handling_mode`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
 - `steer_entries_preserve_handling_mode`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
 - `pending_queues_do_not_overlap`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
 - `terminal_inputs_do_not_appear_in_queue`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
 - `current_run_matches_contributor_presence`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
 - `staged_contributors_are_not_queued`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
 - `applied_pending_consumption_has_last_run`
-  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
 
 

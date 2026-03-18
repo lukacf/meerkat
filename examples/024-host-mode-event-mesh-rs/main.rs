@@ -113,6 +113,7 @@ task that owns the Agent exclusively (no mutex needed).
                      5 minutes.' Acknowledge the alert and describe your initial triage \
                      steps. Keep your response to 2-3 sentences."
                 .into(),
+            render_metadata: None,
             system_prompt: Some(
                 "You are a concise incident-response coordinator. \
                  You maintain context across multiple event injections, building an \
@@ -154,6 +155,8 @@ task that owns the Agent exclusively (no mutex needed).
                          Three other nodes in the cluster show normal metrics. \
                          The deployment log shows a new release was pushed 12 minutes ago."
                     .into(),
+                render_metadata: None,
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: Some(event_tx),
                 host_mode: false,
                 skill_references: None,
@@ -189,6 +192,8 @@ task that owns the Agent exclusively (no mutex needed).
                          CPU is back to 40%, memory at 52%. All health checks passing. \
                          Summarize the full incident timeline and close it out."
                     .into(),
+                render_metadata: None,
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: Some(event_tx),
                 host_mode: false,
                 skill_references: None,

@@ -35,6 +35,7 @@ http = "1"
 sse-stream = "0.2"
 
 [dev-dependencies]
+meerkat-machine-kernels = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 
 [package.metadata.cargo-machete]

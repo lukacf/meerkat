@@ -121,11 +121,6 @@ impl IngressClassificationContext {
                 from_peer: None,
                 lifecycle_peer: None,
             }),
-            InboxItem::SubagentResult { .. } => Some(ClassificationResult {
-                class: PeerInputClass::SubagentResult,
-                from_peer: None,
-                lifecycle_peer: None,
-            }),
         }
     }
 }
@@ -356,15 +351,18 @@ mod tests {
     }
 
     #[test]
-    fn classify_subagent_result() {
+    fn no_lifecycle_leakage_plain_events_remain_the_only_non_peer_inbox_class() {
         let ctx = make_context(false, TrustedPeers::new(), vec![]);
-        let item = InboxItem::SubagentResult {
-            subagent_id: Uuid::new_v4(),
-            result: serde_json::json!({}),
-            summary: "done".to_string(),
+        let item = InboxItem::PlainEvent {
+            body: "event".to_string(),
+            source: meerkat_core::PlainEventSource::Tcp,
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            interaction_id: None,
+            blocks: None,
+            render_metadata: None,
         };
         let result = ctx.classify(&item).expect("should classify");
-        assert_eq!(result.class, PeerInputClass::SubagentResult);
+        assert_eq!(result.class, PeerInputClass::PlainEvent);
     }
 
     #[test]

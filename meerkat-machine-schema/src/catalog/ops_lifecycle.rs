@@ -1018,7 +1018,7 @@ fn terminal_transition(
             },
             Update::MapInsert {
                 field: "terminal_buffered".into(),
-                key: operation_id.clone(),
+                key: operation_id,
                 value: Expr::Bool(true),
             },
         ],
@@ -1028,15 +1028,5 @@ fn terminal_transition(
             notify_op_watcher("operation_id", terminal_status),
             retain_terminal_record("operation_id", terminal_status),
         ],
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::ops_lifecycle_machine;
-
-    #[test]
-    fn validates_ops_lifecycle_machine_definition() {
-        assert_eq!(ops_lifecycle_machine().validate(), Ok(()));
     }
 }

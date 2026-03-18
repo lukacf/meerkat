@@ -5,4 +5,4 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
 cd "$ROOT"
 
-exec cargo run -p xtask -- machine-verify --all "$@"
+exec cargo xtask machine-verify --all "$@"

@@ -66,7 +66,7 @@ The agent loop maintains a clear split: **shared immutable infrastructure** (`Ar
 
 ### Copy-on-write session history
 
-Session messages live in `Arc<Vec<Message>>`. `Session::fork()` clones the `Arc` (O(1)), and `Arc::make_mut` triggers a copy only on first mutation when the refcount exceeds one. Sub-agents get independent session copies cheaply — no full history duplication at fork time.
+Session messages live in `Arc<Vec<Message>>`. `Session::fork()` clones the `Arc` (O(1)), and `Arc::make_mut` triggers a copy only on first mutation when the refcount exceeds one. Forked conversation branches get independent session copies cheaply — no full history duplication at fork time.
 
 ```rust
 pub fn fork(&self) -> Self {

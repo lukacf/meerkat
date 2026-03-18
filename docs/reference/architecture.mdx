@@ -154,7 +154,7 @@ The heart of Meerkat. Contains:
 - **Retry**: exponential backoff with jitter
 - **State machine**: `LoopState` for agent lifecycle management
 - **Compaction**: `Compactor` trait, `CompactionConfig`, compaction flow wired into agent loop
-- **Sub-agents**: fork and spawn operations
+- **Forked session branches**: lightweight history branching without a separate sub-agent owner
 - **Hook contracts**: typed hook points, decisions, patches, invocation/outcome envelopes
 </Accordion>
 
@@ -498,29 +498,9 @@ Three runtime adapters invoke the actual hook logic:
 Run-scoped overrides (`HookRunOverrides`) allow callers to disable specific hooks or inject additional entries for a single run without mutating the base configuration.
 </Note>
 
-### Sub-agent task management
+### Delegated work and forked branches
 
-Sub-agents are managed through the `SubAgentManager` (in `meerkat-core`) and the spawn/fork tools (in `meerkat-tools/src/builtin/sub_agent/`).
-
-<Tabs>
-  <Tab title="Spawn flow">
-    The `agent_spawn` flow:
-
-    1. The parent agent calls `agent_spawn` with a prompt, optional provider/model, tool access policy, and budget.
-    2. `AgentSpawnTool` validates concurrency limits, nesting depth, provider/model against the allowlist, and prompt non-emptiness.
-    3. A `FilteredDispatcher` wraps the parent's tool dispatcher if the child uses an `AllowList` or `DenyList` policy.
-    4. An LLM client is created via `LlmClientFactory` for the resolved provider.
-    5. A fresh session is created (no history inheritance). If comms is enabled, the child's prompt is enriched with parent communication context.
-    6. `spawn_sub_agent_dyn()` registers the child in `SubAgentManager` and starts execution in a background tokio task.
-    7. The parent receives the child's `OperationId` and name for tracking via `agent_status`.
-  </Tab>
-  <Tab title="Fork flow">
-    The `agent_fork` flow creates branches with full conversation history, splitting the parent's budget according to `ForkBudgetPolicy`.
-  </Tab>
-  <Tab title="Lifecycle">
-    Children run independently. The parent polls `agent_status` to check completion. `agent_cancel` sends a cancellation signal. `SubAgentManager` enforces `ConcurrencyLimits` (max concurrent, max depth, max total).
-  </Tab>
-</Tabs>
+In `0.5`, the standalone sub-agent subsystem is gone. Delegated work now routes through mob orchestration plus the canonical runtime/control-plane path, while `Session::fork()` remains as the lightweight history-branching primitive.
 
 ### Comms transport design
 
@@ -536,7 +516,7 @@ The `meerkat-comms` crate provides inter-agent communication with a layered arch
 |---------|----------|
 | **UDS** (Unix Domain Sockets) | Local inter-process, lowest latency |
 | **TCP** | Cross-host communication |
-| **Inproc** (`InprocRegistry`) | In-process channels for sub-agents in the same process. Uses a global registry; the sender looks up the peer by name, verifies the keypair signature, and delivers directly to the peer's inbox |
+| **Inproc** (`InprocRegistry`) | In-process channels for peers in the same process. Uses a global registry; the sender looks up the peer by name, verifies the keypair signature, and delivers directly to the peer's inbox |
 
 **Wire format**: `Envelope` containing `{id, from, to, kind, sig}`. `MessageKind` variants: `Message` (fire-and-forget text), `Request`/`Response` (intent + params / in_reply_to + status + result), `Ack` (delivery confirmation). The `Router` handles serialization via `TransportCodec` (length-prefixed framing) and waits for ACK on non-response messages with a configurable timeout.
 
@@ -573,7 +553,7 @@ Meerkat is extended by implementing three core traits. See the [Rust SDK](/rust/
 1. **API key isolation**: keys are passed explicitly, never stored in config
 2. **Tool sandboxing**: MCP tools execute in separate server processes
 3. **Input validation**: JSON Schema validation for tool arguments
-4. **Sub-agent isolation**: child agents cannot spawn further sub-agents or enable comms by default
+4. **Delegated-work isolation**: forked branches and mob-managed child workflows do not get implicit recursive orchestration powers
 
 ## Crate ownership
 

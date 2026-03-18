@@ -525,7 +525,7 @@ runtime_control_ResetRequested ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "ApplyControlPlaneCommand", payload |-> [command |-> "Reset"], effect_id |-> (model_step_count + 1), source_transition |-> "ResetRequested"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "ApplyControlPlaneCommand", payload |-> [command |-> "Reset"], effect_id |-> (model_step_count + 1), source_transition |-> "ResetRequested"], [machine |-> "runtime_control", variant |-> "ResolveCompletionAsTerminated", payload |-> [reason |-> "Reset"], effect_id |-> (model_step_count + 1), source_transition |-> "ResetRequested"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "ResetRequested", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Idle"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -544,7 +544,7 @@ runtime_control_StopRequested ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "ResolveCompletionAsTerminated", payload |-> [reason |-> "Stopped"], effect_id |-> (model_step_count + 1), source_transition |-> "StopRequested"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "ApplyControlPlaneCommand", payload |-> [command |-> "Stop"], effect_id |-> (model_step_count + 1), source_transition |-> "StopRequested"], [machine |-> "runtime_control", variant |-> "ResolveCompletionAsTerminated", payload |-> [reason |-> "Stopped"], effect_id |-> (model_step_count + 1), source_transition |-> "StopRequested"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "StopRequested", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Stopped"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -563,7 +563,7 @@ runtime_control_DestroyRequested ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "ResolveCompletionAsTerminated", payload |-> [reason |-> "Destroyed"], effect_id |-> (model_step_count + 1), source_transition |-> "DestroyRequested"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "ApplyControlPlaneCommand", payload |-> [command |-> "Destroy"], effect_id |-> (model_step_count + 1), source_transition |-> "DestroyRequested"], [machine |-> "runtime_control", variant |-> "ResolveCompletionAsTerminated", payload |-> [reason |-> "Destroyed"], effect_id |-> (model_step_count + 1), source_transition |-> "DestroyRequested"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "DestroyRequested", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Destroyed"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -1091,12 +1091,12 @@ runtime_ingress_StageDrainSnapshot(arg_run_id, arg_contributing_work_ids) ==
        /\ runtime_ingress_phase = "Active" \/ runtime_ingress_phase = "Retired"
        /\ (runtime_ingress_current_run = None)
        /\ (Len(packet.payload.contributing_work_ids) > 0)
-       /\ (((Len(runtime_ingress_steer_queue) > 0) /\ (packet.payload.contributing_work_ids = runtime_ingress_steer_queue)) \/ ((Len(runtime_ingress_steer_queue) = 0) /\ StartsWith(runtime_ingress_queue, packet.payload.contributing_work_ids)))
+       /\ (((Len(runtime_ingress_steer_queue) > 0) /\ StartsWith(runtime_ingress_steer_queue, packet.payload.contributing_work_ids)) \/ ((Len(runtime_ingress_steer_queue) = 0) /\ StartsWith(runtime_ingress_queue, packet.payload.contributing_work_ids)))
        /\ (\A work_id \in SeqElements(packet.payload.contributing_work_ids) : ((IF work_id \in DOMAIN runtime_ingress_lifecycle THEN runtime_ingress_lifecycle[work_id] ELSE "None") = "Queued"))
        /\ runtime_ingress_phase' = "Active"
        /\ runtime_ingress_lifecycle' = runtime_ingress_StageDrainSnapshot_ForEach0_lifecycle(runtime_ingress_lifecycle, packet.payload.contributing_work_ids, packet.payload.run_id)
        /\ runtime_ingress_queue' = IF (Len(runtime_ingress_steer_queue) > 0) THEN runtime_ingress_queue ELSE SeqRemoveAll(runtime_ingress_queue, packet.payload.contributing_work_ids)
-       /\ runtime_ingress_steer_queue' = IF (Len(runtime_ingress_steer_queue) > 0) THEN <<>> ELSE runtime_ingress_steer_queue
+       /\ runtime_ingress_steer_queue' = IF (Len(runtime_ingress_steer_queue) > 0) THEN SeqRemoveAll(runtime_ingress_steer_queue, packet.payload.contributing_work_ids) ELSE runtime_ingress_steer_queue
        /\ runtime_ingress_current_run' = Some(packet.payload.run_id)
        /\ runtime_ingress_current_run_contributors' = packet.payload.contributing_work_ids
        /\ runtime_ingress_last_run' = runtime_ingress_StageDrainSnapshot_ForEach0_last_run(runtime_ingress_last_run, packet.payload.contributing_work_ids, packet.payload.run_id)

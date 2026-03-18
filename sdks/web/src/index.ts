@@ -8,6 +8,7 @@ export type {
   RuntimeConfig,
   InitResult,
   SessionConfig,
+  SessionState,
   AppendSystemContextOptions,
   AppendSystemContextResult,
   MobAppendSystemContextResult,

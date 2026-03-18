@@ -205,10 +205,12 @@ export class MeerkatRuntime {
   /**
    * Register a tool callback on the WASM module.
    *
-   * **Must be called before {@link init} or {@link initFromMobpack}** because
-   * the tool dispatcher is built during initialization.
+   * Runtime state must already be initialized.
    *
-   * @param wasm - The WASM module (same one passed to init).
+   * Prefer the instance method when possible so registration is clearly scoped
+   * to the active runtime.
+   *
+   * @param wasm - The WASM module used by the active runtime.
    * @param name - Tool name.
    * @param description - Human-readable tool description.
    * @param schema - JSON Schema for tool input.
@@ -232,7 +234,7 @@ export class MeerkatRuntime {
   /**
    * Register a fire-and-forget tool on the WASM module.
    *
-   * **Must be called before {@link init} or {@link initFromMobpack}.**
+   * Runtime state must already be initialized.
    *
    * When the agent calls this tool, it receives `"acknowledged"` immediately
    * and continues processing. The host should watch `ToolCallRequested` events
@@ -253,9 +255,38 @@ export class MeerkatRuntime {
     wasm.register_js_tool(name, description, JSON.stringify(schema));
   }
 
-  /** Clear all registered tool callbacks on the WASM module. */
+  /** Clear all registered tool callbacks on the active WASM runtime. */
   static clearTools(wasm: WasmModule): void {
     wasm.clear_tool_callbacks();
+  }
+
+  /** Register a tool callback on this initialized runtime instance. */
+  registerTool(
+    name: string,
+    description: string,
+    schema: JsonSchema,
+    callback: ToolCallback,
+  ): void {
+    this.wasm.register_tool_callback(
+      name,
+      description,
+      JSON.stringify(schema),
+      async (args: string) => JSON.stringify(await callback(args)),
+    );
+  }
+
+  /** Register a fire-and-forget tool on this initialized runtime instance. */
+  registerFireAndForgetTool(
+    name: string,
+    description: string,
+    schema: JsonSchema,
+  ): void {
+    this.wasm.register_js_tool(name, description, JSON.stringify(schema));
+  }
+
+  /** Clear all runtime-scoped JS tools from this initialized runtime instance. */
+  clearTools(): void {
+    this.wasm.clear_tool_callbacks();
   }
 
   /** Create a mob from a definition. */
@@ -299,7 +330,7 @@ export class MeerkatRuntime {
     await this.wasm.wire_cross_mob(mobA, meerkatA, mobB, meerkatB);
   }
 
-  /** Create a direct (non-mob) session. */
+  /** Create a direct session façade backed by a real runtime session identity. */
   createSession(config: SessionConfig): Session {
     const handle = this.wasm.create_session_simple(
       JSON.stringify(sessionToWasm(config)),

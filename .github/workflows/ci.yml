@@ -50,6 +50,33 @@ jobs:
       - name: Check for unused dependencies
         run: cargo machete --with-metadata
 
+  machine-authority:
+    name: Machine authority workflow
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: machine-authority
+
+      - name: Machine code generation
+        run: cargo xtask machine-codegen --all
+
+      - name: Generated artifacts stay clean
+        run: git diff --exit-code
+
+      - name: Machine drift check
+        run: cargo xtask machine-check-drift --all
+
+      - name: Machine verification
+        run: cargo xtask machine-verify --all
+
   test:
     name: Test suite (all features)
     runs-on: ubuntu-latest
@@ -240,7 +267,7 @@ jobs:
   gate:
     name: CI gate
     if: always()
-    needs: [fmt-lint, test, test-minimal, test-feature-matrix-lib, test-feature-matrix-surface-checks, test-surface-smoke, wasm-check, audit]
+    needs: [fmt-lint, machine-authority, test, test-minimal, test-feature-matrix-lib, test-feature-matrix-surface-checks, test-surface-smoke, wasm-check, audit]
     runs-on: ubuntu-latest
     steps:
       - name: Check results
@@ -248,6 +275,7 @@ jobs:
           failed=""
           for job in \
             fmt-lint \
+            machine-authority \
             test \
             test-minimal \
             test-feature-matrix-lib \
@@ -258,6 +286,7 @@ jobs:
           do
             case "$job" in
               fmt-lint) result="${{ needs.fmt-lint.result }}" ;;
+              machine-authority) result="${{ needs.machine-authority.result }}" ;;
               test) result="${{ needs.test.result }}" ;;
               test-minimal) result="${{ needs.test-minimal.result }}" ;;
               test-feature-matrix-lib) result="${{ needs.test-feature-matrix-lib.result }}" ;;

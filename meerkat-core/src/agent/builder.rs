@@ -9,7 +9,6 @@ use crate::prompt::SystemPromptConfig;
 use crate::retry::RetryPolicy;
 use crate::session::Session;
 use crate::state::LoopState;
-use crate::sub_agent::SubAgentManager;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use crate::tool_scope::{EXTERNAL_TOOL_FILTER_METADATA_KEY, ToolFilter, ToolScope};
@@ -213,7 +212,6 @@ impl AgentBuilder {
         }
 
         let budget = Budget::new(self.budget_limits.unwrap_or_default());
-        let sub_agent_manager = Arc::new(SubAgentManager::new(self.concurrency_limits, self.depth));
         let tool_scope = ToolScope::new(tools.tools());
 
         let mut agent = Agent {
@@ -226,7 +224,6 @@ impl AgentBuilder {
             budget,
             retry_policy: self.retry_policy,
             state: LoopState::CallingLlm,
-            sub_agent_manager,
             depth: self.depth,
             comms_runtime: self.comms_runtime,
             hook_engine: self.hook_engine,

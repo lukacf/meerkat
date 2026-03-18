@@ -66,7 +66,10 @@ test("MeerkatRuntime drives direct-session lifecycle through shipped wasm export
   assert.equal(staged.handle, session.handle);
 
   const state = session.getState();
-  assert.equal(state.session_id, session.handle);
+  assert.equal(session.sessionId, state.session_id);
+  assert.equal(state.handle, session.handle);
+  assert.equal(typeof state.session_id, "string");
+  assert.notEqual(state.session_id, String(session.handle));
   assert.equal(state.model, "claude-sonnet-4-5");
 
   session.destroy();
@@ -108,6 +111,85 @@ test("MeerkatRuntime opens and closes a public mob subscription through the ship
     () => rawWasm.poll_subscription(subscribedHandle),
     /unknown subscription handle/i,
   );
+});
+
+test("MeerkatRuntime exposes runtime-scoped tool registration on the instance surface", async () => {
+  const calls = [];
+  const wasm = {
+    async default() {},
+    runtime_version() {
+      return "0.4.11";
+    },
+    init_runtime_from_config() {
+      return JSON.stringify({ status: "initialized", model: "claude-sonnet-4-5", providers: ["anthropic"] });
+    },
+    register_tool_callback(name, description, schemaJson, callback) {
+      calls.push(["callback", name, description, JSON.parse(schemaJson), typeof callback]);
+    },
+    register_js_tool(name, description, schemaJson) {
+      calls.push(["fire_and_forget", name, description, JSON.parse(schemaJson)]);
+    },
+    clear_tool_callbacks() {
+      calls.push(["clear"]);
+    },
+  };
+
+  const runtime = await MeerkatRuntime.init(wasm, {
+    anthropicApiKey: "sk-test",
+    model: "claude-sonnet-4-5",
+  });
+
+  runtime.registerTool(
+    "echo_browser",
+    "Echo browser payloads",
+    {
+      type: "object",
+      properties: {
+        value: { type: "string" },
+      },
+      required: ["value"],
+    },
+    async (args) => ({ content: args, is_error: false }),
+  );
+  runtime.registerFireAndForgetTool(
+    "notify_browser",
+    "Emit a browser-side notification",
+    {
+      type: "object",
+      properties: {
+        message: { type: "string" },
+      },
+      required: ["message"],
+    },
+  );
+  runtime.clearTools();
+
+  assert.deepEqual(calls[0], [
+    "callback",
+    "echo_browser",
+    "Echo browser payloads",
+    {
+      type: "object",
+      properties: {
+        value: { type: "string" },
+      },
+      required: ["value"],
+    },
+    "function",
+  ]);
+  assert.deepEqual(calls[1], [
+    "fire_and_forget",
+    "notify_browser",
+    "Emit a browser-side notification",
+    {
+      type: "object",
+      properties: {
+        message: { type: "string" },
+      },
+      required: ["message"],
+    },
+  ]);
+  assert.deepEqual(calls[2], ["clear"]);
 });
 
 test("MeerkatRuntime surfaces lagged subscription signals through the shipped package surface", async () => {

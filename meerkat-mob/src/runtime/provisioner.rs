@@ -74,6 +74,7 @@ pub trait MobProvisioner: Send + Sync {
 pub struct SubagentBackend {
     session_service: Arc<dyn MobSessionService>,
     runtime_adapter: Option<Arc<RuntimeSessionAdapter>>,
+    ops_adapter: Arc<super::ops_adapter::MobOpsAdapter>,
     runtime_sessions: RwLock<HashMap<SessionId, Arc<RuntimeSessionState>>>,
 }
 
@@ -85,6 +86,7 @@ impl SubagentBackend {
         Self {
             session_service,
             runtime_adapter,
+            ops_adapter: Arc::new(super::ops_adapter::MobOpsAdapter::new()),
             runtime_sessions: RwLock::new(HashMap::new()),
         }
     }
@@ -253,8 +255,8 @@ fn extract_prompt_from_input(input: &Input) -> String {
         Input::Peer(p) => p.body.clone(),
         Input::FlowStep(f) => f.instructions.clone(),
         Input::ExternalEvent(e) => format!("[External Event: {}] {}", e.event_type, e.payload),
-        Input::SystemGenerated(s) => s.content.clone(),
-        Input::Projected(p) => p.content.clone(),
+        Input::Continuation(c) => format!("[Continuation] {}", c.reason),
+        Input::Operation(_) => String::new(),
         _ => String::new(),
     }
 }
@@ -389,6 +391,9 @@ impl MobProvisioner for SubagentBackend {
         if self.runtime_adapter.is_some() {
             let _ = self.runtime_session_state(&created.session_id).await;
         }
+        self.ops_adapter
+            .mark_member_provisioned(&created.session_id, &req.peer_name)
+            .await?;
         tracing::debug!(
             session_id = %created.session_id,
             "SubagentBackend::provision_member created session"
@@ -408,6 +413,7 @@ impl MobProvisioner for SubagentBackend {
             self.runtime_sessions.write().await.remove(&session_id);
         }
         self.session_service.archive(&session_id).await?;
+        self.ops_adapter.mark_member_retired(member_ref).await?;
         Ok(())
     }
 
@@ -477,6 +483,10 @@ impl MobProvisioner for SubagentBackend {
     ) -> Result<(), MobError> {
         let session_id = Self::require_session(member_ref, "start turn")?;
         if self.runtime_adapter.is_some() {
+            let _ = self
+                .ops_adapter
+                .report_member_progress(member_ref, "turn dispatched")
+                .await;
             let turn_metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                 host_mode: if req.host_mode { Some(true) } else { None },
                 skill_references: req.skill_references.clone(),
@@ -571,11 +581,15 @@ impl MobProvisioner for SubagentBackend {
 
     async fn trusted_peer_spec(
         &self,
-        _member_ref: &MemberRef,
+        member_ref: &MemberRef,
         fallback_name: &str,
         fallback_peer_id: &str,
     ) -> Result<TrustedPeerSpec, MobError> {
-        Self::trusted_peer_spec(fallback_name, fallback_peer_id)
+        let trusted_peer = Self::trusted_peer_spec(fallback_name, fallback_peer_id)?;
+        self.ops_adapter
+            .mark_member_peer_ready(member_ref, fallback_name, trusted_peer.clone())
+            .await?;
+        Ok(trusted_peer)
     }
 
     async fn cancel_all_checkpointers(&self) {

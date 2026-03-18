@@ -71,6 +71,55 @@ pub enum ConsumePoint {
     ExplicitAck,
 }
 
+/// Whether admitted work may interrupt a yielding runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum InterruptPolicy {
+    None,
+    InterruptYielding,
+}
+
+impl Default for InterruptPolicy {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+/// How the runtime should drain admitted work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DrainPolicy {
+    QueueNextTurn,
+    SteerBatch,
+    Immediate,
+    Ignore,
+}
+
+impl Default for DrainPolicy {
+    fn default() -> Self {
+        Self::QueueNextTurn
+    }
+}
+
+/// Where admitted work routes after policy resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RoutingDisposition {
+    Queue,
+    Steer,
+    Immediate,
+    Drop,
+}
+
+impl Default for RoutingDisposition {
+    fn default() -> Self {
+        Self::Queue
+    }
+}
+
 /// Full policy decision for an input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyDecision {
@@ -82,6 +131,15 @@ pub struct PolicyDecision {
     pub queue_mode: QueueMode,
     /// When the input is consumed.
     pub consume_point: ConsumePoint,
+    /// Whether yielding work may be interrupted.
+    #[serde(default)]
+    pub interrupt_policy: InterruptPolicy,
+    /// How runtime drain ownership should handle this work.
+    #[serde(default)]
+    pub drain_policy: DrainPolicy,
+    /// Where the work routes after admission.
+    #[serde(default)]
+    pub routing_disposition: RoutingDisposition,
     /// Whether to record this input in the conversation transcript.
     #[serde(default = "default_true")]
     pub record_transcript: bool,
@@ -159,12 +217,52 @@ mod tests {
     }
 
     #[test]
+    fn interrupt_policy_serde() {
+        for policy in [InterruptPolicy::None, InterruptPolicy::InterruptYielding] {
+            let json = serde_json::to_value(policy).unwrap();
+            let parsed: InterruptPolicy = serde_json::from_value(json).unwrap();
+            assert_eq!(policy, parsed);
+        }
+    }
+
+    #[test]
+    fn drain_policy_serde() {
+        for policy in [
+            DrainPolicy::QueueNextTurn,
+            DrainPolicy::SteerBatch,
+            DrainPolicy::Immediate,
+            DrainPolicy::Ignore,
+        ] {
+            let json = serde_json::to_value(policy).unwrap();
+            let parsed: DrainPolicy = serde_json::from_value(json).unwrap();
+            assert_eq!(policy, parsed);
+        }
+    }
+
+    #[test]
+    fn routing_disposition_serde() {
+        for disposition in [
+            RoutingDisposition::Queue,
+            RoutingDisposition::Steer,
+            RoutingDisposition::Immediate,
+            RoutingDisposition::Drop,
+        ] {
+            let json = serde_json::to_value(disposition).unwrap();
+            let parsed: RoutingDisposition = serde_json::from_value(json).unwrap();
+            assert_eq!(disposition, parsed);
+        }
+    }
+
+    #[test]
     fn policy_decision_serde_roundtrip() {
         let decision = PolicyDecision {
             apply_mode: ApplyMode::StageRunStart,
             wake_mode: WakeMode::WakeIfIdle,
             queue_mode: QueueMode::Fifo,
             consume_point: ConsumePoint::OnRunComplete,
+            interrupt_policy: InterruptPolicy::None,
+            drain_policy: DrainPolicy::QueueNextTurn,
+            routing_disposition: RoutingDisposition::Queue,
             record_transcript: true,
             emit_operator_content: true,
             policy_version: PolicyVersion(1),
@@ -181,6 +279,9 @@ mod tests {
             wake_mode: WakeMode::None,
             queue_mode: QueueMode::None,
             consume_point: ConsumePoint::OnAccept,
+            interrupt_policy: InterruptPolicy::None,
+            drain_policy: DrainPolicy::Ignore,
+            routing_disposition: RoutingDisposition::Drop,
             record_transcript: false,
             emit_operator_content: false,
             policy_version: PolicyVersion(1),

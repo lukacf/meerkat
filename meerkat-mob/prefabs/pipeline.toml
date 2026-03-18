@@ -36,3 +36,48 @@ content = "## Role\nDrive staged pipeline execution."
 [skills.worker]
 source = "inline"
 content = "Execute your stage deterministically and emit handoff artifacts."
+
+[flows.pipeline]
+description = "pipeline flow"
+
+[flows.pipeline.steps.start]
+role = "lead"
+message = "go"
+dispatch_mode = "one_to_one"
+depends_on_mode = "all"
+
+[flows.pipeline.steps.branch_a]
+role = "worker"
+message = "a"
+depends_on = ["start"]
+branch = "choose"
+condition = { op = "eq", path = "params.choice", value = "a" }
+
+[flows.pipeline.steps.branch_b]
+role = "worker"
+message = "b"
+depends_on = ["start"]
+branch = "choose"
+condition = { op = "eq", path = "params.choice", value = "b" }
+
+[flows.pipeline.steps.join]
+role = "lead"
+message = "join"
+depends_on = ["branch_a", "branch_b"]
+depends_on_mode = "any"
+collection_policy = { type = "quorum", n = 1 }
+timeout_ms = 1000
+expected_schema_ref = "schemas/join.json"
+
+[topology]
+mode = "strict"
+rules = [{ from_role = "lead", to_role = "worker", allowed = true }]
+
+[supervisor]
+role = "lead"
+escalation_threshold = 2
+
+[limits]
+max_flow_duration_ms = 30000
+max_step_retries = 1
+max_orphaned_turns = 8

@@ -26,13 +26,13 @@ use meerkat_machine_schema::{
 pub struct SelectionArgs {
     /// Operate on every registered machine and composition.
     #[arg(long)]
-    all: bool,
+    pub all: bool,
     /// Restrict work to one or more machine names or machine slugs.
     #[arg(long = "machine")]
-    machines: Vec<String>,
+    pub machines: Vec<String>,
     /// Restrict work to one or more composition names.
     #[arg(long = "composition")]
-    compositions: Vec<String>,
+    pub compositions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -100,6 +100,8 @@ pub fn machine_check_drift(args: SelectionArgs) -> Result<()> {
     );
     let mut mismatches = collect_drift_mismatches(&root, &selection)?;
     mismatches.extend(collect_coverage_anchor_mismatches(&root, &selection));
+    mismatches.extend(collect_machine_inventory_mismatches(&root)?);
+    mismatches.extend(collect_generated_kernel_boundary_mismatches(&root)?);
     mismatches.extend(collect_authority_language_mismatches(&root)?);
 
     if !mismatches.is_empty() {
@@ -117,7 +119,7 @@ pub fn machine_check_drift(args: SelectionArgs) -> Result<()> {
     Ok(())
 }
 
-fn machine_codegen_at_root(root: &Path, selection: &Selection) -> Result<()> {
+pub fn machine_codegen_at_root(root: &Path, selection: &Selection) -> Result<()> {
     let registry = CanonicalRegistry::load();
     write_generated(
         &generated_kernel_mod_path(root),
@@ -277,6 +279,9 @@ fn machine_verify_at_root(
     }
 
     run_generated_kernel_tests(root)?;
+    for machine in &selection.machines {
+        run_machine_owner_tests(root, machine)?;
+    }
 
     Ok(())
 }
@@ -284,6 +289,8 @@ fn machine_verify_at_root(
 fn ensure_no_drift(root: &Path, selection: &Selection) -> Result<()> {
     let mut mismatches = collect_drift_mismatches(root, selection)?;
     mismatches.extend(collect_coverage_anchor_mismatches(root, selection));
+    mismatches.extend(collect_machine_inventory_mismatches(root)?);
+    mismatches.extend(collect_generated_kernel_boundary_mismatches(root)?);
     mismatches.extend(collect_authority_language_mismatches(root)?);
 
     if !mismatches.is_empty() {
@@ -300,7 +307,7 @@ fn ensure_no_drift(root: &Path, selection: &Selection) -> Result<()> {
     Ok(())
 }
 
-fn collect_drift_mismatches(root: &Path, selection: &Selection) -> Result<Vec<String>> {
+pub fn collect_drift_mismatches(root: &Path, selection: &Selection) -> Result<Vec<String>> {
     let mut mismatches = Vec::new();
     let registry = CanonicalRegistry::load();
 
@@ -395,7 +402,7 @@ fn collect_drift_mismatches(root: &Path, selection: &Selection) -> Result<Vec<St
     Ok(mismatches)
 }
 
-fn collect_authority_language_mismatches(root: &Path) -> Result<Vec<String>> {
+pub fn collect_authority_language_mismatches(root: &Path) -> Result<Vec<String>> {
     let mut mismatches = Vec::new();
     let banned = ["schema.yaml", "PureHandKernel", "PureHand"];
 
@@ -416,7 +423,44 @@ fn collect_authority_language_mismatches(root: &Path) -> Result<Vec<String>> {
     Ok(mismatches)
 }
 
-fn collect_coverage_anchor_mismatches(root: &Path, selection: &Selection) -> Vec<String> {
+pub fn collect_generated_kernel_boundary_mismatches(root: &Path) -> Result<Vec<String>> {
+    let registry = CanonicalRegistry::load();
+    let mut mismatches = Vec::new();
+
+    for machine in &registry.machines {
+        let slug = machine_slug(&machine.machine);
+        let generated_kernel = generated_kernel_module_path(root, &slug);
+        if !generated_kernel.exists() {
+            continue;
+        }
+
+        let owner_file = owner_module_file(root, &machine.rust.crate_name, &machine.rust.module);
+        let owner_mod =
+            owner_module_dir(root, &machine.rust.crate_name, &machine.rust.module).join("mod.rs");
+
+        if owner_file.exists() {
+            mismatches.push(format!(
+                "parallel owner module must be removed for {}: generated kernel {} exists but shell owner file {} still defines machine authority",
+                machine.machine,
+                generated_kernel.display(),
+                owner_file.display()
+            ));
+        }
+
+        if owner_mod.exists() {
+            mismatches.push(format!(
+                "parallel owner module must be removed for {}: generated kernel {} exists but shell owner module {} still defines machine authority",
+                machine.machine,
+                generated_kernel.display(),
+                owner_mod.display()
+            ));
+        }
+    }
+
+    Ok(mismatches)
+}
+
+pub fn collect_coverage_anchor_mismatches(root: &Path, selection: &Selection) -> Vec<String> {
     let mut mismatches = Vec::new();
 
     for machine in &selection.machines {
@@ -448,6 +492,231 @@ fn collect_coverage_anchor_mismatches(root: &Path, selection: &Selection) -> Vec
     mismatches
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MachineOwnerInventoryRow {
+    machine: String,
+    final_mode: String,
+    owner_crate: String,
+}
+
+pub fn collect_machine_inventory_mismatches(root: &Path) -> Result<Vec<String>> {
+    let registry = CanonicalRegistry::load();
+    let owner_inventory = parse_owner_inventory(
+        &fs::read_to_string(root.join("docs/architecture/0.5/meerkat_0_5_implementation_plan.md"))
+            .context("read canonical machine owner map")?,
+    )?;
+    let final_mode_inventory = parse_final_mode_inventory(
+        &fs::read_to_string(
+            root.join("docs/architecture/0.5/meerkat_machine_formalization_strategy.md"),
+        )
+        .context("read final machine mode inventory")?,
+    )?;
+
+    let mut mismatches = Vec::new();
+    let registry_names: BTreeSet<String> = registry
+        .machines
+        .iter()
+        .map(|machine| machine.machine.clone())
+        .collect();
+    let owner_names: BTreeSet<String> = owner_inventory.keys().cloned().collect();
+    let final_mode_names: BTreeSet<String> = final_mode_inventory.keys().cloned().collect();
+
+    for machine in registry_names.difference(&owner_names) {
+        mismatches.push(format!(
+            "canonical machine {machine} missing from docs/architecture/0.5/meerkat_0_5_implementation_plan.md owner map"
+        ));
+    }
+    for machine in owner_names.difference(&registry_names) {
+        mismatches.push(format!(
+            "untracked machine {machine} present in docs/architecture/0.5/meerkat_0_5_implementation_plan.md owner map"
+        ));
+    }
+    for machine in registry_names.difference(&final_mode_names) {
+        mismatches.push(format!(
+            "canonical machine {machine} missing from docs/architecture/0.5/meerkat_machine_formalization_strategy.md final mode table"
+        ));
+    }
+    for machine in final_mode_names.difference(&registry_names) {
+        mismatches.push(format!(
+            "untracked machine {machine} present in docs/architecture/0.5/meerkat_machine_formalization_strategy.md final mode table"
+        ));
+    }
+
+    let specs_machine_root = root.join("specs/machines");
+    let actual_machine_dirs = canonical_machine_dirs(&specs_machine_root)?;
+    let expected_machine_dirs: BTreeSet<String> = registry
+        .machines
+        .iter()
+        .map(|machine| machine_slug(&machine.machine))
+        .collect();
+    for slug in expected_machine_dirs.difference(&actual_machine_dirs) {
+        mismatches.push(format!(
+            "missing canonical machine artifact directory {}",
+            specs_machine_root.join(slug).display()
+        ));
+    }
+    for slug in actual_machine_dirs.difference(&expected_machine_dirs) {
+        mismatches.push(format!(
+            "untracked canonical machine directory {}",
+            specs_machine_root.join(slug).display()
+        ));
+    }
+
+    for machine in &registry.machines {
+        let Some(owner_row) = owner_inventory.get(&machine.machine) else {
+            continue;
+        };
+        let Some(required_final_mode) = final_mode_inventory.get(&machine.machine) else {
+            continue;
+        };
+        if owner_row.owner_crate != machine.rust.crate_name {
+            mismatches.push(format!(
+                "owner inventory mismatch for {}: docs say {}, registry says {}",
+                machine.machine, owner_row.owner_crate, machine.rust.crate_name
+            ));
+        }
+        if owner_row.final_mode != *required_final_mode {
+            mismatches.push(format!(
+                "final mode inventory mismatch for {}: owner map says {}, final mode table says {}",
+                machine.machine, owner_row.final_mode, required_final_mode
+            ));
+        }
+        if required_final_mode != "SchemaKernel" {
+            mismatches.push(format!(
+                "invalid final mode {} for {}: canonical 0.5 machine inventories must converge on SchemaKernel",
+                required_final_mode, machine.machine
+            ));
+        }
+
+        let slug = machine_slug(&machine.machine);
+        for artifact_path in [
+            machine_contract_path(root, &slug),
+            machine_model_path(root, &slug),
+            machine_ci_path(root, &slug),
+            machine_deep_path(root, &slug),
+            machine_mapping_path(root, &slug),
+            generated_kernel_module_path(root, &slug),
+        ] {
+            if !artifact_path.exists() {
+                mismatches.push(format!(
+                    "missing canonical machine artifact {}",
+                    artifact_path.display()
+                ));
+            }
+        }
+    }
+
+    Ok(mismatches)
+}
+
+fn canonical_machine_dirs(root: &Path) -> Result<BTreeSet<String>> {
+    let mut dirs = BTreeSet::new();
+    if !root.exists() {
+        return Ok(dirs);
+    }
+
+    for entry in fs::read_dir(root).with_context(|| format!("read {}", root.display()))? {
+        let entry = entry.with_context(|| format!("iterate {}", root.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("read file type {}", path.display()))?;
+        if !file_type.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name.starts_with('.') {
+            continue;
+        }
+        dirs.insert(name.to_owned());
+    }
+
+    Ok(dirs)
+}
+
+fn parse_owner_inventory(contents: &str) -> Result<BTreeMap<String, MachineOwnerInventoryRow>> {
+    let mut rows = BTreeMap::new();
+    for row in parse_markdown_table_rows(contents, "## Canonical Machine Owner Map")? {
+        if row.len() < 3 {
+            bail!("owner map row must contain machine, final mode, and owner crate");
+        }
+        let entry = MachineOwnerInventoryRow {
+            machine: row[0].clone(),
+            final_mode: row[1].clone(),
+            owner_crate: row[2].clone(),
+        };
+        if rows.insert(entry.machine.clone(), entry).is_some() {
+            bail!("duplicate machine in canonical owner map");
+        }
+    }
+    Ok(rows)
+}
+
+fn parse_final_mode_inventory(contents: &str) -> Result<BTreeMap<String, String>> {
+    let mut rows = BTreeMap::new();
+    for row in parse_markdown_table_rows(contents, "## Final 0.5 Machine Modes")? {
+        if row.len() < 2 {
+            bail!("final mode row must contain machine and required final mode");
+        }
+        if rows.insert(row[0].clone(), row[1].clone()).is_some() {
+            bail!("duplicate machine in final mode inventory");
+        }
+    }
+    Ok(rows)
+}
+
+fn parse_markdown_table_rows(contents: &str, heading: &str) -> Result<Vec<Vec<String>>> {
+    let mut in_section = false;
+    let mut rows = Vec::new();
+
+    for line in contents.lines() {
+        let trimmed = line.trim();
+
+        if !in_section {
+            if trimmed == heading {
+                in_section = true;
+            }
+            continue;
+        }
+
+        if trimmed.starts_with("## ") && !rows.is_empty() {
+            break;
+        }
+        if !trimmed.starts_with('|') {
+            if !rows.is_empty() {
+                break;
+            }
+            continue;
+        }
+
+        let columns: Vec<String> = trimmed
+            .trim_matches('|')
+            .split('|')
+            .map(|column| column.trim().replace('`', ""))
+            .collect();
+        if columns.is_empty() {
+            continue;
+        }
+        if columns[0] == "Machine" {
+            continue;
+        }
+        if columns.iter().all(|column| {
+            !column.is_empty() && column.chars().all(|ch| ch == '-' || ch == ':' || ch == ' ')
+        }) {
+            continue;
+        }
+        rows.push(columns);
+    }
+
+    if rows.is_empty() {
+        bail!("failed to parse markdown table under {heading}");
+    }
+
+    Ok(rows)
+}
+
 fn authority_language_paths(root: &Path) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
 
@@ -464,6 +733,28 @@ fn authority_language_paths(root: &Path) -> Result<Vec<PathBuf>> {
     }
 
     Ok(paths)
+}
+
+pub fn owner_module_dir(root: &Path, crate_name: &str, module: &str) -> PathBuf {
+    let mut path = root.join(crate_name).join("src");
+    let mut segments = module.split("::").peekable();
+    while let Some(segment) = segments.next() {
+        if segments.peek().is_none() {
+            break;
+        }
+        path.push(segment);
+    }
+    path
+}
+
+pub fn owner_module_file(root: &Path, crate_name: &str, module: &str) -> PathBuf {
+    let mut path = owner_module_dir(root, crate_name, module);
+    let leaf = module
+        .rsplit("::")
+        .next()
+        .expect("Rust module path always has a leaf segment");
+    path.push(format!("{leaf}.rs"));
+    path
 }
 
 fn collect_text_paths(dir: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
@@ -495,7 +786,7 @@ fn collect_text_paths(dir: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-struct CanonicalRegistry {
+pub struct CanonicalRegistry {
     machines: Vec<MachineSchema>,
     compositions: Vec<CompositionSchema>,
     machine_coverages: Vec<MachineCoverageManifest>,
@@ -503,7 +794,7 @@ struct CanonicalRegistry {
 }
 
 impl CanonicalRegistry {
-    fn load() -> Self {
+    pub fn load() -> Self {
         Self {
             machines: canonical_machine_schemas(),
             compositions: canonical_composition_schemas(),
@@ -512,7 +803,7 @@ impl CanonicalRegistry {
         }
     }
 
-    fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         let by_name = self.machine_map();
         self.validate_coverages()?;
 
@@ -635,7 +926,7 @@ impl CanonicalRegistry {
             .collect()
     }
 
-    fn select(&self, args: &SelectionArgs) -> Result<Selection> {
+    pub fn select(&self, args: &SelectionArgs) -> Result<Selection> {
         if !args.all && args.machines.is_empty() && args.compositions.is_empty() {
             bail!("select --all or provide at least one --machine/--composition");
         }
@@ -873,23 +1164,23 @@ fn scheduler_rule_name(rule: &SchedulerRule) -> String {
     }
 }
 
-struct Selection {
-    machines: Vec<MachineEntry>,
-    compositions: Vec<CompositionEntry>,
+pub struct Selection {
+    pub machines: Vec<MachineEntry>,
+    pub compositions: Vec<CompositionEntry>,
 }
 
 #[derive(Clone)]
-struct MachineEntry {
-    slug: String,
-    schema: MachineSchema,
-    coverage: MachineCoverageManifest,
+pub struct MachineEntry {
+    pub slug: String,
+    pub schema: MachineSchema,
+    pub coverage: MachineCoverageManifest,
 }
 
 #[derive(Clone)]
-struct CompositionEntry {
-    slug: String,
-    schema: CompositionSchema,
-    coverage: CompositionCoverageManifest,
+pub struct CompositionEntry {
+    pub slug: String,
+    pub schema: CompositionSchema,
+    pub coverage: CompositionCoverageManifest,
 }
 
 fn select_machines(entries: &[MachineEntry], requested: &[String]) -> Result<Vec<MachineEntry>> {
@@ -934,17 +1225,17 @@ fn select_compositions(
 }
 
 #[derive(Debug, Default, Clone)]
-struct TlcCoverageSummary {
+pub struct TlcCoverageSummary {
     counts_by_operator: BTreeMap<String, TlcCoverageCounts>,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-struct TlcCoverageCounts {
-    truth_hits: u64,
-    evaluations: u64,
+pub struct TlcCoverageCounts {
+    pub truth_hits: u64,
+    pub evaluations: u64,
 }
 
-fn merge_tlc_coverage(target: &mut TlcCoverageSummary, other: Option<&TlcCoverageSummary>) {
+pub fn merge_tlc_coverage(target: &mut TlcCoverageSummary, other: Option<&TlcCoverageSummary>) {
     let Some(other) = other else {
         return;
     };
@@ -1045,7 +1336,7 @@ fn maybe_run_tlc_in_dir_with_config(
     Ok(coverage)
 }
 
-fn tlc_run_succeeded(status: &ExitStatus, combined_output: &str) -> bool {
+pub fn tlc_run_succeeded(status: &ExitStatus, combined_output: &str) -> bool {
     if status.success() {
         return true;
     }
@@ -1057,7 +1348,7 @@ fn tlc_run_succeeded(status: &ExitStatus, combined_output: &str) -> bool {
         && !combined_output.contains("is violated.")
 }
 
-fn ensure_machine_transition_coverage(
+pub fn ensure_machine_transition_coverage(
     schema: &MachineSchema,
     coverage: &TlcCoverageSummary,
 ) -> Result<()> {
@@ -1089,7 +1380,7 @@ fn ensure_machine_transition_coverage(
     );
 }
 
-fn ensure_composition_coverage(
+pub fn ensure_composition_coverage(
     schema: &CompositionSchema,
     coverage: &TlcCoverageSummary,
     witness_covered_routes: &BTreeSet<String>,
@@ -1152,7 +1443,7 @@ fn ensure_composition_coverage(
     }
 }
 
-fn parse_tlc_coverage(output: &str) -> TlcCoverageSummary {
+pub fn parse_tlc_coverage(output: &str) -> TlcCoverageSummary {
     let mut summary = TlcCoverageSummary::default();
 
     for line in output.lines() {
@@ -1171,7 +1462,7 @@ fn parse_tlc_coverage(output: &str) -> TlcCoverageSummary {
     summary
 }
 
-fn parse_tlc_coverage_line(line: &str) -> Option<(String, TlcCoverageCounts)> {
+pub fn parse_tlc_coverage_line(line: &str) -> Option<(String, TlcCoverageCounts)> {
     let line = line.trim();
     if !line.starts_with('<') {
         return None;
@@ -1206,6 +1497,114 @@ fn run_generated_kernel_tests(root: &Path) -> Result<()> {
     if !status.success() {
         bail!("generated machine kernel tests failed");
     }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OwnerTestSpec {
+    package: &'static str,
+    target: &'static str,
+    filter: &'static str,
+}
+
+fn owner_test_specs_for_machine(slug: &str) -> &'static [OwnerTestSpec] {
+    const PEER_COMMS: &[OwnerTestSpec] = &[
+        OwnerTestSpec {
+            package: "meerkat-comms",
+            target: "peer_comms_kernel",
+            filter: "peer_comms_kernel_preserves_reservation_and_trust_snapshot_for_trusted_requests",
+        },
+        OwnerTestSpec {
+            package: "meerkat-comms",
+            target: "peer_comms_kernel",
+            filter: "peer_comms_kernel_classifies_inline_terminal_without_child_lifecycle_leakage",
+        },
+    ];
+    const TURN_EXECUTION: &[OwnerTestSpec] = &[
+        OwnerTestSpec {
+            package: "meerkat-core",
+            target: "turn_execution_kernel",
+            filter: "turn_execution_kernel_tool_loop_yields_back_to_llm_after_boundary",
+        },
+        OwnerTestSpec {
+            package: "meerkat-core",
+            target: "turn_execution_kernel",
+            filter: "turn_execution_kernel_immediate_context_completes_without_llm_loop",
+        },
+        OwnerTestSpec {
+            package: "meerkat-core",
+            target: "turn_execution_kernel",
+            filter: "turn_execution_kernel_cancel_and_failure_paths_emit_terminal_effects",
+        },
+    ];
+    const EXTERNAL_TOOL_SURFACE: &[OwnerTestSpec] = &[
+        OwnerTestSpec {
+            package: "meerkat-mcp",
+            target: "external_tool_surface_kernel",
+            filter: "external_tool_surface_kernel_add_and_reload_emit_canonical_deltas",
+        },
+        OwnerTestSpec {
+            package: "meerkat-mcp",
+            target: "external_tool_surface_kernel",
+            filter: "external_tool_surface_kernel_remove_drain_completion_and_forced_finalize_emit_deltas",
+        },
+    ];
+    const FLOW_RUN: &[OwnerTestSpec] = &[OwnerTestSpec {
+        package: "meerkat-mob",
+        target: "flow_run_kernel",
+        filter: "flow_run_kernel_persists_pending_and_terminal_truth_for_machine_verify",
+    }];
+    const MOB_ORCHESTRATOR: &[OwnerTestSpec] = &[OwnerTestSpec {
+        package: "meerkat-mob",
+        target: "mob_orchestrator_kernel",
+        filter: "mob_orchestrator_kernel_tracks_binding_pending_spawn_and_resume_semantics_for_machine_verify",
+    }];
+
+    match slug {
+        "peer_comms" => PEER_COMMS,
+        "turn_execution" => TURN_EXECUTION,
+        "external_tool_surface" => EXTERNAL_TOOL_SURFACE,
+        "flow_run" => FLOW_RUN,
+        "mob_orchestrator" => MOB_ORCHESTRATOR,
+        _ => &[],
+    }
+}
+
+fn run_machine_owner_tests(root: &Path, machine: &MachineEntry) -> Result<()> {
+    for spec in owner_test_specs_for_machine(&machine.slug) {
+        println!(
+            "owner-test: {} -> {}::{}/{}",
+            machine.schema.machine, spec.package, spec.target, spec.filter
+        );
+        let mut cmd = Command::new("cargo");
+        cmd.arg("test")
+            .arg("-p")
+            .arg(spec.package)
+            .arg("--test")
+            .arg(spec.target)
+            .arg(spec.filter)
+            .arg("--")
+            .arg("--exact")
+            .arg("--test-threads=1")
+            .current_dir(root);
+
+        let status = cmd.status().with_context(|| {
+            format!(
+                "run owner test {}::{}/{}",
+                spec.package, spec.target, spec.filter
+            )
+        })?;
+        if !status.success() {
+            bail!(
+                "owner test failed for {}: {}::{}/{}",
+                machine.schema.machine,
+                spec.package,
+                spec.target,
+                spec.filter
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -1324,16 +1723,15 @@ fn remove_dir_if_empty(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn repo_root() -> Result<PathBuf> {
+pub fn repo_root() -> Result<PathBuf> {
+    if let Some(root) = std::env::var_os("MEERKAT_MACHINE_ROOT") {
+        return Ok(PathBuf::from(root));
+    }
+
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| anyhow!("failed to resolve repo root from xtask manifest dir"))
-}
-
-#[cfg(test)]
-fn machine_output_path(root: &Path, slug: &str) -> PathBuf {
-    machine_model_path(root, slug)
 }
 
 fn machine_authority_path(root: &Path, slug: &str) -> PathBuf {
@@ -1344,11 +1742,6 @@ fn machine_authority_path(root: &Path, slug: &str) -> PathBuf {
         .join("authority.tla")
 }
 
-#[cfg(test)]
-fn composition_output_path(root: &Path, slug: &str) -> PathBuf {
-    composition_model_path(root, slug)
-}
-
 fn composition_authority_path(root: &Path, slug: &str) -> PathBuf {
     root.join("specs")
         .join("compositions")
@@ -1357,19 +1750,19 @@ fn composition_authority_path(root: &Path, slug: &str) -> PathBuf {
         .join("authority.tla")
 }
 
-fn machine_model_path(root: &Path, slug: &str) -> PathBuf {
+pub fn machine_model_path(root: &Path, slug: &str) -> PathBuf {
     machine_dir(root, slug).join("model.tla")
 }
 
-fn machine_ci_path(root: &Path, slug: &str) -> PathBuf {
+pub fn machine_ci_path(root: &Path, slug: &str) -> PathBuf {
     machine_dir(root, slug).join("ci.cfg")
 }
 
-fn machine_deep_path(root: &Path, slug: &str) -> PathBuf {
+pub fn machine_deep_path(root: &Path, slug: &str) -> PathBuf {
     machine_dir(root, slug).join("deep.cfg")
 }
 
-fn machine_contract_path(root: &Path, slug: &str) -> PathBuf {
+pub fn machine_contract_path(root: &Path, slug: &str) -> PathBuf {
     machine_dir(root, slug).join("contract.md")
 }
 
@@ -1377,23 +1770,23 @@ fn machine_dir(root: &Path, slug: &str) -> PathBuf {
     root.join("specs").join("machines").join(slug)
 }
 
-fn composition_model_path(root: &Path, slug: &str) -> PathBuf {
+pub fn composition_model_path(root: &Path, slug: &str) -> PathBuf {
     composition_dir(root, slug).join("model.tla")
 }
 
-fn composition_ci_path(root: &Path, slug: &str) -> PathBuf {
+pub fn composition_ci_path(root: &Path, slug: &str) -> PathBuf {
     composition_dir(root, slug).join("ci.cfg")
 }
 
-fn composition_deep_path(root: &Path, slug: &str) -> PathBuf {
+pub fn composition_deep_path(root: &Path, slug: &str) -> PathBuf {
     composition_dir(root, slug).join("deep.cfg")
 }
 
-fn composition_witness_path(root: &Path, slug: &str, witness: &str) -> PathBuf {
+pub fn composition_witness_path(root: &Path, slug: &str, witness: &str) -> PathBuf {
     composition_dir(root, slug).join(composition_witness_cfg_name(witness))
 }
 
-fn composition_contract_path(root: &Path, slug: &str) -> PathBuf {
+pub fn composition_contract_path(root: &Path, slug: &str) -> PathBuf {
     composition_dir(root, slug).join("contract.md")
 }
 
@@ -1401,7 +1794,7 @@ fn composition_dir(root: &Path, slug: &str) -> PathBuf {
     root.join("specs").join("compositions").join(slug)
 }
 
-fn machine_mapping_path(root: &Path, slug: &str) -> PathBuf {
+pub fn machine_mapping_path(root: &Path, slug: &str) -> PathBuf {
     root.join("specs")
         .join("machines")
         .join(slug)
@@ -1414,15 +1807,15 @@ fn generated_kernel_root(root: &Path) -> PathBuf {
         .join("generated")
 }
 
-fn generated_kernel_module_path(root: &Path, slug: &str) -> PathBuf {
+pub fn generated_kernel_module_path(root: &Path, slug: &str) -> PathBuf {
     generated_kernel_root(root).join(format!("{slug}.rs"))
 }
 
-fn generated_kernel_mod_path(root: &Path) -> PathBuf {
+pub fn generated_kernel_mod_path(root: &Path) -> PathBuf {
     generated_kernel_root(root).join("mod.rs")
 }
 
-fn composition_mapping_path(root: &Path, slug: &str) -> PathBuf {
+pub fn composition_mapping_path(root: &Path, slug: &str) -> PathBuf {
     root.join("specs")
         .join("compositions")
         .join(slug)
@@ -1438,16 +1831,16 @@ fn expected_mapping_document(path: &Path, title: &str, generated: &str) -> Resul
     ))
 }
 
-fn machine_slug(machine_name: &str) -> String {
+pub fn machine_slug(machine_name: &str) -> String {
     let trimmed = machine_name.strip_suffix("Machine").unwrap_or(machine_name);
     to_snake_case(trimmed)
 }
 
-fn composition_slug(name: &str) -> String {
+pub fn composition_slug(name: &str) -> String {
     to_snake_case(name)
 }
 
-fn to_snake_case(value: &str) -> String {
+pub fn to_snake_case(value: &str) -> String {
     let mut out = String::new();
     let mut previous_is_sep = true;
 
@@ -1476,543 +1869,5 @@ fn to_snake_case(value: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::fs;
-
-    use meerkat_machine_schema::{
-        runtime_control_machine, runtime_ingress_machine, runtime_pipeline_composition,
-        turn_execution_machine,
-    };
-
-    use super::{
-        CanonicalRegistry, SelectionArgs, collect_coverage_anchor_mismatches,
-        collect_drift_mismatches, composition_mapping_path, composition_output_path,
-        composition_slug, ensure_composition_coverage, ensure_machine_transition_coverage,
-        machine_codegen_at_root, machine_mapping_path, machine_output_path, machine_slug,
-        merge_tlc_coverage, parse_tlc_coverage, parse_tlc_coverage_line, repo_root,
-        tlc_run_succeeded, to_snake_case,
-    };
-    use tempfile::tempdir;
-
-    #[test]
-    fn snake_case_handles_machine_names_and_existing_snake_case() {
-        assert_eq!(machine_slug("RuntimeControlMachine"), "runtime_control");
-        assert_eq!(
-            machine_slug("ExternalToolSurfaceMachine"),
-            "external_tool_surface"
-        );
-        assert_eq!(composition_slug("runtime_pipeline"), "runtime_pipeline");
-        assert_eq!(to_snake_case("Mob-Orchestrator"), "mob_orchestrator");
-    }
-
-    #[test]
-    fn output_paths_land_under_specs() {
-        let root = repo_root().expect("repo root");
-        assert_eq!(
-            machine_output_path(&root, "runtime_control"),
-            root.join("specs/machines/runtime_control/model.tla")
-        );
-        assert_eq!(
-            composition_output_path(&root, "runtime_pipeline"),
-            root.join("specs/compositions/runtime_pipeline/model.tla")
-        );
-    }
-
-    #[test]
-    fn registry_selection_accepts_machine_name_and_slug() {
-        let registry = CanonicalRegistry::load();
-        let by_name = registry
-            .select(&SelectionArgs {
-                all: false,
-                machines: vec!["RuntimeControlMachine".into()],
-                compositions: vec![],
-            })
-            .expect("selection by name");
-        assert_eq!(by_name.machines.len(), 1);
-        assert_eq!(by_name.machines[0].schema.machine, "RuntimeControlMachine");
-
-        let by_slug = registry
-            .select(&SelectionArgs {
-                all: false,
-                machines: vec!["runtime_control".into()],
-                compositions: vec![],
-            })
-            .expect("selection by slug");
-        assert_eq!(by_slug.machines.len(), 1);
-        assert_eq!(by_slug.machines[0].schema.machine, "RuntimeControlMachine");
-    }
-
-    #[test]
-    fn registry_validation_covers_machine_and_composition_sets() {
-        let registry = CanonicalRegistry::load();
-        assert!(registry.validate().is_ok());
-    }
-
-    #[test]
-    fn codegen_writes_machine_and_composition_authority_modules() {
-        let registry = CanonicalRegistry::load();
-        let selection = registry
-            .select(&SelectionArgs {
-                all: false,
-                machines: vec!["runtime_control".into()],
-                compositions: vec!["runtime_pipeline".into()],
-            })
-            .expect("selection");
-        let dir = tempdir().expect("tempdir");
-
-        machine_codegen_at_root(dir.path(), &selection).expect("generate outputs");
-
-        let machine =
-            fs::read_to_string(dir.path().join("specs/machines/runtime_control/model.tla"))
-                .expect("machine model");
-        assert!(machine.starts_with("---- MODULE model ----"));
-        assert!(machine.contains("Generated semantic machine model for RuntimeControlMachine."));
-        let machine_mapping =
-            fs::read_to_string(dir.path().join("specs/machines/runtime_control/mapping.md"))
-                .expect("machine mapping");
-        assert!(machine_mapping.contains("## Generated Coverage"));
-        assert!(machine_mapping.contains("`BeginRunFromIdle`"));
-
-        let composition = fs::read_to_string(
-            dir.path()
-                .join("specs/compositions/runtime_pipeline/model.tla"),
-        )
-        .expect("composition model");
-        assert!(composition.starts_with("---- MODULE model ----"));
-        assert!(composition.contains("Generated composition model for runtime_pipeline."));
-        assert!(composition.contains("effect_packet.effect_id = input_packet.effect_id"));
-        assert!(composition.contains("RouteDeliveryKind("));
-        let composition_ci = fs::read_to_string(
-            dir.path()
-                .join("specs/compositions/runtime_pipeline/ci.cfg"),
-        )
-        .expect("composition ci");
-        assert!(composition_ci.contains("begin_run_requires_staged_drain"));
-        assert!(!composition_ci.contains("control_preempts_ordinary_work"));
-        let composition_contract = fs::read_to_string(
-            dir.path()
-                .join("specs/compositions/runtime_pipeline/contract.md"),
-        )
-        .expect("composition contract");
-        assert!(composition_contract.contains("## Structural Requirements"));
-        assert!(composition_contract.contains("## Behavioral Invariants"));
-        let composition_mapping = fs::read_to_string(
-            dir.path()
-                .join("specs/compositions/runtime_pipeline/mapping.md"),
-        )
-        .expect("composition mapping");
-        assert!(composition_mapping.contains("## Generated Coverage"));
-        assert!(composition_mapping.contains("`staged_run_notifies_control`"));
-    }
-
-    #[test]
-    fn codegen_respects_composition_domain_cardinality_overrides() {
-        let registry = CanonicalRegistry::load();
-        let selection = registry
-            .select(&SelectionArgs {
-                all: false,
-                machines: vec![],
-                compositions: vec!["mob_bundle".into()],
-            })
-            .expect("selection");
-        let dir = tempdir().expect("tempdir");
-
-        machine_codegen_at_root(dir.path(), &selection).expect("generate outputs");
-
-        let deep_cfg =
-            fs::read_to_string(dir.path().join("specs/compositions/mob_bundle/deep.cfg"))
-                .expect("mob deep cfg");
-        assert!(deep_cfg.contains("StringValues = {\"alpha\"}"));
-        assert!(deep_cfg.contains("RunIdValues = {\"runid_1\"}"));
-        assert!(!deep_cfg.contains("\"beta\""));
-        assert!(!deep_cfg.contains("\"runid_2\""));
-    }
-
-    #[test]
-    fn codegen_applies_minimum_witness_state_limits() {
-        let registry = CanonicalRegistry::load();
-        let selection = registry
-            .select(&SelectionArgs {
-                all: false,
-                machines: vec![],
-                compositions: vec!["mob_bundle".into()],
-            })
-            .expect("selection");
-        let dir = tempdir().expect("tempdir");
-
-        machine_codegen_at_root(dir.path(), &selection).expect("generate outputs");
-
-        let model = fs::read_to_string(dir.path().join("specs/compositions/mob_bundle/model.tla"))
-            .expect("mob model");
-        assert!(model.contains(
-            "WitnessStateConstraint_mob_flow_success_path == /\\ model_step_count <= 26"
-        ));
-        assert!(model.contains("Cardinality(delivered_routes) <= 7"));
-        assert!(model.contains("Cardinality(emitted_effects) <= 14"));
-    }
-
-    #[test]
-    fn witness_cfg_includes_required_named_literals_for_path() {
-        let registry = CanonicalRegistry::load();
-        let selection = registry
-            .select(&SelectionArgs {
-                all: false,
-                machines: vec![],
-                compositions: vec!["mob_bundle".into()],
-            })
-            .expect("selection");
-        let dir = tempdir().expect("tempdir");
-
-        machine_codegen_at_root(dir.path(), &selection).expect("generate outputs");
-
-        let cfg = fs::read_to_string(
-            dir.path()
-                .join("specs/compositions/mob_bundle/witness-mob_flow_success_path.cfg"),
-        )
-        .expect("mob witness cfg");
-        assert!(cfg.contains("CandidateIdValues = {\"step_1\"}"));
-        assert!(cfg.contains("InputKindValues = {\"WorkInput\"}"));
-        assert!(cfg.contains("RunIdValues = {\"runid_1\"}"));
-    }
-
-    #[test]
-    fn scheduler_witnesses_seed_initial_competing_inputs() {
-        let registry = CanonicalRegistry::load();
-        let selection = registry
-            .select(&SelectionArgs {
-                all: false,
-                machines: vec![],
-                compositions: vec!["runtime_pipeline".into()],
-            })
-            .expect("selection");
-        let dir = tempdir().expect("tempdir");
-
-        machine_codegen_at_root(dir.path(), &selection).expect("generate outputs");
-
-        let model = fs::read_to_string(
-            dir.path()
-                .join("specs/compositions/runtime_pipeline/model.tla"),
-        )
-        .expect("runtime pipeline model");
-        assert!(model.contains("WitnessInit_control_preemption =="));
-        assert!(model.contains(
-            "pending_inputs = <<[machine |-> \"runtime_control\", variant |-> \"Initialize\""
-        ));
-        assert!(model.contains("[machine |-> \"runtime_ingress\", variant |-> \"AdmitQueued\""));
-        assert!(model.contains("wake |-> TRUE"));
-        assert!(model.contains("process |-> TRUE"));
-    }
-
-    #[test]
-    fn external_tool_witness_uses_boundary_applied_causal_order() {
-        let registry = CanonicalRegistry::load();
-        let selection = registry
-            .select(&SelectionArgs {
-                all: false,
-                machines: vec![],
-                compositions: vec!["external_tool_bundle".into()],
-            })
-            .expect("selection");
-        let dir = tempdir().expect("tempdir");
-
-        machine_codegen_at_root(dir.path(), &selection).expect("generate outputs");
-
-        let model = fs::read_to_string(
-            dir.path()
-                .join("specs/compositions/external_tool_bundle/model.tla"),
-        )
-        .expect("external tool model");
-        assert!(model.contains(
-            "earlier.machine = \"turn_execution\" /\\ earlier.transition = \"LlmReturnedTerminal\" /\\ later.machine = \"external_tool_surface\" /\\ later.transition = \"ApplyBoundaryAdd\""
-        ));
-        assert!(model.contains(
-            "earlier.machine = \"external_tool_surface\" /\\ earlier.transition = \"ApplyBoundaryAdd\" /\\ later.machine = \"turn_execution\" /\\ later.transition = \"BoundaryComplete\""
-        ));
-        assert!(model.contains(
-            "earlier.machine = \"runtime_control\" /\\ earlier.transition = \"ExternalToolDeltaReceivedIdle\" /\\ later.machine = \"turn_execution\" /\\ later.transition = \"BoundaryComplete\""
-        ));
-        assert!(model.contains(
-            "WitnessTransitionObserved_surface_add_notifies_control_turn_execution_LlmReturnedTerminal"
-        ));
-        assert!(model.contains(
-            "WitnessTransitionObserved_turn_boundary_reaches_surface_turn_execution_LlmReturnedTerminal"
-        ));
-        assert!(model.contains(
-            "WitnessTransitionObserved_turn_boundary_reaches_surface_runtime_control_Initialize"
-        ));
-        assert!(model.contains(
-            "WitnessTransitionObserved_turn_boundary_reaches_surface_runtime_control_ExternalToolDeltaReceivedIdle"
-        ));
-    }
-
-    #[test]
-    fn drift_check_reports_missing_and_stale_generated_files() {
-        let registry = CanonicalRegistry::load();
-        let selection = registry
-            .select(&SelectionArgs {
-                all: false,
-                machines: vec!["runtime_control".into()],
-                compositions: vec!["runtime_pipeline".into()],
-            })
-            .expect("selection");
-        let dir = tempdir().expect("tempdir");
-
-        let missing = collect_drift_mismatches(dir.path(), &selection).expect("missing mismatches");
-        assert_eq!(missing.len(), 16);
-        assert!(
-            missing
-                .iter()
-                .any(|item| item.contains("specs/machines/runtime_control/model.tla"))
-        );
-        assert!(
-            missing
-                .iter()
-                .any(|item| item.contains("specs/machines/runtime_control/ci.cfg"))
-        );
-        assert!(
-            missing
-                .iter()
-                .any(|item| item.contains("specs/machines/runtime_control/deep.cfg"))
-        );
-        assert!(
-            missing
-                .iter()
-                .any(|item| item.contains("specs/machines/runtime_control/contract.md"))
-        );
-        assert!(
-            missing
-                .iter()
-                .any(|item| item.contains("specs/machines/runtime_control/mapping.md"))
-        );
-        assert!(
-            missing
-                .iter()
-                .any(|item| item.contains("specs/compositions/runtime_pipeline/model.tla"))
-        );
-        assert!(
-            missing
-                .iter()
-                .any(|item| item.contains("specs/compositions/runtime_pipeline/ci.cfg"))
-        );
-        assert!(
-            missing
-                .iter()
-                .any(|item| item.contains("specs/compositions/runtime_pipeline/deep.cfg"))
-        );
-        assert!(missing.iter().any(|item| {
-            item.contains("specs/compositions/runtime_pipeline/witness-success_path.cfg")
-        }));
-        assert!(missing.iter().any(|item| {
-            item.contains("specs/compositions/runtime_pipeline/witness-failure_path.cfg")
-        }));
-        assert!(missing.iter().any(|item| {
-            item.contains("specs/compositions/runtime_pipeline/witness-cancel_path.cfg")
-        }));
-        assert!(missing.iter().any(|item| {
-            item.contains("specs/compositions/runtime_pipeline/witness-control_preemption.cfg")
-        }));
-        assert!(
-            missing
-                .iter()
-                .any(|item| item.contains("specs/compositions/runtime_pipeline/contract.md"))
-        );
-        assert!(
-            missing
-                .iter()
-                .any(|item| item.contains("specs/compositions/runtime_pipeline/mapping.md"))
-        );
-        assert!(
-            missing
-                .iter()
-                .any(|item| item
-                    .contains("meerkat-machine-kernels/src/generated/runtime_control.rs"))
-        );
-        assert!(
-            missing
-                .iter()
-                .any(|item| item.contains("meerkat-machine-kernels/src/generated/mod.rs"))
-        );
-
-        machine_codegen_at_root(dir.path(), &selection).expect("generate outputs");
-        let clean = collect_drift_mismatches(dir.path(), &selection).expect("clean mismatches");
-        assert!(clean.is_empty());
-
-        let machine_path = dir.path().join("specs/machines/runtime_control/model.tla");
-        fs::write(&machine_path, "stale output").expect("mutate machine model");
-        let stale = collect_drift_mismatches(dir.path(), &selection).expect("stale mismatches");
-        assert_eq!(stale.len(), 1);
-        assert!(stale[0].contains(machine_path.to_string_lossy().as_ref()));
-    }
-
-    #[test]
-    fn drift_check_reports_stale_mapping_file() {
-        let registry = CanonicalRegistry::load();
-        let selection = registry
-            .select(&SelectionArgs {
-                all: false,
-                machines: vec!["runtime_control".into()],
-                compositions: vec!["runtime_pipeline".into()],
-            })
-            .expect("selection");
-        let dir = tempdir().expect("tempdir");
-
-        machine_codegen_at_root(dir.path(), &selection).expect("generate outputs");
-        let machine_mapping_path = machine_mapping_path(dir.path(), "runtime_control");
-        fs::write(
-            &machine_mapping_path,
-            "# RuntimeControlMachine Mapping Note\n\nmanual only",
-        )
-        .expect("mutate machine mapping");
-
-        let mismatches = collect_drift_mismatches(dir.path(), &selection).expect("mismatches");
-        assert_eq!(mismatches.len(), 1);
-        assert!(mismatches[0].contains(machine_mapping_path.to_string_lossy().as_ref()));
-
-        machine_codegen_at_root(dir.path(), &selection).expect("regenerate outputs");
-        let composition_mapping_path = composition_mapping_path(dir.path(), "runtime_pipeline");
-        fs::write(
-            &composition_mapping_path,
-            "# runtime_pipeline Mapping Note\n\nmanual only",
-        )
-        .expect("mutate composition mapping");
-
-        let mismatches = collect_drift_mismatches(dir.path(), &selection).expect("mismatches");
-        assert_eq!(mismatches.len(), 1);
-        assert!(mismatches[0].contains(composition_mapping_path.to_string_lossy().as_ref()));
-    }
-
-    #[test]
-    fn authority_language_check_reports_stale_terms() {
-        let dir = tempdir().expect("tempdir");
-        let docs = dir.path().join("docs/architecture/0.5");
-        fs::create_dir_all(&docs).expect("create docs dir");
-        let file = docs.join("note.md");
-        fs::write(&file, "schema.yaml and PureHandKernel are stale").expect("write file");
-
-        let mismatches =
-            super::collect_authority_language_mismatches(dir.path()).expect("mismatches");
-        assert_eq!(mismatches.len(), 3);
-        assert!(mismatches.iter().any(|item| item.contains("schema.yaml")));
-        assert!(
-            mismatches
-                .iter()
-                .any(|item| item.contains("PureHandKernel"))
-        );
-        assert!(mismatches.iter().any(|item| item.contains("PureHand")));
-    }
-
-    #[test]
-    fn coverage_anchor_check_reports_missing_paths() {
-        let registry = CanonicalRegistry::load();
-        let selection = registry
-            .select(&SelectionArgs {
-                all: false,
-                machines: vec!["runtime_control".into()],
-                compositions: vec!["runtime_pipeline".into()],
-            })
-            .expect("selection");
-
-        let dir = tempdir().expect("tempdir");
-        let mismatches = collect_coverage_anchor_mismatches(dir.path(), &selection);
-        assert!(!mismatches.is_empty());
-    }
-
-    #[test]
-    fn parses_tlc_coverage_lines() {
-        let parsed = parse_tlc_coverage_line(
-            "<BeginRunFromIdle line 12, col 1 to line 24, col 13 of module model>: 7:19",
-        )
-        .expect("coverage line");
-        assert_eq!(parsed.0, "BeginRunFromIdle");
-        assert_eq!(parsed.1.truth_hits, 7);
-        assert_eq!(parsed.1.evaluations, 19);
-    }
-
-    #[test]
-    fn machine_deep_coverage_rejects_zero_hit_transition() {
-        let schema = runtime_control_machine();
-        let coverage = parse_tlc_coverage(
-            "<Initialize line 1, col 1 to line 3, col 1 of module model>: 1:1\n\
-             <BeginRunFromIdle line 4, col 1 to line 6, col 1 of module model>: 0:0\n",
-        );
-        let err = ensure_machine_transition_coverage(&schema, &coverage).expect_err("zero-hit");
-        assert!(err.to_string().contains("BeginRunFromIdle"));
-    }
-
-    #[test]
-    fn canonical_registry_rejects_missing_composition_witness_coverage() {
-        let runtime_control = runtime_control_machine();
-        let runtime_ingress = runtime_ingress_machine();
-        let turn_execution = turn_execution_machine();
-        let mut schema = runtime_pipeline_composition();
-        for witness in &mut schema.witnesses {
-            witness.expected_routes.clear();
-            witness.expected_scheduler_rules.clear();
-        }
-
-        let err = schema
-            .validate_against(&[&runtime_control, &runtime_ingress, &turn_execution])
-            .expect_err("missing witness coverage");
-        assert!(
-            err.to_string()
-                .contains("is not covered by any composition witness")
-        );
-    }
-
-    #[test]
-    fn composition_deep_coverage_accepts_hits_from_witness_runs() {
-        let schema = runtime_pipeline_composition();
-        let mut aggregated = parse_tlc_coverage("");
-        let witness = parse_tlc_coverage(
-            "<RouteCoverage_staged_run_notifies_control line 1, col 1 to line 1, col 10 of module model>: 1:3\n\
-             <RouteCoverage_control_starts_execution line 1, col 1 to line 1, col 10 of module model>: 1:2\n\
-             <RouteCoverage_execution_boundary_updates_ingress line 1, col 1 to line 1, col 10 of module model>: 1:1\n\
-             <RouteCoverage_execution_completion_updates_ingress line 1, col 1 to line 1, col 10 of module model>: 1:1\n\
-             <RouteCoverage_execution_completion_notifies_control line 1, col 1 to line 1, col 10 of module model>: 1:1\n\
-             <RouteCoverage_execution_failure_updates_ingress line 1, col 1 to line 1, col 10 of module model>: 1:1\n\
-             <RouteCoverage_execution_failure_notifies_control line 1, col 1 to line 1, col 10 of module model>: 1:1\n\
-             <RouteCoverage_execution_cancel_updates_ingress line 1, col 1 to line 1, col 10 of module model>: 1:1\n\
-             <RouteCoverage_execution_cancel_notifies_control line 1, col 1 to line 1, col 10 of module model>: 1:1\n\
-             <SchedulerCoverage_PreemptWhenReady_control_plane_ordinary_ingress line 1, col 1 to line 1, col 10 of module model>: 1:4\n",
-        );
-        merge_tlc_coverage(&mut aggregated, Some(&witness));
-
-        ensure_composition_coverage(
-            &schema,
-            &aggregated,
-            &std::collections::BTreeSet::new(),
-            &std::collections::BTreeSet::new(),
-        )
-        .expect("witness coverage should count");
-    }
-
-    #[test]
-    fn accepts_tlc_success_sentinel_even_with_nonzero_exit_status() {
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::ExitStatusExt;
-            use std::process::ExitStatus;
-
-            let status = ExitStatus::from_raw(13 << 8);
-            assert!(tlc_run_succeeded(
-                &status,
-                "Model checking completed. No error has been found.\nEnd of statistics."
-            ));
-        }
-    }
-
-    #[test]
-    fn rejects_tlc_nonzero_status_without_success_sentinel() {
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::ExitStatusExt;
-            use std::process::ExitStatus;
-
-            let status = ExitStatus::from_raw(13 << 8);
-            assert!(!tlc_run_succeeded(
-                &status,
-                "Error: The behavior up to this point is:\nstate 1"
-            ));
-        }
-    }
-}
+#[path = "machines_tests.rs"]
+mod tests;

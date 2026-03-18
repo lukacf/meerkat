@@ -12,10 +12,11 @@ mod transport;
 pub use adapter::McpRouterAdapter;
 pub use connection::McpConnection;
 pub use error::McpError;
+pub use meerkat_core::{ExternalToolDelta, ExternalToolDeltaPhase};
 pub use protocol::McpProtocol;
 pub use router::{
-    McpApplyDelta, McpApplyResult, McpLifecycleAction, McpReloadTarget, McpRouter,
-    McpServerLifecycleState,
+    McpApplyDelta, McpApplyResult, McpLifecycleAction, McpLifecyclePhase, McpReloadTarget,
+    McpRouter, McpServerLifecycleState,
 };
 
 // Re-export McpServerConfig from meerkat-core for backwards compatibility

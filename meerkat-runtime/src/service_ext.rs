@@ -8,6 +8,7 @@ use meerkat_core::lifecycle::InputId;
 use meerkat_core::types::SessionId;
 
 use crate::accept::AcceptOutcome;
+use crate::completion::CompletionHandle;
 use crate::input::Input;
 use crate::input_state::InputState;
 use crate::runtime_state::RuntimeState;
@@ -38,6 +39,14 @@ pub trait SessionServiceRuntimeExt: Send + Sync {
         session_id: &SessionId,
         input: Input,
     ) -> Result<AcceptOutcome, RuntimeDriverError>;
+
+    /// Accept an input and optionally return a completion handle that resolves
+    /// when the admitted work reaches a terminal runtime outcome.
+    async fn accept_input_with_completion(
+        &self,
+        session_id: &SessionId,
+        input: Input,
+    ) -> Result<(AcceptOutcome, Option<CompletionHandle>), RuntimeDriverError>;
 
     /// Get the runtime state for a session.
     async fn runtime_state(

@@ -54,6 +54,7 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `session/read` | Session | Get session state |
 | `session/history` | Session | Get committed session transcript messages |
 | `session/archive` | Session | Remove session from runtime |
+| `session/external_event` | Session | Queue a runtime-backed external event |
 | `turn/start` | Turn | Start a new turn on existing session |
 | `turn/interrupt` | Turn | Cancel in-flight turn |
 | `mob/prefabs` | Mob | List mob prefab templates (mob feature) |
@@ -80,7 +81,7 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `mob/flow_cancel` | Mob | Cancel a flow run (mob feature) |
 | `mob/tools` | Mob | Compatibility/escape-hatch mob tool inventory (mob feature) |
 | `mob/call` | Mob | Compatibility/escape-hatch mob tool call (mob feature) |
-| `comms/send` | Comms | Push an external event into a session |
+| `comms/send` | Comms | Dispatch a comms command to a session |
 | `comms/peers` | Comms | List discoverable peers (comms feature) |
 | `skills/list` | Skills | List skills with provenance |
 | `skills/inspect` | Skills | Inspect a skill's full content |
@@ -154,7 +155,7 @@ Handshake. Returns server capabilities.
     "methods": [
       "initialize", "initialized",
       "session/create", "session/list", "session/read", "session/history",
-      "session/archive", "turn/start", "turn/interrupt",
+      "session/archive", "session/external_event", "turn/start", "turn/interrupt",
       "config/get", "config/set", "config/patch",
       "models/catalog",
       "capabilities/get",
@@ -225,7 +226,6 @@ Create a new session and run the first turn.
     "hooks_override": null,
     "enable_builtins": false,
     "enable_shell": false,
-    "enable_subagents": false,
     "enable_memory": false,
     "host_mode": false,
     "comms_name": null,
@@ -318,10 +318,6 @@ Only `prompt` is required. All other fields are optional and fall back to config
 
 <ParamField body="enable_shell" type="bool" default="false">
   Enable shell tool (requires `enable_builtins`).
-</ParamField>
-
-<ParamField body="enable_subagents" type="bool" default="false">
-  Enable sub-agent tools (fork, spawn).
 </ParamField>
 
 <ParamField body="enable_memory" type="bool" default="false">
@@ -529,16 +525,16 @@ Cancel an in-flight turn. No-op if the session is idle.
 
 ## Event methods
 
-### comms/send
+### session/external_event
 
-Push an external event into a running session's inbox. The event is queued and processed at the next turn boundary.
+Queue a runtime-backed external event for an existing session.
 
 <CodeGroup>
 ```json Request
 {
   "jsonrpc": "2.0",
   "id": 8,
-  "method": "comms/send",
+  "method": "session/external_event",
   "params": {
     "session_id": "01936f8a-...",
     "payload": {"alert": "build failed", "repo": "main"},
@@ -551,24 +547,26 @@ Push an external event into a running session's inbox. The event is queued and p
 {
   "jsonrpc": "2.0",
   "id": 8,
-  "result": {"queued": true}
+  "result": {
+    "outcome_type": "accepted"
+  }
 }
 ```
 </CodeGroup>
 
 <ParamField body="session_id" type="string" required>
-  Session ID to push the event to.
+  Session ID to admit the external event to.
 </ParamField>
 
 <ParamField body="payload" type="any JSON" required>
-  Any JSON value. Serialized and injected as event body.
+  Any JSON value. Stored as the runtime external-event payload.
 </ParamField>
 
 <ParamField body="source" type="string">
-  Optional source label. Prepended as `[source: ci-pipeline]` metadata in the event body.
+  Optional source label. Defaults to `"rpc"` and becomes the runtime external-event source.
 </ParamField>
 
-Error `-32603` if inbox full, `-32602` if session not found or invalid session ID.
+Error `-32603` if runtime admission fails, `-32602` if the session locator is invalid.
 
 ### comms/peers
 

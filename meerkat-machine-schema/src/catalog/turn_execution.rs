@@ -593,10 +593,7 @@ pub fn turn_execution_machine() -> MachineSchema {
                             ("run_id".into(), Expr::Binding("run_id".into())),
                             (
                                 "boundary_sequence".into(),
-                                Expr::Add(
-                                    Box::new(Expr::Field("boundary_count".into())),
-                                    Box::new(Expr::U64(1)),
-                                ),
+                                Expr::Field("boundary_count".into()),
                             ),
                         ]),
                     },
@@ -675,10 +672,7 @@ pub fn turn_execution_machine() -> MachineSchema {
                             ("run_id".into(), Expr::Binding("run_id".into())),
                             (
                                 "boundary_sequence".into(),
-                                Expr::Add(
-                                    Box::new(Expr::Field("boundary_count".into())),
-                                    Box::new(Expr::U64(1)),
-                                ),
+                                Expr::Field("boundary_count".into()),
                             ),
                         ]),
                     },
@@ -753,10 +747,7 @@ pub fn turn_execution_machine() -> MachineSchema {
                             ("run_id".into(), Expr::Binding("run_id".into())),
                             (
                                 "boundary_sequence".into(),
-                                Expr::Add(
-                                    Box::new(Expr::Field("boundary_count".into())),
-                                    Box::new(Expr::U64(1)),
-                                ),
+                                Expr::Field("boundary_count".into()),
                             ),
                         ]),
                     },
@@ -835,10 +826,7 @@ pub fn turn_execution_machine() -> MachineSchema {
                             ("run_id".into(), Expr::Binding("run_id".into())),
                             (
                                 "boundary_sequence".into(),
-                                Expr::Add(
-                                    Box::new(Expr::Field("boundary_count".into())),
-                                    Box::new(Expr::U64(1)),
-                                ),
+                                Expr::Field("boundary_count".into()),
                             ),
                         ]),
                     },
@@ -918,10 +906,7 @@ pub fn turn_execution_machine() -> MachineSchema {
                         ("run_id".into(), Expr::Binding("run_id".into())),
                         (
                             "boundary_sequence".into(),
-                            Expr::Add(
-                                Box::new(Expr::Field("boundary_count".into())),
-                                Box::new(Expr::U64(1)),
-                            ),
+                            Expr::Field("boundary_count".into()),
                         ),
                     ]),
                 }],
@@ -951,10 +936,7 @@ pub fn turn_execution_machine() -> MachineSchema {
                         ("run_id".into(), Expr::Binding("run_id".into())),
                         (
                             "boundary_sequence".into(),
-                            Expr::Add(
-                                Box::new(Expr::Field("boundary_count".into())),
-                                Box::new(Expr::U64(1)),
-                            ),
+                            Expr::Field("boundary_count".into()),
                         ),
                     ]),
                 }],

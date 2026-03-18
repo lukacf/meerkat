@@ -145,6 +145,16 @@ export class Mob {
     return new Member(this.mobId, meerkatId, this.bindings);
   }
 
+  /** Send canonical ordinary work to a specific member through the runtime-backed mob path. */
+  async sendMessage(
+    meerkatId: string,
+    content: ContentInput,
+    handlingMode: HandlingMode = 'queue',
+    renderMetadata?: RenderMetadata,
+  ): Promise<string> {
+    return this.member(meerkatId).send(content, handlingMode, renderMetadata);
+  }
+
   /** Retire and re-spawn an agent with the same profile. */
   async respawn(meerkatId: string, initialMessage?: string): Promise<void> {
     await this.bindings.mob_respawn(this.mobId, meerkatId, initialMessage);

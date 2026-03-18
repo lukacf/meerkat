@@ -694,12 +694,34 @@ impl MobBuilder {
             provisioner.clone(),
             max_orphaned_turns,
         ));
+        let topology_service = Arc::new(super::topology::MobTopologyService::new(
+            definition.topology.clone(),
+        ));
+        let orchestrator = super::orchestrator_kernel::MobOrchestratorKernel::new(
+            &definition,
+            topology_service.clone(),
+        );
+        orchestrator.initialize();
+        let flow_kernel = super::flow_run_kernel::FlowRunKernel::new(
+            handle.mob_id().clone(),
+            run_store.clone(),
+            events.clone(),
+        );
         let flow_engine = FlowEngine::new(
             flow_executor,
             handle.clone(),
             run_store.clone(),
             events.clone(),
+            topology_service,
+            flow_kernel.clone(),
         );
+        let lifecycle = super::state::MobLifecycleOwner::new(state.clone());
+        let task_board_service = crate::tasks::MobTaskBoardService::new(
+            definition.id.clone(),
+            task_board.clone(),
+            events.clone(),
+        );
+        let spawn_policy = Arc::new(super::spawn_policy::SpawnPolicyService::new());
 
         let actor = MobActor {
             definition,
@@ -710,6 +732,8 @@ impl MobBuilder {
             run_store,
             provisioner,
             flow_engine,
+            flow_kernel,
+            orchestrator,
             run_tasks: BTreeMap::new(),
             run_cancel_tokens: BTreeMap::new(),
             flow_streams: handle.flow_streams.clone(),
@@ -726,7 +750,9 @@ impl MobBuilder {
             edge_locks: Arc::new(super::edge_locks::EdgeLockRegistry::new()),
             lifecycle_tasks: tokio::task::JoinSet::new(),
             session_service: handle_session_service,
-            spawn_policy: None,
+            task_board_service,
+            spawn_policy,
+            lifecycle,
         };
         tokio::spawn(actor.run(command_rx));
 

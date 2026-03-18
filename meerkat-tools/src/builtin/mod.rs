@@ -29,8 +29,6 @@ pub mod shell;
 #[cfg(feature = "skills")]
 pub mod skills;
 pub mod store;
-#[cfg(all(feature = "sub-agents", not(target_arch = "wasm32")))]
-pub mod sub_agent;
 pub mod tasks;
 pub mod types;
 pub mod utility;

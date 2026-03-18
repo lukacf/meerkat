@@ -412,6 +412,44 @@ impl MobHandle {
         self.spawn_spec(spec).await
     }
 
+    /// Attach an existing session by reusing the mob spawn control-plane path.
+    pub async fn attach_existing_session(
+        &self,
+        profile_name: ProfileName,
+        meerkat_id: MeerkatId,
+        session_id: meerkat_core::types::SessionId,
+        runtime_mode: Option<crate::MobRuntimeMode>,
+        backend: Option<MobBackendKind>,
+    ) -> Result<MemberRef, MobError> {
+        let mut spec = SpawnMemberSpec::new(profile_name, meerkat_id);
+        spec.resume_session_id = Some(session_id);
+        spec.runtime_mode = runtime_mode;
+        spec.backend = backend;
+        self.spawn_spec(spec).await
+    }
+
+    /// Attach an existing session as the mob orchestrator.
+    pub async fn attach_existing_session_as_orchestrator(
+        &self,
+        profile_name: ProfileName,
+        meerkat_id: MeerkatId,
+        session_id: meerkat_core::types::SessionId,
+    ) -> Result<MemberRef, MobError> {
+        self.attach_existing_session(profile_name, meerkat_id, session_id, None, None)
+            .await
+    }
+
+    /// Attach an existing session as a regular mob member.
+    pub async fn attach_existing_session_as_member(
+        &self,
+        profile_name: ProfileName,
+        meerkat_id: MeerkatId,
+        session_id: meerkat_core::types::SessionId,
+    ) -> Result<MemberRef, MobError> {
+        self.attach_existing_session(profile_name, meerkat_id, session_id, None, None)
+            .await
+    }
+
     /// Spawn a member from a fully-specified [`SpawnMemberSpec`].
     pub async fn spawn_spec(&self, spec: SpawnMemberSpec) -> Result<MemberRef, MobError> {
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -684,6 +722,20 @@ impl MobHandle {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(MobCommand::FlowTrackerCounts { reply_tx })
+            .await
+            .map_err(|_| MobError::Internal("actor task dropped".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| MobError::Internal("actor reply dropped".into()))
+    }
+
+    #[cfg(test)]
+    pub async fn debug_orchestrator_snapshot(
+        &self,
+    ) -> Result<super::MobOrchestratorSnapshot, MobError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(MobCommand::OrchestratorSnapshot { reply_tx })
             .await
             .map_err(|_| MobError::Internal("actor task dropped".into()))?;
         reply_rx

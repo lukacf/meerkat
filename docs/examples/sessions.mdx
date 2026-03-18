@@ -6,6 +6,10 @@ icon: "arrows-rotate"
 
 For concepts, see [Sessions](/concepts/sessions) and [Realms](/concepts/realms).
 
+<Note>
+Rust examples use the runtime-backed `SessionService` path, which is the same canonical session lifecycle used by the other surfaces.
+</Note>
+
 ## Create a session
 
 <Tabs>
@@ -204,21 +208,21 @@ rkat c "Keep going"
     ```python
     sessions = await client.list_sessions()
     for s in sessions:
-        print(s.session_id, s.state)
+        print(s.session_id, s.message_count, s.is_active)
     ```
   </Tab>
   <Tab title="TypeScript">
     ```typescript
     const sessions = await client.listSessions();
     for (const s of sessions) {
-      console.log(s.sessionId, s.state);
+      console.log(s.sessionId, s.messageCount, s.isActive);
     }
     ```
   </Tab>
   <Tab title="Rust">
     ```rust
     let sessions = service.list(SessionQuery::default()).await?;
-    for s in &sessions { println!("{}: {:?}", s.session_id, s.state); }
+    for s in &sessions { println!("{}: {}", s.session_id, s.message_count); }
     ```
   </Tab>
 </Tabs>

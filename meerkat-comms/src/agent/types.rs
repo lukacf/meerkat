@@ -51,10 +51,7 @@ pub enum DrainedMessage {
 
 /// Convert an inbox item into a `DrainedMessage`.
 ///
-/// Returns `None` for:
-/// - `SubagentResult` items (handled separately)
-/// - Ack messages (not injected into session)
-/// - Unknown peers (for authenticated messages)
+/// Returns `None` for Ack messages and unknown peers when peer auth is required.
 pub fn drain_inbox_item(
     item: &InboxItem,
     trusted_peers: &TrustedPeers,
@@ -80,7 +77,6 @@ pub fn drain_inbox_item(
             blocks: blocks.clone(),
             render_metadata: render_metadata.clone(),
         })),
-        InboxItem::SubagentResult { .. } => None,
     }
 }
 
@@ -260,7 +256,7 @@ impl CommsMessage {
     ) -> Option<Self> {
         let envelope = match item {
             InboxItem::External { envelope } => envelope,
-            InboxItem::SubagentResult { .. } | InboxItem::PlainEvent { .. } => return None,
+            InboxItem::PlainEvent { .. } => return None,
         };
 
         // Resolve peer name from pubkey
@@ -313,13 +309,13 @@ impl CommsMessage {
     /// accepted at ingress cannot disappear or change identity if the peer
     /// is removed/renamed before drain.
     ///
-    /// Returns `None` for non-External items, SubagentResult, PlainEvent, and Ack messages.
+    /// Returns `None` for non-External items, PlainEvent, and Ack messages.
     pub(crate) fn from_classified_entry(
         entry: &crate::inbox::ClassifiedInboxEntry,
     ) -> Option<Self> {
         let envelope = match &entry.item {
             InboxItem::External { envelope } => envelope,
-            InboxItem::SubagentResult { .. } | InboxItem::PlainEvent { .. } => return None,
+            InboxItem::PlainEvent { .. } => return None,
         };
 
         let from_peer = entry.from_peer.clone().unwrap_or_else(|| {
@@ -719,20 +715,6 @@ mod tests {
         }
 
         assert!(InprocRegistry::global().unregister(&sender.public_key()));
-    }
-
-    #[test]
-    fn test_comms_message_from_inbox_item_ignores_subagent_result() {
-        let trusted = TrustedPeers::new();
-
-        let item = InboxItem::SubagentResult {
-            subagent_id: Uuid::new_v4(),
-            result: serde_json::json!({"done": true}),
-            summary: "Task completed".to_string(),
-        };
-
-        let msg = CommsMessage::from_inbox_item(&item, &trusted, true);
-        assert!(msg.is_none(), "SubagentResult should return None");
     }
 
     #[test]

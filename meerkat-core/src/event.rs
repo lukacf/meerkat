@@ -108,6 +108,101 @@ pub enum ToolConfigChangeOperation {
     Reload,
 }
 
+/// Canonical lifecycle phase for external-tool boundary deltas.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalToolDeltaPhase {
+    Pending,
+    Applied,
+    Draining,
+    Forced,
+    Failed,
+}
+
+impl ExternalToolDeltaPhase {
+    #[must_use]
+    pub fn as_status(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Applied => "applied",
+            Self::Draining => "draining",
+            Self::Forced => "forced",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// Canonical outward lifecycle delta for external-tool surface changes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExternalToolDelta {
+    pub target: String,
+    pub operation: ToolConfigChangeOperation,
+    pub phase: ExternalToolDeltaPhase,
+    pub persisted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied_at_turn: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl ExternalToolDelta {
+    #[must_use]
+    pub fn new(
+        target: impl Into<String>,
+        operation: ToolConfigChangeOperation,
+        phase: ExternalToolDeltaPhase,
+    ) -> Self {
+        Self {
+            target: target.into(),
+            operation,
+            phase,
+            persisted: !matches!(
+                phase,
+                ExternalToolDeltaPhase::Pending | ExternalToolDeltaPhase::Draining
+            ),
+            applied_at_turn: None,
+            tool_count: None,
+            detail: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_tool_count(mut self, tool_count: Option<usize>) -> Self {
+        self.tool_count = tool_count;
+        self
+    }
+
+    #[must_use]
+    pub fn with_detail(mut self, detail: Option<String>) -> Self {
+        self.detail = detail;
+        self
+    }
+
+    #[must_use]
+    pub fn status_text(&self) -> String {
+        let mut status = self.phase.as_status().to_string();
+        if self.phase == ExternalToolDeltaPhase::Failed
+            && let Some(detail) = &self.detail
+        {
+            status = format!("{status}: {detail}");
+        }
+        status
+    }
+
+    #[must_use]
+    pub fn to_tool_config_changed_payload(&self) -> ToolConfigChangedPayload {
+        ToolConfigChangedPayload {
+            operation: self.operation.clone(),
+            target: self.target.clone(),
+            status: self.status_text(),
+            persisted: self.persisted,
+            applied_at_turn: self.applied_at_turn,
+        }
+    }
+}
+
 /// Events emitted during agent execution
 ///
 /// These events form the streaming API for consumers.

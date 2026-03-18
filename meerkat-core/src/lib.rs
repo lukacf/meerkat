@@ -35,6 +35,7 @@ pub mod lifecycle;
 pub mod mcp_config;
 pub mod memory;
 pub mod ops;
+pub mod ops_lifecycle;
 pub mod peer_meta;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod prompt;
@@ -47,7 +48,6 @@ pub mod session;
 pub mod skills;
 pub mod skills_config;
 pub mod state;
-pub mod sub_agent;
 pub mod time_compat;
 pub mod tool_scope;
 pub mod turn_boundary;
@@ -57,8 +57,8 @@ pub mod wait_interrupt;
 // Re-export main types at crate root
 pub use agent::{
     Agent, AgentBuilder, AgentLlmClient, AgentRunner, AgentSessionStore, AgentToolDispatcher,
-    CommsCapabilityError, CommsRuntime, ExternalToolNotice, ExternalToolUpdate,
-    FilteredToolDispatcher, LlmStreamResult,
+    CommsCapabilityError, CommsRuntime, ExternalToolUpdate, FilteredToolDispatcher,
+    LlmStreamResult,
 };
 pub use budget::{Budget, BudgetLimits, BudgetPool};
 pub use checkpoint::SessionCheckpointer;
@@ -89,9 +89,10 @@ pub use config_store::{
 };
 pub use error::{AgentError, ToolError};
 pub use event::{
-    AgentEvent, BudgetType, EventEnvelope, ScopedAgentEvent, StreamScopeFrame,
-    ToolConfigChangeOperation, ToolConfigChangedPayload, VerboseEventConfig, agent_event_type,
-    compare_event_envelopes, format_verbose_event, format_verbose_event_with_config,
+    AgentEvent, BudgetType, EventEnvelope, ExternalToolDelta, ExternalToolDeltaPhase,
+    ScopedAgentEvent, StreamScopeFrame, ToolConfigChangeOperation, ToolConfigChangedPayload,
+    VerboseEventConfig, agent_event_type, compare_event_envelopes, format_verbose_event,
+    format_verbose_event_with_config,
 };
 pub use event_injector::{EventInjector, EventInjectorError};
 pub use event_tap::{
@@ -119,6 +120,11 @@ pub use ops::{
     OperationPolicy, OperationResult, OperationSpec, ResultShape, SpawnSpec, SubAgentState,
     ToolAccessPolicy, WorkKind,
 };
+pub use ops_lifecycle::{
+    OperationCompletionWatch, OperationKind, OperationLifecycleSnapshot, OperationPeerHandle,
+    OperationProgressUpdate, OperationStatus, OperationTerminalOutcome, OpsLifecycleError,
+    OpsLifecycleRegistry,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use prompt::{AGENTS_MD_MAX_BYTES, DEFAULT_SYSTEM_PROMPT, SystemPromptConfig};
 pub use provider::Provider;
@@ -143,7 +149,6 @@ pub use session::{
     SessionMetadata, SessionSystemContextState, SessionTooling, SystemContextStageError,
 };
 pub use state::LoopState;
-pub use sub_agent::{SubAgentCommsInfo, SubAgentCompletion, SubAgentInfo, SubAgentManager};
 pub use tool_scope::{
     ComposedToolFilter, EXTERNAL_TOOL_FILTER_METADATA_KEY, ToolFilter, ToolScope, ToolScopeHandle,
     ToolScopeRevision, ToolScopeStageError,

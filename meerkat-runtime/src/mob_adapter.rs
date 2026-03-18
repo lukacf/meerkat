@@ -70,6 +70,10 @@ pub async fn deliver_flow_step(
 }
 
 /// Retire a mob member's runtime.
+///
+/// If the session is attached to a live `RuntimeLoop`, queued inputs remain
+/// pending for drain. For plain registered sessions without a loop, retirement
+/// abandons queued work because nothing can execute the drain path.
 pub async fn retire_mob_member(
     adapter: &RuntimeSessionAdapter,
     session_id: &SessionId,
@@ -115,7 +119,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retire_preserves_pending_for_drain() {
+    async fn retire_without_runtime_loop_abandons_pending_inputs() {
         let adapter = RuntimeSessionAdapter::ephemeral();
         let sid = SessionId::new();
         register_mob_member(&adapter, sid.clone()).await;
@@ -125,10 +129,11 @@ mod tests {
             .await
             .unwrap();
 
-        // Retire — preserves inputs for drain, doesn't abandon
+        // No RuntimeLoop is attached for plain registration, so retirement
+        // abandons queued work instead of leaving it pending forever.
         let report = retire_mob_member(&adapter, &sid).await.unwrap();
-        assert_eq!(report.inputs_abandoned, 0);
-        assert_eq!(report.inputs_pending_drain, 1);
+        assert_eq!(report.inputs_abandoned, 1);
+        assert_eq!(report.inputs_pending_drain, 0);
     }
 
     #[tokio::test]

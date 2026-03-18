@@ -37,6 +37,7 @@ pub fn handle_initialize(id: Option<RpcId>, runtime_available: bool) -> RpcRespo
                 "session/read".to_string(),
                 "session/history".to_string(),
                 "session/archive".to_string(),
+                "session/external_event".to_string(),
                 "session/inject_context".to_string(),
                 "session/stream_open".to_string(),
                 "session/stream_close".to_string(),

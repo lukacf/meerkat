@@ -1,11 +1,6 @@
 //! Built-in prefab mob definitions.
 
-use crate::definition::{
-    BackendConfig, MobDefinition, OrchestratorConfig, SkillSource, WiringRules,
-};
-use crate::ids::{MobId, ProfileName};
-use crate::profile::{Profile, ToolConfig};
-use std::collections::BTreeMap;
+use crate::definition::{MobDefinition, SkillSource};
 
 /// Built-in prefab templates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,84 +45,26 @@ impl Prefab {
 
     /// Build a full mob definition for this prefab.
     pub fn definition(self) -> MobDefinition {
-        let mut profiles = BTreeMap::new();
-        profiles.insert(
-            ProfileName::from("lead"),
-            Profile {
-                model: "claude-opus-4-6".to_string(),
-                skills: vec!["orchestrator".to_string()],
-                tools: ToolConfig {
-                    builtins: true,
-                    comms: true,
-                    mob: true,
-                    mob_tasks: true,
-                    ..ToolConfig::default()
-                },
-                peer_description: "Orchestrator".to_string(),
-                external_addressable: true,
-                backend: None,
-                runtime_mode: crate::MobRuntimeMode::AutonomousHost,
-                max_inline_peer_notifications: None,
-                output_schema: None,
-                provider_params: None,
-            },
-        );
-        profiles.insert(
-            ProfileName::from("worker"),
-            Profile {
-                model: "claude-sonnet-4-5".to_string(),
-                skills: vec!["worker".to_string()],
-                tools: ToolConfig {
-                    builtins: true,
-                    shell: true,
-                    comms: true,
-                    mob_tasks: true,
-                    ..ToolConfig::default()
-                },
-                peer_description: "Worker".to_string(),
-                external_addressable: false,
-                backend: None,
-                runtime_mode: crate::MobRuntimeMode::AutonomousHost,
-                max_inline_peer_notifications: None,
-                output_schema: None,
-                provider_params: None,
-            },
-        );
+        let mut definition = MobDefinition::from_toml(self.toml_template()).unwrap_or_else(|err| {
+            panic!(
+                "builtin prefab {} should parse into a mob definition: {err}",
+                self.key()
+            )
+        });
 
-        let mut skills = BTreeMap::new();
-        skills.insert(
+        definition.skills.insert(
             "orchestrator".to_string(),
             SkillSource::Inline {
                 content: orchestrator_skill(self).to_string(),
             },
         );
-        skills.insert(
+        definition.skills.insert(
             "worker".to_string(),
             SkillSource::Inline {
                 content: worker_skill(self).to_string(),
             },
         );
-
-        MobDefinition {
-            id: MobId::from(self.key()),
-            orchestrator: Some(OrchestratorConfig {
-                profile: ProfileName::from("lead"),
-            }),
-            profiles,
-            mcp_servers: BTreeMap::new(),
-            wiring: WiringRules {
-                auto_wire_orchestrator: true,
-                role_wiring: Vec::new(),
-            },
-            skills,
-            backend: BackendConfig::default(),
-            flows: BTreeMap::new(),
-            topology: None,
-            supervisor: None,
-            limits: None,
-            spawn_policy: None,
-            event_router: None,
-        }
+        definition
     }
 
     /// User-editable TOML template for this prefab.
@@ -231,5 +168,31 @@ mod tests {
                 "prefab toml id must match prefab key"
             );
         }
+    }
+
+    #[test]
+    fn test_pipeline_prefab_definition_carries_flow_truth() {
+        let definition = Prefab::Pipeline.definition();
+        let flow = definition
+            .flows
+            .get(&crate::ids::FlowId::from("pipeline"))
+            .expect("pipeline prefab should define a durable pipeline flow");
+
+        assert!(
+            !flow.steps.is_empty(),
+            "pipeline flow should have concrete steps"
+        );
+        assert!(
+            definition.topology.is_some(),
+            "pipeline prefab should carry topology"
+        );
+        assert!(
+            definition.supervisor.is_some(),
+            "pipeline prefab should carry supervisor ownership"
+        );
+        assert!(
+            definition.limits.is_some(),
+            "pipeline prefab should carry runtime limits"
+        );
     }
 }

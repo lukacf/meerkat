@@ -81,9 +81,10 @@ where
     /// Drain comms inbox and inject messages into session.
     /// Returns true if any messages were injected.
     ///
-    /// No-op when `host_drain_active` is set — in host mode, the host loop
-    /// owns the inbox drain cycle via `drain_classified_inbox_interactions()`
-    /// to preserve interaction-scoped subscriber correlation.
+    /// No-op when `host_drain_active` is set — during host-mode compatibility
+    /// execution, the outer bridge owns the inbox drain cycle via
+    /// `drain_classified_inbox_interactions()` to preserve interaction-scoped
+    /// subscriber correlation.
     ///
     /// Routes on the stored `PeerInputClass` from ingress classification —
     /// no downstream re-classification.
@@ -193,7 +194,7 @@ where
                         peer_lifecycle_batch.observe(peer, PeerLifecycleState::Retired);
                     }
                 }
-                PeerInputClass::Ack | PeerInputClass::SubagentResult => {
+                PeerInputClass::Ack => {
                     // Filtered at ingress or handled separately
                 }
                 PeerInputClass::Response
@@ -238,7 +239,11 @@ where
         true
     }
 
-    /// Run the agent in host mode: process initial prompt, then stay alive for comms messages.
+    /// Run the agent in host mode as a compatibility entrypoint over
+    /// comms/runtime orchestration.
+    ///
+    /// When a runtime input sink is installed, ordinary peer work stays
+    /// runtime-owned and this path only coordinates the outer host bridge.
     pub async fn run_host_mode(
         &mut self,
         initial_prompt: ContentInput,
@@ -246,7 +251,7 @@ where
         self.run_host_mode_inner(initial_prompt, None).await
     }
 
-    /// Run in host mode with event streaming.
+    /// Run in host mode with event streaming through the same outer bridge.
     pub async fn run_host_mode_with_events(
         &mut self,
         initial_prompt: ContentInput,
@@ -256,8 +261,8 @@ where
             .await
     }
 
-    /// Core host mode implementation shared by `run_host_mode()` and
-    /// `run_host_mode_with_events()`.
+    /// Core host-mode compatibility implementation shared by `run_host_mode()`
+    /// and `run_host_mode_with_events()`.
     ///
     /// Processes the initial prompt, then loops waiting for comms interactions.
     /// When `event_tx` is `Some`, subscriber-bound interactions get individual
@@ -359,6 +364,14 @@ where
 
                     if comms.dismiss_received() {
                         tracing::info!("Host mode: DISMISS received, exiting");
+                        if let Some(ref sink) = self.runtime_input_sink
+                            && let Err(err) = sink.stop_runtime_executor("peer DISMISS").await
+                        {
+                            tracing::warn!(
+                                error = %err,
+                                "runtime sink rejected stop-runtime-executor"
+                            );
+                        }
                         self.host_drain_active = false;
                         return Ok(last_result);
                     }
@@ -374,6 +387,7 @@ where
                         let mut peer_lifecycle_batch = PeerLifecycleBatch::default();
                         let mut had_session_injections = false;
                         let mut had_response_injections = false;
+                        let mut terminal_response_request_id = None;
 
                         for interaction in interactions {
                             // Consume the subscriber (if any) so it is removed
@@ -414,6 +428,13 @@ where
                                             | crate::interaction::ResponseStatus::Failed
                                     ) {
                                         had_response_injections = true;
+                                        if let InteractionContent::Response {
+                                            in_reply_to, ..
+                                        } = &interaction.content
+                                        {
+                                            terminal_response_request_id =
+                                                Some(in_reply_to.to_string());
+                                        }
                                     }
                                     inject_response_into_session(&mut self.session, &interaction);
                                     had_session_injections = true;
@@ -429,9 +450,15 @@ where
                                     had_session_injections = true;
                                 }
                                 InteractionContent::Message { .. } => {
-                                    // If there's a subscriber and event_tx, route
-                                    // individually so the subscriber gets terminal events.
-                                    if event_tx.is_some() && subscriber.is_some() {
+                                    // Runtime-backed host mode admits actionable peer
+                                    // messages individually so the runtime queue owns
+                                    // exactly-once execution.
+                                    if self.runtime_input_sink.is_some() {
+                                        drop(subscriber);
+                                        individual_requests.push((interaction, None));
+                                    } else if event_tx.is_some() && subscriber.is_some() {
+                                        // If there's a subscriber and event_tx, route
+                                        // individually so the subscriber gets terminal events.
                                         individual_requests.push((interaction, subscriber));
                                     } else {
                                         drop(subscriber);
@@ -557,10 +584,15 @@ where
                         // passthrough work.
                         if had_response_injections && !had_passthrough_work {
                             if let Some(ref sink) = self.runtime_input_sink {
-                                if let Err(err) = sink.accept_continuation().await {
+                                if let Err(err) = sink
+                                    .schedule_terminal_response_continuation(
+                                        terminal_response_request_id.clone(),
+                                    )
+                                    .await
+                                {
                                     tracing::warn!(
                                         error = %err,
-                                        "runtime sink rejected continuation"
+                                        "runtime sink rejected terminal response continuation"
                                     );
                                 }
                             } else {
@@ -609,10 +641,23 @@ where
                         }
                     }
 
-                    if had_legacy_work || comms.dismiss_received() {
+                    if comms.dismiss_received() {
+                        tracing::info!("Host mode: DISMISS received, exiting");
+                        if let Some(ref sink) = self.runtime_input_sink
+                            && let Err(err) = sink.stop_runtime_executor("peer DISMISS").await
+                        {
+                            tracing::warn!(
+                                error = %err,
+                                "runtime sink rejected stop-runtime-executor"
+                            );
+                        }
+                        self.host_drain_active = false;
+                        return Ok(last_result);
+                    }
+
+                    if had_legacy_work {
                         // Re-drain immediately — legacy runtimes may have
-                        // staged batches or dismiss state that only appears
-                        // on the next drain.
+                        // staged batches that only appear on the next drain.
                         continue;
                     }
                     // No work and no dismiss: produce an empty classified vec
@@ -624,6 +669,14 @@ where
 
             if comms.dismiss_received() {
                 tracing::info!("Host mode: DISMISS received, exiting");
+                if let Some(ref sink) = self.runtime_input_sink
+                    && let Err(err) = sink.stop_runtime_executor("peer DISMISS").await
+                {
+                    tracing::warn!(
+                        error = %err,
+                        "runtime sink rejected stop-runtime-executor"
+                    );
+                }
                 self.host_drain_active = false;
                 return Ok(last_result);
             }
@@ -646,6 +699,7 @@ where
                 let mut peer_lifecycle_batch = PeerLifecycleBatch::default();
                 let mut had_session_injections = false;
                 let mut had_response_injections = false;
+                let mut terminal_response_request_id = None;
 
                 for ci in classified {
                     match ci.class {
@@ -672,6 +726,11 @@ where
                                 )
                             {
                                 had_response_injections = true;
+                                if let InteractionContent::Response { in_reply_to, .. } =
+                                    &ci.interaction.content
+                                {
+                                    terminal_response_request_id = Some(in_reply_to.to_string());
+                                }
                             }
                             inject_response_into_session(&mut self.session, &ci.interaction);
                             had_session_injections = true;
@@ -719,7 +778,7 @@ where
                                 }
                             }
                         }
-                        PeerInputClass::Ack | PeerInputClass::SubagentResult => {
+                        PeerInputClass::Ack => {
                             // Filtered at ingress or handled separately
                         }
                     }
@@ -840,12 +899,18 @@ where
                         "Host mode: continuation run after terminal response injection"
                     );
 
-                    // When runtime_input_sink is set, route continuation through runtime
+                    // When runtime_input_sink is set, let the runtime bridge own
+                    // the continuation control-path admission.
                     if let Some(ref sink) = self.runtime_input_sink {
-                        if let Err(err) = sink.accept_continuation().await {
+                        if let Err(err) = sink
+                            .schedule_terminal_response_continuation(
+                                terminal_response_request_id.clone(),
+                            )
+                            .await
+                        {
                             tracing::warn!(
                                 error = %err,
-                                "runtime sink rejected continuation"
+                                "runtime sink rejected terminal response continuation"
                             );
                         }
                         // Don't block — runtime loop will process the continuation
@@ -1182,6 +1247,47 @@ mod tests {
         }
     }
 
+    struct RecordingRuntimeInputSink {
+        accepted: Mutex<Vec<crate::interaction::InboxInteraction>>,
+        continuations: Mutex<Vec<Option<String>>>,
+        stops: Mutex<Vec<String>>,
+    }
+
+    impl RecordingRuntimeInputSink {
+        fn new() -> Self {
+            Self {
+                accepted: Mutex::new(Vec::new()),
+                continuations: Mutex::new(Vec::new()),
+                stops: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl crate::agent::RuntimeInputSink for RecordingRuntimeInputSink {
+        async fn accept_peer_input(
+            &self,
+            interaction: crate::interaction::InboxInteraction,
+        ) -> Result<(), String> {
+            self.accepted.lock().await.push(interaction);
+            Ok(())
+        }
+
+        async fn schedule_terminal_response_continuation(
+            &self,
+            request_id: Option<String>,
+        ) -> Result<(), String> {
+            self.continuations.lock().await.push(request_id);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(&self, reason: &str) -> Result<(), String> {
+            self.stops.lock().await.push(reason.to_string());
+            Ok(())
+        }
+    }
+
     // Advanced mock for testing interaction-aware host mode (uses parking_lot for sync subscriber access).
     // Auto-dismisses: after the first drain that returned interactions, the next empty drain
     // sets dismiss=true so the host loop exits cleanly.
@@ -1391,6 +1497,26 @@ mod tests {
         }
     }
 
+    struct DismissOnlyMockCommsRuntime {
+        notify: Arc<Notify>,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl CommsRuntime for DismissOnlyMockCommsRuntime {
+        async fn drain_messages(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn inbox_notify(&self) -> Arc<Notify> {
+            self.notify.clone()
+        }
+
+        fn dismiss_received(&self) -> bool {
+            true
+        }
+    }
+
     #[tokio::test]
     async fn test_drain_comms_inbox_no_runtime_returns_false() {
         let mut agent = AgentBuilder::new()
@@ -1534,6 +1660,23 @@ mod tests {
             id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
             from: "test-peer".into(),
             content,
+            rendered_text: rendered_text.to_string(),
+        }
+    }
+
+    fn make_response(
+        status: crate::interaction::ResponseStatus,
+        rendered_text: &str,
+    ) -> crate::interaction::InboxInteraction {
+        let reply_to = crate::interaction::InteractionId(uuid::Uuid::new_v4());
+        crate::interaction::InboxInteraction {
+            id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
+            from: "peer".into(),
+            content: InteractionContent::Response {
+                in_reply_to: reply_to,
+                status,
+                result: serde_json::json!({"ok": true}),
+            },
             rendered_text: rendered_text.to_string(),
         }
     }
@@ -2278,6 +2421,140 @@ mod tests {
             "expected InteractionFailed on subscriber channel"
         );
         assert!(err.to_string().contains("forced failure"));
+    }
+
+    #[tokio::test]
+    async fn test_runtime_bridge_path_admits_actionable_work_once_and_keeps_response_inline() {
+        let response = make_response(
+            crate::interaction::ResponseStatus::Completed,
+            "[Response] completed: {\"ok\":true}",
+        );
+        let message = make_interaction(
+            InteractionContent::Message {
+                body: "hello".into(),
+                blocks: None,
+            },
+            "hello from peer",
+        );
+        let runtime_sink = Arc::new(RecordingRuntimeInputSink::new());
+        let comms = Arc::new(SyncInteractionMockCommsRuntime::with_interactions(vec![
+            response, message,
+        ]));
+
+        let mut agent = AgentBuilder::new()
+            .with_comms_runtime(comms as Arc<dyn CommsRuntime>)
+            .with_runtime_input_sink(runtime_sink.clone())
+            .build(
+                Arc::new(MockLlmClient),
+                Arc::new(MockToolDispatcher),
+                Arc::new(MockSessionStore),
+            )
+            .await;
+
+        let result = agent.run_host_mode(String::new().into()).await.unwrap();
+
+        assert_eq!(
+            result.turns, 0,
+            "runtime-backed host mode should not self.run peer work"
+        );
+        let accepted = runtime_sink.accepted.lock().await;
+        assert_eq!(accepted.len(), 1, "message should be admitted exactly once");
+        assert!(matches!(
+            accepted[0].content,
+            InteractionContent::Message { .. }
+        ));
+        drop(accepted);
+
+        let continuations = runtime_sink.continuations.lock().await;
+        assert!(
+            continuations.is_empty(),
+            "passthrough work should avoid a separate continuation admission"
+        );
+        drop(continuations);
+
+        let user_texts: Vec<_> = agent
+            .session()
+            .messages()
+            .iter()
+            .filter_map(|m| match m {
+                Message::User(u) => Some(u.text_content()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            user_texts.iter().any(|text| text.contains("completed")),
+            "terminal response should stay inline in session context"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_bridge_path_schedules_terminal_response_continuation_without_direct_run()
+    {
+        let reply_to = crate::interaction::InteractionId(uuid::Uuid::new_v4());
+        let response = crate::interaction::InboxInteraction {
+            id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
+            from: "peer".into(),
+            content: InteractionContent::Response {
+                in_reply_to: reply_to,
+                status: crate::interaction::ResponseStatus::Completed,
+                result: serde_json::json!({"ok": true}),
+            },
+            rendered_text: "[Response] completed".into(),
+        };
+        let runtime_sink = Arc::new(RecordingRuntimeInputSink::new());
+        let comms = Arc::new(SyncInteractionMockCommsRuntime::with_interactions(vec![
+            response,
+        ]));
+
+        let mut agent = AgentBuilder::new()
+            .with_comms_runtime(comms as Arc<dyn CommsRuntime>)
+            .with_runtime_input_sink(runtime_sink.clone())
+            .build(
+                Arc::new(MockLlmClient),
+                Arc::new(MockToolDispatcher),
+                Arc::new(MockSessionStore),
+            )
+            .await;
+
+        let result = agent.run_host_mode(String::new().into()).await.unwrap();
+
+        assert_eq!(
+            result.turns, 0,
+            "runtime-backed terminal responses should not trigger direct host turns"
+        );
+        assert!(
+            runtime_sink.accepted.lock().await.is_empty(),
+            "inline terminal responses should not be re-admitted as peer work"
+        );
+        assert_eq!(
+            runtime_sink.continuations.lock().await.as_slice(),
+            &[Some(reply_to.to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_bridge_path_routes_dismiss_through_runtime_control() {
+        let runtime_sink = Arc::new(RecordingRuntimeInputSink::new());
+        let comms = Arc::new(DismissOnlyMockCommsRuntime {
+            notify: Arc::new(Notify::new()),
+        });
+
+        let mut agent = AgentBuilder::new()
+            .with_comms_runtime(comms as Arc<dyn CommsRuntime>)
+            .with_runtime_input_sink(runtime_sink.clone())
+            .build(
+                Arc::new(MockLlmClient),
+                Arc::new(MockToolDispatcher),
+                Arc::new(MockSessionStore),
+            )
+            .await;
+
+        let _ = agent.run_host_mode(String::new().into()).await.unwrap();
+
+        assert_eq!(
+            runtime_sink.stops.lock().await.as_slice(),
+            &["peer DISMISS".to_string()]
+        );
     }
 
     #[tokio::test]

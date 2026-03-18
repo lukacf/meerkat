@@ -32,6 +32,7 @@ use std::sync::OnceLock;
 use tokio::sync::mpsc;
 
 use futures::StreamExt;
+use meerkat_client::TestClient;
 use tokio::sync::Mutex;
 
 /// Tool definition provided by the MCP client
@@ -120,9 +121,6 @@ pub struct MeerkatRunInput {
     /// Optional run-scoped hook overrides.
     #[serde(default)]
     pub hooks_override: Option<HookRunOverrides>,
-    /// Enable sub-agent tools.
-    #[serde(default)]
-    pub enable_subagents: Option<bool>,
     /// Enable semantic memory.
     #[serde(default)]
     pub enable_memory: Option<bool>,
@@ -396,6 +394,27 @@ impl MeerkatMcpState {
         bootstrap: RuntimeBootstrap,
         expose_paths: bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_bootstrap_options_and_llm(bootstrap, expose_paths, None).await
+    }
+
+    #[doc(hidden)]
+    pub async fn new_with_bootstrap_and_test_client(
+        bootstrap: RuntimeBootstrap,
+        expose_paths: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_bootstrap_options_and_llm(
+            bootstrap,
+            expose_paths,
+            Some(Arc::new(TestClient::default())),
+        )
+        .await
+    }
+
+    async fn new_with_bootstrap_options_and_llm(
+        bootstrap: RuntimeBootstrap,
+        expose_paths: bool,
+        default_llm_client: Option<Arc<dyn meerkat::LlmClient>>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let locator = bootstrap.realm.resolve_locator()?;
         let realm_id = locator.realm_id;
         let realms_root = locator.state_root;
@@ -462,7 +481,8 @@ impl MeerkatMcpState {
 
         let skill_runtime = factory.build_skill_runtime(&config).await;
 
-        let builder = FactoryAgentBuilder::new_with_config_store(factory, config, config_store);
+        let mut builder = FactoryAgentBuilder::new_with_config_store(factory, config, config_store);
+        builder.default_llm_client = default_llm_client;
         let service = PersistentSessionService::new(builder, 100, session_store, runtime_store);
 
         Ok(Self {
@@ -661,9 +681,6 @@ pub struct MeerkatResumeInput {
     /// Optional run-scoped hook overrides.
     #[serde(default)]
     pub hooks_override: Option<HookRunOverrides>,
-    /// Enable sub-agent tools.
-    #[serde(default)]
-    pub enable_subagents: Option<bool>,
     /// Enable semantic memory.
     #[serde(default)]
     pub enable_memory: Option<bool>,
@@ -2096,6 +2113,7 @@ async fn handle_meerkat_comms_send(
         source: input.source,
         stream: input.stream,
         allow_self_session: input.allow_self_session,
+        handling_mode: None,
     };
     let cmd = request.parse(&session_id).map_err(|errors| {
         let details = meerkat_core::comms::CommsCommandRequest::validation_errors_to_json(&errors);
@@ -2223,7 +2241,7 @@ async fn handle_meerkat_run(
         scoped_event_path: None,
         override_builtins: Some(input.enable_builtins),
         override_shell: Some(input.enable_builtins && enable_shell),
-        override_subagents: input.enable_subagents,
+        override_subagents: None,
         override_memory: input.enable_memory,
         override_mob: input.enable_mob,
         preload_skills,
@@ -2243,6 +2261,7 @@ async fn handle_meerkat_run(
     let req = CreateSessionRequest {
         model,
         prompt: input.prompt.into(),
+        render_metadata: None,
         system_prompt: input.system_prompt,
         max_tokens: input.max_tokens,
         event_tx: event_tx.clone(),
@@ -2318,9 +2337,6 @@ async fn handle_meerkat_resume(
     let enable_mob = input
         .enable_mob
         .or_else(|| stored_metadata.as_ref().map(|meta| meta.tooling.mob));
-    let enable_subagents = input
-        .enable_subagents
-        .or_else(|| stored_metadata.as_ref().map(|meta| meta.tooling.subagents));
     let enable_memory = input.enable_memory;
     let host_mode_requested =
         input.host_mode || stored_metadata.as_ref().is_some_and(|meta| meta.host_mode);
@@ -2413,7 +2429,7 @@ async fn handle_meerkat_resume(
         scoped_event_path: None,
         override_builtins: Some(enable_builtins),
         override_shell: Some(enable_builtins && enable_shell),
-        override_subagents: enable_subagents,
+        override_subagents: None,
         override_memory: enable_memory,
         override_mob: enable_mob,
         preload_skills,
@@ -2452,6 +2468,7 @@ async fn handle_meerkat_resume(
         let req = CreateSessionRequest {
             model,
             prompt: prompt.into(),
+            render_metadata: None,
             system_prompt: input.system_prompt.clone(),
             max_tokens,
             event_tx: event_tx.clone(),
@@ -2467,6 +2484,8 @@ async fn handle_meerkat_resume(
         // from a prior meerkat_run in the same MCP server process).
         let turn_req = StartTurnRequest {
             prompt: prompt.clone().into(),
+            render_metadata: None,
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
             event_tx: event_tx.clone(),
             host_mode,
             skill_references: skill_references.clone(),
@@ -2479,6 +2498,7 @@ async fn handle_meerkat_resume(
                 let req = CreateSessionRequest {
                     model,
                     prompt: prompt.into(),
+                    render_metadata: None,
                     system_prompt: input.system_prompt.clone(),
                     max_tokens,
                     event_tx: event_tx.clone(),
@@ -3187,7 +3207,6 @@ mod tests {
                 comms_name: None, // Missing!
                 peer_meta: None,
                 hooks_override: None,
-                enable_subagents: None,
                 enable_memory: None,
                 enable_mob: None,
                 provider_params: None,

@@ -1396,6 +1396,35 @@ mod tests {
         }
     }
 
+    fn create_request(prompt: &str, initial_turn: InitialTurnPolicy) -> CreateSessionRequest {
+        CreateSessionRequest {
+            model: "test".to_string(),
+            prompt: prompt.to_string().into(),
+            render_metadata: None,
+            system_prompt: None,
+            max_tokens: None,
+            event_tx: None,
+            host_mode: false,
+            skill_references: None,
+            initial_turn,
+            build: None,
+            labels: None,
+        }
+    }
+
+    fn start_turn_request(prompt: &str) -> StartTurnRequest {
+        StartTurnRequest {
+            prompt: prompt.to_string().into(),
+            render_metadata: None,
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            event_tx: None,
+            host_mode: false,
+            skill_references: None,
+            flow_tool_overlay: None,
+            additional_instructions: None,
+        }
+    }
+
     #[tokio::test]
     async fn test_persistent_load_persisted_returns_stored_session() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
@@ -1564,18 +1593,10 @@ mod tests {
             PersistentSessionService::new(builder, 4, Arc::clone(&store), Some(runtime_store));
 
         let result = service
-            .create_session(CreateSessionRequest {
-                model: "test".to_string(),
-                prompt: "hello".to_string().into(),
-                system_prompt: None,
-                max_tokens: None,
-                event_tx: None,
-                host_mode: false,
-                skill_references: None,
-                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
-                build: None,
-                labels: None,
-            })
+            .create_session(create_request(
+                "hello",
+                meerkat_core::service::InitialTurnPolicy::Defer,
+            ))
             .await
             .expect("create_session should succeed");
 
@@ -1670,34 +1691,13 @@ mod tests {
         let service = PersistentSessionService::new(DummyBuilder, 4, Arc::clone(&store), None);
 
         let created = service
-            .create_session(CreateSessionRequest {
-                model: "test".to_string(),
-                prompt: "hello".to_string().into(),
-                system_prompt: None,
-                max_tokens: None,
-                event_tx: None,
-                host_mode: false,
-                skill_references: None,
-                initial_turn: InitialTurnPolicy::RunImmediately,
-                build: None,
-                labels: None,
-            })
+            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
             .await
             .expect("create_session should succeed");
         let id = created.session_id;
 
         service
-            .start_turn(
-                &id,
-                StartTurnRequest {
-                    host_mode: false,
-                    skill_references: None,
-                    flow_tool_overlay: None,
-                    prompt: "follow up".to_string().into(),
-                    event_tx: None,
-                    additional_instructions: None,
-                },
-            )
+            .start_turn(&id, start_turn_request("follow up"))
             .await
             .expect("second turn should succeed");
 
@@ -1742,18 +1742,7 @@ mod tests {
         let service = PersistentSessionService::new(DummyBuilder, 1, Arc::clone(&store), None);
 
         let first = service
-            .create_session(CreateSessionRequest {
-                model: "test".to_string(),
-                prompt: "first".to_string().into(),
-                system_prompt: None,
-                max_tokens: None,
-                event_tx: None,
-                host_mode: false,
-                skill_references: None,
-                initial_turn: InitialTurnPolicy::RunImmediately,
-                build: None,
-                labels: None,
-            })
+            .create_session(create_request("first", InitialTurnPolicy::RunImmediately))
             .await
             .expect("create first session");
         service
@@ -1762,18 +1751,7 @@ mod tests {
             .expect("archive first session");
 
         let second = service
-            .create_session(CreateSessionRequest {
-                model: "test".to_string(),
-                prompt: "second".to_string().into(),
-                system_prompt: None,
-                max_tokens: None,
-                event_tx: None,
-                host_mode: false,
-                skill_references: None,
-                initial_turn: InitialTurnPolicy::RunImmediately,
-                build: None,
-                labels: None,
-            })
+            .create_session(create_request("second", InitialTurnPolicy::RunImmediately))
             .await
             .expect("create second session");
         service
@@ -1812,18 +1790,10 @@ mod tests {
         let service = PersistentSessionService::new(DummyBuilder, 4, Arc::clone(&store), None);
 
         let result = service
-            .create_session(CreateSessionRequest {
-                model: "test".to_string(),
-                prompt: "hello".to_string().into(),
-                system_prompt: None,
-                max_tokens: None,
-                event_tx: None,
-                host_mode: false,
-                skill_references: None,
-                initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
-                build: None,
-                labels: None,
-            })
+            .create_session(create_request(
+                "hello",
+                meerkat_core::service::InitialTurnPolicy::RunImmediately,
+            ))
             .await
             .expect("create_session should succeed");
         let id = result.session_id;
@@ -1876,18 +1846,10 @@ mod tests {
         );
 
         let result = service
-            .create_session(CreateSessionRequest {
-                model: "test".to_string(),
-                prompt: "hello".to_string().into(),
-                system_prompt: None,
-                max_tokens: None,
-                event_tx: None,
-                host_mode: false,
-                skill_references: None,
-                initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
-                build: None,
-                labels: None,
-            })
+            .create_session(create_request(
+                "hello",
+                meerkat_core::service::InitialTurnPolicy::RunImmediately,
+            ))
             .await
             .expect("create_session should succeed");
         let id = result.session_id;
@@ -1954,18 +1916,10 @@ mod tests {
             PersistentSessionService::new(DummyBuilder, 4, Arc::clone(&store), Some(runtime_store));
 
         let result = service
-            .create_session(CreateSessionRequest {
-                model: "test".to_string(),
-                prompt: "hello".to_string().into(),
-                system_prompt: None,
-                max_tokens: None,
-                event_tx: None,
-                host_mode: false,
-                skill_references: None,
-                initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
-                build: None,
-                labels: None,
-            })
+            .create_session(create_request(
+                "hello",
+                meerkat_core::service::InitialTurnPolicy::RunImmediately,
+            ))
             .await
             .expect("create_session should succeed");
 
@@ -1988,18 +1942,10 @@ mod tests {
             PersistentSessionService::new(DummyBuilder, 4, Arc::clone(&store), Some(runtime_store));
 
         let result = service
-            .create_session(CreateSessionRequest {
-                model: "test".to_string(),
-                prompt: "hello".to_string().into(),
-                system_prompt: None,
-                max_tokens: None,
-                event_tx: None,
-                host_mode: false,
-                skill_references: None,
-                initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
-                build: None,
-                labels: None,
-            })
+            .create_session(create_request(
+                "hello",
+                meerkat_core::service::InitialTurnPolicy::RunImmediately,
+            ))
             .await
             .expect("create_session should succeed");
         let id = result.session_id;
@@ -2012,17 +1958,7 @@ mod tests {
             .len();
 
         service
-            .start_turn(
-                &id,
-                StartTurnRequest {
-                    prompt: "follow up".to_string().into(),
-                    event_tx: None,
-                    host_mode: false,
-                    skill_references: None,
-                    flow_tool_overlay: None,
-                    additional_instructions: None,
-                },
-            )
+            .start_turn(&id, start_turn_request("follow up"))
             .await
             .expect("start_turn should succeed");
 
@@ -2045,18 +1981,10 @@ mod tests {
             PersistentSessionService::new(DummyBuilder, 4, Arc::clone(&store), Some(runtime_store));
 
         let result = service
-            .create_session(CreateSessionRequest {
-                model: "test".to_string(),
-                prompt: "hello".to_string().into(),
-                system_prompt: None,
-                max_tokens: None,
-                event_tx: None,
-                host_mode: false,
-                skill_references: None,
-                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
-                build: None,
-                labels: None,
-            })
+            .create_session(create_request(
+                "hello",
+                meerkat_core::service::InitialTurnPolicy::Defer,
+            ))
             .await
             .expect("create_session should succeed");
 
@@ -2096,18 +2024,10 @@ mod tests {
             PersistentSessionService::new(DummyBuilder, 4, Arc::clone(&store), Some(runtime_store));
 
         let result = service
-            .create_session(CreateSessionRequest {
-                model: "test".to_string(),
-                prompt: "hello".to_string().into(),
-                system_prompt: None,
-                max_tokens: None,
-                event_tx: None,
-                host_mode: false,
-                skill_references: None,
-                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
-                build: None,
-                labels: None,
-            })
+            .create_session(create_request(
+                "hello",
+                meerkat_core::service::InitialTurnPolicy::Defer,
+            ))
             .await
             .expect("create_session should succeed");
 
@@ -2165,18 +2085,10 @@ mod tests {
         );
 
         let result = service
-            .create_session(CreateSessionRequest {
-                model: "test".to_string(),
-                prompt: "hello".to_string().into(),
-                system_prompt: None,
-                max_tokens: None,
-                event_tx: None,
-                host_mode: false,
-                skill_references: None,
-                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
-                build: None,
-                labels: None,
-            })
+            .create_session(create_request(
+                "hello",
+                meerkat_core::service::InitialTurnPolicy::Defer,
+            ))
             .await
             .expect("create_session should succeed");
 
@@ -2184,14 +2096,7 @@ mod tests {
             .apply_runtime_turn_with_result(
                 &result.session_id,
                 RunId::new(),
-                StartTurnRequest {
-                    prompt: "runtime committed turn".to_string().into(),
-                    event_tx: None,
-                    host_mode: false,
-                    skill_references: None,
-                    flow_tool_overlay: None,
-                    additional_instructions: None,
-                },
+                start_turn_request("runtime committed turn"),
                 RunApplyBoundary::Immediate,
                 vec![],
             )
@@ -2257,18 +2162,10 @@ mod tests {
             PersistentSessionService::new(DummyBuilder, 4, Arc::clone(&store), Some(runtime_store));
 
         let result = service
-            .create_session(CreateSessionRequest {
-                model: "test".to_string(),
-                prompt: "hello".to_string().into(),
-                system_prompt: None,
-                max_tokens: None,
-                event_tx: None,
-                host_mode: false,
-                skill_references: None,
-                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
-                build: None,
-                labels: None,
-            })
+            .create_session(create_request(
+                "hello",
+                meerkat_core::service::InitialTurnPolicy::Defer,
+            ))
             .await
             .expect("create_session should succeed");
 
@@ -2276,14 +2173,7 @@ mod tests {
             .apply_runtime_turn_with_result(
                 &result.session_id,
                 RunId::new(),
-                StartTurnRequest {
-                    prompt: "runtime committed turn".to_string().into(),
-                    event_tx: None,
-                    host_mode: false,
-                    skill_references: None,
-                    flow_tool_overlay: None,
-                    additional_instructions: None,
-                },
+                start_turn_request("runtime committed turn"),
                 RunApplyBoundary::Immediate,
                 vec![],
             )
@@ -2291,17 +2181,7 @@ mod tests {
             .expect("runtime-backed turn should succeed");
 
         service
-            .start_turn(
-                &result.session_id,
-                StartTurnRequest {
-                    prompt: "direct follow-up".to_string().into(),
-                    event_tx: None,
-                    host_mode: false,
-                    skill_references: None,
-                    flow_tool_overlay: None,
-                    additional_instructions: None,
-                },
-            )
+            .start_turn(&result.session_id, start_turn_request("direct follow-up"))
             .await
             .expect("direct turn should succeed");
 

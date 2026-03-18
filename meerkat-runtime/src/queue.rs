@@ -30,6 +30,11 @@ impl InputQueue {
         self.queue.push_back(QueuedInput { input_id, input });
     }
 
+    /// Enqueue an input at the front of the queue.
+    pub fn enqueue_front(&mut self, input_id: InputId, input: Input) {
+        self.queue.push_front(QueuedInput { input_id, input });
+    }
+
     /// Dequeue the next input (FIFO).
     pub fn dequeue(&mut self) -> Option<QueuedInput> {
         self.queue.pop_front()
@@ -154,5 +159,18 @@ mod tests {
         let drained = queue.drain();
         assert_eq!(drained.len(), 2);
         assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn enqueue_front_wins_ordering() {
+        let mut queue = InputQueue::new();
+        let back = InputId::new();
+        let front = InputId::new();
+
+        queue.enqueue(back.clone(), make_prompt(back.clone()));
+        queue.enqueue_front(front.clone(), make_prompt(front.clone()));
+
+        assert_eq!(queue.dequeue().unwrap().input_id, front);
+        assert_eq!(queue.dequeue().unwrap().input_id, back);
     }
 }

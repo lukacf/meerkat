@@ -4,7 +4,7 @@ description: "Getting started with the Meerkat Python SDK: sessions, turns, stre
 icon: "python"
 ---
 
-The Python SDK (`meerkat-sdk`) lets you create sessions, run agent turns, stream typed events, and query capabilities from Python. It spawns `rkat-rpc` as a subprocess and communicates with it over JSON-RPC 2.0.
+The Python SDK (`meerkat-sdk`) is a thin wrapper over Meerkat's settled runtime-backed contracts. It spawns `rkat-rpc` as a subprocess, then exposes the same session lifecycle used by the CLI, REST, JSON-RPC, and MCP surfaces as Python-native `Session` and `DeferredSession` handles.
 
 - **Python:** `>=3.10`
 - **Dependencies:** zero runtime dependencies
@@ -89,7 +89,7 @@ client = MeerkatClient(rkat_path="/path/to/rkat-rpc")
 
 ### Session methods
 
-`create_session()` returns a `Session` object. All subsequent operations on a session go through it.
+`create_session()` returns a `Session` object. All subsequent operations on a session go through that runtime-backed handle rather than through wrapper-local execution state.
 
 | Method / Property | Description |
 |-------------------|-------------|
@@ -190,7 +190,6 @@ async def create_session(
     hooks_override: dict | None = None,
     enable_builtins: bool = False,
     enable_shell: bool = False,
-    enable_subagents: bool = False,
     enable_memory: bool = False,
     enable_mob: bool = False,
     host_mode: bool = False,

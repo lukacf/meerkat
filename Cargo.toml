@@ -137,6 +137,19 @@ meerkat-machine-schema = { version = "0.4.11", path = "meerkat-machine-schema" }
 meerkat-machine-codegen = { version = "0.4.11", path = "meerkat-machine-codegen" }
 meerkat-machine-kernels = { version = "0.4.11", path = "meerkat-machine-kernels" }
 
+[profile.dev]
+split-debuginfo = "off"
+
+[profile.test]
+codegen-units = 256
+debug = 0
+incremental = false
+split-debuginfo = "off"
+
+[profile.test.package.meerkat-machine-schema]
+codegen-units = 16
+strip = "symbols"
+
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

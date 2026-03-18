@@ -63,6 +63,7 @@ impl MobToolDispatcher {
                         "profile": {"type": "string"},
                         "meerkat_id": {"type": "string"},
                         "initial_message": {"type": "string"},
+                        "resume_session_id": {"type": "string"},
                         "backend": {"type": "string", "enum": ["subagent", "external"]},
                         "runtime_mode": {"type": "string", "enum": ["autonomous_host", "turn_driven"]}
                     },
@@ -83,6 +84,7 @@ impl MobToolDispatcher {
                                     "profile": {"type": "string"},
                                     "meerkat_id": {"type": "string"},
                                     "initial_message": {"type": "string"},
+                                    "resume_session_id": {"type": "string"},
                                     "backend": {"type": "string", "enum": ["subagent", "external"]},
                                     "runtime_mode": {"type": "string", "enum": ["autonomous_host", "turn_driven"]}
                                 },
@@ -255,6 +257,8 @@ struct SpawnMeerkatArgs {
     #[serde(default)]
     initial_message: Option<String>,
     #[serde(default)]
+    resume_session_id: Option<meerkat_core::types::SessionId>,
+    #[serde(default)]
     backend: Option<MobBackendKind>,
     #[serde(default)]
     runtime_mode: Option<crate::MobRuntimeMode>,
@@ -321,15 +325,19 @@ impl AgentToolDispatcher for MobToolDispatcher {
                 let args: SpawnMeerkatArgs = call
                     .parse_args()
                     .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
+                let mut spec = SpawnMemberSpec::from_wire(
+                    args.profile,
+                    args.meerkat_id,
+                    args.initial_message,
+                    args.runtime_mode,
+                    args.backend,
+                );
+                if let Some(session_id) = args.resume_session_id {
+                    spec = spec.with_resume_session_id(session_id);
+                }
                 let member_ref = self
                     .handle
-                    .spawn_with_options(
-                        ProfileName::from(args.profile),
-                        MeerkatId::from(args.meerkat_id),
-                        args.initial_message,
-                        args.runtime_mode,
-                        args.backend,
-                    )
+                    .spawn_spec(spec)
                     .await
                     .map_err(|error| Self::map_mob_error(call, error))?;
                 Self::encode_result(
@@ -348,13 +356,17 @@ impl AgentToolDispatcher for MobToolDispatcher {
                     .specs
                     .into_iter()
                     .map(|spec| {
-                        SpawnMemberSpec::from_wire(
+                        let mut spawn_spec = SpawnMemberSpec::from_wire(
                             spec.profile,
                             spec.meerkat_id,
                             spec.initial_message,
                             spec.runtime_mode,
                             spec.backend,
-                        )
+                        );
+                        if let Some(session_id) = spec.resume_session_id {
+                            spawn_spec = spawn_spec.with_resume_session_id(session_id);
+                        }
+                        spawn_spec
                     })
                     .collect::<Vec<_>>();
                 let results = self.handle.spawn_many(specs).await;

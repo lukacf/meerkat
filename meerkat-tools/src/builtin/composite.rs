@@ -5,8 +5,6 @@ use crate::builtin::shell::{JobManager, ShellConfig};
 #[cfg(feature = "skills")]
 use crate::builtin::skills::SkillToolSet;
 use crate::builtin::store::TaskStore;
-#[cfg(all(feature = "sub-agents", not(target_arch = "wasm32")))]
-use crate::builtin::sub_agent::SubAgentToolSet;
 use crate::builtin::{BuiltinTool, BuiltinToolConfig, BuiltinToolError, ToolOutput};
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
@@ -35,8 +33,6 @@ pub enum CompositeDispatcherError {
 /// A composite dispatcher that combines multiple sources of tools.
 pub struct CompositeDispatcher {
     builtin_tools: Vec<Arc<dyn BuiltinTool>>,
-    #[cfg(all(feature = "sub-agents", not(target_arch = "wasm32")))]
-    sub_agent_tools: Option<SubAgentToolSet>,
     #[cfg(feature = "skills")]
     skill_tools: Option<SkillToolSet>,
     external: Option<Arc<dyn AgentToolDispatcher>>,
@@ -65,6 +61,7 @@ impl CompositeDispatcher {
         _image_tool_results: bool,
     ) -> Result<Self, CompositeDispatcherError> {
         let mut builtin_tools: Vec<Arc<dyn BuiltinTool>> = Vec::new();
+        let shell_session_id = session_id.clone();
         let project_root = project_root
             .or_else(|| shell_config.as_ref().map(|cfg| cfg.project_root.clone()))
             .or_else(|| std::env::current_dir().ok())
@@ -96,7 +93,14 @@ impl CompositeDispatcher {
         // Add shell tools if enabled
         let job_manager = if let Some(cfg) = shell_config {
             if cfg.enabled {
-                let mgr = Arc::new(JobManager::new(cfg.clone()));
+                let mut manager = JobManager::new(cfg.clone());
+                if let Some(session_id) = shell_session_id
+                    .as_deref()
+                    .and_then(|id| meerkat_core::types::SessionId::parse(id).ok())
+                {
+                    manager = manager.with_owner_session_id(session_id);
+                }
+                let mgr = Arc::new(manager);
                 use crate::builtin::shell::{
                     ShellJobCancelTool, ShellJobStatusTool, ShellJobsListTool, ShellTool,
                 };
@@ -130,8 +134,6 @@ impl CompositeDispatcher {
 
         Ok(Self {
             builtin_tools,
-            #[cfg(feature = "sub-agents")]
-            sub_agent_tools: None,
             #[cfg(feature = "skills")]
             skill_tools: None,
             external,
@@ -188,31 +190,6 @@ impl CompositeDispatcher {
         })
     }
 
-    /// Register sub-agent tools.
-    #[cfg(all(feature = "sub-agents", not(target_arch = "wasm32")))]
-    pub fn register_sub_agent_tools(
-        &mut self,
-        tool_set: SubAgentToolSet,
-        config: &BuiltinToolConfig,
-    ) -> Result<(), CompositeDispatcherError> {
-        let resolved_policy = config.resolve();
-        let names = [
-            "agent_spawn",
-            "agent_fork",
-            "agent_status",
-            "agent_cancel",
-            "agent_list",
-        ];
-        for name in names {
-            let name_str = name.to_string();
-            if resolved_policy.is_enabled(&name_str, true) {
-                self.allowed_tools.insert(name_str);
-            }
-        }
-        self.sub_agent_tools = Some(tool_set);
-        Ok(())
-    }
-
     /// Register skill discovery tools (browse_skills, load_skill).
     #[cfg(feature = "skills")]
     pub fn register_skill_tools(&mut self, tool_set: SkillToolSet) {
@@ -235,10 +212,6 @@ impl CompositeDispatcher {
                 }
             }
         }
-        #[cfg(feature = "sub-agents")]
-        if self.sub_agent_tools.is_some() {
-            out.push_str("## Sub-agent tools\nManage hierarchical agents.\n\n");
-        }
         if let Some(ref ext) = self.external {
             let mut wrote_external_header = false;
             for tool in ext.tools().iter() {
@@ -260,6 +233,12 @@ impl CompositeDispatcher {
         }
         out
     }
+
+    /// Return the shared shell job manager when shell tools are enabled.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn shell_job_manager(&self) -> Option<Arc<JobManager>> {
+        self.job_manager.clone()
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -274,17 +253,6 @@ impl AgentToolDispatcher for CompositeDispatcher {
             if self.allowed_tools.contains(tool.name()) {
                 seen_names.insert(tool.name().to_string());
                 tools.push(Arc::new(tool.def()));
-            }
-        }
-
-        // Add allowed sub-agent tools
-        #[cfg(all(feature = "sub-agents", not(target_arch = "wasm32")))]
-        if let Some(ref sub) = self.sub_agent_tools {
-            for tool in sub.tools() {
-                if self.allowed_tools.contains(tool.name()) {
-                    seen_names.insert(tool.name().to_string());
-                    tools.push(Arc::new(tool.def()));
-                }
             }
         }
 
@@ -355,39 +323,6 @@ impl AgentToolDispatcher for CompositeDispatcher {
                     }
                     ToolOutput::Blocks(blocks) => {
                         return Ok(ToolResult::with_blocks(call.id.to_string(), blocks, false));
-                    }
-                }
-            }
-        }
-
-        // Check sub-agent tools
-        #[cfg(all(feature = "sub-agents", not(target_arch = "wasm32")))]
-        if let Some(ref sub) = self.sub_agent_tools {
-            for tool in sub.tools() {
-                if tool.name() == call.name {
-                    let output = tool.call(args.clone()).await.map_err(|e| match e {
-                        BuiltinToolError::InvalidArgs(msg) => ToolError::InvalidArguments {
-                            name: call.name.to_string(),
-                            reason: msg,
-                        },
-                        BuiltinToolError::ExecutionFailed(msg) => {
-                            ToolError::ExecutionFailed { message: msg }
-                        }
-                        BuiltinToolError::TaskError(te) => {
-                            ToolError::ExecutionFailed { message: te }
-                        }
-                    })?;
-                    match output {
-                        ToolOutput::Json(value) => {
-                            let content = match &value {
-                                Value::String(s) => s.clone(),
-                                _ => serde_json::to_string(&value).unwrap_or_default(),
-                            };
-                            return Ok(ToolResult::new(call.id.to_string(), content, false));
-                        }
-                        ToolOutput::Blocks(blocks) => {
-                            return Ok(ToolResult::with_blocks(call.id.to_string(), blocks, false));
-                        }
                     }
                 }
             }

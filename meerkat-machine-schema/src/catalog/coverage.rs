@@ -112,6 +112,16 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     "meerkat-runtime/src/runtime_loop.rs",
                     "control-plane select loop and run coordination precursor",
                 ),
+                anchor(
+                    "runtime_control_plane",
+                    "meerkat-runtime/src/control_plane.rs",
+                    "stop/preemption seam and completion-resolution precursor",
+                ),
+                anchor(
+                    "runtime_session_adapter",
+                    "meerkat-runtime/src/session_adapter.rs",
+                    "surface-facing lifecycle and completion owner precursor",
+                ),
             ],
             &[
                 scenario(
@@ -133,6 +143,10 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 scenario(
                     "retire-stop-destroy",
                     "runtime transitions through retire/stop/destroy commands without reopening ordinary work",
+                ),
+                scenario(
+                    "reset-terminates-waiters",
+                    "reset abandons pending work and resolves completion waiters exactly once",
                 ),
             ],
         ),
@@ -158,6 +172,11 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     "runtime_persistent_driver",
                     "meerkat-runtime/src/driver/persistent.rs",
                     "persistent ingress/recovery precursor",
+                ),
+                anchor(
+                    "runtime_loop",
+                    "meerkat-runtime/src/runtime_loop.rs",
+                    "same-boundary contributor batching and staged run precursor",
                 ),
             ],
             &[

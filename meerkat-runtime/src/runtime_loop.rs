@@ -24,59 +24,117 @@ pub(crate) fn input_to_prompt(input: &Input) -> String {
         Input::ExternalEvent(e) => {
             format!("[External Event: {}] {}", e.event_type, e.payload)
         }
-        Input::SystemGenerated(s) => s.content.clone(),
-        Input::Projected(p) => p.content.clone(),
+        Input::Continuation(c) => format!("[Continuation] {}", c.reason),
+        Input::Operation(operation) => {
+            format!(
+                "[Operation {}] {:?}",
+                operation.operation_id, operation.event
+            )
+        }
     }
+}
+
+fn input_boundary(input: &Input) -> RunApplyBoundary {
+    match input {
+        Input::Peer(peer)
+            if matches!(
+                peer.convention,
+                Some(crate::input::PeerConvention::ResponseProgress { .. })
+            ) =>
+        {
+            RunApplyBoundary::RunCheckpoint
+        }
+        Input::Continuation(continuation) => match continuation.handling_mode {
+            meerkat_core::types::HandlingMode::Queue => RunApplyBoundary::RunStart,
+            meerkat_core::types::HandlingMode::Steer => RunApplyBoundary::RunCheckpoint,
+        },
+        Input::Prompt(prompt) => {
+            match prompt.turn_metadata.as_ref().and_then(|m| m.handling_mode) {
+                Some(meerkat_core::types::HandlingMode::Steer) => RunApplyBoundary::RunCheckpoint,
+                _ => RunApplyBoundary::RunStart,
+            }
+        }
+        Input::FlowStep(flow_step) => {
+            match flow_step
+                .turn_metadata
+                .as_ref()
+                .and_then(|m| m.handling_mode)
+            {
+                Some(meerkat_core::types::HandlingMode::Steer) => RunApplyBoundary::RunCheckpoint,
+                _ => RunApplyBoundary::RunStart,
+            }
+        }
+        _ => RunApplyBoundary::RunStart,
+    }
+}
+
+fn input_turn_metadata(
+    input: &Input,
+) -> Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> {
+    match input {
+        Input::Prompt(prompt) => prompt.turn_metadata.clone(),
+        Input::FlowStep(flow_step) => flow_step.turn_metadata.clone(),
+        Input::Continuation(continuation) => Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                handling_mode: Some(continuation.handling_mode),
+                ..Default::default()
+            },
+        ),
+        _ => None,
+    }
+}
+
+fn input_to_append(input: &Input) -> Option<ConversationAppend> {
+    let content = match input {
+        Input::Prompt(p) if p.blocks.is_some() => CoreRenderable::Blocks {
+            blocks: p.blocks.clone().unwrap_or_default(),
+        },
+        Input::Peer(p) if p.blocks.is_some() => CoreRenderable::Blocks {
+            blocks: p.blocks.clone().unwrap_or_default(),
+        },
+        Input::Prompt(_) | Input::Peer(_) | Input::FlowStep(_) | Input::ExternalEvent(_) => {
+            CoreRenderable::Text {
+                text: input_to_prompt(input),
+            }
+        }
+        Input::Continuation(_) | Input::Operation(_) => return None,
+    };
+
+    Some(ConversationAppend {
+        role: ConversationAppendRole::User,
+        content,
+    })
+}
+
+pub(crate) fn inputs_to_primitive(inputs: &[(InputId, Input)]) -> RunPrimitive {
+    let boundary = inputs
+        .first()
+        .map(|(_, input)| input_boundary(input))
+        .unwrap_or(RunApplyBoundary::RunStart);
+    let appends = inputs
+        .iter()
+        .filter_map(|(_, input)| input_to_append(input))
+        .collect::<Vec<_>>();
+    let contributing_input_ids = inputs
+        .iter()
+        .map(|(input_id, _)| input_id.clone())
+        .collect::<Vec<_>>();
+    let turn_metadata = inputs
+        .iter()
+        .find_map(|(_, input)| input_turn_metadata(input));
+
+    RunPrimitive::StagedInput(StagedRunInput {
+        boundary,
+        appends,
+        context_appends: vec![],
+        contributing_input_ids,
+        turn_metadata,
+    })
 }
 
 /// Convert an `Input` + its ID to a `RunPrimitive` for `CoreExecutor::apply()`.
 pub(crate) fn input_to_primitive(input: &Input, input_id: InputId) -> RunPrimitive {
-    match input {
-        Input::SystemGenerated(system) => RunPrimitive::StagedInput(StagedRunInput {
-            boundary: RunApplyBoundary::Immediate,
-            appends: vec![],
-            context_appends: vec![
-                meerkat_core::lifecycle::run_primitive::ConversationContextAppend {
-                    key: format!("system-generated:{input_id}"),
-                    content: CoreRenderable::Text {
-                        text: system.content.clone(),
-                    },
-                },
-            ],
-            contributing_input_ids: vec![input_id],
-            turn_metadata: None,
-        }),
-        _ => {
-            // Use multimodal blocks when available (PromptInput/PeerInput with images),
-            // otherwise fall back to text.
-            let content = match input {
-                Input::Prompt(p) if p.blocks.is_some() => CoreRenderable::Blocks {
-                    blocks: p.blocks.clone().unwrap_or_default(),
-                },
-                Input::Peer(p) if p.blocks.is_some() => CoreRenderable::Blocks {
-                    blocks: p.blocks.clone().unwrap_or_default(),
-                },
-                _ => CoreRenderable::Text {
-                    text: input_to_prompt(input),
-                },
-            };
-            let turn_metadata = match input {
-                Input::Prompt(prompt) => prompt.turn_metadata.clone(),
-                Input::FlowStep(flow_step) => flow_step.turn_metadata.clone(),
-                _ => None,
-            };
-            RunPrimitive::StagedInput(StagedRunInput {
-                boundary: RunApplyBoundary::RunStart,
-                appends: vec![ConversationAppend {
-                    role: ConversationAppendRole::User,
-                    content,
-                }],
-                context_appends: vec![],
-                contributing_input_ids: vec![input_id],
-                turn_metadata,
-            })
-        }
-    }
+    inputs_to_primitive(&[(input_id, input.clone())])
 }
 
 /// Spawn the per-session runtime loop with optional completion registry.
@@ -92,16 +150,37 @@ pub(crate) fn spawn_runtime_loop_with_completions(
     tokio::spawn(async move {
         loop {
             tokio::select! {
-                maybe_wake = wake_rx.recv() => {
-                    match maybe_wake {
-                        Some(()) => process_queue(&driver, &mut *executor, completions.as_ref()).await,
-                        None => break,
-                    }
-                }
+                biased;
                 maybe_command = control_rx.recv() => {
                     match maybe_command {
                         Some(command) => {
-                            let _ = executor.control(command).await;
+                            if crate::control_plane::apply_executor_control(
+                                &driver,
+                                completions.as_ref(),
+                                &mut *executor,
+                                command,
+                            )
+                            .await
+                            {
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                maybe_wake = wake_rx.recv() => {
+                    match maybe_wake {
+                        Some(()) => {
+                            if process_queue(
+                                &driver,
+                                &mut *executor,
+                                &mut control_rx,
+                                completions.as_ref(),
+                            )
+                            .await
+                            {
+                                break;
+                            }
                         }
                         None => break,
                     }
@@ -122,16 +201,30 @@ pub(crate) fn spawn_runtime_loop_with_completions(
 async fn process_queue(
     driver: &crate::session_adapter::SharedDriver,
     executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
+    control_rx: &mut tokio::sync::mpsc::Receiver<
+        meerkat_core::lifecycle::run_control::RunControlCommand,
+    >,
     completions: Option<&crate::session_adapter::SharedCompletionRegistry>,
-) {
+) -> bool {
     loop {
+        if crate::control_plane::drain_ready_executor_controls(
+            driver,
+            completions,
+            executor,
+            control_rx,
+        )
+        .await
+        {
+            return true;
+        }
+
         // Dequeue and prepare under the driver lock
         let dequeued = {
             let mut d = driver.lock().await;
 
             // Only process if the runtime can process queue (Idle or Retired)
             if !d.can_process_queue() {
-                break;
+                return false;
             }
 
             match d.dequeue_next() {
@@ -140,28 +233,53 @@ async fn process_queue(
 
                     // Start run in the state machine
                     if d.start_run(run_id.clone()).is_err() {
+                        return false;
+                    }
+
+                    let first_boundary = input_boundary(&input);
+                    let mut staged_inputs = vec![(input_id.clone(), input)];
+
+                    loop {
+                        let Some((next_input_id, next_input)) = d.dequeue_next() else {
+                            break;
+                        };
+                        if input_boundary(&next_input) == first_boundary {
+                            staged_inputs.push((next_input_id, next_input));
+                            continue;
+                        }
+
+                        d.enqueue_front_input(next_input_id, next_input);
                         break;
                     }
 
-                    // Stage the input (Queued → Staged).
+                    // Stage the input batch (Queued → Staged).
                     // Do NOT apply here — apply only after successful execution.
                     // If we pre-applied and the executor failed, the input would
                     // be stranded in AppliedPendingConsumption because RunFailed
                     // only rolls back Staged inputs.
-                    if d.stage_input(&input_id, &run_id).is_err() {
-                        let _ = d.complete_run();
-                        break;
+                    let mut staged_ids = Vec::with_capacity(staged_inputs.len());
+                    for (staged_input_id, _) in &staged_inputs {
+                        if d.stage_input(staged_input_id, &run_id).is_err() {
+                            let _ = d.rollback_staged(&staged_ids);
+                            let _ = d.complete_run();
+                            return false;
+                        }
+                        staged_ids.push(staged_input_id.clone());
                     }
 
-                    let primitive = input_to_primitive(&input, input_id.clone());
-                    Some((input_id, run_id, primitive))
+                    let primitive = inputs_to_primitive(&staged_inputs);
+                    let contributing_input_ids = staged_inputs
+                        .iter()
+                        .map(|(staged_input_id, _)| staged_input_id.clone())
+                        .collect::<Vec<_>>();
+                    Some((contributing_input_ids, run_id, primitive))
                 }
                 None => None,
             }
         };
 
         match dequeued {
-            Some((input_id, run_id, primitive)) => {
+            Some((input_ids, run_id, primitive)) => {
                 // Execute outside the driver lock (this calls start_turn, which is slow)
                 let result = executor.apply(run_id.clone(), primitive).await;
 
@@ -205,7 +323,7 @@ async fn process_queue(
                                     reason: format!("runtime boundary commit failed for run {run_id}: {err}"),
                                 })
                                 .await;
-                            break;
+                            return false;
                         }
 
                         // RunCompleted transitions APC → Consumed and returns to Idle/Retired
@@ -213,7 +331,7 @@ async fn process_queue(
                             .as_driver_mut()
                             .on_run_event(RunEvent::RunCompleted {
                                 run_id,
-                                consumed_input_ids: vec![input_id.clone()],
+                                consumed_input_ids: input_ids.clone(),
                             })
                             .await
                         {
@@ -224,7 +342,7 @@ async fn process_queue(
                                     reason: format!("runtime terminal snapshot failed after completion: {err}"),
                                 })
                                 .await;
-                            break;
+                            return false;
                         }
 
                         // Resolve completion waiters unconditionally
@@ -232,10 +350,14 @@ async fn process_queue(
                             let mut reg = completions.lock().await;
                             match run_result {
                                 Some(result) => {
-                                    reg.resolve_completed(&input_id, result);
+                                    for input_id in &input_ids {
+                                        reg.resolve_completed(input_id, result.clone());
+                                    }
                                 }
                                 None => {
-                                    reg.resolve_without_result(&input_id);
+                                    for input_id in &input_ids {
+                                        reg.resolve_without_result(input_id);
+                                    }
                                 }
                             }
                         }
@@ -261,19 +383,25 @@ async fn process_queue(
                                 .await;
                             // Resolve waiter before breaking so callers don't hang.
                             if let Some(completions) = completions.as_ref() {
-                                completions.lock().await.resolve_abandoned(
-                                    &input_id,
-                                    format!("runtime failure snapshot failed: {err}"),
-                                );
+                                let mut completions = completions.lock().await;
+                                for input_id in &input_ids {
+                                    completions.resolve_abandoned(
+                                        input_id,
+                                        format!("runtime failure snapshot failed: {err}"),
+                                    );
+                                }
                             }
-                            break;
+                            return false;
                         }
                         // Resolve completion waiter so callers don't hang.
                         if let Some(completions) = completions.as_ref() {
-                            completions
-                                .lock()
-                                .await
-                                .resolve_abandoned(&input_id, format!("apply failed: {error_msg}"));
+                            let mut completions = completions.lock().await;
+                            for input_id in &input_ids {
+                                completions.resolve_abandoned(
+                                    input_id,
+                                    format!("apply failed: {error_msg}"),
+                                );
+                            }
                         }
                         let should_continue = d.take_wake_requested();
                         drop(d);
@@ -282,11 +410,11 @@ async fn process_queue(
                         }
                         // Leave the failing input queued for a future wake instead of
                         // hot-looping on the same payload indefinitely.
-                        break;
+                        return false;
                     }
                 }
             }
-            None => break, // Queue empty
+            None => return false, // Queue empty
         }
     }
 }

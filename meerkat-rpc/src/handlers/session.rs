@@ -89,9 +89,6 @@ pub struct CreateSessionParams {
     /// Friendly metadata for peer discovery (description, labels).
     #[serde(default)]
     pub peer_meta: Option<meerkat_core::PeerMeta>,
-    /// Enable sub-agent tools. Omit to use runtime defaults.
-    #[serde(default)]
-    pub enable_subagents: Option<bool>,
     /// Enable semantic memory. Omit to use runtime defaults.
     #[serde(default)]
     pub enable_memory: Option<bool>,
@@ -288,7 +285,6 @@ pub async fn handle_create(
     build_config.host_mode = params.host_mode;
     build_config.comms_name = params.comms_name;
     build_config.peer_meta = params.peer_meta;
-    build_config.override_subagents = params.enable_subagents;
     build_config.override_memory = params.enable_memory;
     build_config.override_mob = params.enable_mob;
     build_config.budget_limits = params.budget_limits;

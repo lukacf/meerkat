@@ -14,10 +14,10 @@ pub use catalog::{
 };
 pub use composition::{
     ActorPriority, CompositionInvariant, CompositionInvariantKind, CompositionSchema,
-    CompositionStateLimits, CompositionWitness, CompositionWitnessField, CompositionWitnessInput,
-    CompositionWitnessState, CompositionWitnessTransition, CompositionWitnessTransitionOrder,
-    EntryInput, MachineInstance, Route, RouteBindingSource, RouteDelivery, RouteFieldBinding,
-    RouteTarget, SchedulerRule,
+    CompositionSchemaError, CompositionStateLimits, CompositionWitness, CompositionWitnessField,
+    CompositionWitnessInput, CompositionWitnessState, CompositionWitnessTransition,
+    CompositionWitnessTransitionOrder, EntryInput, MachineInstance, Route, RouteBindingSource,
+    RouteDelivery, RouteFieldBinding, RouteTarget, SchedulerRule,
 };
 pub use machine::{
     EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema, FieldType, Guard, HelperSchema,

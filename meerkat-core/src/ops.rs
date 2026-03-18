@@ -123,7 +123,7 @@ pub struct OperationSpec {
 }
 
 /// Result of a completed operation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationResult {
     pub id: OperationId,
     pub content: String,

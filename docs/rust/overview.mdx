@@ -4,7 +4,7 @@ description: "Embed Meerkat as a Rust library: the full engine with no subproces
 icon: "code"
 ---
 
-The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API servers are thin wrappers over this same engine. Using it directly means no subprocess, no JSON-RPC overhead, and full control over every component.
+The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API servers are thin wrappers over this same engine. The default embedding path is runtime-backed `SessionService`, which keeps Rust aligned with the same session lifecycle semantics used by every other Meerkat surface while still avoiding subprocess or JSON-RPC overhead.
 
 ## Method overview
 
@@ -49,7 +49,7 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
     [dependencies]
     meerkat = { version = "0.4", features = [
         "sqlite-store", "session-store", "session-compaction",
-        "memory-store-session", "comms", "mcp", "sub-agents", "skills"
+        "memory-store-session", "comms", "mcp", "skills"
     ] }
     ```
 
@@ -76,7 +76,6 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
 | `memory-store-session` | Semantic memory indexing | No |
 | `comms` | Ed25519 inter-agent messaging | No |
 | `mcp` | MCP protocol client and tool routing | No |
-| `sub-agents` | Spawn/fork child agents | No |
 | `skills` | Composable knowledge packs | No |
 </Accordion>
 
@@ -177,7 +176,13 @@ match service.start_turn(&id, req).await {
 
 ---
 
-## Running agents
+## Direct agent APIs
+
+<Warning>
+`Agent::run(...)` and `AgentBuilder` are expert-level escape hatches. Prefer `SessionService` for normal embedding so your Rust code follows the same runtime-backed session semantics as CLI, REST, RPC, MCP, Python, and TypeScript.
+</Warning>
+
+## Running agents directly
 
 ### Basic run
 
@@ -384,5 +389,5 @@ println!("Tool calls: {}", result.tool_calls);
 ## See also
 
 - [Tools and stores](/rust/tools-and-stores) - tool system, session stores, MCP integration
-- [Advanced](/rust/advanced) - AgentBuilder, providers, budget, sub-agents
+- [Advanced](/rust/advanced) - expert-only direct agent construction, providers, budgets, and hooks
 - [API reference](/reference/api-reference) - quick-lookup type index

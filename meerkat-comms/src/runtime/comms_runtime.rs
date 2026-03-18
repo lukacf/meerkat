@@ -705,10 +705,6 @@ impl CoreCommsRuntime for CommsRuntime {
                             lifecycle_peer: entry.lifecycle_peer,
                         })
                     }
-                    crate::types::InboxItem::SubagentResult { .. } => {
-                        // Subagent results handled separately
-                        None
-                    }
                 }
             })
             .collect())
@@ -1834,6 +1830,88 @@ mod tests {
             }
             other => panic!("expected message interaction, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "Phase 1 red-ok comms bridge + parent wait suite"]
+    async fn runtime_bridge_red_ok_send_and_stream_reserves_one_interaction_channel() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let runtime = CommsRuntime::inproc_only(&format!("phase1-bridge-{suffix}")).unwrap();
+
+        let cmd = CommsCommand::Input {
+            blocks: None,
+            session_id: SessionId::new(),
+            body: "phase 1 bridge input".to_string(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            source: InputSource::Rpc,
+            stream: InputStreamMode::ReserveInteraction,
+            allow_self_session: true,
+        };
+
+        let (receipt, _stream) = CoreCommsRuntime::send_and_stream(&runtime, cmd)
+            .await
+            .expect("send_and_stream should reserve interaction scope");
+
+        let interaction_id = match receipt {
+            SendReceipt::InputAccepted {
+                interaction_id,
+                stream_reserved,
+            } => {
+                assert!(
+                    stream_reserved,
+                    "bridge receipt should advertise reservation"
+                );
+                interaction_id
+            }
+            other => panic!("expected InputAccepted, got {other:?}"),
+        };
+
+        let duplicate =
+            CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(interaction_id));
+        assert!(
+            matches!(duplicate, Err(StreamError::AlreadyAttached(_))),
+            "reserved interaction streams should reject a second attachment"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "Phase 1 red-ok comms bridge + parent wait suite"]
+    async fn runtime_bridge_red_ok_completed_interaction_terminates_reserved_stream() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let runtime = CommsRuntime::inproc_only(&format!("phase1-complete-{suffix}")).unwrap();
+
+        let receipt = CoreCommsRuntime::send(
+            &runtime,
+            CommsCommand::Input {
+                blocks: None,
+                session_id: SessionId::new(),
+                body: "complete reserved interaction".to_string(),
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                source: InputSource::Rpc,
+                stream: InputStreamMode::ReserveInteraction,
+                allow_self_session: true,
+            },
+        )
+        .await
+        .expect("send should succeed");
+
+        let interaction_id = match receipt {
+            SendReceipt::InputAccepted { interaction_id, .. } => interaction_id,
+            other => panic!("expected InputAccepted, got {other:?}"),
+        };
+
+        let mut stream =
+            CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(interaction_id))
+                .expect("reserved stream should attach");
+        runtime.mark_interaction_complete(interaction_id.0);
+
+        let terminal = timeout(Duration::from_millis(100), stream.next())
+            .await
+            .expect("stream should terminate promptly after completion");
+        assert!(
+            terminal.is_none(),
+            "interaction completion should close the reserved stream for parent waiters"
+        );
     }
 
     #[tokio::test]

@@ -12,9 +12,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-indexmap.workspace = true
-serde.workspace = true
-thiserror.workspace = true
+indexmap = { version = "2", default-features = false, features = ["std"] }
 
 [lints]
 workspace = true

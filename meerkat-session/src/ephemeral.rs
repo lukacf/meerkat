@@ -173,9 +173,10 @@ pub trait SessionAgent: Send {
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError>;
 
-    /// Run the agent in host mode: process prompt then stay alive for comms.
+    /// Run the agent through the host-mode compatibility entrypoint.
     ///
-    /// Event streaming should use the agent's build-time configured event channel.
+    /// Event streaming should use the agent's build-time configured event
+    /// channel while ordinary peer/event work stays runtime-backed.
     async fn run_host_mode(
         &mut self,
         prompt: meerkat_core::types::ContentInput,

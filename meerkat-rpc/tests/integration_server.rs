@@ -161,6 +161,7 @@ async fn initialize_roundtrip() {
     let methods = response["result"]["methods"].as_array().unwrap();
     let method_names: Vec<&str> = methods.iter().map(|m| m.as_str().unwrap()).collect();
     assert!(method_names.contains(&"session/create"));
+    assert!(method_names.contains(&"session/external_event"));
     assert!(method_names.contains(&"turn/start"));
     assert!(method_names.contains(&"config/get"));
     #[cfg(feature = "mcp")]

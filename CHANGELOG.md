@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Added phase-0 propagation and anti-drift contract guards: ignored `xtask` tests now prove public contract slices require regenerated schema artifacts, Python/TypeScript generated bindings, docs/examples, and `CHANGELOG.md`, and the SDK codegen script now supports alternate output roots for freshness checks.
+- REST canonical external-event ingress now uses `POST /sessions/{id}/external-events`, and that route admits runtime-backed external events instead of a surface-local injector path.
+- JSON-RPC canonical external-event ingress now uses `session/external_event`, and the runtime-backed admission path is advertised in the RPC contract artifacts/docs instead of the removed `event/push` behavior.
+- MCP `meerkat_run` and `meerkat_resume` now have an explicit regression contract and docs note that both tools stay on the runtime-backed session-service path, reusing the same `session_id` instead of falling back to a surface-local execution loop.
+- Python and TypeScript SDK docs/tests now treat `Session` and `DeferredSession` as the public runtime-backed wrappers, keeping generated contract version parity, capability checks, skill invocation, and examples aligned with the settled session-first API.
+- Rust docs, starter examples, and platform skills now default to runtime-backed `SessionService` embedding; direct `AgentBuilder` construction is documented as an expert-only escape hatch instead of the primary path.
+
 ## [0.4.11] - 2026-03-15
 
 ### Fixed

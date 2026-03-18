@@ -14,8 +14,9 @@ Each canonical composition bundle lives under its own directory:
 - `contract.md`
 - `model.tla`
 - `ci.cfg`
+- `deep.cfg`
 - `mapping.md`
-- `generated/`
+- witness configs when the bundle declares bounded witness paths
 
 Status:
 

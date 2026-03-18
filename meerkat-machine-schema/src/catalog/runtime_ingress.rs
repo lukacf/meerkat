@@ -602,10 +602,10 @@ pub fn runtime_ingress_machine() -> MachineSchema {
                                     )))),
                                     Box::new(Expr::U64(0)),
                                 ),
-                                Expr::Eq(
-                                    Box::new(Expr::Binding("contributing_work_ids".into())),
-                                    Box::new(Expr::Field("steer_queue".into())),
-                                ),
+                                Expr::SeqStartsWith {
+                                    seq: Box::new(Expr::Field("steer_queue".into())),
+                                    prefix: Box::new(Expr::Binding("contributing_work_ids".into())),
+                                },
                             ]),
                             Expr::And(vec![
                                 Expr::Eq(
@@ -643,9 +643,9 @@ pub fn runtime_ingress_machine() -> MachineSchema {
                             Box::new(Expr::Len(Box::new(Expr::Field("steer_queue".into())))),
                             Box::new(Expr::U64(0)),
                         ),
-                        then_updates: vec![Update::Assign {
+                        then_updates: vec![Update::SeqRemoveAll {
                             field: "steer_queue".into(),
-                            expr: Expr::SeqLiteral(vec![]),
+                            values: Expr::Binding("contributing_work_ids".into()),
                         }],
                         else_updates: vec![Update::SeqRemoveAll {
                             field: "queue".into(),

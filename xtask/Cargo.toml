@@ -11,15 +11,29 @@ documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[lib]
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[features]
+default = []
+machine-authority = ["dep:meerkat-machine-codegen", "dep:which"]
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-which.workspace = true
-meerkat-machine-codegen = { path = "../meerkat-machine-codegen" }
+which = { workspace = true, optional = true }
+meerkat-machine-codegen = { path = "../meerkat-machine-codegen", optional = true }
 meerkat-machine-schema = { path = "../meerkat-machine-schema" }
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[[test]]
+name = "machines_contracts"
+path = "tests/machines_contracts.rs"
+required-features = ["machine-authority"]
 
 [lints]
 workspace = true

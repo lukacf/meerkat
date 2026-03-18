@@ -41,6 +41,11 @@
         "summary": "Get session details"
       }
     },
+    "/sessions/{id}/external-events": {
+      "post": {
+        "summary": "Queue a runtime-backed external event"
+      }
+    },
     "/sessions/{id}/events": {
       "get": {
         "summary": "SSE event stream"

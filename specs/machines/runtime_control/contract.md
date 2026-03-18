@@ -118,19 +118,19 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `ResetRequested`
 - From: `Initializing`, `Idle`, `Recovering`, `Retired`
 - On: `ResetRequested`()
-- Emits: `ApplyControlPlaneCommand`
+- Emits: `ApplyControlPlaneCommand`, `ResolveCompletionAsTerminated`
 - To: `Idle`
 
 ### `StopRequested`
 - From: `Initializing`, `Idle`, `Running`, `Recovering`, `Retired`
 - On: `StopRequested`()
-- Emits: `ResolveCompletionAsTerminated`
+- Emits: `ApplyControlPlaneCommand`, `ResolveCompletionAsTerminated`
 - To: `Stopped`
 
 ### `DestroyRequested`
 - From: `Initializing`, `Idle`, `Running`, `Recovering`, `Retired`, `Stopped`
 - On: `DestroyRequested`()
-- Emits: `ResolveCompletionAsTerminated`
+- Emits: `ApplyControlPlaneCommand`, `ResolveCompletionAsTerminated`
 - To: `Destroyed`
 
 ### `ResumeRequested`
@@ -235,6 +235,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `meerkat-runtime/src/runtime_state.rs` — runtime lifecycle state precursor
 - `meerkat-runtime/src/state_machine.rs` — runtime control reducer precursor
 - `meerkat-runtime/src/runtime_loop.rs` — control-plane select loop and run coordination precursor
+- `meerkat-runtime/src/control_plane.rs` — stop/preemption seam and completion-resolution precursor
+- `meerkat-runtime/src/session_adapter.rs` — surface-facing lifecycle and completion owner precursor
 
 ### Scenarios
 - `control-preempts-ingress` — control commands preempt ordinary ingress work
@@ -242,3 +244,4 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `prompt-steer` — steered ordinary work drains into the active run at the earliest admissible boundary
 - `begin-run-complete` — runtime transitions idle to running to idle for a completed run
 - `retire-stop-destroy` — runtime transitions through retire/stop/destroy commands without reopening ordinary work
+- `reset-terminates-waiters` — reset abandons pending work and resolves completion waiters exactly once

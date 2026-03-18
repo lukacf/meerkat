@@ -2,7 +2,6 @@ use super::disposal::{
     BulkBestEffort, DisposalContext, DisposalReport, DisposalStep, ErrorPolicy, WarnAndContinue,
 };
 use super::provision_guard::PendingProvision;
-use super::terminalization::{FlowTerminalizationAuthority, TerminalizationTarget};
 use super::transaction::LifecycleRollback;
 use super::*;
 #[cfg(target_arch = "wasm32")]
@@ -49,6 +48,8 @@ pub(super) struct MobActor {
     pub(super) run_store: Arc<dyn MobRunStore>,
     pub(super) provisioner: Arc<dyn MobProvisioner>,
     pub(super) flow_engine: FlowEngine,
+    pub(super) flow_kernel: FlowRunKernel,
+    pub(super) orchestrator: super::orchestrator_kernel::MobOrchestratorKernel,
     pub(super) run_tasks: BTreeMap<RunId, tokio::task::JoinHandle<()>>,
     pub(super) run_cancel_tokens: BTreeMap<RunId, (tokio_util::sync::CancellationToken, FlowId)>,
     pub(super) flow_streams:
@@ -67,12 +68,14 @@ pub(super) struct MobActor {
     pub(super) edge_locks: Arc<super::edge_locks::EdgeLockRegistry>,
     pub(super) lifecycle_tasks: tokio::task::JoinSet<()>,
     pub(super) session_service: Arc<dyn MobSessionService>,
-    pub(super) spawn_policy: Option<Arc<dyn super::spawn_policy::SpawnPolicy>>,
+    pub(super) task_board_service: crate::tasks::MobTaskBoardService,
+    pub(super) spawn_policy: Arc<super::spawn_policy::SpawnPolicyService>,
+    pub(super) lifecycle: super::state::MobLifecycleOwner,
 }
 
 impl MobActor {
     fn state(&self) -> MobState {
-        MobState::from_u8(self.state.load(Ordering::Acquire))
+        self.lifecycle.state()
     }
 
     fn mob_handle_for_tools(&self) -> MobHandle {
@@ -90,11 +93,7 @@ impl MobActor {
     }
 
     fn expect_state(&self, expected: &[MobState], to: MobState) -> Result<(), MobError> {
-        let current = self.state();
-        if !expected.contains(&current) {
-            return Err(MobError::InvalidTransition { from: current, to });
-        }
-        Ok(())
+        self.lifecycle.expect_transition(expected, to)
     }
 
     /// Guard that the mob is in one of the `allowed` states.
@@ -104,14 +103,7 @@ impl MobActor {
     /// (retire, wire, external turn, etc.). The `to` parameter in the error
     /// is set to the first allowed state as a hint; no actual transition occurs.
     fn require_state(&self, allowed: &[MobState]) -> Result<(), MobError> {
-        let current = self.state();
-        if !allowed.contains(&current) {
-            return Err(MobError::InvalidTransition {
-                from: current,
-                to: allowed[0],
-            });
-        }
-        Ok(())
+        self.lifecycle.require_state(allowed)
     }
 
     async fn notify_orchestrator_lifecycle(&mut self, message: String) {
@@ -603,7 +595,7 @@ impl MobActor {
                         "failed cleaning up mcp servers after startup error"
                     );
                 }
-                self.state.store(MobState::Stopped as u8, Ordering::Release);
+                self.lifecycle.set_state(MobState::Stopped);
             } else if let Err(error) = self.start_autonomous_host_loops_from_roster().await {
                 tracing::error!(
                     mob_id = %self.definition.id,
@@ -624,7 +616,7 @@ impl MobActor {
                         "failed cleaning up mcp servers after startup error"
                     );
                 }
-                self.state.store(MobState::Stopped as u8, Ordering::Release);
+                self.lifecycle.set_state(MobState::Stopped);
             }
         }
         let mut deferred_commands = VecDeque::new();
@@ -783,12 +775,18 @@ impl MobActor {
                     self.run_tasks.remove(&run_id);
                     self.run_cancel_tokens.remove(&run_id);
                     self.flow_streams.lock().await.remove(&run_id);
+                    self.orchestrator.record_flow_finished();
+                    self.lifecycle.finish_tracked_flow();
                 }
                 #[cfg(test)]
                 MobCommand::FlowTrackerCounts { reply_tx } => {
-                    let tasks = self.run_tasks.len();
+                    let tasks = self.lifecycle.tracked_flow_count();
                     let tokens = self.run_cancel_tokens.len();
                     let _ = reply_tx.send((tasks, tokens));
+                }
+                #[cfg(test)]
+                MobCommand::OrchestratorSnapshot { reply_tx } => {
+                    let _ = reply_tx.send(self.orchestrator.snapshot());
                 }
                 MobCommand::Stop { reply_tx } => {
                     let result = match self.expect_state(&[MobState::Running], MobState::Stopped) {
@@ -829,7 +827,8 @@ impl MobActor {
                                 }
                             }
                             if stop_result.is_ok() {
-                                self.state.store(MobState::Stopped as u8, Ordering::Release);
+                                self.orchestrator.record_stop();
+                                self.lifecycle.set_state(MobState::Stopped);
                             } else {
                                 // Restore checkpointer state — mob stays Running.
                                 self.provisioner.rearm_all_checkpointers().await;
@@ -874,7 +873,8 @@ impl MobActor {
                                 }
                                 Err(error)
                             } else {
-                                self.state.store(MobState::Running as u8, Ordering::Release);
+                                self.orchestrator.record_resume();
+                                self.lifecycle.set_state(MobState::Running);
                                 Ok(())
                             }
                         }
@@ -949,7 +949,7 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::SetSpawnPolicy { policy, reply_tx } => {
-                    self.spawn_policy = policy;
+                    self.spawn_policy.set(policy).await;
                     let _ = reply_tx.send(());
                 }
                 MobCommand::Shutdown { reply_tx } => {
@@ -973,7 +973,8 @@ impl MobActor {
                     // abort_all is non-blocking; join_next drains the abort results.
                     self.lifecycle_tasks.abort_all();
                     while self.lifecycle_tasks.join_next().await.is_some() {}
-                    self.state.store(MobState::Stopped as u8, Ordering::Release);
+                    self.lifecycle.clear_tracked_flows();
+                    self.lifecycle.set_state(MobState::Stopped);
                     let _ = reply_tx.send(result);
                     break;
                 }
@@ -988,6 +989,13 @@ impl MobActor {
 
         for (spawn_ticket, pending) in std::mem::take(&mut self.pending_spawns) {
             self.pending_spawn_ids.remove(&pending.meerkat_id);
+            if let Err(error) = self.orchestrator.record_spawn_completed() {
+                tracing::warn!(
+                    spawn_ticket,
+                    error = %error,
+                    "failed to clear orchestrator pending-spawn snapshot during lifecycle transition"
+                );
+            }
             let _ = pending.reply_tx.send(Err(MobError::Internal(format!(
                 "spawn canceled for '{}': {}",
                 pending.meerkat_id, reason
@@ -1204,6 +1212,15 @@ impl MobActor {
             return;
         };
 
+        let spawn_ticket = self.next_spawn_ticket;
+        self.next_spawn_ticket = self.next_spawn_ticket.wrapping_add(1);
+        let spawn_meerkat_id = meerkat_id.clone();
+        let spawn_runtime_mode = selected_runtime_mode;
+
+        if let Err(error) = self.orchestrator.record_spawn_staged() {
+            let _ = reply_tx.send(Err(error));
+            return;
+        }
         let pending = PendingSpawn {
             profile_name,
             meerkat_id,
@@ -1212,12 +1229,6 @@ impl MobActor {
             labels: resolved_labels,
             reply_tx,
         };
-
-        let spawn_ticket = self.next_spawn_ticket;
-        self.next_spawn_ticket = self.next_spawn_ticket.wrapping_add(1);
-        let spawn_meerkat_id = pending.meerkat_id.clone();
-        let spawn_runtime_mode = pending.runtime_mode;
-
         self.pending_spawn_ids.insert(spawn_meerkat_id.clone());
         self.pending_spawns.insert(spawn_ticket, pending);
 
@@ -1310,6 +1321,13 @@ impl MobActor {
                 continue;
             };
             self.pending_spawn_ids.remove(&pending.meerkat_id);
+            if let Err(error) = self.orchestrator.record_spawn_completed() {
+                tracing::warn!(
+                    spawn_ticket,
+                    error = %error,
+                    "failed to reconcile orchestrator pending-spawn snapshot"
+                );
+            }
             pending_items.push((pending, result));
         }
 
@@ -1950,8 +1968,8 @@ impl MobActor {
                 kind: MobEventKind::MobCompleted,
             })
             .await?;
-        self.state
-            .store(MobState::Completed as u8, Ordering::Release);
+        self.orchestrator.record_completed();
+        self.lifecycle.set_state(MobState::Completed);
         Ok(())
     }
 
@@ -1964,8 +1982,8 @@ impl MobActor {
         self.events.clear().await?;
         self.cleanup_namespace().await?;
         self.edge_locks.clear().await;
-        self.state
-            .store(MobState::Destroyed as u8, Ordering::Release);
+        self.orchestrator.record_destroyed();
+        self.lifecycle.set_state(MobState::Destroyed);
         Ok(())
     }
 
@@ -1973,7 +1991,7 @@ impl MobActor {
     /// error paths after destructive steps have already been taken.
     async fn fail_reset_to_stopped(&self) {
         self.provisioner.cancel_all_checkpointers().await;
-        self.state.store(MobState::Stopped as u8, Ordering::Release);
+        self.lifecycle.set_state(MobState::Stopped);
     }
 
     async fn handle_reset(&mut self) -> Result<(), MobError> {
@@ -2033,7 +2051,7 @@ impl MobActor {
         // stop_mcp_servers already cleared processes and set running=false.
         self.edge_locks.clear().await;
         self.retired_event_index.write().await.clear();
-        self.task_board.write().await.clear();
+        self.task_board_service.clear().await;
 
         // --- Restart phase: bring MCP servers back up. ---
         if let Err(error) = self.start_mcp_servers().await {
@@ -2048,7 +2066,8 @@ impl MobActor {
             return Err(error);
         }
 
-        self.state.store(MobState::Running as u8, Ordering::Release);
+        self.orchestrator.record_resume();
+        self.lifecycle.set_state(MobState::Running);
         Ok(())
     }
 
@@ -2117,29 +2136,9 @@ impl MobActor {
         description: String,
         blocked_by: Vec<TaskId>,
     ) -> Result<TaskId, MobError> {
-        if subject.trim().is_empty() {
-            return Err(MobError::Internal(
-                "task subject cannot be empty".to_string(),
-            ));
-        }
-
-        let task_id = TaskId::from(uuid::Uuid::new_v4().to_string());
-
-        let appended = self
-            .events
-            .append(NewMobEvent {
-                mob_id: self.definition.id.clone(),
-                timestamp: None,
-                kind: MobEventKind::TaskCreated {
-                    task_id: task_id.clone(),
-                    subject,
-                    description,
-                    blocked_by,
-                },
-            })
-            .await?;
-        self.task_board.write().await.apply(&appended);
-        Ok(task_id)
+        self.task_board_service
+            .create_task(subject, description, blocked_by)
+            .await
     }
 
     async fn handle_task_update(
@@ -2148,43 +2147,9 @@ impl MobActor {
         status: TaskStatus,
         owner: Option<MeerkatId>,
     ) -> Result<(), MobError> {
-        {
-            let board = self.task_board.read().await;
-            let task = board
-                .get(&task_id)
-                .ok_or_else(|| MobError::Internal(format!("task '{task_id}' not found")))?;
-
-            if owner.is_some() {
-                if !matches!(status, TaskStatus::InProgress) {
-                    return Err(MobError::Internal(format!(
-                        "task '{task_id}' owner can only be set with in_progress status"
-                    )));
-                }
-                let blocked = task.blocked_by.iter().any(|dependency| {
-                    board.get(dependency).map(|t| t.status) != Some(TaskStatus::Completed)
-                });
-                if blocked {
-                    return Err(MobError::Internal(format!(
-                        "task '{task_id}' is blocked by incomplete dependencies"
-                    )));
-                }
-            }
-        }
-
-        let appended = self
-            .events
-            .append(NewMobEvent {
-                mob_id: self.definition.id.clone(),
-                timestamp: None,
-                kind: MobEventKind::TaskUpdated {
-                    task_id,
-                    status,
-                    owner,
-                },
-            })
-            .await?;
-        self.task_board.write().await.apply(&appended);
-        Ok(())
+        self.task_board_service
+            .update_task(task_id, status, owner)
+            .await
     }
 
     /// P1-T10: external_turn enforces addressability.
@@ -2214,9 +2179,7 @@ impl MobActor {
             }
             None => {
                 // Consult spawn policy for auto-provisioning
-                if let Some(ref policy) = self.spawn_policy
-                    && let Some(spec) = policy.resolve(&meerkat_id).await
-                {
+                if let Some(spec) = self.spawn_policy.resolve(&meerkat_id).await {
                     let (spawn_reply_tx, spawn_reply_rx) = oneshot::channel();
                     let mut spawn_spec =
                         super::handle::SpawnMemberSpec::new(spec.profile, meerkat_id.clone());
@@ -2387,27 +2350,19 @@ impl MobActor {
         activation_params: serde_json::Value,
         scoped_event_tx: Option<mpsc::Sender<meerkat_core::ScopedAgentEvent>>,
     ) -> Result<RunId, MobError> {
-        let run_id = RunId::new();
         let config = FlowRunConfig::from_definition(flow_id, &self.definition)?;
-
-        let initial_run = MobRun {
-            run_id: run_id.clone(),
-            mob_id: self.definition.id.clone(),
-            flow_id: config.flow_id.clone(),
-            status: MobRunStatus::Pending,
-            activation_params: activation_params.clone(),
-            created_at: chrono::Utc::now(),
-            completed_at: None,
-            step_ledger: Vec::new(),
-            failure_ledger: Vec::new(),
-        };
-        self.run_store.create_run(initial_run).await?;
+        let run_id = self
+            .flow_kernel
+            .create_pending_run(config.flow_id.clone(), activation_params.clone())
+            .await?;
+        self.orchestrator.record_flow_started();
 
         let cancel_token = tokio_util::sync::CancellationToken::new();
         self.run_cancel_tokens.insert(
             run_id.clone(),
             (cancel_token.clone(), config.flow_id.clone()),
         );
+        self.lifecycle.register_tracked_flow();
         if let Some(scoped_event_tx) = scoped_event_tx {
             self.flow_streams
                 .lock()
@@ -2417,9 +2372,7 @@ impl MobActor {
 
         let engine = self.flow_engine.clone();
         let cleanup_tx = self.command_tx.clone();
-        let run_store = self.run_store.clone();
-        let events = self.events.clone();
-        let mob_id = self.definition.id.clone();
+        let flow_kernel = self.flow_kernel.clone();
         let flow_run_id = run_id.clone();
         let flow_id_for_task = config.flow_id.clone();
         let cleanup_run_id = run_id.clone();
@@ -2433,17 +2386,11 @@ impl MobActor {
                     run_id = %flow_run_id,
                     flow_id = %flow_id_for_task,
                     error = %error,
-                    "flow task execution failed; applying actor fallback finalization"
+                    "flow task execution failed; delegating terminalization to flow-run kernel"
                 );
-                if let Err(finalize_error) = Self::finalize_run_failed(
-                    run_store,
-                    events,
-                    mob_id,
-                    flow_run_id.clone(),
-                    flow_id_for_task,
-                    error.to_string(),
-                )
-                .await
+                if let Err(finalize_error) = flow_kernel
+                    .terminalize_failed(flow_run_id.clone(), flow_id_for_task, error.to_string())
+                    .await
                 {
                     tracing::error!(
                         run_id = %flow_run_id,
@@ -2481,9 +2428,7 @@ impl MobActor {
             return Ok(());
         };
 
-        let run_store = self.run_store.clone();
-        let events = self.events.clone();
-        let mob_id = self.definition.id.clone();
+        let flow_kernel = self.flow_kernel.clone();
         let cancel_grace_timeout = self
             .definition
             .limits
@@ -2503,43 +2448,14 @@ impl MobActor {
             }
 
             handle.abort();
-            if let Err(error) =
-                Self::finalize_run_canceled(run_store, events, mob_id, run_id, flow_id).await
-            {
+            if let Err(error) = flow_kernel.terminalize_canceled(run_id, flow_id).await {
                 tracing::error!(
                     error = %error,
-                    "failed actor fallback cancellation finalization"
+                    "failed flow-run kernel cancellation terminalization"
                 );
             }
         });
 
-        Ok(())
-    }
-
-    async fn finalize_run_failed(
-        run_store: Arc<dyn MobRunStore>,
-        events: Arc<dyn MobEventStore>,
-        mob_id: MobId,
-        run_id: RunId,
-        flow_id: FlowId,
-        reason: String,
-    ) -> Result<(), MobError> {
-        FlowTerminalizationAuthority::new(run_store, events, mob_id)
-            .terminalize(run_id, flow_id, TerminalizationTarget::Failed { reason })
-            .await?;
-        Ok(())
-    }
-
-    async fn finalize_run_canceled(
-        run_store: Arc<dyn MobRunStore>,
-        events: Arc<dyn MobEventStore>,
-        mob_id: MobId,
-        run_id: RunId,
-        flow_id: FlowId,
-    ) -> Result<(), MobError> {
-        FlowTerminalizationAuthority::new(run_store, events, mob_id)
-            .terminalize(run_id, flow_id, TerminalizationTarget::Canceled)
-            .await?;
         Ok(())
     }
 
@@ -2549,16 +2465,13 @@ impl MobActor {
         for (_, handle) in tasks {
             handle.abort();
         }
+        self.lifecycle.clear_tracked_flows();
         for (run_id, (token, flow_id)) in cancel_tokens {
             token.cancel();
-            if let Err(error) = Self::finalize_run_canceled(
-                self.run_store.clone(),
-                self.events.clone(),
-                self.definition.id.clone(),
-                run_id.clone(),
-                flow_id.clone(),
-            )
-            .await
+            if let Err(error) = self
+                .flow_kernel
+                .terminalize_canceled(run_id.clone(), flow_id.clone())
+                .await
             {
                 tracing::error!(
                     run_id = %run_id,

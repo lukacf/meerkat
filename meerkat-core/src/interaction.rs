@@ -90,8 +90,6 @@ pub enum PeerInputClass {
     Ack,
     /// A plain (unauthenticated) event from an external source.
     PlainEvent,
-    /// A subagent result delivery.
-    SubagentResult,
 }
 
 impl PeerInputClass {

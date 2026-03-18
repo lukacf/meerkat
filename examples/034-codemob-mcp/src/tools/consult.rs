@@ -37,6 +37,7 @@ pub async fn handle(state: &ForceState, arguments: &Value) -> Result<Value, Tool
     let req = CreateSessionRequest {
         model,
         prompt,
+        render_metadata: None,
         system_prompt: Some(
             "You are a helpful technical advisor. Give clear, concise opinions. \
              Be direct about trade-offs and risks. If you disagree with the approach, say so."

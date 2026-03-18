@@ -2,6 +2,34 @@
 # These entries are expected legacy surfaces while the redesign
 # has not yet replaced every public surface.
 # Remove entries in lockstep with cleanup milestones.
+#
+# Phase 8 server-surface audit (2026-03-18):
+# - No CLI/REST/RPC external-event compatibility adapters are allowlisted here.
+# - `POST /sessions/{id}/event` and `event/push` were removed during the phase-8
+#   cutover instead of being carried into another compatibility window.
+# - If a temporary server-surface adapter is reintroduced, it must be added here
+#   explicitly and deleted in the next phase rather than surviving untracked.
+#
+# Phase 9 MCP/browser audit (2026-03-18):
+# - `meerkat-mcp-server` still keeps a per-session `McpRouterAdapter`, but it is
+#   only a session-scoped tool-transport bridge. Session admission, resume, and
+#   completion waiting stay runtime-owned by the shared session service.
+# - `sdks/web/src/session.ts` now exposes `sessionId` and typed `getState()`, but
+#   the numeric `handle` remains a browser-local façade over the runtime-backed
+#   session identity and owns no independent execution semantics.
+# - No pre-init JS tool registry or browser capability bypass is allowlisted; the
+#   runtime bootstrap and forbidden-capability checks are now the only owners.
+#
+# Phase 11 final compatibility audit (2026-03-18):
+# - No allowlisted CLI/REST/RPC/MCP/WASM path owns an independent execution or
+#   lifecycle authority. Runtime admission, completion waiting, and tool-surface
+#   state remain runtime-owned.
+# - Remaining allowlisted SDK vocabulary is wrapper-level API surface area only.
+#   For example, `sdks/web/src/mob.ts` still exposes `sendMessage()` as a thin
+#   alias over `member(...).send(...)`; it is not a second runtime path.
+# - Remaining allowlisted crate matches are steady-state delivery/observation
+#   surfaces (`EventInjector`, `SubscribableInjector`, `interaction_subscriber`,
+#   related docs/changelog references), not transitional execution adapters.
 
 # Public docs / skills / SDK references (M11+M13 cleanup)
 ^\./docs/.+

@@ -211,7 +211,6 @@ export interface SessionOptions {
   hooksOverride?: Record<string, unknown>;
   enableBuiltins?: boolean;
   enableShell?: boolean;
-  enableSubagents?: boolean;
   enableMemory?: boolean;
   enableMob?: boolean;
   hostMode?: boolean;

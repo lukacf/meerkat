@@ -204,7 +204,10 @@ impl InputState {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::policy::{ApplyMode, ConsumePoint, QueueMode, WakeMode};
+    use crate::policy::{
+        ApplyMode, ConsumePoint, DrainPolicy, InterruptPolicy, QueueMode, RoutingDisposition,
+        WakeMode,
+    };
 
     #[test]
     fn lifecycle_state_terminal() {
@@ -261,6 +264,9 @@ mod tests {
                 wake_mode: WakeMode::WakeIfIdle,
                 queue_mode: QueueMode::Fifo,
                 consume_point: ConsumePoint::OnRunComplete,
+                interrupt_policy: InterruptPolicy::None,
+                drain_policy: DrainPolicy::QueueNextTurn,
+                routing_disposition: RoutingDisposition::Queue,
                 record_transcript: true,
                 emit_operator_content: true,
                 policy_version: PolicyVersion(1),

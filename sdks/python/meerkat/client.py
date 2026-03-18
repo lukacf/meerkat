@@ -269,7 +269,6 @@ class MeerkatClient:
         hooks_override: dict[str, Any] | None = None,
         enable_builtins: bool = False,
         enable_shell: bool = False,
-        enable_subagents: bool = False,
         enable_memory: bool = False,
         enable_mob: bool = False,
         host_mode: bool = False,
@@ -296,7 +295,7 @@ class MeerkatClient:
             max_tokens=max_tokens, output_schema=output_schema,
             structured_output_retries=structured_output_retries,
             hooks_override=hooks_override, enable_builtins=enable_builtins,
-            enable_shell=enable_shell, enable_subagents=enable_subagents,
+            enable_shell=enable_shell,
             enable_memory=enable_memory, enable_mob=enable_mob,
             host_mode=host_mode,
             comms_name=comms_name, peer_meta=peer_meta,
@@ -321,7 +320,6 @@ class MeerkatClient:
         hooks_override: dict[str, Any] | None = None,
         enable_builtins: bool = False,
         enable_shell: bool = False,
-        enable_subagents: bool = False,
         enable_memory: bool = False,
         enable_mob: bool = False,
         host_mode: bool = False,
@@ -352,7 +350,7 @@ class MeerkatClient:
             max_tokens=max_tokens, output_schema=output_schema,
             structured_output_retries=structured_output_retries,
             hooks_override=hooks_override, enable_builtins=enable_builtins,
-            enable_shell=enable_shell, enable_subagents=enable_subagents,
+            enable_shell=enable_shell,
             enable_memory=enable_memory, enable_mob=enable_mob,
             host_mode=host_mode,
             comms_name=comms_name, peer_meta=peer_meta,
@@ -388,7 +386,6 @@ class MeerkatClient:
         hooks_override: dict[str, Any] | None = None,
         enable_builtins: bool = False,
         enable_shell: bool = False,
-        enable_subagents: bool = False,
         enable_memory: bool = False,
         enable_mob: bool = False,
         host_mode: bool = False,
@@ -419,7 +416,7 @@ class MeerkatClient:
             max_tokens=max_tokens, output_schema=output_schema,
             structured_output_retries=structured_output_retries,
             hooks_override=hooks_override, enable_builtins=enable_builtins,
-            enable_shell=enable_shell, enable_subagents=enable_subagents,
+            enable_shell=enable_shell,
             enable_memory=enable_memory, enable_mob=enable_mob,
             host_mode=host_mode,
             comms_name=comms_name, peer_meta=peer_meta,
@@ -1112,7 +1109,6 @@ class MeerkatClient:
         hooks_override: dict[str, Any] | None = None,
         enable_builtins: bool = False,
         enable_shell: bool = False,
-        enable_subagents: bool = False,
         enable_memory: bool = False,
         enable_mob: bool = False,
         host_mode: bool = False,
@@ -1143,8 +1139,6 @@ class MeerkatClient:
             params["enable_builtins"] = True
         if enable_shell:
             params["enable_shell"] = True
-        if enable_subagents:
-            params["enable_subagents"] = True
         if enable_memory:
             params["enable_memory"] = True
         if enable_mob:

@@ -4,6 +4,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import packageJson from "../package.json" with { type: "json" };
 import {
   CONTRACT_VERSION,
   MeerkatError,
@@ -30,6 +31,10 @@ describe("Contract Version", () => {
     for (const part of parts) {
       assert.ok(!isNaN(Number(part)));
     }
+  });
+
+  it("matches the published package version", () => {
+    assert.equal(CONTRACT_VERSION, packageJson.version);
   });
 });
 
@@ -391,6 +396,55 @@ describe("Typed Events", () => {
     if (event.type === "tool_config_changed") {
       assert.equal(event.payload.persisted, false);
     }
+  });
+});
+
+describe("Session wrappers", () => {
+  it("createSession returns a runtime-backed Session wrapper", async () => {
+    const client = new MeerkatClient();
+    const seen = [];
+    client.request = async (method, params) => {
+      seen.push([method, params]);
+      return {
+        session_id: "sess-1",
+        session_ref: "team/runtime",
+        text: "ready",
+        turns: 1,
+        tool_calls: 0,
+        usage: { input_tokens: 12, output_tokens: 4 },
+      };
+    };
+
+    const session = await client.createSession("Summarise the runtime path");
+
+    assert.ok(session instanceof Session);
+    assert.equal(session.id, "sess-1");
+    assert.equal(session.ref, "team/runtime");
+    assert.equal(session.text, "ready");
+    assert.equal(session.lastResult.sessionId, "sess-1");
+    assert.deepEqual(seen, [["session/create", { prompt: "Summarise the runtime path" }]]);
+  });
+
+  it("createDeferredSession returns a runtime-backed DeferredSession wrapper", async () => {
+    const client = new MeerkatClient();
+    const seen = [];
+    client.request = async (method, params) => {
+      seen.push([method, params]);
+      return {
+        session_id: "sess-2",
+        session_ref: "team/deferred",
+      };
+    };
+
+    const deferred = await client.createDeferredSession("Hold until first turn");
+
+    assert.ok(deferred instanceof DeferredSession);
+    assert.equal(deferred.id, "sess-2");
+    assert.equal(deferred.ref, "team/deferred");
+    assert.deepEqual(seen, [[
+      "session/create",
+      { prompt: "Hold until first turn", initial_turn: "deferred" },
+    ]]);
   });
 });
 

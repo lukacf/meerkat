@@ -39,8 +39,6 @@ use meerkat_core::{
     BudgetLimits, Config, HookRunOverrides, OutputSchema, Provider, ScopedAgentEvent, Session,
     SessionMetadata, SessionTooling, StreamScopeFrame,
 };
-#[cfg(feature = "sub-agents")]
-use meerkat_core::{ConcurrencyLimits, SubAgentManager};
 #[cfg(not(feature = "memory-store"))]
 use meerkat_core::{SessionId, SessionMeta};
 #[cfg(feature = "jsonl-store")]
@@ -61,8 +59,6 @@ use meerkat_tools::EmptyToolDispatcher;
 use meerkat_tools::builtin::FileTaskStore;
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_tools::builtin::shell::ShellConfig;
-#[cfg(all(feature = "sub-agents", not(target_arch = "wasm32")))]
-use meerkat_tools::builtin::sub_agent::{SubAgentConfig, SubAgentToolSet, SubAgentToolState};
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_tools::builtin::{
     BuiltinToolConfig, CompositeDispatcher, MemoryTaskStore, TaskStore, ToolPolicyLayer,
@@ -305,7 +301,7 @@ pub struct AgentBuildConfig {
     pub shell_env: Option<std::collections::HashMap<String, String>>,
     /// Optional opaque runtime adapter for constructing a per-session `RuntimeInputSink`.
     /// When the `session-store` feature is enabled, the factory downcasts this to the
-    /// runtime adapter type after agent construction and wires a `RuntimeCommsInputSink`
+    /// runtime adapter type after agent construction and wires a `RuntimeCommsBridge`
     /// using the adapter and the agent's session_id.
     pub runtime_adapter_for_sink: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
 }
@@ -1094,98 +1090,11 @@ impl AgentFactory {
                 )
                 .await?;
 
-            let limits = ConcurrencyLimits::default();
-            let manager = Arc::new(SubAgentManager::new(limits, 0));
-            let client_factory: Arc<dyn LlmClientFactory> = Arc::new(DefaultClientFactory::new());
-
-            let sub_agent_task_store = MemoryTaskStore::new();
-            let sub_agent_factory = {
-                let factory = self.clone().subagents(false);
-                #[cfg(feature = "comms")]
-                let factory = factory.comms(false);
-                factory
-            };
-            let sub_agent_dispatcher = sub_agent_factory
-                .build_composite_dispatcher(
-                    Arc::new(sub_agent_task_store),
-                    &config,
-                    project_root,
-                    shell_config_for_subagents,
-                    external,
-                    None,
-                    // Sub-agents may use a different model; default to true here.
-                    // The sub-agent's own build_agent() will resolve its model profile.
-                    true,
-                )
-                .await?;
-            let sub_agent_tools: Arc<dyn AgentToolDispatcher> = Arc::new(sub_agent_dispatcher);
-
-            #[cfg(feature = "memory-store")]
-            let sub_agent_store: Arc<dyn meerkat_core::AgentSessionStore> = Arc::new(
-                sub_agent_factory
-                    .build_store_adapter(Arc::new(MemoryStore::new()))
-                    .await,
-            );
-            #[cfg(not(feature = "memory-store"))]
-            let sub_agent_store: Arc<dyn meerkat_core::AgentSessionStore> = Arc::new(
-                sub_agent_factory
-                    .build_store_adapter(Arc::new(EphemeralSessionStore::new()))
-                    .await,
-            );
-
-            let parent_session = Arc::new(RwLock::new(Session::new()));
-            let mut sub_agent_config = SubAgentConfig::default();
+            let _ = shell_config_for_subagents;
+            let _ = sub_agent_scoped_event_tx;
+            let _ = sub_agent_scope_path;
             #[cfg(all(feature = "sub-agents", feature = "comms"))]
-            if let Some(ref comms) = sub_agent_comms {
-                sub_agent_config = sub_agent_config
-                    .with_enable_comms(true)
-                    .with_comms_base_dir(comms.parent_context.comms_base_dir.clone());
-            }
-
-            #[cfg(all(feature = "sub-agents", feature = "comms"))]
-            let state = Arc::new(match sub_agent_comms {
-                Some(comms) => SubAgentToolState::with_comms(
-                    manager,
-                    client_factory,
-                    sub_agent_tools,
-                    sub_agent_store,
-                    parent_session,
-                    sub_agent_config,
-                    0,
-                    comms.parent_context,
-                    comms.parent_trusted_peers,
-                    comms.parent_classification_peers,
-                ),
-                None => SubAgentToolState::new(
-                    manager,
-                    client_factory,
-                    sub_agent_tools,
-                    sub_agent_store,
-                    parent_session,
-                    sub_agent_config,
-                    0,
-                ),
-            });
-
-            #[cfg(not(all(feature = "sub-agents", feature = "comms")))]
-            let state = Arc::new(SubAgentToolState::new(
-                manager,
-                client_factory,
-                sub_agent_tools,
-                sub_agent_store,
-                parent_session,
-                sub_agent_config,
-                0,
-            ));
-            state
-                .set_scoped_stream(
-                    sub_agent_scoped_event_tx.clone(),
-                    sub_agent_scope_path.clone().unwrap_or_default(),
-                )
-                .await;
-
-            let tool_set = SubAgentToolSet::new(state);
-            composite.register_sub_agent_tools(tool_set, &config)?;
+            let _ = sub_agent_comms;
 
             #[cfg(feature = "skills")]
             if let Some(engine) = skill_engine {
@@ -1937,9 +1846,12 @@ impl AgentFactory {
                 opaque.downcast::<meerkat_runtime::session_adapter::RuntimeSessionAdapter>()
         {
             let session_id = agent.session().id().clone();
-            let sink = std::sync::Arc::new(
-                meerkat_runtime::comms_sink::RuntimeCommsInputSink::new(adapter, session_id),
-            );
+            let comms_runtime = agent.comms_arc();
+            let sink = std::sync::Arc::new(meerkat_runtime::comms_sink::RuntimeCommsBridge::new(
+                adapter,
+                session_id,
+                comms_runtime,
+            ));
             agent.set_runtime_input_sink(sink);
         }
 

@@ -562,6 +562,9 @@ impl MethodRouter {
             "session/read" => self.handle_session_read(id, params).await,
             "session/history" => self.handle_session_history(id, params).await,
             "session/archive" => self.handle_session_archive(id, params).await,
+            "session/external_event" => {
+                handlers::event::handle_external_event(id, params, self.runtime.clone()).await
+            }
             "session/inject_context" => self.handle_session_inject_context(id, params).await,
             "session/stream_open" => self.handle_session_stream_open(id, params).await,
             "session/stream_close" => self.handle_session_stream_close(id, params).await,
@@ -648,7 +651,6 @@ impl MethodRouter {
             "comms/send" => self.handle_comms_send(id, params).await,
             #[cfg(feature = "comms")]
             "comms/peers" => self.handle_comms_peers(id, params).await,
-            // M12: event/push removed. Use comms/send instead.
             "skills/list" => handlers::skills::handle_list(id, &self.skill_runtime).await,
             "skills/inspect" => {
                 handlers::skills::handle_inspect(id, params, &self.skill_runtime).await
@@ -2216,6 +2218,7 @@ mod tests {
         assert!(method_names.contains(&"initialize"));
         assert!(method_names.contains(&"session/create"));
         assert!(method_names.contains(&"session/history"));
+        assert!(method_names.contains(&"session/external_event"));
         assert!(method_names.contains(&"session/inject_context"));
         assert!(method_names.contains(&"turn/start"));
         assert!(

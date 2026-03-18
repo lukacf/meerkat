@@ -1269,7 +1269,6 @@ export class MeerkatClient {
     if (options.hooksOverride) params.hooks_override = options.hooksOverride;
     if (options.enableBuiltins) params.enable_builtins = true;
     if (options.enableShell) params.enable_shell = true;
-    if (options.enableSubagents) params.enable_subagents = true;
     if (options.enableMemory) params.enable_memory = true;
     if (options.enableMob) params.enable_mob = true;
     if (options.hostMode) params.host_mode = true;

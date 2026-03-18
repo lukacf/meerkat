@@ -4,7 +4,10 @@
 
 use crate::identifiers::{KindId, PolicyVersion};
 use crate::input::Input;
-use crate::policy::{ApplyMode, ConsumePoint, PolicyDecision, QueueMode, WakeMode};
+use crate::policy::{
+    ApplyMode, ConsumePoint, DrainPolicy, InterruptPolicy, PolicyDecision, QueueMode,
+    RoutingDisposition, WakeMode,
+};
 
 /// The default policy version for the built-in table.
 pub const DEFAULT_POLICY_VERSION: PolicyVersion = PolicyVersion(1);
@@ -15,6 +18,9 @@ fn pd(
     wake_mode: WakeMode,
     queue_mode: QueueMode,
     consume_point: ConsumePoint,
+    interrupt_policy: InterruptPolicy,
+    drain_policy: DrainPolicy,
+    routing_disposition: RoutingDisposition,
     record_transcript: bool,
 ) -> PolicyDecision {
     PolicyDecision {
@@ -22,6 +28,9 @@ fn pd(
         wake_mode,
         queue_mode,
         consume_point,
+        interrupt_policy,
+        drain_policy,
+        routing_disposition,
         record_transcript,
         emit_operator_content: record_transcript,
         policy_version: DEFAULT_POLICY_VERSION,
@@ -34,6 +43,39 @@ pub struct DefaultPolicyTable;
 impl DefaultPolicyTable {
     /// Resolve a policy decision for the given input and runtime state.
     pub fn resolve(input: &Input, runtime_idle: bool) -> PolicyDecision {
+        if let Some(mode) = input.handling_mode() {
+            return match mode {
+                meerkat_core::types::HandlingMode::Queue => pd(
+                    ApplyMode::StageRunStart,
+                    if runtime_idle {
+                        WakeMode::WakeIfIdle
+                    } else {
+                        WakeMode::None
+                    },
+                    QueueMode::Fifo,
+                    ConsumePoint::OnRunComplete,
+                    InterruptPolicy::None,
+                    DrainPolicy::QueueNextTurn,
+                    RoutingDisposition::Queue,
+                    !matches!(input, Input::Continuation(_)),
+                ),
+                meerkat_core::types::HandlingMode::Steer => pd(
+                    ApplyMode::StageRunBoundary,
+                    if runtime_idle {
+                        WakeMode::WakeIfIdle
+                    } else {
+                        WakeMode::InterruptYielding
+                    },
+                    QueueMode::Fifo,
+                    ConsumePoint::OnRunComplete,
+                    InterruptPolicy::InterruptYielding,
+                    DrainPolicy::SteerBatch,
+                    RoutingDisposition::Steer,
+                    !matches!(input, Input::Continuation(_)),
+                ),
+            };
+        }
+
         let kind = input.kind_id();
         Self::resolve_by_kind(&kind, runtime_idle)
     }
@@ -47,6 +89,9 @@ impl DefaultPolicyTable {
                 WakeMode::WakeIfIdle,
                 QueueMode::Fifo,
                 ConsumePoint::OnRunComplete,
+                InterruptPolicy::None,
+                DrainPolicy::QueueNextTurn,
+                RoutingDisposition::Queue,
                 true,
             ),
             ("prompt", false) => pd(
@@ -54,6 +99,9 @@ impl DefaultPolicyTable {
                 WakeMode::None,
                 QueueMode::Fifo,
                 ConsumePoint::OnRunComplete,
+                InterruptPolicy::None,
+                DrainPolicy::QueueNextTurn,
+                RoutingDisposition::Queue,
                 true,
             ),
 
@@ -65,6 +113,9 @@ impl DefaultPolicyTable {
                 WakeMode::WakeIfIdle,
                 QueueMode::Fifo,
                 ConsumePoint::OnRunComplete,
+                InterruptPolicy::None,
+                DrainPolicy::QueueNextTurn,
+                RoutingDisposition::Queue,
                 true,
             ),
             ("peer_message", false) => pd(
@@ -72,6 +123,9 @@ impl DefaultPolicyTable {
                 WakeMode::InterruptYielding,
                 QueueMode::Fifo,
                 ConsumePoint::OnRunComplete,
+                InterruptPolicy::InterruptYielding,
+                DrainPolicy::QueueNextTurn,
+                RoutingDisposition::Queue,
                 true,
             ),
 
@@ -81,6 +135,9 @@ impl DefaultPolicyTable {
                 WakeMode::WakeIfIdle,
                 QueueMode::Fifo,
                 ConsumePoint::OnRunComplete,
+                InterruptPolicy::None,
+                DrainPolicy::QueueNextTurn,
+                RoutingDisposition::Queue,
                 true,
             ),
             ("peer_request", false) => pd(
@@ -88,6 +145,9 @@ impl DefaultPolicyTable {
                 WakeMode::InterruptYielding,
                 QueueMode::Fifo,
                 ConsumePoint::OnRunComplete,
+                InterruptPolicy::InterruptYielding,
+                DrainPolicy::QueueNextTurn,
+                RoutingDisposition::Queue,
                 true,
             ),
 
@@ -97,6 +157,9 @@ impl DefaultPolicyTable {
                 WakeMode::None,
                 QueueMode::Coalesce,
                 ConsumePoint::OnRunComplete,
+                InterruptPolicy::None,
+                DrainPolicy::SteerBatch,
+                RoutingDisposition::Steer,
                 true,
             ),
             ("peer_response_progress", false) => pd(
@@ -104,6 +167,9 @@ impl DefaultPolicyTable {
                 WakeMode::None,
                 QueueMode::Coalesce,
                 ConsumePoint::OnRunComplete,
+                InterruptPolicy::None,
+                DrainPolicy::SteerBatch,
+                RoutingDisposition::Steer,
                 true,
             ),
 
@@ -113,6 +179,9 @@ impl DefaultPolicyTable {
                 WakeMode::WakeIfIdle,
                 QueueMode::Fifo,
                 ConsumePoint::OnRunComplete,
+                InterruptPolicy::None,
+                DrainPolicy::QueueNextTurn,
+                RoutingDisposition::Queue,
                 true,
             ),
             ("peer_response_terminal", false) => pd(
@@ -120,6 +189,9 @@ impl DefaultPolicyTable {
                 WakeMode::None,
                 QueueMode::Fifo,
                 ConsumePoint::OnRunComplete,
+                InterruptPolicy::None,
+                DrainPolicy::QueueNextTurn,
+                RoutingDisposition::Queue,
                 true,
             ),
 
@@ -129,6 +201,9 @@ impl DefaultPolicyTable {
                 WakeMode::WakeIfIdle,
                 QueueMode::Fifo,
                 ConsumePoint::OnRunComplete,
+                InterruptPolicy::None,
+                DrainPolicy::QueueNextTurn,
+                RoutingDisposition::Queue,
                 true,
             ),
             ("flow_step", false) => pd(
@@ -136,6 +211,9 @@ impl DefaultPolicyTable {
                 WakeMode::None,
                 QueueMode::Fifo,
                 ConsumePoint::OnRunComplete,
+                InterruptPolicy::None,
+                DrainPolicy::QueueNextTurn,
+                RoutingDisposition::Queue,
                 true,
             ),
 
@@ -145,6 +223,9 @@ impl DefaultPolicyTable {
                 WakeMode::WakeIfIdle,
                 QueueMode::Fifo,
                 ConsumePoint::OnRunComplete,
+                InterruptPolicy::None,
+                DrainPolicy::QueueNextTurn,
+                RoutingDisposition::Queue,
                 true,
             ),
             ("external_event", false) => pd(
@@ -152,31 +233,44 @@ impl DefaultPolicyTable {
                 WakeMode::None,
                 QueueMode::Fifo,
                 ConsumePoint::OnRunComplete,
+                InterruptPolicy::None,
+                DrainPolicy::QueueNextTurn,
+                RoutingDisposition::Queue,
                 true,
             ),
 
-            // SystemGenerated — InjectNow, no wake, OnAccept
-            ("system_generated", true | false) => pd(
-                ApplyMode::InjectNow,
-                WakeMode::None,
-                QueueMode::None,
-                ConsumePoint::OnAccept,
-                true,
-            ),
-
-            // Projected — Ignore, None, None(queue), OnAccept, transcript=false
-            ("projected", true) => pd(
-                ApplyMode::Ignore,
-                WakeMode::None,
-                QueueMode::None,
-                ConsumePoint::OnAccept,
+            // Continuation work remains explicit ordinary runtime work.
+            ("continuation", true) => pd(
+                ApplyMode::StageRunBoundary,
+                WakeMode::WakeIfIdle,
+                QueueMode::Fifo,
+                ConsumePoint::OnRunComplete,
+                InterruptPolicy::InterruptYielding,
+                DrainPolicy::SteerBatch,
+                RoutingDisposition::Steer,
                 false,
             ),
-            ("projected", false) => pd(
+            ("continuation", false) => pd(
+                ApplyMode::StageRunBoundary,
+                WakeMode::InterruptYielding,
+                QueueMode::Fifo,
+                ConsumePoint::OnRunComplete,
+                InterruptPolicy::InterruptYielding,
+                DrainPolicy::SteerBatch,
+                RoutingDisposition::Steer,
+                false,
+            ),
+
+            // Typed operation/lifecycle inputs are admitted explicitly but do
+            // not inject ordinary transcript-visible work in this phase.
+            ("operation", true | false) => pd(
                 ApplyMode::Ignore,
                 WakeMode::None,
-                QueueMode::Coalesce,
+                QueueMode::Priority,
                 ConsumePoint::OnAccept,
+                InterruptPolicy::None,
+                DrainPolicy::Ignore,
+                RoutingDisposition::Drop,
                 false,
             ),
 
@@ -186,6 +280,9 @@ impl DefaultPolicyTable {
                 WakeMode::None,
                 QueueMode::Fifo,
                 ConsumePoint::OnRunComplete,
+                InterruptPolicy::None,
+                DrainPolicy::QueueNextTurn,
+                RoutingDisposition::Queue,
                 true,
             ),
         }
@@ -398,49 +495,49 @@ mod tests {
         );
     }
     #[test]
-    fn system_generated_idle() {
+    fn continuation_idle() {
         assert_cell(
-            "system_generated",
+            "continuation",
             true,
-            ApplyMode::InjectNow,
-            WakeMode::None,
-            QueueMode::None,
-            ConsumePoint::OnAccept,
-            true,
-        );
-    }
-    #[test]
-    fn system_generated_running() {
-        assert_cell(
-            "system_generated",
+            ApplyMode::StageRunBoundary,
+            WakeMode::WakeIfIdle,
+            QueueMode::Fifo,
+            ConsumePoint::OnRunComplete,
             false,
-            ApplyMode::InjectNow,
-            WakeMode::None,
-            QueueMode::None,
-            ConsumePoint::OnAccept,
-            true,
         );
     }
     #[test]
-    fn projected_idle() {
+    fn continuation_running() {
         assert_cell(
-            "projected",
+            "continuation",
+            false,
+            ApplyMode::StageRunBoundary,
+            WakeMode::InterruptYielding,
+            QueueMode::Fifo,
+            ConsumePoint::OnRunComplete,
+            false,
+        );
+    }
+    #[test]
+    fn operation_idle() {
+        assert_cell(
+            "operation",
             true,
             ApplyMode::Ignore,
             WakeMode::None,
-            QueueMode::None,
+            QueueMode::Priority,
             ConsumePoint::OnAccept,
             false,
         );
     }
     #[test]
-    fn projected_running() {
+    fn operation_running() {
         assert_cell(
-            "projected",
+            "operation",
             false,
             ApplyMode::Ignore,
             WakeMode::None,
-            QueueMode::Coalesce,
+            QueueMode::Priority,
             ConsumePoint::OnAccept,
             false,
         );
@@ -471,6 +568,37 @@ mod tests {
         let decision = DefaultPolicyTable::resolve(&input, true);
         assert_eq!(decision.apply_mode, ApplyMode::StageRunStart);
         assert_eq!(decision.wake_mode, WakeMode::WakeIfIdle);
+    }
+
+    #[test]
+    fn explicit_steer_metadata_maps_to_checkpoint_policy() {
+        use crate::input::*;
+        use chrono::Utc;
+        use meerkat_core::lifecycle::InputId;
+        use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
+
+        let input = Input::Prompt(PromptInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::Operator,
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            text: "hello".into(),
+            blocks: None,
+            turn_metadata: Some(RuntimeTurnMetadata {
+                handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
+                ..Default::default()
+            }),
+        });
+        let decision = DefaultPolicyTable::resolve(&input, true);
+        assert_eq!(decision.apply_mode, ApplyMode::StageRunBoundary);
+        assert_eq!(decision.drain_policy, DrainPolicy::SteerBatch);
+        assert_eq!(decision.routing_disposition, RoutingDisposition::Steer);
     }
 
     #[test]

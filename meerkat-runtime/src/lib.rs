@@ -27,6 +27,7 @@ pub mod coalescing;
 pub mod comms_bridge;
 pub mod comms_sink;
 pub mod completion;
+pub(crate) mod control_plane;
 pub mod driver;
 pub mod durability;
 pub mod identifiers;
@@ -37,6 +38,7 @@ pub mod input_scope;
 pub mod input_state;
 pub mod lifecycle_ops;
 pub mod mob_adapter;
+pub mod ops_lifecycle;
 pub mod policy;
 pub mod policy_table;
 pub mod queue;
@@ -63,9 +65,9 @@ pub use identifiers::{
     LogicalRuntimeId, PolicyVersion, ProjectionRuleId, RuntimeEventId, SchemaId, SupersessionKey,
 };
 pub use input::{
-    ExternalEventInput, FlowStepInput, Input, InputDurability, InputHeader, InputOrigin,
-    InputVisibility, PeerConvention, PeerInput, ProjectedInput, PromptInput, ResponseProgressPhase,
-    ResponseTerminalStatus, SystemGeneratedInput,
+    ContinuationInput, ExternalEventInput, FlowStepInput, Input, InputDurability, InputHeader,
+    InputOrigin, InputVisibility, OperationInput, PeerConvention, PeerInput, PromptInput,
+    ResponseProgressPhase, ResponseTerminalStatus,
 };
 pub use input_ledger::InputLedger;
 pub use input_machine::{InputStateMachine, InputStateMachineError};
@@ -75,7 +77,11 @@ pub use input_state::{
     InputTerminalOutcome, PolicySnapshot, ReconstructionSource,
 };
 pub use lifecycle_ops::{abandon_non_terminal, would_abandon};
-pub use policy::{ApplyMode, ConsumePoint, PolicyDecision, QueueMode, WakeMode};
+pub use ops_lifecycle::RuntimeOpsLifecycleRegistry;
+pub use policy::{
+    ApplyMode, ConsumePoint, DrainPolicy, InterruptPolicy, PolicyDecision, QueueMode,
+    RoutingDisposition, WakeMode,
+};
 pub use policy_table::{DEFAULT_POLICY_VERSION, DefaultPolicyTable};
 pub use queue::InputQueue;
 pub use runtime_event::{

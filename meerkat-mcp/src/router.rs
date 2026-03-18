@@ -3,11 +3,11 @@
 use crate::{McpConnection, McpError, McpServerConfig};
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
+use meerkat_core::ExternalToolUpdate;
 use meerkat_core::error::ToolError;
-use meerkat_core::event::ToolConfigChangeOperation;
+use meerkat_core::event::{ExternalToolDelta, ExternalToolDeltaPhase, ToolConfigChangeOperation};
 use meerkat_core::types::ToolDef;
 use meerkat_core::types::{ContentBlock, ToolCallView, ToolResult};
-use meerkat_core::{ExternalToolNotice, ExternalToolUpdate};
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -64,23 +64,8 @@ impl From<McpServerConfig> for McpReloadTarget {
     }
 }
 
-/// Lifecycle actions emitted by [`McpRouter::apply_staged`].
-///
-/// Only **synchronous** actions appear here. Async completions (activated,
-/// activation failed) go through [`McpRouter::take_external_updates`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum McpLifecycleAction {
-    /// Server connection is being attempted in the background (add or reload).
-    PendingConnect { server: String },
-    /// Server has been activated (synchronous backward-compat path only).
-    Activated { server: String },
-    /// Server removal drain started.
-    RemovingStarted { server: String },
-    /// Server fully removed.
-    Removed { server: String, degraded: bool },
-    /// Server reload completed (synchronous backward-compat path only).
-    Reloaded { server: String },
-}
+pub type McpLifecyclePhase = ExternalToolDeltaPhase;
+pub type McpLifecycleAction = ExternalToolDelta;
 
 /// Result of applying staged MCP operations.
 #[derive(Debug, Clone, Default)]
@@ -114,6 +99,10 @@ struct PendingResult {
     generation: u64,
     op: PendingOp,
     result: Result<(McpConnection, Vec<Arc<ToolDef>>), McpError>,
+}
+
+struct CompletedLifecycleUpdate {
+    action: McpLifecycleAction,
 }
 
 #[derive(Debug, Clone)]
@@ -174,8 +163,8 @@ pub struct McpRouter {
     pending_rx: Mutex<mpsc::Receiver<PendingResult>>,
     pending_servers: HashMap<String, PendingState>,
     next_generation: u64,
-    /// Queued notices for the agent loop (from async completions).
-    completed_updates: VecDeque<ExternalToolNotice>,
+    /// Queued canonical lifecycle deltas for async completions.
+    completed_updates: VecDeque<CompletedLifecycleUpdate>,
 }
 
 impl McpRouter {
@@ -241,8 +230,9 @@ impl McpRouter {
     /// Apply staged operations at a boundary (non-blocking for add/reload).
     ///
     /// Add and reload operations spawn background connection tasks and return
-    /// immediately with `PendingConnect` in the lifecycle actions. Completions
-    /// arrive via [`take_external_updates`](Self::take_external_updates).
+    /// immediately with `phase = Pending` in the lifecycle actions. Completions
+    /// arrive via [`take_lifecycle_actions`](Self::take_lifecycle_actions) or
+    /// the legacy [`take_external_updates`](Self::take_external_updates).
     ///
     /// Remove operations are synchronous (start drain immediately).
     pub async fn apply_staged(&mut self) -> Result<McpApplyResult, McpError> {
@@ -261,11 +251,11 @@ impl McpRouter {
                     self.pending_servers.remove(&server_name);
 
                     self.spawn_pending(config, PendingOp::Add);
-                    delta
-                        .lifecycle_actions
-                        .push(McpLifecycleAction::PendingConnect {
-                            server: server_name,
-                        });
+                    delta.lifecycle_actions.push(McpLifecycleAction::new(
+                        server_name,
+                        ToolConfigChangeOperation::Add,
+                        McpLifecyclePhase::Pending,
+                    ));
                 }
                 StagedRouterOp::Remove(server_name) => {
                     // Cancel pending for same server if any.
@@ -279,11 +269,11 @@ impl McpRouter {
                             draining_since,
                             timeout_at: draining_since + self.removal_timeout,
                         };
-                        delta
-                            .lifecycle_actions
-                            .push(McpLifecycleAction::RemovingStarted {
-                                server: server_name,
-                            });
+                        delta.lifecycle_actions.push(McpLifecycleAction::new(
+                            server_name,
+                            ToolConfigChangeOperation::Remove,
+                            McpLifecyclePhase::Draining,
+                        ));
                     }
                 }
                 StagedRouterOp::Reload(target) => {
@@ -305,11 +295,11 @@ impl McpRouter {
 
                     // Keep old connection active during reload.
                     self.spawn_pending(config, PendingOp::Reload);
-                    delta
-                        .lifecycle_actions
-                        .push(McpLifecycleAction::PendingConnect {
-                            server: server_name,
-                        });
+                    delta.lifecycle_actions.push(McpLifecycleAction::new(
+                        server_name,
+                        ToolConfigChangeOperation::Reload,
+                        McpLifecyclePhase::Pending,
+                    ));
                 }
             }
         }
@@ -458,11 +448,13 @@ impl McpRouter {
                     }
                 }
 
-                self.completed_updates.push_back(ExternalToolNotice {
-                    server: server_name,
-                    operation,
-                    status: "activated".to_string(),
-                    tool_count: Some(tool_count),
+                self.completed_updates.push_back(CompletedLifecycleUpdate {
+                    action: McpLifecycleAction::new(
+                        server_name,
+                        operation,
+                        McpLifecyclePhase::Applied,
+                    )
+                    .with_tool_count(Some(tool_count)),
                 });
             }
             Err(err) => {
@@ -482,14 +474,26 @@ impl McpRouter {
                 // For reload failure: keep old connection active.
                 // For add failure: nothing to keep.
 
-                self.completed_updates.push_back(ExternalToolNotice {
-                    server: server_name,
-                    operation,
-                    status: format!("failed: {err}"),
-                    tool_count: None,
+                self.completed_updates.push_back(CompletedLifecycleUpdate {
+                    action: McpLifecycleAction::new(
+                        server_name,
+                        operation,
+                        McpLifecyclePhase::Failed,
+                    )
+                    .with_detail(Some(err.to_string())),
                 });
             }
         }
+    }
+
+    /// Drain pending results and return queued canonical lifecycle actions.
+    pub fn take_lifecycle_actions(&mut self) -> Vec<McpLifecycleAction> {
+        self.drain_pending();
+        self.rebuild_visible_cache();
+        self.completed_updates
+            .drain(..)
+            .map(|update| update.action)
+            .collect()
     }
 
     /// Drain pending results and return queued external update notices.
@@ -500,7 +504,11 @@ impl McpRouter {
         self.rebuild_visible_cache();
 
         ExternalToolUpdate {
-            notices: self.completed_updates.drain(..).collect(),
+            notices: self
+                .completed_updates
+                .drain(..)
+                .map(|update| update.action)
+                .collect(),
             pending: self.pending_servers.keys().cloned().collect(),
         }
     }
@@ -562,10 +570,15 @@ impl McpRouter {
 
             self.remove_tool_mappings_for_server(&server_name);
             delta.removed_servers.push(server_name.clone());
-            delta.lifecycle_actions.push(McpLifecycleAction::Removed {
-                server: server_name.clone(),
-                degraded,
-            });
+            delta.lifecycle_actions.push(McpLifecycleAction::new(
+                server_name.clone(),
+                ToolConfigChangeOperation::Remove,
+                if degraded {
+                    McpLifecyclePhase::Forced
+                } else {
+                    McpLifecyclePhase::Applied
+                },
+            ));
 
             if degraded {
                 delta.degraded_removals.push(server_name);
@@ -713,6 +726,7 @@ impl Default for McpRouter {
 mod tests {
     use super::*;
     use crate::connection::McpConnection;
+    use meerkat_core::event::ToolConfigChangeOperation;
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
 
@@ -781,7 +795,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(500)).await;
         let ext = router.take_external_updates();
         assert!(
-            ext.notices.iter().any(|n| n.server == "test-server")
+            ext.notices.iter().any(|n| n.target == "test-server")
                 || router.server_lifecycle_state("test-server")
                     == Some(McpServerLifecycleState::Active),
         );
@@ -881,13 +895,9 @@ mod tests {
         assert_eq!(result.delta.removed_servers, vec!["test-server"]);
         assert_eq!(result.delta.degraded_removals, vec!["test-server"]);
         assert!(result.delta.lifecycle_actions.iter().any(|action| {
-            matches!(
-                action,
-                McpLifecycleAction::Removed {
-                    server,
-                    degraded: true
-                } if server == "test-server"
-            )
+            action.target == "test-server"
+                && action.operation == ToolConfigChangeOperation::Remove
+                && action.phase == McpLifecyclePhase::Forced
         }));
     }
 
@@ -906,10 +916,11 @@ mod tests {
             result.pending_count > 0,
             "server should be pending after non-blocking add"
         );
-        assert!(result.delta.lifecycle_actions.iter().any(|a| matches!(
-            a,
-            McpLifecycleAction::PendingConnect { server } if server == "test-server"
-        )));
+        assert!(result.delta.lifecycle_actions.iter().any(|action| {
+            action.target == "test-server"
+                && action.operation == ToolConfigChangeOperation::Add
+                && action.phase == McpLifecyclePhase::Pending
+        }));
 
         // Poll until the background connect completes.
         let deadline = Instant::now() + async_connect_test_timeout();
@@ -918,7 +929,7 @@ mod tests {
             if ext
                 .notices
                 .iter()
-                .any(|n| n.server == "test-server" && n.status == "activated")
+                .any(|n| n.target == "test-server" && n.phase == McpLifecyclePhase::Applied)
             {
                 break;
             }
@@ -986,7 +997,7 @@ mod tests {
             if ext
                 .notices
                 .iter()
-                .any(|n| n.server == "test-server" && n.status == "activated")
+                .any(|n| n.target == "test-server" && n.phase == McpLifecyclePhase::Applied)
             {
                 break;
             }

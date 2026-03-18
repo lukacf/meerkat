@@ -14,7 +14,8 @@ use meerkat_core::service::{
     SessionServiceHistoryExt, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::types::{
-    AssistantBlock, RunResult, SessionId, StopReason, ToolCallView, ToolDef, ToolResult, Usage,
+    AssistantBlock, HandlingMode, RunResult, SessionId, StopReason, ToolCallView, ToolDef,
+    ToolResult, Usage,
 };
 use meerkat_core::{
     Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, HookDecision,
@@ -517,6 +518,7 @@ fn create_req(prompt: &str) -> CreateSessionRequest {
     CreateSessionRequest {
         model: "mock".to_string(),
         prompt: prompt.to_string().into(),
+        render_metadata: None,
         system_prompt: None,
         max_tokens: None,
         event_tx: None,
@@ -532,6 +534,19 @@ fn create_req_deferred(prompt: &str) -> CreateSessionRequest {
     CreateSessionRequest {
         initial_turn: InitialTurnPolicy::Defer,
         ..create_req(prompt)
+    }
+}
+
+fn turn_req(prompt: &str) -> StartTurnRequest {
+    StartTurnRequest {
+        prompt: prompt.to_string().into(),
+        render_metadata: None,
+        handling_mode: HandlingMode::Queue,
+        event_tx: None,
+        host_mode: false,
+        skill_references: None,
+        flow_tool_overlay: None,
+        additional_instructions: None,
     }
 }
 
@@ -573,17 +588,7 @@ async fn test_create_session_can_defer_initial_turn() {
     assert!(!view.state.is_active);
 
     let started = service
-        .start_turn(
-            &session_id,
-            StartTurnRequest {
-                host_mode: false,
-                skill_references: None,
-                flow_tool_overlay: None,
-                prompt: "now run".to_string().into(),
-                event_tx: None,
-                additional_instructions: None,
-            },
-        )
+        .start_turn(&session_id, turn_req("now run"))
         .await
         .expect("start_turn should run after deferred create");
     assert!(started.text.contains("Hello from mock"));
@@ -604,17 +609,7 @@ async fn test_subscribe_session_events_available_before_first_turn() {
         .expect("session stream should attach immediately after registration");
 
     service
-        .start_turn(
-            &sid,
-            StartTurnRequest {
-                host_mode: false,
-                skill_references: None,
-                flow_tool_overlay: None,
-                prompt: "trigger".to_string().into(),
-                event_tx: None,
-                additional_instructions: None,
-            },
-        )
+        .start_turn(&sid, turn_req("trigger"))
         .await
         .expect("start turn");
 
@@ -644,17 +639,7 @@ async fn test_start_turn_on_existing_session() {
 
     // Start another turn
     let result2 = service
-        .start_turn(
-            &session_id,
-            StartTurnRequest {
-                host_mode: false,
-                skill_references: None,
-                flow_tool_overlay: None,
-                prompt: "Follow up".to_string().into(),
-                event_tx: None,
-                additional_instructions: None,
-            },
-        )
+        .start_turn(&session_id, turn_req("Follow up"))
         .await
         .unwrap();
     assert!(result2.text.contains("Hello from mock"));
@@ -750,17 +735,7 @@ async fn test_turn_on_archived_session_returns_not_found() {
     service.archive(&session_id).await.unwrap();
 
     let result = service
-        .start_turn(
-            &session_id,
-            StartTurnRequest {
-                host_mode: false,
-                skill_references: None,
-                flow_tool_overlay: None,
-                prompt: "After archive".to_string().into(),
-                event_tx: None,
-                additional_instructions: None,
-            },
-        )
+        .start_turn(&session_id, turn_req("After archive"))
         .await;
 
     assert!(result.is_err());
@@ -806,39 +781,14 @@ async fn test_concurrent_turns_return_busy() {
     // Start a slow turn in the background
     let service_clone = service.clone();
     let sid_clone = session_id.clone();
-    let _handle = tokio::spawn(async move {
-        service_clone
-            .start_turn(
-                &sid_clone,
-                StartTurnRequest {
-                    host_mode: false,
-                    skill_references: None,
-                    flow_tool_overlay: None,
-                    prompt: "Slow".to_string().into(),
-                    event_tx: None,
-                    additional_instructions: None,
-                },
-            )
-            .await
-    });
+    let _handle =
+        tokio::spawn(async move { service_clone.start_turn(&sid_clone, turn_req("Slow")).await });
 
     // Give the turn time to start running
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
     // Try to start another turn
-    let result = service
-        .start_turn(
-            &session_id,
-            StartTurnRequest {
-                host_mode: false,
-                skill_references: None,
-                flow_tool_overlay: None,
-                prompt: "Fast".to_string().into(),
-                event_tx: None,
-                additional_instructions: None,
-            },
-        )
-        .await;
+    let result = service.start_turn(&session_id, turn_req("Fast")).await;
 
     assert!(result.is_err());
     let err = result.unwrap_err();
@@ -860,21 +810,8 @@ async fn test_interrupt_cancels_inflight_turn() {
     // Start a slow turn
     let service_clone = service.clone();
     let sid_clone = session_id.clone();
-    let _handle = tokio::spawn(async move {
-        service_clone
-            .start_turn(
-                &sid_clone,
-                StartTurnRequest {
-                    host_mode: false,
-                    skill_references: None,
-                    flow_tool_overlay: None,
-                    prompt: "Slow".to_string().into(),
-                    event_tx: None,
-                    additional_instructions: None,
-                },
-            )
-            .await
-    });
+    let _handle =
+        tokio::spawn(async move { service_clone.start_turn(&sid_clone, turn_req("Slow")).await });
 
     // Give the turn time to start
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -917,12 +854,8 @@ async fn test_flow_tool_overlay_is_cleared_after_canceled_turn() {
             .start_turn(
                 &sid_clone,
                 StartTurnRequest {
-                    host_mode: false,
-                    skill_references: None,
                     flow_tool_overlay: Some(overlay),
-                    prompt: "Slow with overlay".to_string().into(),
-                    event_tx: None,
-                    additional_instructions: None,
+                    ..turn_req("Slow with overlay")
                 },
             )
             .await
@@ -972,32 +905,18 @@ async fn test_flow_tool_overlay_enforced_by_runtime_and_resets_next_turn() {
         .start_turn(
             &session_id,
             StartTurnRequest {
-                host_mode: false,
-                skill_references: None,
                 flow_tool_overlay: Some(TurnToolOverlay {
                     allowed_tools: Some(vec!["alpha".to_string(), "beta".to_string()]),
                     blocked_tools: Some(vec!["beta".to_string()]),
                 }),
-                prompt: "overlayed turn".to_string().into(),
-                event_tx: None,
-                additional_instructions: None,
+                ..turn_req("overlayed turn")
             },
         )
         .await
         .expect("turn with overlay should run");
 
     service
-        .start_turn(
-            &session_id,
-            StartTurnRequest {
-                host_mode: false,
-                skill_references: None,
-                flow_tool_overlay: None,
-                prompt: "baseline turn".to_string().into(),
-                event_tx: None,
-                additional_instructions: None,
-            },
-        )
+        .start_turn(&session_id, turn_req("baseline turn"))
         .await
         .expect("turn without overlay should run");
 
@@ -1041,15 +960,11 @@ async fn test_start_turn_returns_error_when_overlay_clear_fails() {
         .start_turn(
             &session_id,
             StartTurnRequest {
-                host_mode: false,
-                skill_references: None,
                 flow_tool_overlay: Some(TurnToolOverlay {
                     allowed_tools: Some(vec!["alpha".to_string()]),
                     blocked_tools: None,
                 }),
-                prompt: "overlay clear fails".to_string().into(),
-                event_tx: None,
-                additional_instructions: None,
+                ..turn_req("overlay clear fails")
             },
         )
         .await;
@@ -1187,17 +1102,7 @@ async fn test_staged_system_context_applies_at_next_llm_boundary() {
     );
 
     service
-        .start_turn(
-            &session_id,
-            StartTurnRequest {
-                host_mode: false,
-                skill_references: None,
-                flow_tool_overlay: None,
-                prompt: "apply staged context".to_string().into(),
-                event_tx: None,
-                additional_instructions: None,
-            },
-        )
+        .start_turn(&session_id, turn_req("apply staged context"))
         .await
         .expect("turn should run");
 
@@ -1277,32 +1182,12 @@ async fn test_staged_system_context_is_not_replayed_on_later_turns() {
         .expect("append system context");
 
     service
-        .start_turn(
-            &session_id,
-            StartTurnRequest {
-                host_mode: false,
-                skill_references: None,
-                flow_tool_overlay: None,
-                prompt: "apply staged context".to_string().into(),
-                event_tx: None,
-                additional_instructions: None,
-            },
-        )
+        .start_turn(&session_id, turn_req("apply staged context"))
         .await
         .expect("first turn should run");
 
     service
-        .start_turn(
-            &session_id,
-            StartTurnRequest {
-                host_mode: false,
-                skill_references: None,
-                flow_tool_overlay: None,
-                prompt: "follow-up turn".to_string().into(),
-                event_tx: None,
-                additional_instructions: None,
-            },
-        )
+        .start_turn(&session_id, turn_req("follow-up turn"))
         .await
         .expect("second turn should run");
 
@@ -1353,17 +1238,7 @@ async fn test_staged_system_context_appended_during_active_turn_waits_for_next_t
         let session_id = session_id.clone();
         tokio::spawn(async move {
             service
-                .start_turn(
-                    &session_id,
-                    StartTurnRequest {
-                        host_mode: false,
-                        skill_references: None,
-                        flow_tool_overlay: None,
-                        prompt: "first turn".to_string().into(),
-                        event_tx: None,
-                        additional_instructions: None,
-                    },
-                )
+                .start_turn(&session_id, turn_req("first turn"))
                 .await
         })
     };
@@ -1387,17 +1262,7 @@ async fn test_staged_system_context_appended_during_active_turn_waits_for_next_t
         .expect("first turn should finish");
 
     service
-        .start_turn(
-            &session_id,
-            StartTurnRequest {
-                host_mode: false,
-                skill_references: None,
-                flow_tool_overlay: None,
-                prompt: "second turn".to_string().into(),
-                event_tx: None,
-                additional_instructions: None,
-            },
-        )
+        .start_turn(&session_id, turn_req("second turn"))
         .await
         .expect("second turn should run");
 
@@ -1456,17 +1321,7 @@ async fn test_pre_llm_denied_turn_does_not_consume_staged_system_context() {
         .expect("append system context");
 
     let denied = service
-        .start_turn(
-            &session_id,
-            StartTurnRequest {
-                host_mode: false,
-                skill_references: None,
-                flow_tool_overlay: None,
-                prompt: "denied turn".to_string().into(),
-                event_tx: None,
-                additional_instructions: None,
-            },
-        )
+        .start_turn(&session_id, turn_req("denied turn"))
         .await;
     assert!(denied.is_err(), "pre-llm hook should deny the first turn");
 
@@ -1480,17 +1335,7 @@ async fn test_pre_llm_denied_turn_does_not_consume_staged_system_context() {
     );
 
     service
-        .start_turn(
-            &session_id,
-            StartTurnRequest {
-                host_mode: false,
-                skill_references: None,
-                flow_tool_overlay: None,
-                prompt: "eligible turn".to_string().into(),
-                event_tx: None,
-                additional_instructions: None,
-            },
-        )
+        .start_turn(&session_id, turn_req("eligible turn"))
         .await
         .expect("next eligible turn should run");
 
@@ -1542,11 +1387,7 @@ async fn test_interrupt_host_mode_returns_without_waiting_for_ack() {
                 &sid_clone,
                 StartTurnRequest {
                     host_mode: true,
-                    skill_references: None,
-                    flow_tool_overlay: None,
-                    prompt: "host turn".to_string().into(),
-                    event_tx: None,
-                    additional_instructions: None,
+                    ..turn_req("host turn")
                 },
             )
             .await

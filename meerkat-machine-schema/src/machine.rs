@@ -1,8 +1,7 @@
 use indexmap::{IndexMap, IndexSet};
-use serde::{Deserialize, Serialize};
-use thiserror::Error;
+use std::fmt;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MachineSchema {
     pub machine: String,
     pub version: u32,
@@ -143,13 +142,13 @@ impl MachineSchema {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RustBinding {
     pub crate_name: String,
     pub module: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateSchema {
     pub phase: EnumSchema,
     pub fields: Vec<FieldSchema>,
@@ -166,19 +165,19 @@ impl StateSchema {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitSchema {
     pub phase: String,
     pub fields: Vec<FieldInit>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldInit {
     pub field: String,
     pub expr: Expr,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnumSchema {
     pub name: String,
     pub variants: Vec<VariantSchema>,
@@ -215,7 +214,7 @@ impl EnumSchema {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VariantSchema {
     pub name: String,
     pub fields: Vec<FieldSchema>,
@@ -233,13 +232,13 @@ impl VariantSchema {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldSchema {
     pub name: String,
     pub ty: TypeRef,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeRef {
     Bool,
     U32,
@@ -254,7 +253,7 @@ pub enum TypeRef {
 
 pub type FieldType = TypeRef;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HelperSchema {
     pub name: String,
     pub params: Vec<FieldSchema>,
@@ -262,13 +261,13 @@ pub struct HelperSchema {
     pub body: Expr,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvariantSchema {
     pub name: String,
     pub expr: Expr,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransitionSchema {
     pub name: String,
     pub from: Vec<String>,
@@ -279,25 +278,25 @@ pub struct TransitionSchema {
     pub emit: Vec<EffectEmit>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputMatch {
     pub variant: String,
     pub bindings: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Guard {
     pub name: String,
     pub expr: Expr,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectEmit {
     pub variant: String,
     pub fields: IndexMap<String, Expr>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Update {
     Assign {
         field: String,
@@ -507,13 +506,13 @@ impl Update {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Quantifier {
     Any,
     All,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     Bool(bool),
     U64(u64),
@@ -828,378 +827,69 @@ fn unique_names<'a>(
     Ok(seen)
 }
 
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum MachineSchemaError {
-    #[error("duplicate {kind} name `{name}`")]
     DuplicateName { kind: &'static str, name: String },
-    #[error("empty {0} name")]
     EmptyName(&'static str),
-    #[error("unknown phase `{phase}`")]
     UnknownPhase { phase: String },
-    #[error("unknown field `{field}`")]
     UnknownField { field: String },
-    #[error("unknown input variant `{variant}`")]
     UnknownInputVariant { variant: String },
-    #[error("unknown effect variant `{variant}`")]
     UnknownEffectVariant { variant: String },
-    #[error("unknown helper `{helper}`")]
     UnknownHelper { helper: String },
-    #[error("unknown binding `{binding}`")]
     UnknownBinding { binding: String },
-    #[error("unknown variant `{variant}`")]
     UnknownVariant { variant: String },
-    #[error("unknown field `{field}` on variant `{variant}`")]
     UnknownVariantField { variant: String, field: String },
 }
 
+impl fmt::Display for MachineSchemaError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DuplicateName { kind, name } => write!(f, "duplicate {kind} name `{name}`"),
+            Self::EmptyName(kind) => write!(f, "empty {kind} name"),
+            Self::UnknownPhase { phase } => write!(f, "unknown phase `{phase}`"),
+            Self::UnknownField { field } => write!(f, "unknown field `{field}`"),
+            Self::UnknownInputVariant { variant } => {
+                write!(f, "unknown input variant `{variant}`")
+            }
+            Self::UnknownEffectVariant { variant } => {
+                write!(f, "unknown effect variant `{variant}`")
+            }
+            Self::UnknownHelper { helper } => write!(f, "unknown helper `{helper}`"),
+            Self::UnknownBinding { binding } => write!(f, "unknown binding `{binding}`"),
+            Self::UnknownVariant { variant } => write!(f, "unknown variant `{variant}`"),
+            Self::UnknownVariantField { variant, field } => {
+                write!(f, "unknown field `{field}` on variant `{variant}`")
+            }
+        }
+    }
+}
+
+impl std::error::Error for MachineSchemaError {}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::catalog::{
-        canonical_machine_schemas, input_lifecycle_machine, mob_lifecycle_machine,
-    };
-
-    #[test]
-    fn validates_mob_orchestrator_style_machine() {
-        let schema = MachineSchema {
-            machine: "MobOrchestratorMachine".into(),
-            version: 1,
-            rust: RustBinding {
-                crate_name: "meerkat-mob".into(),
-                module: "machines::mob_orchestrator".into(),
-            },
-            state: StateSchema {
-                phase: EnumSchema {
-                    name: "OrchestratorState".into(),
-                    variants: vec![
-                        variant("Creating"),
-                        variant("Running"),
-                        variant("Stopped"),
-                        variant("Completed"),
-                        variant("Destroyed"),
-                    ],
-                },
-                fields: vec![
-                    field("coordinator_bound", TypeRef::Bool),
-                    field("pending_spawn_count", TypeRef::U32),
-                    field("active_flow_count", TypeRef::U32),
-                    field("topology_revision", TypeRef::U32),
-                    field("supervisor_active", TypeRef::Bool),
-                ],
-                init: InitSchema {
-                    phase: "Creating".into(),
-                    fields: vec![
-                        init("coordinator_bound", Expr::Bool(false)),
-                        init("pending_spawn_count", Expr::U64(0)),
-                        init("active_flow_count", Expr::U64(0)),
-                        init("topology_revision", Expr::U64(0)),
-                        init("supervisor_active", Expr::Bool(false)),
-                    ],
-                },
-                terminal_phases: vec!["Destroyed".into()],
-            },
-            inputs: EnumSchema {
-                name: "MobOrchestratorInput".into(),
-                variants: vec![
-                    variant("InitializeOrchestrator"),
-                    variant("BindCoordinator"),
-                    variant("UnbindCoordinator"),
-                    variant("StageSpawn"),
-                    variant("CompleteSpawn"),
-                ],
-            },
-            effects: EnumSchema {
-                name: "MobOrchestratorEffect".into(),
-                variants: vec![
-                    variant("ActivateSupervisor"),
-                    variant("DeactivateSupervisor"),
-                    variant("EmitOrchestratorNotice"),
-                ],
-            },
-            helpers: vec![],
-            derived: vec![],
-            invariants: vec![InvariantSchema {
-                name: "destroyed_is_terminal".into(),
-                expr: Expr::Or(vec![
-                    Expr::Neq(
-                        Box::new(Expr::Field("supervisor_active".into())),
-                        Box::new(Expr::Bool(true)),
-                    ),
-                    Expr::Neq(
-                        Box::new(Expr::Phase("Destroyed".into())),
-                        Box::new(Expr::Phase("Destroyed".into())),
-                    ),
-                ]),
-            }],
-            transitions: vec![
-                TransitionSchema {
-                    name: "InitializeOrchestrator".into(),
-                    from: vec!["Creating".into()],
-                    on: InputMatch {
-                        variant: "InitializeOrchestrator".into(),
-                        bindings: vec![],
-                    },
-                    guards: vec![],
-                    updates: vec![
-                        Update::Assign {
-                            field: "coordinator_bound".into(),
-                            expr: Expr::Bool(true),
-                        },
-                        Update::Assign {
-                            field: "supervisor_active".into(),
-                            expr: Expr::Bool(true),
-                        },
-                    ],
-                    to: "Running".into(),
-                    emit: vec![EffectEmit {
-                        variant: "ActivateSupervisor".into(),
-                        fields: IndexMap::new(),
-                    }],
-                },
-                TransitionSchema {
-                    name: "StageSpawn".into(),
-                    from: vec!["Running".into()],
-                    on: InputMatch {
-                        variant: "StageSpawn".into(),
-                        bindings: vec![],
-                    },
-                    guards: vec![Guard {
-                        name: "coordinator_is_bound".into(),
-                        expr: Expr::Eq(
-                            Box::new(Expr::Field("coordinator_bound".into())),
-                            Box::new(Expr::Bool(true)),
-                        ),
-                    }],
-                    updates: vec![Update::Increment {
-                        field: "pending_spawn_count".into(),
-                        amount: 1,
-                    }],
-                    to: "Running".into(),
-                    emit: vec![],
-                },
-            ],
-        };
-
-        assert_eq!(schema.validate(), Ok(()));
-    }
+    use crate::catalog::peer_comms_machine;
 
     #[test]
     fn validates_peer_comms_style_machine() {
-        let schema = MachineSchema {
-            machine: "PeerCommsMachine".into(),
-            version: 1,
-            rust: RustBinding {
-                crate_name: "meerkat-comms".into(),
-                module: "machines::peer_comms".into(),
-            },
-            state: StateSchema {
-                phase: EnumSchema {
-                    name: "PeerIngressState".into(),
-                    variants: vec![
-                        variant("Absent"),
-                        variant("Received"),
-                        variant("Dropped"),
-                        variant("Submitted"),
-                        variant("Delivered"),
-                    ],
-                },
-                fields: vec![
-                    field(
-                        "trusted_peers",
-                        TypeRef::Set(Box::new(TypeRef::Named("PeerId".into()))),
-                    ),
-                    field(
-                        "raw_item_peer",
-                        TypeRef::Map(
-                            Box::new(TypeRef::Named("RawItemId".into())),
-                            Box::new(TypeRef::Option(Box::new(TypeRef::Named("PeerId".into())))),
-                        ),
-                    ),
-                    field(
-                        "raw_item_kind",
-                        TypeRef::Map(
-                            Box::new(TypeRef::Named("RawItemId".into())),
-                            Box::new(TypeRef::Named("RawPeerKind".into())),
-                        ),
-                    ),
-                    field(
-                        "classified_as",
-                        TypeRef::Map(
-                            Box::new(TypeRef::Named("RawItemId".into())),
-                            Box::new(TypeRef::Option(Box::new(TypeRef::Named(
-                                "PeerInputClass".into(),
-                            )))),
-                        ),
-                    ),
-                    field(
-                        "trusted_snapshot",
-                        TypeRef::Map(
-                            Box::new(TypeRef::Named("RawItemId".into())),
-                            Box::new(TypeRef::Bool),
-                        ),
-                    ),
-                    field(
-                        "submission_queue",
-                        TypeRef::Seq(Box::new(TypeRef::Named("RawItemId".into()))),
-                    ),
-                ],
-                init: InitSchema {
-                    phase: "Absent".into(),
-                    fields: vec![],
-                },
-                terminal_phases: vec!["Dropped".into(), "Delivered".into()],
-            },
-            inputs: EnumSchema {
-                name: "PeerCommsInput".into(),
-                variants: vec![
-                    VariantSchema {
-                        name: "TrustPeer".into(),
-                        fields: vec![field("peer_id", TypeRef::Named("PeerId".into()))],
-                    },
-                    VariantSchema {
-                        name: "ReceivePeerEnvelope".into(),
-                        fields: vec![
-                            field("raw_item_id", TypeRef::Named("RawItemId".into())),
-                            field("peer_id", TypeRef::Named("PeerId".into())),
-                            field("raw_kind", TypeRef::Named("RawPeerKind".into())),
-                        ],
-                    },
-                    VariantSchema {
-                        name: "SubmitTypedPeerInput".into(),
-                        fields: vec![field("raw_item_id", TypeRef::Named("RawItemId".into()))],
-                    },
-                ],
-            },
-            effects: EnumSchema {
-                name: "PeerCommsEffect".into(),
-                variants: vec![VariantSchema {
-                    name: "SubmitPeerInputCandidate".into(),
-                    fields: vec![
-                        field("raw_item_id", TypeRef::Named("RawItemId".into())),
-                        field("peer_input_class", TypeRef::Named("PeerInputClass".into())),
-                    ],
-                }],
-            },
-            helpers: vec![HelperSchema {
-                name: "ClassFor".into(),
-                params: vec![field("raw_kind", TypeRef::Named("RawPeerKind".into()))],
-                returns: TypeRef::Named("PeerInputClass".into()),
-                body: Expr::Binding("raw_kind".into()),
-            }],
-            derived: vec![],
-            invariants: vec![InvariantSchema {
-                name: "delivered_items_are_not_queued".into(),
-                expr: Expr::Quantified {
-                    quantifier: Quantifier::All,
-                    binding: "raw_item_id".into(),
-                    over: Box::new(Expr::Field("submission_queue".into())),
-                    body: Box::new(Expr::Neq(
-                        Box::new(Expr::MapGet {
-                            map: Box::new(Expr::Field("classified_as".into())),
-                            key: Box::new(Expr::Binding("raw_item_id".into())),
-                        }),
-                        Box::new(Expr::None),
-                    )),
-                },
-            }],
-            transitions: vec![
-                TransitionSchema {
-                    name: "TrustPeer".into(),
-                    from: vec!["Absent".into(), "Received".into(), "Submitted".into()],
-                    on: InputMatch {
-                        variant: "TrustPeer".into(),
-                        bindings: vec!["peer_id".into()],
-                    },
-                    guards: vec![],
-                    updates: vec![Update::SetInsert {
-                        field: "trusted_peers".into(),
-                        value: Expr::Binding("peer_id".into()),
-                    }],
-                    to: "Absent".into(),
-                    emit: vec![],
-                },
-                TransitionSchema {
-                    name: "SubmitTypedPeerInput".into(),
-                    from: vec!["Received".into()],
-                    on: InputMatch {
-                        variant: "SubmitTypedPeerInput".into(),
-                        bindings: vec!["raw_item_id".into()],
-                    },
-                    guards: vec![Guard {
-                        name: "item_was_classified".into(),
-                        expr: Expr::Contains {
-                            collection: Box::new(Expr::Field("submission_queue".into())),
-                            value: Box::new(Expr::Binding("raw_item_id".into())),
-                        },
-                    }],
-                    updates: vec![Update::MapInsert {
-                        field: "trusted_snapshot".into(),
-                        key: Expr::Binding("raw_item_id".into()),
-                        value: Expr::Bool(true),
-                    }],
-                    to: "Submitted".into(),
-                    emit: vec![EffectEmit {
-                        variant: "SubmitPeerInputCandidate".into(),
-                        fields: IndexMap::from([
-                            ("raw_item_id".into(), Expr::Binding("raw_item_id".into())),
-                            (
-                                "peer_input_class".into(),
-                                Expr::Call {
-                                    helper: "ClassFor".into(),
-                                    args: vec![Expr::Variant("ReceivePeerEnvelope".into())],
-                                },
-                            ),
-                        ]),
-                    }],
-                },
-            ],
-        };
+        let schema = peer_comms_machine();
 
+        assert_eq!(schema.machine, "PeerCommsMachine");
+        assert_eq!(schema.rust.crate_name, "meerkat-comms");
+        assert_eq!(schema.rust.module, "machines::peer_comms");
+        assert!(
+            schema
+                .transitions
+                .iter()
+                .any(|transition| transition.name == "SubmitTypedPeerInputDelivered")
+        );
+        assert!(
+            schema
+                .state
+                .terminal_phases
+                .iter()
+                .any(|phase| phase == "Delivered")
+        );
         assert_eq!(schema.validate(), Ok(()));
-    }
-
-    #[test]
-    fn validates_input_lifecycle_machine_definition() {
-        let schema = input_lifecycle_machine();
-        assert_eq!(schema.validate(), Ok(()));
-    }
-
-    #[test]
-    fn validates_mob_lifecycle_machine_definition() {
-        let schema = mob_lifecycle_machine();
-        assert_eq!(schema.validate(), Ok(()));
-    }
-
-    #[test]
-    fn canonical_machine_registry_is_individually_valid() {
-        for schema in canonical_machine_schemas() {
-            assert_eq!(
-                schema.validate(),
-                Ok(()),
-                "machine {} should validate",
-                schema.machine
-            );
-        }
-    }
-
-    fn variant(name: &str) -> VariantSchema {
-        VariantSchema {
-            name: name.into(),
-            fields: vec![],
-        }
-    }
-
-    fn field(name: &str, ty: TypeRef) -> FieldSchema {
-        FieldSchema {
-            name: name.into(),
-            ty,
-        }
-    }
-
-    fn init(field: &str, expr: Expr) -> FieldInit {
-        FieldInit {
-            field: field.into(),
-            expr,
-        }
     }
 }

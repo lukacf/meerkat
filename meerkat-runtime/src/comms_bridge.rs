@@ -1,7 +1,7 @@
-//! CommsInputBridge — translates InboxInteraction → v9 Input::PeerInput.
+//! Runtime comms bridge helpers.
 //!
-//! This bridge maps the existing comms system (InboxInteraction) into the
-//! v9 input model without changing meerkat-core's comms module.
+//! These helpers translate drained comms interactions into the runtime-owned
+//! input families used by the host-mode cutover bridge.
 
 use chrono::Utc;
 use meerkat_core::interaction::{InboxInteraction, InteractionContent, ResponseStatus};
@@ -9,16 +9,61 @@ use meerkat_core::lifecycle::InputId;
 
 use crate::identifiers::{CorrelationId, LogicalRuntimeId};
 use crate::input::{
-    Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PeerConvention, PeerInput,
-    ResponseProgressPhase, ResponseTerminalStatus,
+    ExternalEventInput, Input, InputDurability, InputHeader, InputOrigin, InputVisibility,
+    PeerConvention, PeerInput, ResponseProgressPhase, ResponseTerminalStatus,
 };
+
+/// Convert a drained comms interaction into the appropriate runtime-owned
+/// input family.
+pub fn interaction_to_runtime_input(
+    interaction: &InboxInteraction,
+    runtime_id: &LogicalRuntimeId,
+) -> Input {
+    if let Some(source_name) = interaction.from.strip_prefix("event:") {
+        return Input::ExternalEvent(ExternalEventInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::External {
+                    source_name: source_name.to_string(),
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility {
+                    transcript_eligible: true,
+                    operator_eligible: true,
+                },
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: Some(CorrelationId::from_uuid(interaction.id.0)),
+            },
+            event_type: source_name.to_string(),
+            payload: match &interaction.content {
+                InteractionContent::Message { body, .. } => serde_json::json!({ "body": body }),
+                InteractionContent::Request { intent, params } => {
+                    serde_json::json!({ "intent": intent, "params": params })
+                }
+                InteractionContent::Response {
+                    in_reply_to,
+                    status,
+                    result,
+                } => serde_json::json!({
+                    "in_reply_to": in_reply_to,
+                    "status": status,
+                    "result": result,
+                }),
+            },
+        });
+    }
+
+    interaction_to_peer_input(interaction, runtime_id)
+}
 
 /// Convert an `InboxInteraction` to a v9 `Input::Peer`.
 pub fn interaction_to_peer_input(
     interaction: &InboxInteraction,
     runtime_id: &LogicalRuntimeId,
 ) -> Input {
-    let (convention, body) = map_convention(&interaction.content);
+    let (convention, body) = map_convention(interaction);
     let durability = map_durability(&convention);
 
     Input::Peer(PeerInput {
@@ -44,12 +89,12 @@ pub fn interaction_to_peer_input(
     })
 }
 
-fn map_convention(content: &InteractionContent) -> (PeerConvention, String) {
-    match content {
+fn map_convention(interaction: &InboxInteraction) -> (PeerConvention, String) {
+    match &interaction.content {
         InteractionContent::Message { body, .. } => (PeerConvention::Message, body.clone()),
         InteractionContent::Request { intent, params, .. } => (
             PeerConvention::Request {
-                request_id: uuid::Uuid::now_v7().to_string(),
+                request_id: interaction.id.0.to_string(),
                 intent: intent.clone(),
             },
             serde_json::to_string(params).unwrap_or_default(),
@@ -140,9 +185,36 @@ mod tests {
         let input = interaction_to_peer_input(&interaction, &LogicalRuntimeId::new("test"));
         if let Input::Peer(p) = &input {
             assert!(matches!(p.convention, Some(PeerConvention::Request { .. })));
+            match p.convention.as_ref().expect("request convention") {
+                PeerConvention::Request { request_id, .. } => {
+                    assert_eq!(request_id, &interaction.id.0.to_string());
+                }
+                other => panic!("Expected request convention, got {other:?}"),
+            }
             assert_eq!(p.header.durability, InputDurability::Durable);
         } else {
             panic!("Expected PeerInput");
+        }
+    }
+
+    #[test]
+    fn plain_event_to_external_event_input() {
+        let interaction = InboxInteraction {
+            from: "event:webhook".into(),
+            content: InteractionContent::Message {
+                body: "{\"ok\":true}".into(),
+                blocks: None,
+            },
+            id: make_interaction_id(),
+            rendered_text: String::new(),
+        };
+        let input = interaction_to_runtime_input(&interaction, &LogicalRuntimeId::new("test"));
+        match input {
+            Input::ExternalEvent(event) => {
+                assert_eq!(event.event_type, "webhook");
+                assert_eq!(event.payload["body"], "{\"ok\":true}");
+            }
+            other => panic!("Expected ExternalEvent input, got {other:?}"),
         }
     }
 

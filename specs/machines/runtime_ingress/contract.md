@@ -197,6 +197,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `meerkat-runtime/src/queue.rs` — ordered queue discipline precursor
 - `meerkat-runtime/src/driver/ephemeral.rs` — ephemeral ingress mutation precursor
 - `meerkat-runtime/src/driver/persistent.rs` — persistent ingress/recovery precursor
+- `meerkat-runtime/src/runtime_loop.rs` — same-boundary contributor batching and staged run precursor
 
 ### Scenarios
 - `admit-and-stage-prefix` — individually admitted inputs form a runtime-authored staged prefix

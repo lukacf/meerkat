@@ -5,8 +5,8 @@ Reads schema artifacts from artifacts/schemas/ and generates typed client
 code for Python and TypeScript SDKs.
 """
 
+import argparse
 import json
-import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -446,9 +446,31 @@ def load_available_capabilities(artifacts_dir: Path) -> set[str]:
     return set(enum_values)
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--root",
+        type=Path,
+        help="Repository root to read schemas from (defaults to the workspace root inferred from this script).",
+    )
+    parser.add_argument(
+        "--artifacts-dir",
+        type=Path,
+        help="Schema artifact directory to read from (defaults to <root>/artifacts/schemas).",
+    )
+    parser.add_argument(
+        "--output-root",
+        type=Path,
+        help="Root directory under which generated SDK files should be written (defaults to <root>).",
+    )
+    return parser.parse_args()
+
+
 def main():
-    root = Path(__file__).parent.parent.parent
-    artifacts_dir = root / "artifacts" / "schemas"
+    args = parse_args()
+    root = (args.root or Path(__file__).resolve().parent.parent.parent).resolve()
+    artifacts_dir = (args.artifacts_dir or (root / "artifacts" / "schemas")).resolve()
+    output_root = (args.output_root or root).resolve()
 
     if not artifacts_dir.exists():
         print(f"Error: {artifacts_dir} does not exist. Run emit-schemas first.", file=sys.stderr)
@@ -469,12 +491,12 @@ def main():
     has_skills = "skills" in available_caps or not available_caps
 
     # Generate Python
-    py_output = root / "sdks" / "python" / "meerkat" / "generated"
+    py_output = output_root / "sdks" / "python" / "meerkat" / "generated"
     generate_python_types(schemas, py_output, has_comms=has_comms, has_skills=has_skills)
     print(f"Generated Python types in {py_output}")
 
     # Generate TypeScript
-    ts_output = root / "sdks" / "typescript" / "src" / "generated"
+    ts_output = output_root / "sdks" / "typescript" / "src" / "generated"
     generate_typescript_types(schemas, ts_output, has_comms=has_comms, has_skills=has_skills)
     print(f"Generated TypeScript types in {ts_output}")
 

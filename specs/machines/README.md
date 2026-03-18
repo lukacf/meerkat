@@ -14,7 +14,9 @@ Each canonical machine lives under its own directory:
 - `contract.md`
 - `model.tla`
 - `ci.cfg`
+- `deep.cfg`
 - `mapping.md`
+- generated Rust kernel at `meerkat-machine-kernels/src/generated/<machine>.rs`
 
 Status:
 
@@ -50,6 +52,26 @@ Canonical machine set:
 - `mob_orchestrator`
 - `mob_lifecycle`
 - `flow_run`
+
+Final release-closure inventory:
+
+All canonical `0.5` machines now target the same final implementation mode:
+`SchemaKernel`. The checked-in Rust catalog remains the semantic authority and
+the generated kernel is the explicit transition boundary consumed by repo
+verification.
+
+| Machine | Final mode | Catalog authority | Generated transition boundary |
+| --- | --- | --- | --- |
+| `input_lifecycle` | `SchemaKernel` | `meerkat-machine-schema/src/catalog/input_lifecycle.rs` | `meerkat-machine-kernels/src/generated/input_lifecycle.rs` |
+| `runtime_ingress` | `SchemaKernel` | `meerkat-machine-schema/src/catalog/runtime_ingress.rs` | `meerkat-machine-kernels/src/generated/runtime_ingress.rs` |
+| `runtime_control` | `SchemaKernel` | `meerkat-machine-schema/src/catalog/runtime_control.rs` | `meerkat-machine-kernels/src/generated/runtime_control.rs` |
+| `mob_lifecycle` | `SchemaKernel` | `meerkat-machine-schema/src/catalog/mob_lifecycle.rs` | `meerkat-machine-kernels/src/generated/mob_lifecycle.rs` |
+| `ops_lifecycle` | `SchemaKernel` | `meerkat-machine-schema/src/catalog/ops_lifecycle.rs` | `meerkat-machine-kernels/src/generated/ops_lifecycle.rs` |
+| `peer_comms` | `SchemaKernel` | `meerkat-machine-schema/src/catalog/peer_comms.rs` | `meerkat-machine-kernels/src/generated/peer_comms.rs` |
+| `external_tool_surface` | `SchemaKernel` | `meerkat-machine-schema/src/catalog/external_tool_surface.rs` | `meerkat-machine-kernels/src/generated/external_tool_surface.rs` |
+| `turn_execution` | `SchemaKernel` | `meerkat-machine-schema/src/catalog/turn_execution.rs` | `meerkat-machine-kernels/src/generated/turn_execution.rs` |
+| `flow_run` | `SchemaKernel` | `meerkat-machine-schema/src/catalog/flow_run.rs` | `meerkat-machine-kernels/src/generated/flow_run.rs` |
+| `mob_orchestrator` | `SchemaKernel` | `meerkat-machine-schema/src/catalog/mob_orchestrator.rs` | `meerkat-machine-kernels/src/generated/mob_orchestrator.rs` |
 
 Verification posture:
 

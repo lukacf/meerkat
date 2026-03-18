@@ -453,7 +453,7 @@ pub struct PeerDirectoryEntry {
 }
 
 /// Canonical payload for registering a trusted peer through a runtime seam.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrustedPeerSpec {
     pub name: String,
     pub peer_id: String,

@@ -1,6 +1,7 @@
 project: "Meerkat 0.5"
-last_updated: "2026-03-15"
+last_updated: "2026-03-18"
 notes:
-  - "Initial blocker ledger for the docs-local RCT package."
-  - "No live execution has started yet; blockers are empty by design."
+  - "Phase 11 release-closure prep refreshed the docs-local blocker ledger."
+  - "The final release-gate bundle is gate-owned: cargo nextest run --workspace --all-targets; cargo xtask machine-verify --all; cargo xtask machine-check-drift --all; cargo check -p meerkat-machine-schema --target wasm32-unknown-unknown; cargo check -p meerkat-machine-kernels --target wasm32-unknown-unknown."
+  - "No docs-local blocker is open before the build/test gate runs that bundle."
 blockers: []

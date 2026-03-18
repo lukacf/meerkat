@@ -1,62 +1,16 @@
 # Typed But Unwired
 
-This is the initial carry-forward list for types and contracts that are
-described by the `0.5` docs but are not yet safely assumed to be fully wired
-through the shipped runtime path.
+The carry-forward list is empty for the phase-11 release-closure cut.
 
-## Runtime Taxonomy And Control
+Closed requirement families:
 
-- `OperationInput`
-  documented by the ops seam and implementation plan, but not yet established
-  as a proven runtime input family
-- explicit continuation input/primitive
-  required by host-mode cutover, but still transitional in current runtime docs
-- runtime-authoritative multi-contributor drain snapshots for
-  `contributing_input_ids`
-  present in docs and receipts, but not yet proven end-to-end
-- explicit `InterruptPolicy` / `DrainPolicy` / `RoutingDisposition` ownership
-  described conceptually, but not yet proven as the final implementation split
-
-## Shared Async-Operation Lifecycle
-
-- `OperationId`
-- `OperationKind`
-- `OperationSpec`
-- `OperationPeerHandle`
-- `OperationProgressUpdate`
-- `OperationTerminalOutcome`
-- `OperationLifecycleSnapshot`
-- `OperationCompletionWatch`
-- `OpsLifecycleRegistry`
-- `RuntimeOpsLifecycleRegistry`
-
-These are all defined by the seam docs but still need real runtime wiring and
-real-entrypoint evidence.
-
-## Host-Mode Replacement
-
-- `RuntimeCommsBridge`
-- completion-aware reservation resolution
-- runtime-owned continuation scheduling after terminal peer responses
-- exact control-plane stop/dismiss mapping
-
-## External Tool Surface
-
-- canonical typed outward lifecycle delta
-- canonical typed surface update notice
-- browser runtime-scoped tool registration/update surface
-
-## Mob Decomposition
-
-- explicit `MobOrchestratorMachine` pending-spawn/coordinator/topology-revision
-  state
-- explicit `FlowRunMachine` durable run truth boundary
-- explicit service boundaries for topology/task-board/supervision
-
-## Surface Contracts
-
-- canonical REST external-event route/payload wiring
-- canonical JSON-RPC external-event method wiring
-- explicit WASM capability envelope and runtime-scoped browser-local tool
-  surface
-- mob control-plane attach/adopt helpers for "spawn helper agent" flows
+- runtime taxonomy, contributor, policy, and control-plane items were wired and
+  proven in phases 3 and 5
+- shared async-operation lifecycle and child-lifecycle ownership were wired and
+  proven in phase 4
+- external-tool, mob, and machine-authority seams were wired and proven in
+  phases 6 and 7
+- server, MCP, browser, SDK, and docs/example surfaces were wired and proven in
+  phases 8 through 10
+- final machine-mode, deletion-ledger, and compatibility-audit closure is
+  recorded in the phase-11 release artifacts

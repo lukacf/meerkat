@@ -6146,7 +6146,7 @@ fn witness_state(
 ) -> CompositionWitnessState {
     CompositionWitnessState {
         machine: machine.into(),
-        phase: phase.map(|phase| phase.into()),
+        phase: phase.map(Into::into),
         fields,
     }
 }

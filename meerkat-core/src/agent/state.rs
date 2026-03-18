@@ -106,15 +106,6 @@ where
         // Only commit boundary side effects after hooks accept the transition.
         self.drain_comms_inbox().await;
 
-        let sub_agent_results = self.collect_sub_agent_results().await;
-        if !sub_agent_results.is_empty() {
-            let results: Vec<ToolResult> = sub_agent_results
-                .into_iter()
-                .map(|r| ToolResult::new(r.id.to_string(), r.content, r.is_error))
-                .collect();
-            self.session.push(Message::ToolResults { results });
-        }
-
         Ok(())
     }
 
@@ -244,15 +235,11 @@ where
 
                     // 2. Emit ToolConfigChanged for completed background connections.
                     for notice in &ext.notices {
-                        emit_event!(AgentEvent::ToolConfigChanged {
-                            payload: ToolConfigChangedPayload {
-                                operation: notice.operation.clone(),
-                                target: notice.server.clone(),
-                                status: notice.status.clone(),
-                                persisted: false,
-                                applied_at_turn: Some(turn_count),
-                            },
-                        });
+                        let mut payload = notice.to_tool_config_changed_payload();
+                        if payload.applied_at_turn.is_none() {
+                            payload.applied_at_turn = Some(turn_count);
+                        }
+                        emit_event!(AgentEvent::ToolConfigChanged { payload });
                     }
 
                     // 3. Manage [MCP_PENDING] notice lifecycle.

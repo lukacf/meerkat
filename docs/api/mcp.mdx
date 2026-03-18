@@ -28,6 +28,12 @@ Model Context Protocol (MCP) is the tool protocol Meerkat uses in two ways: as a
 
 The `meerkat-mcp-server` crate exposes Meerkat as MCP tools that other clients can call.
 
+`meerkat_run` and `meerkat_resume` keep the same public MCP tool contract, but
+their execution path is runtime-backed: `meerkat_run` allocates a session
+through the shared session service and waits for that admitted turn to finish,
+and `meerkat_resume` re-enters the same `session_id` instead of starting a
+second surface-local execution loop.
+
 | Tool | Description |
 |------|-------------|
 | `meerkat_run` | Start a new agent session |
@@ -342,7 +348,9 @@ When tools with `handler: "callback"` are provided and the agent requests a tool
 
 ### meerkat_resume
 
-Resume an existing session or provide tool results for pending tool calls.
+Resume an existing runtime-backed session or provide tool results for pending
+tool calls. The call waits for the resumed turn to complete and returns the same
+`session_id` that `meerkat_run` originally materialized.
 
 <CodeGroup>
 ```json Request (minimal)

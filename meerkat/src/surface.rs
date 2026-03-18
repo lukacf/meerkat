@@ -273,9 +273,7 @@ pub async fn emit_mcp_lifecycle_events(
     turn_number: u32,
     actions: Vec<meerkat_mcp::McpLifecycleAction>,
 ) {
-    use meerkat_core::event::ToolConfigChangeOperation;
-    use meerkat_core::event::ToolConfigChangedPayload;
-    use meerkat_mcp::McpLifecycleAction;
+    use meerkat_mcp::McpLifecyclePhase;
 
     const MCP_SEQ_SOURCE_CAP: usize = 8192;
 
@@ -288,40 +286,9 @@ pub async fn emit_mcp_lifecycle_events(
     static MCP_EVENT_SEQ_BY_SOURCE: OnceLock<Mutex<McpSeqState>> = OnceLock::new();
 
     for action in actions {
-        let (operation, target, status) = match action {
-            McpLifecycleAction::PendingConnect { server } => (
-                ToolConfigChangeOperation::Add,
-                server,
-                "pending".to_string(),
-            ),
-            McpLifecycleAction::Activated { server } => (
-                ToolConfigChangeOperation::Add,
-                server,
-                "applied".to_string(),
-            ),
-            McpLifecycleAction::Reloaded { server } => (
-                ToolConfigChangeOperation::Reload,
-                server,
-                "applied".to_string(),
-            ),
-            McpLifecycleAction::RemovingStarted { server } => (
-                ToolConfigChangeOperation::Remove,
-                server,
-                "draining".to_string(),
-            ),
-            McpLifecycleAction::Removed { server, degraded } => (
-                ToolConfigChangeOperation::Remove,
-                server,
-                if degraded { "forced" } else { "applied" }.to_string(),
-            ),
-        };
-        let payload = ToolConfigChangedPayload {
-            operation,
-            target: target.clone(),
-            status: status.clone(),
-            persisted: false,
-            applied_at_turn: Some(turn_number),
-        };
+        let mut payload = action.to_tool_config_changed_payload();
+        payload.applied_at_turn = Some(turn_number);
+        let target = payload.target.clone();
         let seq = {
             let map = MCP_EVENT_SEQ_BY_SOURCE.get_or_init(|| Mutex::new(McpSeqState::default()));
             let mut guard = match map.lock() {
@@ -359,7 +326,7 @@ pub async fn emit_mcp_lifecycle_events(
                 },
             ))
             .await;
-        if status == "forced" {
+        if action.phase == McpLifecyclePhase::Forced {
             if !prompt.is_empty() {
                 prompt.push('\n');
             }

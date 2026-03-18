@@ -14,7 +14,9 @@ use meerkat_core::service::{
     SessionQuery, SessionService, SessionServiceCommsExt, SessionSummary, SessionUsage,
     SessionView, StartTurnRequest,
 };
-use meerkat_core::types::{RunResult, SessionId, Usage};
+use meerkat_core::types::{
+    ContentInput, HandlingMode, RenderMetadata, RunResult, SessionId, Usage,
+};
 use meerkat_core::{InteractionId, PlainEventSource};
 use meerkat_mob::{
     MeerkatId, MobBackendKind, MobBuilder, MobId, MobRuntimeMode, MobSessionService, MobStorage,
@@ -35,7 +37,13 @@ struct MockInjector {
 }
 
 impl EventInjector for MockInjector {
-    fn inject(&self, _body: String, _source: PlainEventSource) -> Result<(), EventInjectorError> {
+    fn inject(
+        &self,
+        _body: ContentInput,
+        _source: PlainEventSource,
+        _handling_mode: HandlingMode,
+        _render_metadata: Option<RenderMetadata>,
+    ) -> Result<(), EventInjectorError> {
         self.inject_calls.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -44,10 +52,12 @@ impl EventInjector for MockInjector {
 impl SubscribableInjector for MockInjector {
     fn inject_with_subscription(
         &self,
-        body: String,
+        body: ContentInput,
         source: PlainEventSource,
+        handling_mode: HandlingMode,
+        render_metadata: Option<RenderMetadata>,
     ) -> Result<InteractionSubscription, EventInjectorError> {
-        self.inject(body, source)?;
+        self.inject(body, source, handling_mode, render_metadata)?;
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         let interaction_id = InteractionId(uuid::Uuid::new_v4());
         let interaction_id_for_task = interaction_id;

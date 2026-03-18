@@ -21,6 +21,22 @@ pub struct MobRun {
     pub failure_ledger: Vec<FailureLedgerEntry>,
 }
 
+impl MobRun {
+    pub fn pending(mob_id: MobId, flow_id: FlowId, activation_params: serde_json::Value) -> Self {
+        Self {
+            run_id: RunId::new(),
+            mob_id,
+            flow_id,
+            status: MobRunStatus::Pending,
+            activation_params,
+            created_at: Utc::now(),
+            completed_at: None,
+            step_ledger: Vec::new(),
+            failure_ledger: Vec::new(),
+        }
+    }
+}
+
 /// Run lifecycle states.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

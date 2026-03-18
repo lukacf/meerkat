@@ -139,6 +139,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
             {"name": "session/read", "description": "Get session state"},
             {"name": "session/history", "description": "Get full session history"},
             {"name": "session/archive", "description": "Remove session"},
+            {"name": "session/external_event", "description": "Queue a runtime-backed external event"},
             {"name": "turn/start", "description": "Start a new turn on existing session"},
             {"name": "turn/interrupt", "description": "Cancel in-flight turn"},
             {"name": "capabilities/get", "description": "Get runtime capabilities"},
@@ -188,6 +189,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
             "/sessions/{id}": {"get": {"summary": "Get session details"}},
             "/sessions/{id}/history": {"get": {"summary": "Get full session history"}},
             "/sessions/{id}/messages": {"post": {"summary": "Continue session with new message"}},
+            "/sessions/{id}/external-events": {"post": {"summary": "Queue a runtime-backed external event"}},
             "/sessions/{id}/events": {"get": {"summary": "SSE event stream"}},
             "/sessions/{id}/mcp/add": {"post": {
                 "summary": "Stage live MCP server addition",

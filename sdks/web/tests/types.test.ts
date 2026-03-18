@@ -6,8 +6,10 @@
  */
 
 import type {
+  Mob,
   RuntimeConfig,
   SessionConfig,
+  SessionState,
   AppendSystemContextOptions,
   AppendSystemContextResult,
   MobAppendSystemContextResult,
@@ -58,6 +60,18 @@ const appendSystemContextOptions: AppendSystemContextOptions = {
 const appendSystemContextResult: AppendSystemContextResult = {
   handle: 1,
   status: 'staged',
+};
+
+const sessionState: SessionState = {
+  handle: 1,
+  session_id: '00000000-0000-0000-0000-000000000001',
+  mob_id: '',
+  model: 'claude-sonnet-4-5',
+  usage: { input_tokens: 1, output_tokens: 2 },
+  run_counter: 0,
+  message_count: 0,
+  is_active: true,
+  last_assistant_text: null,
 };
 
 const mobAppendSystemContextResult: MobAppendSystemContextResult = {
@@ -137,11 +151,15 @@ const myTool: ToolCallback = async (args: string) => {
 
 const actions: MobLifecycleAction[] = ['stop', 'resume', 'complete', 'destroy'];
 
+declare const mob: Mob;
+const sendMessageResult: Promise<string> = mob.sendMessage('worker-1', 'hello');
+
 // ─── Ensure all exports type-check (suppress unused warnings) ───
 
 void minimalConfig;
 void fullConfig;
 void sessionConfig;
+void sessionState;
 void appendSystemContextOptions;
 void appendSystemContextResult;
 void mobAppendSystemContextResult;
@@ -150,3 +168,4 @@ void spawnSpec;
 void handleEvent;
 void myTool;
 void actions;
+void sendMessageResult;

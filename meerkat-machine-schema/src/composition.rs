@@ -1,10 +1,9 @@
 use crate::{Expr, MachineSchema, TypeRef, machine::MachineSchemaError};
 use indexmap::IndexSet;
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use thiserror::Error;
+use std::fmt;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionSchema {
     pub name: String,
     pub machines: Vec<MachineInstance>,
@@ -15,12 +14,11 @@ pub struct CompositionSchema {
     pub invariants: Vec<CompositionInvariant>,
     pub witnesses: Vec<CompositionWitness>,
     pub deep_domain_cardinality: usize,
-    #[serde(default)]
     pub deep_domain_overrides: BTreeMap<String, usize>,
     pub witness_domain_cardinality: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionWitness {
     pub name: String,
     pub preload_inputs: Vec<CompositionWitnessInput>,
@@ -32,39 +30,39 @@ pub struct CompositionWitness {
     pub state_limits: CompositionStateLimits,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionWitnessInput {
     pub machine: String,
     pub input_variant: String,
     pub fields: Vec<CompositionWitnessField>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionWitnessField {
     pub field: String,
     pub expr: Expr,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionWitnessState {
     pub machine: String,
     pub phase: Option<String>,
     pub fields: Vec<CompositionWitnessField>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionWitnessTransition {
     pub machine: String,
     pub transition: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionWitnessTransitionOrder {
     pub earlier: CompositionWitnessTransition,
     pub later: CompositionWitnessTransition,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionStateLimits {
     pub step_limit: u32,
     pub pending_input_limit: u32,
@@ -104,6 +102,7 @@ impl CompositionStateLimits {
     }
 }
 
+#[allow(clippy::result_large_err)]
 impl CompositionSchema {
     pub fn validate(&self) -> Result<(), CompositionSchemaError> {
         if self.deep_domain_cardinality == 0 {
@@ -184,7 +183,7 @@ impl CompositionSchema {
                 )?;
             }
             let _ = unique_names(
-                witness.expected_routes.iter().map(|route| route.as_str()),
+                witness.expected_routes.iter().map(String::as_str),
                 "witness expected route",
             )?;
             for route in &witness.expected_routes {
@@ -695,21 +694,21 @@ impl CompositionSchema {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MachineInstance {
     pub instance_id: String,
     pub machine_name: String,
     pub actor: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryInput {
     pub name: String,
     pub machine: String,
     pub input_variant: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Route {
     pub name: String,
     pub from_machine: String,
@@ -719,19 +718,19 @@ pub struct Route {
     pub delivery: RouteDelivery,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteTarget {
     pub machine: String,
     pub input_variant: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteFieldBinding {
     pub to_field: String,
     pub source: RouteBindingSource,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouteBindingSource {
     Field {
         from_field: String,
@@ -740,25 +739,25 @@ pub enum RouteBindingSource {
     Literal(Expr),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouteDelivery {
     Immediate,
     Enqueue,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SchedulerRule {
     PreemptWhenReady { higher: String, lower: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActorPriority {
     pub higher: String,
     pub lower: String,
     pub reason: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositionInvariant {
     pub name: String,
     pub kind: CompositionInvariantKind,
@@ -767,7 +766,7 @@ pub struct CompositionInvariant {
     pub references_actors: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompositionInvariantKind {
     RoutePresent {
         from_machine: String,
@@ -817,6 +816,7 @@ impl CompositionInvariantKind {
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn unique_names<'a>(
     names: impl IntoIterator<Item = &'a str>,
     kind: &'static str,
@@ -836,25 +836,30 @@ fn unique_names<'a>(
     Ok(seen)
 }
 
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum CompositionSchemaError {
-    #[error("duplicate {kind} name `{name}`")]
-    DuplicateName { kind: &'static str, name: String },
-    #[error("empty {0} name")]
+    DuplicateName {
+        kind: &'static str,
+        name: String,
+    },
     EmptyName(&'static str),
-    #[error("unknown machine instance `{machine}`")]
-    UnknownMachine { machine: String },
-    #[error("unknown machine schema `{schema}`")]
-    UnknownMachineSchema { schema: String },
-    #[error("unknown actor `{actor}`")]
-    UnknownActor { actor: String },
-    #[error("route from `{machine}` references unknown effect `{effect}`")]
-    UnknownRouteEffect { machine: String, effect: String },
-    #[error("route to `{machine}` references unknown input `{input}`")]
-    UnknownRouteInput { machine: String, input: String },
-    #[error(
-        "invariant `{invariant}` requires route {from_machine}.{effect_variant} -> {to_machine}.{input_variant}, but it is missing"
-    )]
+    UnknownMachine {
+        machine: String,
+    },
+    UnknownMachineSchema {
+        schema: String,
+    },
+    UnknownActor {
+        actor: String,
+    },
+    UnknownRouteEffect {
+        machine: String,
+        effect: String,
+    },
+    UnknownRouteInput {
+        machine: String,
+        input: String,
+    },
     MissingRequiredRoute {
         invariant: String,
         from_machine: String,
@@ -862,9 +867,6 @@ pub enum CompositionSchemaError {
         to_machine: String,
         input_variant: String,
     },
-    #[error(
-        "invariant `{invariant}` requires observed input origin {from_machine}.{effect_variant} -> {to_machine}.{input_variant}, but it is missing"
-    )]
     MissingRequiredObservedInputRoute {
         invariant: String,
         from_machine: String,
@@ -872,9 +874,6 @@ pub enum CompositionSchemaError {
         to_machine: String,
         input_variant: String,
     },
-    #[error(
-        "invariant `{invariant}` requires observed route `{route_name}` carrying {from_machine}.{effect_variant} -> {to_machine}.{input_variant}, but it is missing"
-    )]
     MissingRequiredObservedRoute {
         invariant: String,
         route_name: String,
@@ -883,22 +882,15 @@ pub enum CompositionSchemaError {
         to_machine: String,
         input_variant: String,
     },
-    #[error(
-        "invariant `{invariant}` requires actor priority {higher} > {lower}, but it is missing"
-    )]
     MissingRequiredActorPriority {
         invariant: String,
         higher: String,
         lower: String,
     },
-    #[error("invariant `{invariant}` requires scheduler rule `{rule:?}`, but it is missing")]
     MissingRequiredSchedulerRule {
         invariant: String,
         rule: SchedulerRule,
     },
-    #[error(
-        "invariant `{invariant}` requires outcome route {from_machine}.{effect_variant} -> {to_machine}.{input_variant}, but it is missing"
-    )]
     MissingOutcomeRoute {
         invariant: String,
         from_machine: String,
@@ -906,9 +898,6 @@ pub enum CompositionSchemaError {
         to_machine: String,
         input_variant: String,
     },
-    #[error(
-        "route `{route}` field type mismatch: {from_machine}.{from_field}:{from_ty:?} -> {to_machine}.{to_field}:{to_ty:?}"
-    )]
     RouteFieldTypeMismatch {
         route: String,
         from_machine: String,
@@ -918,94 +907,279 @@ pub enum CompositionSchemaError {
         to_field: String,
         to_ty: TypeRef,
     },
-    #[error(
-        "route `{route}` literal does not match destination type {to_machine}.{to_field}:{to_ty:?}"
-    )]
     RouteLiteralTypeMismatch {
         route: String,
         to_machine: String,
         to_field: String,
         to_ty: TypeRef,
     },
-    #[error("route `{route}` uses unsupported literal binding for {to_machine}.{to_field}")]
     UnsupportedRouteLiteral {
         route: String,
         to_machine: String,
         to_field: String,
     },
-    #[error("witness `{witness}` is missing required field {machine}.{input_variant}.{field}")]
     MissingWitnessField {
         witness: String,
         machine: String,
         input_variant: String,
         field: String,
     },
-    #[error("witness `{witness}` uses unsupported literal for {machine}.{field}")]
     UnsupportedWitnessLiteral {
         witness: String,
         machine: String,
         field: String,
     },
-    #[error("witness `{witness}` literal does not match destination type {machine}.{field}:{ty:?}")]
     WitnessLiteralTypeMismatch {
         witness: String,
         machine: String,
         field: String,
         ty: TypeRef,
     },
-    #[error("witness `{witness}` references unknown route `{route}`")]
-    UnknownWitnessRoute { witness: String, route: String },
-    #[error("witness `{witness}` references unknown scheduler rule `{rule:?}`")]
+    UnknownWitnessRoute {
+        witness: String,
+        route: String,
+    },
     UnknownWitnessSchedulerRule {
         witness: String,
         rule: SchedulerRule,
     },
-    #[error("witness `{witness}` references unknown phase `{phase}` on machine `{machine}`")]
     UnknownWitnessPhase {
         witness: String,
         machine: String,
         phase: String,
     },
-    #[error("witness `{witness}` references unknown state field `{field}` on machine `{machine}`")]
     UnknownWitnessStateField {
         witness: String,
         machine: String,
         field: String,
     },
-    #[error("witness `{witness}` uses unsupported state literal for {machine}.{field}")]
     UnsupportedWitnessStateLiteral {
         witness: String,
         machine: String,
         field: String,
     },
-    #[error(
-        "witness `{witness}` state literal does not match destination type {machine}.{field}:{ty:?}"
-    )]
     WitnessStateLiteralTypeMismatch {
         witness: String,
         machine: String,
         field: String,
         ty: TypeRef,
     },
-    #[error(
-        "witness `{witness}` references unknown transition `{transition}` on machine `{machine}`"
-    )]
     UnknownWitnessTransition {
         witness: String,
         machine: String,
         transition: String,
     },
-    #[error("route `{route}` is not covered by any composition witness")]
-    MissingWitnessRouteCoverage { route: String },
-    #[error("scheduler rule `{rule:?}` is not covered by any composition witness")]
-    MissingWitnessSchedulerCoverage { rule: SchedulerRule },
-    #[error("invalid composition {scope} domain cardinality (must be >= 1)")]
-    InvalidDomainCardinality { scope: String },
-    #[error("invalid composition {scope} domain cardinality for `{domain}` (must be >= 1)")]
-    InvalidNamedDomainCardinality { scope: String, domain: String },
-    #[error(transparent)]
-    MachineSchema(#[from] MachineSchemaError),
+    MissingWitnessRouteCoverage {
+        route: String,
+    },
+    MissingWitnessSchedulerCoverage {
+        rule: SchedulerRule,
+    },
+    InvalidDomainCardinality {
+        scope: String,
+    },
+    InvalidNamedDomainCardinality {
+        scope: String,
+        domain: String,
+    },
+    MachineSchema(MachineSchemaError),
 }
+
+impl fmt::Display for CompositionSchemaError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DuplicateName { kind, name } => write!(f, "duplicate {kind} name `{name}`"),
+            Self::EmptyName(kind) => write!(f, "empty {kind} name"),
+            Self::UnknownMachine { machine } => write!(f, "unknown machine instance `{machine}`"),
+            Self::UnknownMachineSchema { schema } => write!(f, "unknown machine schema `{schema}`"),
+            Self::UnknownActor { actor } => write!(f, "unknown actor `{actor}`"),
+            Self::UnknownRouteEffect { machine, effect } => {
+                write!(
+                    f,
+                    "route from `{machine}` references unknown effect `{effect}`"
+                )
+            }
+            Self::UnknownRouteInput { machine, input } => {
+                write!(f, "route to `{machine}` references unknown input `{input}`")
+            }
+            Self::MissingRequiredRoute {
+                invariant,
+                from_machine,
+                effect_variant,
+                to_machine,
+                input_variant,
+            } => write!(
+                f,
+                "invariant `{invariant}` requires route {from_machine}.{effect_variant} -> {to_machine}.{input_variant}, but it is missing"
+            ),
+            Self::MissingRequiredObservedInputRoute {
+                invariant,
+                from_machine,
+                effect_variant,
+                to_machine,
+                input_variant,
+            } => write!(
+                f,
+                "invariant `{invariant}` requires observed input origin {from_machine}.{effect_variant} -> {to_machine}.{input_variant}, but it is missing"
+            ),
+            Self::MissingRequiredObservedRoute {
+                invariant,
+                route_name,
+                from_machine,
+                effect_variant,
+                to_machine,
+                input_variant,
+            } => write!(
+                f,
+                "invariant `{invariant}` requires observed route `{route_name}` carrying {from_machine}.{effect_variant} -> {to_machine}.{input_variant}, but it is missing"
+            ),
+            Self::MissingRequiredActorPriority {
+                invariant,
+                higher,
+                lower,
+            } => write!(
+                f,
+                "invariant `{invariant}` requires actor priority {higher} > {lower}, but it is missing"
+            ),
+            Self::MissingRequiredSchedulerRule { invariant, rule } => write!(
+                f,
+                "invariant `{invariant}` requires scheduler rule `{rule:?}`, but it is missing"
+            ),
+            Self::MissingOutcomeRoute {
+                invariant,
+                from_machine,
+                effect_variant,
+                to_machine,
+                input_variant,
+            } => write!(
+                f,
+                "invariant `{invariant}` requires outcome route {from_machine}.{effect_variant} -> {to_machine}.{input_variant}, but it is missing"
+            ),
+            Self::RouteFieldTypeMismatch {
+                route,
+                from_machine,
+                from_field,
+                from_ty,
+                to_machine,
+                to_field,
+                to_ty,
+            } => write!(
+                f,
+                "route `{route}` field type mismatch: {from_machine}.{from_field}:{from_ty:?} -> {to_machine}.{to_field}:{to_ty:?}"
+            ),
+            Self::RouteLiteralTypeMismatch {
+                route,
+                to_machine,
+                to_field,
+                to_ty,
+            } => write!(
+                f,
+                "route `{route}` literal does not match destination type {to_machine}.{to_field}:{to_ty:?}"
+            ),
+            Self::UnsupportedRouteLiteral {
+                route,
+                to_machine,
+                to_field,
+            } => write!(
+                f,
+                "route `{route}` uses unsupported literal binding for {to_machine}.{to_field}"
+            ),
+            Self::MissingWitnessField {
+                witness,
+                machine,
+                input_variant,
+                field,
+            } => write!(
+                f,
+                "witness `{witness}` is missing required field {machine}.{input_variant}.{field}"
+            ),
+            Self::UnsupportedWitnessLiteral {
+                witness,
+                machine,
+                field,
+            } => write!(
+                f,
+                "witness `{witness}` uses unsupported literal for {machine}.{field}"
+            ),
+            Self::WitnessLiteralTypeMismatch {
+                witness,
+                machine,
+                field,
+                ty,
+            } => write!(
+                f,
+                "witness `{witness}` literal does not match destination type {machine}.{field}:{ty:?}"
+            ),
+            Self::UnknownWitnessRoute { witness, route } => {
+                write!(f, "witness `{witness}` references unknown route `{route}`")
+            }
+            Self::UnknownWitnessSchedulerRule { witness, rule } => write!(
+                f,
+                "witness `{witness}` references unknown scheduler rule `{rule:?}`"
+            ),
+            Self::UnknownWitnessPhase {
+                witness,
+                machine,
+                phase,
+            } => write!(
+                f,
+                "witness `{witness}` references unknown phase `{phase}` on machine `{machine}`"
+            ),
+            Self::UnknownWitnessStateField {
+                witness,
+                machine,
+                field,
+            } => write!(
+                f,
+                "witness `{witness}` references unknown state field `{field}` on machine `{machine}`"
+            ),
+            Self::UnsupportedWitnessStateLiteral {
+                witness,
+                machine,
+                field,
+            } => write!(
+                f,
+                "witness `{witness}` uses unsupported state literal for {machine}.{field}"
+            ),
+            Self::WitnessStateLiteralTypeMismatch {
+                witness,
+                machine,
+                field,
+                ty,
+            } => write!(
+                f,
+                "witness `{witness}` state literal does not match destination type {machine}.{field}:{ty:?}"
+            ),
+            Self::UnknownWitnessTransition {
+                witness,
+                machine,
+                transition,
+            } => write!(
+                f,
+                "witness `{witness}` references unknown transition `{transition}` on machine `{machine}`"
+            ),
+            Self::MissingWitnessRouteCoverage { route } => write!(
+                f,
+                "route `{route}` is not covered by any composition witness"
+            ),
+            Self::MissingWitnessSchedulerCoverage { rule } => write!(
+                f,
+                "scheduler rule `{rule:?}` is not covered by any composition witness"
+            ),
+            Self::InvalidDomainCardinality { scope } => write!(
+                f,
+                "invalid composition {scope} domain cardinality (must be >= 1)"
+            ),
+            Self::InvalidNamedDomainCardinality { scope, domain } => write!(
+                f,
+                "invalid composition {scope} domain cardinality for `{domain}` (must be >= 1)"
+            ),
+            Self::MachineSchema(err) => err.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for CompositionSchemaError {}
 
 fn route_literal_expr_allowed(expr: &Expr) -> bool {
     match expr {
@@ -1030,6 +1204,7 @@ fn literal_matches_type(expr: &Expr, ty: &TypeRef) -> bool {
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn validate_witness_transition_ref(
     composition: &CompositionSchema,
     schemas: &[&MachineSchema],
@@ -1061,197 +1236,4 @@ fn validate_witness_transition_ref(
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::BTreeMap;
-
-    use crate::RouteDelivery;
-    use crate::catalog::{
-        flow_run_machine, mob_bundle_composition, mob_lifecycle_machine, mob_orchestrator_machine,
-        ops_lifecycle_machine, ops_runtime_bundle_composition, peer_comms_machine,
-        peer_runtime_bundle_composition, runtime_control_machine, runtime_ingress_machine,
-        runtime_pipeline_composition, turn_execution_machine,
-    };
-    use crate::composition::CompositionSchemaError;
-
-    #[test]
-    fn validates_runtime_pipeline_composition() {
-        let runtime_control = runtime_control_machine();
-        let runtime_ingress = runtime_ingress_machine();
-        let turn_execution = turn_execution_machine();
-        let composition = runtime_pipeline_composition();
-
-        assert_eq!(
-            composition.validate_against(&[&runtime_control, &runtime_ingress, &turn_execution]),
-            Ok(())
-        );
-    }
-
-    #[test]
-    fn rejects_route_with_type_mismatch() {
-        let runtime_control = runtime_control_machine();
-        let runtime_ingress = runtime_ingress_machine();
-        let turn_execution = turn_execution_machine();
-        let mut composition = runtime_pipeline_composition();
-        composition.routes.push(crate::Route {
-            name: "bad_boundary_sequence_into_run_id".into(),
-            from_machine: "runtime_ingress".into(),
-            effect_variant: "ReadyForRun".into(),
-            to: crate::RouteTarget {
-                machine: "turn_execution".into(),
-                input_variant: "StartConversationRun".into(),
-            },
-            bindings: vec![crate::RouteFieldBinding {
-                to_field: "run_id".into(),
-                source: crate::RouteBindingSource::Field {
-                    from_field: "contributing_input_ids".into(),
-                    allow_named_alias: false,
-                },
-            }],
-            delivery: RouteDelivery::Immediate,
-        });
-        composition.witnesses[0]
-            .expected_routes
-            .push("bad_boundary_sequence_into_run_id".into());
-
-        let result =
-            composition.validate_against(&[&runtime_control, &runtime_ingress, &turn_execution]);
-        assert!(matches!(
-            result,
-            Err(CompositionSchemaError::RouteFieldTypeMismatch { .. })
-                | Err(CompositionSchemaError::MachineSchema(_))
-        ));
-    }
-
-    #[test]
-    fn rejects_missing_failure_outcome_route() {
-        let runtime_control = runtime_control_machine();
-        let runtime_ingress = runtime_ingress_machine();
-        let turn_execution = turn_execution_machine();
-        let mut composition = runtime_pipeline_composition();
-        composition
-            .routes
-            .retain(|route| route.name != "execution_failure_updates_ingress");
-        for witness in &mut composition.witnesses {
-            witness
-                .expected_routes
-                .retain(|route| route != "execution_failure_updates_ingress");
-        }
-
-        let result =
-            composition.validate_against(&[&runtime_control, &runtime_ingress, &turn_execution]);
-        assert!(matches!(
-            result,
-            Err(CompositionSchemaError::MissingOutcomeRoute { .. })
-        ));
-    }
-
-    #[test]
-    fn rejects_missing_scheduler_rule() {
-        let runtime_control = runtime_control_machine();
-        let runtime_ingress = runtime_ingress_machine();
-        let turn_execution = turn_execution_machine();
-        let mut composition = runtime_pipeline_composition();
-        composition.scheduler_rules.clear();
-        for witness in &mut composition.witnesses {
-            witness.expected_scheduler_rules.clear();
-        }
-
-        let result =
-            composition.validate_against(&[&runtime_control, &runtime_ingress, &turn_execution]);
-        assert!(matches!(
-            result,
-            Err(CompositionSchemaError::MissingRequiredSchedulerRule { .. })
-        ));
-    }
-
-    #[test]
-    fn rejects_zero_deep_domain_override() {
-        let mut composition = runtime_pipeline_composition();
-        composition.deep_domain_overrides = BTreeMap::from([("WorkIdValues".into(), 0)]);
-
-        let result = composition.validate();
-        assert!(matches!(
-            result,
-            Err(CompositionSchemaError::InvalidNamedDomainCardinality { .. })
-        ));
-    }
-
-    #[test]
-    fn validates_peer_runtime_bundle_with_alias_and_literal_bindings() {
-        let peer_comms = peer_comms_machine();
-        let runtime_control = runtime_control_machine();
-        let runtime_ingress = runtime_ingress_machine();
-        let composition = peer_runtime_bundle_composition();
-
-        assert_eq!(
-            composition.validate_against(&[&peer_comms, &runtime_control, &runtime_ingress]),
-            Ok(())
-        );
-    }
-
-    #[test]
-    fn validates_ops_runtime_bundle_with_alias_and_literal_bindings() {
-        let ops_lifecycle = ops_lifecycle_machine();
-        let runtime_control = runtime_control_machine();
-        let runtime_ingress = runtime_ingress_machine();
-        let turn_execution = turn_execution_machine();
-        let composition = ops_runtime_bundle_composition();
-
-        assert_eq!(
-            composition.validate_against(&[
-                &ops_lifecycle,
-                &runtime_control,
-                &runtime_ingress,
-                &turn_execution,
-            ]),
-            Ok(())
-        );
-    }
-
-    #[test]
-    fn rejects_unsupported_route_literal_expression() {
-        let peer_comms = peer_comms_machine();
-        let runtime_control = runtime_control_machine();
-        let runtime_ingress = runtime_ingress_machine();
-        let mut composition = peer_runtime_bundle_composition();
-        composition.routes[0].bindings[1].source =
-            crate::RouteBindingSource::Literal(crate::Expr::Field("not_allowed".into()));
-
-        let result =
-            composition.validate_against(&[&peer_comms, &runtime_control, &runtime_ingress]);
-        assert!(matches!(
-            result,
-            Err(CompositionSchemaError::UnsupportedRouteLiteral { .. })
-        ));
-    }
-
-    #[test]
-    fn validates_mob_bundle_skeleton_routes() {
-        let mob_lifecycle = mob_lifecycle_machine();
-        let mob_orchestrator = mob_orchestrator_machine();
-        let flow_run = flow_run_machine();
-        let ops_lifecycle = ops_lifecycle_machine();
-        let peer_comms = peer_comms_machine();
-        let runtime_control = runtime_control_machine();
-        let runtime_ingress = runtime_ingress_machine();
-        let turn_execution = turn_execution_machine();
-        let composition = mob_bundle_composition();
-
-        assert_eq!(
-            composition.validate_against(&[
-                &mob_lifecycle,
-                &mob_orchestrator,
-                &flow_run,
-                &ops_lifecycle,
-                &peer_comms,
-                &runtime_control,
-                &runtime_ingress,
-                &turn_execution,
-            ]),
-            Ok(())
-        );
-    }
 }

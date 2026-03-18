@@ -25,6 +25,10 @@
       "name": "session/archive"
     },
     {
+      "description": "Queue a runtime-backed external event",
+      "name": "session/external_event"
+    },
+    {
       "description": "Start a new turn on existing session",
       "name": "turn/start"
     },

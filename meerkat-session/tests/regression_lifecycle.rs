@@ -13,7 +13,7 @@ use meerkat_core::service::{
     SessionError, SessionQuery, SessionService, SessionServiceControlExt, StartTurnRequest,
     TurnToolOverlay,
 };
-use meerkat_core::types::{RunResult, SessionId, Usage};
+use meerkat_core::types::{HandlingMode, RunResult, SessionId, Usage};
 use meerkat_session::ephemeral::SessionSnapshot;
 use meerkat_session::{EphemeralSessionService, SessionAgent, SessionAgentBuilder};
 use std::collections::BTreeMap;
@@ -264,6 +264,7 @@ fn create_req(prompt: &str) -> CreateSessionRequest {
     CreateSessionRequest {
         model: "mock".to_string(),
         prompt: prompt.to_string().into(),
+        render_metadata: None,
         system_prompt: None,
         max_tokens: None,
         event_tx: None,
@@ -292,6 +293,8 @@ fn create_req_with_labels(prompt: &str, labels: BTreeMap<String, String>) -> Cre
 fn turn_req(prompt: &str) -> StartTurnRequest {
     StartTurnRequest {
         prompt: prompt.to_string().into(),
+        render_metadata: None,
+        handling_mode: HandlingMode::Queue,
         event_tx: None,
         host_mode: false,
         skill_references: None,
@@ -427,18 +430,7 @@ async fn interrupt_during_slow_turn_returns_promptly() {
 
     // Defer initial turn so we can control the slow turn
     let created = service
-        .create_session(CreateSessionRequest {
-            initial_turn: InitialTurnPolicy::Defer,
-            model: "mock".to_string(),
-            prompt: "slow".to_string().into(),
-            system_prompt: None,
-            max_tokens: None,
-            event_tx: None,
-            host_mode: false,
-            skill_references: None,
-            build: None,
-            labels: None,
-        })
+        .create_session(create_req_deferred("slow"))
         .await
         .unwrap();
     let sid = created.session_id;
@@ -497,18 +489,7 @@ async fn interrupt_host_mode_returns_without_blocking() {
 
     // Create with deferred turn so we can start host_mode turn manually
     let created = service
-        .create_session(CreateSessionRequest {
-            initial_turn: InitialTurnPolicy::Defer,
-            model: "mock".to_string(),
-            prompt: "host".to_string().into(),
-            system_prompt: None,
-            max_tokens: None,
-            event_tx: None,
-            host_mode: false,
-            skill_references: None,
-            build: None,
-            labels: None,
-        })
+        .create_session(create_req_deferred("host"))
         .await
         .unwrap();
     let sid = created.session_id;
@@ -520,12 +501,8 @@ async fn interrupt_host_mode_returns_without_blocking() {
         svc.start_turn(
             &sid2,
             StartTurnRequest {
-                prompt: "Host mode turn".to_string().into(),
-                event_tx: None,
                 host_mode: true,
-                skill_references: None,
-                flow_tool_overlay: None,
-                additional_instructions: None,
+                ..turn_req("Host mode turn")
             },
         )
         .await
@@ -555,18 +532,7 @@ async fn concurrent_turn_on_busy_session_returns_busy() {
     let service = make_slow_service(200);
 
     let created = service
-        .create_session(CreateSessionRequest {
-            initial_turn: InitialTurnPolicy::Defer,
-            model: "mock".to_string(),
-            prompt: "busy".to_string().into(),
-            system_prompt: None,
-            max_tokens: None,
-            event_tx: None,
-            host_mode: false,
-            skill_references: None,
-            build: None,
-            labels: None,
-        })
+        .create_session(create_req_deferred("busy"))
         .await
         .unwrap();
     let sid = created.session_id;
@@ -873,18 +839,7 @@ async fn failed_turn_returns_agent_error() {
 
     // Defer so we can control the failing turn
     let created = service
-        .create_session(CreateSessionRequest {
-            initial_turn: InitialTurnPolicy::Defer,
-            model: "mock".to_string(),
-            prompt: "will fail".to_string().into(),
-            system_prompt: None,
-            max_tokens: None,
-            event_tx: None,
-            host_mode: false,
-            skill_references: None,
-            build: None,
-            labels: None,
-        })
+        .create_session(create_req_deferred("will fail"))
         .await
         .unwrap();
     let sid = created.session_id;

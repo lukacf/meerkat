@@ -36,3 +36,11 @@ The anti-drift rule is:
    long-term semantic source of truth
 3. CI must reject any drift between machine authority and downstream
    code/docs/verification artifacts
+
+The public-change propagation rule is:
+
+1. canonical contract-source edits land with regenerated `artifacts/schemas/*`
+2. the same slice regenerates `sdks/python/meerkat/generated/*` and
+   `sdks/typescript/src/generated/*`
+3. affected docs/examples and `CHANGELOG.md` update in the same slice instead
+   of relying on follow-up cleanup

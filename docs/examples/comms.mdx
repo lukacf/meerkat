@@ -1,10 +1,10 @@
 ---
-title: "Comms & sub-agents"
-description: "Inter-agent messaging, host mode, external event injection, and sub-agent orchestration."
+title: "Comms & mobs"
+description: "Inter-agent messaging, host mode, external event injection, and mob orchestration."
 icon: "tower-broadcast"
 ---
 
-For the full guide, see [Comms](/guides/comms) and [Sub-agents](/guides/sub-agents).
+For the full guide, see [Comms](/guides/comms) and the `0.5` mob orchestration architecture notes.
 
 ## Host mode
 
@@ -258,88 +258,6 @@ Push external events from outside systems into a running agent. Events are drain
   </Tab>
 </Tabs>
 
-## Enable sub-agents
+## Delegate through mobs
 
-Give the agent the ability to spawn, fork, and manage independent sub-agents running concurrently in background tasks.
-
-<Tabs>
-  <Tab title="CLI">
-    ```bash
-    rkat run --enable-subagents --enable-builtins \
-      "Break this task into sub-tasks and delegate."
-    ```
-  </Tab>
-  <Tab title="JSON-RPC">
-    ```json
-    {
-      "jsonrpc": "2.0", "id": 7,
-      "method": "session/create",
-      "params": {
-        "prompt": "Break this task into sub-tasks and delegate.",
-        "enable_subagents": true
-      }
-    }
-    ```
-  </Tab>
-  <Tab title="REST">
-    ```bash
-    curl -X POST http://localhost:8080/sessions \
-      -H "Content-Type: application/json" \
-      -d '{
-        "prompt": "Break this task into sub-tasks and delegate.",
-        "enable_subagents": true
-      }'
-    ```
-  </Tab>
-  <Tab title="MCP">
-    ```json
-    {"name": "meerkat_run", "arguments": {
-      "prompt": "Research these topics in parallel",
-      "enable_builtins": true,
-      "enable_subagents": true
-    }}
-    ```
-  </Tab>
-  <Tab title="Python">
-    ```python
-    session = await client.create_session(
-        "Break this task into sub-tasks and delegate.",
-        enable_subagents=True,
-    )
-    ```
-  </Tab>
-  <Tab title="TypeScript">
-    ```typescript
-    const session = await client.createSession(
-      "Break this task into sub-tasks and delegate.",
-      { enableSubagents: true },
-    );
-    ```
-  </Tab>
-  <Tab title="Rust">
-    ```rust
-    let factory = AgentFactory::new(store_path)
-        .builtins(true)
-        .subagents(true);
-
-    let agent = factory.build_agent(
-        AgentBuildConfig::new("claude-sonnet-4-5"),
-        &config,
-    ).await?;
-    ```
-  </Tab>
-</Tabs>
-
-## Sub-agent tools
-
-When sub-agents are enabled, the agent gains these tools automatically:
-
-| Tool | Description |
-|------|-------------|
-| `agent_spawn` | Create a sub-agent with a clean context (only the prompt). |
-| `agent_fork` | Create a sub-agent that inherits the full conversation history. |
-| `agent_status` | Get the status and output of a sub-agent by ID. |
-| `agent_cancel` | Cancel a running sub-agent. |
-| `agent_list` | List all sub-agents and their current states. |
-
-Sub-agents run concurrently with isolated budgets. A Claude parent can spawn GPT or Gemini children. The parent monitors, collects results, and cancels children as needed.
+In `0.5`, delegated and multi-agent work routes through mobs rather than a separate sub-agent tool family. Use mob member refs, flow runs, and peer messaging to coordinate temporary discussion groups or longer-lived orchestration topologies.

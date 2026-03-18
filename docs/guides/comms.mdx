@@ -362,7 +362,6 @@ mode = "inproc"                    # "inproc", "tcp", or "uds"
 address = "0.0.0.0:4200"          # Required when mode = "tcp" or "uds"
 auth = "none"                      # "none" (open) or "ed25519"
 event_address = "127.0.0.1:4201"  # Plain-text event listener (requires auth = "none")
-auto_enable_for_subagents = false
 ```
 
 | Field | Type | Default | Description |
@@ -371,7 +370,6 @@ auto_enable_for_subagents = false
 | `address` | `Option<String>` | `None` | Listen address for signed agent-to-agent comms |
 | `auth` | `CommsAuthMode` | `Open` | Auth mode: `"none"` (open) or `"ed25519"` |
 | `event_address` | `Option<String>` | `None` | Plain-text event listener address (requires `auth = "none"`) |
-| `auto_enable_for_subagents` | `bool` | `false` | Whether to auto-enable comms for spawned sub-agents |
 </Accordion>
 
 <Accordion title="CoreCommsConfig (internal)">
@@ -516,7 +514,7 @@ let build_config = AgentBuildConfig {
     host_mode: true,
     comms_name: Some("my-agent".to_string()),
     peer_meta: Some(PeerMeta::default()
-        .with_description("Coordinates sub-agents")),
+        .with_description("Coordinates peer agents")),
     ..AgentBuildConfig::new("claude-sonnet-4-5")
 };
 
@@ -629,17 +627,15 @@ Inline summaries show up to 10 peer names per category (`connected` / `retired`)
 
 ## External event ingestion
 
-External systems can push plain-text events into a running agent's inbox without Ed25519 authentication. Events are drained at turn boundaries (or continuously in host mode) and injected as user messages.
-
-All events flow through the `EventInjector` trait into the bounded inbox, regardless of source.
+External systems can push events into a running agent without Ed25519 authentication. Surface-level convenience routes now admit those events through runtime-owned `ExternalEvent` inputs instead of a separate injector-owned execution path.
 
 ### Event sources
 
 | Source | Surface | How to use | Auth |
 |--------|---------|-----------|------|
 | Stdin | CLI | `--stdin` flag (with `--host`) | None |
-| Webhook | REST | `POST /sessions/{id}/event` | `RKAT_WEBHOOK_SECRET` env var |
-| RPC | JSON-RPC | `comms/send` method | None (implicit) |
+| Webhook | REST | `POST /sessions/{id}/external-events` | `RKAT_WEBHOOK_SECRET` env var |
+| RPC | JSON-RPC | `session/external_event` method | None (implicit) |
 | TCP listener | Comms | Configure `event_address` in config | `auth = "none"` required |
 | UDS listener | Comms | Configure `event_address` in config | `auth = "none"` required |
 
@@ -664,39 +660,38 @@ Push events to a running session via HTTP. Auth is optional via `RKAT_WEBHOOK_SE
 
 ```bash
 # Without auth (localhost only)
-curl -X POST http://localhost:8080/sessions/sid_abc/event \
+curl -X POST http://localhost:8080/sessions/sid_abc/external-events \
   -H "Content-Type: application/json" \
   -d '{"alert": "CPU spike", "host": "web-03"}'
 
 # With webhook secret
 RKAT_WEBHOOK_SECRET=my-secret  # set on server
-curl -X POST http://localhost:8080/sessions/sid_abc/event \
+curl -X POST http://localhost:8080/sessions/sid_abc/external-events \
   -H "Content-Type: application/json" \
   -H "X-Webhook-Secret: my-secret" \
   -d '{"alert": "deployment failed"}'
 ```
 
-Returns `202 Accepted` with `{"queued": true}`. Returns `503` if inbox full, `404` if session not found.
+Returns `202 Accepted` with `{"queued": true}`. Runtime admission failures are returned as ordinary REST errors.
 
-### RPC comms/send
+### RPC session/external_event
 
-Send a comms command to a running session via JSON-RPC.
+Queue a runtime-backed external event for a running session via JSON-RPC.
 
 ```json
 {
   "jsonrpc": "2.0",
   "id": 1,
-  "method": "comms/send",
+  "method": "session/external_event",
   "params": {
     "session_id": "sid_abc123",
-    "kind": "input",
-    "body": "{\"alert\": \"build failed\"}",
+    "payload": {"alert": "build failed"},
     "source": "rpc"
   }
 }
 ```
 
-The optional `source` field is prepended as `[source: ci-pipeline]` metadata. Returns `{"queued": true}` on success.
+The optional `source` field becomes the runtime external-event source. The method returns a runtime acceptance envelope on success.
 
 ### TCP/UDS plain event listeners
 
@@ -773,4 +768,4 @@ The current implementation does not include nonce-based replay prevention.
 
 - [Built-in tools reference](/reference/builtin-tools) - comms tool parameter details
 - [Configuration: comms](/concepts/configuration) - config file settings
-- [Examples: comms](/examples/comms) - host mode, messaging, sub-agents across surfaces
+- [Examples: comms](/examples/comms) - host mode and messaging across surfaces

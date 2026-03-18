@@ -45,7 +45,7 @@ impl TerminalizationTarget {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum TerminalizationOutcome {
+pub enum TerminalizationOutcome {
     Transitioned,
     Noop,
 }

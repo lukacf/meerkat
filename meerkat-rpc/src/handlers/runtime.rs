@@ -242,6 +242,17 @@ mod tests {
             })
         }
 
+        async fn accept_input_with_completion(
+            &self,
+            _session_id: &SessionId,
+            _input: Input,
+        ) -> Result<(AcceptOutcome, Option<meerkat_runtime::CompletionHandle>), RuntimeDriverError>
+        {
+            Err(RuntimeDriverError::NotReady {
+                state: RuntimeState::Retired,
+            })
+        }
+
         async fn runtime_state(
             &self,
             _session_id: &SessionId,

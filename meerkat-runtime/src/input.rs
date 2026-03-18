@@ -7,6 +7,8 @@
 use chrono::{DateTime, Utc};
 use meerkat_core::lifecycle::InputId;
 use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
+use meerkat_core::ops::{OpEvent, OperationId};
+use meerkat_core::types::HandlingMode;
 use serde::{Deserialize, Serialize};
 
 use crate::identifiers::{
@@ -102,10 +104,10 @@ pub enum Input {
     FlowStep(FlowStepInput),
     /// External event input.
     ExternalEvent(ExternalEventInput),
-    /// System-generated input (compaction, etc.).
-    SystemGenerated(SystemGeneratedInput),
-    /// Projection-derived input.
-    Projected(ProjectedInput),
+    /// Explicit runtime continuation work.
+    Continuation(ContinuationInput),
+    /// Explicit non-content operation/lifecycle input.
+    Operation(OperationInput),
 }
 
 impl Input {
@@ -116,8 +118,8 @@ impl Input {
             Input::Peer(i) => &i.header,
             Input::FlowStep(i) => &i.header,
             Input::ExternalEvent(i) => &i.header,
-            Input::SystemGenerated(i) => &i.header,
-            Input::Projected(i) => &i.header,
+            Input::Continuation(i) => &i.header,
+            Input::Operation(i) => &i.header,
         }
     }
 
@@ -143,8 +145,18 @@ impl Input {
             },
             Input::FlowStep(_) => KindId::new("flow_step"),
             Input::ExternalEvent(_) => KindId::new("external_event"),
-            Input::SystemGenerated(_) => KindId::new("system_generated"),
-            Input::Projected(_) => KindId::new("projected"),
+            Input::Continuation(_) => KindId::new("continuation"),
+            Input::Operation(_) => KindId::new("operation"),
+        }
+    }
+
+    /// Handling-mode hint for ordinary work admitted through the runtime.
+    pub fn handling_mode(&self) -> Option<HandlingMode> {
+        match self {
+            Input::Prompt(prompt) => prompt.turn_metadata.as_ref()?.handling_mode,
+            Input::FlowStep(flow_step) => flow_step.turn_metadata.as_ref()?.handling_mode,
+            Input::Continuation(continuation) => Some(continuation.handling_mode),
+            _ => None,
         }
     }
 }
@@ -297,26 +309,65 @@ pub struct ExternalEventInput {
     pub payload: serde_json::Value,
 }
 
-/// System-generated input (e.g., compaction summary).
+/// Explicit continuation request that asks the runtime to keep draining
+/// ordinary work after a boundary-local event (for example, terminal peer
+/// responses injected into session state).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SystemGeneratedInput {
+pub struct ContinuationInput {
     pub header: InputHeader,
-    /// What generated this input.
-    pub generator: String,
-    /// Content.
-    pub content: String,
+    /// Stable reason for the continuation request.
+    pub reason: String,
+    /// Ordinary-work handling mode for the continuation.
+    #[serde(default)]
+    pub handling_mode: HandlingMode,
+    /// Optional request/correlation handle tied to the continuation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
 }
 
-/// Projection-derived input (generated from RuntimeEvent by projection rules).
+impl ContinuationInput {
+    /// Build the common runtime-owned continuation used after terminal peer
+    /// response injection.
+    pub fn terminal_peer_response(reason: impl Into<String>) -> Self {
+        Self::terminal_peer_response_for_request(reason, None)
+    }
+
+    /// Build the common runtime-owned continuation used after terminal peer
+    /// response injection, preserving the correlated request when known.
+    pub fn terminal_peer_response_for_request(
+        reason: impl Into<String>,
+        request_id: Option<String>,
+    ) -> Self {
+        Self {
+            header: InputHeader {
+                id: meerkat_core::lifecycle::InputId::new(),
+                timestamp: chrono::Utc::now(),
+                source: InputOrigin::System,
+                durability: InputDurability::Ephemeral,
+                visibility: InputVisibility {
+                    transcript_eligible: false,
+                    operator_eligible: false,
+                },
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            reason: reason.into(),
+            handling_mode: HandlingMode::Steer,
+            request_id,
+        }
+    }
+}
+
+/// Explicit operation/lifecycle input admitted through runtime instead of
+/// being smuggled through transcript projections or peer-only paths.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProjectedInput {
+pub struct OperationInput {
     pub header: InputHeader,
-    /// The projection rule that created this.
-    pub rule_id: String,
-    /// Source event ID.
-    pub source_event_id: String,
-    /// Projected content.
-    pub content: String,
+    /// Stable operation identifier.
+    pub operation_id: OperationId,
+    /// Typed lifecycle event for the operation.
+    pub event: OpEvent,
 }
 
 #[cfg(test)]
@@ -446,33 +497,40 @@ mod tests {
     }
 
     #[test]
-    fn system_generated_input_serde() {
-        let input = Input::SystemGenerated(SystemGeneratedInput {
-            header: make_header(),
-            generator: "compactor".into(),
-            content: "summary text".into(),
-        });
+    fn continuation_input_serde() {
+        let input = Input::Continuation(ContinuationInput::terminal_peer_response_for_request(
+            "terminal peer response",
+            Some("req-1".into()),
+        ));
         let json = serde_json::to_value(&input).unwrap();
-        assert_eq!(json["input_type"], "system_generated");
+        assert_eq!(json["input_type"], "continuation");
+        assert_eq!(json["request_id"], "req-1");
         let parsed: Input = serde_json::from_value(json).unwrap();
-        assert!(matches!(parsed, Input::SystemGenerated(_)));
+        match parsed {
+            Input::Continuation(continuation) => {
+                assert_eq!(continuation.request_id.as_deref(), Some("req-1"));
+                assert_eq!(continuation.handling_mode, HandlingMode::Steer);
+            }
+            other => panic!("Expected Continuation, got {other:?}"),
+        }
     }
 
     #[test]
-    fn projected_input_serde() {
-        let input = Input::Projected(ProjectedInput {
+    fn operation_input_serde() {
+        let input = Input::Operation(OperationInput {
             header: InputHeader {
                 durability: InputDurability::Derived,
                 ..make_header()
             },
-            rule_id: "rule-1".into(),
-            source_event_id: "evt-1".into(),
-            content: "projected content".into(),
+            operation_id: OperationId::new(),
+            event: OpEvent::Cancelled {
+                id: OperationId::new(),
+            },
         });
         let json = serde_json::to_value(&input).unwrap();
-        assert_eq!(json["input_type"], "projected");
+        assert_eq!(json["input_type"], "operation");
         let parsed: Input = serde_json::from_value(json).unwrap();
-        assert!(matches!(parsed, Input::Projected(_)));
+        assert!(matches!(parsed, Input::Operation(_)));
     }
 
     #[test]
@@ -503,6 +561,23 @@ mod tests {
             blocks: None,
         });
         assert_eq!(peer_req.kind_id().0, "peer_request");
+
+        let continuation = Input::Continuation(ContinuationInput {
+            header: make_header(),
+            reason: "continue".into(),
+            handling_mode: HandlingMode::Steer,
+            request_id: None,
+        });
+        assert_eq!(continuation.kind_id().0, "continuation");
+
+        let operation = Input::Operation(OperationInput {
+            header: make_header(),
+            operation_id: OperationId::new(),
+            event: OpEvent::Cancelled {
+                id: OperationId::new(),
+            },
+        });
+        assert_eq!(operation.kind_id().0, "operation");
     }
 
     #[test]

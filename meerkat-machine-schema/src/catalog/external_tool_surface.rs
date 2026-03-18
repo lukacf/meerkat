@@ -946,7 +946,7 @@ fn lookup_string_helper(
     };
     let lookup = Expr::MapGet {
         map: Box::new(Expr::Field(map_field.into())),
-        key: Box::new(key.clone()),
+        key: Box::new(key),
     };
     HelperSchema {
         name: name.into(),
@@ -968,7 +968,7 @@ fn lookup_u64_helper(name: &str, map_field: &str) -> HelperSchema {
     };
     let lookup = Expr::MapGet {
         map: Box::new(Expr::Field(map_field.into())),
-        key: Box::new(key.clone()),
+        key: Box::new(key),
     };
     HelperSchema {
         name: name.into(),

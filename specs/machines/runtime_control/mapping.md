@@ -75,6 +75,8 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `runtime_state`: `meerkat-runtime/src/runtime_state.rs` — runtime lifecycle state precursor
 - `runtime_state_machine`: `meerkat-runtime/src/state_machine.rs` — runtime control reducer precursor
 - `runtime_loop`: `meerkat-runtime/src/runtime_loop.rs` — control-plane select loop and run coordination precursor
+- `runtime_control_plane`: `meerkat-runtime/src/control_plane.rs` — stop/preemption seam and completion-resolution precursor
+- `runtime_session_adapter`: `meerkat-runtime/src/session_adapter.rs` — surface-facing lifecycle and completion owner precursor
 
 ### Scenarios
 - `control-preempts-ingress` — control commands preempt ordinary ingress work
@@ -82,129 +84,130 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `prompt-steer` — steered ordinary work drains into the active run at the earliest admissible boundary
 - `begin-run-complete` — runtime transitions idle to running to idle for a completed run
 - `retire-stop-destroy` — runtime transitions through retire/stop/destroy commands without reopening ordinary work
+- `reset-terminates-waiters` — reset abandons pending work and resolves completion waiters exactly once
 
 ### Transitions
 - `Initialize`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `control-preempts-ingress`
 - `BeginRunFromIdle`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `begin-run-complete`
 - `BeginRunFromRetired`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
-  - scenarios: `retire-stop-destroy`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `retire-stop-destroy`, `reset-terminates-waiters`
 - `RunCompleted`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `begin-run-complete`
 - `RunFailed`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `begin-run-complete`
 - `RunCancelled`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `begin-run-complete`
 - `RecoverRequestedFromIdle`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
-  - scenarios: `retire-stop-destroy`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `retire-stop-destroy`, `reset-terminates-waiters`
 - `RecoverRequestedFromRunning`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
-  - scenarios: `retire-stop-destroy`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `retire-stop-destroy`, `reset-terminates-waiters`
 - `RecoverySucceeded`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
-  - scenarios: `retire-stop-destroy`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `retire-stop-destroy`, `reset-terminates-waiters`
 - `RetireRequestedFromIdle`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
-  - scenarios: `retire-stop-destroy`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `retire-stop-destroy`, `reset-terminates-waiters`
 - `RetireRequestedFromRunning`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
-  - scenarios: `retire-stop-destroy`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `retire-stop-destroy`, `reset-terminates-waiters`
 - `ResetRequested`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
-  - scenarios: `retire-stop-destroy`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `retire-stop-destroy`, `reset-terminates-waiters`
 - `StopRequested`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
-  - scenarios: `retire-stop-destroy`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `retire-stop-destroy`, `reset-terminates-waiters`
 - `DestroyRequested`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
-  - scenarios: `retire-stop-destroy`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `retire-stop-destroy`, `reset-terminates-waiters`
 - `ResumeRequested`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
-  - scenarios: `retire-stop-destroy`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `retire-stop-destroy`, `reset-terminates-waiters`
 - `SubmitWorkFromIdle`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `control-preempts-ingress`
 - `SubmitWorkFromRunning`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `begin-run-complete`
 - `AdmissionAcceptedIdleQueue`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `control-preempts-ingress`
 - `AdmissionAcceptedIdleSteer`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `control-preempts-ingress`
 - `AdmissionAcceptedRunningQueue`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `begin-run-complete`
 - `AdmissionAcceptedRunningSteer`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `begin-run-complete`
 - `AdmissionRejectedIdle`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `control-preempts-ingress`
 - `AdmissionRejectedRunning`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `begin-run-complete`
 - `AdmissionDeduplicatedIdle`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `control-preempts-ingress`
 - `AdmissionDeduplicatedRunning`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `begin-run-complete`
 - `ExternalToolDeltaReceivedIdle`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `control-preempts-ingress`
 - `ExternalToolDeltaReceivedRunning`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `begin-run-complete`
 - `ExternalToolDeltaReceivedRecovering`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
-  - scenarios: `retire-stop-destroy`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `retire-stop-destroy`, `reset-terminates-waiters`
 - `ExternalToolDeltaReceivedRetired`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
-  - scenarios: `retire-stop-destroy`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `retire-stop-destroy`, `reset-terminates-waiters`
 
 ### Effects
 - `ResolveAdmission`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `control-preempts-ingress`
 - `SubmitAdmittedIngressEffect`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `control-preempts-ingress`
 - `SubmitRunPrimitive`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `begin-run-complete`
 - `SignalWake`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `control-preempts-ingress`
 - `SignalImmediateProcess`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `control-preempts-ingress`
 - `EmitRuntimeNotice`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `begin-run-complete`
 - `ResolveCompletionAsTerminated`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `control-preempts-ingress`
 - `ApplyControlPlaneCommand`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `control-preempts-ingress`
 
 ### Invariants
 - `running_implies_active_run`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `begin-run-complete`
 - `active_run_only_while_running_or_retired`
-  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`
-  - scenarios: `retire-stop-destroy`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `retire-stop-destroy`, `reset-terminates-waiters`
 
 
 <!-- GENERATED_COVERAGE_END -->

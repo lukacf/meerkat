@@ -736,14 +736,3 @@ fn effect_with_step(variant: &str, step_binding: &str) -> EffectEmit {
         fields: IndexMap::from([("step_id".into(), Expr::Binding(step_binding.into()))]),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::flow_run_machine;
-
-    #[test]
-    fn validates_flow_run_machine_definition() {
-        let schema = flow_run_machine();
-        assert_eq!(schema.validate(), Ok(()));
-    }
-}

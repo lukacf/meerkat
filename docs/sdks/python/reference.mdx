@@ -6,7 +6,7 @@ icon: "book"
 
 ## RunResult
 
-`RunResult` is returned by `client.create_session()`, `session.turn()`, and `session.invoke_skill()`. It is also available as `events.result` after consuming an `EventStream`.
+`RunResult` is returned by `session.turn()`, `session.invoke_skill()`, and `deferred.start_turn()`. Session creation returns runtime-backed `Session` or `DeferredSession` wrappers, and the latest `RunResult` remains available through `session.last_result` or `events.result` after consuming an `EventStream`.
 
 ```python
 from meerkat import RunResult
@@ -21,6 +21,50 @@ from meerkat import RunResult
 <ResponseField name="structured_output" type="Any | None">Parsed structured output, if an `output_schema` was provided.</ResponseField>
 <ResponseField name="schema_warnings" type="list[SchemaWarning] | None">Schema validation warnings emitted by the provider.</ResponseField>
 <ResponseField name="skill_diagnostics" type="SkillRuntimeDiagnostics | None">Runtime diagnostics from the skill subsystem, when present.</ResponseField>
+
+---
+
+## Session
+
+`client.create_session()` returns a runtime-backed `Session` wrapper.
+
+```python
+from meerkat import Session
+```
+
+<ResponseField name="id" type="str">Stable session UUID used by the runtime.</ResponseField>
+<ResponseField name="ref" type="str | None">Optional human-readable session reference.</ResponseField>
+<ResponseField name="text" type="str">Assistant text from the most recent turn.</ResponseField>
+<ResponseField name="usage" type="Usage">Token usage from the most recent turn.</ResponseField>
+<ResponseField name="turns" type="int">Number of LLM turns in the most recent run.</ResponseField>
+<ResponseField name="tool_calls" type="int">Number of tool calls in the most recent run.</ResponseField>
+<ResponseField name="structured_output" type="Any | None">Structured output from the most recent run, if present.</ResponseField>
+<ResponseField name="last_result" type="RunResult">Cached result from the most recent runtime-backed turn.</ResponseField>
+
+The `Session` methods are thin conveniences over canonical runtime calls:
+
+- `await session.turn(...)`
+- `session.stream(...)`
+- `await session.history(...)`
+- `await session.archive()`
+- `await session.interrupt()`
+- `await session.invoke_skill(...)`
+- `await session.subscribe_events()`
+
+---
+
+## DeferredSession
+
+`client.create_deferred_session()` returns a `DeferredSession` when you want to allocate session identity now and run the first turn later.
+
+```python
+from meerkat import DeferredSession
+```
+
+<ResponseField name="id" type="str">Stable session UUID reserved by the runtime.</ResponseField>
+<ResponseField name="ref" type="str | None">Optional human-readable session reference.</ResponseField>
+
+Use `await deferred.start_turn(...)` to execute the first turn through the same runtime-backed path as any other session.
 
 ---
 

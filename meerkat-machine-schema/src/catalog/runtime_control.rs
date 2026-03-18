@@ -505,10 +505,16 @@ pub fn runtime_control_machine() -> MachineSchema {
                     },
                 ],
                 to: "Idle".into(),
-                emit: vec![EffectEmit {
-                    variant: "ApplyControlPlaneCommand".into(),
-                    fields: IndexMap::from([("command".into(), Expr::String("Reset".into()))]),
-                }],
+                emit: vec![
+                    EffectEmit {
+                        variant: "ApplyControlPlaneCommand".into(),
+                        fields: IndexMap::from([("command".into(), Expr::String("Reset".into()))]),
+                    },
+                    EffectEmit {
+                        variant: "ResolveCompletionAsTerminated".into(),
+                        fields: IndexMap::from([("reason".into(), Expr::String("Reset".into()))]),
+                    },
+                ],
             },
             TransitionSchema {
                 name: "StopRequested".into(),
@@ -535,10 +541,16 @@ pub fn runtime_control_machine() -> MachineSchema {
                     },
                 ],
                 to: "Stopped".into(),
-                emit: vec![EffectEmit {
-                    variant: "ResolveCompletionAsTerminated".into(),
-                    fields: IndexMap::from([("reason".into(), Expr::String("Stopped".into()))]),
-                }],
+                emit: vec![
+                    EffectEmit {
+                        variant: "ApplyControlPlaneCommand".into(),
+                        fields: IndexMap::from([("command".into(), Expr::String("Stop".into()))]),
+                    },
+                    EffectEmit {
+                        variant: "ResolveCompletionAsTerminated".into(),
+                        fields: IndexMap::from([("reason".into(), Expr::String("Stopped".into()))]),
+                    },
+                ],
             },
             TransitionSchema {
                 name: "DestroyRequested".into(),
@@ -566,10 +578,22 @@ pub fn runtime_control_machine() -> MachineSchema {
                     },
                 ],
                 to: "Destroyed".into(),
-                emit: vec![EffectEmit {
-                    variant: "ResolveCompletionAsTerminated".into(),
-                    fields: IndexMap::from([("reason".into(), Expr::String("Destroyed".into()))]),
-                }],
+                emit: vec![
+                    EffectEmit {
+                        variant: "ApplyControlPlaneCommand".into(),
+                        fields: IndexMap::from([(
+                            "command".into(),
+                            Expr::String("Destroy".into()),
+                        )]),
+                    },
+                    EffectEmit {
+                        variant: "ResolveCompletionAsTerminated".into(),
+                        fields: IndexMap::from([(
+                            "reason".into(),
+                            Expr::String("Destroyed".into()),
+                        )]),
+                    },
+                ],
             },
             TransitionSchema {
                 name: "ResumeRequested".into(),

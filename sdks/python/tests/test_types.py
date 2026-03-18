@@ -2,6 +2,8 @@ import asyncio
 """Conformance tests for Meerkat Python SDK types and events."""
 
 import pytest
+import tomllib
+from pathlib import Path
 
 from meerkat import (
     CONTRACT_VERSION,
@@ -56,6 +58,12 @@ def test_contract_version():
     assert len(parts) == 3
     for part in parts:
         int(part)
+
+
+def test_contract_version_matches_package_version():
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    data = tomllib.loads(pyproject.read_text())
+    assert CONTRACT_VERSION == data["project"]["version"]
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +266,34 @@ async def test_session_history_convenience_method_uses_client() -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_session_returns_runtime_backed_session_wrapper() -> None:
+    client = MeerkatClient()
+    seen: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
+        seen.append((method, params))
+        return {
+            "session_id": "sess-1",
+            "session_ref": "team/runtime",
+            "text": "ready",
+            "turns": 1,
+            "tool_calls": 0,
+            "usage": {"input_tokens": 12, "output_tokens": 4},
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    session = await client.create_session("Summarise the runtime path")
+
+    assert isinstance(session, Session)
+    assert session.id == "sess-1"
+    assert session.ref == "team/runtime"
+    assert session.text == "ready"
+    assert session.last_result.session_id == "sess-1"
+    assert seen == [("session/create", {"prompt": "Summarise the runtime path"})]
+
+
+@pytest.mark.asyncio
 async def test_deferred_session_history_convenience_method_uses_client() -> None:
     expected = SessionHistory(
         session_id="def",
@@ -279,6 +315,33 @@ async def test_deferred_session_history_convenience_method_uses_client() -> None
     session = DeferredSession(StubClient(), "def")  # type: ignore[arg-type]
     history = await session.history(offset=1)
     assert history is expected
+
+
+@pytest.mark.asyncio
+async def test_create_deferred_session_returns_runtime_backed_deferred_wrapper() -> None:
+    client = MeerkatClient()
+    seen: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
+        seen.append((method, params))
+        return {
+            "session_id": "sess-2",
+            "session_ref": "team/deferred",
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    deferred = await client.create_deferred_session("Hold until first turn")
+
+    assert isinstance(deferred, DeferredSession)
+    assert deferred.id == "sess-2"
+    assert deferred.ref == "team/deferred"
+    assert seen == [
+        (
+            "session/create",
+            {"prompt": "Hold until first turn", "initial_turn": "deferred"},
+        )
+    ]
 
 
 def test_live_mcp_contract_types_exported():

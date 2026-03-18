@@ -188,7 +188,8 @@ export GEMINI_API_KEY=...           # Optional (examples 021, 034)
 │  Surfaces:  CLI (rkat)  │  REST API  │  JSON-RPC  │  MCP Server │
 │             Python SDK  │  TypeScript SDK  │  Rust SDK           │
 │                                                                 │
-│  Agent:     AgentBuilder → Agent Loop → RunResult               │
+│  Runtime:   SessionService → AgentFactory::build_agent()        │
+│             → Agent Loop → RunResult                            │
 │             LLM ↔ Tools ↔ Events ↔ Budget ↔ Retry              │
 │                                                                 │
 │  Features:  Skills  │  Hooks  │  Sessions  │  Memory            │

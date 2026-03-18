@@ -7616,6 +7616,58 @@ async fn test_flow_finished_cleans_tracking_maps() {
 }
 
 #[tokio::test]
+async fn test_orchestrator_snapshot_tracks_pending_spawn_ownership_and_revision() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let initial = handle
+        .debug_orchestrator_snapshot()
+        .await
+        .expect("orchestrator snapshot");
+    assert!(initial.coordinator_bound);
+    assert_eq!(initial.pending_spawn_count, 0);
+
+    service.set_create_session_delay_ms(150);
+    let spawn_handle = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+                .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let staged = handle
+        .debug_orchestrator_snapshot()
+        .await
+        .expect("staged snapshot");
+    assert_eq!(staged.pending_spawn_count, 1);
+    assert!(
+        staged.topology_revision > initial.topology_revision,
+        "staging a spawn must advance orchestrator-owned topology revision"
+    );
+
+    spawn_handle
+        .await
+        .expect("spawn join")
+        .expect("spawn worker");
+    let settled = handle
+        .debug_orchestrator_snapshot()
+        .await
+        .expect("settled snapshot");
+    assert_eq!(settled.pending_spawn_count, 0);
+    assert!(
+        settled.topology_revision > staged.topology_revision,
+        "spawn completion must advance the orchestrator-owned revision again"
+    );
+
+    let events = handle.events().replay_all().await.expect("replay events");
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        MobEventKind::MeerkatSpawned { meerkat_id, .. } if meerkat_id.as_str() == "w-1"
+    )));
+}
+
+#[tokio::test]
 async fn test_flow_tracker_maps_remain_coherent_under_concurrent_run_and_cancel_commands() {
     let (handle, service) =
         create_test_mob(sample_definition_with_single_step_flow(5_000, 8)).await;
@@ -7672,6 +7724,80 @@ async fn test_flow_tracker_maps_remain_coherent_under_concurrent_run_and_cancel_
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+#[tokio::test]
+async fn test_orchestrator_snapshot_tracks_flow_activation_and_lifecycle_transitions() {
+    let (handle, service) = create_test_mob(sample_definition_with_supervisor_threshold(1)).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_delay_ms(150);
+
+    let run_id = handle
+        .run_flow(
+            FlowId::from("demo"),
+            serde_json::json!({"source":"orchestrator-test"}),
+        )
+        .await
+        .expect("run flow");
+
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let active = handle
+        .debug_orchestrator_snapshot()
+        .await
+        .expect("active snapshot");
+    assert_eq!(active.active_flow_count, 1);
+    assert!(active.coordinator_bound);
+    assert!(active.supervisor_active);
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let settled = loop {
+        let snapshot = handle
+            .debug_orchestrator_snapshot()
+            .await
+            .expect("settled snapshot");
+        if snapshot.active_flow_count == 0 {
+            break snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for orchestrator active-flow count to drain"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert!(settled.coordinator_bound);
+    assert!(settled.supervisor_active);
+
+    handle.stop().await.expect("stop mob");
+    let stopped = handle
+        .debug_orchestrator_snapshot()
+        .await
+        .expect("stopped snapshot");
+    assert!(!stopped.coordinator_bound);
+    assert!(!stopped.supervisor_active);
+
+    handle.resume().await.expect("resume mob");
+    let resumed = handle
+        .debug_orchestrator_snapshot()
+        .await
+        .expect("resumed snapshot");
+    assert!(resumed.coordinator_bound);
+    assert!(resumed.supervisor_active);
+
+    let events = handle.events().replay_all().await.expect("replay events");
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        MobEventKind::FlowStarted { run_id: event_run_id, .. } if event_run_id == &run_id
+    )));
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        MobEventKind::FlowCompleted { run_id: event_run_id, .. } if event_run_id == &run_id
+    )));
 }
 
 #[tokio::test]

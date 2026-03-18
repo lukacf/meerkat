@@ -3032,8 +3032,6 @@ async fn run_agent(
         provider_params,
         external_tools,
         llm_client_override: None,
-        scoped_event_tx: scoped_event_tx.clone(),
-        scoped_event_path: scoped_event_tx.as_ref().map(|_| primary_scope_path.clone()),
         override_builtins: None,
         override_shell: None,
         override_memory: if enable_memory { Some(true) } else { None },
@@ -3542,12 +3540,6 @@ async fn resume_session_with_llm_override(
         provider_params: merged_provider_params,
         external_tools,
         llm_client_override: llm_override.map(meerkat::encode_llm_client_override_for_service),
-        scoped_event_tx: scoped_event_tx.clone(),
-        scoped_event_path: scoped_event_tx.as_ref().map(|_| {
-            vec![StreamScopeFrame::Primary {
-                session_id: session_id.to_string(),
-            }]
-        }),
         override_builtins: None,
         override_shell: None,
         override_memory: None,

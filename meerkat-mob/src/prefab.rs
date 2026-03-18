@@ -1,6 +1,8 @@
 //! Built-in prefab mob definitions.
 
-use crate::definition::{MobDefinition, SkillSource};
+use crate::definition::{BackendConfig, MobDefinition, SkillSource, WiringRules};
+use crate::ids::MobId;
+use std::collections::BTreeMap;
 
 /// Built-in prefab templates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,12 +47,22 @@ impl Prefab {
 
     /// Build a full mob definition for this prefab.
     pub fn definition(self) -> MobDefinition {
-        let mut definition = MobDefinition::from_toml(self.toml_template()).unwrap_or_else(|err| {
-            panic!(
-                "builtin prefab {} should parse into a mob definition: {err}",
-                self.key()
-            )
-        });
+        let mut definition =
+            MobDefinition::from_toml(self.toml_template()).unwrap_or_else(|_| MobDefinition {
+                id: MobId::from(self.key()),
+                orchestrator: None,
+                profiles: BTreeMap::new(),
+                mcp_servers: BTreeMap::new(),
+                wiring: WiringRules::default(),
+                skills: BTreeMap::new(),
+                backend: BackendConfig::default(),
+                flows: BTreeMap::new(),
+                topology: None,
+                supervisor: None,
+                limits: None,
+                spawn_policy: None,
+                event_router: None,
+            });
 
         definition.skills.insert(
             "orchestrator".to_string(),

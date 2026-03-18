@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used)]
+
 use meerkat_machine_codegen::{
     GENERATED_COVERAGE_END, GENERATED_COVERAGE_START, merge_mapping_document,
     render_composition_mapping_coverage, render_composition_module,

@@ -1080,8 +1080,6 @@ impl SessionRuntime {
                 .default_llm_client
                 .clone()
                 .map(encode_llm_client_override_for_service),
-            scoped_event_tx: None,
-            scoped_event_path: None,
             override_builtins: Some(tooling.builtins),
             override_shell: Some(tooling.shell),
             override_memory: Some(tooling.memory),

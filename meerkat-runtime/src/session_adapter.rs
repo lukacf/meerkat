@@ -462,10 +462,10 @@ impl RuntimeSessionAdapter {
                 state: RuntimeState::Destroyed,
             })?;
 
-        if let Some(control_tx) = &entry.control_tx {
-            if control_tx.send(command.clone()).await.is_ok() {
-                return Ok(());
-            }
+        if let Some(control_tx) = &entry.control_tx
+            && control_tx.send(command.clone()).await.is_ok()
+        {
+            return Ok(());
         }
 
         if matches!(command, RunControlCommand::StopRuntimeExecutor { .. }) {
@@ -802,10 +802,10 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
         if report.inputs_pending_drain > 0 {
             // Wake the runtime loop so it drains already-queued inputs.
             // Retired state allows processing but rejects new accepts.
-            if let Some(ref wake_tx) = entry.wake_tx {
-                if wake_tx.send(()).await.is_ok() {
-                    return Ok(report);
-                }
+            if let Some(ref wake_tx) = entry.wake_tx
+                && wake_tx.send(()).await.is_ok()
+            {
+                return Ok(report);
             }
 
             // No live loop can drain this retired queue. Abandon the queued work

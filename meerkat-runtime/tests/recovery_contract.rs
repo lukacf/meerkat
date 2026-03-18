@@ -308,9 +308,10 @@ async fn recovery_persistent_driver_contract_replays_missing_receipts_and_persis
             );
         }
 
-        let mut replayed_ids = Vec::new();
-        replayed_ids.push(driver.dequeue_next().unwrap().0);
-        replayed_ids.push(driver.dequeue_next().unwrap().0);
+        let replayed_ids = vec![
+            driver.dequeue_next().unwrap().0,
+            driver.dequeue_next().unwrap().0,
+        ];
         assert!(
             driver.dequeue_next().is_none(),
             "{}: only the recovered contributors should be queued for replay",
@@ -354,9 +355,10 @@ async fn recovery_persistent_driver_contract_replays_missing_receipts_and_persis
             harness.name
         );
 
-        let mut retired_replayed_ids = Vec::new();
-        retired_replayed_ids.push(retired_driver.dequeue_next().unwrap().0);
-        retired_replayed_ids.push(retired_driver.dequeue_next().unwrap().0);
+        let retired_replayed_ids = vec![
+            retired_driver.dequeue_next().unwrap().0,
+            retired_driver.dequeue_next().unwrap().0,
+        ];
         assert!(
             retired_driver.dequeue_next().is_none(),
             "{}: retire recovery should requeue the preserved contributors exactly once",

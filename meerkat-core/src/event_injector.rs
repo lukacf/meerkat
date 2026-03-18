@@ -93,16 +93,16 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex;
 
+    type RecordedEvent = (
+        ContentInput,
+        PlainEventSource,
+        HandlingMode,
+        Option<RenderMetadata>,
+    );
+
     /// Mock EventInjector for testing — records injected events.
     struct MockEventInjector {
-        events: Mutex<
-            Vec<(
-                ContentInput,
-                PlainEventSource,
-                HandlingMode,
-                Option<RenderMetadata>,
-            )>,
-        >,
+        events: Mutex<Vec<RecordedEvent>>,
     }
 
     impl MockEventInjector {

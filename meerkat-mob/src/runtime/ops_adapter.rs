@@ -23,6 +23,7 @@ impl MobOpsAdapter {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn registry(&self) -> Arc<RuntimeOpsLifecycleRegistry> {
         Arc::clone(&self.registry)
     }

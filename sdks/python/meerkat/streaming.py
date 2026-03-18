@@ -154,7 +154,7 @@ class _StdoutDispatcher:
                 if method in {"session/stream_event", "mob/stream_event"}:
                     stream_id = str(params.get("stream_id", ""))
                     raw_event = params.get("event") or params
-                    # Preserve scope fields when present (sub-agent / mob-member scoped events).
+                    # Preserve scope fields when present (delegated-branch / mob-member scoped events).
                     scope_id = params.get("scope_id")
                     scope_path = params.get("scope_path")
                     if scope_id is not None or scope_path is not None:

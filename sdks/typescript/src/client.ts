@@ -956,7 +956,7 @@ export class MeerkatClient {
         const streamId = String(params.stream_id ?? "");
         const queue = this.streamQueues.get(streamId);
         const rawEvent = (params.event ?? params) as Record<string, unknown>;
-        // Preserve scope fields when present (sub-agent / mob-member scoped events).
+        // Preserve scope fields when present (delegated-branch / mob-member scoped events).
         const scopeId = params.scope_id as string | undefined;
         const scopePath = params.scope_path as unknown[] | undefined;
         const event: Record<string, unknown> =

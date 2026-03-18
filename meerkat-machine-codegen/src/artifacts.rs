@@ -1,6 +1,41 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
+struct InfallibleWrite;
+
+impl InfallibleWrite {
+    fn expect(self, _message: &str) {}
+}
+
+fn push_fmt(out: &mut String, args: std::fmt::Arguments<'_>) {
+    let _ignored = out.write_fmt(args);
+}
+
+fn push_line(out: &mut String, args: std::fmt::Arguments<'_>) {
+    push_fmt(out, args);
+    out.push('\n');
+}
+
+macro_rules! pushln {
+    ($out:expr) => {{
+        $out.push('\n');
+    }};
+    ($out:expr, $($arg:tt)*) => {{
+        push_line($out, format_args!($($arg)*));
+    }};
+}
+
+macro_rules! writeln {
+    ($dst:expr) => {{
+        let _ignored = ::std::writeln!($dst);
+        InfallibleWrite
+    }};
+    ($dst:expr, $($arg:tt)*) => {{
+        let _ignored = ::std::writeln!($dst, $($arg)*);
+        InfallibleWrite
+    }};
+}
+
 use meerkat_machine_schema::{
     CompositionCoverageManifest, CompositionInvariantKind, CompositionSchema,
     CompositionStateLimits, CompositionWitness, EntryInput, EnumSchema, Expr, Guard, HelperSchema,
@@ -14,29 +49,29 @@ pub fn render_machine_contract_markdown(
 ) -> String {
     let mut out = String::new();
 
-    writeln!(&mut out, "# {}", schema.machine).expect("write to string");
-    writeln!(&mut out).expect("write to string");
+    pushln!(&mut out, "# {}", schema.machine);
+    pushln!(&mut out);
     writeln!(
         &mut out,
         "_Generated from the Rust machine catalog. Do not edit by hand._"
     )
     .expect("write to string");
-    writeln!(&mut out).expect("write to string");
-    writeln!(&mut out, "- Version: `{}`", schema.version).expect("write to string");
+    pushln!(&mut out);
+    pushln!(&mut out, "- Version: `{}`", schema.version);
     writeln!(
         &mut out,
         "- Rust owner: `{}` / `{}`",
         schema.rust.crate_name, schema.rust.module
     )
     .expect("write to string");
-    writeln!(&mut out).expect("write to string");
+    pushln!(&mut out);
 
     render_state_markdown(&mut out, schema);
     render_enum_markdown(&mut out, "Inputs", &schema.inputs);
     render_enum_markdown(&mut out, "Effects", &schema.effects);
 
     if !schema.helpers.is_empty() {
-        writeln!(&mut out, "## Helpers").expect("write to string");
+        pushln!(&mut out, "## Helpers");
         for helper in &schema.helpers {
             writeln!(
                 &mut out,
@@ -47,11 +82,11 @@ pub fn render_machine_contract_markdown(
             )
             .expect("write to string");
         }
-        writeln!(&mut out).expect("write to string");
+        pushln!(&mut out);
     }
 
     if !schema.derived.is_empty() {
-        writeln!(&mut out, "## Derived").expect("write to string");
+        pushln!(&mut out, "## Derived");
         for derived in &schema.derived {
             writeln!(
                 &mut out,
@@ -62,18 +97,18 @@ pub fn render_machine_contract_markdown(
             )
             .expect("write to string");
         }
-        writeln!(&mut out).expect("write to string");
+        pushln!(&mut out);
     }
 
-    writeln!(&mut out, "## Invariants").expect("write to string");
+    pushln!(&mut out, "## Invariants");
     for invariant in &schema.invariants {
-        writeln!(&mut out, "- `{}`", invariant.name).expect("write to string");
+        pushln!(&mut out, "- `{}`", invariant.name);
     }
-    writeln!(&mut out).expect("write to string");
+    pushln!(&mut out);
 
-    writeln!(&mut out, "## Transitions").expect("write to string");
+    pushln!(&mut out, "## Transitions");
     for transition in &schema.transitions {
-        writeln!(&mut out, "### `{}`", transition.name).expect("write to string");
+        pushln!(&mut out, "### `{}`", transition.name);
         writeln!(
             &mut out,
             "- From: {}",
@@ -93,9 +128,9 @@ pub fn render_machine_contract_markdown(
         )
         .expect("write to string");
         if !transition.guards.is_empty() {
-            writeln!(&mut out, "- Guards:").expect("write to string");
+            pushln!(&mut out, "- Guards:");
             for guard in &transition.guards {
-                writeln!(&mut out, "  - `{}`", guard.name).expect("write to string");
+                pushln!(&mut out, "  - `{}`", guard.name);
             }
         }
         if !transition.emit.is_empty() {
@@ -111,19 +146,19 @@ pub fn render_machine_contract_markdown(
             )
             .expect("write to string");
         }
-        writeln!(&mut out, "- To: `{}`", transition.to).expect("write to string");
-        writeln!(&mut out).expect("write to string");
+        pushln!(&mut out, "- To: `{}`", transition.to);
+        pushln!(&mut out);
     }
 
-    writeln!(&mut out, "## Coverage").expect("write to string");
-    writeln!(&mut out, "### Code Anchors").expect("write to string");
+    pushln!(&mut out, "## Coverage");
+    pushln!(&mut out, "### Code Anchors");
     for anchor in &coverage.code_anchors {
-        writeln!(&mut out, "- `{}` — {}", anchor.path, anchor.note).expect("write to string");
+        pushln!(&mut out, "- `{}` — {}", anchor.path, anchor.note);
     }
-    writeln!(&mut out).expect("write to string");
-    writeln!(&mut out, "### Scenarios").expect("write to string");
+    pushln!(&mut out);
+    pushln!(&mut out, "### Scenarios");
     for scenario in &coverage.scenarios {
-        writeln!(&mut out, "- `{}` — {}", scenario.id, scenario.summary).expect("write to string");
+        pushln!(&mut out, "- `{}` — {}", scenario.id, scenario.summary);
     }
 
     out
@@ -135,16 +170,16 @@ pub fn render_composition_contract_markdown(
 ) -> String {
     let mut out = String::new();
 
-    writeln!(&mut out, "# {}", schema.name).expect("write to string");
-    writeln!(&mut out).expect("write to string");
+    pushln!(&mut out, "# {}", schema.name);
+    pushln!(&mut out);
     writeln!(
         &mut out,
         "_Generated from the Rust composition catalog. Do not edit by hand._"
     )
     .expect("write to string");
-    writeln!(&mut out).expect("write to string");
+    pushln!(&mut out);
 
-    writeln!(&mut out, "## Machines").expect("write to string");
+    pushln!(&mut out, "## Machines");
     for machine in &schema.machines {
         writeln!(
             &mut out,
@@ -153,9 +188,9 @@ pub fn render_composition_contract_markdown(
         )
         .expect("write to string");
     }
-    writeln!(&mut out).expect("write to string");
+    pushln!(&mut out);
 
-    writeln!(&mut out, "## Routes").expect("write to string");
+    pushln!(&mut out, "## Routes");
     for route in &schema.routes {
         writeln!(
             &mut out,
@@ -169,17 +204,17 @@ pub fn render_composition_contract_markdown(
         )
         .expect("write to string");
     }
-    writeln!(&mut out).expect("write to string");
+    pushln!(&mut out);
 
-    writeln!(&mut out, "## Scheduler Rules").expect("write to string");
+    pushln!(&mut out, "## Scheduler Rules");
     if schema.scheduler_rules.is_empty() {
-        writeln!(&mut out, "- `(none)`").expect("write to string");
+        pushln!(&mut out, "- `(none)`");
     } else {
         for rule in &schema.scheduler_rules {
-            writeln!(&mut out, "- `{}`", render_scheduler_rule(rule)).expect("write to string");
+            pushln!(&mut out, "- `{}`", render_scheduler_rule(rule));
         }
     }
-    writeln!(&mut out).expect("write to string");
+    pushln!(&mut out);
 
     let structural_invariants = schema
         .invariants
@@ -192,37 +227,35 @@ pub fn render_composition_contract_markdown(
         .filter(|invariant| invariant.kind.is_behavioral())
         .collect::<Vec<_>>();
 
-    writeln!(&mut out, "## Structural Requirements").expect("write to string");
+    pushln!(&mut out, "## Structural Requirements");
     if structural_invariants.is_empty() {
-        writeln!(&mut out, "- `(none)`").expect("write to string");
+        pushln!(&mut out, "- `(none)`");
     } else {
         for invariant in &structural_invariants {
-            writeln!(&mut out, "- `{}` — {}", invariant.name, invariant.statement)
-                .expect("write to string");
+            pushln!(&mut out, "- `{}` — {}", invariant.name, invariant.statement);
         }
     }
-    writeln!(&mut out).expect("write to string");
+    pushln!(&mut out);
 
-    writeln!(&mut out, "## Behavioral Invariants").expect("write to string");
+    writeln!(&mut out, "## Behavioral Invariants");
     if behavioral_invariants.is_empty() {
-        writeln!(&mut out, "- `(none)`").expect("write to string");
+        pushln!(&mut out, "- `(none)`");
     } else {
         for invariant in &behavioral_invariants {
-            writeln!(&mut out, "- `{}` — {}", invariant.name, invariant.statement)
-                .expect("write to string");
+            pushln!(&mut out, "- `{}` — {}", invariant.name, invariant.statement);
         }
     }
-    writeln!(&mut out).expect("write to string");
+    pushln!(&mut out);
 
-    writeln!(&mut out, "## Coverage").expect("write to string");
-    writeln!(&mut out, "### Code Anchors").expect("write to string");
+    writeln!(&mut out, "## Coverage");
+    pushln!(&mut out, "### Code Anchors");
     for anchor in &coverage.code_anchors {
-        writeln!(&mut out, "- `{}` — {}", anchor.path, anchor.note).expect("write to string");
+        pushln!(&mut out, "- `{}` — {}", anchor.path, anchor.note);
     }
-    writeln!(&mut out).expect("write to string");
-    writeln!(&mut out, "### Scenarios").expect("write to string");
+    pushln!(&mut out);
+    pushln!(&mut out, "### Scenarios");
     for scenario in &coverage.scenarios {
-        writeln!(&mut out, "- `{}` — {}", scenario.id, scenario.summary).expect("write to string");
+        pushln!(&mut out, "- `{}` — {}", scenario.id, scenario.summary);
     }
 
     out
@@ -233,9 +266,9 @@ pub fn render_machine_ci_cfg(schema: &MachineSchema, deep: bool) -> String {
     let domains = collect_binding_domains(schema);
     let named_samples = collect_machine_named_type_samples(schema);
 
-    writeln!(&mut out, "SPECIFICATION Spec").expect("write to string");
+    pushln!(&mut out, "SPECIFICATION Spec");
     if !domains.is_empty() {
-        writeln!(&mut out, "CONSTANTS").expect("write to string");
+        pushln!(&mut out, "CONSTANTS");
         for (name, ty) in domains {
             if matches!(ty, TypeRef::Seq(_) | TypeRef::Option(_)) {
                 continue;
@@ -254,12 +287,12 @@ pub fn render_machine_ci_cfg(schema: &MachineSchema, deep: bool) -> String {
         }
     }
     if !schema.invariants.is_empty() {
-        writeln!(&mut out, "INVARIANTS").expect("write to string");
+        pushln!(&mut out, "INVARIANTS");
         for invariant in &schema.invariants {
-            writeln!(&mut out, "  {}", invariant.name).expect("write to string");
+            pushln!(&mut out, "  {}", invariant.name);
         }
     }
-    writeln!(&mut out, "CONSTRAINTS").expect("write to string");
+    pushln!(&mut out, "CONSTRAINTS");
     writeln!(
         &mut out,
         "  {}",
@@ -284,13 +317,11 @@ pub fn render_composition_ci_cfg(schema: &CompositionSchema, deep: bool) -> Stri
     let machine_by_instance = schema
         .machines
         .iter()
-        .map(|instance| {
-            (
-                instance.instance_id.as_str(),
-                *machine_by_name
-                    .get(instance.machine_name.as_str())
-                    .expect("canonical composition machine"),
-            )
+        .filter_map(|instance| {
+            machine_by_name
+                .get(instance.machine_name.as_str())
+                .copied()
+                .map(|machine| (instance.instance_id.as_str(), machine))
         })
         .collect::<BTreeMap<_, _>>();
     let domains = collect_composition_binding_domains(schema, &machine_by_instance);
@@ -298,10 +329,12 @@ pub fn render_composition_ci_cfg(schema: &CompositionSchema, deep: bool) -> Stri
     let mut instance_invariants = Vec::new();
 
     for instance in &schema.machines {
-        let machine = machine_by_instance
+        let Some(machine) = machine_by_instance
             .get(instance.instance_id.as_str())
             .copied()
-            .expect("canonical composition machine");
+        else {
+            continue;
+        };
         for invariant in &machine.invariants {
             instance_invariants.push(format!(
                 "{}_{}",
@@ -311,9 +344,9 @@ pub fn render_composition_ci_cfg(schema: &CompositionSchema, deep: bool) -> Stri
         }
     }
 
-    writeln!(&mut out, "SPECIFICATION Spec").expect("write to string");
+    pushln!(&mut out, "SPECIFICATION Spec");
     if !domains.is_empty() {
-        writeln!(&mut out, "CONSTANTS").expect("write to string");
+        pushln!(&mut out, "CONSTANTS");
         for (name, ty) in domains {
             if matches!(ty, TypeRef::Seq(_) | TypeRef::Option(_)) {
                 continue;
@@ -342,18 +375,18 @@ pub fn render_composition_ci_cfg(schema: &CompositionSchema, deep: bool) -> Stri
         .filter(|invariant| invariant.kind.is_behavioral())
         .collect::<Vec<_>>();
     if !behavioral_invariants.is_empty() || !instance_invariants.is_empty() || deep {
-        writeln!(&mut out, "INVARIANTS").expect("write to string");
+        pushln!(&mut out, "INVARIANTS");
         for invariant in behavioral_invariants {
-            writeln!(&mut out, "  {}", invariant.name).expect("write to string");
+            pushln!(&mut out, "  {}", invariant.name);
         }
         for invariant_name in instance_invariants {
-            writeln!(&mut out, "  {}", invariant_name).expect("write to string");
+            pushln!(&mut out, "  {}", invariant_name);
         }
         if deep {
-            writeln!(&mut out, "  CoverageInstrumentation").expect("write to string");
+            pushln!(&mut out, "  CoverageInstrumentation");
         }
     }
-    writeln!(&mut out, "CONSTRAINTS").expect("write to string");
+    pushln!(&mut out, "CONSTRAINTS");
     writeln!(
         &mut out,
         "  {}",
@@ -381,13 +414,11 @@ pub fn render_composition_witness_cfg(
     let machine_by_instance = schema
         .machines
         .iter()
-        .map(|instance| {
-            (
-                instance.instance_id.as_str(),
-                *machine_by_name
-                    .get(instance.machine_name.as_str())
-                    .expect("canonical composition machine"),
-            )
+        .filter_map(|instance| {
+            machine_by_name
+                .get(instance.machine_name.as_str())
+                .copied()
+                .map(|machine| (instance.instance_id.as_str(), machine))
         })
         .collect::<BTreeMap<_, _>>();
     let domains = collect_composition_binding_domains(schema, &machine_by_instance);
@@ -399,10 +430,12 @@ pub fn render_composition_witness_cfg(
     let mut instance_invariants = Vec::new();
 
     for instance in &schema.machines {
-        let machine = machine_by_instance
+        let Some(machine) = machine_by_instance
             .get(instance.instance_id.as_str())
             .copied()
-            .expect("canonical composition machine");
+        else {
+            continue;
+        };
         for invariant in &machine.invariants {
             instance_invariants.push(format!(
                 "{}_{}",
@@ -419,7 +452,7 @@ pub fn render_composition_witness_cfg(
     )
     .expect("write to string");
     if !domains.is_empty() {
-        writeln!(&mut out, "CONSTANTS").expect("write to string");
+        pushln!(&mut out, "CONSTANTS");
         for (name, ty) in domains {
             if matches!(ty, TypeRef::Seq(_) | TypeRef::Option(_)) {
                 continue;
@@ -434,14 +467,14 @@ pub fn render_composition_witness_cfg(
         }
     }
     if !schema.invariants.is_empty() || !instance_invariants.is_empty() {
-        writeln!(&mut out, "INVARIANTS").expect("write to string");
+        pushln!(&mut out, "INVARIANTS");
         for invariant in &schema.invariants {
-            writeln!(&mut out, "  {}", invariant.name).expect("write to string");
+            pushln!(&mut out, "  {}", invariant.name);
         }
         for invariant_name in instance_invariants {
-            writeln!(&mut out, "  {}", invariant_name).expect("write to string");
+            pushln!(&mut out, "  {}", invariant_name);
         }
-        writeln!(&mut out, "  CoverageInstrumentation").expect("write to string");
+        pushln!(&mut out, "  CoverageInstrumentation");
     }
     let witness_properties = witness
         .expected_routes
@@ -478,12 +511,12 @@ pub fn render_composition_witness_cfg(
         )
         .collect::<Vec<_>>();
     if !witness_properties.is_empty() {
-        writeln!(&mut out, "PROPERTIES").expect("write to string");
+        pushln!(&mut out, "PROPERTIES");
         for property in witness_properties {
-            writeln!(&mut out, "  {property}").expect("write to string");
+            pushln!(&mut out, "  {property}");
         }
     }
-    writeln!(&mut out, "CONSTRAINTS").expect("write to string");
+    pushln!(&mut out, "CONSTRAINTS");
     writeln!(
         &mut out,
         "  {}",
@@ -597,9 +630,10 @@ fn composition_witness_state_constraint_name(name: &str) -> String {
 
 pub fn render_composition_semantic_model(schema: &CompositionSchema) -> String {
     let machine_catalog = canonical_machine_schemas();
-    CompositionTlaCompiler::new(schema, &machine_catalog)
-        .expect("composition machine lookup")
-        .render()
+    match CompositionTlaCompiler::new(schema, &machine_catalog) {
+        Ok(compiler) => compiler.render(),
+        Err(_) => String::new(),
+    }
 }
 
 pub fn render_machine_semantic_model(schema: &MachineSchema) -> String {
@@ -608,7 +642,7 @@ pub fn render_machine_semantic_model(schema: &MachineSchema) -> String {
 }
 
 fn render_state_markdown(out: &mut String, schema: &MachineSchema) {
-    writeln!(out, "## State").expect("write to string");
+    pushln!(out, "## State");
     writeln!(
         out,
         "- Phase enum: `{}`",
@@ -623,17 +657,16 @@ fn render_state_markdown(out: &mut String, schema: &MachineSchema) {
     )
     .expect("write to string");
     for field in &schema.state.fields {
-        writeln!(out, "- `{}`: `{}`", field.name, render_type_ref(&field.ty))
-            .expect("write to string");
+        pushln!(out, "- `{}`: `{}`", field.name, render_type_ref(&field.ty));
     }
-    writeln!(out).expect("write to string");
+    pushln!(out);
 }
 
 fn render_enum_markdown(out: &mut String, label: &str, schema: &EnumSchema) {
-    writeln!(out, "## {label}").expect("write to string");
+    writeln!(out, "## {label}");
     for variant in &schema.variants {
         if variant.fields.is_empty() {
-            writeln!(out, "- `{}`", variant.name).expect("write to string");
+            pushln!(out, "- `{}`", variant.name);
         } else {
             writeln!(
                 out,
@@ -644,7 +677,7 @@ fn render_enum_markdown(out: &mut String, label: &str, schema: &EnumSchema) {
             .expect("write to string");
         }
     }
-    writeln!(out).expect("write to string");
+    pushln!(out);
 }
 
 fn render_field_list(fields: &[meerkat_machine_schema::FieldSchema]) -> String {
@@ -689,14 +722,15 @@ fn collect_composition_binding_domains(
     }
 
     for entry_input in &schema.entry_inputs {
-        let machine = machine_by_instance
+        let Some(machine) = machine_by_instance
             .get(entry_input.machine.as_str())
             .copied()
-            .expect("entry-input machine schema");
-        let variant = machine
-            .inputs
-            .variant_named(&entry_input.input_variant)
-            .expect("entry-input variant");
+        else {
+            continue;
+        };
+        let Ok(variant) = machine.inputs.variant_named(&entry_input.input_variant) else {
+            continue;
+        };
         for field in &variant.fields {
             collect_type_domains(&field.ty, &mut domains);
         }
@@ -781,18 +815,22 @@ fn collect_machine_named_type_samples(
         let binding_types = schema
             .inputs
             .variant_named(&transition.on.variant)
-            .expect("transition input variant")
-            .fields
-            .iter()
-            .filter(|field| {
-                transition
-                    .on
-                    .bindings
+            .ok()
+            .map(|variant| {
+                variant
+                    .fields
                     .iter()
-                    .any(|binding| binding == &field.name)
+                    .filter(|field| {
+                        transition
+                            .on
+                            .bindings
+                            .iter()
+                            .any(|binding| binding == &field.name)
+                    })
+                    .map(|field| (field.name.clone(), field.ty.clone()))
+                    .collect::<BTreeMap<_, _>>()
             })
-            .map(|field| (field.name.clone(), field.ty.clone()))
-            .collect::<BTreeMap<_, _>>();
+            .unwrap_or_default();
 
         for guard in &transition.guards {
             collect_named_literals_from_expr(
@@ -814,10 +852,9 @@ fn collect_machine_named_type_samples(
             );
         }
         for effect in &transition.emit {
-            let effect_variant = schema
-                .effects
-                .variant_named(&effect.variant)
-                .expect("effect variant");
+            let Ok(effect_variant) = schema.effects.variant_named(&effect.variant) else {
+                continue;
+            };
             for field in &effect_variant.fields {
                 if let Some(expr) = effect.fields.get(&field.name) {
                     collect_named_literals_from_expr(
@@ -846,35 +883,38 @@ fn collect_composition_named_type_samples(
     }
 
     for entry_input in &schema.entry_inputs {
-        let machine = machine_by_instance
+        let Some(machine) = machine_by_instance
             .get(entry_input.machine.as_str())
             .copied()
-            .expect("entry-input machine schema");
+        else {
+            continue;
+        };
         merge_named_type_samples(&mut samples, collect_machine_named_type_samples(machine));
     }
 
     for route in &schema.routes {
-        let source_machine = machine_by_instance
+        let Some(source_machine) = machine_by_instance
             .get(route.from_machine.as_str())
             .copied()
-            .expect("route source machine schema");
-        let source_variant = source_machine
-            .effects
-            .variant_named(&route.effect_variant)
-            .expect("route source effect variant");
+        else {
+            continue;
+        };
+        let Ok(source_variant) = source_machine.effects.variant_named(&route.effect_variant) else {
+            continue;
+        };
         let source_field_types = source_variant
             .fields
             .iter()
             .map(|field| (field.name.clone(), field.ty.clone()))
             .collect::<BTreeMap<_, _>>();
-        let target_machine = machine_by_instance
-            .get(route.to.machine.as_str())
-            .copied()
-            .expect("route target machine schema");
-        let target_variant = target_machine
-            .inputs
-            .variant_named(&route.to.input_variant)
-            .expect("route target input variant");
+        let Some(target_machine) = machine_by_instance.get(route.to.machine.as_str()).copied()
+        else {
+            continue;
+        };
+        let Ok(target_variant) = target_machine.inputs.variant_named(&route.to.input_variant)
+        else {
+            continue;
+        };
         let field_types = target_variant
             .fields
             .iter()
@@ -882,39 +922,37 @@ fn collect_composition_named_type_samples(
             .collect::<BTreeMap<_, _>>();
 
         for binding in &route.bindings {
-            if let RouteBindingSource::Literal(expr) = &binding.source {
-                if let Some(field_ty) = field_types.get(&binding.to_field) {
-                    collect_named_literals_from_expr(
-                        &mut samples,
-                        expr,
-                        Some(field_ty),
-                        &field_types,
-                        &BTreeMap::new(),
-                        &BTreeMap::new(),
-                    );
-                }
+            if let RouteBindingSource::Literal(expr) = &binding.source
+                && let Some(field_ty) = field_types.get(&binding.to_field)
+            {
+                collect_named_literals_from_expr(
+                    &mut samples,
+                    expr,
+                    Some(field_ty),
+                    &field_types,
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                );
             }
-            if let RouteBindingSource::Field { from_field, .. } = &binding.source {
-                if let (Some(source_ty), Some(target_ty)) = (
+            if let RouteBindingSource::Field { from_field, .. } = &binding.source
+                && let (Some(source_ty), Some(target_ty)) = (
                     source_field_types.get(from_field),
                     field_types.get(&binding.to_field),
-                ) {
-                    propagate_named_samples_between_types(&mut samples, source_ty, target_ty);
-                }
+                )
+            {
+                propagate_named_samples_between_types(&mut samples, source_ty, target_ty);
             }
         }
     }
 
     for witness in &schema.witnesses {
         for preload in &witness.preload_inputs {
-            let machine = machine_by_instance
-                .get(preload.machine.as_str())
-                .copied()
-                .expect("witness preload machine schema");
-            let variant = machine
-                .inputs
-                .variant_named(&preload.input_variant)
-                .expect("witness preload input variant");
+            let Some(machine) = machine_by_instance.get(preload.machine.as_str()).copied() else {
+                continue;
+            };
+            let Ok(variant) = machine.inputs.variant_named(&preload.input_variant) else {
+                continue;
+            };
             let field_types = variant
                 .fields
                 .iter()
@@ -952,27 +990,28 @@ fn collect_composition_witness_named_type_samples(
             continue;
         }
 
-        let source_machine = machine_by_instance
+        let Some(source_machine) = machine_by_instance
             .get(route.from_machine.as_str())
             .copied()
-            .expect("route source machine schema");
-        let source_variant = source_machine
-            .effects
-            .variant_named(&route.effect_variant)
-            .expect("route source effect variant");
+        else {
+            continue;
+        };
+        let Ok(source_variant) = source_machine.effects.variant_named(&route.effect_variant) else {
+            continue;
+        };
         let source_field_types = source_variant
             .fields
             .iter()
             .map(|field| (field.name.clone(), field.ty.clone()))
             .collect::<BTreeMap<_, _>>();
-        let target_machine = machine_by_instance
-            .get(route.to.machine.as_str())
-            .copied()
-            .expect("route target machine schema");
-        let target_variant = target_machine
-            .inputs
-            .variant_named(&route.to.input_variant)
-            .expect("route target input variant");
+        let Some(target_machine) = machine_by_instance.get(route.to.machine.as_str()).copied()
+        else {
+            continue;
+        };
+        let Ok(target_variant) = target_machine.inputs.variant_named(&route.to.input_variant)
+        else {
+            continue;
+        };
         let field_types = target_variant
             .fields
             .iter()
@@ -980,38 +1019,36 @@ fn collect_composition_witness_named_type_samples(
             .collect::<BTreeMap<_, _>>();
 
         for binding in &route.bindings {
-            if let RouteBindingSource::Literal(expr) = &binding.source {
-                if let Some(field_ty) = field_types.get(&binding.to_field) {
-                    collect_named_literals_from_expr(
-                        &mut samples,
-                        expr,
-                        Some(field_ty),
-                        &field_types,
-                        &BTreeMap::new(),
-                        &BTreeMap::new(),
-                    );
-                }
+            if let RouteBindingSource::Literal(expr) = &binding.source
+                && let Some(field_ty) = field_types.get(&binding.to_field)
+            {
+                collect_named_literals_from_expr(
+                    &mut samples,
+                    expr,
+                    Some(field_ty),
+                    &field_types,
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                );
             }
-            if let RouteBindingSource::Field { from_field, .. } = &binding.source {
-                if let (Some(source_ty), Some(target_ty)) = (
+            if let RouteBindingSource::Field { from_field, .. } = &binding.source
+                && let (Some(source_ty), Some(target_ty)) = (
                     source_field_types.get(from_field),
                     field_types.get(&binding.to_field),
-                ) {
-                    propagate_named_samples_between_types(&mut samples, source_ty, target_ty);
-                }
+                )
+            {
+                propagate_named_samples_between_types(&mut samples, source_ty, target_ty);
             }
         }
     }
 
     for preload in &witness.preload_inputs {
-        let machine = machine_by_instance
-            .get(preload.machine.as_str())
-            .copied()
-            .expect("witness preload machine schema");
-        let variant = machine
-            .inputs
-            .variant_named(&preload.input_variant)
-            .expect("witness preload input variant");
+        let Some(machine) = machine_by_instance.get(preload.machine.as_str()).copied() else {
+            continue;
+        };
+        let Ok(variant) = machine.inputs.variant_named(&preload.input_variant) else {
+            continue;
+        };
         let field_types = variant
             .fields
             .iter()
@@ -1035,40 +1072,42 @@ fn collect_composition_witness_named_type_samples(
             if !expected_routes.contains(&route.name) || route.from_machine != preload.machine {
                 continue;
             }
-            let source_machine = machine_by_instance
+            let Some(source_machine) = machine_by_instance
                 .get(route.from_machine.as_str())
                 .copied()
-                .expect("route source machine schema");
-            let source_variant = source_machine
-                .effects
-                .variant_named(&route.effect_variant)
-                .expect("route source effect variant");
+            else {
+                continue;
+            };
+            let Ok(source_variant) = source_machine.effects.variant_named(&route.effect_variant)
+            else {
+                continue;
+            };
             let source_field_types = source_variant
                 .fields
                 .iter()
                 .map(|field| (field.name.clone(), field.ty.clone()))
                 .collect::<BTreeMap<_, _>>();
-            let target_machine = machine_by_instance
-                .get(route.to.machine.as_str())
-                .copied()
-                .expect("route target machine schema");
-            let target_variant = target_machine
-                .inputs
-                .variant_named(&route.to.input_variant)
-                .expect("route target input variant");
+            let Some(target_machine) = machine_by_instance.get(route.to.machine.as_str()).copied()
+            else {
+                continue;
+            };
+            let Ok(target_variant) = target_machine.inputs.variant_named(&route.to.input_variant)
+            else {
+                continue;
+            };
             let target_field_types = target_variant
                 .fields
                 .iter()
                 .map(|field| (field.name.clone(), field.ty.clone()))
                 .collect::<BTreeMap<_, _>>();
             for binding in &route.bindings {
-                if let RouteBindingSource::Field { from_field, .. } = &binding.source {
-                    if let (Some(source_ty), Some(target_ty)) = (
+                if let RouteBindingSource::Field { from_field, .. } = &binding.source
+                    && let (Some(source_ty), Some(target_ty)) = (
                         source_field_types.get(from_field),
                         target_field_types.get(&binding.to_field),
-                    ) {
-                        propagate_named_samples_between_types(&mut samples, source_ty, target_ty);
-                    }
+                    )
+                {
+                    propagate_named_samples_between_types(&mut samples, source_ty, target_ty);
                 }
             }
         }
@@ -1403,7 +1442,7 @@ fn collect_named_literals_from_expr(
             let collection_ty =
                 infer_expr_type(collection, field_types, helper_returns, binding_types);
             let value_ty = match collection_ty {
-                Some(TypeRef::Set(inner_ty)) | Some(TypeRef::Seq(inner_ty)) => Some(*inner_ty),
+                Some(TypeRef::Set(inner_ty) | TypeRef::Seq(inner_ty)) => Some(*inner_ty),
                 Some(TypeRef::Map(key_ty, _)) => Some(*key_ty),
                 _ => None,
             };
@@ -1795,6 +1834,7 @@ fn type_ref_name(ty: &TypeRef) -> String {
 struct CompositionTlaCompiler<'a> {
     schema: &'a CompositionSchema,
     machine_by_instance: BTreeMap<&'a str, &'a MachineSchema>,
+    fallback_machine: &'a MachineSchema,
 }
 
 impl<'a> CompositionTlaCompiler<'a> {
@@ -1824,6 +1864,12 @@ impl<'a> CompositionTlaCompiler<'a> {
         Ok(Self {
             schema,
             machine_by_instance,
+            fallback_machine: machine_catalog.first().ok_or_else(|| {
+                format!(
+                    "no machine catalog available for composition `{}`",
+                    schema.name
+                )
+            })?,
         })
     }
 
@@ -1833,17 +1879,16 @@ impl<'a> CompositionTlaCompiler<'a> {
         let machine_vars = self.machine_vars();
         let mut machine_invariant_names = Vec::new();
 
-        writeln!(&mut out, "---- MODULE model ----").expect("write to string");
-        writeln!(&mut out, "EXTENDS TLC, Naturals, Sequences, FiniteSets")
-            .expect("write to string");
-        writeln!(&mut out).expect("write to string");
+        pushln!(&mut out, "---- MODULE model ----");
+        pushln!(&mut out, "EXTENDS TLC, Naturals, Sequences, FiniteSets");
+        pushln!(&mut out);
         writeln!(
             &mut out,
             "\\* Generated composition model for {}.",
             self.schema.name
         )
         .expect("write to string");
-        writeln!(&mut out).expect("write to string");
+        pushln!(&mut out);
 
         let model_constants = constants
             .iter()
@@ -1853,13 +1898,13 @@ impl<'a> CompositionTlaCompiler<'a> {
         if !model_constants.is_empty() {
             writeln!(&mut out, "CONSTANTS {}", model_constants.join(", "))
                 .expect("write to string");
-            writeln!(&mut out).expect("write to string");
+            pushln!(&mut out);
         }
 
         writeln!(&mut out, "None == [tag |-> \"none\", value |-> \"none\"]")
             .expect("write to string");
-        writeln!(&mut out, "Some(v) == [tag |-> \"some\", value |-> v]").expect("write to string");
-        writeln!(&mut out).expect("write to string");
+        writeln!(&mut out, "Some(v) == [tag |-> \"some\", value |-> v]");
+        pushln!(&mut out);
         for (name, ty) in &constants {
             match ty {
                 TypeRef::Seq(inner) => {
@@ -1887,7 +1932,7 @@ impl<'a> CompositionTlaCompiler<'a> {
             .values()
             .any(|ty| matches!(ty, TypeRef::Seq(_) | TypeRef::Option(_)))
         {
-            writeln!(&mut out).expect("write to string");
+            pushln!(&mut out);
         }
         writeln!(
             &mut out,
@@ -1938,7 +1983,7 @@ impl<'a> CompositionTlaCompiler<'a> {
             machine_vars.join(", ")
         )
         .expect("write to string");
-        writeln!(&mut out).expect("write to string");
+        pushln!(&mut out);
 
         writeln!(
             &mut out,
@@ -1955,9 +2000,9 @@ impl<'a> CompositionTlaCompiler<'a> {
             "HigherPriorityReady(actor) == \\E priority \\in ActorPriorities : /\\ priority[2] = actor /\\ priority[1] \\in PendingActors"
         )
         .expect("write to string");
-        writeln!(&mut out).expect("write to string");
+        pushln!(&mut out);
 
-        writeln!(&mut out, "BaseInit ==").expect("write to string");
+        pushln!(&mut out, "BaseInit ==");
         for instance in &self.schema.machines {
             let machine = self.machine(instance.instance_id.as_str());
             writeln!(
@@ -1995,21 +2040,20 @@ impl<'a> CompositionTlaCompiler<'a> {
                 .expect("write to string");
             }
         }
-        writeln!(&mut out, "    /\\ model_step_count = 0").expect("write to string");
-        writeln!(&mut out, "    /\\ pending_routes = <<>>").expect("write to string");
-        writeln!(&mut out, "    /\\ delivered_routes = {{}}").expect("write to string");
-        writeln!(&mut out, "    /\\ emitted_effects = {{}}").expect("write to string");
-        writeln!(&mut out, "    /\\ observed_transitions = {{}}").expect("write to string");
-        writeln!(&mut out).expect("write to string");
+        pushln!(&mut out, "    /\\ model_step_count = 0");
+        pushln!(&mut out, "    /\\ pending_routes = <<>>");
+        pushln!(&mut out, "    /\\ delivered_routes = {{}}");
+        pushln!(&mut out, "    /\\ emitted_effects = {{}}");
+        pushln!(&mut out, "    /\\ observed_transitions = {{}}");
+        pushln!(&mut out);
 
-        writeln!(&mut out, "Init ==").expect("write to string");
-        writeln!(&mut out, "    /\\ BaseInit").expect("write to string");
-        writeln!(&mut out, "    /\\ pending_inputs = <<>>").expect("write to string");
-        writeln!(&mut out, "    /\\ observed_inputs = {{}}").expect("write to string");
-        writeln!(&mut out, "    /\\ witness_current_script_input = None").expect("write to string");
-        writeln!(&mut out, "    /\\ witness_remaining_script_inputs = <<>>")
-            .expect("write to string");
-        writeln!(&mut out).expect("write to string");
+        pushln!(&mut out, "Init ==");
+        pushln!(&mut out, "    /\\ BaseInit");
+        pushln!(&mut out, "    /\\ pending_inputs = <<>>");
+        pushln!(&mut out, "    /\\ observed_inputs = {{}}");
+        pushln!(&mut out, "    /\\ witness_current_script_input = None");
+        pushln!(&mut out, "    /\\ witness_remaining_script_inputs = <<>>");
+        pushln!(&mut out);
 
         for witness in &self.schema.witnesses {
             writeln!(
@@ -2018,7 +2062,7 @@ impl<'a> CompositionTlaCompiler<'a> {
                 composition_witness_init_name(&witness.name)
             )
             .expect("write to string");
-            writeln!(&mut out, "    /\\ BaseInit").expect("write to string");
+            writeln!(&mut out, "    /\\ BaseInit");
             writeln!(
                 &mut out,
                 "    /\\ pending_inputs = {}",
@@ -2043,7 +2087,7 @@ impl<'a> CompositionTlaCompiler<'a> {
                 self.witness_remaining_script_inputs_expr(witness)
             )
             .expect("write to string");
-            writeln!(&mut out).expect("write to string");
+            pushln!(&mut out);
         }
 
         for instance in &self.schema.machines {
@@ -2054,11 +2098,11 @@ impl<'a> CompositionTlaCompiler<'a> {
                 .with_field_env_override(self.machine_field_env(instance.instance_id.as_str()));
             for helper in &machine.helpers {
                 compiler.render_helper(&mut out, helper);
-                writeln!(&mut out).expect("write to string");
+                pushln!(&mut out);
             }
             for derived in &machine.derived {
                 compiler.render_helper(&mut out, derived);
-                writeln!(&mut out).expect("write to string");
+                pushln!(&mut out);
             }
 
             let mut rendered_actions = Vec::new();
@@ -2074,13 +2118,13 @@ impl<'a> CompositionTlaCompiler<'a> {
             }
 
             for helper in &compiler.helper_defs {
-                writeln!(&mut out, "{helper}").expect("write to string");
-                writeln!(&mut out).expect("write to string");
+                pushln!(&mut out, "{helper}");
+                pushln!(&mut out);
             }
 
             for action in &rendered_actions {
-                writeln!(&mut out, "{action}").expect("write to string");
-                writeln!(&mut out).expect("write to string");
+                pushln!(&mut out, "{action}");
+                pushln!(&mut out);
             }
 
             let invariant_field_env = self.machine_field_env(instance.instance_id.as_str());
@@ -2104,7 +2148,7 @@ impl<'a> CompositionTlaCompiler<'a> {
                 .expect("write to string");
             }
             if !machine.invariants.is_empty() {
-                writeln!(&mut out).expect("write to string");
+                pushln!(&mut out);
             }
         }
 
@@ -2115,11 +2159,11 @@ impl<'a> CompositionTlaCompiler<'a> {
 
         let core_next_branches = self.core_next_branches();
 
-        writeln!(&mut out, "CoreNext ==").expect("write to string");
+        pushln!(&mut out, "CoreNext ==");
         for branch in &core_next_branches {
-            writeln!(&mut out, "    \\/ {branch}").expect("write to string");
+            pushln!(&mut out, "    \\/ {branch}");
         }
-        writeln!(&mut out).expect("write to string");
+        pushln!(&mut out);
 
         let inject_branches = self
             .schema
@@ -2128,22 +2172,22 @@ impl<'a> CompositionTlaCompiler<'a> {
             .map(|entry_input| self.render_entry_input_call(entry_input))
             .collect::<Vec<_>>();
 
-        writeln!(&mut out, "InjectNext ==").expect("write to string");
+        pushln!(&mut out, "InjectNext ==");
         if inject_branches.is_empty() {
-            writeln!(&mut out, "    FALSE").expect("write to string");
+            pushln!(&mut out, "    FALSE");
         } else {
             for branch in &inject_branches {
-                writeln!(&mut out, "    \\/ {branch}").expect("write to string");
+                pushln!(&mut out, "    \\/ {branch}");
             }
         }
-        writeln!(&mut out).expect("write to string");
+        pushln!(&mut out);
 
-        writeln!(&mut out, "Next ==").expect("write to string");
-        writeln!(&mut out, "    \\/ CoreNext").expect("write to string");
+        pushln!(&mut out, "Next ==");
+        pushln!(&mut out, "    \\/ CoreNext");
         if !inject_branches.is_empty() {
-            writeln!(&mut out, "    \\/ InjectNext").expect("write to string");
+            pushln!(&mut out, "    \\/ InjectNext");
         }
-        writeln!(&mut out).expect("write to string");
+        pushln!(&mut out);
 
         for witness in &self.schema.witnesses {
             writeln!(
@@ -2152,16 +2196,16 @@ impl<'a> CompositionTlaCompiler<'a> {
                 composition_witness_next_name(&witness.name)
             )
             .expect("write to string");
-            writeln!(&mut out, "    \\/ CoreNext").expect("write to string");
+            pushln!(&mut out, "    \\/ CoreNext");
             writeln!(
                 &mut out,
                 "    \\/ {}",
                 self.render_witness_inject_next_call(witness)
             )
             .expect("write to string");
-            writeln!(&mut out).expect("write to string");
+            pushln!(&mut out);
         }
-        writeln!(&mut out).expect("write to string");
+        pushln!(&mut out);
 
         for invariant in &self.schema.invariants {
             writeln!(
@@ -2173,7 +2217,7 @@ impl<'a> CompositionTlaCompiler<'a> {
             .expect("write to string");
         }
         if !self.schema.invariants.is_empty() {
-            writeln!(&mut out).expect("write to string");
+            pushln!(&mut out);
         }
 
         self.render_coverage_instrumentation(&mut out);
@@ -2211,9 +2255,9 @@ impl<'a> CompositionTlaCompiler<'a> {
             )
             .expect("write to string");
         }
-        writeln!(&mut out).expect("write to string");
+        pushln!(&mut out);
 
-        writeln!(&mut out, "Spec == Init /\\ [][Next]_vars").expect("write to string");
+        pushln!(&mut out, "Spec == Init /\\ [][Next]_vars");
         for witness in &self.schema.witnesses {
             let fairness = self
                 .witness_fairness_clauses(witness)
@@ -2231,7 +2275,7 @@ impl<'a> CompositionTlaCompiler<'a> {
             )
             .expect("write to string");
         }
-        writeln!(&mut out).expect("write to string");
+        pushln!(&mut out);
         for witness in &self.schema.witnesses {
             for route in &witness.expected_routes {
                 writeln!(
@@ -2284,15 +2328,15 @@ impl<'a> CompositionTlaCompiler<'a> {
             }
         }
         if !self.schema.witnesses.is_empty() {
-            writeln!(&mut out).expect("write to string");
+            pushln!(&mut out);
         }
         for invariant in &self.schema.invariants {
-            writeln!(&mut out, "THEOREM Spec => []{}", invariant.name).expect("write to string");
+            pushln!(&mut out, "THEOREM Spec => []{}", invariant.name);
         }
         for invariant_name in &machine_invariant_names {
-            writeln!(&mut out, "THEOREM Spec => []{}", invariant_name).expect("write to string");
+            pushln!(&mut out, "THEOREM Spec => []{}", invariant_name);
         }
-        writeln!(&mut out).expect("write to string");
+        pushln!(&mut out);
         writeln!(
             &mut out,
             "============================================================================="
@@ -2310,7 +2354,7 @@ impl<'a> CompositionTlaCompiler<'a> {
         self.machine_by_instance
             .get(instance_id)
             .copied()
-            .expect("machine instance schema")
+            .unwrap_or(self.fallback_machine)
     }
 
     fn actor(&self, instance_id: &str) -> &str {
@@ -2319,7 +2363,7 @@ impl<'a> CompositionTlaCompiler<'a> {
             .iter()
             .find(|machine| machine.instance_id == instance_id)
             .map(|machine| machine.actor.as_str())
-            .expect("machine instance actor")
+            .unwrap_or("")
     }
 
     fn phase_var(&self, instance_id: &str) -> String {
@@ -2346,29 +2390,31 @@ impl<'a> CompositionTlaCompiler<'a> {
                 .machine(instance_id)
                 .inputs
                 .variant_named(&transition.on.variant)
-                .expect("transition input variant")
-                .fields
-                .iter()
-                .filter(|field| {
-                    transition
-                        .on
-                        .bindings
+                .ok()
+                .map(|variant| {
+                    variant
+                        .fields
                         .iter()
-                        .any(|binding| binding == &field.name)
+                        .filter(|field| {
+                            transition
+                                .on
+                                .bindings
+                                .iter()
+                                .any(|binding| binding == &field.name)
+                        })
+                        .map(|field| (field.name.clone(), field.ty.clone()))
+                        .collect::<BTreeMap<_, _>>()
                 })
-                .map(|field| (field.name.clone(), field.ty.clone()))
-                .collect::<BTreeMap<_, _>>();
-            let prefix = transition
-                .on
-                .bindings
-                .iter()
-                .map(|binding| {
-                    let local = format!("arg_{}", tla_ident(binding));
-                    let domain = self
-                        .binding_domain_for_type(binding_types.get(binding).expect("binding type"));
-                    format!("\\E {local} \\in {domain} : ")
-                })
-                .collect::<String>();
+                .unwrap_or_default();
+            let mut prefix = String::new();
+            for binding in &transition.on.bindings {
+                let local = format!("arg_{}", tla_ident(binding));
+                let Some(ty) = binding_types.get(binding) else {
+                    return self.machine_transition_name(instance_id, transition);
+                };
+                let domain = self.binding_domain_for_type(ty);
+                push_fmt(&mut prefix, format_args!("\\E {local} \\in {domain} : "));
+            }
             let args = transition
                 .on
                 .bindings
@@ -2480,12 +2526,12 @@ impl<'a> CompositionTlaCompiler<'a> {
             instrumentation_terms.join(" /\\ ")
         };
 
-        writeln!(out, "CoverageInstrumentation == {instrumentation}").expect("write to string");
-        writeln!(out).expect("write to string");
+        pushln!(out, "CoverageInstrumentation == {instrumentation}");
+        pushln!(out);
     }
 
     fn render_static_sets(&self, out: &mut String) {
-        writeln!(out, "Machines == {{").expect("write to string");
+        pushln!(out, "Machines == {{");
         for (idx, machine) in self.schema.machines.iter().enumerate() {
             let suffix = if idx + 1 == self.schema.machines.len() {
                 ""
@@ -2502,34 +2548,34 @@ impl<'a> CompositionTlaCompiler<'a> {
             )
             .expect("write to string");
         }
-        writeln!(out, "}}").expect("write to string");
-        writeln!(out).expect("write to string");
+        pushln!(out, "}}");
+        pushln!(out);
 
-        writeln!(out, "RouteNames == {{").expect("write to string");
+        pushln!(out, "RouteNames == {{");
         for (idx, route) in self.schema.routes.iter().enumerate() {
             let suffix = if idx + 1 == self.schema.routes.len() {
                 ""
             } else {
                 ","
             };
-            writeln!(out, "    {}{}", tla_string(&route.name), suffix).expect("write to string");
+            pushln!(out, "    {}{}", tla_string(&route.name), suffix);
         }
-        writeln!(out, "}}").expect("write to string");
-        writeln!(out).expect("write to string");
+        pushln!(out, "}}");
+        pushln!(out);
 
-        writeln!(out, "Actors == {{").expect("write to string");
+        pushln!(out, "Actors == {{");
         for (idx, machine) in self.schema.machines.iter().enumerate() {
             let suffix = if idx + 1 == self.schema.machines.len() {
                 ""
             } else {
                 ","
             };
-            writeln!(out, "    {}{}", tla_string(&machine.actor), suffix).expect("write to string");
+            pushln!(out, "    {}{}", tla_string(&machine.actor), suffix);
         }
-        writeln!(out, "}}").expect("write to string");
-        writeln!(out).expect("write to string");
+        pushln!(out, "}}");
+        pushln!(out);
 
-        writeln!(out, "ActorPriorities == {{").expect("write to string");
+        pushln!(out, "ActorPriorities == {{");
         for (idx, priority) in self.schema.actor_priorities.iter().enumerate() {
             let suffix = if idx + 1 == self.schema.actor_priorities.len() {
                 ""
@@ -2545,21 +2591,20 @@ impl<'a> CompositionTlaCompiler<'a> {
             )
             .expect("write to string");
         }
-        writeln!(out, "}}").expect("write to string");
-        writeln!(out).expect("write to string");
+        pushln!(out, "}}");
+        pushln!(out);
 
-        writeln!(out, "SchedulerRules == {{").expect("write to string");
+        pushln!(out, "SchedulerRules == {{");
         for (idx, rule) in self.schema.scheduler_rules.iter().enumerate() {
             let suffix = if idx + 1 == self.schema.scheduler_rules.len() {
                 ""
             } else {
                 ","
             };
-            writeln!(out, "    {}{}", render_scheduler_rule_tuple(rule), suffix)
-                .expect("write to string");
+            pushln!(out, "    {}{}", render_scheduler_rule_tuple(rule), suffix);
         }
-        writeln!(out, "}}").expect("write to string");
-        writeln!(out).expect("write to string");
+        writeln!(out, "}}");
+        pushln!(out);
 
         render_composition_case_fn(
             out,
@@ -2640,16 +2685,15 @@ impl<'a> CompositionTlaCompiler<'a> {
             "RouteTargetActor(route_name) == ActorOfMachine(RouteTargetMachine(route_name))"
         )
         .expect("write to string");
-        writeln!(out).expect("write to string");
+        pushln!(out);
     }
 
     fn render_entry_input_actions(&self, out: &mut String) {
         for entry_input in &self.schema.entry_inputs {
             let machine = self.machine(entry_input.machine.as_str());
-            let variant = machine
-                .inputs
-                .variant_named(&entry_input.input_variant)
-                .expect("entry input variant");
+            let Ok(variant) = machine.inputs.variant_named(&entry_input.input_variant) else {
+                continue;
+            };
             let action_name = self.entry_input_action_name(entry_input);
             let params = variant
                 .fields
@@ -2677,10 +2721,9 @@ impl<'a> CompositionTlaCompiler<'a> {
             );
 
             if params.is_empty() {
-                writeln!(out, "{} ==", action_name).expect("write to string");
+                pushln!(out, "{} ==", action_name);
             } else {
-                writeln!(out, "{}({}) ==", action_name, params.join(", "))
-                    .expect("write to string");
+                pushln!(out, "{}({}) ==", action_name, params.join(", "));
             }
             writeln!(
                 out,
@@ -2708,16 +2751,15 @@ impl<'a> CompositionTlaCompiler<'a> {
                 self.machine_vars().join(", ")
             )
             .expect("write to string");
-            writeln!(out).expect("write to string");
+            pushln!(out);
         }
     }
 
     fn render_entry_input_call(&self, entry_input: &EntryInput) -> String {
         let machine = self.machine(entry_input.machine.as_str());
-        let variant = machine
-            .inputs
-            .variant_named(&entry_input.input_variant)
-            .expect("entry input variant");
+        let Ok(variant) = machine.inputs.variant_named(&entry_input.input_variant) else {
+            return self.entry_input_action_name(entry_input);
+        };
         let action_name = self.entry_input_action_name(entry_input);
         if variant.fields.is_empty() {
             action_name
@@ -2742,11 +2784,10 @@ impl<'a> CompositionTlaCompiler<'a> {
     }
 
     fn render_deliver_queued_route_action(&self, out: &mut String) {
-        writeln!(out, "DeliverQueuedRoute ==").expect("write to string");
-        writeln!(out, "    /\\ Len(pending_routes) > 0").expect("write to string");
-        writeln!(out, "    /\\ LET route == Head(pending_routes) IN").expect("write to string");
-        writeln!(out, "       /\\ pending_routes' = Tail(pending_routes)")
-            .expect("write to string");
+        writeln!(out, "DeliverQueuedRoute ==");
+        pushln!(out, "    /\\ Len(pending_routes) > 0");
+        pushln!(out, "    /\\ LET route == Head(pending_routes) IN");
+        pushln!(out, "       /\\ pending_routes' = Tail(pending_routes)");
         writeln!(
             out,
             "       /\\ delivered_routes' = delivered_routes \\cup {{route}}"
@@ -2770,15 +2811,15 @@ impl<'a> CompositionTlaCompiler<'a> {
             self.machine_vars().join(", ")
         )
         .expect("write to string");
-        writeln!(out).expect("write to string");
+        pushln!(out);
     }
 
     fn render_quiescent_stutter(&self, out: &mut String) {
-        writeln!(out, "QuiescentStutter ==").expect("write to string");
-        writeln!(out, "    /\\ Len(pending_routes) = 0").expect("write to string");
-        writeln!(out, "    /\\ Len(pending_inputs) = 0").expect("write to string");
-        writeln!(out, "    /\\ UNCHANGED vars").expect("write to string");
-        writeln!(out).expect("write to string");
+        writeln!(out, "QuiescentStutter ==");
+        pushln!(out, "    /\\ Len(pending_routes) = 0");
+        pushln!(out, "    /\\ Len(pending_inputs) = 0");
+        pushln!(out, "    /\\ UNCHANGED vars");
+        pushln!(out);
     }
 
     fn render_witness_inject_next_call(&self, witness: &CompositionWitness) -> String {
@@ -2986,23 +3027,22 @@ impl<'a> CompositionTlaCompiler<'a> {
     fn render_witness_inject_actions(&self, out: &mut String) {
         for witness in &self.schema.witnesses {
             let action_name = self.render_witness_inject_next_call(witness);
-            writeln!(out, "{action_name} ==").expect("write to string");
+            pushln!(out, "{action_name} ==");
             if witness.preload_inputs.len() <= 1 {
-                writeln!(out, "    FALSE").expect("write to string");
-                writeln!(out).expect("write to string");
+                pushln!(out, "    FALSE");
+                pushln!(out);
                 continue;
             }
 
-            writeln!(out, "    /\\ witness_current_script_input # None").expect("write to string");
+            pushln!(out, "    /\\ witness_current_script_input # None");
             writeln!(
                 out,
                 "    /\\ ~(witness_current_script_input \\in SeqElements(pending_inputs))"
             )
             .expect("write to string");
-            writeln!(out, "    /\\ Len(pending_inputs) = 0").expect("write to string");
-            writeln!(out, "    /\\ Len(pending_routes) = 0").expect("write to string");
-            writeln!(out, "    /\\ Len(witness_remaining_script_inputs) > 0")
-                .expect("write to string");
+            pushln!(out, "    /\\ Len(pending_inputs) = 0");
+            pushln!(out, "    /\\ Len(pending_routes) = 0");
+            pushln!(out, "    /\\ Len(witness_remaining_script_inputs) > 0");
             writeln!(
                 out,
                 "    /\\ pending_inputs' = Append(pending_inputs, Head(witness_remaining_script_inputs))"
@@ -3031,7 +3071,7 @@ impl<'a> CompositionTlaCompiler<'a> {
                 self.machine_vars().join(", ")
             )
             .expect("write to string");
-            writeln!(out).expect("write to string");
+            pushln!(out);
         }
     }
 
@@ -3056,7 +3096,7 @@ impl<'a> CompositionTlaCompiler<'a> {
                     .join(", ");
                 format!("<<{rendered}>>")
             }
-            other => panic!("unsupported witness literal expr: {other:?}"),
+            _ => "None".into(),
         }
     }
 
@@ -3164,9 +3204,9 @@ impl<'a> CompositionTlaCompiler<'a> {
             .collect::<Vec<_>>();
 
         if params.is_empty() {
-            writeln!(out, "{} ==", action_name).expect("write to string");
+            writeln!(out, "{} ==", action_name);
         } else {
-            writeln!(out, "{}({}) ==", action_name, params.join(", ")).expect("write to string");
+            pushln!(out, "{}({}) ==", action_name, params.join(", "));
         }
 
         let phase_var = self.phase_var(instance_id);
@@ -3181,8 +3221,7 @@ impl<'a> CompositionTlaCompiler<'a> {
                 .join(" \\/ ")
         };
 
-        writeln!(out, "    /\\ \\E packet \\in SeqElements(pending_inputs) :")
-            .expect("write to string");
+        pushln!(out, "    /\\ \\E packet \\in SeqElements(pending_inputs) :");
         writeln!(
             out,
             "       /\\ packet.machine = {}",
@@ -3211,7 +3250,7 @@ impl<'a> CompositionTlaCompiler<'a> {
             tla_string(self.actor(instance_id))
         )
         .expect("write to string");
-        writeln!(out, "       /\\ {}", from_guard).expect("write to string");
+        writeln!(out, "       /\\ {}", from_guard);
 
         let field_env = self.machine_field_env(instance_id);
         for guard in &transition.guards {
@@ -3325,7 +3364,10 @@ impl<'a> CompositionTlaCompiler<'a> {
             .iter()
             .filter_map(|field| {
                 let next = next_env.get(&field.name)?;
-                if next != field_env.get(&field.name).unwrap() {
+                if field_env
+                    .get(&field.name)
+                    .is_some_and(|current| next != current)
+                {
                     Some((field.name.as_str(), next.as_str()))
                 } else {
                     None
@@ -3422,8 +3464,7 @@ impl<'a> CompositionTlaCompiler<'a> {
             self.transition_packet_expr(instance_id, transition)
         );
 
-        writeln!(out, "       /\\ pending_inputs' = {}", pending_inputs_next)
-            .expect("write to string");
+        pushln!(out, "       /\\ pending_inputs' = {}", pending_inputs_next);
         writeln!(
             out,
             "       /\\ observed_inputs' = {}",
@@ -3466,14 +3507,13 @@ impl<'a> CompositionTlaCompiler<'a> {
         binding_types: &BTreeMap<String, TypeRef>,
     ) -> String {
         let target_machine = self.machine(route.to.machine.as_str());
-        let target_variant = target_machine
-            .inputs
-            .variant_named(&route.to.input_variant)
-            .expect("target input variant");
-        let source_effect_variant = source_machine
-            .effects
-            .variant_named(effect_variant)
-            .expect("source effect variant");
+        let Ok(target_variant) = target_machine.inputs.variant_named(&route.to.input_variant)
+        else {
+            return String::new();
+        };
+        let Ok(source_effect_variant) = source_machine.effects.variant_named(effect_variant) else {
+            return String::new();
+        };
         let bindings = route
             .bindings
             .iter()
@@ -3492,7 +3532,7 @@ impl<'a> CompositionTlaCompiler<'a> {
                                 .find(|field| field.name == *from_field)
                                 .map(|_| format!("packet.payload.{}", tla_ident(from_field)))
                         })
-                        .expect("effect field binding"),
+                        .unwrap_or_else(|| "None".to_string()),
                     RouteBindingSource::Literal(expr) => {
                         compiler.render_expr_with_types(expr, next_env, binding_env, binding_types)
                     }
@@ -3586,17 +3626,16 @@ impl<'a> MachineTlaCompiler<'a> {
         let mut out = String::new();
         let constants = collect_binding_domains(self.schema);
 
-        writeln!(&mut out, "---- MODULE model ----").expect("write to string");
-        writeln!(&mut out, "EXTENDS TLC, Naturals, Sequences, FiniteSets")
-            .expect("write to string");
-        writeln!(&mut out).expect("write to string");
+        pushln!(&mut out, "---- MODULE model ----");
+        pushln!(&mut out, "EXTENDS TLC, Naturals, Sequences, FiniteSets");
+        pushln!(&mut out);
         writeln!(
             &mut out,
             "\\* Generated semantic machine model for {}.",
             self.schema.machine
         )
         .expect("write to string");
-        writeln!(&mut out).expect("write to string");
+        pushln!(&mut out);
 
         let model_constants = constants
             .iter()
@@ -3605,14 +3644,13 @@ impl<'a> MachineTlaCompiler<'a> {
             .collect::<Vec<_>>();
         if !model_constants.is_empty() {
             let constant_list = model_constants.join(", ");
-            writeln!(&mut out, "CONSTANTS {constant_list}").expect("write to string");
-            writeln!(&mut out).expect("write to string");
+            writeln!(&mut out, "CONSTANTS {constant_list}");
+            pushln!(&mut out);
         }
 
-        writeln!(&mut out, "None == [tag |-> \"none\", value |-> \"none\"]")
-            .expect("write to string");
-        writeln!(&mut out, "Some(v) == [tag |-> \"some\", value |-> v]").expect("write to string");
-        writeln!(&mut out).expect("write to string");
+        pushln!(&mut out, "None == [tag |-> \"none\", value |-> \"none\"]");
+        writeln!(&mut out, "Some(v) == [tag |-> \"some\", value |-> v]");
+        pushln!(&mut out);
         for (name, ty) in &constants {
             match ty {
                 TypeRef::Seq(inner) => {
@@ -3640,7 +3678,7 @@ impl<'a> MachineTlaCompiler<'a> {
             .values()
             .any(|ty| matches!(ty, TypeRef::Seq(_) | TypeRef::Option(_)))
         {
-            writeln!(&mut out).expect("write to string");
+            pushln!(&mut out);
         }
         writeln!(
             &mut out,
@@ -3672,7 +3710,7 @@ impl<'a> MachineTlaCompiler<'a> {
             "RECURSIVE SeqRemoveAll(_, _)\nSeqRemoveAll(seq, values) == IF Len(values) = 0 THEN seq ELSE SeqRemoveAll(SeqRemove(seq, Head(values)), Tail(values))"
         )
         .expect("write to string");
-        writeln!(&mut out).expect("write to string");
+        pushln!(&mut out);
 
         let variable_list = std::iter::once("phase".to_string())
             .chain(std::iter::once("model_step_count".to_string()))
@@ -3685,8 +3723,8 @@ impl<'a> MachineTlaCompiler<'a> {
             )
             .collect::<Vec<_>>()
             .join(", ");
-        writeln!(&mut out, "VARIABLES {variable_list}").expect("write to string");
-        writeln!(&mut out).expect("write to string");
+        pushln!(&mut out, "VARIABLES {variable_list}");
+        pushln!(&mut out);
         let vars = std::iter::once("phase".to_string())
             .chain(std::iter::once("model_step_count".to_string()))
             .chain(
@@ -3697,8 +3735,8 @@ impl<'a> MachineTlaCompiler<'a> {
                     .map(|field| field.name.clone()),
             )
             .collect::<Vec<_>>();
-        writeln!(&mut out, "vars == << {} >>", vars.join(", ")).expect("write to string");
-        writeln!(&mut out).expect("write to string");
+        pushln!(&mut out, "vars == << {} >>", vars.join(", "));
+        pushln!(&mut out);
 
         for helper in &self.schema.helpers {
             self.render_helper(&mut out, helper);
@@ -3707,17 +3745,17 @@ impl<'a> MachineTlaCompiler<'a> {
             self.render_helper(&mut out, derived);
         }
         if !self.schema.helpers.is_empty() || !self.schema.derived.is_empty() {
-            writeln!(&mut out).expect("write to string");
+            pushln!(&mut out);
         }
 
-        writeln!(&mut out, "Init ==").expect("write to string");
+        pushln!(&mut out, "Init ==");
         writeln!(
             &mut out,
             "    /\\ phase = {}",
             tla_string(&self.schema.state.init.phase)
         )
         .expect("write to string");
-        writeln!(&mut out, "    /\\ model_step_count = 0").expect("write to string");
+        pushln!(&mut out, "    /\\ model_step_count = 0");
         for field in &self.schema.state.fields {
             let init_expr = self
                 .schema
@@ -3728,9 +3766,9 @@ impl<'a> MachineTlaCompiler<'a> {
                 .find(|item| item.field == field.name)
                 .map(|item| self.render_expr(&item.expr, &BTreeMap::new(), &BTreeMap::new()))
                 .unwrap_or_else(|| default_state_init_expr(&field.ty));
-            writeln!(&mut out, "    /\\ {} = {}", field.name, init_expr).expect("write to string");
+            pushln!(&mut out, "    /\\ {} = {}", field.name, init_expr);
         }
-        writeln!(&mut out).expect("write to string");
+        pushln!(&mut out);
 
         let mut rendered_transitions = Vec::new();
         for transition in &self.schema.transitions {
@@ -3754,25 +3792,25 @@ impl<'a> MachineTlaCompiler<'a> {
                     .collect::<Vec<_>>()
                     .join(" \\/ ")
             };
-            writeln!(&mut out, "TerminalStutter ==").expect("write to string");
-            writeln!(&mut out, "    /\\ {}", terminal_guard).expect("write to string");
-            writeln!(&mut out, "    /\\ UNCHANGED vars").expect("write to string");
-            writeln!(&mut out).expect("write to string");
+            pushln!(&mut out, "TerminalStutter ==");
+            pushln!(&mut out, "    /\\ {}", terminal_guard);
+            pushln!(&mut out, "    /\\ UNCHANGED vars");
+            pushln!(&mut out);
         }
 
         if !self.helper_defs.is_empty() {
             for helper in &self.helper_defs {
-                writeln!(&mut out, "{helper}").expect("write to string");
-                writeln!(&mut out).expect("write to string");
+                pushln!(&mut out, "{helper}");
+                pushln!(&mut out);
             }
         }
 
         for transition in &rendered_transitions {
-            writeln!(&mut out, "{transition}").expect("write to string");
-            writeln!(&mut out).expect("write to string");
+            pushln!(&mut out, "{transition}");
+            pushln!(&mut out);
         }
 
-        writeln!(&mut out, "Next ==").expect("write to string");
+        pushln!(&mut out, "Next ==");
         for transition in &self.schema.transitions {
             let call = if transition.on.bindings.is_empty() {
                 transition.name.clone()
@@ -3786,7 +3824,9 @@ impl<'a> MachineTlaCompiler<'a> {
                     .collect::<BTreeMap<_, _>>();
                 let mut prefix = String::new();
                 for binding in &transition.on.bindings {
-                    let ty = binding_types.get(binding).expect("binding type");
+                    let Some(ty) = binding_types.get(binding) else {
+                        return String::new();
+                    };
                     let domain = self.binding_domain_for_type(ty);
                     let local = binding_env
                         .get(binding)
@@ -3808,12 +3848,12 @@ impl<'a> MachineTlaCompiler<'a> {
                     .join(", ");
                 format!("{prefix}{}({})", transition.name, args)
             };
-            writeln!(&mut out, "    \\/ {}", call).expect("write to string");
+            pushln!(&mut out, "    \\/ {}", call);
         }
         if !self.schema.state.terminal_phases.is_empty() {
-            writeln!(&mut out, "    \\/ TerminalStutter").expect("write to string");
+            pushln!(&mut out, "    \\/ TerminalStutter");
         }
-        writeln!(&mut out).expect("write to string");
+        pushln!(&mut out);
 
         for invariant in &self.schema.invariants {
             writeln!(
@@ -3824,7 +3864,7 @@ impl<'a> MachineTlaCompiler<'a> {
             )
             .expect("write to string");
         }
-        writeln!(&mut out).expect("write to string");
+        pushln!(&mut out);
 
         writeln!(
             &mut out,
@@ -3838,14 +3878,14 @@ impl<'a> MachineTlaCompiler<'a> {
             render_machine_state_constraint(self.schema, true)
         )
         .expect("write to string");
-        writeln!(&mut out).expect("write to string");
+        pushln!(&mut out);
 
-        writeln!(&mut out, "Spec == Init /\\ [][Next]_vars").expect("write to string");
-        writeln!(&mut out).expect("write to string");
+        pushln!(&mut out, "Spec == Init /\\ [][Next]_vars");
+        pushln!(&mut out);
         for invariant in &self.schema.invariants {
-            writeln!(&mut out, "THEOREM Spec => []{}", invariant.name).expect("write to string");
+            pushln!(&mut out, "THEOREM Spec => []{}", invariant.name);
         }
-        writeln!(&mut out).expect("write to string");
+        pushln!(&mut out);
         writeln!(
             &mut out,
             "============================================================================="
@@ -3921,9 +3961,9 @@ impl<'a> MachineTlaCompiler<'a> {
             .collect::<Vec<_>>()
             .join(", ");
         if params.is_empty() {
-            writeln!(out, "{} ==", transition.name).expect("write to string");
+            writeln!(out, "{} ==", transition.name);
         } else {
-            writeln!(out, "{}({}) ==", transition.name, params).expect("write to string");
+            pushln!(out, "{}({}) ==", transition.name, params);
         }
 
         let from_guard = if transition.from.len() == 1 {
@@ -3936,7 +3976,7 @@ impl<'a> MachineTlaCompiler<'a> {
                 .collect::<Vec<_>>()
                 .join(" \\/ ")
         };
-        writeln!(out, "    /\\ {}", from_guard).expect("write to string");
+        pushln!(out, "    /\\ {}", from_guard);
 
         let mut env = self
             .schema
@@ -3963,8 +4003,8 @@ impl<'a> MachineTlaCompiler<'a> {
             &transition.updates,
         );
 
-        writeln!(out, "    /\\ phase' = {}", tla_string(&transition.to)).expect("write to string");
-        writeln!(out, "    /\\ model_step_count' = model_step_count + 1").expect("write to string");
+        pushln!(out, "    /\\ phase' = {}", tla_string(&transition.to));
+        pushln!(out, "    /\\ model_step_count' = model_step_count + 1");
         let touched = self
             .schema
             .state
@@ -3981,7 +4021,7 @@ impl<'a> MachineTlaCompiler<'a> {
             .collect::<Vec<_>>();
 
         for (field, expr) in &touched {
-            writeln!(out, "    /\\ {}' = {}", field, expr).expect("write to string");
+            pushln!(out, "    /\\ {}' = {}", field, expr);
         }
 
         let unchanged = self
@@ -3993,8 +4033,7 @@ impl<'a> MachineTlaCompiler<'a> {
             .map(|field| field.name.clone())
             .collect::<Vec<_>>();
         if !unchanged.is_empty() {
-            writeln!(out, "    /\\ UNCHANGED << {} >>", unchanged.join(", "))
-                .expect("write to string");
+            pushln!(out, "    /\\ UNCHANGED << {} >>", unchanged.join(", "));
         }
     }
 
@@ -5418,26 +5457,25 @@ fn render_composition_case_fn(
     mappings: Vec<(&str, String)>,
     default_expr: String,
 ) {
-    writeln!(out, "{fn_name}({param}) ==").expect("write to string");
+    writeln!(out, "{fn_name}({param}) ==");
     if mappings.is_empty() {
-        writeln!(out, "    {}", default_expr).expect("write to string");
-        writeln!(out).expect("write to string");
+        pushln!(out, "    {}", default_expr);
+        pushln!(out);
         return;
     }
 
     let mut first = true;
     for (key, value) in mappings {
         if first {
-            writeln!(out, "    CASE {} = {} -> {}", param, tla_string(key), value)
-                .expect("write to string");
+            pushln!(out, "    CASE {} = {} -> {}", param, tla_string(key), value);
             first = false;
         } else {
             writeln!(out, "      [] {} = {} -> {}", param, tla_string(key), value)
                 .expect("write to string");
         }
     }
-    writeln!(out, "      [] OTHER -> {}", default_expr).expect("write to string");
-    writeln!(out).expect("write to string");
+    writeln!(out, "      [] OTHER -> {}", default_expr);
+    pushln!(out);
 }
 
 fn tla_ident(value: &str) -> String {

@@ -46,9 +46,7 @@ impl SpawnPolicyService {
 
     pub async fn resolve(&self, target: &MeerkatId) -> Option<SpawnSpec> {
         let policy = self.policy.read().await.clone();
-        let Some(policy) = policy else {
-            return None;
-        };
+        let policy = policy?;
         policy.resolve(target).await
     }
 }

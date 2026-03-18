@@ -516,8 +516,6 @@ async fn apply_runtime_turn(
                     .llm_client_override
                     .clone()
                     .map(encode_llm_client_override_for_service),
-                scoped_event_tx: None,
-                scoped_event_path: None,
                 override_builtins: Some(tooling.builtins),
                 override_shell: Some(tooling.shell),
                 override_memory: Some(tooling.memory),
@@ -1535,10 +1533,10 @@ async fn post_external_event(
     let input = make_runtime_external_event_input("webhook", "webhook", payload);
 
     match state.runtime_adapter.accept_input(&session_id, input).await {
-        Ok(meerkat_runtime::AcceptOutcome::Accepted { .. })
-        | Ok(meerkat_runtime::AcceptOutcome::Deduplicated { .. }) => {
-            Ok((StatusCode::ACCEPTED, Json(json!({"queued": true}))))
-        }
+        Ok(
+            meerkat_runtime::AcceptOutcome::Accepted { .. }
+            | meerkat_runtime::AcceptOutcome::Deduplicated { .. },
+        ) => Ok((StatusCode::ACCEPTED, Json(json!({"queued": true})))),
         Ok(meerkat_runtime::AcceptOutcome::Rejected { reason }) => {
             Err((StatusCode::CONFLICT, Json(json!({"error": reason}))).into_response())
         }
@@ -1906,8 +1904,6 @@ async fn create_session(
             .llm_client_override
             .clone()
             .map(encode_llm_client_override_for_service),
-        scoped_event_tx: None,
-        scoped_event_path: None,
         override_builtins: req.enable_builtins,
         override_shell: req.enable_shell,
         override_memory: req.enable_memory,

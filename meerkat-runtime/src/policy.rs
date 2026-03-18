@@ -72,52 +72,37 @@ pub enum ConsumePoint {
 }
 
 /// Whether admitted work may interrupt a yielding runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum InterruptPolicy {
+    #[default]
     None,
     InterruptYielding,
 }
 
-impl Default for InterruptPolicy {
-    fn default() -> Self {
-        Self::None
-    }
-}
-
 /// How the runtime should drain admitted work.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum DrainPolicy {
+    #[default]
     QueueNextTurn,
     SteerBatch,
     Immediate,
     Ignore,
 }
 
-impl Default for DrainPolicy {
-    fn default() -> Self {
-        Self::QueueNextTurn
-    }
-}
-
 /// Where admitted work routes after policy resolution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum RoutingDisposition {
+    #[default]
     Queue,
     Steer,
     Immediate,
     Drop,
-}
-
-impl Default for RoutingDisposition {
-    fn default() -> Self {
-        Self::Queue
-    }
 }
 
 /// Full policy decision for an input.

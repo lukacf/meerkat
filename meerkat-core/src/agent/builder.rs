@@ -44,8 +44,6 @@ pub struct AgentBuilder {
     pub(super) max_inline_peer_notifications: Option<i32>,
     pub(super) event_tap: Option<crate::event_tap::EventTap>,
     pub(super) default_event_tx: Option<mpsc::Sender<crate::event::AgentEvent>>,
-    pub(super) default_scoped_event_tx: Option<mpsc::Sender<crate::event::ScopedAgentEvent>>,
-    pub(super) default_scope_path: Vec<crate::event::StreamScopeFrame>,
 }
 
 impl AgentBuilder {
@@ -71,8 +69,6 @@ impl AgentBuilder {
             max_inline_peer_notifications: None,
             event_tap: None,
             default_event_tx: None,
-            default_scoped_event_tx: None,
-            default_scope_path: Vec::new(),
         }
     }
 
@@ -257,8 +253,6 @@ impl AgentBuilder {
                 .unwrap_or_else(crate::event_tap::new_event_tap),
             system_context_state,
             default_event_tx: self.default_event_tx,
-            default_scoped_event_tx: self.default_scoped_event_tx,
-            default_scope_path: self.default_scope_path,
             host_drain_active: false,
             runtime_input_sink: self.runtime_input_sink,
             extraction_mode: false,
@@ -350,24 +344,6 @@ impl AgentBuilder {
         event_tx: mpsc::Sender<crate::event::AgentEvent>,
     ) -> Self {
         self.default_event_tx = Some(event_tx);
-        self
-    }
-
-    /// Set a default scoped event channel for attributed multi-agent streaming.
-    pub fn with_default_scoped_event_tx(
-        mut self,
-        scoped_event_tx: mpsc::Sender<crate::event::ScopedAgentEvent>,
-    ) -> Self {
-        self.default_scoped_event_tx = Some(scoped_event_tx);
-        self
-    }
-
-    /// Set the base scope path used for attributed nested stream events.
-    pub fn with_default_scope_path(
-        mut self,
-        scope_path: Vec<crate::event::StreamScopeFrame>,
-    ) -> Self {
-        self.default_scope_path = scope_path;
         self
     }
 }

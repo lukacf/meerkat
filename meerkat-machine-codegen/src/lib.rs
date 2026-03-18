@@ -1,3 +1,17 @@
+#![allow(
+    clippy::collapsible_if,
+    clippy::double_ended_iterator_last,
+    clippy::format_collect,
+    clippy::if_not_else,
+    clippy::manual_clamp,
+    clippy::self_only_used_in_recursion,
+    clippy::semicolon_if_nothing_returned,
+    clippy::too_many_arguments,
+    clippy::uninlined_format_args,
+    clippy::useless_conversion,
+    clippy::useless_format
+)]
+
 #[cfg(not(test))]
 mod artifacts;
 mod render;

@@ -138,7 +138,7 @@ fn peer_comms_kernel_classifies_inline_terminal_without_child_lifecycle_leakage(
     );
     assert_ne!(
         delivered.effects[0].fields.get("peer_input_class"),
-        Some(&string("DelegatedBranchResult"))
+        Some(&string("SubagentResult"))
     );
     assert_eq!(
         map_value(&received, "trusted_snapshot", "raw-inline"),

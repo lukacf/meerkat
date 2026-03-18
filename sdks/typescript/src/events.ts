@@ -75,7 +75,7 @@ export type StreamScopeFrame =
       readonly session_id: string;
     }
   | {
-      readonly scope: "sub_agent";
+      readonly scope: "delegated_branch" | "sub_agent";
       readonly agent_id: string;
       readonly tool_call_id?: string;
       readonly label?: string;

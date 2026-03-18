@@ -5,8 +5,8 @@
 
 pub mod transport;
 
+use crate::event::AgentEvent;
 use crate::event::EventEnvelope;
-use crate::event::{AgentEvent, ScopedAgentEvent, StreamScopeFrame};
 use crate::session::SystemContextStageError;
 use crate::time_compat::SystemTime;
 #[cfg(target_arch = "wasm32")]
@@ -172,10 +172,6 @@ pub struct SessionBuildOptions {
     ///
     /// Factory builders may downcast this to their concrete client trait.
     pub llm_client_override: Option<Arc<dyn std::any::Any + Send + Sync>>,
-    /// Optional scoped stream sink for attributed multi-agent events.
-    pub scoped_event_tx: Option<mpsc::Sender<ScopedAgentEvent>>,
-    /// Base scope path for attributed events emitted by nested agents.
-    pub scoped_event_path: Option<Vec<StreamScopeFrame>>,
     pub override_builtins: Option<bool>,
     pub override_shell: Option<bool>,
     pub override_memory: Option<bool>,
@@ -232,8 +228,6 @@ impl Default for SessionBuildOptions {
             provider_params: None,
             external_tools: None,
             llm_client_override: None,
-            scoped_event_tx: None,
-            scoped_event_path: None,
             override_builtins: None,
             override_shell: None,
             override_memory: None,
@@ -268,8 +262,6 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("provider_params", &self.provider_params.is_some())
             .field("external_tools", &self.external_tools.is_some())
             .field("llm_client_override", &self.llm_client_override.is_some())
-            .field("scoped_event_tx", &self.scoped_event_tx.is_some())
-            .field("scoped_event_path", &self.scoped_event_path.is_some())
             .field("override_builtins", &self.override_builtins)
             .field("override_shell", &self.override_shell)
             .field("override_memory", &self.override_memory)

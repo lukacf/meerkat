@@ -185,8 +185,8 @@ mod tests {
         let input = interaction_to_peer_input(&interaction, &LogicalRuntimeId::new("test"));
         if let Input::Peer(p) = &input {
             assert!(matches!(p.convention, Some(PeerConvention::Request { .. })));
-            match p.convention.as_ref().expect("request convention") {
-                PeerConvention::Request { request_id, .. } => {
+            match p.convention.as_ref() {
+                Some(PeerConvention::Request { request_id, .. }) => {
                     assert_eq!(request_id, &interaction.id.0.to_string());
                 }
                 other => panic!("Expected request convention, got {other:?}"),

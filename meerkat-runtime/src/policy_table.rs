@@ -13,6 +13,7 @@ use crate::policy::{
 pub const DEFAULT_POLICY_VERSION: PolicyVersion = PolicyVersion(1);
 
 /// Helper to construct a PolicyDecision with transcript defaults.
+#[allow(clippy::too_many_arguments)]
 fn pd(
     apply_mode: ApplyMode,
     wake_mode: WakeMode,

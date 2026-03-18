@@ -506,12 +506,6 @@ where
     pub(crate) default_event_tx: Option<tokio::sync::mpsc::Sender<crate::event::AgentEvent>>,
     /// Optional session checkpointer for host-mode persistence.
     pub(crate) checkpointer: Option<Arc<dyn crate::checkpoint::SessionCheckpointer>>,
-    /// Optional default scoped event channel configured at build time.
-    /// Used by nested delegated-branch forwarding to emit attributed events.
-    pub(crate) default_scoped_event_tx:
-        Option<tokio::sync::mpsc::Sender<crate::event::ScopedAgentEvent>>,
-    /// Base scope path for nested scoped event forwarding.
-    pub(crate) default_scope_path: Vec<crate::event::StreamScopeFrame>,
     /// Comms intents that should be silently injected into the session
     /// without triggering an LLM turn. Matched against `InteractionContent::Request.intent`.
     #[allow(dead_code)] // Used by comms_impl when comms feature is enabled

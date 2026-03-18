@@ -192,7 +192,13 @@ impl GeneratedMachineKernel {
                 variant: input.variant.clone(),
             }),
             1 => {
-                let (transition, bindings) = matches.pop().expect("single match");
+                let Some((transition, bindings)) = matches.pop() else {
+                    return Err(TransitionRefusal::NoMatchingTransition {
+                        machine: self.schema.machine.clone(),
+                        phase: state.phase.clone(),
+                        variant: input.variant.clone(),
+                    });
+                };
                 self.apply_transition(state, transition, &bindings)
             }
             _ => Err(TransitionRefusal::AmbiguousTransition {
@@ -837,6 +843,7 @@ mod tests {
 
     use super::{GeneratedMachineKernel, KernelInput, KernelValue, TransitionRefusal};
 
+    #[allow(clippy::expect_used)]
     #[test]
     fn every_catalog_machine_builds_an_initial_state() {
         for schema in canonical_machine_schemas() {
@@ -846,6 +853,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::expect_used)]
     #[test]
     fn input_lifecycle_queue_accepted_transition_executes() {
         let kernel = GeneratedMachineKernel::new(input_lifecycle_machine());
@@ -863,6 +871,7 @@ mod tests {
         assert_eq!(outcome.next_state.phase, "Queued");
     }
 
+    #[allow(clippy::expect_used)]
     #[test]
     fn runtime_control_rejects_unknown_input_variant() {
         let kernel = GeneratedMachineKernel::new(runtime_control_machine());
@@ -882,6 +891,7 @@ mod tests {
         ));
     }
 
+    #[allow(clippy::expect_used)]
     #[test]
     fn input_payload_types_are_checked() {
         let kernel = GeneratedMachineKernel::new(runtime_control_machine());
@@ -907,6 +917,7 @@ mod tests {
         ));
     }
 
+    #[allow(clippy::expect_used)]
     #[test]
     fn named_numeric_aliases_accept_u64_payloads() {
         use meerkat_machine_schema::{external_tool_surface_machine, input_lifecycle_machine};

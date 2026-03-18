@@ -118,6 +118,7 @@ impl MobLifecycleOwner {
         self.tracked_flows.store(0, Ordering::Release);
     }
 
+    #[cfg(test)]
     pub(super) fn tracked_flow_count(&self) -> usize {
         self.tracked_flows.load(Ordering::Acquire)
     }

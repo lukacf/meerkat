@@ -22,6 +22,12 @@ pub struct MobOrchestratorKernel {
 }
 
 impl MobOrchestratorKernel {
+    fn snapshot_guard(&self) -> std::sync::MutexGuard<'_, MobOrchestratorSnapshot> {
+        self.snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     pub fn new(definition: &MobDefinition, topology: Arc<MobTopologyService>) -> Self {
         Self {
             orchestrator_role: definition
@@ -37,7 +43,7 @@ impl MobOrchestratorKernel {
     pub fn initialize(&self) {
         if self.orchestrator_role.is_some() {
             let revision = self.topology.bind_coordinator();
-            let mut snapshot = self.snapshot.lock().expect("orchestrator snapshot lock");
+            let mut snapshot = self.snapshot_guard();
             snapshot.coordinator_bound = true;
             snapshot.topology_revision = revision;
             snapshot.supervisor_active = self.supervisor_enabled;
@@ -45,14 +51,11 @@ impl MobOrchestratorKernel {
     }
 
     pub fn snapshot(&self) -> MobOrchestratorSnapshot {
-        self.snapshot
-            .lock()
-            .expect("orchestrator snapshot lock")
-            .clone()
+        self.snapshot_guard().clone()
     }
 
     pub fn record_spawn_staged(&self) -> Result<(), MobError> {
-        let mut snapshot = self.snapshot.lock().expect("orchestrator snapshot lock");
+        let mut snapshot = self.snapshot_guard();
         if self.orchestrator_role.is_none() || !snapshot.coordinator_bound {
             return Err(MobError::Internal(
                 "pending spawn ownership requires a bound orchestrator coordinator".into(),
@@ -64,7 +67,7 @@ impl MobOrchestratorKernel {
     }
 
     pub fn record_spawn_completed(&self) -> Result<(), MobError> {
-        let mut snapshot = self.snapshot.lock().expect("orchestrator snapshot lock");
+        let mut snapshot = self.snapshot_guard();
         if snapshot.pending_spawn_count == 0 {
             return Err(MobError::Internal(
                 "spawn completion arrived with no pending orchestrator-owned spawn".into(),
@@ -76,18 +79,18 @@ impl MobOrchestratorKernel {
     }
 
     pub fn record_flow_started(&self) {
-        let mut snapshot = self.snapshot.lock().expect("orchestrator snapshot lock");
+        let mut snapshot = self.snapshot_guard();
         snapshot.active_flow_count = snapshot.active_flow_count.saturating_add(1);
     }
 
     pub fn record_flow_finished(&self) {
-        let mut snapshot = self.snapshot.lock().expect("orchestrator snapshot lock");
+        let mut snapshot = self.snapshot_guard();
         snapshot.active_flow_count = snapshot.active_flow_count.saturating_sub(1);
     }
 
     pub fn record_stop(&self) {
         let revision = self.topology.unbind_coordinator();
-        let mut snapshot = self.snapshot.lock().expect("orchestrator snapshot lock");
+        let mut snapshot = self.snapshot_guard();
         snapshot.coordinator_bound = false;
         snapshot.topology_revision = revision;
         snapshot.supervisor_active = false;
@@ -99,7 +102,7 @@ impl MobOrchestratorKernel {
         } else {
             self.topology.revision()
         };
-        let mut snapshot = self.snapshot.lock().expect("orchestrator snapshot lock");
+        let mut snapshot = self.snapshot_guard();
         snapshot.coordinator_bound = self.orchestrator_role.is_some();
         snapshot.topology_revision = revision;
         snapshot.supervisor_active = self.supervisor_enabled;
@@ -107,13 +110,13 @@ impl MobOrchestratorKernel {
 
     pub fn record_completed(&self) {
         self.record_stop();
-        let mut snapshot = self.snapshot.lock().expect("orchestrator snapshot lock");
+        let mut snapshot = self.snapshot_guard();
         snapshot.active_flow_count = 0;
     }
 
     pub fn record_destroyed(&self) {
         self.record_stop();
-        let mut snapshot = self.snapshot.lock().expect("orchestrator snapshot lock");
+        let mut snapshot = self.snapshot_guard();
         snapshot.pending_spawn_count = 0;
         snapshot.active_flow_count = 0;
     }

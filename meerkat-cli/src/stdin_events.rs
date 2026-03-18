@@ -68,8 +68,10 @@ pub fn spawn_stdin_reader(
                 .accept_input(&session_id, make_stdin_external_event_input(body))
                 .await
             {
-                Ok(meerkat_runtime::AcceptOutcome::Accepted { .. })
-                | Ok(meerkat_runtime::AcceptOutcome::Deduplicated { .. }) => {}
+                Ok(
+                    meerkat_runtime::AcceptOutcome::Accepted { .. }
+                    | meerkat_runtime::AcceptOutcome::Deduplicated { .. },
+                ) => {}
                 Ok(meerkat_runtime::AcceptOutcome::Rejected { reason }) => {
                     tracing::warn!("Stdin reader: runtime rejected stdin event: {reason}");
                 }
@@ -99,7 +101,7 @@ pub fn spawn_stdin_reader(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 

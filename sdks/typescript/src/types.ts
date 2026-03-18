@@ -161,7 +161,7 @@ export interface SpawnSpec {
   readonly meerkatId: string;
   readonly initialMessage?: string;
   readonly runtimeMode?: "turn_driven" | "autonomous_host";
-  readonly backend?: "subagent" | "external";
+  readonly backend?: "session" | "subagent" | "external";
   readonly labels?: Record<string, string>;
   readonly context?: Record<string, unknown>;
   readonly resumeSessionId?: string;

@@ -1,5 +1,23 @@
 use std::fmt::Write;
 
+fn push_fmt(out: &mut String, args: std::fmt::Arguments<'_>) {
+    let _ignored = out.write_fmt(args);
+}
+
+fn push_line(out: &mut String, args: std::fmt::Arguments<'_>) {
+    push_fmt(out, args);
+    out.push('\n');
+}
+
+macro_rules! pushln {
+    ($out:expr) => {{
+        $out.push('\n');
+    }};
+    ($out:expr, $($arg:tt)*) => {{
+        push_line($out, format_args!($($arg)*));
+    }};
+}
+
 #[cfg(not(test))]
 use meerkat_machine_schema::{
     CompositionCoverageManifest, CompositionInvariantKind, CompositionSchema,
@@ -19,56 +37,52 @@ pub fn render_machine_module(schema: &MachineSchema) -> String {
     let mut out = String::new();
     let module_name = format!("Machine_{}", tla_ident(&schema.machine));
 
-    writeln!(&mut out, "---- MODULE {} ----", module_name).expect("write to string");
-    writeln!(
+    pushln!(&mut out, "---- MODULE {module_name} ----");
+    pushln!(
         &mut out,
         "(* machine = {} ; version = {} *)",
-        schema.machine, schema.version
-    )
-    .expect("write to string");
-    writeln!(
+        schema.machine,
+        schema.version
+    );
+    pushln!(
         &mut out,
         "(* rust = {}::{} *)",
-        schema.rust.crate_name, schema.rust.module
-    )
-    .expect("write to string");
+        schema.rust.crate_name,
+        schema.rust.module
+    );
     out.push('\n');
 
-    writeln!(&mut out, "STATE").expect("write to string");
-    writeln!(
+    pushln!(&mut out, "STATE");
+    pushln!(
         &mut out,
         "  phase : {}",
         render_enum_variants_inline(&schema.state.phase)
-    )
-    .expect("write to string");
+    );
     for field in &schema.state.fields {
-        writeln!(
+        pushln!(
             &mut out,
             "  {} : {}",
             field.name,
             render_type_ref(&field.ty)
-        )
-        .expect("write to string");
+        );
     }
     out.push('\n');
 
-    writeln!(&mut out, "INIT").expect("write to string");
-    writeln!(
+    pushln!(&mut out, "INIT");
+    pushln!(
         &mut out,
         "  phase = {}",
         tla_string(&schema.state.init.phase)
-    )
-    .expect("write to string");
+    );
     for field in &schema.state.init.fields {
         render_field_init(&mut out, field);
     }
     if !schema.state.terminal_phases.is_empty() {
-        writeln!(
+        pushln!(
             &mut out,
             "  terminal_phases = {}",
             render_string_list(&schema.state.terminal_phases)
-        )
-        .expect("write to string");
+        );
     }
     out.push('\n');
 
@@ -80,7 +94,7 @@ pub fn render_machine_module(schema: &MachineSchema) -> String {
     render_invariants_section(&mut out, schema);
     render_transitions_section(&mut out, schema);
 
-    writeln!(&mut out, "====").expect("write to string");
+    pushln!(&mut out, "====");
     out
 }
 
@@ -89,24 +103,25 @@ pub fn render_composition_module(schema: &CompositionSchema) -> String {
     let mut out = String::new();
     let module_name = format!("Composition_{}", tla_ident(&schema.name));
 
-    writeln!(&mut out, "---- MODULE {} ----", module_name).expect("write to string");
-    writeln!(&mut out, "(* composition = {} *)", schema.name).expect("write to string");
+    pushln!(&mut out, "---- MODULE {module_name} ----");
+    pushln!(&mut out, "(* composition = {} *)", schema.name);
     out.push('\n');
 
-    writeln!(&mut out, "MACHINES").expect("write to string");
+    pushln!(&mut out, "MACHINES");
     for machine in &schema.machines {
-        writeln!(
+        pushln!(
             &mut out,
             "  {} : {} @ actor {}",
-            machine.instance_id, machine.machine_name, machine.actor
-        )
-        .expect("write to string");
+            machine.instance_id,
+            machine.machine_name,
+            machine.actor
+        );
     }
     out.push('\n');
 
-    writeln!(&mut out, "ROUTES").expect("write to string");
+    pushln!(&mut out, "ROUTES");
     for route in &schema.routes {
-        writeln!(
+        pushln!(
             &mut out,
             "  {} == {}.{} -> {}.{} [{}]",
             route.name,
@@ -115,50 +130,47 @@ pub fn render_composition_module(schema: &CompositionSchema) -> String {
             route.to.machine,
             route.to.input_variant,
             render_route_delivery(&route.delivery)
-        )
-        .expect("write to string");
+        );
         if !route.bindings.is_empty() {
-            writeln!(&mut out, "    bindings = {}", render_route_bindings(route))
-                .expect("write to string");
+            pushln!(&mut out, "    bindings = {}", render_route_bindings(route));
         }
     }
     out.push('\n');
 
-    writeln!(&mut out, "ACTOR_PRIORITIES").expect("write to string");
+    pushln!(&mut out, "ACTOR_PRIORITIES");
     for priority in &schema.actor_priorities {
-        writeln!(
+        pushln!(
             &mut out,
             "  {} > {} ; {}",
-            priority.higher, priority.lower, priority.reason
-        )
-        .expect("write to string");
+            priority.higher,
+            priority.lower,
+            priority.reason
+        );
     }
     out.push('\n');
 
-    writeln!(&mut out, "SCHEDULER_RULES").expect("write to string");
+    pushln!(&mut out, "SCHEDULER_RULES");
     for rule in &schema.scheduler_rules {
-        writeln!(&mut out, "  {}", render_scheduler_rule(rule)).expect("write to string");
+        pushln!(&mut out, "  {}", render_scheduler_rule(rule));
     }
     out.push('\n');
 
-    writeln!(&mut out, "INVARIANTS").expect("write to string");
+    pushln!(&mut out, "INVARIANTS");
     for invariant in &schema.invariants {
-        writeln!(
+        pushln!(
             &mut out,
             "  {} == {}",
             invariant.name,
             render_composition_invariant_kind(&invariant.kind)
-        )
-        .expect("write to string");
-        writeln!(
+        );
+        pushln!(
             &mut out,
             "    statement = {}",
             tla_string(&invariant.statement)
-        )
-        .expect("write to string");
+        );
     }
 
-    writeln!(&mut out, "====").expect("write to string");
+    pushln!(&mut out, "====");
     out
 }
 
@@ -169,32 +181,32 @@ pub fn render_machine_mapping_coverage(
 ) -> String {
     let mut out = String::new();
 
-    writeln!(&mut out, "## Generated Coverage").expect("write to string");
-    writeln!(
+    pushln!(&mut out, "## Generated Coverage");
+    pushln!(
         &mut out,
         "This section is generated from the Rust machine catalog. Do not edit it by hand."
-    )
-    .expect("write to string");
+    );
     out.push('\n');
 
-    writeln!(&mut out, "### Machine").expect("write to string");
-    writeln!(&mut out, "- `{}`", schema.machine).expect("write to string");
+    pushln!(&mut out, "### Machine");
+    pushln!(&mut out, "- `{}`", schema.machine);
     out.push('\n');
 
-    writeln!(&mut out, "### Code Anchors").expect("write to string");
+    pushln!(&mut out, "### Code Anchors");
     for anchor in &coverage.code_anchors {
-        writeln!(
+        pushln!(
             &mut out,
             "- `{}`: `{}` — {}",
-            anchor.id, anchor.path, anchor.note
-        )
-        .expect("write to string");
+            anchor.id,
+            anchor.path,
+            anchor.note
+        );
     }
     out.push('\n');
 
-    writeln!(&mut out, "### Scenarios").expect("write to string");
+    pushln!(&mut out, "### Scenarios");
     for scenario in &coverage.scenarios {
-        writeln!(&mut out, "- `{}` — {}", scenario.id, scenario.summary).expect("write to string");
+        pushln!(&mut out, "- `{}` — {}", scenario.id, scenario.summary);
     }
     out.push('\n');
 
@@ -212,32 +224,32 @@ pub fn render_composition_mapping_coverage(
 ) -> String {
     let mut out = String::new();
 
-    writeln!(&mut out, "## Generated Coverage").expect("write to string");
-    writeln!(
+    pushln!(&mut out, "## Generated Coverage");
+    pushln!(
         &mut out,
         "This section is generated from the Rust composition catalog. Do not edit it by hand."
-    )
-    .expect("write to string");
+    );
     out.push('\n');
 
-    writeln!(&mut out, "### Composition").expect("write to string");
-    writeln!(&mut out, "- `{}`", schema.name).expect("write to string");
+    pushln!(&mut out, "### Composition");
+    pushln!(&mut out, "- `{}`", schema.name);
     out.push('\n');
 
-    writeln!(&mut out, "### Code Anchors").expect("write to string");
+    pushln!(&mut out, "### Code Anchors");
     for anchor in &coverage.code_anchors {
-        writeln!(
+        pushln!(
             &mut out,
             "- `{}`: `{}` — {}",
-            anchor.id, anchor.path, anchor.note
-        )
-        .expect("write to string");
+            anchor.id,
+            anchor.path,
+            anchor.note
+        );
     }
     out.push('\n');
 
-    writeln!(&mut out, "### Scenarios").expect("write to string");
+    pushln!(&mut out, "### Scenarios");
     for scenario in &coverage.scenarios {
-        writeln!(&mut out, "- `{}` — {}", scenario.id, scenario.summary).expect("write to string");
+        pushln!(&mut out, "- `{}` — {}", scenario.id, scenario.summary);
     }
     out.push('\n');
 
@@ -258,45 +270,44 @@ pub fn render_machine_kernel_module(schema: &MachineSchema) -> String {
     let module_name = machine_slug(&schema.machine);
     let catalog_fn = format!("{module_name}_machine");
 
-    writeln!(
+    pushln!(
         &mut out,
         "// Generated by `cargo xtask machine-codegen --all`."
-    )
-    .expect("write");
-    writeln!(&mut out, "use crate::runtime::{{").expect("write");
-    writeln!(&mut out, "    GeneratedMachineKernel, KernelInput, KernelState, TransitionOutcome, TransitionRefusal,").expect("write");
-    writeln!(&mut out, "}};").expect("write");
-    writeln!(&mut out).expect("write");
-    writeln!(
+    );
+    pushln!(&mut out, "use crate::runtime::{{");
+    pushln!(
+        &mut out,
+        "    GeneratedMachineKernel, KernelInput, KernelState, TransitionOutcome, TransitionRefusal,"
+    );
+    pushln!(&mut out, "}};");
+    pushln!(&mut out);
+    pushln!(
         &mut out,
         "pub fn schema() -> meerkat_machine_schema::MachineSchema {{"
-    )
-    .expect("write");
-    writeln!(&mut out, "    meerkat_machine_schema::{catalog_fn}()").expect("write");
-    writeln!(&mut out, "}}").expect("write");
-    writeln!(&mut out).expect("write");
-    writeln!(&mut out, "pub fn kernel() -> GeneratedMachineKernel {{").expect("write");
-    writeln!(&mut out, "    GeneratedMachineKernel::new(schema())").expect("write");
-    writeln!(&mut out, "}}").expect("write");
-    writeln!(&mut out).expect("write");
-    writeln!(
+    );
+    pushln!(&mut out, "    meerkat_machine_schema::{catalog_fn}()");
+    pushln!(&mut out, "}}");
+    pushln!(&mut out);
+    pushln!(&mut out, "pub fn kernel() -> GeneratedMachineKernel {{");
+    pushln!(&mut out, "    GeneratedMachineKernel::new(schema())");
+    pushln!(&mut out, "}}");
+    pushln!(&mut out);
+    pushln!(
         &mut out,
         "pub fn initial_state() -> Result<KernelState, TransitionRefusal> {{"
-    )
-    .expect("write");
-    writeln!(&mut out, "    kernel().initial_state()").expect("write");
-    writeln!(&mut out, "}}").expect("write");
-    writeln!(&mut out).expect("write");
-    writeln!(&mut out, "pub fn transition(").expect("write");
-    writeln!(&mut out, "    state: &KernelState,").expect("write");
-    writeln!(&mut out, "    input: &KernelInput,").expect("write");
-    writeln!(
+    );
+    pushln!(&mut out, "    kernel().initial_state()");
+    pushln!(&mut out, "}}");
+    pushln!(&mut out);
+    pushln!(&mut out, "pub fn transition(");
+    pushln!(&mut out, "    state: &KernelState,");
+    pushln!(&mut out, "    input: &KernelInput,");
+    pushln!(
         &mut out,
         ") -> Result<TransitionOutcome, TransitionRefusal> {{"
-    )
-    .expect("write");
-    writeln!(&mut out, "    kernel().transition(state, input)").expect("write");
-    writeln!(&mut out, "}}").expect("write");
+    );
+    pushln!(&mut out, "    kernel().transition(state, input)");
+    pushln!(&mut out, "}}");
 
     out
 }
@@ -304,34 +315,32 @@ pub fn render_machine_kernel_module(schema: &MachineSchema) -> String {
 #[cfg(not(test))]
 pub fn render_generated_kernel_mod(schemas: &[MachineSchema]) -> String {
     let mut out = String::new();
-    writeln!(
+    pushln!(
         &mut out,
         "// Generated by `cargo xtask machine-codegen --all`."
-    )
-    .expect("write");
+    );
     let mut module_slugs: Vec<_> = schemas
         .iter()
         .map(|schema| machine_slug(&schema.machine))
         .collect();
     module_slugs.sort();
     for slug in module_slugs {
-        writeln!(&mut out, "pub mod {slug};").expect("write");
+        pushln!(&mut out, "pub mod {slug};");
     }
     out.push('\n');
-    writeln!(&mut out, "use crate::runtime::GeneratedMachineKernel;").expect("write");
-    writeln!(&mut out).expect("write");
-    writeln!(
+    pushln!(&mut out, "use crate::runtime::GeneratedMachineKernel;");
+    pushln!(&mut out);
+    pushln!(
         &mut out,
         "pub fn all_kernels() -> Vec<GeneratedMachineKernel> {{"
-    )
-    .expect("write");
-    writeln!(&mut out, "    vec![").expect("write");
+    );
+    pushln!(&mut out, "    vec![");
     for schema in schemas {
         let slug = machine_slug(&schema.machine);
-        writeln!(&mut out, "        {slug}::kernel(),").expect("write");
+        pushln!(&mut out, "        {slug}::kernel(),");
     }
-    writeln!(&mut out, "    ]").expect("write");
-    writeln!(&mut out, "}}").expect("write");
+    pushln!(&mut out, "    ]");
+    pushln!(&mut out, "}}");
     out
 }
 
@@ -341,16 +350,16 @@ fn render_semantic_mapping_section(
     heading: &str,
     entries: &[SemanticCoverageEntry],
 ) {
-    writeln!(out, "### {heading}").expect("write to string");
+    pushln!(out, "### {heading}");
     if entries.is_empty() {
-        writeln!(out, "- `(none)`").expect("write to string");
+        pushln!(out, "- `(none)`");
         out.push('\n');
         return;
     }
 
     for entry in entries {
-        writeln!(out, "- `{}`", entry.name).expect("write to string");
-        writeln!(
+        pushln!(out, "- `{}`", entry.name);
+        pushln!(
             out,
             "  - anchors: {}",
             entry
@@ -359,9 +368,8 @@ fn render_semantic_mapping_section(
                 .map(|id| format!("`{id}`"))
                 .collect::<Vec<_>>()
                 .join(", ")
-        )
-        .expect("write to string");
-        writeln!(
+        );
+        pushln!(
             out,
             "  - scenarios: {}",
             entry
@@ -370,8 +378,7 @@ fn render_semantic_mapping_section(
                 .map(|id| format!("`{id}`"))
                 .collect::<Vec<_>>()
                 .join(", ")
-        )
-        .expect("write to string");
+        );
     }
     out.push('\n');
 }
@@ -441,22 +448,20 @@ pub fn merge_mapping_document(existing: Option<&str>, title: &str, generated: &s
 }
 
 fn render_enum_section(out: &mut String, label: &str, schema: &EnumSchema) {
-    writeln!(out, "{label}").expect("write to string");
-    writeln!(
+    pushln!(out, "{label}");
+    pushln!(
         out,
         "  {} = {}",
         schema.name,
         render_enum_variants_inline(schema)
-    )
-    .expect("write to string");
+    );
     for variant in &schema.variants {
-        writeln!(
+        pushln!(
             out,
             "  {} == {}",
             variant.name,
             render_variant_fields(variant)
-        )
-        .expect("write to string");
+        );
     }
     out.push('\n');
 }
@@ -465,37 +470,35 @@ fn render_helpers_section(out: &mut String, label: &str, helpers: &[HelperSchema
     if helpers.is_empty() {
         return;
     }
-    writeln!(out, "{label}").expect("write to string");
+    pushln!(out, "{label}");
     for helper in helpers {
-        writeln!(
+        pushln!(
             out,
             "  {}({}) : {}",
             helper.name,
             render_fields(&helper.params),
             render_type_ref(&helper.returns)
-        )
-        .expect("write to string");
-        writeln!(out, "    == {}", render_expr(&helper.body)).expect("write to string");
+        );
+        pushln!(out, "    == {}", render_expr(&helper.body));
     }
     out.push('\n');
 }
 
 fn render_invariants_section(out: &mut String, schema: &MachineSchema) {
-    writeln!(out, "INVARIANTS").expect("write to string");
+    pushln!(out, "INVARIANTS");
     for invariant in &schema.invariants {
-        writeln!(
+        pushln!(
             out,
             "  {} == {}",
             invariant.name,
             render_expr(&invariant.expr)
-        )
-        .expect("write to string");
+        );
     }
     out.push('\n');
 }
 
 fn render_transitions_section(out: &mut String, schema: &MachineSchema) {
-    writeln!(out, "TRANSITIONS").expect("write to string");
+    pushln!(out, "TRANSITIONS");
     for transition in &schema.transitions {
         render_transition(out, transition);
     }
@@ -503,48 +506,46 @@ fn render_transitions_section(out: &mut String, schema: &MachineSchema) {
 }
 
 fn render_transition(out: &mut String, transition: &TransitionSchema) {
-    writeln!(out, "  {}", transition.name).expect("write to string");
-    writeln!(out, "    from = {}", render_string_list(&transition.from)).expect("write to string");
-    writeln!(
+    pushln!(out, "  {}", transition.name);
+    pushln!(out, "    from = {}", render_string_list(&transition.from));
+    pushln!(
         out,
         "    on = {}({})",
         transition.on.variant,
         transition.on.bindings.join(", ")
-    )
-    .expect("write to string");
+    );
     if !transition.guards.is_empty() {
-        writeln!(out, "    guards =").expect("write to string");
+        pushln!(out, "    guards =");
         for guard in &transition.guards {
             render_guard(out, guard);
         }
     }
     if !transition.updates.is_empty() {
-        writeln!(out, "    updates =").expect("write to string");
+        pushln!(out, "    updates =");
         for update in &transition.updates {
-            writeln!(out, "      - {}", render_update(update)).expect("write to string");
+            pushln!(out, "      - {}", render_update(update));
         }
     }
-    writeln!(out, "    to = {}", tla_string(&transition.to)).expect("write to string");
+    pushln!(out, "    to = {}", tla_string(&transition.to));
     if !transition.emit.is_empty() {
-        writeln!(out, "    emit =").expect("write to string");
+        pushln!(out, "    emit =");
         for effect in &transition.emit {
-            writeln!(out, "      - {}", render_effect_emit(effect)).expect("write to string");
+            pushln!(out, "      - {}", render_effect_emit(effect));
         }
     }
 }
 
 fn render_guard(out: &mut String, guard: &Guard) {
-    writeln!(
+    pushln!(
         out,
         "      - {} == {}",
         guard.name,
         render_expr(&guard.expr)
-    )
-    .expect("write to string");
+    );
 }
 
 fn render_field_init(out: &mut String, field: &FieldInit) {
-    writeln!(out, "  {} = {}", field.field, render_expr(&field.expr)).expect("write to string");
+    pushln!(out, "  {} = {}", field.field, render_expr(&field.expr));
 }
 
 fn render_variant_fields(variant: &VariantSchema) -> String {

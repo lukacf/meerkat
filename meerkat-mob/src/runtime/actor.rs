@@ -705,7 +705,7 @@ impl MobActor {
                         let _ = reply_tx.send(Err(error));
                         continue;
                     }
-                    self.enqueue_spawn(spec, reply_tx).await;
+                    self.enqueue_spawn(*spec, reply_tx).await;
                 }
                 MobCommand::SpawnProvisioned {
                     spawn_ticket,

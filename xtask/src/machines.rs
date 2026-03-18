@@ -230,10 +230,10 @@ fn machine_verify_at_root(
                 profile,
                 workers,
             )?;
-            if matches!(profile, VerifyProfile::Deep) {
-                if let Some(coverage) = coverage {
-                    ensure_machine_transition_coverage(&machine.schema, &coverage)?;
-                }
+            if matches!(profile, VerifyProfile::Deep)
+                && let Some(coverage) = coverage
+            {
+                ensure_machine_transition_coverage(&machine.schema, &coverage)?;
             }
         }
     }
@@ -434,7 +434,7 @@ pub fn collect_generated_kernel_boundary_mismatches(root: &Path) -> Result<Vec<S
             continue;
         }
 
-        let owner_file = owner_module_file(root, &machine.rust.crate_name, &machine.rust.module);
+        let owner_file = owner_module_file(root, &machine.rust.crate_name, &machine.rust.module)?;
         let owner_mod =
             owner_module_dir(root, &machine.rust.crate_name, &machine.rust.module).join("mod.rs");
 
@@ -747,14 +747,14 @@ pub fn owner_module_dir(root: &Path, crate_name: &str, module: &str) -> PathBuf 
     path
 }
 
-pub fn owner_module_file(root: &Path, crate_name: &str, module: &str) -> PathBuf {
+pub fn owner_module_file(root: &Path, crate_name: &str, module: &str) -> Result<PathBuf> {
     let mut path = owner_module_dir(root, crate_name, module);
     let leaf = module
         .rsplit("::")
         .next()
-        .expect("Rust module path always has a leaf segment");
+        .ok_or_else(|| anyhow!("Rust module path always has a leaf segment"))?;
     path.push(format!("{leaf}.rs"));
-    path
+    Ok(path)
 }
 
 fn collect_text_paths(dir: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
@@ -843,8 +843,8 @@ impl CanonicalRegistry {
         let machine_names = self
             .machines
             .iter()
-            .map(|schema| (schema.machine.as_str(), ()))
-            .collect::<BTreeMap<_, _>>();
+            .map(|schema| schema.machine.as_str())
+            .collect::<BTreeSet<_>>();
 
         for schema in &self.machines {
             let manifest = self
@@ -870,7 +870,7 @@ impl CanonicalRegistry {
         }
 
         for manifest in &self.machine_coverages {
-            if !machine_names.contains_key(manifest.machine.as_str()) {
+            if !machine_names.contains(manifest.machine.as_str()) {
                 bail!(
                     "machine coverage manifest {} does not match a canonical machine",
                     manifest.machine
@@ -881,8 +881,8 @@ impl CanonicalRegistry {
         let composition_names = self
             .compositions
             .iter()
-            .map(|schema| (schema.name.as_str(), ()))
-            .collect::<BTreeMap<_, _>>();
+            .map(|schema| schema.name.as_str())
+            .collect::<BTreeSet<_>>();
 
         for schema in &self.compositions {
             let manifest = self
@@ -908,7 +908,7 @@ impl CanonicalRegistry {
         }
 
         for manifest in &self.composition_coverages {
-            if !composition_names.contains_key(manifest.composition.as_str()) {
+            if !composition_names.contains(manifest.composition.as_str()) {
                 bail!(
                     "composition coverage manifest {} does not match a canonical composition",
                     manifest.composition
@@ -934,32 +934,42 @@ impl CanonicalRegistry {
         let machine_entries = self
             .machines
             .iter()
-            .map(|schema| MachineEntry {
-                slug: machine_slug(&schema.machine),
-                schema: schema.clone(),
-                coverage: self
+            .map(|schema| {
+                let coverage = self
                     .machine_coverages
                     .iter()
                     .find(|item| item.machine == schema.machine)
-                    .expect("validated machine coverage")
-                    .clone(),
+                    .ok_or_else(|| {
+                        anyhow!("missing validated machine coverage for {}", schema.machine)
+                    })?
+                    .clone();
+                Ok(MachineEntry {
+                    slug: machine_slug(&schema.machine),
+                    schema: schema.clone(),
+                    coverage,
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
 
         let composition_entries = self
             .compositions
             .iter()
-            .map(|schema| CompositionEntry {
-                slug: composition_slug(&schema.name),
-                schema: schema.clone(),
-                coverage: self
+            .map(|schema| {
+                let coverage = self
                     .composition_coverages
                     .iter()
                     .find(|item| item.composition == schema.name)
-                    .expect("validated composition coverage")
-                    .clone(),
+                    .ok_or_else(|| {
+                        anyhow!("missing validated composition coverage for {}", schema.name)
+                    })?
+                    .clone();
+                Ok(CompositionEntry {
+                    slug: composition_slug(&schema.name),
+                    schema: schema.clone(),
+                    coverage,
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
 
         let machines = if args.all {
             machine_entries
@@ -987,13 +997,13 @@ fn validate_machine_semantic_coverage(
     let anchor_ids = manifest
         .code_anchors
         .iter()
-        .map(|anchor| (anchor.id.as_str(), ()))
-        .collect::<BTreeMap<_, _>>();
+        .map(|anchor| anchor.id.as_str())
+        .collect::<BTreeSet<_>>();
     let scenario_ids = manifest
         .scenarios
         .iter()
-        .map(|scenario| (scenario.id.as_str(), ()))
-        .collect::<BTreeMap<_, _>>();
+        .map(|scenario| scenario.id.as_str())
+        .collect::<BTreeSet<_>>();
 
     validate_semantic_entries(
         &format!("machine {}", schema.machine),
@@ -1043,13 +1053,13 @@ fn validate_composition_semantic_coverage(
     let anchor_ids = manifest
         .code_anchors
         .iter()
-        .map(|anchor| (anchor.id.as_str(), ()))
-        .collect::<BTreeMap<_, _>>();
+        .map(|anchor| anchor.id.as_str())
+        .collect::<BTreeSet<_>>();
     let scenario_ids = manifest
         .scenarios
         .iter()
-        .map(|scenario| (scenario.id.as_str(), ()))
-        .collect::<BTreeMap<_, _>>();
+        .map(|scenario| scenario.id.as_str())
+        .collect::<BTreeSet<_>>();
 
     validate_semantic_entries(
         &format!("composition {}", schema.name),
@@ -1096,26 +1106,26 @@ fn validate_semantic_entries(
     item_kind: &str,
     expected_names: &[String],
     entries: &[SemanticCoverageEntry],
-    anchor_ids: &BTreeMap<&str, ()>,
-    scenario_ids: &BTreeMap<&str, ()>,
+    anchor_ids: &BTreeSet<&str>,
+    scenario_ids: &BTreeSet<&str>,
 ) -> Result<()> {
     let expected = expected_names
         .iter()
-        .map(|name| (name.as_str(), ()))
-        .collect::<BTreeMap<_, _>>();
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
     let seen = entries
         .iter()
-        .map(|entry| (entry.name.as_str(), ()))
-        .collect::<BTreeMap<_, _>>();
+        .map(|entry| entry.name.as_str())
+        .collect::<BTreeSet<_>>();
 
-    for name in expected.keys() {
-        if !seen.contains_key(name) {
+    for name in &expected {
+        if !seen.contains(name) {
             bail!("{owner} missing semantic coverage entry for {item_kind} `{name}`");
         }
     }
 
     for entry in entries {
-        if !expected.contains_key(entry.name.as_str()) {
+        if !expected.contains(entry.name.as_str()) {
             bail!(
                 "{owner} semantic coverage entry `{}` does not match a declared {item_kind}",
                 entry.name
@@ -1135,7 +1145,7 @@ fn validate_semantic_entries(
         }
 
         for anchor_id in &entry.anchor_ids {
-            if !anchor_ids.contains_key(anchor_id.as_str()) {
+            if !anchor_ids.contains(anchor_id.as_str()) {
                 bail!(
                     "{owner} semantic coverage entry `{}` references unknown code anchor `{anchor_id}`",
                     entry.name
@@ -1144,7 +1154,7 @@ fn validate_semantic_entries(
         }
 
         for scenario_id in &entry.scenario_ids {
-            if !scenario_ids.contains_key(scenario_id.as_str()) {
+            if !scenario_ids.contains(scenario_id.as_str()) {
                 bail!(
                     "{owner} semantic coverage entry `{}` references unknown scenario `{scenario_id}`",
                     entry.name
@@ -1193,12 +1203,12 @@ fn select_machines(entries: &[MachineEntry], requested: &[String]) -> Result<Vec
         .map(|wanted| {
             entries
                 .iter()
-                .cloned()
                 .find(|entry| {
                     entry.schema.machine == *wanted
                         || entry.slug == *wanted
                         || entry.schema.machine.strip_suffix("Machine") == Some(wanted.as_str())
                 })
+                .cloned()
                 .ok_or_else(|| anyhow!("unknown machine selection `{wanted}`"))
         })
         .collect()
@@ -1217,8 +1227,8 @@ fn select_compositions(
         .map(|wanted| {
             entries
                 .iter()
-                .cloned()
                 .find(|entry| entry.schema.name == *wanted || entry.slug == *wanted)
+                .cloned()
                 .ok_or_else(|| anyhow!("unknown composition selection `{wanted}`"))
         })
         .collect()
@@ -1638,7 +1648,7 @@ fn resolve_tlc_workers(explicit: Option<usize>) -> Result<usize> {
     }
 
     Ok(std::thread::available_parallelism()
-        .map(|count| count.get())
+        .map(std::num::NonZero::get)
         .unwrap_or(1)
         .max(1))
 }

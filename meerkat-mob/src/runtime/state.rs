@@ -131,7 +131,7 @@ impl MobLifecycleOwner {
 /// Commands sent from [`MobHandle`] to the [`MobActor`] for serialized processing.
 pub(super) enum MobCommand {
     Spawn {
-        spec: super::handle::SpawnMemberSpec,
+        spec: Box<super::handle::SpawnMemberSpec>,
         reply_tx: oneshot::Sender<Result<MemberRef, MobError>>,
     },
     SpawnProvisioned {

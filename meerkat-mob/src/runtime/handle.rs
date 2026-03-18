@@ -553,7 +553,10 @@ impl MobHandle {
     pub async fn spawn_spec(&self, spec: SpawnMemberSpec) -> Result<MemberRef, MobError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
-            .send(MobCommand::Spawn { spec, reply_tx })
+            .send(MobCommand::Spawn {
+                spec: Box::new(spec),
+                reply_tx,
+            })
             .await
             .map_err(|_| MobError::Internal("actor task dropped".into()))?;
         reply_rx
@@ -993,10 +996,10 @@ impl MobHandle {
         let entries = self.list_all_members().await;
         let mut completed = Vec::new();
         for entry in entries {
-            if let Ok(snapshot) = self.member_status(&entry.meerkat_id).await {
-                if snapshot.is_final {
-                    completed.push((entry.meerkat_id, snapshot));
-                }
+            if let Ok(snapshot) = self.member_status(&entry.meerkat_id).await
+                && snapshot.is_final
+            {
+                completed.push((entry.meerkat_id, snapshot));
             }
         }
         completed

@@ -12,11 +12,12 @@ use meerkat_core::types::SessionId;
 use serde::{Deserialize, Serialize};
 
 /// How a mob member should be launched.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum MemberLaunchMode {
     /// Start with a brand-new session (default).
+    #[default]
     Fresh,
     /// Resume an existing session by ID.
     Resume { session_id: SessionId },
@@ -28,35 +29,25 @@ pub enum MemberLaunchMode {
     },
 }
 
-impl Default for MemberLaunchMode {
-    fn default() -> Self {
-        Self::Fresh
-    }
-}
-
 /// Controls how much conversation history is included when forking.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ForkContext {
     /// Full conversation history via `Session::fork()` (O(1) CoW).
+    #[default]
     FullHistory,
     /// Last N messages from the source session.
     LastMessages { count: u32 },
 }
 
-impl Default for ForkContext {
-    fn default() -> Self {
-        Self::FullHistory
-    }
-}
-
 /// How to split the orchestrator's remaining budget among spawned members.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum BudgetSplitPolicy {
     /// Split remaining budget equally among members.
+    #[default]
     Equal,
     /// Proportional split (no-op unless weights are implemented).
     Proportional,
@@ -64,10 +55,4 @@ pub enum BudgetSplitPolicy {
     Remaining,
     /// Fixed token budget for the new member.
     Fixed(u64),
-}
-
-impl Default for BudgetSplitPolicy {
-    fn default() -> Self {
-        Self::Equal
-    }
 }

@@ -21,17 +21,17 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     #[command(name = "machine-codegen")]
-    MachineCodegen(SelectionArgs),
+    Codegen(SelectionArgs),
     #[command(name = "machine-verify")]
-    MachineVerify(VerifyArgs),
+    Verify(VerifyArgs),
     #[command(name = "machine-check-drift")]
-    MachineCheckDrift(SelectionArgs),
+    CheckDrift(SelectionArgs),
 }
 
 pub fn run() -> Result<()> {
     match Cli::parse().command {
-        Commands::MachineCodegen(args) => machines::machine_codegen(args),
-        Commands::MachineVerify(args) => machines::machine_verify(args),
-        Commands::MachineCheckDrift(args) => machines::machine_check_drift(args),
+        Commands::Codegen(args) => machines::machine_codegen(args),
+        Commands::Verify(args) => machines::machine_verify(args),
+        Commands::CheckDrift(args) => machines::machine_check_drift(args),
     }
 }

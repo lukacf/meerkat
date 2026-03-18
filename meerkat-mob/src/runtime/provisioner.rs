@@ -17,7 +17,7 @@ use meerkat_core::types::SessionId;
 use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
 use meerkat_runtime::{
     Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PromptInput,
-    RuntimeDriverError, RuntimeSessionAdapter, RuntimeState,
+    RuntimeSessionAdapter,
 };
 use std::collections::{HashMap, VecDeque};
 use tokio::sync::{Mutex, RwLock};
@@ -33,7 +33,6 @@ pub struct ProvisionMemberRequest {
 pub trait MobProvisioner: Send + Sync {
     async fn provision_member(&self, req: ProvisionMemberRequest) -> Result<MemberRef, MobError>;
     async fn retire_member(&self, member_ref: &MemberRef) -> Result<(), MobError>;
-    async fn reset_member(&self, member_ref: &MemberRef) -> Result<(), MobError>;
     async fn interrupt_member(&self, member_ref: &MemberRef) -> Result<(), MobError>;
     async fn start_turn(
         &self,
@@ -429,53 +428,6 @@ impl MobProvisioner for SessionBackend {
         Ok(())
     }
 
-    async fn reset_member(&self, member_ref: &MemberRef) -> Result<(), MobError> {
-        let session_id = Self::require_session(member_ref, "reset")?;
-        let adapter = self.runtime_adapter.as_ref().ok_or_else(|| {
-            MobError::Internal(format!(
-                "session-backed provisioner cannot reset member without runtime adapter: {member_ref:?}"
-            ))
-        })?;
-        let runtime_state = self.runtime_session_state(&session_id).await;
-        match adapter.reset_runtime(&session_id).await {
-            Ok(_) => {}
-            Err(RuntimeDriverError::NotReady {
-                state: RuntimeState::Running,
-            }) => {
-                if adapter.interrupt_current_run(&session_id).await.is_err() {
-                    let _ = self.session_service.interrupt(&session_id).await;
-                }
-
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-                loop {
-                    let runtime_state = adapter
-                        .runtime_state(&session_id)
-                        .await
-                        .map_err(|err| MobError::Internal(err.to_string()))?;
-                    if !matches!(runtime_state, RuntimeState::Running) {
-                        break;
-                    }
-                    if std::time::Instant::now() >= deadline {
-                        return Err(MobError::Internal(format!(
-                            "timed out waiting for member runtime to stop before reset: {session_id}"
-                        )));
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                }
-
-                adapter
-                    .reset_runtime(&session_id)
-                    .await
-                    .map_err(|err| MobError::Internal(err.to_string()))?;
-            }
-            Err(err) => return Err(MobError::Internal(err.to_string())),
-        }
-        if let Some(state) = runtime_state {
-            state.clear_queued_turns().await;
-        }
-        Ok(())
-    }
-
     async fn start_turn(
         &self,
         member_ref: &MemberRef,
@@ -739,10 +691,6 @@ impl MobProvisioner for MultiBackendProvisioner {
 
     async fn retire_member(&self, member_ref: &MemberRef) -> Result<(), MobError> {
         self.session.retire_member(member_ref).await
-    }
-
-    async fn reset_member(&self, member_ref: &MemberRef) -> Result<(), MobError> {
-        self.session.reset_member(member_ref).await
     }
 
     async fn interrupt_member(&self, member_ref: &MemberRef) -> Result<(), MobError> {

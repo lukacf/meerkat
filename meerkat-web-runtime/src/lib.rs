@@ -1261,7 +1261,7 @@ fn create_runtime_backed_session(
 
     let created = futures::executor::block_on(session_service.create_session(request))
         .map_err(err_session)?;
-    let session_id = created.session_id.clone();
+    let session_id = created.session_id;
     let event_rx = match futures::executor::block_on(
         session_service.subscribe_session_events_raw(&session_id),
     ) {

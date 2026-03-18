@@ -111,13 +111,20 @@ pub async fn handle_tools_call(
 }
 
 async fn handle_send(ctx: &ToolContext, input: SendInput) -> Result<Value, String> {
+    // If the LLM sends a peer_request with body but no params, promote body
+    // into params so the recipient sees the content. LLMs naturally put text
+    // in `body` regardless of kind.
+    let params = match (&*input.kind, &input.params, &input.body) {
+        ("peer_request", None, Some(body)) => Some(serde_json::json!({ "body": body })),
+        _ => input.params,
+    };
     let request = meerkat_core::comms::CommsCommandRequest {
         kind: input.kind,
         to: Some(input.to),
         body: input.body,
         blocks: input.blocks,
         intent: input.intent,
-        params: input.params,
+        params,
         in_reply_to: input.in_reply_to,
         status: input.status,
         result: input.result,

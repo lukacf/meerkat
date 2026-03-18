@@ -281,7 +281,7 @@ ExternalToolDeltaReceivedRetired ==
     /\ UNCHANGED << current_run_id, pre_run_state, wake_pending, process_pending >>
 
 
-RespawnRequestedFromRetired ==
+RecycleRequestedFromRetired ==
     /\ phase = "Retired"
     /\ (current_run_id = None)
     /\ phase' = "Recovering"
@@ -290,7 +290,7 @@ RespawnRequestedFromRetired ==
     /\ UNCHANGED << current_run_id, wake_pending, process_pending >>
 
 
-RespawnRequestedFromIdle ==
+RecycleRequestedFromIdle ==
     /\ phase = "Idle"
     /\ (current_run_id = None)
     /\ phase' = "Recovering"
@@ -299,7 +299,7 @@ RespawnRequestedFromIdle ==
     /\ UNCHANGED << current_run_id, wake_pending, process_pending >>
 
 
-RespawnSucceeded ==
+RecycleSucceeded ==
     /\ phase = "Recovering"
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
@@ -339,9 +339,9 @@ Next ==
     \/ ExternalToolDeltaReceivedRunning
     \/ ExternalToolDeltaReceivedRecovering
     \/ ExternalToolDeltaReceivedRetired
-    \/ RespawnRequestedFromRetired
-    \/ RespawnRequestedFromIdle
-    \/ RespawnSucceeded
+    \/ RecycleRequestedFromRetired
+    \/ RecycleRequestedFromIdle
+    \/ RecycleSucceeded
     \/ TerminalStutter
 
 running_implies_active_run == ((phase # "Running") \/ (current_run_id # None))

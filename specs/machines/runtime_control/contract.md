@@ -30,8 +30,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `DestroyRequested`
 - `ResumeRequested`
 - `ExternalToolDeltaReceived`
-- `RespawnRequested`
-- `RespawnSucceeded`
+- `RecycleRequested`
+- `RecycleSucceeded`
 
 ## Effects
 - `ResolveAdmission`(work_id: WorkId)
@@ -42,7 +42,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `EmitRuntimeNotice`(kind: String, detail: String)
 - `ResolveCompletionAsTerminated`(reason: String)
 - `ApplyControlPlaneCommand`(command: String)
-- `InitiateRespawn`
+- `InitiateRecycle`
 
 ## Invariants
 - `running_implies_active_run`
@@ -233,25 +233,25 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `EmitRuntimeNotice`
 - To: `Retired`
 
-### `RespawnRequestedFromRetired`
+### `RecycleRequestedFromRetired`
 - From: `Retired`
-- On: `RespawnRequested`()
+- On: `RecycleRequested`()
 - Guards:
   - `no_active_run`
-- Emits: `InitiateRespawn`
+- Emits: `InitiateRecycle`
 - To: `Recovering`
 
-### `RespawnRequestedFromIdle`
+### `RecycleRequestedFromIdle`
 - From: `Idle`
-- On: `RespawnRequested`()
+- On: `RecycleRequested`()
 - Guards:
   - `no_active_run`
-- Emits: `InitiateRespawn`
+- Emits: `InitiateRecycle`
 - To: `Recovering`
 
-### `RespawnSucceeded`
+### `RecycleSucceeded`
 - From: `Recovering`
-- On: `RespawnSucceeded`()
+- On: `RecycleSucceeded`()
 - Emits: `EmitRuntimeNotice`
 - To: `Idle`
 

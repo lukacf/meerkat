@@ -174,13 +174,13 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ExternalToolDeltaReceivedRetired`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `retire-stop-destroy`, `reset-terminates-waiters`
-- `RespawnRequestedFromRetired`
+- `RecycleRequestedFromRetired`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `retire-stop-destroy`, `reset-terminates-waiters`
-- `RespawnRequestedFromIdle`
+- `RecycleRequestedFromIdle`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `control-preempts-ingress`
-- `RespawnSucceeded`
+- `RecycleSucceeded`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `control-preempts-ingress`
 
@@ -209,7 +209,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ApplyControlPlaneCommand`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `control-preempts-ingress`
-- `InitiateRespawn`
+- `InitiateRecycle`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `control-preempts-ingress`
 

@@ -1,4 +1,4 @@
-//! §25 Lifecycle operations — retire, respawn, reset, destroy.
+//! §25 Lifecycle operations — retire, recycle, reset, destroy.
 //!
 //! These operate on InputState entries, transitioning all non-terminal
 //! inputs to Abandoned with the appropriate reason. Terminal states

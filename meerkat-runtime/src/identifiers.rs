@@ -28,7 +28,7 @@ impl std::fmt::Display for RuntimeEventId {
     }
 }
 
-/// Logical identity of a runtime instance (survives retire/respawn).
+/// Logical identity of a runtime instance (survives retire/recycle).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LogicalRuntimeId(pub String);
 

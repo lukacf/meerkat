@@ -164,8 +164,8 @@ pub enum RuntimeTopologyEvent {
     RuntimeCreated { runtime_id: LogicalRuntimeId },
     /// A runtime instance was retired.
     RuntimeRetired { runtime_id: LogicalRuntimeId },
-    /// A runtime instance was respawned.
-    RuntimeRespawned { runtime_id: LogicalRuntimeId },
+    /// A runtime instance was recycled (driver reset and state recovered).
+    RuntimeRecycled { runtime_id: LogicalRuntimeId },
     /// A runtime instance was destroyed.
     RuntimeDestroyed { runtime_id: LogicalRuntimeId },
 }
@@ -175,7 +175,7 @@ impl RuntimeTopologyEvent {
         match self {
             Self::RuntimeCreated { .. } => EventCodeId::new("topology.runtime_created"),
             Self::RuntimeRetired { .. } => EventCodeId::new("topology.runtime_retired"),
-            Self::RuntimeRespawned { .. } => EventCodeId::new("topology.runtime_respawned"),
+            Self::RuntimeRecycled { .. } => EventCodeId::new("topology.runtime_recycled"),
             Self::RuntimeDestroyed { .. } => EventCodeId::new("topology.runtime_destroyed"),
         }
     }

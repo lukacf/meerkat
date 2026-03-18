@@ -8,7 +8,7 @@
 //! - InputState lifecycle tracking
 //! - Policy resolution (what to do with each input)
 //! - Runtime state machine (Idle ↔ Running ↔ Recovering → Stopped/Destroyed)
-//! - Retire/respawn/reset lifecycle operations
+//! - Retire/recycle/reset lifecycle operations
 //! - RuntimeEvent observability
 //!
 //! Core-facing types (RunPrimitive, RunEvent, CoreExecutor, etc.) live in
@@ -95,6 +95,6 @@ pub use session_adapter::RuntimeSessionAdapter;
 pub use state_machine::RuntimeStateMachine;
 pub use store::{InMemoryRuntimeStore, RuntimeStore, RuntimeStoreError, SessionDelta};
 pub use traits::{
-    DestroyReport, RecoveryReport, ResetReport, RespawnReport, RetireReport, RuntimeControlCommand,
+    DestroyReport, RecoveryReport, RecycleReport, ResetReport, RetireReport, RuntimeControlCommand,
     RuntimeControlPlane, RuntimeControlPlaneError, RuntimeDriver, RuntimeDriverError,
 };

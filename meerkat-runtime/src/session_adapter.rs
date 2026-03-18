@@ -32,7 +32,7 @@ use crate::store::RuntimeStore;
 use crate::tokio;
 use crate::tokio::sync::{Mutex, RwLock, mpsc};
 use crate::traits::{
-    RecoveryReport, ResetReport, RespawnReport, RetireReport, RuntimeControlPlaneError,
+    RecoveryReport, RecycleReport, ResetReport, RetireReport, RuntimeControlPlaneError,
     RuntimeDriver, RuntimeDriverError,
 };
 
@@ -1035,13 +1035,13 @@ impl crate::traits::RuntimeControlPlane for RuntimeSessionAdapter {
         Ok(report)
     }
 
-    async fn respawn(
+    async fn recycle(
         &self,
         runtime_id: &LogicalRuntimeId,
-    ) -> Result<RespawnReport, RuntimeControlPlaneError> {
+    ) -> Result<RecycleReport, RuntimeControlPlaneError> {
         let (_session_id, driver, completions, wake_tx) = self.lookup_entry(runtime_id).await?;
 
-        // Respawn = reset the driver to Idle and re-queue any recoverable inputs.
+        // Recycle = reset the driver to Idle and re-queue any recoverable inputs.
         // For persistent drivers, the store already has the input states; recovery
         // will replay them. For ephemeral drivers, inputs that survived are re-queued.
         let transferred = {
@@ -1075,7 +1075,7 @@ impl crate::traits::RuntimeControlPlane for RuntimeSessionAdapter {
         // Resolve existing completion waiters since inputs were recycled
         {
             let mut comp = completions.lock().await;
-            comp.resolve_all_terminated("respawned");
+            comp.resolve_all_terminated("recycled");
         }
 
         // Wake the runtime loop to process re-queued inputs
@@ -1083,7 +1083,7 @@ impl crate::traits::RuntimeControlPlane for RuntimeSessionAdapter {
             let _ = tx.try_send(());
         }
 
-        Ok(RespawnReport {
+        Ok(RecycleReport {
             inputs_transferred: transferred,
         })
     }

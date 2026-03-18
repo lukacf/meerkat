@@ -125,9 +125,9 @@ pub fn runtime_control_machine() -> MachineSchema {
                 variant("DestroyRequested"),
                 variant("ResumeRequested"),
                 variant("ExternalToolDeltaReceived"),
-                // Phase D: respawn preserves identity, creates new session
-                variant("RespawnRequested"),
-                variant("RespawnSucceeded"),
+                // Phase D: recycle preserves identity, resets driver
+                variant("RecycleRequested"),
+                variant("RecycleSucceeded"),
             ],
         },
         effects: EnumSchema {
@@ -175,9 +175,9 @@ pub fn runtime_control_machine() -> MachineSchema {
                     name: "ApplyControlPlaneCommand".into(),
                     fields: vec![field("command", TypeRef::String)],
                 },
-                // Phase D: respawn — same identity, new session
+                // Phase D: recycle — same identity, reset driver
                 VariantSchema {
-                    name: "InitiateRespawn".into(),
+                    name: "InitiateRecycle".into(),
                     fields: vec![],
                 },
             ],
@@ -813,12 +813,12 @@ pub fn runtime_control_machine() -> MachineSchema {
                     ]),
                 }],
             },
-            // Phase D: Respawn — preserves member identity, creates new session
+            // Phase D: Recycle — preserves member identity, resets driver
             TransitionSchema {
-                name: "RespawnRequestedFromRetired".into(),
+                name: "RecycleRequestedFromRetired".into(),
                 from: vec!["Retired".into()],
                 on: InputMatch {
-                    variant: "RespawnRequested".into(),
+                    variant: "RecycleRequested".into(),
                     bindings: vec![],
                 },
                 guards: vec![Guard {
@@ -834,15 +834,15 @@ pub fn runtime_control_machine() -> MachineSchema {
                 }],
                 to: "Recovering".into(),
                 emit: vec![EffectEmit {
-                    variant: "InitiateRespawn".into(),
+                    variant: "InitiateRecycle".into(),
                     fields: IndexMap::new(),
                 }],
             },
             TransitionSchema {
-                name: "RespawnRequestedFromIdle".into(),
+                name: "RecycleRequestedFromIdle".into(),
                 from: vec!["Idle".into()],
                 on: InputMatch {
-                    variant: "RespawnRequested".into(),
+                    variant: "RecycleRequested".into(),
                     bindings: vec![],
                 },
                 guards: vec![Guard {
@@ -858,16 +858,16 @@ pub fn runtime_control_machine() -> MachineSchema {
                 }],
                 to: "Recovering".into(),
                 emit: vec![EffectEmit {
-                    variant: "InitiateRespawn".into(),
+                    variant: "InitiateRecycle".into(),
                     fields: IndexMap::new(),
                 }],
             },
-            // Respawn success goes Recovering → Idle
+            // Recycle success goes Recovering → Idle
             TransitionSchema {
-                name: "RespawnSucceeded".into(),
+                name: "RecycleSucceeded".into(),
                 from: vec!["Recovering".into()],
                 on: InputMatch {
-                    variant: "RespawnSucceeded".into(),
+                    variant: "RecycleSucceeded".into(),
                     bindings: vec![],
                 },
                 guards: vec![],
@@ -893,7 +893,7 @@ pub fn runtime_control_machine() -> MachineSchema {
                 emit: vec![EffectEmit {
                     variant: "EmitRuntimeNotice".into(),
                     fields: IndexMap::from([
-                        ("kind".into(), Expr::String("Respawn".into())),
+                        ("kind".into(), Expr::String("Recycle".into())),
                         ("detail".into(), Expr::String("Succeeded".into())),
                     ]),
                 }],

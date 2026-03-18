@@ -95,9 +95,9 @@ pub struct ResetReport {
     pub inputs_abandoned: usize,
 }
 
-/// Report from a respawn operation.
+/// Report from a recycle operation (reset driver and recover state).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RespawnReport {
+pub struct RecycleReport {
     /// How many inputs were transferred to the new instance.
     pub inputs_transferred: usize,
 }
@@ -176,11 +176,11 @@ pub trait RuntimeControlPlane: Send + Sync {
         runtime_id: &LogicalRuntimeId,
     ) -> Result<RetireReport, RuntimeControlPlaneError>;
 
-    /// Respawn a runtime (transfer pending input to new instance).
-    async fn respawn(
+    /// Recycle a runtime (reset driver and recover state).
+    async fn recycle(
         &self,
         runtime_id: &LogicalRuntimeId,
-    ) -> Result<RespawnReport, RuntimeControlPlaneError>;
+    ) -> Result<RecycleReport, RuntimeControlPlaneError>;
 
     /// Reset a runtime (abandon all pending input).
     async fn reset(

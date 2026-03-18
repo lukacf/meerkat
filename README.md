@@ -60,13 +60,12 @@ rkat run "What is the capital of France?"
 rkat run --model gpt-5.2 "Explain async/await"
 ```
 
-**Give it tools and let it work.** Enable shell access and the agent can spawn sub-agents with different models to divide work:
+**Give it tools and let it work.** Enable shell access and mob orchestration, then let the agent coordinate delegated work through mob members and flows:
 
 ```bash
-rkat run --enable-builtins --enable-shell \
-  "Find all functions in src/ with more than 50 lines. For each one, spawn a \
-   sub-agent to suggest how to refactor it. Use gemini-3-flash-preview for the \
-   sub-agents to save cost. Collect the results and write a summary."
+rkat run --enable-builtins --enable-shell --enable-mob \
+  "Create a small mob to inspect src/ for functions longer than 50 lines. \
+   Ask the members to suggest refactors, then collect and summarize the results."
 ```
 
 **Extract structured data** with schema validation and budget controls:
@@ -94,7 +93,7 @@ The agent loops autonomously -- calling tools, reading results, reasoning, calli
 
 **Packaging and targets.** Build once as a signed `.mobpack`, then choose runtime target: direct deploy, embedded native binary, optimized compile, or browser WASM bundle.
 
-**Modularity.** Every subsystem is opt-in via Cargo features. Default: three providers and nothing else. Add `session-store`, `mcp`, `comms`, `skills`, or `sub-agents` as needed. Disabled features return typed errors, not panics. See the [capability matrix](https://docs.rkat.ai/reference/capability-matrix) for the full feature map.
+**Modularity.** Every subsystem is opt-in via Cargo features. Default: three providers and nothing else. Add `session-store`, `mcp`, `comms`, or `skills` as needed. Disabled features return typed errors, not panics. See the [capability matrix](https://docs.rkat.ai/reference/capability-matrix) for the full feature map.
 
 ## Surfaces
 
@@ -184,9 +183,9 @@ route_to_oncall(triage).await;
 
 The agent returns validated JSON matching your schema, enforced by budget limits. This runs in-process in your Rust binary -- no HTTP roundtrip, no subprocess management.
 
-### CI failure analysis with sub-agents (Python)
+### CI failure analysis with mobs (Python)
 
-Drive an agent from your Python backend. The agent spawns sub-agents to parallelize work across providers.
+Drive an agent from your Python backend. The agent coordinates mob members to parallelize work across providers.
 
 ```python
 from meerkat import MeerkatClient
@@ -195,13 +194,13 @@ client = MeerkatClient()
 await client.connect()
 
 result = await client.create_session(
-    f"Analyze these CI failures. For each failing test, spawn a sub-agent "
-    f"(use gemini-3-flash-preview for speed) to investigate the root cause by "
+    f"Analyze these CI failures. For each failing test, create a small mob "
+    f"member task (use gemini-3-flash-preview for speed) to investigate the root cause by "
     f"reading the relevant source files. Collect results and return structured JSON.\n\n"
     f"{ci_log}",
     model="claude-sonnet-4-5",
     enable_shell=True,
-    enable_subagents=True,
+    enable_mob=True,
     output_schema={
         "type": "object",
         "properties": {
@@ -218,7 +217,7 @@ result = await client.create_session(
 return json.loads(result.structured_output)["failures"]
 ```
 
-The orchestrator agent (Claude) delegates investigation to fast sub-agents (Gemini), collects their findings, and synthesizes a structured report. Budget controls prevent runaway cost.
+The orchestrator agent delegates investigation to fast mob members, collects their findings, and synthesizes a structured report. Budget controls prevent runaway cost.
 
 ### Multi-agent mob for code audit (CLI)
 
@@ -292,7 +291,7 @@ Full documentation at **[docs.rkat.ai](https://docs.rkat.ai)**.
 |---------|--------|
 | [Getting Started](https://docs.rkat.ai/introduction) | Introduction, quickstart |
 | [Core Concepts](https://docs.rkat.ai/concepts/sessions) | Sessions, tools, providers, configuration, realms |
-| [Guides](https://docs.rkat.ai/guides/hooks) | Hooks, skills, memory, sub-agents, comms, mobs, structured output |
+| [Guides](https://docs.rkat.ai/guides/hooks) | Hooks, skills, memory, comms, mobs, structured output |
 | [CLI & APIs](https://docs.rkat.ai/cli/commands) | CLI reference, REST, JSON-RPC, MCP |
 | [SDKs](https://docs.rkat.ai/rust/overview) | Rust, Python, TypeScript |
 | [Reference](https://docs.rkat.ai/reference/architecture) | Architecture, capability matrix, session contracts |

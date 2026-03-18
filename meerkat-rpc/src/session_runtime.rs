@@ -1084,7 +1084,6 @@ impl SessionRuntime {
             scoped_event_path: None,
             override_builtins: Some(tooling.builtins),
             override_shell: Some(tooling.shell),
-            override_subagents: Some(tooling.subagents),
             override_memory: Some(tooling.memory),
             override_mob: Some(tooling.mob),
             preload_skills: tooling.active_skills.clone(),
@@ -1645,7 +1644,6 @@ impl SessionRuntime {
             build_config.peer_meta = meta.peer_meta.clone();
             build_config.override_builtins = Some(meta.tooling.builtins);
             build_config.override_shell = Some(meta.tooling.shell);
-            build_config.override_subagents = Some(meta.tooling.subagents);
             build_config.override_mob = Some(meta.tooling.mob);
             build_config.override_memory = Some(meta.tooling.memory);
             build_config.preload_skills = meta.tooling.active_skills.clone();

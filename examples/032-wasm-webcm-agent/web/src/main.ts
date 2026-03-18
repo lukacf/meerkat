@@ -2,7 +2,7 @@
  * 032 — Meerkat WebCM Agent (TUI)
  *
  * Claude Code-inspired coding agent mob running entirely in the browser.
- * Left: orchestrator stream. Right: three sub-agent panels (planner/coder/reviewer).
+ * Left: orchestrator stream. Right: three specialist panels (planner/coder/reviewer).
  * All agents communicate via comms (send/peers). No custom delegation tools.
  */
 
@@ -59,7 +59,7 @@ const mainStreamEl = document.getElementById("main-stream") as HTMLDivElement;
 const promptInput = document.getElementById("prompt") as HTMLInputElement;
 const promptSigil = document.getElementById("prompt-sigil") as HTMLSpanElement;
 
-// Sub-agent panel elements
+// Specialist panel elements
 const panelEls = {
   planner: {
     stream: document.getElementById("stream-planner") as HTMLDivElement,
@@ -125,7 +125,7 @@ async function boot() {
     bootStatus.textContent = "Initializing mob runtime...";
     const mobRuntime = runtime as unknown as MobRuntime;
 
-    // Build panel state for sub-agents (orchestrator goes to main stream)
+    // Build panel state for specialist members (orchestrator goes to main stream)
     const panelStates = new Map<string, any>();
 
     // Orchestrator events → main stream

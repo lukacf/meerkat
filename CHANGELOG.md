@@ -56,7 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - **`meerkat-core` reads model defaults from catalog** — `ModelDefaults` no longer reads from `config_template.toml`; all model defaults come from `meerkat-models` catalog.
 - **OpenAI adapter delegates detection to shared profiles** — capability detection logic moved from `meerkat-client` to `meerkat-models` profile rules.
-- **Sub-agent validation uses catalog for fallback resolution** — `meerkat-tools` sub-agent spawn now resolves fallback models via catalog instead of hardcoded strings.
+- **Legacy delegated-agent validation uses catalog for fallback resolution** — the remaining `sub-agents` compatibility path in `meerkat-tools` now resolves fallback models via catalog instead of hardcoded strings.
 - **Stale template defaults updated** — `gpt-4.1` → `gpt-5.2`, `gemini-1.5-pro` → `gemini-3-flash-preview`.
 - **`SessionError::Unsupported` variant** — new error variant for capability negotiation across session service implementations.
 
@@ -107,7 +107,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Per-turn overrides**: `model`, `provider`, `max_tokens` overrides on `turn/start` for pending sessions.
 - **Rich session responses**: `session/list` returns `WireSessionSummary` (timestamps, message counts, token totals) with pagination (`limit`/`offset`). `session/read` returns `WireSessionInfo` (timestamps, message counts, last assistant text).
 - **Batch mob spawning**: `mob/spawn_many` with per-spec error reporting.
-- **Scoped event streaming**: `scope_id`/`scope_path` preserved on `session/stream_event` notifications for sub-agent/flow scope forwarding.
+- **Scoped event streaming**: `scope_id`/`scope_path` preserved on `session/stream_event` notifications for delegated child-scope / flow-scope forwarding.
 - **Persistent session recovery**: `turn/start` recovers persisted sessions after runtime restart, mirroring the REST recovery path. Archived sessions are rejected.
 - **Callback tool protocol**: bidirectional JSON-RPC request/response for SDK-provided tool implementations. `ToolCallbackHandler` helpers in Python and TypeScript SDKs.
 - 6 new RPC handler methods with legacy-mode guard.
@@ -509,7 +509,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 #### Skills System
 - `meerkat-skills` crate with skill sources (filesystem, embedded, in-memory, composite), parser, resolver, renderer, and engine
 - Core skill contracts in `meerkat-core/src/skills/`: `SkillId`, `SkillScope`, `SkillDescriptor`, `SkillDocument`, `SkillError`, `SkillSource` and `SkillEngine` traits
-- 8 embedded skills: `task-workflow`, `shell-patterns`, `sub-agent-orchestration`, `multi-agent-comms`, `mcp-server-setup`, `hook-authoring`, `memory-retrieval`, `session-management`
+- 8 embedded skills: `task-workflow`, `shell-patterns`, `sub-agent-orchestration` (legacy name), `multi-agent-comms`, `mcp-server-setup`, `hook-authoring`, `memory-retrieval`, `session-management`
 - Skill inventory section injected into system prompt via `extra_sections` slot
 - Per-turn skill injection via `<skill>` tagged blocks prepended to user messages
 - `SkillsResolved` and `SkillResolutionFailed` agent events
@@ -538,14 +538,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Failure policies: observe defaults to fail-open, guardrail/rewrite default to fail-closed
 - Per-run hook overrides via `HookRunOverrides` (add entries, disable hooks)
 
-#### Sub-Agents
-- `agent_spawn` and `agent_fork` tools for parallel sub-agent work
+#### Legacy Sub-Agent Surface (pre-0.5)
+- `agent_spawn` and `agent_fork` tools for parallel delegated child work
 - `agent_status`, `agent_cancel`, `agent_list` management tools
 - `SubAgentManager` with concurrency limits, nesting depth control, and budget allocation
 - `ContextStrategy` for spawn context: `FullHistory`, `LastTurns(n)`, `Summary`, `Custom`
-- `ToolAccessPolicy`: `Inherit`, `AllowList`, `DenyList` for sub-agent tool filtering
+- `ToolAccessPolicy`: `Inherit`, `AllowList`, `DenyList` for delegated child-agent tool filtering
 - `ForkBudgetPolicy`: `EqualSplit`, `Proportional`, `Fixed` for budget allocation
-- Model allowlists per provider for sub-agent spawns
+- Model allowlists per provider for delegated child-agent spawns
 
 #### Comms (Inter-Agent Communication)
 - `meerkat-comms` crate with `Router`, `Inbox`, `InprocRegistry`
@@ -621,12 +621,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Test infrastructure stabilized: fast test target isolation, real E2E gating, pre-commit hook fixes for bin-only crates
 
 ### Changed - Feature defaults
-- `meerkat-tools`: comms, mcp, and sub-agents are now optional features (default: on)
+- `meerkat-tools`: comms, mcp, and the legacy `sub-agents` compatibility feature are now optional features (default: on)
   - `--no-default-features` builds tools with zero optional deps
   - Features: `comms`, `mcp`, `sub-agents`
-- `meerkat` facade: comms, mcp, and sub-agents are now optional features (default: on)
+- `meerkat` facade: comms, mcp, and the legacy `sub-agents` compatibility feature are now optional features (default: on)
   - Features: `comms`, `mcp`, `sub-agents`
-- `meerkat-rpc`: comms, mcp, mob, and sub-agents are optional features (default: on)
+- `meerkat-rpc`: comms, mcp, mob, and the legacy `sub-agents` compatibility feature are optional features (default: on)
   - `--no-default-features` builds the minimal server surface
   - Features: `comms`, `mcp`, `mob`, `sub-agents`
 - `meerkat-rest`: comms is opt-in (default: on), no comms code when disabled
@@ -645,8 +645,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - RPC `session/create` expanded to full `AgentBuildConfig` parity
 - Provider schema lowering moved from core to adapters, removing provider leakage
 - `thought_signature` removed from generic `ToolCall`/`ToolResult` (provider-specific only)
-- Config-driven sub-agent model policy with fail-closed validation
-- Sub-agents, comms, and memory enabled through RPC/SDK surfaces
+- Config-driven delegated child-agent compatibility policy with fail-closed validation
+- Legacy `sub-agents` compatibility, comms, and memory enabled through RPC/SDK surfaces
 
 ### Removed
 - Dead files in meerkat-core: `comms_runtime.rs`, `comms_bootstrap.rs`, `comms_config.rs`, `agent/comms.rs`

@@ -398,7 +398,7 @@ Type/parsing notes:
 ## Rust SDK
 
 **AgentFactory vs AgentBuilder**: `AgentFactory` (facade crate) is the opinionated composition layer that
-wires all tool categories (builtins, shell, sub-agents, comms, memory, mob, skills) into the dispatcher.
+wires all tool categories (builtins, shell, comms, memory, mob, skills) into the dispatcher.
 `AgentBuilder` (meerkat-core) is lower-level — it takes pre-built components and has no tool opinions.
 All surfaces go through `AgentFactory`; direct `AgentBuilder` usage means manual dispatcher composition.
 
@@ -415,7 +415,6 @@ let factory = AgentFactory::new(realm.root.clone())
     .runtime_root(realm.root)
     .builtins(true)
     .shell(true)
-    .subagents(true)
     .mob(true);  // opt-in mob orchestration tools
 
 let build = AgentBuildConfig::new("claude-sonnet-4-5");
@@ -439,13 +438,13 @@ if let Some(runtime) = factory.build_skill_runtime(&config).await {
 
 ---
 
-## Comms, hooks, skills, sub-agents
+## Comms, hooks, skills, delegated work
 
 - Inproc comms is namespace-scoped; realm namespace isolates peer discovery/sends.
 - **Silent comms intents**: `AgentBuildConfig.silent_comms_intents` suppresses LLM turns for informational intents. Mob meerkats default to `["mob.peer_added", "mob.peer_retired"]`.
 - Hooks and skills resolve from runtime root. Workspace-default CLI realms preserve project ergonomics.
 - **Skill introspection**: `SkillRuntime::list_all_with_provenance()` returns active + shadowed skills; `load_from_source()` bypasses first-wins.
-- Sub-agents with comms enabled inherit parent realm namespace for inproc communication.
+- Delegated work routes through mobs and forked branches rather than a standalone helper-agent surface.
 
 ---
 

@@ -176,7 +176,7 @@ All transports use a length-prefixed CBOR framing protocol implemented by `Trans
 |--------|--------|----------|
 | `uds://` | `uds:///path/to/socket.sock` | Same-machine, lowest latency |
 | `tcp://` | `tcp://host:port` | Cross-machine |
-| `inproc://` | `inproc://agent-name` | In-process sub-agent communication |
+| `inproc://` | `inproc://agent-name` | In-process peer communication |
 
 <Accordion title="Transport details">
 **UDS transport**: Unix Domain Socket listeners are spawned by `spawn_uds_listener()`. The socket file is created at the configured path (existing files are removed first). Parent directories are created automatically.
@@ -550,13 +550,13 @@ let result = comms_agent.run_stay_alive("You are a coordinator.".to_string(), No
 ```
 </Accordion>
 
-<Accordion title="CommsBootstrap (sub-agent integration)">
+<Accordion title="CommsBootstrap (nested runtime integration)">
 ```rust
 // Standalone
 let bootstrap = CommsBootstrap::from_config(config, base_dir);
 let prepared = bootstrap.prepare().await?;
 
-// Child sub-agent (inproc, auto-trusts parent)
+// Child runtime (inproc, auto-trusts parent)
 let bootstrap = CommsBootstrap::for_child_inproc(
     "child-agent".to_string(),
     ParentCommsContext {

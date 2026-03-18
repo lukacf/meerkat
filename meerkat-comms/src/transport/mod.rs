@@ -45,7 +45,7 @@ pub enum PeerAddr {
     /// TCP address as "host:port" string (supports both IP addresses and hostnames).
     /// DNS resolution happens at connect time via ToSocketAddrs.
     Tcp(String),
-    /// In-process address for sub-agent communication.
+    /// In-process address for peer communication within one runtime.
     /// Messages are delivered directly via in-memory channels.
     Inproc(String),
 }
@@ -244,18 +244,18 @@ mod tests {
 
     #[test]
     fn test_peer_addr_inproc_variant() {
-        let addr = PeerAddr::Inproc("sub-agent-123".to_string());
+        let addr = PeerAddr::Inproc("peer-123".to_string());
         match addr {
-            PeerAddr::Inproc(name) => assert_eq!(name, "sub-agent-123"),
+            PeerAddr::Inproc(name) => assert_eq!(name, "peer-123"),
             _ => panic!("expected Inproc variant"),
         }
     }
 
     #[test]
     fn test_parse_inproc_addr() {
-        let addr = PeerAddr::parse("inproc://my-sub-agent").unwrap();
+        let addr = PeerAddr::parse("inproc://my-peer").unwrap();
         match addr {
-            PeerAddr::Inproc(name) => assert_eq!(name, "my-sub-agent"),
+            PeerAddr::Inproc(name) => assert_eq!(name, "my-peer"),
             _ => panic!("expected Inproc variant"),
         }
     }

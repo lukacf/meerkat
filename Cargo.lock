@@ -2970,7 +2970,6 @@ dependencies = [
  "humantime",
  "inventory",
  "jsonschema",
- "meerkat-client",
  "meerkat-comms",
  "meerkat-contracts",
  "meerkat-core",

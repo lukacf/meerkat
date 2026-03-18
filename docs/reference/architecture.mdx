@@ -106,7 +106,7 @@ graph TD
     SS --> AF
 
     subgraph core["meerkat-core"]
-        AGENT["Agent<br/>llm_client · tool_dispatcher<br/>session_store · session · budget<br/>retry_policy · state · compactor<br/>sub_agent_manager"]
+        AGENT["Agent<br/>llm_client · tool_dispatcher<br/>session_store · session · budget<br/>retry_policy · state · compactor<br/>delegated-work coordinator"]
     end
 
     AF --> AGENT
@@ -154,7 +154,7 @@ The heart of Meerkat. Contains:
 - **Retry**: exponential backoff with jitter
 - **State machine**: `LoopState` for agent lifecycle management
 - **Compaction**: `Compactor` trait, `CompactionConfig`, compaction flow wired into agent loop
-- **Forked session branches**: lightweight history branching without a separate sub-agent owner
+- **Forked session branches**: lightweight history branching without a standalone child-agent owner
 - **Hook contracts**: typed hook points, decisions, patches, invocation/outcome envelopes
 </Accordion>
 
@@ -443,7 +443,7 @@ Turn boundaries are critical moments where:
 1. Tool results are injected into the session
 2. Steering messages (from parent agents) are applied
 3. Comms inbox is drained and messages injected (for inter-agent communication)
-4. Sub-agent results are collected and injected
+4. Delegated-work projections are collected and injected
 5. Budget is checked
 6. Session is checkpointed
 7. `turn_boundary` hooks run before the next state transition
@@ -500,7 +500,7 @@ Run-scoped overrides (`HookRunOverrides`) allow callers to disable specific hook
 
 ### Delegated work and forked branches
 
-In `0.5`, the standalone sub-agent subsystem is gone. Delegated work now routes through mob orchestration plus the canonical runtime/control-plane path, while `Session::fork()` remains as the lightweight history-branching primitive.
+In `0.5`, the standalone child-agent subsystem is gone. Delegated work now routes through mob orchestration plus the canonical runtime/control-plane path, while `Session::fork()` remains as the lightweight history-branching primitive.
 
 ### Comms transport design
 
@@ -532,7 +532,7 @@ flowchart TD
     STREAM --> CHECK{Tool calls?}
     CHECK -- Yes --> DISPATCH["4. Dispatch tool calls"]
     DISPATCH --> RESULTS["5. Execute and return results"]
-    RESULTS --> POST["6. Add results to session<br/>7. Apply steering messages<br/>8. Drain comms inbox<br/>9. Collect sub-agent results"]
+    RESULTS --> POST["6. Add results to session<br/>7. Apply steering messages<br/>8. Drain comms inbox<br/>9. Apply delegated-work projections"]
     POST --> LLM
     CHECK -- No --> DONE["Complete"]
 ```

@@ -174,11 +174,10 @@ pub struct SessionBuildOptions {
     pub llm_client_override: Option<Arc<dyn std::any::Any + Send + Sync>>,
     /// Optional scoped stream sink for attributed multi-agent events.
     pub scoped_event_tx: Option<mpsc::Sender<ScopedAgentEvent>>,
-    /// Base scope path for attributed events emitted by nested sub-agents.
+    /// Base scope path for attributed events emitted by nested agents.
     pub scoped_event_path: Option<Vec<StreamScopeFrame>>,
     pub override_builtins: Option<bool>,
     pub override_shell: Option<bool>,
-    pub override_subagents: Option<bool>,
     pub override_memory: Option<bool>,
     pub override_mob: Option<bool>,
     pub preload_skills: Option<Vec<crate::skills::SkillId>>,
@@ -237,7 +236,6 @@ impl Default for SessionBuildOptions {
             scoped_event_path: None,
             override_builtins: None,
             override_shell: None,
-            override_subagents: None,
             override_memory: None,
             override_mob: None,
             preload_skills: None,
@@ -274,7 +272,6 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("scoped_event_path", &self.scoped_event_path.is_some())
             .field("override_builtins", &self.override_builtins)
             .field("override_shell", &self.override_shell)
-            .field("override_subagents", &self.override_subagents)
             .field("override_memory", &self.override_memory)
             .field("override_mob", &self.override_mob)
             .field("preload_skills", &self.preload_skills)

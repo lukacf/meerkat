@@ -1,4 +1,4 @@
-//! In-process message transport for sub-agent communication.
+//! In-process message transport for peer communication within one runtime.
 //!
 //! This module provides a process-global registry that allows agents within
 //! the same process to communicate without network sockets. Messages are
@@ -83,7 +83,7 @@ impl RegistryState {
     }
 }
 
-/// Process-global registry for in-process agent communication.
+/// Process-global registry for in-process peer communication.
 ///
 /// This registry maps agent pubkeys to their inbox senders, allowing
 /// direct message delivery without network transport.

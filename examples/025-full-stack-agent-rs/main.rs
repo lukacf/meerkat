@@ -237,7 +237,7 @@ Professional, concise, action-oriented. Always provide next steps.
 │  Tools:                                                    │
 │  ├── Built-in: task_create, task_list, task_update, wait   │
 │  ├── Domain:   search_docs, create_ticket                  │
-│  └── (Optional: shell, MCP, comms, sub-agents)            │
+│  └── (Optional: shell, MCP, comms, delegated work)        │
 │                                                            │
 │  Events:    Streaming to event logger (verbose mode)       │
 │  Storage:   JsonlStore (file-based session persistence)    │

@@ -2679,7 +2679,6 @@ async fn build_deploy_mob_session_service(
         .project_root(project_root)
         .builtins(config.tools.builtins_enabled)
         .shell(config.tools.shell_enabled)
-        .subagents(config.tools.subagents_enabled)
         .memory(true);
     if let Some(context_root) = scope.context_root.clone() {
         factory = factory.context_root(context_root);
@@ -2972,8 +2971,7 @@ async fn run_agent(
         )
         .project_root(project_root)
         .builtins(enable_builtins)
-        .shell(enable_shell)
-        .subagents(false);
+        .shell(enable_shell);
     if let Some(context_root) = scope.context_root.clone() {
         factory = factory.context_root(context_root);
     }
@@ -3038,7 +3036,6 @@ async fn run_agent(
         scoped_event_path: scoped_event_tx.as_ref().map(|_| primary_scope_path.clone()),
         override_builtins: None,
         override_shell: None,
-        override_subagents: None,
         override_memory: if enable_memory { Some(true) } else { None },
         override_mob: Some(effective_mob),
         preload_skills,
@@ -3409,7 +3406,6 @@ async fn resume_session_with_llm_override(
             builtins: config.tools.builtins_enabled,
             shell: config.tools.shell_enabled,
             comms: config.tools.comms_enabled,
-            subagents: config.tools.subagents_enabled,
             mob: config.tools.mob_enabled,
             memory: false,
             active_skills: None,
@@ -3465,8 +3461,7 @@ async fn resume_session_with_llm_override(
         )
         .project_root(project_root)
         .builtins(tooling.builtins)
-        .shell(tooling.shell)
-        .subagents(tooling.subagents);
+        .shell(tooling.shell);
     if let Some(context_root) = scope.context_root.clone() {
         factory = factory.context_root(context_root);
     }
@@ -3555,7 +3550,6 @@ async fn resume_session_with_llm_override(
         }),
         override_builtins: None,
         override_shell: None,
-        override_subagents: None,
         override_memory: None,
         override_mob: Some(tooling.mob),
         preload_skills: None,
@@ -3724,8 +3718,7 @@ async fn build_cli_persistent_service(
         )
         .project_root(project_root)
         .builtins(config.tools.builtins_enabled)
-        .shell(config.tools.shell_enabled)
-        .subagents(config.tools.subagents_enabled);
+        .shell(config.tools.shell_enabled);
     if let Some(context_root) = scope.context_root.clone() {
         factory = factory.context_root(context_root);
     }
@@ -5870,7 +5863,6 @@ where
         .project_root(project_root)
         .builtins(config.tools.builtins_enabled)
         .shell(config.tools.shell_enabled)
-        .subagents(config.tools.subagents_enabled)
         .memory(true);
     if let Some(context_root) = scope.context_root.clone() {
         factory = factory.context_root(context_root);
@@ -6474,7 +6466,6 @@ mod tests {
         let full = resolve_tool_preset(ToolPreset::Full, false);
         assert!(full.builtins);
         assert!(full.shell);
-        assert!(full.subagents);
         assert!(full.memory);
         assert!(full.mob);
 
@@ -8283,9 +8274,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
     #[tokio::test]
     async fn test_run_session_build_wires_mob_tools_into_llm_request() {
         let temp = tempfile::tempdir().expect("tempdir must be created");
-        let factory = AgentFactory::new(temp.path().join("sessions"))
-            .builtins(true)
-            .subagents(true);
+        let factory = AgentFactory::new(temp.path().join("sessions")).builtins(true);
         let service = Arc::new(build_cli_service(factory, Config::default()));
 
         let external_tools = compose_external_tool_dispatchers(

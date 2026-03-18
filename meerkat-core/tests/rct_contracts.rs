@@ -90,7 +90,6 @@ fn test_resume_metadata_contract() -> Result<(), Box<dyn std::error::Error>> {
             builtins: true,
             shell: true,
             comms: false,
-            subagents: true,
             mob: false,
             memory: false,
             active_skills: None,
@@ -119,7 +118,6 @@ fn test_comms_runtime_contract() -> Result<(), Box<dyn std::error::Error>> {
     let config = CommsRuntimeConfig::default();
     assert_eq!(config.mode, CommsRuntimeMode::Inproc);
     assert!(config.address.is_none());
-    assert!(!config.auto_enable_for_subagents);
 
     let encoded = serde_json::to_value(&config)?;
     let decoded: CommsRuntimeConfig = serde_json::from_value(encoded)?;
@@ -288,7 +286,6 @@ async fn test_inv_005_agents_md_injected() -> Result<(), Box<dyn std::error::Err
 fn test_inv_008_comms_runtime_defaults_consistent() {
     let config = CommsRuntimeConfig::default();
     assert_eq!(config.mode, CommsRuntimeMode::Inproc);
-    assert!(!config.auto_enable_for_subagents);
 }
 
 #[tokio::test]

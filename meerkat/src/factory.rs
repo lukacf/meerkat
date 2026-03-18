@@ -43,10 +43,7 @@ use meerkat_core::{
 use meerkat_core::{SessionId, SessionMeta};
 #[cfg(feature = "jsonl-store")]
 use meerkat_store::JsonlStore;
-#[cfg(all(
-    feature = "memory-store",
-    any(not(feature = "jsonl-store"), feature = "sub-agents")
-))]
+#[cfg(all(feature = "memory-store", not(feature = "jsonl-store")))]
 use meerkat_store::MemoryStore;
 #[cfg(not(feature = "memory-store"))]
 use meerkat_store::SessionFilter;
@@ -63,17 +60,11 @@ use meerkat_tools::builtin::shell::ShellConfig;
 use meerkat_tools::builtin::{
     BuiltinToolConfig, CompositeDispatcher, MemoryTaskStore, TaskStore, ToolPolicyLayer,
 };
-#[cfg(all(
-    any(not(feature = "memory-store"), feature = "sub-agents"),
-    not(target_arch = "wasm32")
-))]
+#[cfg(all(not(feature = "memory-store"), not(target_arch = "wasm32")))]
 use tokio::sync::RwLock;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::mpsc;
-#[cfg(all(
-    any(not(feature = "memory-store"), feature = "sub-agents"),
-    target_arch = "wasm32"
-))]
+#[cfg(all(not(feature = "memory-store"), target_arch = "wasm32"))]
 use tokio_with_wasm::alias::sync::RwLock;
 #[cfg(target_arch = "wasm32")]
 use tokio_with_wasm::alias::sync::mpsc;
@@ -158,14 +149,6 @@ pub type DynAgent = Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn Agent
 #[derive(Clone)]
 struct ErasedLlmClientOverride(Arc<dyn LlmClient>);
 
-#[cfg(all(feature = "sub-agents", feature = "comms"))]
-#[derive(Clone)]
-struct SubAgentCommsWiring {
-    parent_context: meerkat_comms::runtime::ParentCommsContext,
-    parent_trusted_peers: Arc<parking_lot::RwLock<meerkat_comms::TrustedPeers>>,
-    parent_classification_peers: Arc<parking_lot::RwLock<meerkat_comms::TrustedPeers>>,
-}
-
 /// Encode an LLM client override for transport in `SessionBuildOptions`.
 ///
 /// `SessionBuildOptions` lives in `meerkat-core` and cannot depend directly on
@@ -233,9 +216,6 @@ pub struct AgentBuildConfig {
     /// Per-build override for factory-level `enable_shell`.
     /// When `Some`, takes precedence over `AgentFactory::enable_shell`.
     pub override_shell: Option<bool>,
-    /// Per-build override for factory-level `enable_subagents`.
-    /// When `Some`, takes precedence over `AgentFactory::enable_subagents`.
-    pub override_subagents: Option<bool>,
     /// Per-build override for factory-level `enable_memory`.
     /// When `Some`, takes precedence over `AgentFactory::enable_memory`.
     pub override_memory: Option<bool>,
@@ -334,7 +314,6 @@ impl std::fmt::Debug for AgentBuildConfig {
             .field("external_tools", &self.external_tools.is_some())
             .field("override_builtins", &self.override_builtins)
             .field("override_shell", &self.override_shell)
-            .field("override_subagents", &self.override_subagents)
             .field("override_memory", &self.override_memory)
             .field("override_mob", &self.override_mob)
             .field("realm_id", &self.realm_id)
@@ -389,7 +368,6 @@ impl AgentBuildConfig {
             external_tools: None,
             override_builtins: None,
             override_shell: None,
-            override_subagents: None,
             override_memory: None,
             override_mob: None,
             preload_skills: None,
@@ -448,7 +426,6 @@ impl AgentBuildConfig {
         self.scoped_event_path = build.scoped_event_path.clone();
         self.override_builtins = build.override_builtins;
         self.override_shell = build.override_shell;
-        self.override_subagents = build.override_subagents;
         self.override_memory = build.override_memory;
         self.override_mob = build.override_mob;
         self.preload_skills = build.preload_skills.clone();
@@ -487,7 +464,6 @@ impl AgentBuildConfig {
             scoped_event_path: self.scoped_event_path.clone(),
             override_builtins: self.override_builtins,
             override_shell: self.override_shell,
-            override_subagents: self.override_subagents,
             override_memory: self.override_memory,
             override_mob: self.override_mob,
             preload_skills: self.preload_skills.clone(),
@@ -560,7 +536,6 @@ pub struct AgentFactory {
     pub user_config_root: Option<PathBuf>,
     pub enable_builtins: bool,
     pub enable_shell: bool,
-    pub enable_subagents: bool,
     #[cfg(feature = "comms")]
     pub enable_comms: bool,
     pub enable_memory: bool,
@@ -584,7 +559,6 @@ impl std::fmt::Debug for AgentFactory {
             .field("user_config_root", &self.user_config_root)
             .field("enable_builtins", &self.enable_builtins)
             .field("enable_shell", &self.enable_shell)
-            .field("enable_subagents", &self.enable_subagents)
             .field("enable_memory", &self.enable_memory)
             .field("enable_mob", &self.enable_mob);
         #[cfg(feature = "comms")]
@@ -611,7 +585,6 @@ impl AgentFactory {
             user_config_root: None,
             enable_builtins: false,
             enable_shell: false,
-            enable_subagents: false,
             #[cfg(feature = "comms")]
             enable_comms: false,
             enable_memory: false,
@@ -632,7 +605,6 @@ impl AgentFactory {
             user_config_root: None,
             enable_builtins: false,
             enable_shell: false,
-            enable_subagents: false,
             #[cfg(feature = "comms")]
             enable_comms: false,
             enable_memory: false,
@@ -684,12 +656,6 @@ impl AgentFactory {
     /// Enable or disable shell tools.
     pub fn shell(mut self, enabled: bool) -> Self {
         self.enable_shell = enabled;
-        self
-    }
-
-    /// Enable or disable sub-agent tools.
-    pub fn subagents(mut self, enabled: bool) -> Self {
-        self.enable_subagents = enabled;
         self
     }
 
@@ -909,7 +875,7 @@ impl AgentFactory {
         StoreAdapter::new(store)
     }
 
-    /// Build a composite dispatcher so callers can register sub-agent tools.
+    /// Build a composite dispatcher so callers can register additional tools.
     #[cfg(not(target_arch = "wasm32"))]
     #[allow(clippy::too_many_arguments)]
     pub async fn build_composite_dispatcher(
@@ -979,18 +945,13 @@ impl AgentFactory {
             external,
             session_id,
             skill_engine,
-            None,
-            None,
-            #[cfg(all(feature = "sub-agents", feature = "comms"))]
-            None,
             // Public API defaults to true (all tools visible).
             true,
         )
         .await
     }
 
-    /// Internal dispatcher builder used by `build_agent` when extra sub-agent
-    /// comms wiring is available from a live parent runtime.
+    /// Internal dispatcher builder used by `build_agent`.
     #[cfg(not(target_arch = "wasm32"))]
     #[allow(clippy::too_many_arguments)]
     async fn build_builtin_dispatcher_with_skills_internal(
@@ -1004,16 +965,17 @@ impl AgentFactory {
         #[cfg_attr(not(feature = "skills"), allow(unused_variables))] skill_engine: Option<
             Arc<meerkat_core::skills::SkillRuntime>,
         >,
-        #[cfg_attr(not(feature = "sub-agents"), allow(unused_variables))]
-        sub_agent_scoped_event_tx: Option<mpsc::Sender<ScopedAgentEvent>>,
-        #[cfg_attr(not(feature = "sub-agents"), allow(unused_variables))]
-        sub_agent_scope_path: Option<Vec<StreamScopeFrame>>,
-        #[cfg(all(feature = "sub-agents", feature = "comms"))] sub_agent_comms: Option<
-            SubAgentCommsWiring,
-        >,
         image_tool_results: bool,
     ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
-        let builder = BuiltinDispatcherConfig {
+        let BuiltinDispatcherConfig {
+            store,
+            config,
+            project_root,
+            shell_config,
+            external,
+            session_id,
+            image_tool_results,
+        } = BuiltinDispatcherConfig {
             store,
             config,
             project_root,
@@ -1022,91 +984,28 @@ impl AgentFactory {
             session_id,
             image_tool_results,
         };
-        #[cfg(not(feature = "sub-agents"))]
-        {
-            #[allow(unused_mut)]
-            let mut composite = CompositeDispatcher::new(
-                builder.store,
-                &builder.config,
-                builder.project_root,
-                builder.shell_config,
-                builder.external,
-                builder.session_id,
-                builder.image_tool_results,
-            )?;
-            #[cfg(feature = "skills")]
-            if let Some(engine) = skill_engine {
-                composite.register_skill_tools(meerkat_tools::builtin::skills::SkillToolSet::new(
-                    engine,
-                ));
-            }
-            // (wait binding happens in build_agent via bind_wait_interrupt)
-            Ok(Arc::new(composite))
-        }
 
-        #[cfg(feature = "sub-agents")]
-        if !self.enable_subagents {
-            let mut composite = CompositeDispatcher::new(
-                builder.store,
-                &builder.config,
-                builder.project_root,
-                builder.shell_config,
-                builder.external,
-                builder.session_id,
-                builder.image_tool_results,
-            )?;
-            #[cfg(feature = "skills")]
-            if let Some(engine) = skill_engine {
-                composite.register_skill_tools(meerkat_tools::builtin::skills::SkillToolSet::new(
-                    engine,
-                ));
-            }
-            // (wait binding happens in build_agent via bind_wait_interrupt)
-            return Ok(Arc::new(composite));
-        }
-
-        #[cfg(feature = "sub-agents")]
-        {
-            let BuiltinDispatcherConfig {
+        #[cfg_attr(not(feature = "skills"), allow(unused_mut))]
+        let mut composite = self
+            .build_composite_dispatcher(
                 store,
-                config,
+                &config,
                 project_root,
                 shell_config,
                 external,
                 session_id,
-                image_tool_results: builder_image_tool_results,
-            } = builder;
+                image_tool_results,
+            )
+            .await?;
 
-            let shell_config_for_subagents = shell_config.clone();
-            let mut composite = self
-                .build_composite_dispatcher(
-                    store,
-                    &config,
-                    project_root.clone(),
-                    shell_config,
-                    external.clone(),
-                    session_id,
-                    builder_image_tool_results,
-                )
-                .await?;
-
-            let _ = shell_config_for_subagents;
-            let _ = sub_agent_scoped_event_tx;
-            let _ = sub_agent_scope_path;
-            #[cfg(all(feature = "sub-agents", feature = "comms"))]
-            let _ = sub_agent_comms;
-
-            #[cfg(feature = "skills")]
-            if let Some(engine) = skill_engine {
-                composite.register_skill_tools(meerkat_tools::builtin::skills::SkillToolSet::new(
-                    engine,
-                ));
-            }
-
-            // (wait binding happens in build_agent via bind_wait_interrupt)
-
-            Ok(Arc::new(composite))
+        #[cfg(feature = "skills")]
+        if let Some(engine) = skill_engine {
+            composite
+                .register_skill_tools(meerkat_tools::builtin::skills::SkillToolSet::new(engine));
         }
+
+        // (wait binding happens in build_agent via bind_wait_interrupt)
+        Ok(Arc::new(composite))
     }
 
     /// Build a fully-configured, type-erased agent ready to run.
@@ -1243,11 +1142,7 @@ impl AgentFactory {
             .override_builtins
             .unwrap_or(self.enable_builtins);
         let effective_shell = build_config.override_shell.unwrap_or(self.enable_shell);
-        let effective_subagents = build_config
-            .override_subagents
-            .unwrap_or(self.enable_subagents);
-        // 6b. Create comms runtime (before tool wiring so sub-agent tools can
-        // inherit parent comms context when auto-enabled).
+        // 6b. Create comms runtime before tool wiring.
         #[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
         let comms_runtime = if build_config.host_mode || build_config.comms_name.is_some() {
             let comms_name = build_config
@@ -1306,26 +1201,6 @@ impl AgentFactory {
         #[allow(clippy::no_effect_underscore_binding)]
         let _comms_runtime: Option<()> = None;
 
-        #[cfg(all(feature = "sub-agents", feature = "comms"))]
-        let sub_agent_comms = if config.comms.auto_enable_for_subagents && effective_subagents {
-            comms_runtime.as_ref().map(|runtime| SubAgentCommsWiring {
-                parent_context: meerkat_comms::runtime::ParentCommsContext {
-                    parent_name: runtime.participant_name().to_string(),
-                    parent_pubkey: *runtime.public_key().as_bytes(),
-                    parent_addr: runtime.advertised_address(),
-                    comms_base_dir: _realm_scope_root
-                        .join(".rkat")
-                        .join("subagents")
-                        .join("comms"),
-                    inproc_namespace: runtime.inproc_namespace().map(ToOwned::to_owned),
-                },
-                parent_trusted_peers: runtime.trusted_peers_shared(),
-                parent_classification_peers: runtime.router().classification_peers_arc(),
-            })
-        } else {
-            None
-        };
-
         // Resolve model profile for capability gating (e.g., hiding view_image
         // when the model cannot process image blocks in tool results).
         let image_tool_results = meerkat_models::profile::profile_for(provider.as_str(), &model)
@@ -1347,12 +1222,7 @@ impl AgentFactory {
                         build_config.external_tools,
                         effective_builtins,
                         effective_shell,
-                        effective_subagents,
                         skill_engine.clone(),
-                        build_config.scoped_event_tx.clone(),
-                        build_config.scoped_event_path.clone(),
-                        #[cfg(all(feature = "sub-agents", feature = "comms"))]
-                        sub_agent_comms,
                         build_config.shell_env.take(),
                         image_tool_results,
                     )
@@ -1879,7 +1749,6 @@ impl AgentFactory {
                 builtins: effective_builtins,
                 shell: effective_shell,
                 comms: comms_enabled,
-                subagents: effective_subagents,
                 mob: build_config.override_mob.unwrap_or(self.enable_mob),
                 memory: effective_memory,
                 active_skills: active_skill_ids,
@@ -1903,9 +1772,8 @@ impl AgentFactory {
 impl AgentFactory {
     /// Build the tool dispatcher and usage instructions.
     ///
-    /// `effective_builtins`, `effective_shell`, and `effective_subagents` override
-    /// the factory-level flags for this specific build. Delegates to
-    /// [`Self::build_builtin_dispatcher`] for the full sub-agent wiring path.
+    /// `effective_builtins` and `effective_shell` override the factory-level
+    /// flags for this specific build.
     #[cfg(not(target_arch = "wasm32"))]
     #[allow(clippy::too_many_arguments)]
     async fn build_tool_dispatcher_for_agent_with_overrides(
@@ -1914,13 +1782,7 @@ impl AgentFactory {
         external: Option<Arc<dyn AgentToolDispatcher>>,
         effective_builtins: bool,
         effective_shell: bool,
-        effective_subagents: bool,
         skill_engine: Option<Arc<meerkat_core::skills::SkillRuntime>>,
-        sub_agent_scoped_event_tx: Option<mpsc::Sender<ScopedAgentEvent>>,
-        sub_agent_scope_path: Option<Vec<StreamScopeFrame>>,
-        #[cfg(all(feature = "sub-agents", feature = "comms"))] sub_agent_comms: Option<
-            SubAgentCommsWiring,
-        >,
         shell_env: Option<std::collections::HashMap<String, String>>,
         image_tool_results: bool,
     ) -> Result<(Arc<dyn AgentToolDispatcher>, String), BuildAgentError> {
@@ -1971,11 +1833,7 @@ impl AgentFactory {
             BuiltinToolConfig::default()
         };
 
-        // Use a temporary factory with the effective subagents flag to delegate
-        // to build_builtin_dispatcher which has the full sub-agent wiring.
-        let mut temp_factory = self.clone();
-        temp_factory.enable_subagents = effective_subagents;
-        let dispatcher = temp_factory
+        let dispatcher = self
             .build_builtin_dispatcher_with_skills_internal(
                 task_store,
                 builtin_config,
@@ -1984,10 +1842,6 @@ impl AgentFactory {
                 external,
                 None,
                 skill_engine,
-                sub_agent_scoped_event_tx,
-                sub_agent_scope_path,
-                #[cfg(all(feature = "sub-agents", feature = "comms"))]
-                sub_agent_comms,
                 image_tool_results,
             )
             .await?;

@@ -1,5 +1,5 @@
 /**
- * Mob orchestrator — multi-provider sub-agent management.
+ * Mob orchestrator — multi-provider specialist coordination.
  *
  * Creates a 3-agent mob (planner, coder, reviewer) with different LLM
  * providers per role. Manages subscriptions, background polling, and
@@ -302,7 +302,7 @@ export class MobOrchestrator {
     );
   }
 
-  /** Start background polling for sub-agent events. */
+  /** Start background polling for specialist member events. */
   startPolling(): void {
     if (this.pollInterval) return;
     this.pollInterval = setInterval(() => this.pollAll(), 200);

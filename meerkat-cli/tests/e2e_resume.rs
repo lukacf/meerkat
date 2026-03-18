@@ -200,6 +200,5 @@ async fn inner_test_cli_resume_tools() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(metadata.tooling.builtins, original_tooling.builtins);
     assert_eq!(metadata.tooling.shell, original_tooling.shell);
     assert_eq!(metadata.tooling.comms, original_tooling.comms);
-    assert_eq!(metadata.tooling.subagents, original_tooling.subagents);
     Ok(())
 }

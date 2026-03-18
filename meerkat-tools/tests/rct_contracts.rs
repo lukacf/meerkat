@@ -533,8 +533,8 @@ async fn test_regression_composite_deduplicates_external_tools()
 }
 
 /// Regression test: FilteredDispatcher must enforce tool access policies.
-/// Previously, tool_access was parsed but never applied in agent_spawn/agent_fork,
-/// so sub-agents could access all tools regardless of allow/deny configuration.
+/// Previously, delegated branches could access all tools regardless of
+/// allow/deny configuration.
 #[test]
 fn test_regression_filtered_dispatcher_enforces_tool_access_policy() {
     use async_trait::async_trait;
@@ -556,7 +556,7 @@ fn test_regression_filtered_dispatcher_enforces_tool_access_policy() {
                 }),
                 Arc::new(ToolDef {
                     name: "agent_spawn".to_string(),
-                    description: "Spawn sub-agents (nesting sensitive)".to_string(),
+                    description: "Start delegated branches (nesting sensitive)".to_string(),
                     input_schema: json!({"type": "object"}),
                 }),
                 Arc::new(ToolDef {

@@ -139,7 +139,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .project_root(project_root)
         .builtins(true)
         .shell(true)
-        .subagents(true)
         .memory(true);
     if let Some(context_root) = cli.context_root.clone() {
         factory = factory.context_root(context_root);

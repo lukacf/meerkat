@@ -75,8 +75,7 @@ pub use config::{
     AgentConfig, BudgetConfig, CommsAuthMode, CommsRuntimeConfig, CommsRuntimeMode, Config,
     ConfigDelta, ConfigError, ConfigScope, HookEntryConfig, HookRunOverrides, HookRuntimeConfig,
     HooksConfig, LimitsConfig, ModelDefaults, PlainEventSource, ProviderConfig, ProviderSettings,
-    ResolvedSubAgentConfig, RetryConfig, ShellDefaults, StorageConfig, StoreConfig,
-    SubAgentsConfig, ToolsConfig,
+    RetryConfig, ShellDefaults, StorageConfig, StoreConfig, ToolsConfig,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use config_runtime::{

@@ -112,7 +112,7 @@ impl AgentToolDispatcher for ToolDispatcher {
 
 /// A dispatcher wrapper that filters tools based on a ToolAccessPolicy.
 ///
-/// This is used to restrict which tools a sub-agent can access when spawned
+/// This is used to restrict which tools a delegated branch can access
 /// with an allow/deny list configuration.
 pub struct FilteredDispatcher {
     inner: Arc<dyn AgentToolDispatcher>,
@@ -298,9 +298,8 @@ mod tests {
         }
     }
 
-    /// Regression test: Ensure tool access policy is actually enforced
-    /// Previously, _tool_access was parsed but never applied, so sub-agents
-    /// could access all tools regardless of allow/deny configuration.
+    /// Regression test: Ensure tool access policy is actually enforced.
+    /// Previously, delegated branches could bypass allow/deny configuration.
     #[tokio::test]
     async fn test_regression_tool_access_policy_must_be_enforced() {
         let inner = Arc::new(MockDispatcher::new(vec![

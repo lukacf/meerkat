@@ -487,7 +487,6 @@ async fn apply_runtime_turn(
                     builtins: context.enable_builtins,
                     shell: context.enable_shell,
                     comms: false,
-                    subagents: false,
                     mob: false,
                     memory: false,
                     active_skills: None,
@@ -521,7 +520,6 @@ async fn apply_runtime_turn(
                 scoped_event_path: None,
                 override_builtins: Some(tooling.builtins),
                 override_shell: Some(tooling.shell),
-                override_subagents: Some(tooling.subagents),
                 override_memory: Some(tooling.memory),
                 override_mob: Some(tooling.mob),
                 preload_skills: tooling.active_skills.clone(),
@@ -726,9 +724,6 @@ pub struct CreateSessionRequest {
     /// Enable shell tool. Omit to use factory defaults.
     #[serde(default)]
     pub enable_shell: Option<bool>,
-    /// Enable sub-agent tools. Omit to use factory defaults.
-    #[serde(default)]
-    pub enable_subagents: Option<bool>,
     /// Enable semantic memory. Omit to use factory defaults.
     #[serde(default)]
     pub enable_memory: Option<bool>,
@@ -1915,7 +1910,6 @@ async fn create_session(
         scoped_event_path: None,
         override_builtins: req.enable_builtins,
         override_shell: req.enable_shell,
-        override_subagents: req.enable_subagents,
         override_memory: req.enable_memory,
         override_mob: req.enable_mob,
         preload_skills: req

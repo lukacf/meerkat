@@ -507,7 +507,7 @@ where
     /// Optional session checkpointer for host-mode persistence.
     pub(crate) checkpointer: Option<Arc<dyn crate::checkpoint::SessionCheckpointer>>,
     /// Optional default scoped event channel configured at build time.
-    /// Used by nested sub-agent forwarding to emit attributed events.
+    /// Used by nested delegated-branch forwarding to emit attributed events.
     pub(crate) default_scoped_event_tx:
         Option<tokio::sync::mpsc::Sender<crate::event::ScopedAgentEvent>>,
     /// Base scope path for nested scoped event forwarding.

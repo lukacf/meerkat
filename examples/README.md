@@ -87,7 +87,6 @@ branch.
 
 | # | Example | Surface | Description |
 |---|---------|---------|-------------|
-| 016 | [sub-agent-orchestration-rs](016-sub-agent-orchestration-rs/) | Rust | Delegate subtasks to independent child agents |
 | 017 | [mob-coding-swarm-rs](017-mob-coding-swarm-rs/) | Rust | Orchestrator + worker mob for coding tasks |
 | 018 | [mob-research-team-rs](018-mob-research-team-rs/) | Rust | Diverge/converge research with specialized profiles |
 | 019 | [mob-pipeline-rs](019-mob-pipeline-rs/) | Rust | Sequential CI/CD pipeline with stage handoffs |

@@ -1,6 +1,6 @@
 //! Async operation types for Meerkat
 //!
-//! Unified abstraction for tool calls, shell commands, and sub-agents.
+//! Unified abstraction for tool calls, shell commands, and delegated branches.
 
 use crate::budget::BudgetLimits;
 use crate::types::Message;
@@ -38,7 +38,7 @@ pub enum WorkKind {
     ToolCall,
     /// Shell command execution
     ShellCommand,
-    /// Sub-agent (spawn or fork)
+    /// Delegated branch (spawn or fork)
     SubAgent,
 }
 
@@ -54,7 +54,7 @@ pub enum ResultShape {
     Batch,
 }
 
-/// How much context a sub-agent receives
+/// How much context a delegated branch receives
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ContextStrategy {
@@ -84,7 +84,7 @@ pub enum ForkBudgetPolicy {
     Remaining,
 }
 
-/// Tool access control for sub-agents
+/// Tool access control for delegated branches
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ToolAccessPolicy {
@@ -162,11 +162,11 @@ pub enum OpEvent {
 /// Concurrency limits for operations
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConcurrencyLimits {
-    /// Maximum sub-agent nesting depth
+    /// Maximum delegated-branch nesting depth
     pub max_depth: u32,
     /// Maximum concurrent operations (all types)
     pub max_concurrent_ops: usize,
-    /// Maximum concurrent sub-agents specifically
+    /// Maximum concurrent delegated branches specifically
     pub max_concurrent_agents: usize,
     /// Maximum children per parent agent
     pub max_children_per_agent: usize,
@@ -183,18 +183,18 @@ impl Default for ConcurrencyLimits {
     }
 }
 
-/// Specification for spawning a new sub-agent
+/// Specification for spawning a new delegated branch
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SpawnSpec {
-    /// The prompt/task for the sub-agent
+    /// The prompt/task for the delegated branch
     pub prompt: String,
-    /// How much context the sub-agent receives
+    /// How much context the delegated branch receives
     pub context: ContextStrategy,
-    /// Which tools the sub-agent can access
+    /// Which tools the delegated branch can access
     pub tool_access: ToolAccessPolicy,
-    /// Budget allocation for the sub-agent
+    /// Budget allocation for the delegated branch
     pub budget: BudgetLimits,
-    /// If false, sub-agent cannot spawn/fork further
+    /// If false, the delegated branch cannot spawn/fork further
     pub allow_spawn: bool,
     /// System prompt override (None = inherit from parent)
     pub system_prompt: Option<String>,
@@ -211,17 +211,17 @@ pub struct ForkBranch {
     pub tool_access: Option<ToolAccessPolicy>,
 }
 
-/// State of a running sub-agent
+/// State of a running delegated branch
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubAgentState {
-    /// Sub-agent is running
+    /// Delegated branch is running
     Running,
-    /// Sub-agent completed successfully
+    /// Delegated branch completed successfully
     Completed,
-    /// Sub-agent failed with error
+    /// Delegated branch failed with error
     Failed,
-    /// Sub-agent was cancelled
+    /// Delegated branch was cancelled
     Cancelled,
 }
 

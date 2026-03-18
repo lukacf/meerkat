@@ -30,4 +30,4 @@ Use `comms_response` to reply to incoming requests.
 
 - **UDS** (Unix Domain Socket): Same machine, lowest latency
 - **TCP**: Cross-machine communication
-- **inproc**: In-process, for sub-agents in the same runtime
+- **inproc**: In-process, for peers in the same runtime

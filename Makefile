@@ -70,14 +70,12 @@ test-minimal:
 # Library crate feature combinations
 test-feature-matrix-lib:
 	@echo "$(GREEN)Running library feature matrix checks...$(NC)"
-	cargo check -p meerkat-tools --no-default-features --features sub-agents
 	cargo check -p meerkat-tools --no-default-features --features comms
 	cargo check -p meerkat-tools --no-default-features --features mcp
-	cargo check -p meerkat-tools --no-default-features --features sub-agents,comms
 	cargo check -p meerkat-tools --no-default-features --features comms,mcp
 	cargo check -p meerkat --no-default-features --features openai,memory-store
 	cargo check -p meerkat --no-default-features --features gemini,jsonl-store
-	cargo check -p meerkat --features all-providers,comms,mcp,sub-agents
+	cargo check -p meerkat --features all-providers,comms,mcp
 	cargo nextest run -p meerkat --features all-providers,comms,mcp
 
 # Surface crate feature combinations
@@ -125,10 +123,9 @@ lint:
 # Run clippy across key feature combinations (not just --all-features)
 lint-feature-matrix:
 	@echo "$(GREEN)Running clippy feature matrix...$(NC)"
-	cargo clippy -p meerkat-tools --no-default-features --features sub-agents
 	cargo clippy -p meerkat-tools --no-default-features --features comms,mcp
 	cargo clippy -p meerkat --no-default-features --features openai,memory-store
-	cargo clippy -p meerkat --features all-providers,comms,mcp,sub-agents
+	cargo clippy -p meerkat --features all-providers,comms,mcp
 	cargo clippy -p rkat --no-default-features --features session-store,mcp
 	cargo clippy -p meerkat-rpc --no-default-features
 

@@ -25,7 +25,7 @@ pub enum ToolDispatcherSource {
     /// MCP-based tools
     #[cfg(feature = "mcp")]
     Mcp(McpDispatcherConfig),
-    /// Built-in and sub-agent tools (boxed to reduce enum size)
+    /// Built-in and delegated-work tools (boxed to reduce enum size)
     Composite(Box<BuiltinDispatcherConfig>),
 }
 
@@ -35,7 +35,7 @@ pub struct McpDispatcherConfig {
     pub router: Arc<McpRouter>,
 }
 
-/// Configuration for a built-in and sub-agent dispatcher
+/// Configuration for a built-in and delegated-work dispatcher
 pub struct BuiltinDispatcherConfig {
     pub store: Arc<dyn TaskStore>,
     pub config: BuiltinToolConfig,

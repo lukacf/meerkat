@@ -76,13 +76,13 @@ impl AgentBuilder {
         }
     }
 
-    /// Set concurrency limits for sub-agents
+    /// Set concurrency limits for delegated branches
     pub fn concurrency_limits(mut self, limits: ConcurrencyLimits) -> Self {
         self.concurrency_limits = limits;
         self
     }
 
-    /// Set the nesting depth for sub-agents
+    /// Set the nesting depth for delegated branches
     pub fn depth(mut self, depth: u32) -> Self {
         self.depth = depth;
         self

@@ -44,7 +44,6 @@ pub enum CapabilityId {
     Builtins,
     Shell,
     Comms,
-    SubAgents,
     MemoryStore,
     SessionStore,
     SessionCompaction,

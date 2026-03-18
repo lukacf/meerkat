@@ -6,7 +6,7 @@ implement, and review code in a sandboxed Linux VM — no backend required.
 
 ## Features
 
-- **TUI-style UI**: Claude Code-inspired layout with main agent stream + three sub-agent panels
+- **TUI-style UI**: Claude Code-inspired layout with main agent stream + three specialist panels
 - **Multi-provider mob**: Anthropic (orchestrator), OpenAI (planner + coder), Gemini (reviewer)
 - **Comms-driven orchestration**: Agents communicate via `send`/`peers` tools — no polling, no custom delegation
 - **Real-time streaming**: Reasoning traces, tool calls, and text stream incrementally in all panels
@@ -51,7 +51,7 @@ Browser Tab
 │   └── xterm-pty bridge for serialized command I/O
 └── TUI
     ├── Main stream (left 70%): orchestrator events + user input
-    └── Sub-agent panels (right 30%): planner / coder / reviewer
+    └── Specialist panels (right 30%): planner / coder / reviewer
 ```
 
 ## Agent flow

@@ -563,7 +563,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 resume_session: Some(stored),
                 override_builtins: Some(tooling.builtins),
                 override_shell: Some(tooling.shell),
-                override_subagents: Some(tooling.subagents),
                 override_memory: Some(tooling.memory),
                 override_mob: Some(tooling.mob),
                 realm_id: stored_metadata
@@ -2225,7 +2224,6 @@ mod tests {
                     builtins: true,
                     shell: false,
                     comms: false,
-                    subagents: false,
                     mob: false,
                     memory: true,
                     active_skills: None,

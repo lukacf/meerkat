@@ -23,7 +23,7 @@ Meerkat is a library-first agent runtime. The execution pipeline is shared acros
 | `meerkat-core` | Agent loop, types, budget, retry, state machine, ALL trait contracts | `AgentLlmClient`, `AgentToolDispatcher` (incl. `bind_wait_interrupt`, `supports_wait_interrupt`), `AgentSessionStore`, `SessionService` (incl. `set_session_client`), `SessionAgent` (incl. `replace_client`), `CommsRuntime`, `HookEngine` |
 | `meerkat-client` | LLM providers (Anthropic, OpenAI, Gemini) | Implements `AgentLlmClient` (via `LlmClientAdapter`) |
 | `meerkat-store` | Session persistence (SQLite, Jsonl, Memory, Redb) | Implements `SessionStore` |
-| `meerkat-tools` | Tool registry, dispatch, builtins (task tools, utility helpers like `apply_patch`, shell/comms/sub-agent surfaces) | Implements `AgentToolDispatcher` |
+| `meerkat-tools` | Tool registry, dispatch, builtins (task tools, utility helpers like `apply_patch`, shell/comms/delegated-work compatibility surfaces) | Implements `AgentToolDispatcher` |
 | `meerkat-session` | Session orchestration (Ephemeral, Persistent) | Implements `SessionService` |
 | `meerkat-comms` | Inter-agent messaging (inproc, TCP, UDS) | Implements `CommsRuntime` |
 | `meerkat-mob` | Multi-agent orchestration (MobBuilder, FlowEngine) | `MobSessionService`, `MobProvisioner` (mob-local traits) |
@@ -46,7 +46,7 @@ Meerkat is a library-first agent runtime. The execution pipeline is shared acros
 4. Create LLM adapter (with event channel and event tap)
 5. Resolve max_tokens
 6a. Build skill engine (override > factory > config > filesystem)
-6b. Build tool dispatcher (override > factory builtin builder); create comms runtime (if comms_name set; inproc on wasm32); wire sub-agent comms inheritance (if enabled)
+6b. Build tool dispatcher (override > factory builtin builder); create comms runtime (if comms_name set; inproc on wasm32); wire delegated child-session comms inheritance for legacy compatibility only
 7. Create session store (override > factory custom_store > feature-flag default)
 9. Compose tools with comms (add send/list_peers tools)
 10. Resolve hooks (override > filesystem layered config)
@@ -93,7 +93,7 @@ MobBuilder::new(definition, storage)
 
 `MobHandle` is clone-cheap (Arc-shared state). Sends commands to `MobActor` via channel.
 
-**Provisioning:** `MobActor` → `MobProvisioner` → `SubagentBackend` → `session_service.create_session(req)`. Members are real sessions.
+**Provisioning:** `MobActor` → `MobProvisioner` → session-backed provisioner (`SubagentBackend` in the current code) → `session_service.create_session(req)`. Members are real sessions.
 
 **Wiring:** Definition has `WiringRules` with `role_wiring: [{a, b}]`. At spawn time, `MobActor::spawn_wiring_targets()` computes peers, `do_wire()` establishes bidirectional trust via comms.
 

@@ -112,15 +112,15 @@ You have access to utility tools for timing and coordination.
 ## Using the Wait Tool
 
 The `wait` tool is essential for async operations. Use it to:
-- **Wait between status checks**: After spawning a sub-agent, call `wait(15)` before checking status
+- **Wait between status checks**: After starting async delegated work, call `wait(15)` before checking status
 - **Rate limiting**: When making repeated API calls, wait between them
 - **Coordination**: When timing matters, use wait to synchronize operations
 
-Example pattern for sub-agents:
-1. `agent_spawn` - spawn the sub-agent
-2. Do other useful work (create tasks, spawn more agents, etc.)
+Example pattern for delegated work:
+1. Start the async work or branch
+2. Do other useful work
 3. `wait(20)` - wait 20 seconds
-4. `agent_status` - check if done
+4. Check whether it is done
 5. If not done: `wait(15)` then check again
 
 **DO NOT** poll status in a tight loop without waiting. Always use `wait` between status checks.

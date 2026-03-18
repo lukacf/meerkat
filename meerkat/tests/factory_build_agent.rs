@@ -192,7 +192,6 @@ async fn build_agent_sets_session_metadata() {
     assert!(metadata.tooling.builtins);
     assert!(metadata.tooling.shell);
     assert!(!metadata.tooling.comms);
-    assert!(!metadata.tooling.subagents);
     // Skills become active only when they were explicitly preloaded.
     #[cfg(feature = "skills")]
     assert!(metadata.tooling.active_skills.is_none());
@@ -278,7 +277,6 @@ async fn build_agent_with_resume_uses_stored_metadata() {
             builtins: true,
             shell: false,
             comms: false,
-            subagents: false,
             mob: false,
             memory: false,
             active_skills: None,
@@ -585,7 +583,6 @@ async fn test_resume_filters_persisted_active_skills_unavailable_on_current_surf
                 builtins: false,
                 shell: false,
                 comms: false,
-                subagents: false,
                 mob: false,
                 memory: false,
                 active_skills: Some(vec![meerkat_core::skills::SkillId(

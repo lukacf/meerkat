@@ -17,8 +17,7 @@ name = "integration_shell_jobs"
 path = "tests/integration_shell_jobs.rs"
 
 [features]
-default = ["sub-agents", "comms", "mcp", "skills"]
-sub-agents = ["dep:meerkat-client"]
+default = ["comms", "mcp", "skills"]
 comms = ["dep:meerkat-comms", "dep:parking_lot"]
 mcp = ["dep:meerkat-mcp"]
 skills = []
@@ -30,7 +29,6 @@ meerkat-contracts = { workspace = true }
 meerkat-models = { workspace = true }
 meerkat-skills = { workspace = true }
 inventory = { workspace = true }
-meerkat-client = { workspace = true, optional = true }
 meerkat-comms = { workspace = true, optional = true }
 parking_lot = { workspace = true, optional = true }
 meerkat-mcp = { workspace = true, optional = true }

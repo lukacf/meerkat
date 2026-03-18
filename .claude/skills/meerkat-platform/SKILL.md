@@ -1,6 +1,6 @@
 ---
 name: meerkat-platform
-description: "Comprehensive guide for building applications with the Meerkat agent platform. Covers all surfaces (CLI, REST, RPC, MCP, Python SDK, TypeScript SDK, Rust SDK), configuration, sessions, streaming, skills, hooks, sub-agents, memory, and inter-agent communication. This skill should be used when users ask how to integrate with Meerkat, build agents, configure the runtime, use the SDK, set up multi-agent systems, or work with any Meerkat feature."
+description: "Comprehensive guide for building applications with the Meerkat agent platform. Covers all surfaces (CLI, REST, RPC, MCP, Python SDK, TypeScript SDK, Rust SDK), configuration, sessions, streaming, skills, hooks, memory, inter-agent communication, and delegated-work patterns such as mobs and forked branches. This skill should be used when users ask how to integrate with Meerkat, build agents, configure the runtime, use the SDK, set up multi-agent systems, or work with any Meerkat feature."
 ---
 
 # Meerkat Platform Guide
@@ -158,7 +158,7 @@ await mob.spawn([{ profile: 'worker', meerkat_id: 'w1' }]);
 
 **Not available on wasm32 (inherent browser limitations):**
 - Filesystem (config loading, AGENTS.md, skill files, session persistence)
-- Shell tool, process spawning, sub-agent spawning
+- Shell tool, process spawning, legacy standalone child-agent compatibility paths
 - MCP protocol client (rmcp blocked by tokio/mio)
 - Network comms (TCP/UDS sockets — inproc only)
 
@@ -305,11 +305,11 @@ meerkat = { version = "0.4", default-features = false, features = ["anthropic"] 
 # Add persistence + memory + comms
 meerkat = { version = "0.4", features = [
     "jsonl-store", "session-store", "session-compaction",
-    "memory-store-session", "comms", "mcp", "sub-agents", "skills"
+    "memory-store-session", "comms", "mcp", "skills"
 ] }
 ```
 
-Available features: `anthropic`, `openai`, `gemini`, `all-providers`, `jsonl-store`, `memory-store`, `session-store`, `session-compaction`, `memory-store-session`, `comms`, `mcp`, `sub-agents`, `skills`.
+Available features: `anthropic`, `openai`, `gemini`, `all-providers`, `jsonl-store`, `memory-store`, `session-store`, `session-compaction`, `memory-store-session`, `comms`, `mcp`, `skills`.
 
 Prebuilt binaries (`rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`) include everything. Custom binary builds:
 
@@ -387,9 +387,9 @@ Introspection returns both active and shadowed skills with their source provenan
 
 Hook config is realm-aware, with compatibility layering from user/project hook files when available.
 
-### Sub-agents
+### Delegated work
 
-Sub-agents inherit realm context. With comms enabled, parent/child inproc communication is namespace-scoped by realm.
+Use mobs for orchestrated helper agents and `Session::fork()` for lightweight history branches. A few deeper runtime internals still carry legacy delegated-work naming, but the supported surface is mobs plus forked history branches.
 
 ### Inter-agent comms
 

@@ -40,11 +40,10 @@ uuid = { workspace = true }
 clap = { workspace = true }
 
 [features]
-default = ["comms", "mcp", "mob", "sub-agents"]
+default = ["comms", "mcp", "mob"]
 comms = ["meerkat/comms"]
 mcp = ["meerkat/mcp"]
 mob = ["dep:meerkat-mob", "dep:meerkat-mob-mcp"]
-sub-agents = ["meerkat/sub-agents"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

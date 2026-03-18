@@ -82,7 +82,7 @@ impl NotificationSink {
     ///
     /// When `scope_id` and `scope_path` are provided, they are included as
     /// additional fields on the notification params alongside the event. This
-    /// allows SDKs to distinguish sub-agent and mob-member scoped events from
+    /// allows SDKs to distinguish delegated-branch and mob-member scoped events from
     /// direct session events.
     async fn emit_session_stream_event(
         &self,

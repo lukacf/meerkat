@@ -8,7 +8,7 @@
  *
  * ORDERING MATTERS: JsToolDispatcher snapshots tool definitions at
  * build_wasm_tool_dispatcher() call time. WebCM tools are registered before
- * init_runtime_from_config (so mob sub-agents get them). Delegation tools are
+ * init_runtime_from_config (so mob members get them). Delegation tools are
  * registered after mob init but before create_session_simple (so only the
  * main agent gets them).
  */

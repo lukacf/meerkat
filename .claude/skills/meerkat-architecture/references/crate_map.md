@@ -58,7 +58,7 @@ Surface binaries:
 | Trait | Purpose | Implementors |
 |-------|---------|-------------|
 | `MobSessionService` | Session service + comms access for mobs | `EphemeralSessionService<B>`, `PersistentSessionService<B>` |
-| `MobProvisioner` | Member spawn/retire/turn | `MultiBackendProvisioner`, `SubagentBackend` |
+| `MobProvisioner` | Member spawn/retire/turn | `MultiBackendProvisioner`, `SubagentBackend` (legacy impl name for the session-backed member provisioner) |
 | `MobEventStore` | Mob structural events | `InMemoryMobEventStore`, `RedbMobEventStore` |
 
 ### Multimodal types (defined in meerkat-core)

@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn test_peer_meta_serde_roundtrip() {
         let meta = PeerMeta::default()
-            .with_description("Coordinates sub-agents")
+            .with_description("Coordinates delegated work")
             .with_label("team", "platform")
             .with_label("tier", "1");
 

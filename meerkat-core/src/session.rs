@@ -538,7 +538,6 @@ pub struct SessionTooling {
     pub builtins: bool,
     pub shell: bool,
     pub comms: bool,
-    pub subagents: bool,
     /// Mob (multi-agent orchestration) tools enabled.
     #[serde(default)]
     pub mob: bool,

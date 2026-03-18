@@ -582,66 +582,6 @@ mod scenario_03_structured_output {
 
 mod scenario_04_sub_agent {
     use super::*;
-
-    #[tokio::test]
-    #[ignore = "integration-real: live API"]
-    async fn e2e_smoke_sub_agent_spawn() {
-        let Some(_api_key) = anthropic_api_key() else {
-            eprintln!("Skipping scenario 4: missing ANTHROPIC_API_KEY");
-            return;
-        };
-
-        // Use AgentFactory with subagents enabled — the agent gets the
-        // agent_spawn/agent_fork/agent_status/agent_list tools and must
-        // actually use them to complete the prompt.
-        let temp_dir = TempDir::new().unwrap();
-        let factory = AgentFactory::new(temp_dir.path().join("sessions"))
-            .builtins(true)
-            .subagents(true)
-            .project_root(temp_dir.path());
-
-        let config = Config::default();
-        let mut build_config = AgentBuildConfig::new(smoke_model());
-        build_config.system_prompt = Some(
-            "You are an orchestrator. When asked to analyze something, \
-             use agent_spawn to delegate sub-tasks. After spawning, \
-             use agent_status to check results. Be brief."
-                .to_string(),
-        );
-
-        let mut agent = factory
-            .build_agent(build_config, &config)
-            .await
-            .expect("Sub-agent factory should build");
-
-        let result = agent
-            .run(
-                "Spawn a sub-agent to answer: what is 2+2? \
-                 Then check its status with agent_status and tell me the result."
-                    .into(),
-            )
-            .await
-            .expect("Sub-agent orchestration should succeed");
-
-        eprintln!(
-            "[scenario 4] tool_calls={}, turns={}, text={}",
-            result.tool_calls,
-            result.turns,
-            &result.text[..result.text.len().min(120)]
-        );
-
-        assert!(
-            result.tool_calls >= 2,
-            "Should have called agent_spawn + agent_status (at least 2 tool calls), got {}",
-            result.tool_calls
-        );
-        let text_lower = result.text.to_lowercase();
-        assert!(
-            text_lower.contains('4') || text_lower.contains("four"),
-            "Should relay the sub-agent's answer (4), got: {}",
-            result.text
-        );
-    }
 }
 
 // ============================================================================

@@ -1,10 +1,10 @@
 # Full profile — everything enabled.
-# Comms, sub-agents, memory, skills, compaction.
+# Comms, memory, skills, compaction.
 [profile]
 name = "meerkat-full"
 
 [features]
-include = ["comms", "sub-agents", "session-store", "session-compaction", "memory-store", "skills", "mcp"]
+include = ["comms", "session-store", "session-compaction", "memory-store", "skills", "mcp"]
 exclude = []
 
 [sdk]

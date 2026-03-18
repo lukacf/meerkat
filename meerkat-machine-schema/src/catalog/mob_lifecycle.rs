@@ -11,7 +11,7 @@ pub fn mob_lifecycle_machine() -> MachineSchema {
         version: 2,
         rust: RustBinding {
             crate_name: "meerkat-mob".into(),
-            module: "machines::mob_lifecycle".into(),
+            module: "generated::mob_lifecycle".into(),
         },
         state: StateSchema {
             phase: EnumSchema {

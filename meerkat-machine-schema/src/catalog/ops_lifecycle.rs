@@ -12,7 +12,7 @@ pub fn ops_lifecycle_machine() -> MachineSchema {
         version: 2,
         rust: RustBinding {
             crate_name: "meerkat-runtime".into(),
-            module: "machines::ops_lifecycle".into(),
+            module: "generated::ops_lifecycle".into(),
         },
         state: StateSchema {
             phase: EnumSchema {

@@ -12,7 +12,7 @@ pub fn mob_orchestrator_machine() -> MachineSchema {
         version: 2,
         rust: RustBinding {
             crate_name: "meerkat-mob".into(),
-            module: "machines::mob_orchestrator".into(),
+            module: "generated::mob_orchestrator".into(),
         },
         state: StateSchema {
             phase: EnumSchema {
@@ -518,7 +518,7 @@ mod tests {
 
         assert_eq!(schema.machine, "MobOrchestratorMachine");
         assert_eq!(schema.rust.crate_name, "meerkat-mob");
-        assert_eq!(schema.rust.module, "machines::mob_orchestrator");
+        assert_eq!(schema.rust.module, "generated::mob_orchestrator");
         assert!(
             schema
                 .transitions

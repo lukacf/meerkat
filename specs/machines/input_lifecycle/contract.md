@@ -3,7 +3,7 @@
 _Generated from the Rust machine catalog. Do not edit by hand._
 
 - Version: `1`
-- Rust owner: `meerkat-runtime` / `machines::input_lifecycle`
+- Rust owner: `meerkat-runtime` / `generated::input_lifecycle`
 
 ## State
 - Phase enum: `Accepted | Queued | Staged | Applied | AppliedPendingConsumption | Consumed | Superseded | Coalesced | Abandoned`

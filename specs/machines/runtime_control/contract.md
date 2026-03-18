@@ -3,7 +3,7 @@
 _Generated from the Rust machine catalog. Do not edit by hand._
 
 - Version: `2`
-- Rust owner: `meerkat-runtime` / `machines::runtime_control`
+- Rust owner: `meerkat-runtime` / `generated::runtime_control`
 
 ## State
 - Phase enum: `Initializing | Idle | Running | Recovering | Retired | Stopped | Destroyed`

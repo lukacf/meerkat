@@ -3,7 +3,7 @@
 _Generated from the Rust machine catalog. Do not edit by hand._
 
 - Version: `2`
-- Rust owner: `meerkat-runtime` / `machines::ops_lifecycle`
+- Rust owner: `meerkat-runtime` / `generated::ops_lifecycle`
 
 ## State
 - Phase enum: `Active`

@@ -12,7 +12,7 @@ pub fn runtime_ingress_machine() -> MachineSchema {
         version: 2,
         rust: RustBinding {
             crate_name: "meerkat-runtime".into(),
-            module: "machines::runtime_ingress".into(),
+            module: "generated::runtime_ingress".into(),
         },
         state: StateSchema {
             phase: EnumSchema {

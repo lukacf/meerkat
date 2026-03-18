@@ -12,7 +12,7 @@ pub fn input_lifecycle_machine() -> MachineSchema {
         version: 1,
         rust: RustBinding {
             crate_name: "meerkat-runtime".into(),
-            module: "machines::input_lifecycle".into(),
+            module: "generated::input_lifecycle".into(),
         },
         state: StateSchema {
             phase: EnumSchema {

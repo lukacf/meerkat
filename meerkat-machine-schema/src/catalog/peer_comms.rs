@@ -12,7 +12,7 @@ pub fn peer_comms_machine() -> MachineSchema {
         version: 1,
         rust: RustBinding {
             crate_name: "meerkat-comms".into(),
-            module: "machines::peer_comms".into(),
+            module: "generated::peer_comms".into(),
         },
         state: StateSchema {
             phase: EnumSchema {

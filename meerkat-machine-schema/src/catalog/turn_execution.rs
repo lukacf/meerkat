@@ -12,7 +12,7 @@ pub fn turn_execution_machine() -> MachineSchema {
         version: 1,
         rust: RustBinding {
             crate_name: "meerkat-core".into(),
-            module: "machines::turn_execution".into(),
+            module: "generated::turn_execution".into(),
         },
         state: StateSchema {
             phase: EnumSchema {

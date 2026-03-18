@@ -3,7 +3,7 @@
 _Generated from the Rust machine catalog. Do not edit by hand._
 
 - Version: `1`
-- Rust owner: `meerkat-mcp` / `machines::external_tool_surface`
+- Rust owner: `meerkat-mcp` / `generated::external_tool_surface`
 
 ## State
 - Phase enum: `Operating | Shutdown`

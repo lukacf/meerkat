@@ -12,7 +12,7 @@ pub fn external_tool_surface_machine() -> MachineSchema {
         version: 1,
         rust: RustBinding {
             crate_name: "meerkat-mcp".into(),
-            module: "machines::external_tool_surface".into(),
+            module: "generated::external_tool_surface".into(),
         },
         state: StateSchema {
             phase: EnumSchema {

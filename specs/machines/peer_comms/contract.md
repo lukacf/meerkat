@@ -3,7 +3,7 @@
 _Generated from the Rust machine catalog. Do not edit by hand._
 
 - Version: `1`
-- Rust owner: `meerkat-comms` / `machines::peer_comms`
+- Rust owner: `meerkat-comms` / `generated::peer_comms`
 
 ## State
 - Phase enum: `Absent | Received | Dropped | Delivered`

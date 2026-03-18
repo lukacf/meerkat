@@ -3,7 +3,7 @@
 _Generated from the Rust machine catalog. Do not edit by hand._
 
 - Version: `1`
-- Rust owner: `meerkat-mob` / `machines::flow_run`
+- Rust owner: `meerkat-mob` / `generated::flow_run`
 
 ## State
 - Phase enum: `Absent | Pending | Running | Completed | Failed | Canceled`

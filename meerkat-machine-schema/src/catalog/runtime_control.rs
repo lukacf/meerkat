@@ -12,7 +12,7 @@ pub fn runtime_control_machine() -> MachineSchema {
         version: 2,
         rust: RustBinding {
             crate_name: "meerkat-runtime".into(),
-            module: "machines::runtime_control".into(),
+            module: "generated::runtime_control".into(),
         },
         state: StateSchema {
             phase: EnumSchema {

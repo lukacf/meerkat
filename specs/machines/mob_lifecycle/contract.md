@@ -3,7 +3,7 @@
 _Generated from the Rust machine catalog. Do not edit by hand._
 
 - Version: `2`
-- Rust owner: `meerkat-mob` / `machines::mob_lifecycle`
+- Rust owner: `meerkat-mob` / `generated::mob_lifecycle`
 
 ## State
 - Phase enum: `Creating | Running | Stopped | Completed | Destroyed`

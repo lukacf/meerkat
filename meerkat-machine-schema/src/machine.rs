@@ -876,7 +876,7 @@ mod tests {
 
         assert_eq!(schema.machine, "PeerCommsMachine");
         assert_eq!(schema.rust.crate_name, "meerkat-comms");
-        assert_eq!(schema.rust.module, "machines::peer_comms");
+        assert_eq!(schema.rust.module, "generated::peer_comms");
         assert!(
             schema
                 .transitions

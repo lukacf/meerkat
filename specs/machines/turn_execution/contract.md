@@ -3,7 +3,7 @@
 _Generated from the Rust machine catalog. Do not edit by hand._
 
 - Version: `1`
-- Rust owner: `meerkat-core` / `machines::turn_execution`
+- Rust owner: `meerkat-core` / `generated::turn_execution`
 
 ## State
 - Phase enum: `Ready | ApplyingPrimitive | CallingLlm | WaitingForOps | DrainingBoundary | ErrorRecovery | Cancelling | Completed | Failed | Cancelled`

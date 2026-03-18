@@ -3,7 +3,7 @@
 _Generated from the Rust machine catalog. Do not edit by hand._
 
 - Version: `2`
-- Rust owner: `meerkat-runtime` / `machines::runtime_ingress`
+- Rust owner: `meerkat-runtime` / `generated::runtime_ingress`
 
 ## State
 - Phase enum: `Active | Retired | Destroyed`

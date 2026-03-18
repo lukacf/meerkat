@@ -477,13 +477,12 @@ impl MobBuilder {
             config.llm_client_override = Some(reconcile_client);
 
             // Try to reactivate the persisted session (preserves ID and history).
+            // Do NOT pass llm_client_override here — the reactivated agent should
+            // use the real LLM client resolved by the factory, not the TestClient
+            // that is only meant for the create_session bootstrap turn.
             if let Some(session_id) = entry.session_id() {
                 let mut build_options = config.to_session_build_options();
-                // Type-erase the LLM client override for the service layer.
-                build_options.llm_client_override = config
-                    .llm_client_override
-                    .clone()
-                    .map(|c| Arc::new(c) as Arc<dyn std::any::Any + Send + Sync>);
+                build_options.llm_client_override = None;
                 let req = meerkat_core::service::ReactivateSessionRequest {
                     model: config.model.clone(),
                     system_prompt: config.system_prompt.clone(),

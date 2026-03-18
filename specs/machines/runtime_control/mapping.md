@@ -90,25 +90,55 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `Initialize`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `control-preempts-ingress`
+- `AttachFromIdle`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `control-preempts-ingress`
+- `DetachToIdle`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `control-preempts-ingress`
 - `BeginRunFromIdle`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `begin-run-complete`
 - `BeginRunFromRetired`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `retire-stop-destroy`, `reset-terminates-waiters`
-- `RunCompleted`
+- `BeginRunFromAttached`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `begin-run-complete`
-- `RunFailed`
+- `RunCompletedToIdle`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `begin-run-complete`
-- `RunCancelled`
+- `RunCompletedToAttached`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `begin-run-complete`
+- `RunCompletedToRetired`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `retire-stop-destroy`, `reset-terminates-waiters`
+- `RunFailedToIdle`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `begin-run-complete`
+- `RunFailedToAttached`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `begin-run-complete`
+- `RunFailedToRetired`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `retire-stop-destroy`, `reset-terminates-waiters`
+- `RunCancelledToIdle`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `begin-run-complete`
+- `RunCancelledToAttached`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `begin-run-complete`
+- `RunCancelledToRetired`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `retire-stop-destroy`, `reset-terminates-waiters`
 - `RecoverRequestedFromIdle`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `retire-stop-destroy`, `reset-terminates-waiters`
 - `RecoverRequestedFromRunning`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `retire-stop-destroy`, `reset-terminates-waiters`
+- `RecoverRequestedFromAttached`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `retire-stop-destroy`, `reset-terminates-waiters`
 - `RecoverySucceeded`
@@ -118,6 +148,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `retire-stop-destroy`, `reset-terminates-waiters`
 - `RetireRequestedFromRunning`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `retire-stop-destroy`, `reset-terminates-waiters`
+- `RetireRequestedFromAttached`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `retire-stop-destroy`, `reset-terminates-waiters`
 - `ResetRequested`
@@ -138,6 +171,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SubmitWorkFromRunning`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `begin-run-complete`
+- `SubmitWorkFromAttached`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `control-preempts-ingress`
 - `AdmissionAcceptedIdleQueue`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `control-preempts-ingress`
@@ -150,18 +186,30 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AdmissionAcceptedRunningSteer`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `begin-run-complete`
+- `AdmissionAcceptedAttachedQueue`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `control-preempts-ingress`
+- `AdmissionAcceptedAttachedSteer`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `control-preempts-ingress`
 - `AdmissionRejectedIdle`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `control-preempts-ingress`
 - `AdmissionRejectedRunning`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `begin-run-complete`
+- `AdmissionRejectedAttached`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `control-preempts-ingress`
 - `AdmissionDeduplicatedIdle`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `control-preempts-ingress`
 - `AdmissionDeduplicatedRunning`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `begin-run-complete`
+- `AdmissionDeduplicatedAttached`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `control-preempts-ingress`
 - `ExternalToolDeltaReceivedIdle`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `control-preempts-ingress`
@@ -174,10 +222,16 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ExternalToolDeltaReceivedRetired`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `retire-stop-destroy`, `reset-terminates-waiters`
+- `ExternalToolDeltaReceivedAttached`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `control-preempts-ingress`
 - `RecycleRequestedFromRetired`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `retire-stop-destroy`, `reset-terminates-waiters`
 - `RecycleRequestedFromIdle`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `control-preempts-ingress`
+- `RecycleRequestedFromAttached`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `control-preempts-ingress`
 - `RecycleSucceeded`

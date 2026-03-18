@@ -6,7 +6,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Rust owner: `meerkat-runtime` / `generated::runtime_control`
 
 ## State
-- Phase enum: `Initializing | Idle | Running | Recovering | Retired | Stopped | Destroyed`
+- Phase enum: `Initializing | Idle | Attached | Running | Recovering | Retired | Stopped | Destroyed`
 - `current_run_id`: `Option<RunId>`
 - `pre_run_state`: `Option<RuntimeState>`
 - `wake_pending`: `Bool`
@@ -22,6 +22,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RunCompleted`(run_id: RunId)
 - `RunFailed`(run_id: RunId)
 - `RunCancelled`(run_id: RunId)
+- `AttachExecutor`
+- `DetachExecutor`
 - `RecoverRequested`
 - `RecoverySucceeded`
 - `RetireRequested`
@@ -54,6 +56,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `Initialize`()
 - To: `Idle`
 
+### `AttachFromIdle`
+- From: `Idle`
+- On: `AttachExecutor`()
+- To: `Attached`
+
+### `DetachToIdle`
+- From: `Attached`
+- On: `DetachExecutor`()
+- To: `Idle`
+
 ### `BeginRunFromIdle`
 - From: `Idle`
 - On: `BeginRun`(run_id)
@@ -70,26 +82,85 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `SubmitRunPrimitive`
 - To: `Running`
 
-### `RunCompleted`
+### `BeginRunFromAttached`
+- From: `Attached`
+- On: `BeginRun`(run_id)
+- Guards:
+  - `no_active_run`
+- Emits: `SubmitRunPrimitive`
+- To: `Running`
+
+### `RunCompletedToIdle`
 - From: `Running`
 - On: `RunCompleted`(run_id)
 - Guards:
   - `active_run_matches`
+  - `pre_run_state_is_idle`
 - To: `Idle`
 
-### `RunFailed`
+### `RunCompletedToAttached`
+- From: `Running`
+- On: `RunCompleted`(run_id)
+- Guards:
+  - `active_run_matches`
+  - `pre_run_state_is_attached`
+- To: `Attached`
+
+### `RunCompletedToRetired`
+- From: `Running`
+- On: `RunCompleted`(run_id)
+- Guards:
+  - `active_run_matches`
+  - `pre_run_state_is_retired`
+- To: `Retired`
+
+### `RunFailedToIdle`
 - From: `Running`
 - On: `RunFailed`(run_id)
 - Guards:
   - `active_run_matches`
+  - `pre_run_state_is_idle`
 - To: `Idle`
 
-### `RunCancelled`
+### `RunFailedToAttached`
+- From: `Running`
+- On: `RunFailed`(run_id)
+- Guards:
+  - `active_run_matches`
+  - `pre_run_state_is_attached`
+- To: `Attached`
+
+### `RunFailedToRetired`
+- From: `Running`
+- On: `RunFailed`(run_id)
+- Guards:
+  - `active_run_matches`
+  - `pre_run_state_is_retired`
+- To: `Retired`
+
+### `RunCancelledToIdle`
 - From: `Running`
 - On: `RunCancelled`(run_id)
 - Guards:
   - `active_run_matches`
+  - `pre_run_state_is_idle`
 - To: `Idle`
+
+### `RunCancelledToAttached`
+- From: `Running`
+- On: `RunCancelled`(run_id)
+- Guards:
+  - `active_run_matches`
+  - `pre_run_state_is_attached`
+- To: `Attached`
+
+### `RunCancelledToRetired`
+- From: `Running`
+- On: `RunCancelled`(run_id)
+- Guards:
+  - `active_run_matches`
+  - `pre_run_state_is_retired`
+- To: `Retired`
 
 ### `RecoverRequestedFromIdle`
 - From: `Idle`
@@ -98,6 +169,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverRequestedFromRunning`
 - From: `Running`
+- On: `RecoverRequested`()
+- To: `Recovering`
+
+### `RecoverRequestedFromAttached`
+- From: `Attached`
 - On: `RecoverRequested`()
 - To: `Recovering`
 
@@ -118,20 +194,26 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `ApplyControlPlaneCommand`
 - To: `Retired`
 
+### `RetireRequestedFromAttached`
+- From: `Attached`
+- On: `RetireRequested`()
+- Emits: `ApplyControlPlaneCommand`
+- To: `Retired`
+
 ### `ResetRequested`
-- From: `Initializing`, `Idle`, `Recovering`, `Retired`
+- From: `Initializing`, `Idle`, `Attached`, `Recovering`, `Retired`
 - On: `ResetRequested`()
 - Emits: `ApplyControlPlaneCommand`, `ResolveCompletionAsTerminated`
 - To: `Idle`
 
 ### `StopRequested`
-- From: `Initializing`, `Idle`, `Running`, `Recovering`, `Retired`
+- From: `Initializing`, `Idle`, `Attached`, `Running`, `Recovering`, `Retired`
 - On: `StopRequested`()
 - Emits: `ApplyControlPlaneCommand`, `ResolveCompletionAsTerminated`
 - To: `Stopped`
 
 ### `DestroyRequested`
-- From: `Initializing`, `Idle`, `Running`, `Recovering`, `Retired`, `Stopped`
+- From: `Initializing`, `Idle`, `Attached`, `Running`, `Recovering`, `Retired`, `Stopped`
 - On: `DestroyRequested`()
 - Emits: `ApplyControlPlaneCommand`, `ResolveCompletionAsTerminated`
 - To: `Destroyed`
@@ -152,6 +234,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `SubmitWork`(work_id, content_shape, handling_mode, request_id, reservation_key)
 - Emits: `ResolveAdmission`
 - To: `Running`
+
+### `SubmitWorkFromAttached`
+- From: `Attached`
+- On: `SubmitWork`(work_id, content_shape, handling_mode, request_id, reservation_key)
+- Emits: `ResolveAdmission`
+- To: `Attached`
 
 ### `AdmissionAcceptedIdleQueue`
 - From: `Idle`
@@ -185,6 +273,22 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `SubmitAdmittedIngressEffect`, `SignalWake`, `SignalImmediateProcess`
 - To: `Running`
 
+### `AdmissionAcceptedAttachedQueue`
+- From: `Attached`
+- On: `AdmissionAccepted`(work_id, content_shape, handling_mode, request_id, reservation_key, admission_effect)
+- Guards:
+  - `handling_mode_is_queue`
+- Emits: `SubmitAdmittedIngressEffect`, `SignalWake`
+- To: `Attached`
+
+### `AdmissionAcceptedAttachedSteer`
+- From: `Attached`
+- On: `AdmissionAccepted`(work_id, content_shape, handling_mode, request_id, reservation_key, admission_effect)
+- Guards:
+  - `handling_mode_is_steer`
+- Emits: `SubmitAdmittedIngressEffect`, `SignalWake`, `SignalImmediateProcess`
+- To: `Attached`
+
 ### `AdmissionRejectedIdle`
 - From: `Idle`
 - On: `AdmissionRejected`(work_id, reason)
@@ -197,6 +301,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `EmitRuntimeNotice`
 - To: `Running`
 
+### `AdmissionRejectedAttached`
+- From: `Attached`
+- On: `AdmissionRejected`(work_id, reason)
+- Emits: `EmitRuntimeNotice`
+- To: `Attached`
+
 ### `AdmissionDeduplicatedIdle`
 - From: `Idle`
 - On: `AdmissionDeduplicated`(work_id, existing_work_id)
@@ -208,6 +318,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AdmissionDeduplicated`(work_id, existing_work_id)
 - Emits: `EmitRuntimeNotice`
 - To: `Running`
+
+### `AdmissionDeduplicatedAttached`
+- From: `Attached`
+- On: `AdmissionDeduplicated`(work_id, existing_work_id)
+- Emits: `EmitRuntimeNotice`
+- To: `Attached`
 
 ### `ExternalToolDeltaReceivedIdle`
 - From: `Idle`
@@ -233,6 +349,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `EmitRuntimeNotice`
 - To: `Retired`
 
+### `ExternalToolDeltaReceivedAttached`
+- From: `Attached`
+- On: `ExternalToolDeltaReceived`()
+- Emits: `EmitRuntimeNotice`
+- To: `Attached`
+
 ### `RecycleRequestedFromRetired`
 - From: `Retired`
 - On: `RecycleRequested`()
@@ -243,6 +365,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecycleRequestedFromIdle`
 - From: `Idle`
+- On: `RecycleRequested`()
+- Guards:
+  - `no_active_run`
+- Emits: `InitiateRecycle`
+- To: `Recovering`
+
+### `RecycleRequestedFromAttached`
+- From: `Attached`
 - On: `RecycleRequested`()
 - Guards:
   - `no_active_run`

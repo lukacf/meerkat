@@ -54,6 +54,16 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                 input_variant: "StageDrainSnapshot".into(),
             },
             EntryInput {
+                name: "control_attach_executor".into(),
+                machine: "runtime_control".into(),
+                input_variant: "AttachExecutor".into(),
+            },
+            EntryInput {
+                name: "control_detach_executor".into(),
+                machine: "runtime_control".into(),
+                input_variant: "DetachExecutor".into(),
+            },
+            EntryInput {
                 name: "control_recover_requested".into(),
                 machine: "runtime_control".into(),
                 input_variant: "RecoverRequested".into(),
@@ -686,6 +696,203 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                     map_limit: 2,
                 },
             },
+            // Attached admission witnesses — parallel to idle witnesses
+            CompositionWitness {
+                name: "prompt_queue_attached".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AttachExecutor".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "prompt_1",
+                            "WorkInput",
+                            "TextOnly",
+                            true,
+                            false,
+                        ),
+                    },
+                ],
+                expected_routes: vec!["admitted_work_enters_ingress".into()],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state(
+                        "runtime_control",
+                        Some("Attached"),
+                        vec![
+                            CompositionWitnessField {
+                                field: "wake_pending".into(),
+                                expr: Expr::Bool(true),
+                            },
+                            CompositionWitnessField {
+                                field: "process_pending".into(),
+                                expr: Expr::Bool(false),
+                            },
+                        ],
+                    ),
+                    witness_state(
+                        "runtime_ingress",
+                        Some("Active"),
+                        vec![
+                            CompositionWitnessField {
+                                field: "queue".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("prompt_1".into())]),
+                            },
+                            CompositionWitnessField {
+                                field: "wake_requested".into(),
+                                expr: Expr::Bool(true),
+                            },
+                            CompositionWitnessField {
+                                field: "process_requested".into(),
+                                expr: Expr::Bool(false),
+                            },
+                        ],
+                    ),
+                ],
+                expected_transitions: vec![
+                    witness_transition("runtime_control", "Initialize"),
+                    witness_transition("runtime_control", "AttachFromIdle"),
+                    witness_transition("runtime_control", "AdmissionAcceptedAttachedQueue"),
+                    witness_transition("runtime_ingress", "AdmitQueuedQueue"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "runtime_control",
+                        "Initialize",
+                        "runtime_control",
+                        "AttachFromIdle",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "AttachFromIdle",
+                        "runtime_control",
+                        "AdmissionAcceptedAttachedQueue",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedAttachedQueue",
+                        "runtime_ingress",
+                        "AdmitQueuedQueue",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 4,
+                    pending_input_limit: 3,
+                    pending_route_limit: 1,
+                    delivered_route_limit: 1,
+                    emitted_effect_limit: 2,
+                    seq_limit: 2,
+                    set_limit: 2,
+                    map_limit: 2,
+                },
+            },
+            CompositionWitness {
+                name: "prompt_steer_attached".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AttachExecutor".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "prompt_1",
+                            "WorkInput",
+                            "InlineImage",
+                            true,
+                            true,
+                        ),
+                    },
+                ],
+                expected_routes: vec!["admitted_work_enters_ingress".into()],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state(
+                        "runtime_control",
+                        Some("Attached"),
+                        vec![
+                            CompositionWitnessField {
+                                field: "wake_pending".into(),
+                                expr: Expr::Bool(true),
+                            },
+                            CompositionWitnessField {
+                                field: "process_pending".into(),
+                                expr: Expr::Bool(true),
+                            },
+                        ],
+                    ),
+                    witness_state(
+                        "runtime_ingress",
+                        Some("Active"),
+                        vec![
+                            CompositionWitnessField {
+                                field: "queue".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("prompt_1".into())]),
+                            },
+                            CompositionWitnessField {
+                                field: "wake_requested".into(),
+                                expr: Expr::Bool(true),
+                            },
+                            CompositionWitnessField {
+                                field: "process_requested".into(),
+                                expr: Expr::Bool(true),
+                            },
+                        ],
+                    ),
+                ],
+                expected_transitions: vec![
+                    witness_transition("runtime_control", "Initialize"),
+                    witness_transition("runtime_control", "AttachFromIdle"),
+                    witness_transition("runtime_control", "AdmissionAcceptedAttachedSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "runtime_control",
+                        "Initialize",
+                        "runtime_control",
+                        "AttachFromIdle",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "AttachFromIdle",
+                        "runtime_control",
+                        "AdmissionAcceptedAttachedSteer",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedAttachedSteer",
+                        "runtime_ingress",
+                        "AdmitQueuedSteer",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 4,
+                    pending_input_limit: 3,
+                    pending_route_limit: 1,
+                    delivered_route_limit: 1,
+                    emitted_effect_limit: 3,
+                    seq_limit: 2,
+                    set_limit: 2,
+                    map_limit: 2,
+                },
+            },
             CompositionWitness {
                 name: "prompt_queue_running".into(),
                 preload_inputs: vec![
@@ -1177,7 +1384,7 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                     witness_transition("turn_execution", "StartConversationRun"),
                     witness_transition("turn_execution", "BoundaryComplete"),
                     witness_transition("runtime_ingress", "RunCompleted"),
-                    witness_transition("runtime_control", "RunCompleted"),
+                    witness_transition("runtime_control", "RunCompletedToIdle"),
                 ],
                 expected_transition_order: vec![
                     witness_transition_order(
@@ -1202,7 +1409,7 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                         "turn_execution",
                         "BoundaryComplete",
                         "runtime_control",
-                        "RunCompleted",
+                        "RunCompletedToIdle",
                     ),
                 ],
                 state_limits: CompositionStateLimits {
@@ -1274,7 +1481,7 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                     witness_transition("turn_execution", "StartConversationRun"),
                     witness_transition("turn_execution", "FatalFailureFromApplyingPrimitive"),
                     witness_transition("runtime_ingress", "RunFailed"),
-                    witness_transition("runtime_control", "RunFailed"),
+                    witness_transition("runtime_control", "RunFailedToIdle"),
                 ],
                 expected_transition_order: vec![
                     witness_transition_order(
@@ -1299,7 +1506,7 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                         "turn_execution",
                         "FatalFailureFromApplyingPrimitive",
                         "runtime_control",
-                        "RunFailed",
+                        "RunFailedToIdle",
                     ),
                 ],
                 state_limits: CompositionStateLimits {
@@ -1377,7 +1584,7 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                     witness_transition("turn_execution", "CancelNowFromApplyingPrimitive"),
                     witness_transition("turn_execution", "CancellationObserved"),
                     witness_transition("runtime_ingress", "RunCancelled"),
-                    witness_transition("runtime_control", "RunCancelled"),
+                    witness_transition("runtime_control", "RunCancelledToIdle"),
                 ],
                 expected_transition_order: vec![
                     witness_transition_order(
@@ -1402,7 +1609,7 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                         "turn_execution",
                         "CancellationObserved",
                         "runtime_control",
-                        "RunCancelled",
+                        "RunCancelledToIdle",
                     ),
                 ],
                 state_limits: CompositionStateLimits {
@@ -1504,7 +1711,7 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                     witness_transition("turn_execution", "LlmReturnedTerminal"),
                     witness_transition("turn_execution", "BoundaryCompleteCancelsAfterBoundary"),
                     witness_transition("runtime_ingress", "RunCancelled"),
-                    witness_transition("runtime_control", "RunCancelled"),
+                    witness_transition("runtime_control", "RunCancelledToIdle"),
                 ],
                 expected_transition_order: vec![
                     witness_transition_order(
@@ -1541,7 +1748,7 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                         "turn_execution",
                         "BoundaryCompleteCancelsAfterBoundary",
                         "runtime_control",
-                        "RunCancelled",
+                        "RunCancelledToIdle",
                     ),
                 ],
                 state_limits: CompositionStateLimits {
@@ -3046,7 +3253,7 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                     witness_transition("turn_execution", "StartConversationRun"),
                     witness_transition("turn_execution", "BoundaryComplete"),
                     witness_transition("runtime_ingress", "RunCompleted"),
-                    witness_transition("runtime_control", "RunCompleted"),
+                    witness_transition("runtime_control", "RunCompletedToIdle"),
                 ],
                 expected_transition_order: vec![
                     witness_transition_order(
@@ -3172,7 +3379,7 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                     witness_transition("turn_execution", "StartConversationRun"),
                     witness_transition("turn_execution", "FatalFailureFromApplyingPrimitive"),
                     witness_transition("runtime_ingress", "RunFailed"),
-                    witness_transition("runtime_control", "RunFailed"),
+                    witness_transition("runtime_control", "RunFailedToIdle"),
                 ],
                 expected_transition_order: vec![
                     witness_transition_order(
@@ -3191,7 +3398,7 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                         "turn_execution",
                         "FatalFailureFromApplyingPrimitive",
                         "runtime_control",
-                        "RunFailed",
+                        "RunFailedToIdle",
                     ),
                 ],
                 state_limits: CompositionStateLimits {
@@ -3301,7 +3508,7 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                     witness_transition("turn_execution", "CancelNowFromApplyingPrimitive"),
                     witness_transition("turn_execution", "CancellationObserved"),
                     witness_transition("runtime_ingress", "RunCancelled"),
-                    witness_transition("runtime_control", "RunCancelled"),
+                    witness_transition("runtime_control", "RunCancelledToIdle"),
                 ],
                 expected_transition_order: vec![
                     witness_transition_order(
@@ -3320,7 +3527,7 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                         "turn_execution",
                         "CancellationObserved",
                         "runtime_control",
-                        "RunCancelled",
+                        "RunCancelledToIdle",
                     ),
                 ],
                 state_limits: CompositionStateLimits {
@@ -3867,7 +4074,7 @@ pub fn surface_event_runtime_bundle_composition() -> CompositionSchema {
                     witness_transition("turn_execution", "StartConversationRun"),
                     witness_transition("turn_execution", "BoundaryComplete"),
                     witness_transition("runtime_ingress", "RunCompleted"),
-                    witness_transition("runtime_control", "RunCompleted"),
+                    witness_transition("runtime_control", "RunCompletedToIdle"),
                 ],
                 expected_transition_order: vec![
                     witness_transition_order(
@@ -3898,7 +4105,7 @@ pub fn surface_event_runtime_bundle_composition() -> CompositionSchema {
                         "turn_execution",
                         "BoundaryComplete",
                         "runtime_control",
-                        "RunCompleted",
+                        "RunCompletedToIdle",
                     ),
                 ],
                 state_limits: CompositionStateLimits {
@@ -4018,7 +4225,7 @@ pub fn surface_event_runtime_bundle_composition() -> CompositionSchema {
                     witness_transition("turn_execution", "StartConversationRun"),
                     witness_transition("turn_execution", "BoundaryComplete"),
                     witness_transition("runtime_ingress", "RunCompleted"),
-                    witness_transition("runtime_control", "RunCompleted"),
+                    witness_transition("runtime_control", "RunCompletedToIdle"),
                 ],
                 expected_transition_order: vec![
                     witness_transition_order(
@@ -4049,7 +4256,7 @@ pub fn surface_event_runtime_bundle_composition() -> CompositionSchema {
                         "turn_execution",
                         "BoundaryComplete",
                         "runtime_control",
-                        "RunCompleted",
+                        "RunCompletedToIdle",
                     ),
                 ],
                 state_limits: CompositionStateLimits {
@@ -4142,7 +4349,7 @@ pub fn surface_event_runtime_bundle_composition() -> CompositionSchema {
                     witness_transition("turn_execution", "StartConversationRun"),
                     witness_transition("turn_execution", "FatalFailureFromApplyingPrimitive"),
                     witness_transition("runtime_ingress", "RunFailed"),
-                    witness_transition("runtime_control", "RunFailed"),
+                    witness_transition("runtime_control", "RunFailedToIdle"),
                 ],
                 expected_transition_order: vec![
                     witness_transition_order(
@@ -4173,7 +4380,7 @@ pub fn surface_event_runtime_bundle_composition() -> CompositionSchema {
                         "turn_execution",
                         "FatalFailureFromApplyingPrimitive",
                         "runtime_control",
-                        "RunFailed",
+                        "RunFailedToIdle",
                     ),
                 ],
                 state_limits: CompositionStateLimits {
@@ -4591,7 +4798,7 @@ pub fn continuation_runtime_bundle_composition() -> CompositionSchema {
                     witness_transition("turn_execution", "StartConversationRun"),
                     witness_transition("turn_execution", "BoundaryComplete"),
                     witness_transition("runtime_ingress", "RunCompleted"),
-                    witness_transition("runtime_control", "RunCompleted"),
+                    witness_transition("runtime_control", "RunCompletedToIdle"),
                 ],
                 expected_transition_order: vec![
                     witness_transition_order(
@@ -4622,7 +4829,7 @@ pub fn continuation_runtime_bundle_composition() -> CompositionSchema {
                         "turn_execution",
                         "BoundaryComplete",
                         "runtime_control",
-                        "RunCompleted",
+                        "RunCompletedToIdle",
                     ),
                 ],
                 state_limits: CompositionStateLimits {
@@ -4733,7 +4940,7 @@ pub fn continuation_runtime_bundle_composition() -> CompositionSchema {
                     witness_transition("turn_execution", "StartConversationRun"),
                     witness_transition("turn_execution", "BoundaryComplete"),
                     witness_transition("runtime_ingress", "RunCompleted"),
-                    witness_transition("runtime_control", "RunCompleted"),
+                    witness_transition("runtime_control", "RunCompletedToIdle"),
                 ],
                 expected_transition_order: vec![
                     witness_transition_order(
@@ -4764,7 +4971,7 @@ pub fn continuation_runtime_bundle_composition() -> CompositionSchema {
                         "turn_execution",
                         "BoundaryComplete",
                         "runtime_control",
-                        "RunCompleted",
+                        "RunCompletedToIdle",
                     ),
                 ],
                 state_limits: CompositionStateLimits {
@@ -5503,7 +5710,7 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     witness_transition("turn_execution", "StartConversationRun"),
                     witness_transition("turn_execution", "BoundaryComplete"),
                     witness_transition("runtime_ingress", "RunCompleted"),
-                    witness_transition("runtime_control", "RunCompleted"),
+                    witness_transition("runtime_control", "RunCompletedToIdle"),
                     witness_transition("flow_run", "CompleteStep"),
                     witness_transition("flow_run", "RecordStepOutput"),
                     witness_transition("flow_run", "TerminalizeCompleted"),
@@ -5575,7 +5782,7 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                         "turn_execution",
                         "BoundaryComplete",
                         "runtime_control",
-                        "RunCompleted",
+                        "RunCompletedToIdle",
                     ),
                     witness_transition_order(
                         "flow_run",
@@ -5874,7 +6081,7 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     witness_transition("turn_execution", "StartConversationRun"),
                     witness_transition("turn_execution", "FatalFailureFromApplyingPrimitive"),
                     witness_transition("runtime_ingress", "RunFailed"),
-                    witness_transition("runtime_control", "RunFailed"),
+                    witness_transition("runtime_control", "RunFailedToIdle"),
                 ],
                 expected_transition_order: vec![
                     witness_transition_order(
@@ -5911,7 +6118,7 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                         "turn_execution",
                         "FatalFailureFromApplyingPrimitive",
                         "runtime_control",
-                        "RunFailed",
+                        "RunFailedToIdle",
                     ),
                 ],
                 state_limits: CompositionStateLimits {
@@ -6027,7 +6234,7 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     witness_transition("turn_execution", "CancelNowFromApplyingPrimitive"),
                     witness_transition("turn_execution", "CancellationObserved"),
                     witness_transition("runtime_ingress", "RunCancelled"),
-                    witness_transition("runtime_control", "RunCancelled"),
+                    witness_transition("runtime_control", "RunCancelledToIdle"),
                 ],
                 expected_transition_order: vec![
                     witness_transition_order(
@@ -6070,7 +6277,7 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                         "turn_execution",
                         "CancellationObserved",
                         "runtime_control",
-                        "RunCancelled",
+                        "RunCancelledToIdle",
                     ),
                 ],
                 state_limits: CompositionStateLimits {

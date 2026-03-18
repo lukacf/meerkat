@@ -20,6 +20,7 @@ pub fn runtime_control_machine() -> MachineSchema {
                 variants: vec![
                     variant("Initializing"),
                     variant("Idle"),
+                    variant("Attached"),
                     variant("Running"),
                     variant("Recovering"),
                     variant("Retired"),
@@ -117,6 +118,8 @@ pub fn runtime_control_machine() -> MachineSchema {
                     name: "RunCancelled".into(),
                     fields: vec![field("run_id", TypeRef::Named("RunId".into()))],
                 },
+                variant("AttachExecutor"),
+                variant("DetachExecutor"),
                 variant("RecoverRequested"),
                 variant("RecoverySucceeded"),
                 variant("RetireRequested"),
@@ -229,6 +232,31 @@ pub fn runtime_control_machine() -> MachineSchema {
                 to: "Idle".into(),
                 emit: vec![],
             },
+            // Attached: executor attachment/detachment
+            TransitionSchema {
+                name: "AttachFromIdle".into(),
+                from: vec!["Idle".into()],
+                on: InputMatch {
+                    variant: "AttachExecutor".into(),
+                    bindings: vec![],
+                },
+                guards: vec![],
+                updates: vec![],
+                to: "Attached".into(),
+                emit: vec![],
+            },
+            TransitionSchema {
+                name: "DetachToIdle".into(),
+                from: vec!["Attached".into()],
+                on: InputMatch {
+                    variant: "DetachExecutor".into(),
+                    bindings: vec![],
+                },
+                guards: vec![],
+                updates: vec![],
+                to: "Idle".into(),
+                emit: vec![],
+            },
             TransitionSchema {
                 name: "BeginRunFromIdle".into(),
                 from: vec!["Idle".into()],
@@ -306,86 +334,56 @@ pub fn runtime_control_machine() -> MachineSchema {
                 }],
             },
             TransitionSchema {
-                name: "RunCompleted".into(),
-                from: vec!["Running".into()],
+                name: "BeginRunFromAttached".into(),
+                from: vec!["Attached".into()],
                 on: InputMatch {
-                    variant: "RunCompleted".into(),
+                    variant: "BeginRun".into(),
                     bindings: vec!["run_id".into()],
                 },
                 guards: vec![Guard {
-                    name: "active_run_matches".into(),
+                    name: "no_active_run".into(),
                     expr: Expr::Eq(
                         Box::new(Expr::Field("current_run_id".into())),
-                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                        Box::new(Expr::None),
                     ),
                 }],
                 updates: vec![
                     Update::Assign {
                         field: "current_run_id".into(),
-                        expr: Expr::None,
+                        expr: Expr::Some(Box::new(Expr::Binding("run_id".into()))),
                     },
                     Update::Assign {
                         field: "pre_run_state".into(),
-                        expr: Expr::None,
+                        expr: Expr::Some(Box::new(Expr::Phase("Attached".into()))),
+                    },
+                    Update::Assign {
+                        field: "wake_pending".into(),
+                        expr: Expr::Bool(false),
+                    },
+                    Update::Assign {
+                        field: "process_pending".into(),
+                        expr: Expr::Bool(false),
                     },
                 ],
-                to: "Idle".into(),
-                emit: vec![],
-            },
-            TransitionSchema {
-                name: "RunFailed".into(),
-                from: vec!["Running".into()],
-                on: InputMatch {
-                    variant: "RunFailed".into(),
-                    bindings: vec!["run_id".into()],
-                },
-                guards: vec![Guard {
-                    name: "active_run_matches".into(),
-                    expr: Expr::Eq(
-                        Box::new(Expr::Field("current_run_id".into())),
-                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
-                    ),
+                to: "Running".into(),
+                emit: vec![EffectEmit {
+                    variant: "SubmitRunPrimitive".into(),
+                    fields: IndexMap::from([("run_id".into(), Expr::Binding("run_id".into()))]),
                 }],
-                updates: vec![
-                    Update::Assign {
-                        field: "current_run_id".into(),
-                        expr: Expr::None,
-                    },
-                    Update::Assign {
-                        field: "pre_run_state".into(),
-                        expr: Expr::None,
-                    },
-                ],
-                to: "Idle".into(),
-                emit: vec![],
             },
-            TransitionSchema {
-                name: "RunCancelled".into(),
-                from: vec!["Running".into()],
-                on: InputMatch {
-                    variant: "RunCancelled".into(),
-                    bindings: vec!["run_id".into()],
-                },
-                guards: vec![Guard {
-                    name: "active_run_matches".into(),
-                    expr: Expr::Eq(
-                        Box::new(Expr::Field("current_run_id".into())),
-                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
-                    ),
-                }],
-                updates: vec![
-                    Update::Assign {
-                        field: "current_run_id".into(),
-                        expr: Expr::None,
-                    },
-                    Update::Assign {
-                        field: "pre_run_state".into(),
-                        expr: Expr::None,
-                    },
-                ],
-                to: "Idle".into(),
-                emit: vec![],
-            },
+            // RunCompleted — split by pre_run_state guard
+            // RunCompleted — split by pre_run_state
+            run_terminal_transition("RunCompletedToIdle", "RunCompleted", "Idle"),
+            run_terminal_transition("RunCompletedToAttached", "RunCompleted", "Attached"),
+            run_terminal_transition("RunCompletedToRetired", "RunCompleted", "Retired"),
+            // RunFailed — split by pre_run_state
+            run_terminal_transition("RunFailedToIdle", "RunFailed", "Idle"),
+            run_terminal_transition("RunFailedToAttached", "RunFailed", "Attached"),
+            run_terminal_transition("RunFailedToRetired", "RunFailed", "Retired"),
+            // RunCancelled — split by pre_run_state
+            run_terminal_transition("RunCancelledToIdle", "RunCancelled", "Idle"),
+            run_terminal_transition("RunCancelledToAttached", "RunCancelled", "Attached"),
+            run_terminal_transition("RunCancelledToRetired", "RunCancelled", "Retired"),
             TransitionSchema {
                 name: "RecoverRequestedFromIdle".into(),
                 from: vec!["Idle".into()],
@@ -419,6 +417,21 @@ pub fn runtime_control_machine() -> MachineSchema {
                         expr: Expr::Some(Box::new(Expr::Phase("Running".into()))),
                     },
                 ],
+                to: "Recovering".into(),
+                emit: vec![],
+            },
+            TransitionSchema {
+                name: "RecoverRequestedFromAttached".into(),
+                from: vec!["Attached".into()],
+                on: InputMatch {
+                    variant: "RecoverRequested".into(),
+                    bindings: vec![],
+                },
+                guards: vec![],
+                updates: vec![Update::Assign {
+                    field: "pre_run_state".into(),
+                    expr: Expr::Some(Box::new(Expr::Phase("Attached".into()))),
+                }],
                 to: "Recovering".into(),
                 emit: vec![],
             },
@@ -482,10 +495,26 @@ pub fn runtime_control_machine() -> MachineSchema {
                 }],
             },
             TransitionSchema {
+                name: "RetireRequestedFromAttached".into(),
+                from: vec!["Attached".into()],
+                on: InputMatch {
+                    variant: "RetireRequested".into(),
+                    bindings: vec![],
+                },
+                guards: vec![],
+                updates: vec![],
+                to: "Retired".into(),
+                emit: vec![EffectEmit {
+                    variant: "ApplyControlPlaneCommand".into(),
+                    fields: IndexMap::from([("command".into(), Expr::String("Retire".into()))]),
+                }],
+            },
+            TransitionSchema {
                 name: "ResetRequested".into(),
                 from: vec![
                     "Initializing".into(),
                     "Idle".into(),
+                    "Attached".into(),
                     "Recovering".into(),
                     "Retired".into(),
                 ],
@@ -529,6 +558,7 @@ pub fn runtime_control_machine() -> MachineSchema {
                 from: vec![
                     "Initializing".into(),
                     "Idle".into(),
+                    "Attached".into(),
                     "Running".into(),
                     "Recovering".into(),
                     "Retired".into(),
@@ -565,6 +595,7 @@ pub fn runtime_control_machine() -> MachineSchema {
                 from: vec![
                     "Initializing".into(),
                     "Idle".into(),
+                    "Attached".into(),
                     "Running".into(),
                     "Recovering".into(),
                     "Retired".into(),
@@ -657,6 +688,27 @@ pub fn runtime_control_machine() -> MachineSchema {
                     fields: IndexMap::from([("work_id".into(), Expr::Binding("work_id".into()))]),
                 }],
             },
+            TransitionSchema {
+                name: "SubmitWorkFromAttached".into(),
+                from: vec!["Attached".into()],
+                on: InputMatch {
+                    variant: "SubmitWork".into(),
+                    bindings: vec![
+                        "work_id".into(),
+                        "content_shape".into(),
+                        "handling_mode".into(),
+                        "request_id".into(),
+                        "reservation_key".into(),
+                    ],
+                },
+                guards: vec![],
+                updates: vec![],
+                to: "Attached".into(),
+                emit: vec![EffectEmit {
+                    variant: "ResolveAdmission".into(),
+                    fields: IndexMap::from([("work_id".into(), Expr::Binding("work_id".into()))]),
+                }],
+            },
             runtime_control_admission_transition("AdmissionAcceptedIdleQueue", "Idle", "Queue"),
             runtime_control_admission_transition("AdmissionAcceptedIdleSteer", "Idle", "Steer"),
             runtime_control_admission_transition(
@@ -667,6 +719,16 @@ pub fn runtime_control_machine() -> MachineSchema {
             runtime_control_admission_transition(
                 "AdmissionAcceptedRunningSteer",
                 "Running",
+                "Steer",
+            ),
+            runtime_control_admission_transition(
+                "AdmissionAcceptedAttachedQueue",
+                "Attached",
+                "Queue",
+            ),
+            runtime_control_admission_transition(
+                "AdmissionAcceptedAttachedSteer",
+                "Attached",
                 "Steer",
             ),
             TransitionSchema {
@@ -706,6 +768,24 @@ pub fn runtime_control_machine() -> MachineSchema {
                 }],
             },
             TransitionSchema {
+                name: "AdmissionRejectedAttached".into(),
+                from: vec!["Attached".into()],
+                on: InputMatch {
+                    variant: "AdmissionRejected".into(),
+                    bindings: vec!["work_id".into(), "reason".into()],
+                },
+                guards: vec![],
+                updates: vec![],
+                to: "Attached".into(),
+                emit: vec![EffectEmit {
+                    variant: "EmitRuntimeNotice".into(),
+                    fields: IndexMap::from([
+                        ("kind".into(), Expr::String("AdmissionRejected".into())),
+                        ("detail".into(), Expr::Binding("reason".into())),
+                    ]),
+                }],
+            },
+            TransitionSchema {
                 name: "AdmissionDeduplicatedIdle".into(),
                 from: vec!["Idle".into()],
                 on: InputMatch {
@@ -733,6 +813,24 @@ pub fn runtime_control_machine() -> MachineSchema {
                 guards: vec![],
                 updates: vec![],
                 to: "Running".into(),
+                emit: vec![EffectEmit {
+                    variant: "EmitRuntimeNotice".into(),
+                    fields: IndexMap::from([
+                        ("kind".into(), Expr::String("AdmissionDeduplicated".into())),
+                        ("detail".into(), Expr::String("ExistingInputLinked".into())),
+                    ]),
+                }],
+            },
+            TransitionSchema {
+                name: "AdmissionDeduplicatedAttached".into(),
+                from: vec!["Attached".into()],
+                on: InputMatch {
+                    variant: "AdmissionDeduplicated".into(),
+                    bindings: vec!["work_id".into(), "existing_work_id".into()],
+                },
+                guards: vec![],
+                updates: vec![],
+                to: "Attached".into(),
                 emit: vec![EffectEmit {
                     variant: "EmitRuntimeNotice".into(),
                     fields: IndexMap::from([
@@ -813,6 +911,24 @@ pub fn runtime_control_machine() -> MachineSchema {
                     ]),
                 }],
             },
+            TransitionSchema {
+                name: "ExternalToolDeltaReceivedAttached".into(),
+                from: vec!["Attached".into()],
+                on: InputMatch {
+                    variant: "ExternalToolDeltaReceived".into(),
+                    bindings: vec![],
+                },
+                guards: vec![],
+                updates: vec![],
+                to: "Attached".into(),
+                emit: vec![EffectEmit {
+                    variant: "EmitRuntimeNotice".into(),
+                    fields: IndexMap::from([
+                        ("kind".into(), Expr::String("ExternalToolDelta".into())),
+                        ("detail".into(), Expr::String("Received".into())),
+                    ]),
+                }],
+            },
             // Phase D: Recycle — preserves member identity, resets driver
             TransitionSchema {
                 name: "RecycleRequestedFromRetired".into(),
@@ -855,6 +971,30 @@ pub fn runtime_control_machine() -> MachineSchema {
                 updates: vec![Update::Assign {
                     field: "pre_run_state".into(),
                     expr: Expr::Some(Box::new(Expr::Phase("Idle".into()))),
+                }],
+                to: "Recovering".into(),
+                emit: vec![EffectEmit {
+                    variant: "InitiateRecycle".into(),
+                    fields: IndexMap::new(),
+                }],
+            },
+            TransitionSchema {
+                name: "RecycleRequestedFromAttached".into(),
+                from: vec!["Attached".into()],
+                on: InputMatch {
+                    variant: "RecycleRequested".into(),
+                    bindings: vec![],
+                },
+                guards: vec![Guard {
+                    name: "no_active_run".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("current_run_id".into())),
+                        Box::new(Expr::None),
+                    ),
+                }],
+                updates: vec![Update::Assign {
+                    field: "pre_run_state".into(),
+                    expr: Expr::Some(Box::new(Expr::Phase("Attached".into()))),
                 }],
                 to: "Recovering".into(),
                 emit: vec![EffectEmit {
@@ -946,12 +1086,73 @@ fn submit_admitted_ingress_effect_fields() -> IndexMap<String, Expr> {
     ])
 }
 
+/// Helper for run terminal transitions (RunCompleted/RunFailed/RunCancelled)
+/// split by pre_run_state guard.
+fn run_terminal_transition(
+    name: &str,
+    input_variant: &str,
+    target_phase: &str,
+) -> TransitionSchema {
+    let guard_expr = if target_phase == "Idle" {
+        // Idle is the default — matches None or Some(Idle)
+        Expr::Or(vec![
+            Expr::Eq(
+                Box::new(Expr::Field("pre_run_state".into())),
+                Box::new(Expr::None),
+            ),
+            Expr::Eq(
+                Box::new(Expr::Field("pre_run_state".into())),
+                Box::new(Expr::Some(Box::new(Expr::Phase("Idle".into())))),
+            ),
+        ])
+    } else {
+        Expr::Eq(
+            Box::new(Expr::Field("pre_run_state".into())),
+            Box::new(Expr::Some(Box::new(Expr::Phase(target_phase.into())))),
+        )
+    };
+
+    TransitionSchema {
+        name: name.into(),
+        from: vec!["Running".into()],
+        on: InputMatch {
+            variant: input_variant.into(),
+            bindings: vec!["run_id".into()],
+        },
+        guards: vec![
+            Guard {
+                name: "active_run_matches".into(),
+                expr: Expr::Eq(
+                    Box::new(Expr::Field("current_run_id".into())),
+                    Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                ),
+            },
+            Guard {
+                name: format!("pre_run_state_is_{}", target_phase.to_lowercase()),
+                expr: guard_expr,
+            },
+        ],
+        updates: vec![
+            Update::Assign {
+                field: "current_run_id".into(),
+                expr: Expr::None,
+            },
+            Update::Assign {
+                field: "pre_run_state".into(),
+                expr: Expr::None,
+            },
+        ],
+        to: target_phase.into(),
+        emit: vec![],
+    }
+}
+
 fn runtime_control_admission_transition(
     name: &str,
     from_phase: &str,
     handling_mode: &str,
 ) -> TransitionSchema {
-    let wake_when_idle = from_phase == "Idle";
+    let wake_when_idle = from_phase == "Idle" || from_phase == "Attached";
     let process_immediately = handling_mode == "Steer";
 
     let mut emit = vec![EffectEmit {

@@ -49,6 +49,11 @@ impl RuntimeStateMachine {
         self.state == RuntimeState::Idle
     }
 
+    /// Check if the runtime is attached (executor present, waiting for input).
+    pub fn is_attached(&self) -> bool {
+        self.state == RuntimeState::Attached
+    }
+
     /// Check if the runtime is running.
     pub fn is_running(&self) -> bool {
         self.state == RuntimeState::Running
@@ -56,9 +61,30 @@ impl RuntimeStateMachine {
 
     /// Check if the runtime can process queued inputs.
     ///
-    /// True for Idle and Retired (Retired drains existing queue).
+    /// True for Idle, Attached, and Retired (Retired drains existing queue).
     pub fn can_process_queue(&self) -> bool {
         self.state.can_process_queue()
+    }
+
+    /// Transition from Idle to Attached (executor attachment).
+    ///
+    /// Returns `Ok(())` if the transition succeeded, or `Err` if the current
+    /// state is not Idle.
+    pub fn attach(&mut self) -> Result<(), RuntimeStateTransitionError> {
+        self.state.transition(RuntimeState::Attached)
+    }
+
+    /// Transition from Attached back to Idle (executor detachment).
+    ///
+    /// No-op if not currently Attached (returns `Ok(None)`).
+    /// Returns `Ok(Some(Attached))` on successful detach.
+    pub fn detach(&mut self) -> Result<Option<RuntimeState>, RuntimeStateTransitionError> {
+        if self.state == RuntimeState::Attached {
+            self.state.transition(RuntimeState::Idle)?;
+            Ok(Some(RuntimeState::Attached))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Transition to a new state.
@@ -93,10 +119,12 @@ impl RuntimeStateMachine {
     /// Transition from Running back to the pre-run state (run completed).
     ///
     /// Returns to Retired if the run was started from Retired (drain mode),
+    /// returns to Attached if the run was started from Attached,
     /// otherwise returns to Idle.
     pub fn complete_run(&mut self) -> Result<RunId, RuntimeStateTransitionError> {
         let return_to = match self.pre_run_state.take() {
             Some(RuntimeState::Retired) => RuntimeState::Retired,
+            Some(RuntimeState::Attached) => RuntimeState::Attached,
             _ => RuntimeState::Idle,
         };
         self.state.transition(return_to)?;
@@ -126,7 +154,7 @@ impl RuntimeStateMachine {
                 from: RuntimeState::Running,
                 to: RuntimeState::Idle,
             }),
-            RuntimeState::Retired => {
+            RuntimeState::Retired | RuntimeState::Attached => {
                 self.state = RuntimeState::Idle;
                 self.current_run_id = None;
                 self.pre_run_state = None;
@@ -311,6 +339,9 @@ mod tests {
         let sm_idle = RuntimeStateMachine::from_state(RuntimeState::Idle);
         assert!(sm_idle.can_process_queue());
 
+        let sm_attached = RuntimeStateMachine::from_state(RuntimeState::Attached);
+        assert!(sm_attached.can_process_queue());
+
         let sm_retired = RuntimeStateMachine::from_state(RuntimeState::Retired);
         assert!(sm_retired.can_process_queue());
 
@@ -319,5 +350,86 @@ mod tests {
 
         let sm_stopped = RuntimeStateMachine::from_state(RuntimeState::Stopped);
         assert!(!sm_stopped.can_process_queue());
+    }
+
+    #[test]
+    fn attach_from_idle() {
+        let mut sm = RuntimeStateMachine::new();
+        sm.initialize().unwrap();
+        assert!(sm.is_idle());
+
+        sm.attach().unwrap();
+        assert!(sm.is_attached());
+        assert!(!sm.is_idle());
+    }
+
+    #[test]
+    fn attach_rejected_from_non_idle() {
+        let mut sm = RuntimeStateMachine::new();
+        // Initializing → Attached is not valid
+        assert!(sm.attach().is_err());
+    }
+
+    #[test]
+    fn detach_from_attached() {
+        let mut sm = RuntimeStateMachine::new();
+        sm.initialize().unwrap();
+        sm.attach().unwrap();
+        assert!(sm.is_attached());
+
+        let result = sm.detach().unwrap();
+        assert_eq!(result, Some(RuntimeState::Attached));
+        assert!(sm.is_idle());
+    }
+
+    #[test]
+    fn detach_noop_when_not_attached() {
+        let mut sm = RuntimeStateMachine::new();
+        sm.initialize().unwrap();
+        assert!(sm.is_idle());
+
+        let result = sm.detach().unwrap();
+        assert_eq!(result, None);
+        assert!(sm.is_idle()); // unchanged
+    }
+
+    #[test]
+    fn attached_running_attached_cycle() {
+        let mut sm = RuntimeStateMachine::new();
+        sm.initialize().unwrap();
+        sm.attach().unwrap();
+
+        for _ in 0..3 {
+            let run_id = RunId::new();
+            sm.start_run(run_id.clone()).unwrap();
+            assert!(sm.is_running());
+            let completed = sm.complete_run().unwrap();
+            assert_eq!(completed, run_id);
+            assert!(sm.is_attached());
+        }
+    }
+
+    #[test]
+    fn complete_run_returns_to_attached() {
+        let mut sm = RuntimeStateMachine::new();
+        sm.initialize().unwrap();
+        sm.attach().unwrap();
+
+        let run_id = RunId::new();
+        sm.start_run(run_id.clone()).unwrap();
+        let completed = sm.complete_run().unwrap();
+        assert_eq!(completed, run_id);
+        assert_eq!(sm.state(), RuntimeState::Attached);
+    }
+
+    #[test]
+    fn reset_from_attached() {
+        let mut sm = RuntimeStateMachine::new();
+        sm.initialize().unwrap();
+        sm.attach().unwrap();
+
+        let from = sm.reset_to_idle().unwrap();
+        assert_eq!(from, Some(RuntimeState::Attached));
+        assert_eq!(sm.state(), RuntimeState::Idle);
     }
 }

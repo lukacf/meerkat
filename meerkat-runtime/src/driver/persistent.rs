@@ -60,6 +60,34 @@ impl PersistentRuntimeDriver {
         self.inner.is_idle()
     }
 
+    /// Check if the runtime is idle or attached (delegates to inner).
+    pub fn is_idle_or_attached(&self) -> bool {
+        self.inner.is_idle_or_attached()
+    }
+
+    /// Attach an executor (Idle → Attached). Delegates to inner.
+    pub fn attach(&mut self) -> Result<(), crate::runtime_state::RuntimeStateTransitionError> {
+        self.inner.attach()
+    }
+
+    /// Detach an executor (Attached → Idle). Delegates to inner.
+    pub fn detach(
+        &mut self,
+    ) -> Result<Option<RuntimeState>, crate::runtime_state::RuntimeStateTransitionError> {
+        self.inner.detach()
+    }
+
+    /// Map runtime state for persistence.
+    ///
+    /// Attached must never be persisted — on recovery, the executor is
+    /// re-attached by the surface. Map Attached to Idle for store operations.
+    fn runtime_state_for_persistence(&self) -> RuntimeState {
+        match self.inner.runtime_state() {
+            RuntimeState::Attached => RuntimeState::Idle,
+            other => other,
+        }
+    }
+
     /// Start a new run (delegates to inner).
     pub fn start_run(
         &mut self,
@@ -157,7 +185,11 @@ impl PersistentRuntimeDriver {
         let input_states = self.inner.input_states_snapshot();
         if let Err(err) = self
             .store
-            .atomic_lifecycle_commit(&self.runtime_id, self.inner.runtime_state(), &input_states)
+            .atomic_lifecycle_commit(
+                &self.runtime_id,
+                self.runtime_state_for_persistence(),
+                &input_states,
+            )
             .await
         {
             self.inner = checkpoint;
@@ -257,7 +289,7 @@ impl RuntimeDriver for PersistentRuntimeDriver {
                     .store
                     .atomic_lifecycle_commit(
                         &self.runtime_id,
-                        self.inner.runtime_state(),
+                        self.runtime_state_for_persistence(),
                         &input_states,
                     )
                     .await
@@ -285,7 +317,11 @@ impl RuntimeDriver for PersistentRuntimeDriver {
         let input_states = self.inner.input_states_snapshot();
         if let Err(err) = self
             .store
-            .atomic_lifecycle_commit(&self.runtime_id, self.inner.runtime_state(), &input_states)
+            .atomic_lifecycle_commit(
+                &self.runtime_id,
+                self.runtime_state_for_persistence(),
+                &input_states,
+            )
             .await
         {
             self.inner = checkpoint;
@@ -422,7 +458,11 @@ impl RuntimeDriver for PersistentRuntimeDriver {
         // Persist recovered state atomically
         let input_states = self.inner.input_states_snapshot();
         self.store
-            .atomic_lifecycle_commit(&self.runtime_id, self.inner.runtime_state(), &input_states)
+            .atomic_lifecycle_commit(
+                &self.runtime_id,
+                self.runtime_state_for_persistence(),
+                &input_states,
+            )
             .await
             .map_err(|e| RuntimeDriverError::Internal(format!("recovery persist failed: {e}")))?;
         Ok(report)
@@ -434,7 +474,11 @@ impl RuntimeDriver for PersistentRuntimeDriver {
         let input_states = self.inner.input_states_snapshot();
         if let Err(err) = self
             .store
-            .atomic_lifecycle_commit(&self.runtime_id, self.inner.runtime_state(), &input_states)
+            .atomic_lifecycle_commit(
+                &self.runtime_id,
+                self.runtime_state_for_persistence(),
+                &input_states,
+            )
             .await
         {
             self.inner = checkpoint;
@@ -451,7 +495,11 @@ impl RuntimeDriver for PersistentRuntimeDriver {
         let input_states = self.inner.input_states_snapshot();
         if let Err(err) = self
             .store
-            .atomic_lifecycle_commit(&self.runtime_id, self.inner.runtime_state(), &input_states)
+            .atomic_lifecycle_commit(
+                &self.runtime_id,
+                self.runtime_state_for_persistence(),
+                &input_states,
+            )
             .await
         {
             self.inner = checkpoint;
@@ -467,7 +515,11 @@ impl RuntimeDriver for PersistentRuntimeDriver {
         let input_states = self.inner.input_states_snapshot();
         if let Err(err) = self
             .store
-            .atomic_lifecycle_commit(&self.runtime_id, self.inner.runtime_state(), &input_states)
+            .atomic_lifecycle_commit(
+                &self.runtime_id,
+                self.runtime_state_for_persistence(),
+                &input_states,
+            )
             .await
         {
             return Err(RuntimeDriverError::Internal(format!(

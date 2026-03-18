@@ -43,6 +43,20 @@ Initialize ==
     /\ UNCHANGED << current_run_id, pre_run_state, wake_pending, process_pending >>
 
 
+AttachFromIdle ==
+    /\ phase = "Idle"
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << current_run_id, pre_run_state, wake_pending, process_pending >>
+
+
+DetachToIdle ==
+    /\ phase = "Attached"
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << current_run_id, pre_run_state, wake_pending, process_pending >>
+
+
 BeginRunFromIdle(run_id) ==
     /\ phase = "Idle"
     /\ (current_run_id = None)
@@ -65,9 +79,21 @@ BeginRunFromRetired(run_id) ==
     /\ process_pending' = FALSE
 
 
-RunCompleted(run_id) ==
+BeginRunFromAttached(run_id) ==
+    /\ phase = "Attached"
+    /\ (current_run_id = None)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ current_run_id' = Some(run_id)
+    /\ pre_run_state' = Some("Attached")
+    /\ wake_pending' = FALSE
+    /\ process_pending' = FALSE
+
+
+RunCompletedToIdle(run_id) ==
     /\ phase = "Running"
     /\ (current_run_id = Some(run_id))
+    /\ ((pre_run_state = None) \/ (pre_run_state = Some("Idle")))
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = None
@@ -75,9 +101,32 @@ RunCompleted(run_id) ==
     /\ UNCHANGED << wake_pending, process_pending >>
 
 
-RunFailed(run_id) ==
+RunCompletedToAttached(run_id) ==
     /\ phase = "Running"
     /\ (current_run_id = Some(run_id))
+    /\ (pre_run_state = Some("Attached"))
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ current_run_id' = None
+    /\ pre_run_state' = None
+    /\ UNCHANGED << wake_pending, process_pending >>
+
+
+RunCompletedToRetired(run_id) ==
+    /\ phase = "Running"
+    /\ (current_run_id = Some(run_id))
+    /\ (pre_run_state = Some("Retired"))
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ current_run_id' = None
+    /\ pre_run_state' = None
+    /\ UNCHANGED << wake_pending, process_pending >>
+
+
+RunFailedToIdle(run_id) ==
+    /\ phase = "Running"
+    /\ (current_run_id = Some(run_id))
+    /\ ((pre_run_state = None) \/ (pre_run_state = Some("Idle")))
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = None
@@ -85,10 +134,55 @@ RunFailed(run_id) ==
     /\ UNCHANGED << wake_pending, process_pending >>
 
 
-RunCancelled(run_id) ==
+RunFailedToAttached(run_id) ==
     /\ phase = "Running"
     /\ (current_run_id = Some(run_id))
+    /\ (pre_run_state = Some("Attached"))
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ current_run_id' = None
+    /\ pre_run_state' = None
+    /\ UNCHANGED << wake_pending, process_pending >>
+
+
+RunFailedToRetired(run_id) ==
+    /\ phase = "Running"
+    /\ (current_run_id = Some(run_id))
+    /\ (pre_run_state = Some("Retired"))
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ current_run_id' = None
+    /\ pre_run_state' = None
+    /\ UNCHANGED << wake_pending, process_pending >>
+
+
+RunCancelledToIdle(run_id) ==
+    /\ phase = "Running"
+    /\ (current_run_id = Some(run_id))
+    /\ ((pre_run_state = None) \/ (pre_run_state = Some("Idle")))
     /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ current_run_id' = None
+    /\ pre_run_state' = None
+    /\ UNCHANGED << wake_pending, process_pending >>
+
+
+RunCancelledToAttached(run_id) ==
+    /\ phase = "Running"
+    /\ (current_run_id = Some(run_id))
+    /\ (pre_run_state = Some("Attached"))
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ current_run_id' = None
+    /\ pre_run_state' = None
+    /\ UNCHANGED << wake_pending, process_pending >>
+
+
+RunCancelledToRetired(run_id) ==
+    /\ phase = "Running"
+    /\ (current_run_id = Some(run_id))
+    /\ (pre_run_state = Some("Retired"))
+    /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = None
     /\ pre_run_state' = None
@@ -110,6 +204,14 @@ RecoverRequestedFromRunning ==
     /\ current_run_id' = None
     /\ pre_run_state' = Some("Running")
     /\ UNCHANGED << wake_pending, process_pending >>
+
+
+RecoverRequestedFromAttached ==
+    /\ phase = "Attached"
+    /\ phase' = "Recovering"
+    /\ model_step_count' = model_step_count + 1
+    /\ pre_run_state' = Some("Attached")
+    /\ UNCHANGED << current_run_id, wake_pending, process_pending >>
 
 
 RecoverySucceeded ==
@@ -136,8 +238,15 @@ RetireRequestedFromRunning ==
     /\ UNCHANGED << current_run_id, pre_run_state, wake_pending, process_pending >>
 
 
+RetireRequestedFromAttached ==
+    /\ phase = "Attached"
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << current_run_id, pre_run_state, wake_pending, process_pending >>
+
+
 ResetRequested ==
-    /\ phase = "Initializing" \/ phase = "Idle" \/ phase = "Recovering" \/ phase = "Retired"
+    /\ phase = "Initializing" \/ phase = "Idle" \/ phase = "Attached" \/ phase = "Recovering" \/ phase = "Retired"
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = None
@@ -147,7 +256,7 @@ ResetRequested ==
 
 
 StopRequested ==
-    /\ phase = "Initializing" \/ phase = "Idle" \/ phase = "Running" \/ phase = "Recovering" \/ phase = "Retired"
+    /\ phase = "Initializing" \/ phase = "Idle" \/ phase = "Attached" \/ phase = "Running" \/ phase = "Recovering" \/ phase = "Retired"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = None
@@ -156,7 +265,7 @@ StopRequested ==
 
 
 DestroyRequested ==
-    /\ phase = "Initializing" \/ phase = "Idle" \/ phase = "Running" \/ phase = "Recovering" \/ phase = "Retired" \/ phase = "Stopped"
+    /\ phase = "Initializing" \/ phase = "Idle" \/ phase = "Attached" \/ phase = "Running" \/ phase = "Recovering" \/ phase = "Retired" \/ phase = "Stopped"
     /\ phase' = "Destroyed"
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = None
@@ -181,6 +290,13 @@ SubmitWorkFromIdle(work_id, content_shape, handling_mode, request_id, reservatio
 SubmitWorkFromRunning(work_id, content_shape, handling_mode, request_id, reservation_key) ==
     /\ phase = "Running"
     /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << current_run_id, pre_run_state, wake_pending, process_pending >>
+
+
+SubmitWorkFromAttached(work_id, content_shape, handling_mode, request_id, reservation_key) ==
+    /\ phase = "Attached"
+    /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << current_run_id, pre_run_state, wake_pending, process_pending >>
 
@@ -225,6 +341,26 @@ AdmissionAcceptedRunningSteer(work_id, content_shape, handling_mode, request_id,
     /\ UNCHANGED << current_run_id, pre_run_state >>
 
 
+AdmissionAcceptedAttachedQueue(work_id, content_shape, handling_mode, request_id, reservation_key, admission_effect) ==
+    /\ phase = "Attached"
+    /\ (handling_mode = "Queue")
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ wake_pending' = TRUE
+    /\ process_pending' = FALSE
+    /\ UNCHANGED << current_run_id, pre_run_state >>
+
+
+AdmissionAcceptedAttachedSteer(work_id, content_shape, handling_mode, request_id, reservation_key, admission_effect) ==
+    /\ phase = "Attached"
+    /\ (handling_mode = "Steer")
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ wake_pending' = TRUE
+    /\ process_pending' = TRUE
+    /\ UNCHANGED << current_run_id, pre_run_state >>
+
+
 AdmissionRejectedIdle(work_id, reason) ==
     /\ phase = "Idle"
     /\ phase' = "Idle"
@@ -239,6 +375,13 @@ AdmissionRejectedRunning(work_id, reason) ==
     /\ UNCHANGED << current_run_id, pre_run_state, wake_pending, process_pending >>
 
 
+AdmissionRejectedAttached(work_id, reason) ==
+    /\ phase = "Attached"
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << current_run_id, pre_run_state, wake_pending, process_pending >>
+
+
 AdmissionDeduplicatedIdle(work_id, existing_work_id) ==
     /\ phase = "Idle"
     /\ phase' = "Idle"
@@ -249,6 +392,13 @@ AdmissionDeduplicatedIdle(work_id, existing_work_id) ==
 AdmissionDeduplicatedRunning(work_id, existing_work_id) ==
     /\ phase = "Running"
     /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << current_run_id, pre_run_state, wake_pending, process_pending >>
+
+
+AdmissionDeduplicatedAttached(work_id, existing_work_id) ==
+    /\ phase = "Attached"
+    /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << current_run_id, pre_run_state, wake_pending, process_pending >>
 
@@ -281,6 +431,13 @@ ExternalToolDeltaReceivedRetired ==
     /\ UNCHANGED << current_run_id, pre_run_state, wake_pending, process_pending >>
 
 
+ExternalToolDeltaReceivedAttached ==
+    /\ phase = "Attached"
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << current_run_id, pre_run_state, wake_pending, process_pending >>
+
+
 RecycleRequestedFromRetired ==
     /\ phase = "Retired"
     /\ (current_run_id = None)
@@ -299,6 +456,15 @@ RecycleRequestedFromIdle ==
     /\ UNCHANGED << current_run_id, wake_pending, process_pending >>
 
 
+RecycleRequestedFromAttached ==
+    /\ phase = "Attached"
+    /\ (current_run_id = None)
+    /\ phase' = "Recovering"
+    /\ model_step_count' = model_step_count + 1
+    /\ pre_run_state' = Some("Attached")
+    /\ UNCHANGED << current_run_id, wake_pending, process_pending >>
+
+
 RecycleSucceeded ==
     /\ phase = "Recovering"
     /\ phase' = "Idle"
@@ -311,36 +477,54 @@ RecycleSucceeded ==
 
 Next ==
     \/ Initialize
+    \/ AttachFromIdle
+    \/ DetachToIdle
     \/ \E run_id \in RunIdValues : BeginRunFromIdle(run_id)
     \/ \E run_id \in RunIdValues : BeginRunFromRetired(run_id)
-    \/ \E run_id \in RunIdValues : RunCompleted(run_id)
-    \/ \E run_id \in RunIdValues : RunFailed(run_id)
-    \/ \E run_id \in RunIdValues : RunCancelled(run_id)
+    \/ \E run_id \in RunIdValues : BeginRunFromAttached(run_id)
+    \/ \E run_id \in RunIdValues : RunCompletedToIdle(run_id)
+    \/ \E run_id \in RunIdValues : RunCompletedToAttached(run_id)
+    \/ \E run_id \in RunIdValues : RunCompletedToRetired(run_id)
+    \/ \E run_id \in RunIdValues : RunFailedToIdle(run_id)
+    \/ \E run_id \in RunIdValues : RunFailedToAttached(run_id)
+    \/ \E run_id \in RunIdValues : RunFailedToRetired(run_id)
+    \/ \E run_id \in RunIdValues : RunCancelledToIdle(run_id)
+    \/ \E run_id \in RunIdValues : RunCancelledToAttached(run_id)
+    \/ \E run_id \in RunIdValues : RunCancelledToRetired(run_id)
     \/ RecoverRequestedFromIdle
     \/ RecoverRequestedFromRunning
+    \/ RecoverRequestedFromAttached
     \/ RecoverySucceeded
     \/ RetireRequestedFromIdle
     \/ RetireRequestedFromRunning
+    \/ RetireRequestedFromAttached
     \/ ResetRequested
     \/ StopRequested
     \/ DestroyRequested
     \/ ResumeRequested
     \/ \E work_id \in WorkIdValues : \E content_shape \in ContentShapeValues : \E handling_mode \in HandlingModeValues : \E request_id \in OptionRequestIdValues : \E reservation_key \in OptionReservationKeyValues : SubmitWorkFromIdle(work_id, content_shape, handling_mode, request_id, reservation_key)
     \/ \E work_id \in WorkIdValues : \E content_shape \in ContentShapeValues : \E handling_mode \in HandlingModeValues : \E request_id \in OptionRequestIdValues : \E reservation_key \in OptionReservationKeyValues : SubmitWorkFromRunning(work_id, content_shape, handling_mode, request_id, reservation_key)
+    \/ \E work_id \in WorkIdValues : \E content_shape \in ContentShapeValues : \E handling_mode \in HandlingModeValues : \E request_id \in OptionRequestIdValues : \E reservation_key \in OptionReservationKeyValues : SubmitWorkFromAttached(work_id, content_shape, handling_mode, request_id, reservation_key)
     \/ \E work_id \in WorkIdValues : \E content_shape \in ContentShapeValues : \E handling_mode \in HandlingModeValues : \E request_id \in OptionRequestIdValues : \E reservation_key \in OptionReservationKeyValues : \E admission_effect \in AdmissionEffectValues : AdmissionAcceptedIdleQueue(work_id, content_shape, handling_mode, request_id, reservation_key, admission_effect)
     \/ \E work_id \in WorkIdValues : \E content_shape \in ContentShapeValues : \E handling_mode \in HandlingModeValues : \E request_id \in OptionRequestIdValues : \E reservation_key \in OptionReservationKeyValues : \E admission_effect \in AdmissionEffectValues : AdmissionAcceptedIdleSteer(work_id, content_shape, handling_mode, request_id, reservation_key, admission_effect)
     \/ \E work_id \in WorkIdValues : \E content_shape \in ContentShapeValues : \E handling_mode \in HandlingModeValues : \E request_id \in OptionRequestIdValues : \E reservation_key \in OptionReservationKeyValues : \E admission_effect \in AdmissionEffectValues : AdmissionAcceptedRunningQueue(work_id, content_shape, handling_mode, request_id, reservation_key, admission_effect)
     \/ \E work_id \in WorkIdValues : \E content_shape \in ContentShapeValues : \E handling_mode \in HandlingModeValues : \E request_id \in OptionRequestIdValues : \E reservation_key \in OptionReservationKeyValues : \E admission_effect \in AdmissionEffectValues : AdmissionAcceptedRunningSteer(work_id, content_shape, handling_mode, request_id, reservation_key, admission_effect)
+    \/ \E work_id \in WorkIdValues : \E content_shape \in ContentShapeValues : \E handling_mode \in HandlingModeValues : \E request_id \in OptionRequestIdValues : \E reservation_key \in OptionReservationKeyValues : \E admission_effect \in AdmissionEffectValues : AdmissionAcceptedAttachedQueue(work_id, content_shape, handling_mode, request_id, reservation_key, admission_effect)
+    \/ \E work_id \in WorkIdValues : \E content_shape \in ContentShapeValues : \E handling_mode \in HandlingModeValues : \E request_id \in OptionRequestIdValues : \E reservation_key \in OptionReservationKeyValues : \E admission_effect \in AdmissionEffectValues : AdmissionAcceptedAttachedSteer(work_id, content_shape, handling_mode, request_id, reservation_key, admission_effect)
     \/ \E work_id \in WorkIdValues : \E reason \in {"alpha", "beta"} : AdmissionRejectedIdle(work_id, reason)
     \/ \E work_id \in WorkIdValues : \E reason \in {"alpha", "beta"} : AdmissionRejectedRunning(work_id, reason)
+    \/ \E work_id \in WorkIdValues : \E reason \in {"alpha", "beta"} : AdmissionRejectedAttached(work_id, reason)
     \/ \E work_id \in WorkIdValues : \E existing_work_id \in WorkIdValues : AdmissionDeduplicatedIdle(work_id, existing_work_id)
     \/ \E work_id \in WorkIdValues : \E existing_work_id \in WorkIdValues : AdmissionDeduplicatedRunning(work_id, existing_work_id)
+    \/ \E work_id \in WorkIdValues : \E existing_work_id \in WorkIdValues : AdmissionDeduplicatedAttached(work_id, existing_work_id)
     \/ ExternalToolDeltaReceivedIdle
     \/ ExternalToolDeltaReceivedRunning
     \/ ExternalToolDeltaReceivedRecovering
     \/ ExternalToolDeltaReceivedRetired
+    \/ ExternalToolDeltaReceivedAttached
     \/ RecycleRequestedFromRetired
     \/ RecycleRequestedFromIdle
+    \/ RecycleRequestedFromAttached
     \/ RecycleSucceeded
     \/ TerminalStutter
 

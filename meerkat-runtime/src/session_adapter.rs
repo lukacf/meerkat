@@ -68,7 +68,8 @@ impl DriverEntry {
         }
     }
 
-    /// Check if the runtime is idle.
+    /// Check if the runtime is specifically in the Idle state (no executor attached).
+    #[allow(dead_code)]
     pub(crate) fn is_idle(&self) -> bool {
         match self {
             DriverEntry::Ephemeral(d) => d.is_idle(),
@@ -76,7 +77,33 @@ impl DriverEntry {
         }
     }
 
-    /// Check if the runtime can process queued inputs (Idle or Retired).
+    /// Check if the runtime is idle or attached (quiescent with or without executor).
+    pub(crate) fn is_idle_or_attached(&self) -> bool {
+        match self {
+            DriverEntry::Ephemeral(d) => d.is_idle_or_attached(),
+            DriverEntry::Persistent(d) => d.is_idle_or_attached(),
+        }
+    }
+
+    /// Attach an executor (Idle → Attached).
+    pub(crate) fn attach(&mut self) -> Result<(), RuntimeStateTransitionError> {
+        match self {
+            DriverEntry::Ephemeral(d) => d.attach(),
+            DriverEntry::Persistent(d) => d.attach(),
+        }
+    }
+
+    /// Detach an executor (Attached → Idle). No-op if not Attached.
+    pub(crate) fn detach(
+        &mut self,
+    ) -> Result<Option<crate::runtime_state::RuntimeState>, RuntimeStateTransitionError> {
+        match self {
+            DriverEntry::Ephemeral(d) => d.detach(),
+            DriverEntry::Persistent(d) => d.detach(),
+        }
+    }
+
+    /// Check if the runtime can process queued inputs (Idle, Attached, or Retired).
     pub(crate) fn can_process_queue(&self) -> bool {
         match self {
             DriverEntry::Ephemeral(d) => d.state_machine_ref().can_process_queue(),
@@ -349,7 +376,9 @@ impl RuntimeSessionAdapter {
 
         if let Some((driver, wake_tx)) = upgrade {
             let should_wake = {
-                let driver = driver.lock().await;
+                let mut driver = driver.lock().await;
+                // Transition Idle → Attached now that an executor is wired up
+                let _ = driver.attach();
                 !driver.as_driver().active_input_ids().is_empty()
             };
             if should_wake {
@@ -426,7 +455,9 @@ impl RuntimeSessionAdapter {
         drop(sessions);
 
         let should_wake = {
-            let driver = driver.lock().await;
+            let mut driver = driver.lock().await;
+            // Transition Idle → Attached now that an executor is wired up
+            let _ = driver.attach();
             !driver.as_driver().active_input_ids().is_empty()
         };
         if should_wake {
@@ -436,9 +467,16 @@ impl RuntimeSessionAdapter {
 
     /// Unregister a session's runtime driver.
     ///
-    /// Drops the wake channel sender, which causes the RuntimeLoop to exit.
+    /// Detaches the executor (Attached → Idle) before removal, then drops
+    /// the wake channel sender, which causes the RuntimeLoop to exit.
     pub async fn unregister_session(&self, session_id: &SessionId) {
-        self.sessions.write().await.remove(session_id);
+        let mut sessions = self.sessions.write().await;
+        if let Some(entry) = sessions.get(session_id) {
+            let mut driver = entry.driver.lock().await;
+            let _ = driver.detach(); // Attached → Idle (no-op if not Attached)
+            drop(driver);
+        }
+        sessions.remove(session_id);
     }
 
     /// Check whether a runtime driver is already registered for a session.
@@ -535,7 +573,7 @@ impl RuntimeSessionAdapter {
 
         let (input_id, run_id, primitive) = {
             let mut driver = driver.lock().await;
-            if !driver.is_idle() || !driver.as_driver().active_input_ids().is_empty() {
+            if !driver.is_idle_or_attached() || !driver.as_driver().active_input_ids().is_empty() {
                 return Err(RuntimeDriverError::NotReady {
                     state: driver.as_driver().runtime_state(),
                 });
@@ -549,7 +587,7 @@ impl RuntimeSessionAdapter {
                 }
             };
 
-            if !driver.is_idle() {
+            if !driver.is_idle_or_attached() {
                 return Err(RuntimeDriverError::NotReady {
                     state: driver.as_driver().runtime_state(),
                 });

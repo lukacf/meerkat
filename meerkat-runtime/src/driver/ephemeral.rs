@@ -78,6 +78,35 @@ impl EphemeralRuntimeDriver {
         self.state_machine.is_idle()
     }
 
+    /// Check if the runtime is idle or attached (quiescent with or without executor).
+    pub fn is_idle_or_attached(&self) -> bool {
+        self.state_machine.state().is_idle_or_attached()
+    }
+
+    /// Attach an executor (Idle → Attached).
+    pub fn attach(&mut self) -> Result<(), crate::runtime_state::RuntimeStateTransitionError> {
+        self.state_machine.attach()?;
+        self.emit_event(RuntimeEvent::RuntimeStateChange(RuntimeStateChangeEvent {
+            from: RuntimeState::Idle,
+            to: RuntimeState::Attached,
+        }));
+        Ok(())
+    }
+
+    /// Detach an executor (Attached → Idle). No-op if not Attached.
+    pub fn detach(
+        &mut self,
+    ) -> Result<Option<RuntimeState>, crate::runtime_state::RuntimeStateTransitionError> {
+        let result = self.state_machine.detach()?;
+        if result.is_some() {
+            self.emit_event(RuntimeEvent::RuntimeStateChange(RuntimeStateChangeEvent {
+                from: RuntimeState::Attached,
+                to: RuntimeState::Idle,
+            }));
+        }
+        Ok(result)
+    }
+
     /// Start a new run (Idle → Running).
     pub fn start_run(
         &mut self,
@@ -548,8 +577,8 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
             self.ledger.accept(state.clone());
         }
 
-        // Resolve policy
-        let runtime_idle = self.state_machine.is_idle();
+        // Resolve policy — Attached is idle-equivalent for wake/process decisions
+        let runtime_idle = self.state_machine.state().is_idle_or_attached();
         let mut policy = DefaultPolicyTable::resolve(&input, runtime_idle);
 
         // Apply silent intent override: if the input is a peer request whose

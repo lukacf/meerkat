@@ -1,6 +1,6 @@
 //! §22 RuntimeState — the runtime's own state machine with validated transitions.
 //!
-//! 7 states with strict transition rules from the spec.
+//! 8 states with strict transition rules from the spec.
 
 use serde::{Deserialize, Serialize};
 
@@ -11,8 +11,14 @@ use serde::{Deserialize, Serialize};
 pub enum RuntimeState {
     /// Initializing (first state after creation).
     Initializing,
-    /// Idle — no run in progress, ready to accept input.
+    /// Idle — no executor attached, no run in progress, ready to accept input.
     Idle,
+    /// Attached — executor attached, runtime loop alive, waiting for input.
+    ///
+    /// Semantically equivalent to Idle for input acceptance and queue processing,
+    /// but indicates an active executor is ready to process work immediately.
+    /// This state must never be persisted; on recovery it maps to Idle.
+    Attached,
     /// A run is in progress.
     Running,
     /// Recovering from a crash or error.
@@ -33,29 +39,47 @@ impl RuntimeState {
 
     /// Check if the runtime can accept new input in this state.
     pub fn can_accept_input(&self) -> bool {
-        matches!(self, Self::Idle | Self::Running)
+        matches!(self, Self::Idle | Self::Attached | Self::Running)
     }
 
     /// Check if the runtime can process queued inputs in this state.
     ///
     /// Retired runtimes can still drain their queue but cannot accept new input.
+    /// Attached runtimes have an active executor ready to process immediately.
     pub fn can_process_queue(&self) -> bool {
-        matches!(self, Self::Idle | Self::Retired)
+        matches!(self, Self::Idle | Self::Attached | Self::Retired)
+    }
+
+    /// Check if the runtime is in the Attached state.
+    pub fn is_attached(&self) -> bool {
+        matches!(self, Self::Attached)
+    }
+
+    /// Check if the runtime is Idle or Attached (quiescent with or without executor).
+    ///
+    /// Use this when the semantics require "is the runtime quiescent enough to
+    /// accept new work or process the queue" — both Idle and Attached qualify.
+    pub fn is_idle_or_attached(&self) -> bool {
+        matches!(self, Self::Idle | Self::Attached)
     }
 
     /// Validate a transition from this state to another (§22 table).
     pub fn can_transition_to(&self, next: &RuntimeState) -> bool {
-        use RuntimeState::{Destroyed, Idle, Initializing, Recovering, Retired, Running, Stopped};
+        use RuntimeState::{
+            Attached, Destroyed, Idle, Initializing, Recovering, Retired, Running, Stopped,
+        };
         matches!(
             (self, next),
             // Initializing → Idle, Stopped, Destroyed
             (Initializing, Idle | Stopped | Destroyed)
-            // Idle → Running, Retired, Recovering, Stopped, Destroyed
-            | (Idle, Running | Retired | Recovering | Stopped | Destroyed)
-            // Running → Idle, Recovering, Retired, Stopped, Destroyed
-            | (Running, Idle | Recovering | Retired | Stopped | Destroyed)
-            // Recovering → Idle, Running, Stopped, Destroyed
-            | (Recovering, Idle | Running | Stopped | Destroyed)
+            // Idle → Attached, Running, Retired, Recovering, Stopped, Destroyed
+            | (Idle, Attached | Running | Retired | Recovering | Stopped | Destroyed)
+            // Attached → Running, Idle, Retired, Recovering, Stopped, Destroyed
+            | (Attached, Running | Idle | Retired | Recovering | Stopped | Destroyed)
+            // Running → Idle, Attached, Recovering, Retired, Stopped, Destroyed
+            | (Running, Idle | Attached | Recovering | Retired | Stopped | Destroyed)
+            // Recovering → Idle, Attached, Running, Stopped, Destroyed
+            | (Recovering, Idle | Attached | Running | Stopped | Destroyed)
             // Retired → Running (drain), Stopped, Destroyed
             | (Retired, Running | Stopped | Destroyed)
         )
@@ -80,6 +104,7 @@ impl std::fmt::Display for RuntimeState {
         match self {
             Self::Initializing => write!(f, "initializing"),
             Self::Idle => write!(f, "idle"),
+            Self::Attached => write!(f, "attached"),
             Self::Running => write!(f, "running"),
             Self::Recovering => write!(f, "recovering"),
             Self::Retired => write!(f, "retired"),
@@ -109,6 +134,7 @@ mod tests {
 
         assert!(!RuntimeState::Initializing.is_terminal());
         assert!(!RuntimeState::Idle.is_terminal());
+        assert!(!RuntimeState::Attached.is_terminal());
         assert!(!RuntimeState::Running.is_terminal());
         assert!(!RuntimeState::Recovering.is_terminal());
         assert!(!RuntimeState::Retired.is_terminal());
@@ -117,6 +143,7 @@ mod tests {
     #[test]
     fn can_accept_input() {
         assert!(RuntimeState::Idle.can_accept_input());
+        assert!(RuntimeState::Attached.can_accept_input());
         assert!(RuntimeState::Running.can_accept_input());
 
         assert!(!RuntimeState::Initializing.can_accept_input());
@@ -129,6 +156,7 @@ mod tests {
     #[test]
     fn can_process_queue() {
         assert!(RuntimeState::Idle.can_process_queue());
+        assert!(RuntimeState::Attached.can_process_queue());
         assert!(RuntimeState::Retired.can_process_queue());
 
         assert!(!RuntimeState::Initializing.can_process_queue());
@@ -136,6 +164,26 @@ mod tests {
         assert!(!RuntimeState::Recovering.can_process_queue());
         assert!(!RuntimeState::Stopped.can_process_queue());
         assert!(!RuntimeState::Destroyed.can_process_queue());
+    }
+
+    #[test]
+    fn is_attached() {
+        assert!(RuntimeState::Attached.is_attached());
+        assert!(!RuntimeState::Idle.is_attached());
+        assert!(!RuntimeState::Running.is_attached());
+    }
+
+    #[test]
+    fn is_idle_or_attached() {
+        assert!(RuntimeState::Idle.is_idle_or_attached());
+        assert!(RuntimeState::Attached.is_idle_or_attached());
+
+        assert!(!RuntimeState::Initializing.is_idle_or_attached());
+        assert!(!RuntimeState::Running.is_idle_or_attached());
+        assert!(!RuntimeState::Recovering.is_idle_or_attached());
+        assert!(!RuntimeState::Retired.is_idle_or_attached());
+        assert!(!RuntimeState::Stopped.is_idle_or_attached());
+        assert!(!RuntimeState::Destroyed.is_idle_or_attached());
     }
 
     // §22 transition table — exhaustive valid transitions
@@ -147,6 +195,7 @@ mod tests {
         assert!(s.can_transition_to(&RuntimeState::Destroyed));
 
         // Invalid
+        assert!(!s.can_transition_to(&RuntimeState::Attached));
         assert!(!s.can_transition_to(&RuntimeState::Running));
         assert!(!s.can_transition_to(&RuntimeState::Recovering));
         assert!(!s.can_transition_to(&RuntimeState::Retired));
@@ -156,6 +205,7 @@ mod tests {
     #[test]
     fn idle_valid_transitions() {
         let s = RuntimeState::Idle;
+        assert!(s.can_transition_to(&RuntimeState::Attached));
         assert!(s.can_transition_to(&RuntimeState::Running));
         assert!(s.can_transition_to(&RuntimeState::Retired));
         assert!(s.can_transition_to(&RuntimeState::Recovering));
@@ -168,9 +218,25 @@ mod tests {
     }
 
     #[test]
+    fn attached_valid_transitions() {
+        let s = RuntimeState::Attached;
+        assert!(s.can_transition_to(&RuntimeState::Running));
+        assert!(s.can_transition_to(&RuntimeState::Idle));
+        assert!(s.can_transition_to(&RuntimeState::Retired));
+        assert!(s.can_transition_to(&RuntimeState::Recovering));
+        assert!(s.can_transition_to(&RuntimeState::Stopped));
+        assert!(s.can_transition_to(&RuntimeState::Destroyed));
+
+        // Invalid
+        assert!(!s.can_transition_to(&RuntimeState::Initializing));
+        assert!(!s.can_transition_to(&RuntimeState::Attached));
+    }
+
+    #[test]
     fn running_valid_transitions() {
         let s = RuntimeState::Running;
         assert!(s.can_transition_to(&RuntimeState::Idle));
+        assert!(s.can_transition_to(&RuntimeState::Attached));
         assert!(s.can_transition_to(&RuntimeState::Recovering));
         assert!(s.can_transition_to(&RuntimeState::Retired));
         assert!(s.can_transition_to(&RuntimeState::Stopped));
@@ -185,6 +251,7 @@ mod tests {
     fn recovering_valid_transitions() {
         let s = RuntimeState::Recovering;
         assert!(s.can_transition_to(&RuntimeState::Idle));
+        assert!(s.can_transition_to(&RuntimeState::Attached));
         assert!(s.can_transition_to(&RuntimeState::Running));
         assert!(s.can_transition_to(&RuntimeState::Stopped));
         assert!(s.can_transition_to(&RuntimeState::Destroyed));
@@ -205,6 +272,7 @@ mod tests {
         // Invalid
         assert!(!s.can_transition_to(&RuntimeState::Initializing));
         assert!(!s.can_transition_to(&RuntimeState::Idle));
+        assert!(!s.can_transition_to(&RuntimeState::Attached));
         assert!(!s.can_transition_to(&RuntimeState::Recovering));
         assert!(!s.can_transition_to(&RuntimeState::Retired));
     }
@@ -214,6 +282,7 @@ mod tests {
         let s = RuntimeState::Stopped;
         assert!(!s.can_transition_to(&RuntimeState::Initializing));
         assert!(!s.can_transition_to(&RuntimeState::Idle));
+        assert!(!s.can_transition_to(&RuntimeState::Attached));
         assert!(!s.can_transition_to(&RuntimeState::Running));
         assert!(!s.can_transition_to(&RuntimeState::Recovering));
         assert!(!s.can_transition_to(&RuntimeState::Retired));
@@ -226,6 +295,7 @@ mod tests {
         let s = RuntimeState::Destroyed;
         assert!(!s.can_transition_to(&RuntimeState::Initializing));
         assert!(!s.can_transition_to(&RuntimeState::Idle));
+        assert!(!s.can_transition_to(&RuntimeState::Attached));
         assert!(!s.can_transition_to(&RuntimeState::Running));
         assert!(!s.can_transition_to(&RuntimeState::Recovering));
         assert!(!s.can_transition_to(&RuntimeState::Retired));
@@ -259,6 +329,7 @@ mod tests {
         for state in [
             RuntimeState::Initializing,
             RuntimeState::Idle,
+            RuntimeState::Attached,
             RuntimeState::Running,
             RuntimeState::Recovering,
             RuntimeState::Retired,
@@ -274,6 +345,7 @@ mod tests {
     #[test]
     fn display() {
         assert_eq!(RuntimeState::Idle.to_string(), "idle");
+        assert_eq!(RuntimeState::Attached.to_string(), "attached");
         assert_eq!(RuntimeState::Running.to_string(), "running");
         assert_eq!(RuntimeState::Destroyed.to_string(), "destroyed");
     }

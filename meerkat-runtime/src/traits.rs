@@ -143,6 +143,9 @@ pub trait RuntimeDriver: Send + Sync {
     /// Reset the runtime (abandon all pending input, drain queue).
     async fn reset(&mut self) -> Result<ResetReport, RuntimeDriverError>;
 
+    /// Destroy the runtime (terminal state, abandon all pending input).
+    async fn destroy(&mut self) -> Result<DestroyReport, RuntimeDriverError>;
+
     /// Get the current runtime state.
     fn runtime_state(&self) -> RuntimeState;
 
@@ -199,6 +202,12 @@ pub trait RuntimeControlPlane: Send + Sync {
         &self,
         runtime_id: &LogicalRuntimeId,
     ) -> Result<RuntimeState, RuntimeControlPlaneError>;
+
+    /// Destroy a runtime (terminal state, no recovery possible).
+    async fn destroy(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<DestroyReport, RuntimeControlPlaneError>;
 
     /// Load a boundary receipt for verification.
     async fn load_boundary_receipt(

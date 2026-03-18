@@ -25,7 +25,8 @@ use crate::runtime_event::{
 use crate::runtime_state::RuntimeState;
 use crate::state_machine::RuntimeStateMachine;
 use crate::traits::{
-    RecoveryReport, ResetReport, RetireReport, RuntimeControlCommand, RuntimeDriverError,
+    DestroyReport, RecoveryReport, ResetReport, RetireReport, RuntimeControlCommand,
+    RuntimeDriverError,
 };
 
 /// Ephemeral runtime driver — all state in-memory.
@@ -816,6 +817,13 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
 
     async fn reset(&mut self) -> Result<ResetReport, RuntimeDriverError> {
         EphemeralRuntimeDriver::reset(self)
+    }
+
+    async fn destroy(&mut self) -> Result<DestroyReport, RuntimeDriverError> {
+        let abandoned = EphemeralRuntimeDriver::destroy(self)?;
+        Ok(DestroyReport {
+            inputs_abandoned: abandoned,
+        })
     }
 
     fn input_state(&self, input_id: &InputId) -> Option<&InputState> {

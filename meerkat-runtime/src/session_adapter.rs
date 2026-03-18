@@ -32,8 +32,8 @@ use crate::store::RuntimeStore;
 use crate::tokio;
 use crate::tokio::sync::{Mutex, RwLock, mpsc};
 use crate::traits::{
-    RecoveryReport, RecycleReport, ResetReport, RetireReport, RuntimeControlPlaneError,
-    RuntimeDriver, RuntimeDriverError,
+    DestroyReport, RecoveryReport, RecycleReport, ResetReport, RetireReport,
+    RuntimeControlPlaneError, RuntimeDriver, RuntimeDriverError,
 };
 
 /// Shared driver handle used by both the adapter and the RuntimeLoop.
@@ -1130,6 +1130,26 @@ impl crate::traits::RuntimeControlPlane for RuntimeSessionAdapter {
         if let Some(ref tx) = wake_tx {
             let _ = tx.try_send(());
         }
+
+        Ok(report)
+    }
+
+    async fn destroy(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<DestroyReport, RuntimeControlPlaneError> {
+        let (_session_id, driver, completions, _wake_tx) = self.lookup_entry(runtime_id).await?;
+
+        let mut drv = driver.lock().await;
+        let report = drv
+            .as_driver_mut()
+            .destroy()
+            .await
+            .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
+        drop(drv);
+
+        let mut comp = completions.lock().await;
+        comp.resolve_all_terminated("runtime destroyed");
 
         Ok(report)
     }

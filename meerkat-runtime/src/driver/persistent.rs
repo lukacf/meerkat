@@ -19,7 +19,9 @@ use crate::input_state::{
 use crate::runtime_event::RuntimeEventEnvelope;
 use crate::runtime_state::RuntimeState;
 use crate::store::RuntimeStore;
-use crate::traits::{RecoveryReport, RuntimeControlCommand, RuntimeDriver, RuntimeDriverError};
+use crate::traits::{
+    DestroyReport, RecoveryReport, RuntimeControlCommand, RuntimeDriver, RuntimeDriverError,
+};
 
 use super::ephemeral::EphemeralRuntimeDriver;
 
@@ -458,6 +460,23 @@ impl RuntimeDriver for PersistentRuntimeDriver {
             )));
         }
         Ok(report)
+    }
+
+    async fn destroy(&mut self) -> Result<DestroyReport, RuntimeDriverError> {
+        let abandoned = self.inner.destroy()?;
+        let input_states = self.inner.input_states_snapshot();
+        if let Err(err) = self
+            .store
+            .atomic_lifecycle_commit(&self.runtime_id, self.inner.runtime_state(), &input_states)
+            .await
+        {
+            return Err(RuntimeDriverError::Internal(format!(
+                "destroy persist failed: {err}"
+            )));
+        }
+        Ok(DestroyReport {
+            inputs_abandoned: abandoned,
+        })
     }
 
     fn runtime_state(&self) -> RuntimeState {

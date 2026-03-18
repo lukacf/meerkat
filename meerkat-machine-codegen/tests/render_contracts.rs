@@ -19,7 +19,7 @@ fn renders_machine_fixture_with_stable_sections() {
     assert!(rendered.contains(
         "STATE\n  phase : {\"Creating\", \"Running\", \"Stopped\", \"Completed\", \"Destroyed\"}"
     ));
-    assert!(rendered.contains("INPUTS\n  MobOrchestratorInput = {\"InitializeOrchestrator\", \"BindCoordinator\", \"UnbindCoordinator\", \"StageSpawn\", \"CompleteSpawn\", \"StartFlow\", \"CompleteFlow\", \"StopOrchestrator\", \"ResumeOrchestrator\", \"MarkCompleted\", \"DestroyOrchestrator\"}"));
+    assert!(rendered.contains("INPUTS\n  MobOrchestratorInput = {\"InitializeOrchestrator\", \"BindCoordinator\", \"UnbindCoordinator\", \"StageSpawn\", \"CompleteSpawn\", \"StartFlow\", \"CompleteFlow\", \"StopOrchestrator\", \"ResumeOrchestrator\", \"MarkCompleted\", \"DestroyOrchestrator\", \"ForceCancelMember\", \"RespawnMember\"}"));
     assert!(rendered.contains("TRANSITIONS\n  InitializeOrchestrator"));
     assert!(rendered.ends_with("====\n"));
 }

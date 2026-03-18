@@ -81,6 +81,10 @@ pub fn handle_initialize(id: Option<RpcId>, runtime_available: bool) -> RpcRespo
                 m.push("mob/flow_run".to_string());
                 m.push("mob/flow_status".to_string());
                 m.push("mob/flow_cancel".to_string());
+                m.push("mob/spawn_helper".to_string());
+                m.push("mob/fork_helper".to_string());
+                m.push("mob/force_cancel".to_string());
+                m.push("mob/member_status".to_string());
                 m.push("mob/tools".to_string());
                 m.push("mob/call".to_string());
                 m.push("mob/stream_open".to_string());

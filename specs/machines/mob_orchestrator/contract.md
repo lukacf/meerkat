@@ -2,7 +2,7 @@
 
 _Generated from the Rust machine catalog. Do not edit by hand._
 
-- Version: `1`
+- Version: `2`
 - Rust owner: `meerkat-mob` / `machines::mob_orchestrator`
 
 ## State
@@ -25,6 +25,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResumeOrchestrator`
 - `MarkCompleted`
 - `DestroyOrchestrator`
+- `ForceCancelMember`
+- `RespawnMember`
 
 ## Effects
 - `ActivateSupervisor`
@@ -32,6 +34,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `FlowActivated`
 - `FlowDeactivated`
 - `EmitOrchestratorNotice`
+- `MemberForceCancelled`
+- `MemberRespawnInitiated`
 
 ## Invariants
 - `destroyed_is_terminal`
@@ -125,6 +129,22 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `no_active_flows`
 - Emits: `DeactivateSupervisor`, `EmitOrchestratorNotice`
 - To: `Destroyed`
+
+### `ForceCancelMember`
+- From: `Running`
+- On: `ForceCancelMember`()
+- Guards:
+  - `coordinator_is_bound`
+- Emits: `MemberForceCancelled`, `EmitOrchestratorNotice`
+- To: `Running`
+
+### `RespawnMember`
+- From: `Running`
+- On: `RespawnMember`()
+- Guards:
+  - `coordinator_is_bound`
+- Emits: `MemberRespawnInitiated`, `EmitOrchestratorNotice`
+- To: `Running`
 
 ## Coverage
 ### Code Anchors

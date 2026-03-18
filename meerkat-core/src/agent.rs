@@ -523,6 +523,13 @@ where
     /// When set, ordinary comms execution stays runtime-backed instead of
     /// calling `self.run()` directly from the host loop.
     pub(crate) runtime_input_sink: Option<Arc<dyn RuntimeInputSink>>,
+    /// Optional shared lifecycle registry for async operations.
+    ///
+    /// When set, the WaitingForOps state awaits pending operations
+    /// registered in this registry before transitioning to DrainingEvents.
+    pub(crate) ops_lifecycle: Option<Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>>,
+    /// Operation IDs to wait on in WaitingForOps state.
+    pub(crate) pending_ops: Vec<crate::ops::OperationId>,
     /// True after the agentic loop completes when `output_schema` is set.
     /// Causes the next `CallingLlm` iteration to use extraction parameters
     /// (no tools, temperature 0.0, structured_output provider params).

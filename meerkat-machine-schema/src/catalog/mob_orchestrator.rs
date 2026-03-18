@@ -9,7 +9,7 @@ use crate::{
 pub fn mob_orchestrator_machine() -> MachineSchema {
     MachineSchema {
         machine: "MobOrchestratorMachine".into(),
-        version: 1,
+        version: 2,
         rust: RustBinding {
             crate_name: "meerkat-mob".into(),
             module: "machines::mob_orchestrator".into(),
@@ -58,6 +58,10 @@ pub fn mob_orchestrator_machine() -> MachineSchema {
                 variant("ResumeOrchestrator"),
                 variant("MarkCompleted"),
                 variant("DestroyOrchestrator"),
+                // Phase C: force-cancel a member's in-flight turn
+                variant("ForceCancelMember"),
+                // Phase D: respawn a member with new session
+                variant("RespawnMember"),
             ],
         },
         effects: EnumSchema {
@@ -68,6 +72,10 @@ pub fn mob_orchestrator_machine() -> MachineSchema {
                 variant("FlowActivated"),
                 variant("FlowDeactivated"),
                 variant("EmitOrchestratorNotice"),
+                // Phase C: member force-cancel initiated
+                variant("MemberForceCancelled"),
+                // Phase D: member respawn initiated
+                variant("MemberRespawnInitiated"),
             ],
         },
         helpers: vec![],
@@ -408,6 +416,65 @@ pub fn mob_orchestrator_machine() -> MachineSchema {
                 emit: vec![
                     EffectEmit {
                         variant: "DeactivateSupervisor".into(),
+                        fields: IndexMap::new(),
+                    },
+                    EffectEmit {
+                        variant: "EmitOrchestratorNotice".into(),
+                        fields: IndexMap::new(),
+                    },
+                ],
+            },
+            // Phase C: ForceCancelMember — cancels in-flight turn
+            TransitionSchema {
+                name: "ForceCancelMember".into(),
+                from: vec!["Running".into()],
+                on: InputMatch {
+                    variant: "ForceCancelMember".into(),
+                    bindings: vec![],
+                },
+                guards: vec![Guard {
+                    name: "coordinator_is_bound".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("coordinator_bound".into())),
+                        Box::new(Expr::Bool(true)),
+                    ),
+                }],
+                updates: vec![],
+                to: "Running".into(),
+                emit: vec![
+                    EffectEmit {
+                        variant: "MemberForceCancelled".into(),
+                        fields: IndexMap::new(),
+                    },
+                    EffectEmit {
+                        variant: "EmitOrchestratorNotice".into(),
+                        fields: IndexMap::new(),
+                    },
+                ],
+            },
+            // Phase D: RespawnMember — same identity, new session
+            TransitionSchema {
+                name: "RespawnMember".into(),
+                from: vec!["Running".into()],
+                on: InputMatch {
+                    variant: "RespawnMember".into(),
+                    bindings: vec![],
+                },
+                guards: vec![Guard {
+                    name: "coordinator_is_bound".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("coordinator_bound".into())),
+                        Box::new(Expr::Bool(true)),
+                    ),
+                }],
+                updates: vec![Update::Increment {
+                    field: "topology_revision".into(),
+                    amount: 1,
+                }],
+                to: "Running".into(),
+                emit: vec![
+                    EffectEmit {
+                        variant: "MemberRespawnInitiated".into(),
                         fields: IndexMap::new(),
                     },
                     EffectEmit {

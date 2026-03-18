@@ -128,6 +128,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `OwnerTerminated`
   - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
   - scenarios: `register-progress-terminal`
+- `WaitAll`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+- `CollectCompleted`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
 
 ### Effects
 - `SubmitOpEvent`
@@ -140,6 +146,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
   - scenarios: `register-progress-terminal`
 - `RetainTerminalRecord`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+- `EvictCompletedRecord`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+- `WaitAllSatisfied`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+- `CollectCompletedResult`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+- `ConcurrencyLimitExceeded`
   - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
   - scenarios: `register-progress-terminal`
 

@@ -9,7 +9,7 @@ use crate::{
 pub fn runtime_ingress_machine() -> MachineSchema {
     MachineSchema {
         machine: "RuntimeIngressMachine".into(),
-        version: 1,
+        version: 2,
         rust: RustBinding {
             crate_name: "meerkat-runtime".into(),
             module: "machines::runtime_ingress".into(),
@@ -117,6 +117,11 @@ pub fn runtime_ingress_machine() -> MachineSchema {
                 ),
                 field("wake_requested", TypeRef::Bool),
                 field("process_requested", TypeRef::Bool),
+                // Phase D: silent intent override — intents that bypass LLM turn
+                field(
+                    "silent_intent_overrides",
+                    TypeRef::Set(Box::new(TypeRef::String)),
+                ),
             ],
             init: InitSchema {
                 phase: "Active".into(),
@@ -138,6 +143,7 @@ pub fn runtime_ingress_machine() -> MachineSchema {
                     init("last_boundary_sequence", Expr::EmptyMap),
                     init("wake_requested", Expr::Bool(false)),
                     init("process_requested", Expr::Bool(false)),
+                    init("silent_intent_overrides", Expr::EmptySet),
                 ],
             },
             terminal_phases: vec!["Destroyed".into()],
@@ -228,6 +234,11 @@ pub fn runtime_ingress_machine() -> MachineSchema {
                 variant("Reset"),
                 variant("Destroy"),
                 variant("Recover"),
+                // Phase D: configure silent intent overrides
+                VariantSchema {
+                    name: "SetSilentIntentOverrides".into(),
+                    fields: vec![field("intents", TypeRef::Set(Box::new(TypeRef::String)))],
+                },
             ],
         },
         effects: EnumSchema {
@@ -268,6 +279,14 @@ pub fn runtime_ingress_machine() -> MachineSchema {
                     fields: vec![
                         field("kind", TypeRef::String),
                         field("detail", TypeRef::String),
+                    ],
+                },
+                // Phase D: silent intent override applied — input accepted without LLM turn
+                VariantSchema {
+                    name: "SilentIntentApplied".into(),
+                    fields: vec![
+                        field("work_id", TypeRef::Named("WorkId".into())),
+                        field("intent", TypeRef::String),
                     ],
                 },
             ],
@@ -1542,6 +1561,49 @@ pub fn runtime_ingress_machine() -> MachineSchema {
                             "detail".into(),
                             Expr::String("RecoveryAppliedToCurrentRun".into()),
                         ),
+                    ]),
+                }],
+            },
+            // Phase D: SetSilentIntentOverrides — configure which intents skip LLM turns
+            TransitionSchema {
+                name: "SetSilentIntentOverridesFromActive".into(),
+                from: vec!["Active".into()],
+                on: InputMatch {
+                    variant: "SetSilentIntentOverrides".into(),
+                    bindings: vec!["intents".into()],
+                },
+                guards: vec![],
+                updates: vec![Update::Assign {
+                    field: "silent_intent_overrides".into(),
+                    expr: Expr::Binding("intents".into()),
+                }],
+                to: "Active".into(),
+                emit: vec![EffectEmit {
+                    variant: "IngressNotice".into(),
+                    fields: IndexMap::from([
+                        ("kind".into(), Expr::String("SilentIntentOverrides".into())),
+                        ("detail".into(), Expr::String("Updated".into())),
+                    ]),
+                }],
+            },
+            TransitionSchema {
+                name: "SetSilentIntentOverridesFromRetired".into(),
+                from: vec!["Retired".into()],
+                on: InputMatch {
+                    variant: "SetSilentIntentOverrides".into(),
+                    bindings: vec!["intents".into()],
+                },
+                guards: vec![],
+                updates: vec![Update::Assign {
+                    field: "silent_intent_overrides".into(),
+                    expr: Expr::Binding("intents".into()),
+                }],
+                to: "Retired".into(),
+                emit: vec![EffectEmit {
+                    variant: "IngressNotice".into(),
+                    fields: IndexMap::from([
+                        ("kind".into(), Expr::String("SilentIntentOverrides".into())),
+                        ("detail".into(), Expr::String("Updated".into())),
                     ]),
                 }],
             },

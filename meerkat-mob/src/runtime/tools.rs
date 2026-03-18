@@ -56,16 +56,29 @@ impl MobToolDispatcher {
         if enable_mob {
             defs.push(tool_def(
                 TOOL_SPAWN_MEERKAT,
-                "Spawn a meerkat from a profile",
+                "Spawn a meerkat from a profile. Supports fresh, resume, or fork launch modes.",
                 json!({
                     "type": "object",
                     "properties": {
                         "profile": {"type": "string"},
                         "meerkat_id": {"type": "string"},
                         "initial_message": {"type": "string"},
-                        "resume_session_id": {"type": "string"},
+                        "resume_session_id": {"type": "string", "description": "Deprecated: use launch_mode.resume instead"},
                         "backend": {"type": "string", "enum": ["session", "external"]},
-                        "runtime_mode": {"type": "string", "enum": ["autonomous_host", "turn_driven"]}
+                        "runtime_mode": {"type": "string", "enum": ["autonomous_host", "turn_driven"]},
+                        "launch_mode": {
+                            "type": "object",
+                            "description": "Launch mode: fresh (default), resume {session_id}, or fork {source_member_id, fork_context}",
+                        },
+                        "tool_access_policy": {
+                            "type": "object",
+                            "description": "Tool access policy: inherit (default), allow_list, or deny_list"
+                        },
+                        "budget_split_policy": {
+                            "type": "object",
+                            "description": "Budget split policy: equal, proportional, remaining, or fixed"
+                        },
+                        "auto_wire_parent": {"type": "boolean", "description": "Auto-wire to spawner after spawn"}
                     },
                     "required": ["profile", "meerkat_id"]
                 }),
@@ -172,6 +185,28 @@ impl MobToolDispatcher {
                     "required": ["run_id"]
                 }),
             ));
+            defs.push(tool_def(
+                TOOL_FORCE_CANCEL_MEERKAT,
+                "Force-cancel a meerkat's in-flight turn. Does not retire the member.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "meerkat_id": {"type": "string"}
+                    },
+                    "required": ["meerkat_id"]
+                }),
+            ));
+            defs.push(tool_def(
+                TOOL_MEERKAT_STATUS,
+                "Get a meerkat's execution status snapshot including output preview and token usage.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "meerkat_id": {"type": "string"}
+                    },
+                    "required": ["meerkat_id"]
+                }),
+            ));
         }
         if enable_mob_tasks {
             defs.push(tool_def(
@@ -262,6 +297,24 @@ struct SpawnMeerkatArgs {
     backend: Option<MobBackendKind>,
     #[serde(default)]
     runtime_mode: Option<crate::MobRuntimeMode>,
+    #[serde(default)]
+    launch_mode: Option<crate::launch::MemberLaunchMode>,
+    #[serde(default)]
+    tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+    #[serde(default)]
+    budget_split_policy: Option<crate::launch::BudgetSplitPolicy>,
+    #[serde(default)]
+    auto_wire_parent: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct ForceCancelArgs {
+    meerkat_id: String,
+}
+
+#[derive(Deserialize)]
+struct MeerkatStatusArgs {
+    meerkat_id: String,
 }
 
 #[derive(Deserialize)]
@@ -332,8 +385,21 @@ impl AgentToolDispatcher for MobToolDispatcher {
                     args.runtime_mode,
                     args.backend,
                 );
-                if let Some(session_id) = args.resume_session_id {
+                // Resolve launch mode: explicit launch_mode takes precedence,
+                // then legacy resume_session_id, then default (Fresh).
+                if let Some(launch_mode) = args.launch_mode {
+                    spec = spec.with_launch_mode(launch_mode);
+                } else if let Some(session_id) = args.resume_session_id {
                     spec = spec.with_resume_session_id(session_id);
+                }
+                if let Some(policy) = args.tool_access_policy {
+                    spec = spec.with_tool_access_policy(policy);
+                }
+                if let Some(policy) = args.budget_split_policy {
+                    spec = spec.with_budget_split_policy(policy);
+                }
+                if let Some(auto_wire) = args.auto_wire_parent {
+                    spec = spec.with_auto_wire_parent(auto_wire);
                 }
                 let member_ref = self
                     .handle
@@ -363,8 +429,19 @@ impl AgentToolDispatcher for MobToolDispatcher {
                             spec.runtime_mode,
                             spec.backend,
                         );
-                        if let Some(session_id) = spec.resume_session_id {
+                        if let Some(launch_mode) = spec.launch_mode {
+                            spawn_spec = spawn_spec.with_launch_mode(launch_mode);
+                        } else if let Some(session_id) = spec.resume_session_id {
                             spawn_spec = spawn_spec.with_resume_session_id(session_id);
+                        }
+                        if let Some(policy) = spec.tool_access_policy {
+                            spawn_spec = spawn_spec.with_tool_access_policy(policy);
+                        }
+                        if let Some(policy) = spec.budget_split_policy {
+                            spawn_spec = spawn_spec.with_budget_split_policy(policy);
+                        }
+                        if let Some(auto_wire) = spec.auto_wire_parent {
+                            spawn_spec = spawn_spec.with_auto_wire_parent(auto_wire);
                         }
                         spawn_spec
                     })
@@ -515,6 +592,27 @@ impl AgentToolDispatcher for MobToolDispatcher {
                     .map_err(|error| Self::map_mob_error(call, error))?;
                 Self::encode_result(call, json!({ "task": task }))
             }
+            TOOL_FORCE_CANCEL_MEERKAT => {
+                let args: ForceCancelArgs = call
+                    .parse_args()
+                    .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
+                self.handle
+                    .force_cancel_member(MeerkatId::from(args.meerkat_id))
+                    .await
+                    .map_err(|error| Self::map_mob_error(call, error))?;
+                Self::encode_result(call, json!({"ok": true}))
+            }
+            TOOL_MEERKAT_STATUS => {
+                let args: MeerkatStatusArgs = call
+                    .parse_args()
+                    .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
+                let snapshot = self
+                    .handle
+                    .member_status(&MeerkatId::from(args.meerkat_id))
+                    .await
+                    .map_err(|error| Self::map_mob_error(call, error))?;
+                Self::encode_result(call, json!(snapshot))
+            }
             _ => Err(ToolError::not_found(call.name)),
         }
     }
@@ -523,6 +621,8 @@ impl AgentToolDispatcher for MobToolDispatcher {
 const TOOL_SPAWN_MEERKAT: &str = "spawn_meerkat";
 const TOOL_SPAWN_MANY_MEERKATS: &str = "spawn_many_meerkats";
 const TOOL_RETIRE_MEERKAT: &str = "retire_meerkat";
+const TOOL_FORCE_CANCEL_MEERKAT: &str = "force_cancel_meerkat";
+const TOOL_MEERKAT_STATUS: &str = "meerkat_status";
 const TOOL_WIRE_PEERS: &str = "wire_peers";
 const TOOL_UNWIRE_PEERS: &str = "unwire_peers";
 const TOOL_LIST_MEERKATS: &str = "list_meerkats";

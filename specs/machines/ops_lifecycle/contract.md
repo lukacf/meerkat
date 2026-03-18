@@ -2,7 +2,7 @@
 
 _Generated from the Rust machine catalog. Do not edit by hand._
 
-- Version: `1`
+- Version: `2`
 - Rust owner: `meerkat-runtime` / `machines::ops_lifecycle`
 
 ## State
@@ -15,6 +15,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `watcher_count`: `Map<OperationId, u32>`
 - `terminal_outcome`: `Map<OperationId, OperationTerminalOutcome>`
 - `terminal_buffered`: `Map<OperationId, Bool>`
+- `completed_order`: `Seq<OperationId>`
+- `max_completed`: `u32`
+- `max_concurrent`: `u32`
+- `active_count`: `u32`
+- `created_at_ms`: `Map<OperationId, u64>`
+- `completed_at_ms`: `Map<OperationId, u64>`
 
 ## Inputs
 - `RegisterOperation`(operation_id: OperationId, operation_kind: OperationKind)
@@ -30,12 +36,18 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RetireCompleted`(operation_id: OperationId)
 - `CollectTerminal`(operation_id: OperationId)
 - `OwnerTerminated`
+- `WaitAll`(operation_ids: Seq<OperationId>)
+- `CollectCompleted`
 
 ## Effects
 - `SubmitOpEvent`(operation_id: OperationId, event_kind: OpEventKind)
 - `NotifyOpWatcher`(operation_id: OperationId, terminal_outcome: OperationTerminalOutcome)
 - `ExposeOperationPeer`(operation_id: OperationId)
 - `RetainTerminalRecord`(operation_id: OperationId, terminal_outcome: OperationTerminalOutcome)
+- `EvictCompletedRecord`(operation_id: OperationId)
+- `WaitAllSatisfied`(operation_ids: Seq<OperationId>)
+- `CollectCompletedResult`(operation_ids: Seq<OperationId>)
+- `ConcurrencyLimitExceeded`(operation_id: OperationId, limit: u32, active: u32)
 
 ## Helpers
 - `status_of`(operation_id: OperationId) -> `OperationStatus`
@@ -64,6 +76,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `operation_absent`
   - `kind_is_real`
+  - `concurrency_limit_allows`
 - To: `Active`
 
 ### `ProvisioningSucceeded`
@@ -156,6 +169,18 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `OwnerTerminated`
 - From: `Active`
 - On: `OwnerTerminated`()
+- To: `Active`
+
+### `WaitAll`
+- From: `Active`
+- On: `WaitAll`(operation_ids)
+- Emits: `WaitAllSatisfied`
+- To: `Active`
+
+### `CollectCompleted`
+- From: `Active`
+- On: `CollectCompleted`()
+- Emits: `CollectCompletedResult`
 - To: `Active`
 
 ## Coverage

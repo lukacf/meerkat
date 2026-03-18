@@ -8,6 +8,8 @@ CONSTANTS OperationIdValues, OperationKindValues
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
 
+SeqOfOperationIdValues == {<<>>} \cup {<<x>> : x \in OperationIdValues} \cup {<<x, y>> : x \in OperationIdValues, y \in OperationIdValues}
+
 MapLookup(map, key) == IF key \in DOMAIN map THEN map[key] ELSE None
 MapSet(map, key, value) == [x \in DOMAIN map \cup {key} |-> IF x = key THEN value ELSE map[x]]
 StartsWith(seq, prefix) == /\ Len(prefix) <= Len(seq) /\ SubSeq(seq, 1, Len(prefix)) = prefix
@@ -17,9 +19,9 @@ SeqRemove(seq, value) == IF Len(seq) = 0 THEN <<>> ELSE IF Head(seq) = value THE
 RECURSIVE SeqRemoveAll(_, _)
 SeqRemoveAll(seq, values) == IF Len(values) = 0 THEN seq ELSE SeqRemoveAll(SeqRemove(seq, Head(values)), Tail(values))
 
-VARIABLES phase, model_step_count, known_operations, operation_status, operation_kind, peer_ready, progress_count, watcher_count, terminal_outcome, terminal_buffered
+VARIABLES phase, model_step_count, known_operations, operation_status, operation_kind, peer_ready, progress_count, watcher_count, terminal_outcome, terminal_buffered, completed_order, max_completed, max_concurrent, active_count, created_at_ms, completed_at_ms
 
-vars == << phase, model_step_count, known_operations, operation_status, operation_kind, peer_ready, progress_count, watcher_count, terminal_outcome, terminal_buffered >>
+vars == << phase, model_step_count, known_operations, operation_status, operation_kind, peer_ready, progress_count, watcher_count, terminal_outcome, terminal_buffered, completed_order, max_completed, max_concurrent, active_count, created_at_ms, completed_at_ms >>
 
 status_of(operation_id) == (IF (operation_id \in known_operations) THEN (IF operation_id \in DOMAIN operation_status THEN operation_status[operation_id] ELSE "None") ELSE "Absent")
 kind_of(operation_id) == (IF (operation_id \in known_operations) THEN (IF operation_id \in DOMAIN operation_kind THEN operation_kind[operation_id] ELSE "None") ELSE "None")
@@ -43,6 +45,12 @@ Init ==
     /\ watcher_count = [x \in {} |-> None]
     /\ terminal_outcome = [x \in {} |-> None]
     /\ terminal_buffered = [x \in {} |-> None]
+    /\ completed_order = <<>>
+    /\ max_completed = 256
+    /\ max_concurrent = 0
+    /\ active_count = 0
+    /\ created_at_ms = [x \in {} |-> None]
+    /\ completed_at_ms = [x \in {} |-> None]
 
 RECURSIVE OwnerTerminated_ForEach0_operation_status(_, _)
 OwnerTerminated_ForEach0_operation_status(acc, remaining) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET operation_id == item IN LET next_acc == IF is_owner_terminatable_status(status_of(operation_id)) THEN MapSet(acc, operation_id, "Terminated") ELSE acc IN OwnerTerminated_ForEach0_operation_status(next_acc, remaining \ {item})
@@ -57,6 +65,7 @@ RegisterOperation(operation_id, arg_operation_kind) ==
     /\ phase = "Active"
     /\ (status_of(operation_id) = "Absent")
     /\ (arg_operation_kind # "None")
+    /\ ((max_concurrent = 0) \/ (active_count < max_concurrent))
     /\ phase' = "Active"
     /\ model_step_count' = model_step_count + 1
     /\ known_operations' = (known_operations \cup {operation_id})
@@ -67,6 +76,10 @@ RegisterOperation(operation_id, arg_operation_kind) ==
     /\ watcher_count' = MapSet(watcher_count, operation_id, 0)
     /\ terminal_outcome' = MapSet(terminal_outcome, operation_id, "None")
     /\ terminal_buffered' = MapSet(terminal_buffered, operation_id, FALSE)
+    /\ active_count' = (active_count) + 1
+    /\ created_at_ms' = MapSet(created_at_ms, operation_id, 0)
+    /\ completed_at_ms' = MapSet(completed_at_ms, operation_id, 0)
+    /\ UNCHANGED << completed_order, max_completed, max_concurrent >>
 
 
 ProvisioningSucceeded(operation_id) ==
@@ -75,7 +88,7 @@ ProvisioningSucceeded(operation_id) ==
     /\ phase' = "Active"
     /\ model_step_count' = model_step_count + 1
     /\ operation_status' = MapSet(operation_status, operation_id, "Running")
-    /\ UNCHANGED << known_operations, operation_kind, peer_ready, progress_count, watcher_count, terminal_outcome, terminal_buffered >>
+    /\ UNCHANGED << known_operations, operation_kind, peer_ready, progress_count, watcher_count, terminal_outcome, terminal_buffered, completed_order, max_completed, max_concurrent, active_count, created_at_ms, completed_at_ms >>
 
 
 ProvisioningFailed(operation_id) ==
@@ -86,7 +99,9 @@ ProvisioningFailed(operation_id) ==
     /\ operation_status' = MapSet(operation_status, operation_id, "Failed")
     /\ terminal_outcome' = MapSet(terminal_outcome, operation_id, "Failed")
     /\ terminal_buffered' = MapSet(terminal_buffered, operation_id, TRUE)
-    /\ UNCHANGED << known_operations, operation_kind, peer_ready, progress_count, watcher_count >>
+    /\ completed_order' = Append(completed_order, operation_id)
+    /\ active_count' = (active_count) - 1
+    /\ UNCHANGED << known_operations, operation_kind, peer_ready, progress_count, watcher_count, max_completed, max_concurrent, created_at_ms, completed_at_ms >>
 
 
 PeerReady(operation_id) ==
@@ -96,7 +111,7 @@ PeerReady(operation_id) ==
     /\ phase' = "Active"
     /\ model_step_count' = model_step_count + 1
     /\ peer_ready' = MapSet(peer_ready, operation_id, TRUE)
-    /\ UNCHANGED << known_operations, operation_status, operation_kind, progress_count, watcher_count, terminal_outcome, terminal_buffered >>
+    /\ UNCHANGED << known_operations, operation_status, operation_kind, progress_count, watcher_count, terminal_outcome, terminal_buffered, completed_order, max_completed, max_concurrent, active_count, created_at_ms, completed_at_ms >>
 
 
 RegisterWatcher(operation_id) ==
@@ -105,7 +120,7 @@ RegisterWatcher(operation_id) ==
     /\ phase' = "Active"
     /\ model_step_count' = model_step_count + 1
     /\ watcher_count' = MapSet(watcher_count, operation_id, (watcher_count_of(operation_id) + 1))
-    /\ UNCHANGED << known_operations, operation_status, operation_kind, peer_ready, progress_count, terminal_outcome, terminal_buffered >>
+    /\ UNCHANGED << known_operations, operation_status, operation_kind, peer_ready, progress_count, terminal_outcome, terminal_buffered, completed_order, max_completed, max_concurrent, active_count, created_at_ms, completed_at_ms >>
 
 
 ProgressReported(operation_id) ==
@@ -114,7 +129,7 @@ ProgressReported(operation_id) ==
     /\ phase' = "Active"
     /\ model_step_count' = model_step_count + 1
     /\ progress_count' = MapSet(progress_count, operation_id, (progress_count_of(operation_id) + 1))
-    /\ UNCHANGED << known_operations, operation_status, operation_kind, peer_ready, watcher_count, terminal_outcome, terminal_buffered >>
+    /\ UNCHANGED << known_operations, operation_status, operation_kind, peer_ready, watcher_count, terminal_outcome, terminal_buffered, completed_order, max_completed, max_concurrent, active_count, created_at_ms, completed_at_ms >>
 
 
 CompleteOperation(operation_id) ==
@@ -125,7 +140,9 @@ CompleteOperation(operation_id) ==
     /\ operation_status' = MapSet(operation_status, operation_id, "Completed")
     /\ terminal_outcome' = MapSet(terminal_outcome, operation_id, "Completed")
     /\ terminal_buffered' = MapSet(terminal_buffered, operation_id, TRUE)
-    /\ UNCHANGED << known_operations, operation_kind, peer_ready, progress_count, watcher_count >>
+    /\ completed_order' = Append(completed_order, operation_id)
+    /\ active_count' = (active_count) - 1
+    /\ UNCHANGED << known_operations, operation_kind, peer_ready, progress_count, watcher_count, max_completed, max_concurrent, created_at_ms, completed_at_ms >>
 
 
 FailOperation(operation_id) ==
@@ -136,7 +153,9 @@ FailOperation(operation_id) ==
     /\ operation_status' = MapSet(operation_status, operation_id, "Failed")
     /\ terminal_outcome' = MapSet(terminal_outcome, operation_id, "Failed")
     /\ terminal_buffered' = MapSet(terminal_buffered, operation_id, TRUE)
-    /\ UNCHANGED << known_operations, operation_kind, peer_ready, progress_count, watcher_count >>
+    /\ completed_order' = Append(completed_order, operation_id)
+    /\ active_count' = (active_count) - 1
+    /\ UNCHANGED << known_operations, operation_kind, peer_ready, progress_count, watcher_count, max_completed, max_concurrent, created_at_ms, completed_at_ms >>
 
 
 CancelOperation(operation_id) ==
@@ -147,7 +166,9 @@ CancelOperation(operation_id) ==
     /\ operation_status' = MapSet(operation_status, operation_id, "Cancelled")
     /\ terminal_outcome' = MapSet(terminal_outcome, operation_id, "Cancelled")
     /\ terminal_buffered' = MapSet(terminal_buffered, operation_id, TRUE)
-    /\ UNCHANGED << known_operations, operation_kind, peer_ready, progress_count, watcher_count >>
+    /\ completed_order' = Append(completed_order, operation_id)
+    /\ active_count' = (active_count) - 1
+    /\ UNCHANGED << known_operations, operation_kind, peer_ready, progress_count, watcher_count, max_completed, max_concurrent, created_at_ms, completed_at_ms >>
 
 
 RetireRequested(operation_id) ==
@@ -156,7 +177,7 @@ RetireRequested(operation_id) ==
     /\ phase' = "Active"
     /\ model_step_count' = model_step_count + 1
     /\ operation_status' = MapSet(operation_status, operation_id, "Retiring")
-    /\ UNCHANGED << known_operations, operation_kind, peer_ready, progress_count, watcher_count, terminal_outcome, terminal_buffered >>
+    /\ UNCHANGED << known_operations, operation_kind, peer_ready, progress_count, watcher_count, terminal_outcome, terminal_buffered, completed_order, max_completed, max_concurrent, active_count, created_at_ms, completed_at_ms >>
 
 
 RetireCompleted(operation_id) ==
@@ -167,7 +188,9 @@ RetireCompleted(operation_id) ==
     /\ operation_status' = MapSet(operation_status, operation_id, "Retired")
     /\ terminal_outcome' = MapSet(terminal_outcome, operation_id, "Retired")
     /\ terminal_buffered' = MapSet(terminal_buffered, operation_id, TRUE)
-    /\ UNCHANGED << known_operations, operation_kind, peer_ready, progress_count, watcher_count >>
+    /\ completed_order' = Append(completed_order, operation_id)
+    /\ active_count' = (active_count) - 1
+    /\ UNCHANGED << known_operations, operation_kind, peer_ready, progress_count, watcher_count, max_completed, max_concurrent, created_at_ms, completed_at_ms >>
 
 
 CollectTerminal(operation_id) ==
@@ -177,7 +200,7 @@ CollectTerminal(operation_id) ==
     /\ phase' = "Active"
     /\ model_step_count' = model_step_count + 1
     /\ terminal_buffered' = MapSet(terminal_buffered, operation_id, FALSE)
-    /\ UNCHANGED << known_operations, operation_status, operation_kind, peer_ready, progress_count, watcher_count, terminal_outcome >>
+    /\ UNCHANGED << known_operations, operation_status, operation_kind, peer_ready, progress_count, watcher_count, terminal_outcome, completed_order, max_completed, max_concurrent, active_count, created_at_ms, completed_at_ms >>
 
 
 OwnerTerminated ==
@@ -187,7 +210,21 @@ OwnerTerminated ==
     /\ operation_status' = OwnerTerminated_ForEach0_operation_status(operation_status, known_operations)
     /\ terminal_outcome' = OwnerTerminated_ForEach0_terminal_outcome(terminal_outcome, known_operations)
     /\ terminal_buffered' = OwnerTerminated_ForEach0_terminal_buffered(terminal_buffered, known_operations)
-    /\ UNCHANGED << known_operations, operation_kind, peer_ready, progress_count, watcher_count >>
+    /\ UNCHANGED << known_operations, operation_kind, peer_ready, progress_count, watcher_count, completed_order, max_completed, max_concurrent, active_count, created_at_ms, completed_at_ms >>
+
+
+WaitAll(operation_ids) ==
+    /\ phase = "Active"
+    /\ phase' = "Active"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << known_operations, operation_status, operation_kind, peer_ready, progress_count, watcher_count, terminal_outcome, terminal_buffered, completed_order, max_completed, max_concurrent, active_count, created_at_ms, completed_at_ms >>
+
+
+CollectCompleted ==
+    /\ phase = "Active"
+    /\ phase' = "Active"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << known_operations, operation_status, operation_kind, peer_ready, progress_count, watcher_count, terminal_outcome, terminal_buffered, completed_order, max_completed, max_concurrent, active_count, created_at_ms, completed_at_ms >>
 
 
 Next ==
@@ -204,6 +241,8 @@ Next ==
     \/ \E operation_id \in OperationIdValues : RetireCompleted(operation_id)
     \/ \E operation_id \in OperationIdValues : CollectTerminal(operation_id)
     \/ OwnerTerminated
+    \/ \E operation_ids \in SeqOfOperationIdValues : WaitAll(operation_ids)
+    \/ CollectCompleted
 
 terminal_buffered_only_for_terminal_states == (\A operation_id \in known_operations : (~(terminal_buffered_of(operation_id)) \/ is_terminal_status(status_of(operation_id))))
 peer_ready_implies_mob_member_child == (\A operation_id \in known_operations : (~(peer_ready_of(operation_id)) \/ (kind_of(operation_id) = "MobMemberChild")))
@@ -212,8 +251,8 @@ present_operations_keep_kind_identity == (\A operation_id \in known_operations :
 terminal_statuses_have_matching_terminal_outcome == (\A operation_id \in known_operations : (~(is_terminal_status(status_of(operation_id))) \/ terminal_outcome_matches_status(status_of(operation_id), terminal_outcome_of(operation_id))))
 nonterminal_statuses_have_no_terminal_outcome == (\A operation_id \in known_operations : (is_terminal_status(status_of(operation_id)) \/ (terminal_outcome_of(operation_id) = "None")))
 
-CiStateConstraint == /\ model_step_count <= 6 /\ Cardinality(known_operations) <= 1 /\ Cardinality(DOMAIN operation_status) <= 1 /\ Cardinality(DOMAIN operation_kind) <= 1 /\ Cardinality(DOMAIN peer_ready) <= 1 /\ Cardinality(DOMAIN progress_count) <= 1 /\ Cardinality(DOMAIN watcher_count) <= 1 /\ Cardinality(DOMAIN terminal_outcome) <= 1 /\ Cardinality(DOMAIN terminal_buffered) <= 1
-DeepStateConstraint == /\ model_step_count <= 8 /\ Cardinality(known_operations) <= 2 /\ Cardinality(DOMAIN operation_status) <= 2 /\ Cardinality(DOMAIN operation_kind) <= 2 /\ Cardinality(DOMAIN peer_ready) <= 2 /\ Cardinality(DOMAIN progress_count) <= 2 /\ Cardinality(DOMAIN watcher_count) <= 2 /\ Cardinality(DOMAIN terminal_outcome) <= 2 /\ Cardinality(DOMAIN terminal_buffered) <= 2
+CiStateConstraint == /\ model_step_count <= 6 /\ Cardinality(known_operations) <= 1 /\ Cardinality(DOMAIN operation_status) <= 1 /\ Cardinality(DOMAIN operation_kind) <= 1 /\ Cardinality(DOMAIN peer_ready) <= 1 /\ Cardinality(DOMAIN progress_count) <= 1 /\ Cardinality(DOMAIN watcher_count) <= 1 /\ Cardinality(DOMAIN terminal_outcome) <= 1 /\ Cardinality(DOMAIN terminal_buffered) <= 1 /\ Len(completed_order) <= 1 /\ Cardinality(DOMAIN created_at_ms) <= 1 /\ Cardinality(DOMAIN completed_at_ms) <= 1
+DeepStateConstraint == /\ model_step_count <= 8 /\ Cardinality(known_operations) <= 2 /\ Cardinality(DOMAIN operation_status) <= 2 /\ Cardinality(DOMAIN operation_kind) <= 2 /\ Cardinality(DOMAIN peer_ready) <= 2 /\ Cardinality(DOMAIN progress_count) <= 2 /\ Cardinality(DOMAIN watcher_count) <= 2 /\ Cardinality(DOMAIN terminal_outcome) <= 2 /\ Cardinality(DOMAIN terminal_buffered) <= 2 /\ Len(completed_order) <= 2 /\ Cardinality(DOMAIN created_at_ms) <= 2 /\ Cardinality(DOMAIN completed_at_ms) <= 2
 
 Spec == Init /\ [][Next]_vars
 

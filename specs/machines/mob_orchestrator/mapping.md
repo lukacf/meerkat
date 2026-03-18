@@ -105,6 +105,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `DestroyOrchestrator`
   - anchors: `mob_runtime_actor`, `mob_runtime_builder`, `mob_definition`
   - scenarios: `coordinator-bind-and-supervise`, `topology-revision`
+- `ForceCancelMember`
+  - anchors: `mob_runtime_actor`, `mob_runtime_builder`, `mob_definition`
+  - scenarios: `coordinator-bind-and-supervise`, `topology-revision`
+- `RespawnMember`
+  - anchors: `mob_runtime_actor`, `mob_runtime_builder`, `mob_definition`
+  - scenarios: `pending-spawn-ledger`
 
 ### Effects
 - `ActivateSupervisor`
@@ -122,6 +128,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `EmitOrchestratorNotice`
   - anchors: `mob_runtime_actor`, `mob_runtime_builder`, `mob_definition`
   - scenarios: `coordinator-bind-and-supervise`, `topology-revision`
+- `MemberForceCancelled`
+  - anchors: `mob_runtime_actor`, `mob_runtime_builder`, `mob_definition`
+  - scenarios: `coordinator-bind-and-supervise`, `topology-revision`
+- `MemberRespawnInitiated`
+  - anchors: `mob_runtime_actor`, `mob_runtime_builder`, `mob_definition`
+  - scenarios: `pending-spawn-ledger`
 
 ### Invariants
 - `destroyed_is_terminal`

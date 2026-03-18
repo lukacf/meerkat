@@ -86,7 +86,10 @@ use tools::compose_external_tools_for_profile;
 pub use builder::MobBuilder;
 pub use event_router::{MobEventRouterConfig, MobEventRouterHandle};
 pub use flow_run_kernel::FlowRunKernel;
-pub use handle::{MemberHandle, MobEventsView, MobHandle, SpawnMemberSpec};
+pub use handle::{
+    HelperOptions, HelperResult, MemberExecutionSnapshot, MemberExecutionStatus, MemberHandle,
+    MobEventsView, MobHandle, SpawnMemberSpec,
+};
 pub use orchestrator_kernel::{MobOrchestratorKernel, MobOrchestratorSnapshot};
 pub use session_service::MobSessionService;
 pub use spawn_policy::{SpawnPolicy, SpawnSpec};

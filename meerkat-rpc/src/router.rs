@@ -644,6 +644,22 @@ impl MethodRouter {
                 handlers::mob::handle_flow_cancel(id, params, &self.mob_state).await
             }
             #[cfg(feature = "mob")]
+            "mob/spawn_helper" => {
+                handlers::mob::handle_spawn_helper(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/fork_helper" => {
+                handlers::mob::handle_fork_helper(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/force_cancel" => {
+                handlers::mob::handle_force_cancel(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/member_status" => {
+                handlers::mob::handle_member_status(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
             "mob/stream_open" => self.handle_mob_stream_open(id, params).await,
             #[cfg(feature = "mob")]
             "mob/stream_close" => self.handle_mob_stream_close(id, params).await,

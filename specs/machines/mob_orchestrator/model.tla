@@ -137,6 +137,23 @@ DestroyOrchestrator ==
     /\ UNCHANGED << pending_spawn_count, active_flow_count, topology_revision >>
 
 
+ForceCancelMember ==
+    /\ phase = "Running"
+    /\ (coordinator_bound = TRUE)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << coordinator_bound, pending_spawn_count, active_flow_count, topology_revision, supervisor_active >>
+
+
+RespawnMember ==
+    /\ phase = "Running"
+    /\ (coordinator_bound = TRUE)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ topology_revision' = (topology_revision) + 1
+    /\ UNCHANGED << coordinator_bound, pending_spawn_count, active_flow_count, supervisor_active >>
+
+
 Next ==
     \/ InitializeOrchestrator
     \/ BindCoordinator
@@ -149,6 +166,8 @@ Next ==
     \/ ResumeOrchestrator
     \/ MarkCompleted
     \/ DestroyOrchestrator
+    \/ ForceCancelMember
+    \/ RespawnMember
     \/ TerminalStutter
 
 destroyed_is_terminal == ((phase # "Destroyed") \/ (supervisor_active # TRUE))

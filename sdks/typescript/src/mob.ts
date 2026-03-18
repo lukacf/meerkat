@@ -40,6 +40,29 @@ export class Mob {
     await this.client.respawnMobMember(this.mobId, meerkatId, initialMessage);
   }
 
+  async forceCancel(meerkatId: string): Promise<void> {
+    await this.client.forceCancelMobMember(this.mobId, meerkatId);
+  }
+
+  async memberStatus(meerkatId: string): Promise<Record<string, unknown>> {
+    return this.client.mobMemberStatus(this.mobId, meerkatId);
+  }
+
+  async spawnHelper(
+    prompt: string,
+    options?: { meerkatId?: string; profileName?: string },
+  ): Promise<Record<string, unknown>> {
+    return this.client.spawnMobHelper(this.mobId, prompt, options);
+  }
+
+  async forkHelper(
+    sourceMemberId: string,
+    prompt: string,
+    options?: { meerkatId?: string; profileName?: string; forkContext?: Record<string, unknown> },
+  ): Promise<Record<string, unknown>> {
+    return this.client.forkMobHelper(this.mobId, sourceMemberId, prompt, options);
+  }
+
   async wire(a: string, b: string): Promise<void> {
     await this.client.wireMobMembers(this.mobId, a, b);
   }

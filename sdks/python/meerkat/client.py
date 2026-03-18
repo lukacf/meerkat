@@ -696,6 +696,54 @@ class MeerkatClient:
     async def respawn_mob_member(self, mob_id: str, meerkat_id: str, initial_message: str | None = None) -> None:
         await self._request("mob/respawn", {"mob_id": mob_id, "meerkat_id": meerkat_id, "initial_message": initial_message})
 
+    async def force_cancel_mob_member(self, mob_id: str, meerkat_id: str) -> None:
+        await self._request("mob/force_cancel", {"mob_id": mob_id, "meerkat_id": meerkat_id})
+
+    async def mob_member_status(self, mob_id: str, meerkat_id: str) -> dict[str, Any]:
+        return await self._request("mob/member_status", {"mob_id": mob_id, "meerkat_id": meerkat_id})
+
+    async def spawn_mob_helper(
+        self,
+        mob_id: str,
+        prompt: str,
+        *,
+        meerkat_id: str | None = None,
+        profile_name: str | None = None,
+        runtime_mode: str | None = None,
+        backend: str | None = None,
+    ) -> dict[str, Any]:
+        return await self._request("mob/spawn_helper", {
+            "mob_id": mob_id,
+            "prompt": prompt,
+            "meerkat_id": meerkat_id,
+            "profile_name": profile_name,
+            "runtime_mode": runtime_mode,
+            "backend": backend,
+        })
+
+    async def fork_mob_helper(
+        self,
+        mob_id: str,
+        source_member_id: str,
+        prompt: str,
+        *,
+        meerkat_id: str | None = None,
+        profile_name: str | None = None,
+        fork_context: dict[str, Any] | None = None,
+        runtime_mode: str | None = None,
+        backend: str | None = None,
+    ) -> dict[str, Any]:
+        return await self._request("mob/fork_helper", {
+            "mob_id": mob_id,
+            "source_member_id": source_member_id,
+            "prompt": prompt,
+            "meerkat_id": meerkat_id,
+            "profile_name": profile_name,
+            "fork_context": fork_context,
+            "runtime_mode": runtime_mode,
+            "backend": backend,
+        })
+
     async def wire_mob_members(self, mob_id: str, a: str, b: str) -> None:
         await self._request("mob/wire", {"mob_id": mob_id, "a": a, "b": b})
 

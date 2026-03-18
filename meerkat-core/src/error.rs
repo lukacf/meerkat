@@ -212,16 +212,8 @@ pub enum AgentError {
     ConcurrencyLimitExceeded,
     #[error("Configuration error: {0}")]
     ConfigError(String),
-    #[error("Delegated branch limit exceeded: max {limit} concurrent delegated branches")]
-    DelegatedBranchLimitExceeded { limit: usize },
-    #[error("Delegated branch not found: {id}")]
-    DelegatedBranchNotFound { id: String },
-    #[error("Delegated branch {id} not running (state: {state})")]
-    DelegatedBranchNotRunning { id: String, state: String },
     #[error("Invalid tool in access policy: {tool}")]
     InvalidToolAccess { tool: String },
-    #[error("Delegated branch spawn failed: {reason}")]
-    DelegatedBranchSpawnFailed { reason: String },
     #[error("Internal error: {0}")]
     InternalError(String),
 

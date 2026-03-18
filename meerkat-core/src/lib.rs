@@ -115,9 +115,9 @@ pub use lifecycle::{
 };
 pub use mcp_config::{McpConfig, McpConfigError, McpScope, McpServerConfig, McpServerWithScope};
 pub use ops::{
-    ConcurrencyLimits, ContextStrategy, DelegatedBranchState, ForkBranch, ForkBudgetPolicy,
-    OpEvent, OperationId, OperationPolicy, OperationResult, OperationSpec, ResultShape, SpawnSpec,
-    ToolAccessPolicy, WorkKind,
+    ConcurrencyLimits, ContextStrategy, ForkBranch, ForkBudgetPolicy, OpEvent, OperationId,
+    OperationPolicy, OperationResult, OperationSpec, ResultShape, SpawnSpec, ToolAccessPolicy,
+    WorkKind,
 };
 pub use ops_lifecycle::{
     OperationCompletionWatch, OperationKind, OperationLifecycleSnapshot, OperationPeerHandle,

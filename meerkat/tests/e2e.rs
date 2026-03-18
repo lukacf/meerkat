@@ -1334,15 +1334,15 @@ mod parallel_tools {
 // E2E: SUB-AGENT OPERATIONS
 // ============================================================================
 
-/// E2E: delegated-branch operations
+/// E2E: mob member operations
 /// Tests fork, spawn, context strategies, tool access policies, and depth limits.
-mod delegated_branch_ops {
+mod mob_member_ops {
     use super::*;
     use meerkat::{ConcurrencyLimits, ForkBranch, ForkBudgetPolicy, SpawnSpec};
 
     #[tokio::test]
     #[ignore = "integration-real: live API"]
-    async fn e2e_delegated_branch_fork_and_return() {
+    async fn e2e_mob_member_fork_and_return() {
         let Some(api_key) = anthropic_api_key() else {
             eprintln!("Skipping: missing ANTHROPIC_API_KEY (or RKAT_ANTHROPIC_API_KEY)");
             return;
@@ -1395,7 +1395,7 @@ mod delegated_branch_ops {
 
     #[tokio::test]
     #[ignore = "integration-real: live API"]
-    async fn e2e_delegated_branch_spawn() {
+    async fn e2e_mob_member_spawn() {
         let Some(api_key) = anthropic_api_key() else {
             eprintln!("Skipping: missing ANTHROPIC_API_KEY (or RKAT_ANTHROPIC_API_KEY)");
             return;

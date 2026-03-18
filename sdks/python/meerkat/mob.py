@@ -77,6 +77,44 @@ class Mob:
     async def respawn(self, meerkat_id: str, initial_message: str | None = None) -> None:
         await self._client.respawn_mob_member(self.id, meerkat_id, initial_message)
 
+    async def force_cancel(self, meerkat_id: str) -> None:
+        await self._client.force_cancel_mob_member(self.id, meerkat_id)
+
+    async def member_status(self, meerkat_id: str) -> dict[str, Any]:
+        return await self._client.mob_member_status(self.id, meerkat_id)
+
+    async def spawn_helper(
+        self,
+        prompt: str,
+        *,
+        meerkat_id: str | None = None,
+        profile_name: str | None = None,
+    ) -> dict[str, Any]:
+        return await self._client.spawn_mob_helper(
+            self.id,
+            prompt,
+            meerkat_id=meerkat_id,
+            profile_name=profile_name,
+        )
+
+    async def fork_helper(
+        self,
+        source_member_id: str,
+        prompt: str,
+        *,
+        meerkat_id: str | None = None,
+        profile_name: str | None = None,
+        fork_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await self._client.fork_mob_helper(
+            self.id,
+            source_member_id,
+            prompt,
+            meerkat_id=meerkat_id,
+            profile_name=profile_name,
+            fork_context=fork_context,
+        )
+
     async def wire(self, a: str, b: str) -> None:
         await self._client.wire_mob_members(self.id, a, b)
 

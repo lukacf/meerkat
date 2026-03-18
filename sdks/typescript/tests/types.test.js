@@ -222,16 +222,15 @@ describe("Typed Events", () => {
 
   it("should parse scoped wrapper events", () => {
     const event = parseEvent({
-      scope_id: "primary/sub:op-1",
+      scope_id: "mob:writer",
       scope_path: [
-        { scope: "primary", session_id: "s1" },
-        { scope: "sub_agent", agent_id: "op-1", label: "spawn" },
+        { scope: "mob_member", flow_run_id: "run_1", member_ref: "writer", session_id: "s1" },
       ],
       event: { type: "text_delta", delta: "hello" },
     });
     assert.equal(event.type, "scoped_agent_event");
     if (event.type === "scoped_agent_event") {
-      assert.equal(event.scopeId, "primary/sub:op-1");
+      assert.equal(event.scopeId, "mob:writer");
       assert.equal(event.event.type, "text_delta");
     }
   });

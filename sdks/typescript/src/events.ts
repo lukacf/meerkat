@@ -73,12 +73,6 @@ export type StreamScopeFrame =
       readonly flow_run_id: string;
       readonly member_ref: string;
       readonly session_id: string;
-    }
-  | {
-      readonly scope: "delegated_branch" | "sub_agent";
-      readonly agent_id: string;
-      readonly tool_call_id?: string;
-      readonly label?: string;
     };
 
 export interface ScopedAgentEvent {

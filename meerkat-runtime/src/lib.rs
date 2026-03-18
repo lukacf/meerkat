@@ -47,6 +47,7 @@ pub(crate) mod runtime_loop;
 pub mod runtime_state;
 pub mod service_ext;
 pub mod session_adapter;
+pub mod silent_intent;
 pub mod state_machine;
 pub mod store;
 pub mod traits;
@@ -77,7 +78,7 @@ pub use input_state::{
     InputTerminalOutcome, PolicySnapshot, ReconstructionSource,
 };
 pub use lifecycle_ops::{abandon_non_terminal, would_abandon};
-pub use ops_lifecycle::RuntimeOpsLifecycleRegistry;
+pub use ops_lifecycle::{OpsLifecycleConfig, RuntimeOpsLifecycleRegistry};
 pub use policy::{
     ApplyMode, ConsumePoint, DrainPolicy, InterruptPolicy, PolicyDecision, QueueMode,
     RoutingDisposition, WakeMode,

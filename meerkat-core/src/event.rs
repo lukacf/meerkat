@@ -417,15 +417,6 @@ pub enum StreamScopeFrame {
         member_ref: String,
         session_id: String,
     },
-    /// Delegated branch scope nested under a parent scope.
-    #[serde(rename = "delegated_branch", alias = "sub_agent")]
-    DelegatedBranch {
-        agent_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        tool_call_id: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        label: Option<String>,
-    },
 }
 
 /// Attributed stream event wrapper for multi-agent streaming.
@@ -474,8 +465,6 @@ impl ScopedAgentEvent {
     /// Formats:
     /// - `primary`
     /// - `mob:<member_ref>`
-    /// - `primary/sub:<agent_id>`
-    /// - `mob:<member_ref>/sub:<agent_id>`
     pub fn scope_id_from_path(path: &[StreamScopeFrame]) -> String {
         if path.is_empty() {
             return "primary".to_string();
@@ -486,9 +475,6 @@ impl ScopedAgentEvent {
                 StreamScopeFrame::Primary { .. } => segments.push("primary".to_string()),
                 StreamScopeFrame::MobMember { member_ref, .. } => {
                     segments.push(format!("mob:{member_ref}"));
-                }
-                StreamScopeFrame::DelegatedBranch { agent_id, .. } => {
-                    segments.push(format!("sub:{agent_id}"));
                 }
             }
         }
@@ -756,28 +742,21 @@ mod tests {
     #[test]
     fn test_scoped_agent_event_roundtrip() {
         let event = ScopedAgentEvent::new(
-            vec![
-                StreamScopeFrame::MobMember {
-                    flow_run_id: "run_123".to_string(),
-                    member_ref: "writer".to_string(),
-                    session_id: "sid_1".to_string(),
-                },
-                StreamScopeFrame::DelegatedBranch {
-                    agent_id: "op_abc".to_string(),
-                    tool_call_id: Some("tool_1".to_string()),
-                    label: Some("fork-op_abc".to_string()),
-                },
-            ],
+            vec![StreamScopeFrame::MobMember {
+                flow_run_id: "run_123".to_string(),
+                member_ref: "writer".to_string(),
+                session_id: "sid_1".to_string(),
+            }],
             AgentEvent::TextDelta {
                 delta: "hello".to_string(),
             },
         );
 
-        assert_eq!(event.scope_id, "mob:writer/sub:op_abc");
+        assert_eq!(event.scope_id, "mob:writer");
 
         let json = serde_json::to_value(&event).unwrap();
         let roundtrip: ScopedAgentEvent = serde_json::from_value(json).unwrap();
-        assert_eq!(roundtrip.scope_id, "mob:writer/sub:op_abc");
+        assert_eq!(roundtrip.scope_id, "mob:writer");
         assert!(matches!(
             roundtrip.event,
             AgentEvent::TextDelta { ref delta } if delta == "hello"
@@ -791,37 +770,12 @@ mod tests {
         }];
         assert_eq!(ScopedAgentEvent::scope_id_from_path(&primary), "primary");
 
-        let primary_sub = vec![
-            StreamScopeFrame::Primary {
-                session_id: "sid_x".to_string(),
-            },
-            StreamScopeFrame::DelegatedBranch {
-                agent_id: "op_1".to_string(),
-                tool_call_id: None,
-                label: None,
-            },
-        ];
-        assert_eq!(
-            ScopedAgentEvent::scope_id_from_path(&primary_sub),
-            "primary/sub:op_1"
-        );
-
-        let mob_sub = vec![
-            StreamScopeFrame::MobMember {
-                flow_run_id: "run_1".to_string(),
-                member_ref: "planner".to_string(),
-                session_id: "sid_m".to_string(),
-            },
-            StreamScopeFrame::DelegatedBranch {
-                agent_id: "op_2".to_string(),
-                tool_call_id: None,
-                label: None,
-            },
-        ];
-        assert_eq!(
-            ScopedAgentEvent::scope_id_from_path(&mob_sub),
-            "mob:planner/sub:op_2"
-        );
+        let mob = vec![StreamScopeFrame::MobMember {
+            flow_run_id: "run_1".to_string(),
+            member_ref: "planner".to_string(),
+            session_id: "sid_m".to_string(),
+        }];
+        assert_eq!(ScopedAgentEvent::scope_id_from_path(&mob), "mob:planner");
     }
 
     #[test]

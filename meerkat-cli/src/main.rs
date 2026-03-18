@@ -964,6 +964,73 @@ enum MobCommands {
     },
     /// Show JSON status for a flow run.
     FlowStatus { mob_id: String, run_id: String },
+    /// Spawn a short-lived helper member, wait for it to finish, and print the result.
+    SpawnHelper {
+        /// Mob ID to spawn into
+        mob_id: String,
+        /// Task prompt for the helper
+        prompt: String,
+        /// Meerkat ID for the helper (auto-generated if omitted)
+        #[arg(long)]
+        meerkat_id: Option<String>,
+        /// Profile to use
+        #[arg(long)]
+        profile: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Fork from an existing member's context, wait for completion, and print the result.
+    ForkHelper {
+        /// Mob ID
+        mob_id: String,
+        /// Source member to fork from
+        source_member: String,
+        /// Task prompt for the forked helper
+        prompt: String,
+        /// Meerkat ID for the helper (auto-generated if omitted)
+        #[arg(long)]
+        meerkat_id: Option<String>,
+        /// Profile to use
+        #[arg(long)]
+        profile: Option<String>,
+        /// Fork context type (full-history or last-messages)
+        #[arg(long, default_value = "full-history")]
+        fork_context: String,
+        /// Number of last messages (when fork-context is last-messages)
+        #[arg(long)]
+        last_messages: Option<u32>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Get execution status snapshot for a mob member.
+    MemberStatus {
+        /// Mob ID
+        mob_id: String,
+        /// Meerkat ID of the member
+        meerkat_id: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Force-cancel a member's in-flight turn.
+    ForceCancel {
+        /// Mob ID
+        mob_id: String,
+        /// Meerkat ID of the member to cancel
+        meerkat_id: String,
+    },
+    /// Retire and respawn a mob member with the same profile.
+    Respawn {
+        /// Mob ID
+        mob_id: String,
+        /// Meerkat ID to respawn
+        meerkat_id: String,
+        /// Initial message for the respawned member
+        #[arg(long)]
+        initial_message: Option<String>,
+    },
     /// Web deployment commands.
     Web {
         #[command(subcommand)]
@@ -5061,6 +5128,163 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             println!("{}", render_flow_status_json(resolved)?);
             Ok(())
         }
+        MobCommands::SpawnHelper {
+            mob_id,
+            prompt,
+            meerkat_id,
+            profile,
+            json,
+        } => {
+            let mid = meerkat_mob::MeerkatId::from(meerkat_id.unwrap_or_else(|| {
+                format!(
+                    "helper-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0)
+                )
+            }));
+            let mut options = meerkat_mob::HelperOptions::default();
+            if let Some(p) = profile {
+                options.profile_name = Some(meerkat_mob::ProfileName::from(p));
+            }
+            let result = state
+                .mob_spawn_helper(&meerkat_mob::MobId::from(mob_id), mid, prompt, options)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "output": result.output,
+                        "tokens_used": result.tokens_used,
+                        "session_id": result.session_id,
+                    }))?
+                );
+            } else if let Some(output) = &result.output {
+                println!("{output}");
+            }
+            Ok(())
+        }
+        MobCommands::ForkHelper {
+            mob_id,
+            source_member,
+            prompt,
+            meerkat_id,
+            profile,
+            fork_context,
+            last_messages,
+            json,
+        } => {
+            let mid = meerkat_mob::MeerkatId::from(meerkat_id.unwrap_or_else(|| {
+                format!(
+                    "fork-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0)
+                )
+            }));
+            let source_id = meerkat_mob::MeerkatId::from(source_member);
+            let ctx = match fork_context.as_str() {
+                "last-messages" => {
+                    let count = last_messages.unwrap_or(10);
+                    meerkat_mob::ForkContext::LastMessages { count }
+                }
+                _ => meerkat_mob::ForkContext::FullHistory,
+            };
+            let mut options = meerkat_mob::HelperOptions::default();
+            if let Some(p) = profile {
+                options.profile_name = Some(meerkat_mob::ProfileName::from(p));
+            }
+            let result = state
+                .mob_fork_helper(
+                    &meerkat_mob::MobId::from(mob_id),
+                    &source_id,
+                    mid,
+                    prompt,
+                    ctx,
+                    options,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "output": result.output,
+                        "tokens_used": result.tokens_used,
+                        "session_id": result.session_id,
+                    }))?
+                );
+            } else if let Some(output) = &result.output {
+                println!("{output}");
+            }
+            Ok(())
+        }
+        MobCommands::MemberStatus {
+            mob_id,
+            meerkat_id,
+            json,
+        } => {
+            let snapshot = state
+                .mob_member_status(
+                    &meerkat_mob::MobId::from(mob_id),
+                    &meerkat_mob::MeerkatId::from(meerkat_id),
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "status": format!("{:?}", snapshot.status),
+                        "output_preview": snapshot.output_preview,
+                        "tokens_used": snapshot.tokens_used,
+                        "is_final": snapshot.is_final,
+                        "error": snapshot.error,
+                    }))?
+                );
+            } else {
+                println!("status: {:?}", snapshot.status);
+                println!("tokens_used: {}", snapshot.tokens_used);
+                println!("is_final: {}", snapshot.is_final);
+                if let Some(preview) = &snapshot.output_preview {
+                    println!("output: {preview}");
+                }
+                if let Some(error) = &snapshot.error {
+                    println!("error: {error}");
+                }
+            }
+            Ok(())
+        }
+        MobCommands::ForceCancel { mob_id, meerkat_id } => {
+            state
+                .mob_force_cancel(
+                    &meerkat_mob::MobId::from(mob_id),
+                    meerkat_mob::MeerkatId::from(meerkat_id),
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("cancelled");
+            Ok(())
+        }
+        MobCommands::Respawn {
+            mob_id,
+            meerkat_id,
+            initial_message,
+        } => {
+            state
+                .mob_respawn(
+                    &meerkat_mob::MobId::from(mob_id),
+                    meerkat_mob::MeerkatId::from(meerkat_id),
+                    initial_message,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("respawned");
+            Ok(())
+        }
         MobCommands::Pack { .. }
         | MobCommands::Inspect { .. }
         | MobCommands::Validate { .. }
@@ -6929,7 +7153,12 @@ mod tests {
         assert!(mob.contains("flow-status"));
         assert!(!mob.contains("prefabs"));
         assert!(!mob.contains("create"));
-        assert!(!mob.contains("spawn"));
+        // spawn-helper and fork-helper are user-facing; raw "spawn" is not
+        assert!(mob.contains("spawn-helper"));
+        assert!(mob.contains("fork-helper"));
+        assert!(mob.contains("member-status"));
+        assert!(mob.contains("force-cancel"));
+        assert!(mob.contains("respawn"));
     }
 
     #[test]

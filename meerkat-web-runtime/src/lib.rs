@@ -1689,22 +1689,21 @@ pub async fn mob_spawn(mob_id: &str, specs_json: &str) -> Result<JsValue, JsValu
 
     let mut spawn_specs = Vec::with_capacity(specs.len());
     for s in specs {
-        let resume_session_id = match s.resume_session_id {
-            Some(id) => Some(meerkat_core::SessionId::parse(&id).map_err(|_| {
-                err_js(
-                    "invalid_resume_session_id",
-                    &format!("invalid session ID: {id}"),
-                )
-            })?),
-            None => None,
-        };
         let mut spec = meerkat_mob::SpawnMemberSpec::new(s.profile.as_str(), s.meerkat_id.as_str());
         spec.initial_message = s.initial_message;
         spec.runtime_mode = s.runtime_mode;
         spec.backend = s.backend;
         spec.context = s.context;
         spec.labels = s.labels;
-        spec.resume_session_id = resume_session_id;
+        if let Some(id) = s.resume_session_id {
+            let sid = meerkat_core::SessionId::parse(&id).map_err(|_| {
+                err_js(
+                    "invalid_resume_session_id",
+                    &format!("invalid session ID: {id}"),
+                )
+            })?;
+            spec = spec.with_resume_session_id(sid);
+        }
         spec.additional_instructions = s.additional_instructions;
         spawn_specs.push(spec);
     }

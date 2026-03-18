@@ -41,6 +41,7 @@ pub mod definition;
 pub mod error;
 pub mod event;
 pub mod ids;
+pub mod launch;
 pub mod prefab;
 pub mod profile;
 pub mod roster;
@@ -62,6 +63,7 @@ pub use event::{
     MobEventKindCompat, NewMobEvent,
 };
 pub use ids::{BranchId, FlowId, MeerkatId, MobId, ProfileName, RunId, StepId, TaskId};
+pub use launch::{BudgetSplitPolicy, ForkContext, MemberLaunchMode};
 pub use prefab::Prefab;
 pub use profile::{Profile, ToolConfig};
 pub use roster::{MemberState, Roster, RosterAddEntry, RosterEntry};
@@ -71,8 +73,9 @@ pub use run::{
 };
 pub use runtime::{FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition};
 pub use runtime::{
-    MemberHandle, MobBuilder, MobEventRouterConfig, MobEventRouterHandle, MobHandle,
-    MobSessionService, MobState, SpawnMemberSpec, SpawnPolicy, SpawnSpec,
+    HelperOptions, HelperResult, MemberExecutionSnapshot, MemberExecutionStatus, MemberHandle,
+    MobBuilder, MobEventRouterConfig, MobEventRouterHandle, MobHandle, MobSessionService, MobState,
+    SpawnMemberSpec, SpawnPolicy, SpawnSpec,
 };
 pub use runtime_mode::MobRuntimeMode;
 pub use spec::SpecValidator;

@@ -9,7 +9,7 @@ use crate::{
 pub fn runtime_control_machine() -> MachineSchema {
     MachineSchema {
         machine: "RuntimeControlMachine".into(),
-        version: 1,
+        version: 2,
         rust: RustBinding {
             crate_name: "meerkat-runtime".into(),
             module: "machines::runtime_control".into(),
@@ -125,6 +125,9 @@ pub fn runtime_control_machine() -> MachineSchema {
                 variant("DestroyRequested"),
                 variant("ResumeRequested"),
                 variant("ExternalToolDeltaReceived"),
+                // Phase D: respawn preserves identity, creates new session
+                variant("RespawnRequested"),
+                variant("RespawnSucceeded"),
             ],
         },
         effects: EnumSchema {
@@ -171,6 +174,11 @@ pub fn runtime_control_machine() -> MachineSchema {
                 VariantSchema {
                     name: "ApplyControlPlaneCommand".into(),
                     fields: vec![field("command", TypeRef::String)],
+                },
+                // Phase D: respawn — same identity, new session
+                VariantSchema {
+                    name: "InitiateRespawn".into(),
+                    fields: vec![],
                 },
             ],
         },
@@ -802,6 +810,91 @@ pub fn runtime_control_machine() -> MachineSchema {
                     fields: IndexMap::from([
                         ("kind".into(), Expr::String("ExternalToolDelta".into())),
                         ("detail".into(), Expr::String("Received".into())),
+                    ]),
+                }],
+            },
+            // Phase D: Respawn — preserves member identity, creates new session
+            TransitionSchema {
+                name: "RespawnRequestedFromRetired".into(),
+                from: vec!["Retired".into()],
+                on: InputMatch {
+                    variant: "RespawnRequested".into(),
+                    bindings: vec![],
+                },
+                guards: vec![Guard {
+                    name: "no_active_run".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("current_run_id".into())),
+                        Box::new(Expr::None),
+                    ),
+                }],
+                updates: vec![Update::Assign {
+                    field: "pre_run_state".into(),
+                    expr: Expr::Some(Box::new(Expr::Phase("Retired".into()))),
+                }],
+                to: "Recovering".into(),
+                emit: vec![EffectEmit {
+                    variant: "InitiateRespawn".into(),
+                    fields: IndexMap::new(),
+                }],
+            },
+            TransitionSchema {
+                name: "RespawnRequestedFromIdle".into(),
+                from: vec!["Idle".into()],
+                on: InputMatch {
+                    variant: "RespawnRequested".into(),
+                    bindings: vec![],
+                },
+                guards: vec![Guard {
+                    name: "no_active_run".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("current_run_id".into())),
+                        Box::new(Expr::None),
+                    ),
+                }],
+                updates: vec![Update::Assign {
+                    field: "pre_run_state".into(),
+                    expr: Expr::Some(Box::new(Expr::Phase("Idle".into()))),
+                }],
+                to: "Recovering".into(),
+                emit: vec![EffectEmit {
+                    variant: "InitiateRespawn".into(),
+                    fields: IndexMap::new(),
+                }],
+            },
+            // Respawn success goes Recovering → Idle
+            TransitionSchema {
+                name: "RespawnSucceeded".into(),
+                from: vec!["Recovering".into()],
+                on: InputMatch {
+                    variant: "RespawnSucceeded".into(),
+                    bindings: vec![],
+                },
+                guards: vec![],
+                updates: vec![
+                    Update::Assign {
+                        field: "current_run_id".into(),
+                        expr: Expr::None,
+                    },
+                    Update::Assign {
+                        field: "pre_run_state".into(),
+                        expr: Expr::None,
+                    },
+                    Update::Assign {
+                        field: "wake_pending".into(),
+                        expr: Expr::Bool(false),
+                    },
+                    Update::Assign {
+                        field: "process_pending".into(),
+                        expr: Expr::Bool(false),
+                    },
+                ],
+                to: "Idle".into(),
+                emit: vec![EffectEmit {
+                    variant: "EmitRuntimeNotice".into(),
+                    fields: IndexMap::from([
+                        ("kind".into(), Expr::String("Respawn".into())),
+                        ("detail".into(), Expr::String("Succeeded".into())),
                     ]),
                 }],
             },

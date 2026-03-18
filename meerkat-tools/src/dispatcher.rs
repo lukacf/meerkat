@@ -299,19 +299,18 @@ mod tests {
     }
 
     /// Regression test: Ensure tool access policy is actually enforced.
-    /// Previously, delegated branches could bypass allow/deny configuration.
     #[tokio::test]
     async fn test_regression_tool_access_policy_must_be_enforced() {
         let inner = Arc::new(MockDispatcher::new(vec![
             "shell",
-            "agent_spawn",
+            "dangerous_exec",
             "task_list",
             "wait",
         ]));
 
-        // Deny shell and agent_spawn - common security restriction
+        // Deny shell and dangerous_exec - common security restriction
         let policy =
-            ToolAccessPolicy::DenyList(vec!["shell".to_string(), "agent_spawn".to_string()]);
+            ToolAccessPolicy::DenyList(vec!["shell".to_string(), "dangerous_exec".to_string()]);
         let filtered = FilteredDispatcher::new(inner, &policy);
 
         // Only safe tools should be visible
@@ -326,8 +325,8 @@ mod tests {
             "shell should not be visible in tools list"
         );
         assert!(
-            !visible_tools.contains(&"agent_spawn".to_string()),
-            "agent_spawn should not be visible in tools list"
+            !visible_tools.contains(&"dangerous_exec".to_string()),
+            "dangerous_exec should not be visible in tools list"
         );
 
         // Attempting to dispatch denied tools should fail

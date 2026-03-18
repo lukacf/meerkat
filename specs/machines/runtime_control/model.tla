@@ -281,6 +281,34 @@ ExternalToolDeltaReceivedRetired ==
     /\ UNCHANGED << current_run_id, pre_run_state, wake_pending, process_pending >>
 
 
+RespawnRequestedFromRetired ==
+    /\ phase = "Retired"
+    /\ (current_run_id = None)
+    /\ phase' = "Recovering"
+    /\ model_step_count' = model_step_count + 1
+    /\ pre_run_state' = Some("Retired")
+    /\ UNCHANGED << current_run_id, wake_pending, process_pending >>
+
+
+RespawnRequestedFromIdle ==
+    /\ phase = "Idle"
+    /\ (current_run_id = None)
+    /\ phase' = "Recovering"
+    /\ model_step_count' = model_step_count + 1
+    /\ pre_run_state' = Some("Idle")
+    /\ UNCHANGED << current_run_id, wake_pending, process_pending >>
+
+
+RespawnSucceeded ==
+    /\ phase = "Recovering"
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ current_run_id' = None
+    /\ pre_run_state' = None
+    /\ wake_pending' = FALSE
+    /\ process_pending' = FALSE
+
+
 Next ==
     \/ Initialize
     \/ \E run_id \in RunIdValues : BeginRunFromIdle(run_id)
@@ -311,6 +339,9 @@ Next ==
     \/ ExternalToolDeltaReceivedRunning
     \/ ExternalToolDeltaReceivedRecovering
     \/ ExternalToolDeltaReceivedRetired
+    \/ RespawnRequestedFromRetired
+    \/ RespawnRequestedFromIdle
+    \/ RespawnSucceeded
     \/ TerminalStutter
 
 running_implies_active_run == ((phase # "Running") \/ (current_run_id # None))

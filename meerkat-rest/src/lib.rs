@@ -927,7 +927,21 @@ pub fn router(state: AppState) -> Router {
         .route("/mob/prefabs", get(mob_prefabs))
         .route("/mob/tools", get(mob_tools))
         .route("/mob/call", post(mob_call))
-        .route("/mob/{id}/events", get(mob_event_stream));
+        .route("/mob/{id}/events", get(mob_event_stream))
+        .route("/mob/{id}/spawn-helper", post(mob_spawn_helper))
+        .route("/mob/{id}/fork-helper", post(mob_fork_helper))
+        .route(
+            "/mob/{id}/members/{meerkat_id}/status",
+            get(mob_member_status),
+        )
+        .route(
+            "/mob/{id}/members/{meerkat_id}/cancel",
+            post(mob_force_cancel),
+        )
+        .route(
+            "/mob/{id}/members/{meerkat_id}/respawn",
+            post(mob_member_respawn),
+        );
 
     #[cfg(feature = "mcp")]
     let r = r
@@ -1282,6 +1296,169 @@ async fn mob_event_stream(
         };
 
     Ok(Sse::new(stream))
+}
+
+// ---------------------------------------------------------------------------
+// Mob parity endpoints
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+#[cfg(feature = "mob")]
+struct SpawnHelperRequest {
+    prompt: String,
+    #[serde(default)]
+    meerkat_id: Option<String>,
+    #[serde(default)]
+    profile_name: Option<String>,
+    #[serde(default)]
+    runtime_mode: Option<meerkat_mob::MobRuntimeMode>,
+    #[serde(default)]
+    backend: Option<meerkat_mob::MobBackendKind>,
+}
+
+/// POST /mob/{id}/spawn-helper — spawn a short-lived helper, wait, return result.
+#[cfg(feature = "mob")]
+async fn mob_spawn_helper(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<SpawnHelperRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let mob_id = meerkat_mob::MobId::from(id.as_str());
+    let meerkat_id = meerkat_mob::MeerkatId::from(
+        req.meerkat_id
+            .unwrap_or_else(|| format!("helper-{}", uuid::Uuid::new_v4())),
+    );
+    let mut options = meerkat_mob::HelperOptions::default();
+    if let Some(profile) = req.profile_name {
+        options.profile_name = Some(meerkat_mob::ProfileName::from(profile));
+    }
+    options.runtime_mode = req.runtime_mode;
+    options.backend = req.backend;
+    let result = state
+        .mob_state
+        .mob_spawn_helper(&mob_id, meerkat_id, req.prompt, options)
+        .await
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    Ok(Json(json!({
+        "output": result.output,
+        "tokens_used": result.tokens_used,
+        "session_id": result.session_id,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg(feature = "mob")]
+struct ForkHelperRequest {
+    source_member_id: String,
+    prompt: String,
+    #[serde(default)]
+    meerkat_id: Option<String>,
+    #[serde(default)]
+    profile_name: Option<String>,
+    #[serde(default)]
+    fork_context: Option<meerkat_mob::ForkContext>,
+    #[serde(default)]
+    runtime_mode: Option<meerkat_mob::MobRuntimeMode>,
+    #[serde(default)]
+    backend: Option<meerkat_mob::MobBackendKind>,
+}
+
+/// POST /mob/{id}/fork-helper — fork from a member's context, wait, return result.
+#[cfg(feature = "mob")]
+async fn mob_fork_helper(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<ForkHelperRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let mob_id = meerkat_mob::MobId::from(id.as_str());
+    let source_member_id = meerkat_mob::MeerkatId::from(req.source_member_id.as_str());
+    let meerkat_id = meerkat_mob::MeerkatId::from(
+        req.meerkat_id
+            .unwrap_or_else(|| format!("fork-{}", uuid::Uuid::new_v4())),
+    );
+    let fork_context = req
+        .fork_context
+        .unwrap_or(meerkat_mob::ForkContext::FullHistory);
+    let mut options = meerkat_mob::HelperOptions::default();
+    if let Some(profile) = req.profile_name {
+        options.profile_name = Some(meerkat_mob::ProfileName::from(profile));
+    }
+    options.runtime_mode = req.runtime_mode;
+    options.backend = req.backend;
+    let result = state
+        .mob_state
+        .mob_fork_helper(
+            &mob_id,
+            &source_member_id,
+            meerkat_id,
+            req.prompt,
+            fork_context,
+            options,
+        )
+        .await
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    Ok(Json(json!({
+        "output": result.output,
+        "tokens_used": result.tokens_used,
+        "session_id": result.session_id,
+    })))
+}
+
+/// GET /mob/{id}/members/{meerkat_id}/status — member execution snapshot.
+#[cfg(feature = "mob")]
+async fn mob_member_status(
+    State(state): State<AppState>,
+    Path((id, meerkat_id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let mob_id = meerkat_mob::MobId::from(id.as_str());
+    let meerkat_id = meerkat_mob::MeerkatId::from(meerkat_id.as_str());
+    let snapshot = state
+        .mob_state
+        .mob_member_status(&mob_id, &meerkat_id)
+        .await
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    Ok(Json(json!({
+        "status": format!("{:?}", snapshot.status),
+        "output_preview": snapshot.output_preview,
+        "tokens_used": snapshot.tokens_used,
+        "is_final": snapshot.is_final,
+        "error": snapshot.error,
+    })))
+}
+
+/// POST /mob/{id}/members/{meerkat_id}/cancel — force-cancel in-flight turn.
+#[cfg(feature = "mob")]
+async fn mob_force_cancel(
+    State(state): State<AppState>,
+    Path((id, meerkat_id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let mob_id = meerkat_mob::MobId::from(id.as_str());
+    let meerkat_id = meerkat_mob::MeerkatId::from(meerkat_id.as_str());
+    state
+        .mob_state
+        .mob_force_cancel(&mob_id, meerkat_id)
+        .await
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    Ok(Json(json!({"cancelled": true})))
+}
+
+/// POST /mob/{id}/members/{meerkat_id}/respawn — retire + respawn member.
+#[cfg(feature = "mob")]
+async fn mob_member_respawn(
+    State(state): State<AppState>,
+    Path((id, meerkat_id)): Path<(String, String)>,
+    body: Option<Json<Value>>,
+) -> Result<Json<Value>, ApiError> {
+    let mob_id = meerkat_mob::MobId::from(id.as_str());
+    let meerkat_id_val = meerkat_mob::MeerkatId::from(meerkat_id.as_str());
+    let initial_message =
+        body.and_then(|Json(v)| v.get("initial_message")?.as_str().map(String::from));
+    state
+        .mob_state
+        .mob_respawn(&mob_id, meerkat_id_val, initial_message)
+        .await
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    Ok(Json(json!({"respawned": true})))
 }
 
 /// Canonical comms send request body.

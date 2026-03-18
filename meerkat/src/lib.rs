@@ -68,7 +68,6 @@ pub use meerkat_core::{
     ConfigDelta,
     ConfigError,
     ContextStrategy,
-    DelegatedBranchState,
     ForkBranch,
     ForkBudgetPolicy,
     HookCapability,

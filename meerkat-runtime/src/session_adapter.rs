@@ -31,7 +31,10 @@ use crate::service_ext::{RuntimeMode, SessionServiceRuntimeExt};
 use crate::store::RuntimeStore;
 use crate::tokio;
 use crate::tokio::sync::{Mutex, RwLock, mpsc};
-use crate::traits::{ResetReport, RetireReport, RuntimeDriver, RuntimeDriverError};
+use crate::traits::{
+    RecoveryReport, ResetReport, RespawnReport, RetireReport, RuntimeControlPlaneError,
+    RuntimeDriver, RuntimeDriverError,
+};
 
 /// Shared driver handle used by both the adapter and the RuntimeLoop.
 pub(crate) type SharedDriver = Arc<Mutex<DriverEntry>>;
@@ -54,6 +57,14 @@ impl DriverEntry {
         match self {
             DriverEntry::Ephemeral(d) => d,
             DriverEntry::Persistent(d) => d,
+        }
+    }
+
+    /// Set the silent comms intents for the underlying driver.
+    pub(crate) fn set_silent_comms_intents(&mut self, intents: Vec<String>) {
+        match self {
+            DriverEntry::Ephemeral(d) => d.set_silent_comms_intents(intents),
+            DriverEntry::Persistent(d) => d.set_silent_comms_intents(intents),
         }
     }
 
@@ -267,6 +278,18 @@ impl RuntimeSessionAdapter {
         };
         let mut sessions = self.sessions.write().await;
         sessions.entry(session_id).or_insert(session_entry);
+    }
+
+    /// Set the silent comms intents for a session's runtime driver.
+    ///
+    /// Peer requests whose intent matches one of these strings will be accepted
+    /// without triggering an LLM turn (ApplyMode::Ignore, WakeMode::None).
+    pub async fn set_session_silent_intents(&self, session_id: &SessionId, intents: Vec<String>) {
+        let sessions = self.sessions.read().await;
+        if let Some(entry) = sessions.get(session_id) {
+            let mut driver = entry.driver.lock().await;
+            driver.set_silent_comms_intents(intents);
+        }
     }
 
     /// Register a runtime driver for a session WITH a RuntimeLoop backed by a
@@ -877,5 +900,265 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
             })?;
         let driver = entry.driver.lock().await;
         Ok(driver.as_driver().active_input_ids())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RuntimeControlPlane implementation
+// ---------------------------------------------------------------------------
+
+impl RuntimeSessionAdapter {
+    /// Resolve a LogicalRuntimeId to a SessionId for internal lookup.
+    ///
+    /// The adapter uses `LogicalRuntimeId::new(session_id.to_string())` when
+    /// creating drivers, so runtime IDs are UUID strings that parse back to
+    /// SessionId.
+    fn resolve_session_id(
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<SessionId, RuntimeControlPlaneError> {
+        runtime_id
+            .0
+            .parse::<uuid::Uuid>()
+            .map(SessionId)
+            .map_err(|_| RuntimeControlPlaneError::NotFound(runtime_id.clone()))
+    }
+
+    /// Look up the session entry for a runtime ID, returning a control-plane error
+    /// if not found.
+    async fn lookup_entry(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<
+        (
+            SessionId,
+            SharedDriver,
+            SharedCompletionRegistry,
+            Option<mpsc::Sender<()>>,
+        ),
+        RuntimeControlPlaneError,
+    > {
+        let session_id = Self::resolve_session_id(runtime_id)?;
+        let sessions = self.sessions.read().await;
+        let entry = sessions
+            .get(&session_id)
+            .ok_or_else(|| RuntimeControlPlaneError::NotFound(runtime_id.clone()))?;
+        Ok((
+            session_id,
+            entry.driver.clone(),
+            entry.completions.clone(),
+            entry.wake_tx.clone(),
+        ))
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl crate::traits::RuntimeControlPlane for RuntimeSessionAdapter {
+    async fn ingest(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        input: Input,
+    ) -> Result<AcceptOutcome, RuntimeControlPlaneError> {
+        let (session_id, driver, _completions, wake_tx) = self.lookup_entry(runtime_id).await?;
+        let _ = session_id;
+
+        let (outcome, should_wake, should_process) = {
+            let mut drv = driver.lock().await;
+            let result = drv
+                .as_driver_mut()
+                .accept_input(input)
+                .await
+                .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
+            let wake = drv.take_wake_requested();
+            let process_now = drv.take_process_requested();
+            (result, wake, process_now)
+        };
+
+        if (should_wake || should_process)
+            && let Some(ref tx) = wake_tx
+        {
+            let _ = tx.try_send(());
+        }
+
+        Ok(outcome)
+    }
+
+    async fn publish_event(
+        &self,
+        event: crate::runtime_event::RuntimeEventEnvelope,
+    ) -> Result<(), RuntimeControlPlaneError> {
+        let runtime_id = event.runtime_id.clone();
+        let (_session_id, driver, _completions, _wake_tx) = self.lookup_entry(&runtime_id).await?;
+
+        let mut drv = driver.lock().await;
+        drv.as_driver_mut()
+            .on_runtime_event(event)
+            .await
+            .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))
+    }
+
+    async fn retire(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<RetireReport, RuntimeControlPlaneError> {
+        let (session_id, driver, completions, wake_tx) = self.lookup_entry(runtime_id).await?;
+        let _ = session_id;
+
+        let mut drv = driver.lock().await;
+        let mut report = drv
+            .as_driver_mut()
+            .retire()
+            .await
+            .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
+        drop(drv);
+
+        if report.inputs_pending_drain > 0 {
+            if let Some(ref tx) = wake_tx
+                && tx.send(()).await.is_ok()
+            {
+                return Ok(report);
+            }
+
+            // No live loop — abandon queued work
+            let mut drv = driver.lock().await;
+            let abandoned = drv
+                .abandon_pending_inputs(crate::input_state::InputAbandonReason::Retired)
+                .await
+                .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
+            drop(drv);
+            let mut comp = completions.lock().await;
+            comp.resolve_all_terminated("retired without runtime loop");
+            report.inputs_abandoned += abandoned;
+            report.inputs_pending_drain = 0;
+        }
+
+        Ok(report)
+    }
+
+    async fn respawn(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<RespawnReport, RuntimeControlPlaneError> {
+        let (_session_id, driver, completions, wake_tx) = self.lookup_entry(runtime_id).await?;
+
+        // Respawn = reset the driver to Idle and re-queue any recoverable inputs.
+        // For persistent drivers, the store already has the input states; recovery
+        // will replay them. For ephemeral drivers, inputs that survived are re-queued.
+        let transferred = {
+            let mut drv = driver.lock().await;
+            let state = drv.as_driver().runtime_state();
+            if matches!(state, RuntimeState::Running) {
+                return Err(RuntimeControlPlaneError::InvalidState { state });
+            }
+
+            // Count non-terminal inputs before reset — these are transferred.
+            let active = drv.as_driver().active_input_ids().len();
+
+            // Reset to Idle, which re-queues Staged inputs and abandons nothing
+            // that can be recovered.
+            let _report = drv
+                .as_driver_mut()
+                .reset()
+                .await
+                .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
+
+            // Run recovery to rebuild queue from persisted state
+            let _recovery = drv
+                .as_driver_mut()
+                .recover()
+                .await
+                .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
+
+            active
+        };
+
+        // Resolve existing completion waiters since inputs were recycled
+        {
+            let mut comp = completions.lock().await;
+            comp.resolve_all_terminated("respawned");
+        }
+
+        // Wake the runtime loop to process re-queued inputs
+        if let Some(ref tx) = wake_tx {
+            let _ = tx.try_send(());
+        }
+
+        Ok(RespawnReport {
+            inputs_transferred: transferred,
+        })
+    }
+
+    async fn reset(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<crate::traits::ResetReport, RuntimeControlPlaneError> {
+        let (_session_id, driver, completions, _wake_tx) = self.lookup_entry(runtime_id).await?;
+
+        let mut drv = driver.lock().await;
+        if matches!(drv.as_driver().runtime_state(), RuntimeState::Running) {
+            return Err(RuntimeControlPlaneError::InvalidState {
+                state: RuntimeState::Running,
+            });
+        }
+        let report = drv
+            .as_driver_mut()
+            .reset()
+            .await
+            .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
+        drop(drv);
+
+        let mut comp = completions.lock().await;
+        comp.resolve_all_terminated("runtime reset");
+
+        Ok(report)
+    }
+
+    async fn recover(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<RecoveryReport, RuntimeControlPlaneError> {
+        let (_session_id, driver, _completions, wake_tx) = self.lookup_entry(runtime_id).await?;
+
+        let mut drv = driver.lock().await;
+        let report = drv
+            .as_driver_mut()
+            .recover()
+            .await
+            .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
+        drop(drv);
+
+        if let Some(ref tx) = wake_tx {
+            let _ = tx.try_send(());
+        }
+
+        Ok(report)
+    }
+
+    async fn runtime_state(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<RuntimeState, RuntimeControlPlaneError> {
+        let (_session_id, driver, _completions, _wake_tx) = self.lookup_entry(runtime_id).await?;
+
+        let drv = driver.lock().await;
+        Ok(drv.as_driver().runtime_state())
+    }
+
+    async fn load_boundary_receipt(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        run_id: &RunId,
+        sequence: u64,
+    ) -> Result<Option<meerkat_core::lifecycle::RunBoundaryReceipt>, RuntimeControlPlaneError> {
+        match &self.store {
+            Some(store) => store
+                .load_boundary_receipt(runtime_id, run_id, sequence)
+                .await
+                .map_err(|e| RuntimeControlPlaneError::StoreError(e.to_string())),
+            None => {
+                // Ephemeral mode — no persisted receipts
+                Ok(None)
+            }
+        }
     }
 }

@@ -45,6 +45,8 @@ pub struct EphemeralRuntimeDriver {
     wake_requested: bool,
     /// Whether immediate processing was requested without a normal wake.
     process_requested: bool,
+    /// Comms intents that should be silently accepted without triggering an LLM turn.
+    silent_comms_intents: Vec<String>,
 }
 
 impl EphemeralRuntimeDriver {
@@ -61,7 +63,13 @@ impl EphemeralRuntimeDriver {
             events: Vec::new(),
             wake_requested: false,
             process_requested: false,
+            silent_comms_intents: Vec::new(),
         }
+    }
+
+    /// Set the list of comms intents that should be silently accepted.
+    pub fn set_silent_comms_intents(&mut self, intents: Vec<String>) {
+        self.silent_comms_intents = intents;
     }
 
     /// Check if the runtime is idle.
@@ -541,7 +549,15 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
 
         // Resolve policy
         let runtime_idle = self.state_machine.is_idle();
-        let policy = DefaultPolicyTable::resolve(&input, runtime_idle);
+        let mut policy = DefaultPolicyTable::resolve(&input, runtime_idle);
+
+        // Apply silent intent override: if the input is a peer request whose
+        // intent matches the session's silent_comms_intents, suppress the LLM turn.
+        crate::silent_intent::apply_silent_intent_override(
+            &input,
+            &self.silent_comms_intents,
+            &mut policy,
+        );
 
         // Store policy snapshot
         if let Some(s) = self.ledger.get_mut(&input_id) {

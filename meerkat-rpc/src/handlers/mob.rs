@@ -231,20 +231,20 @@ pub async fn handle_spawn(
         Ok(m) => m,
         Err(resp) => return resp,
     };
-    let resume_session_id = match params.resume_session_id {
-        Some(session_id) => match SessionId::parse(&session_id) {
-            Ok(session_id) => Some(session_id),
-            Err(err) => return invalid_params(id, format!("Invalid resume_session_id: {err}")),
-        },
-        None => None,
-    };
     let mut spec = SpawnMemberSpec::new(params.profile.as_str(), params.meerkat_id.as_str());
     spec.initial_message = params.initial_message;
     spec.runtime_mode = params.runtime_mode;
     spec.backend = params.backend;
     spec.context = params.context;
     spec.labels = params.labels;
-    spec.resume_session_id = resume_session_id;
+    if let Some(session_id) = params.resume_session_id {
+        match SessionId::parse(&session_id) {
+            Ok(sid) => {
+                spec = spec.with_resume_session_id(sid);
+            }
+            Err(err) => return invalid_params(id, format!("Invalid resume_session_id: {err}")),
+        }
+    }
     spec.additional_instructions = params.additional_instructions;
     match state.mob_spawn_spec(&mob_id, spec).await {
         Ok(member_ref) => RpcResponse::success(
@@ -319,25 +319,25 @@ pub async fn handle_spawn_many(
 
     let mut specs = Vec::with_capacity(params.specs.len());
     for s in &params.specs {
-        let resume_session_id = match &s.resume_session_id {
-            Some(raw) => match SessionId::parse(raw) {
-                Ok(sid) => Some(sid),
-                Err(err) => {
-                    return invalid_params(
-                        id,
-                        format!("Invalid resume_session_id for {}: {err}", s.meerkat_id),
-                    );
-                }
-            },
-            None => None,
-        };
         let mut spec = SpawnMemberSpec::new(s.profile.as_str(), s.meerkat_id.as_str());
         spec.initial_message = s.initial_message.clone();
         spec.runtime_mode = s.runtime_mode;
         spec.backend = s.backend;
         spec.context = s.context.clone();
         spec.labels = s.labels.clone();
-        spec.resume_session_id = resume_session_id;
+        if let Some(raw) = &s.resume_session_id {
+            match SessionId::parse(raw) {
+                Ok(sid) => {
+                    spec = spec.with_resume_session_id(sid);
+                }
+                Err(err) => {
+                    return invalid_params(
+                        id,
+                        format!("Invalid resume_session_id for {}: {err}", s.meerkat_id),
+                    );
+                }
+            }
+        }
         spec.additional_instructions = s.additional_instructions.clone();
         specs.push(spec);
     }
@@ -769,6 +769,197 @@ pub async fn handle_flow_cancel(
     };
     match state.mob_cancel_flow(&mob_id, run_id).await {
         Ok(()) => RpcResponse::success(id, serde_json::json!({"canceled": true})),
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// mob/spawn_helper
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct MobSpawnHelperParams {
+    pub mob_id: String,
+    pub prompt: String,
+    #[serde(default)]
+    pub meerkat_id: Option<String>,
+    #[serde(default)]
+    pub profile_name: Option<String>,
+    #[serde(default)]
+    pub runtime_mode: Option<MobRuntimeMode>,
+    #[serde(default)]
+    pub backend: Option<MobBackendKind>,
+}
+
+pub async fn handle_spawn_helper(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobSpawnHelperParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let meerkat_id = MeerkatId::from(
+        params
+            .meerkat_id
+            .unwrap_or_else(|| format!("helper-{}", uuid::Uuid::new_v4())),
+    );
+    let mut options = meerkat_mob::HelperOptions::default();
+    if let Some(profile) = params.profile_name {
+        options.profile_name = Some(meerkat_mob::ProfileName::from(profile));
+    }
+    options.runtime_mode = params.runtime_mode;
+    options.backend = params.backend;
+    match state
+        .mob_spawn_helper(&mob_id, meerkat_id, params.prompt, options)
+        .await
+    {
+        Ok(result) => RpcResponse::success(
+            id,
+            serde_json::json!({
+                "output": result.output,
+                "tokens_used": result.tokens_used,
+                "session_id": result.session_id,
+            }),
+        ),
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// mob/fork_helper
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct MobForkHelperParams {
+    pub mob_id: String,
+    pub source_member_id: String,
+    pub prompt: String,
+    #[serde(default)]
+    pub meerkat_id: Option<String>,
+    #[serde(default)]
+    pub profile_name: Option<String>,
+    #[serde(default)]
+    pub fork_context: Option<meerkat_mob::ForkContext>,
+    #[serde(default)]
+    pub runtime_mode: Option<MobRuntimeMode>,
+    #[serde(default)]
+    pub backend: Option<MobBackendKind>,
+}
+
+pub async fn handle_fork_helper(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobForkHelperParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let source_member_id = MeerkatId::from(params.source_member_id.as_str());
+    let meerkat_id = MeerkatId::from(
+        params
+            .meerkat_id
+            .unwrap_or_else(|| format!("fork-{}", uuid::Uuid::new_v4())),
+    );
+    let fork_context = params
+        .fork_context
+        .unwrap_or(meerkat_mob::ForkContext::FullHistory);
+    let mut options = meerkat_mob::HelperOptions::default();
+    if let Some(profile) = params.profile_name {
+        options.profile_name = Some(meerkat_mob::ProfileName::from(profile));
+    }
+    options.runtime_mode = params.runtime_mode;
+    options.backend = params.backend;
+    match state
+        .mob_fork_helper(
+            &mob_id,
+            &source_member_id,
+            meerkat_id,
+            params.prompt,
+            fork_context,
+            options,
+        )
+        .await
+    {
+        Ok(result) => RpcResponse::success(
+            id,
+            serde_json::json!({
+                "output": result.output,
+                "tokens_used": result.tokens_used,
+                "session_id": result.session_id,
+            }),
+        ),
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// mob/force_cancel
+// ---------------------------------------------------------------------------
+
+pub async fn handle_force_cancel(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobMemberParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    match state
+        .mob_force_cancel(&mob_id, MeerkatId::from(params.meerkat_id.as_str()))
+        .await
+    {
+        Ok(()) => RpcResponse::success(id, serde_json::json!({"cancelled": true})),
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// mob/member_status
+// ---------------------------------------------------------------------------
+
+pub async fn handle_member_status(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobMemberParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    match state
+        .mob_member_status(&mob_id, &MeerkatId::from(params.meerkat_id.as_str()))
+        .await
+    {
+        Ok(snapshot) => RpcResponse::success(
+            id,
+            serde_json::json!({
+                "status": format!("{:?}", snapshot.status),
+                "output_preview": snapshot.output_preview,
+                "tokens_used": snapshot.tokens_used,
+                "is_final": snapshot.is_final,
+                "error": snapshot.error,
+            }),
+        ),
         Err(err) => invalid_params(id, err.to_string()),
     }
 }

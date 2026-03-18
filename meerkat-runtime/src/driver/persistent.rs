@@ -48,6 +48,11 @@ impl PersistentRuntimeDriver {
         &self.inner
     }
 
+    /// Set the list of comms intents that should be silently accepted (delegates to inner).
+    pub fn set_silent_comms_intents(&mut self, intents: Vec<String>) {
+        self.inner.set_silent_comms_intents(intents);
+    }
+
     /// Check if the runtime is idle (delegates to inner).
     pub fn is_idle(&self) -> bool {
         self.inner.is_idle()

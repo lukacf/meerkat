@@ -2,6 +2,64 @@ use super::*;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use meerkat_core::types::{HandlingMode, RenderMetadata};
+use serde::Serialize;
+
+/// Point-in-time snapshot of a member's execution state.
+#[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
+pub struct MemberExecutionSnapshot {
+    /// Current lifecycle status.
+    pub status: MemberExecutionStatus,
+    /// Preview of the last assistant output (if any).
+    pub output_preview: Option<String>,
+    /// Error description (if the member errored).
+    pub error: Option<String>,
+    /// Cumulative token usage.
+    pub tokens_used: u64,
+    /// Whether the member has reached a terminal state.
+    pub is_final: bool,
+}
+
+/// Execution status for a mob member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum MemberExecutionStatus {
+    /// Member is active and potentially running.
+    Active,
+    /// Member is in the process of retiring.
+    Retiring,
+    /// Member has completed (session archived or not found).
+    Completed,
+    /// Member is not in the roster.
+    Unknown,
+}
+
+/// Options for helper convenience spawns.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct HelperOptions {
+    /// Profile to use. If None, requires a default profile in the definition.
+    pub profile_name: Option<ProfileName>,
+    /// Runtime mode override.
+    pub runtime_mode: Option<crate::MobRuntimeMode>,
+    /// Backend override.
+    pub backend: Option<MobBackendKind>,
+    /// Tool access policy for the helper.
+    pub tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+}
+
+/// Result from a helper spawn-and-wait operation.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct HelperResult {
+    /// The member's final output text.
+    pub output: Option<String>,
+    /// Total tokens used by the helper.
+    pub tokens_used: u64,
+    /// The session ID that was used.
+    pub session_id: Option<meerkat_core::types::SessionId>,
+}
 
 // ---------------------------------------------------------------------------
 // MobHandle
@@ -55,8 +113,14 @@ pub struct SpawnMemberSpec {
     pub context: Option<serde_json::Value>,
     /// Application-defined labels for this member.
     pub labels: Option<std::collections::BTreeMap<String, String>>,
-    /// Resume an existing session instead of creating a new one.
-    pub resume_session_id: Option<meerkat_core::types::SessionId>,
+    /// How this member should be launched (fresh, resume, or fork).
+    pub launch_mode: crate::launch::MemberLaunchMode,
+    /// Tool access policy for this member.
+    pub tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+    /// How to split budget from the orchestrator to this member.
+    pub budget_split_policy: Option<crate::launch::BudgetSplitPolicy>,
+    /// When true, automatically wire this member to its spawner.
+    pub auto_wire_parent: bool,
     /// Additional instruction sections appended to the system prompt for this member.
     pub additional_instructions: Option<Vec<String>>,
     /// Per-agent environment variables injected into shell tool subprocesses.
@@ -73,7 +137,10 @@ impl SpawnMemberSpec {
             backend: None,
             context: None,
             labels: None,
-            resume_session_id: None,
+            launch_mode: crate::launch::MemberLaunchMode::Fresh,
+            tool_access_policy: None,
+            budget_split_policy: None,
+            auto_wire_parent: false,
             additional_instructions: None,
             shell_env: None,
         }
@@ -109,8 +176,32 @@ impl SpawnMemberSpec {
         self
     }
 
+    /// Set launch mode to resume an existing session.
+    ///
+    /// This is a convenience method equivalent to setting
+    /// `launch_mode = MemberLaunchMode::Resume { session_id }`.
     pub fn with_resume_session_id(mut self, id: meerkat_core::types::SessionId) -> Self {
-        self.resume_session_id = Some(id);
+        self.launch_mode = crate::launch::MemberLaunchMode::Resume { session_id: id };
+        self
+    }
+
+    pub fn with_launch_mode(mut self, mode: crate::launch::MemberLaunchMode) -> Self {
+        self.launch_mode = mode;
+        self
+    }
+
+    pub fn with_tool_access_policy(mut self, policy: meerkat_core::ops::ToolAccessPolicy) -> Self {
+        self.tool_access_policy = Some(policy);
+        self
+    }
+
+    pub fn with_budget_split_policy(mut self, policy: crate::launch::BudgetSplitPolicy) -> Self {
+        self.budget_split_policy = Some(policy);
+        self
+    }
+
+    pub fn with_auto_wire_parent(mut self, auto_wire: bool) -> Self {
+        self.auto_wire_parent = auto_wire;
         self
     }
 
@@ -131,6 +222,14 @@ impl SpawnMemberSpec {
         spec.runtime_mode = runtime_mode;
         spec.backend = backend;
         spec
+    }
+
+    /// Extract the resume session ID if the launch mode is `Resume`.
+    pub fn resume_session_id(&self) -> Option<&meerkat_core::types::SessionId> {
+        match &self.launch_mode {
+            crate::launch::MemberLaunchMode::Resume { session_id } => Some(session_id),
+            _ => None,
+        }
     }
 }
 
@@ -422,7 +521,7 @@ impl MobHandle {
         backend: Option<MobBackendKind>,
     ) -> Result<MemberRef, MobError> {
         let mut spec = SpawnMemberSpec::new(profile_name, meerkat_id);
-        spec.resume_session_id = Some(session_id);
+        spec.launch_mode = crate::launch::MemberLaunchMode::Resume { session_id };
         spec.runtime_mode = runtime_mode;
         spec.backend = backend;
         self.spawn_spec(spec).await
@@ -773,6 +872,210 @@ impl MobHandle {
             .await
             .map_err(|_| MobError::Internal("actor reply dropped".into()))??;
         Ok(())
+    }
+
+    /// Force-cancel a member's in-flight turn via session interrupt.
+    ///
+    /// Unlike [`retire`](Self::retire), this does not archive the session or
+    /// remove the member from the roster — it only cancels the current turn.
+    pub async fn force_cancel_member(&self, meerkat_id: MeerkatId) -> Result<(), MobError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(MobCommand::ForceCancel {
+                meerkat_id,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| MobError::Internal("actor task dropped".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| MobError::Internal("actor reply dropped".into()))?
+    }
+
+    /// Get a point-in-time execution snapshot for a member.
+    pub async fn member_status(
+        &self,
+        meerkat_id: &MeerkatId,
+    ) -> Result<MemberExecutionSnapshot, MobError> {
+        let roster = self.roster.read().await;
+        let entry = roster.get(meerkat_id);
+        let Some(entry) = entry else {
+            return Ok(MemberExecutionSnapshot {
+                status: MemberExecutionStatus::Unknown,
+                output_preview: None,
+                error: None,
+                tokens_used: 0,
+                is_final: true,
+            });
+        };
+        let status = match entry.state {
+            crate::roster::MemberState::Active => MemberExecutionStatus::Active,
+            crate::roster::MemberState::Retiring => MemberExecutionStatus::Retiring,
+        };
+        let session_id = entry.member_ref.session_id().cloned();
+        drop(roster);
+
+        let (output_preview, tokens_used, is_active) = if let Some(ref sid) = session_id {
+            match self.session_service.read(sid).await {
+                Ok(view) => {
+                    let output = view.state.last_assistant_text.clone();
+                    let tokens = view.billing.total_tokens;
+                    let active = view.state.is_active;
+                    (output, tokens, active)
+                }
+                Err(_) => (None, 0, false),
+            }
+        } else {
+            (None, 0, false)
+        };
+
+        let is_final = !is_active && status != MemberExecutionStatus::Active;
+        Ok(MemberExecutionSnapshot {
+            status,
+            output_preview,
+            error: None,
+            tokens_used,
+            is_final,
+        })
+    }
+
+    /// Wait for a specific member to reach a terminal state, then return its snapshot.
+    ///
+    /// Polls the session state until the member is no longer active.
+    pub async fn wait_one(
+        &self,
+        meerkat_id: &MeerkatId,
+    ) -> Result<MemberExecutionSnapshot, MobError> {
+        loop {
+            let snapshot = self.member_status(meerkat_id).await?;
+            if snapshot.is_final || snapshot.status == MemberExecutionStatus::Unknown {
+                return Ok(snapshot);
+            }
+            // Check if session is still active
+            let roster = self.roster.read().await;
+            let session_id = roster
+                .get(meerkat_id)
+                .and_then(|e| e.member_ref.session_id().cloned());
+            drop(roster);
+
+            if let Some(sid) = session_id {
+                match self.session_service.read(&sid).await {
+                    Ok(view) if !view.state.is_active => {
+                        return self.member_status(meerkat_id).await;
+                    }
+                    Err(_) => {
+                        return self.member_status(meerkat_id).await;
+                    }
+                    _ => {}
+                }
+            } else {
+                return self.member_status(meerkat_id).await;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Wait for all specified members to reach terminal states.
+    pub async fn wait_all(
+        &self,
+        meerkat_ids: &[MeerkatId],
+    ) -> Result<Vec<MemberExecutionSnapshot>, MobError> {
+        let futs = meerkat_ids
+            .iter()
+            .map(|id| self.wait_one(id))
+            .collect::<Vec<_>>();
+        let results = futures::future::join_all(futs).await;
+        results.into_iter().collect()
+    }
+
+    /// Collect snapshots for all members that have reached terminal states.
+    pub async fn collect_completed(&self) -> Vec<(MeerkatId, MemberExecutionSnapshot)> {
+        let entries = self.list_all_members().await;
+        let mut completed = Vec::new();
+        for entry in entries {
+            if let Ok(snapshot) = self.member_status(&entry.meerkat_id).await {
+                if snapshot.is_final {
+                    completed.push((entry.meerkat_id, snapshot));
+                }
+            }
+        }
+        completed
+    }
+
+    /// Spawn a fresh helper, wait for it to complete, retire it, and return its result.
+    ///
+    /// This is a convenience wrapper around spawn → wait → collect → retire for
+    /// short-lived sub-tasks.
+    pub async fn spawn_helper(
+        &self,
+        meerkat_id: MeerkatId,
+        task: impl Into<String>,
+        options: HelperOptions,
+    ) -> Result<HelperResult, MobError> {
+        let profile_name = options
+            .profile_name
+            .or_else(|| self.definition.profiles.keys().next().cloned())
+            .ok_or_else(|| {
+                MobError::Internal("no profile specified and definition has no profiles".into())
+            })?;
+        let task_text = task.into();
+        let mut spec = SpawnMemberSpec::new(profile_name, meerkat_id.clone());
+        spec.initial_message = Some(task_text);
+        spec.runtime_mode = options.runtime_mode;
+        spec.backend = options.backend;
+        spec.tool_access_policy = options.tool_access_policy;
+        spec.auto_wire_parent = true;
+
+        let member_ref = self.spawn_spec(spec).await?;
+        let snapshot = self.wait_one(&meerkat_id).await?;
+        let _ = self.retire(meerkat_id.clone()).await;
+
+        Ok(HelperResult {
+            output: snapshot.output_preview,
+            tokens_used: snapshot.tokens_used,
+            session_id: member_ref.session_id().cloned(),
+        })
+    }
+
+    /// Fork from an existing member's context, wait for completion, retire, and return.
+    ///
+    /// Like `spawn_helper` but uses `MemberLaunchMode::Fork` to share conversation
+    /// context with the source member.
+    pub async fn fork_helper(
+        &self,
+        source_member_id: &MeerkatId,
+        meerkat_id: MeerkatId,
+        task: impl Into<String>,
+        fork_context: crate::launch::ForkContext,
+        options: HelperOptions,
+    ) -> Result<HelperResult, MobError> {
+        let profile_name = options
+            .profile_name
+            .or_else(|| self.definition.profiles.keys().next().cloned())
+            .ok_or_else(|| {
+                MobError::Internal("no profile specified and definition has no profiles".into())
+            })?;
+        let task_text = task.into();
+        let mut spec = SpawnMemberSpec::new(profile_name, meerkat_id.clone());
+        spec.initial_message = Some(task_text);
+        spec.runtime_mode = options.runtime_mode;
+        spec.backend = options.backend;
+        spec.tool_access_policy = options.tool_access_policy;
+        spec.auto_wire_parent = true;
+        spec.launch_mode = crate::launch::MemberLaunchMode::Fork {
+            source_member_id: source_member_id.clone(),
+            fork_context,
+        };
+
+        let member_ref = self.spawn_spec(spec).await?;
+        let snapshot = self.wait_one(&meerkat_id).await?;
+        let _ = self.retire(meerkat_id.clone()).await;
+
+        Ok(HelperResult {
+            output: snapshot.output_preview,
+            tokens_used: snapshot.tokens_used,
+            session_id: member_ref.session_id().cloned(),
+        })
     }
 }
 

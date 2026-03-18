@@ -779,7 +779,23 @@ where
                             results: tool_results,
                         });
 
-                        // Go through DrainingEvents to CallingLlm (state machine requires this)
+                        // Check for pending async operations before transitioning
+                        if let Some(ref registry) = self.ops_lifecycle {
+                            let pending: Vec<crate::ops::OperationId> = registry
+                                .list_operations()
+                                .into_iter()
+                                .filter(|snap| !snap.status.is_terminal())
+                                .map(|snap| snap.id)
+                                .collect();
+                            if !pending.is_empty() {
+                                self.pending_ops = pending;
+                                // Stay in WaitingForOps — the outer match arm
+                                // will await completion via wait_all.
+                                continue;
+                            }
+                        }
+
+                        // No pending ops — go through DrainingEvents to CallingLlm
                         self.state.transition(LoopState::DrainingEvents)?;
                         self.drain_turn_boundary(turn_count, event_tx.as_ref())
                             .await?;
@@ -997,8 +1013,26 @@ where
                     }
                 }
                 LoopState::WaitingForOps => {
-                    // This state is handled inline above
-                    unreachable!("WaitingForOps handled inline");
+                    // Await completion of all pending async operations via the
+                    // lifecycle registry's all-complete barrier.
+                    if !self.pending_ops.is_empty() {
+                        if let Some(ref registry) = self.ops_lifecycle {
+                            let ids = std::mem::take(&mut self.pending_ops);
+                            let _results = registry.wait_all(&ids).await.map_err(|e| {
+                                AgentError::InternalError(format!(
+                                    "ops lifecycle wait_all failed: {e}"
+                                ))
+                            })?;
+                        } else {
+                            // No registry but pending ops — clear and proceed.
+                            self.pending_ops.clear();
+                        }
+                    }
+                    self.state.transition(LoopState::DrainingEvents)?;
+                    self.drain_turn_boundary(turn_count, event_tx.as_ref())
+                        .await?;
+                    self.state.transition(LoopState::CallingLlm)?;
+                    turn_count += 1;
                 }
                 LoopState::DrainingEvents => {
                     // Wait for any pending events to be processed

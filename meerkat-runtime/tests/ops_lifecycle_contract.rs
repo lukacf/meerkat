@@ -9,12 +9,13 @@ use meerkat_core::lifecycle::InputId;
 use meerkat_core::ops::{OpEvent, OperationId};
 use meerkat_core::ops_lifecycle::{
     OperationKind, OperationPeerHandle, OperationProgressUpdate, OperationResult, OperationSpec,
-    OperationStatus, OperationTerminalOutcome, OpsLifecycleRegistry,
+    OperationStatus, OperationTerminalOutcome, OpsLifecycleError, OpsLifecycleRegistry,
 };
 use meerkat_core::types::SessionId;
 use meerkat_runtime::{
     Input, InputDurability, InputHeader, InputOrigin, InputVisibility, OperationInput,
-    RuntimeOpsLifecycleRegistry, RuntimeSessionAdapter, SessionServiceRuntimeExt,
+    OpsLifecycleConfig, RuntimeOpsLifecycleRegistry, RuntimeSessionAdapter,
+    SessionServiceRuntimeExt,
 };
 
 fn background_spec(name: &str) -> OperationSpec {
@@ -346,4 +347,267 @@ async fn ops_lifecycle_contract_runtime_admits_operation_inputs_for_child_and_ba
         .expect("accept background lifecycle operation input");
     assert!(background_outcome.is_accepted());
     assert!(background_handle.is_none());
+}
+
+// ─── Phase B contract tests ───
+
+#[tokio::test]
+#[ignore = "Phase B ops-lifecycle upgrade contract"]
+async fn ops_lifecycle_contract_bounded_completed_retention_evicts_oldest() {
+    let registry = RuntimeOpsLifecycleRegistry::with_config(OpsLifecycleConfig {
+        max_completed: 3,
+        max_concurrent: None,
+    });
+
+    let mut ids = Vec::new();
+    for i in 0..5 {
+        let spec = background_spec(&format!("evict-{i}"));
+        let id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&id).unwrap();
+        registry
+            .complete_operation(&id, op_result(&id, &format!("done-{i}")))
+            .unwrap();
+        ids.push(id);
+    }
+
+    assert!(
+        registry.snapshot(&ids[0]).is_none(),
+        "op-0 should be evicted"
+    );
+    assert!(
+        registry.snapshot(&ids[1]).is_none(),
+        "op-1 should be evicted"
+    );
+    assert!(
+        registry.snapshot(&ids[2]).is_some(),
+        "op-2 should be retained"
+    );
+    assert!(
+        registry.snapshot(&ids[3]).is_some(),
+        "op-3 should be retained"
+    );
+    assert!(
+        registry.snapshot(&ids[4]).is_some(),
+        "op-4 should be retained"
+    );
+}
+
+#[tokio::test]
+#[ignore = "Phase B ops-lifecycle upgrade contract"]
+async fn ops_lifecycle_contract_multi_listener_completion_all_receive_outcome() {
+    let registry = RuntimeOpsLifecycleRegistry::new();
+    let spec = background_spec("multi-listen");
+    let op_id = spec.id.clone();
+    registry.register_operation(spec).unwrap();
+    registry.provisioning_succeeded(&op_id).unwrap();
+
+    let watch1 = registry.register_watcher(&op_id).unwrap();
+    let watch2 = registry.register_watcher(&op_id).unwrap();
+    let watch3 = registry.register_watcher(&op_id).unwrap();
+
+    let result = op_result(&op_id, "multi-done");
+    registry.complete_operation(&op_id, result.clone()).unwrap();
+
+    for watch in [watch1, watch2, watch3] {
+        assert_eq!(
+            watch.wait().await,
+            OperationTerminalOutcome::Completed(result.clone())
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "Phase B ops-lifecycle upgrade contract"]
+async fn ops_lifecycle_contract_wait_all_returns_all_outcomes() {
+    let registry = RuntimeOpsLifecycleRegistry::new();
+
+    let spec_a = background_spec("wait-a");
+    let id_a = spec_a.id.clone();
+    registry.register_operation(spec_a).unwrap();
+    registry.provisioning_succeeded(&id_a).unwrap();
+
+    let spec_b = background_spec("wait-b");
+    let id_b = spec_b.id.clone();
+    registry.register_operation(spec_b).unwrap();
+    registry.provisioning_succeeded(&id_b).unwrap();
+
+    let spec_c = background_spec("wait-c");
+    let id_c = spec_c.id.clone();
+    registry.register_operation(spec_c).unwrap();
+    registry.provisioning_succeeded(&id_c).unwrap();
+
+    registry
+        .complete_operation(&id_a, op_result(&id_a, "a-done"))
+        .unwrap();
+    registry.fail_operation(&id_b, "b-error".into()).unwrap();
+    registry
+        .cancel_operation(&id_c, Some("c-reason".into()))
+        .unwrap();
+
+    let results = registry
+        .wait_all(&[id_a.clone(), id_b.clone(), id_c.clone()])
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0].0, id_a);
+    assert!(matches!(
+        results[0].1,
+        OperationTerminalOutcome::Completed(_)
+    ));
+    assert_eq!(results[1].0, id_b);
+    assert!(matches!(
+        results[1].1,
+        OperationTerminalOutcome::Failed { .. }
+    ));
+    assert_eq!(results[2].0, id_c);
+    assert!(matches!(
+        results[2].1,
+        OperationTerminalOutcome::Cancelled { .. }
+    ));
+}
+
+#[tokio::test]
+#[ignore = "Phase B ops-lifecycle upgrade contract"]
+async fn ops_lifecycle_contract_wait_all_unknown_id_returns_not_found() {
+    let registry = RuntimeOpsLifecycleRegistry::new();
+    let unknown = OperationId::new();
+    let result = registry.wait_all(&[unknown]).await;
+    assert!(matches!(result, Err(OpsLifecycleError::NotFound(_))));
+}
+
+#[tokio::test]
+#[ignore = "Phase B ops-lifecycle upgrade contract"]
+async fn ops_lifecycle_contract_collect_completed_drains_terminal_operations() {
+    let registry = RuntimeOpsLifecycleRegistry::new();
+
+    let spec_a = background_spec("collect-a");
+    let id_a = spec_a.id.clone();
+    registry.register_operation(spec_a).unwrap();
+    registry.provisioning_succeeded(&id_a).unwrap();
+    registry
+        .complete_operation(&id_a, op_result(&id_a, "done-a"))
+        .unwrap();
+
+    let spec_b = background_spec("collect-b");
+    let id_b = spec_b.id.clone();
+    registry.register_operation(spec_b).unwrap();
+    registry.provisioning_succeeded(&id_b).unwrap();
+
+    let collected = registry.collect_completed().unwrap();
+    assert_eq!(collected.len(), 1);
+    assert_eq!(collected[0].0, id_a);
+    assert!(matches!(
+        collected[0].1,
+        OperationTerminalOutcome::Completed(_)
+    ));
+
+    assert!(registry.snapshot(&id_a).is_none());
+    assert!(registry.snapshot(&id_b).is_some());
+
+    assert!(registry.collect_completed().unwrap().is_empty());
+}
+
+#[tokio::test]
+#[ignore = "Phase B ops-lifecycle upgrade contract"]
+async fn ops_lifecycle_contract_snapshot_includes_peer_handle() {
+    let registry = RuntimeOpsLifecycleRegistry::new();
+    let spec = mob_member_spec("peer-snap");
+    let op_id = spec.id.clone();
+    registry.register_operation(spec).unwrap();
+    registry.provisioning_succeeded(&op_id).unwrap();
+
+    let snap1 = registry.snapshot(&op_id).unwrap();
+    assert!(snap1.peer_handle.is_none());
+
+    registry
+        .peer_ready(&op_id, peer_handle("peer-snap"))
+        .unwrap();
+
+    let snap2 = registry.snapshot(&op_id).unwrap();
+    assert!(snap2.peer_handle.is_some());
+    assert_eq!(snap2.peer_handle.unwrap().peer_name, "peer-snap");
+}
+
+#[tokio::test]
+#[ignore = "Phase B ops-lifecycle upgrade contract"]
+async fn ops_lifecycle_contract_snapshot_includes_timestamps() {
+    let registry = RuntimeOpsLifecycleRegistry::new();
+    let spec = background_spec("timestamps");
+    let op_id = spec.id.clone();
+    registry.register_operation(spec).unwrap();
+
+    let snap1 = registry.snapshot(&op_id).unwrap();
+    assert!(snap1.created_at_ms > 0, "created_at_ms should be set");
+    assert!(snap1.started_at_ms.is_none(), "not yet started");
+    assert!(snap1.completed_at_ms.is_none(), "not yet completed");
+    assert!(snap1.elapsed_ms.is_none(), "no elapsed before completion");
+
+    registry.provisioning_succeeded(&op_id).unwrap();
+    let snap2 = registry.snapshot(&op_id).unwrap();
+    assert!(
+        snap2.started_at_ms.is_some(),
+        "started_at_ms set after provisioning_succeeded"
+    );
+    assert!(snap2.started_at_ms.unwrap() >= snap2.created_at_ms);
+
+    registry
+        .complete_operation(&op_id, op_result(&op_id, "done"))
+        .unwrap();
+    let snap3 = registry.snapshot(&op_id).unwrap();
+    assert!(snap3.completed_at_ms.is_some(), "completed_at_ms set");
+    assert!(snap3.elapsed_ms.is_some(), "elapsed_ms computed");
+    assert!(snap3.completed_at_ms.unwrap() >= snap3.started_at_ms.unwrap());
+}
+
+#[tokio::test]
+#[ignore = "Phase B ops-lifecycle upgrade contract"]
+async fn ops_lifecycle_contract_max_concurrent_enforcement() {
+    let registry = RuntimeOpsLifecycleRegistry::with_config(OpsLifecycleConfig {
+        max_completed: 256,
+        max_concurrent: Some(2),
+    });
+
+    let spec_a = background_spec("conc-a");
+    let id_a = spec_a.id.clone();
+    registry.register_operation(spec_a).unwrap();
+
+    let spec_b = background_spec("conc-b");
+    registry.register_operation(spec_b).unwrap();
+
+    let spec_c = background_spec("conc-c");
+    let result = registry.register_operation(spec_c);
+    assert!(
+        matches!(
+            result,
+            Err(OpsLifecycleError::MaxConcurrentExceeded {
+                limit: 2,
+                active: 2
+            })
+        ),
+        "should reject when at max concurrent"
+    );
+
+    registry.provisioning_succeeded(&id_a).unwrap();
+    registry
+        .complete_operation(&id_a, op_result(&id_a, "freed"))
+        .unwrap();
+
+    let spec_d = background_spec("conc-d");
+    assert!(registry.register_operation(spec_d).is_ok());
+}
+
+#[tokio::test]
+#[ignore = "Phase B ops-lifecycle upgrade contract"]
+async fn ops_lifecycle_contract_max_concurrent_none_means_unlimited() {
+    let registry = RuntimeOpsLifecycleRegistry::with_config(OpsLifecycleConfig {
+        max_completed: 256,
+        max_concurrent: None,
+    });
+
+    for i in 0..100 {
+        let spec = background_spec(&format!("unlimited-{i}"));
+        assert!(registry.register_operation(spec).is_ok());
+    }
 }

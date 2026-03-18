@@ -152,6 +152,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecoverFromRetired`
   - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `recover-retire-reset-destroy`
+- `SetSilentIntentOverridesFromActive`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
+  - scenarios: `admit-and-stage-prefix`
+- `SetSilentIntentOverridesFromRetired`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
+  - scenarios: `recover-retire-reset-destroy`
 
 ### Effects
 - `IngressAccepted`
@@ -173,6 +179,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
 - `IngressNotice`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
+  - scenarios: `admit-and-stage-prefix`
+- `SilentIntentApplied`
   - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
 

@@ -11,6 +11,9 @@ use crate::comms::TrustedPeerSpec;
 pub use crate::ops::{OperationId, OperationResult};
 use crate::types::SessionId;
 
+/// Default maximum number of completed operations to retain before eviction.
+pub const DEFAULT_MAX_COMPLETED: usize = 256;
+
 /// The kind of async operation tracked by the shared lifecycle registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -103,6 +106,21 @@ pub struct OperationLifecycleSnapshot {
     pub watcher_count: u32,
     pub terminal_outcome: Option<OperationTerminalOutcome>,
     pub child_session_id: Option<SessionId>,
+    /// Peer handle info (exposed when peer_ready is true).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub peer_handle: Option<OperationPeerHandle>,
+    /// Wall-clock epoch millis when the operation was registered.
+    #[serde(default)]
+    pub created_at_ms: u64,
+    /// Wall-clock epoch millis when provisioning succeeded (entered Running).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub started_at_ms: Option<u64>,
+    /// Wall-clock epoch millis when the operation reached terminal state.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub completed_at_ms: Option<u64>,
+    /// Monotonic elapsed millis from creation to terminal (computed from Instant).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub elapsed_ms: Option<u64>,
 }
 
 /// One watcher for a terminal lifecycle outcome.
@@ -155,6 +173,10 @@ pub enum OpsLifecycleError {
     PeerNotExpected(OperationId),
     #[error("operation is already peer-ready: {0}")]
     AlreadyPeerReady(OperationId),
+    #[error("max concurrent operations exceeded (limit: {limit}, active: {active})")]
+    MaxConcurrentExceeded { limit: usize, active: usize },
+    #[error("operation not supported: {0}")]
+    Unsupported(String),
     #[error("internal lifecycle registry error: {0}")]
     Internal(String),
 }
@@ -195,6 +217,37 @@ pub trait OpsLifecycleRegistry: Send + Sync {
     fn snapshot(&self, id: &OperationId) -> Option<OperationLifecycleSnapshot>;
     fn list_operations(&self) -> Vec<OperationLifecycleSnapshot>;
     fn terminate_owner(&self, reason: String) -> Result<(), OpsLifecycleError>;
+
+    /// Drain all completed operations from the registry, returning their outcomes.
+    fn collect_completed(
+        &self,
+    ) -> Result<Vec<(OperationId, OperationTerminalOutcome)>, OpsLifecycleError> {
+        Err(OpsLifecycleError::Unsupported("collect_completed".into()))
+    }
+
+    /// Register a completion watcher for each ID and await all of them.
+    ///
+    /// Returns when every listed operation has reached a terminal state.
+    /// Already-terminal operations resolve immediately.
+    #[allow(clippy::type_complexity)]
+    fn wait_all(
+        &self,
+        _ids: &[OperationId],
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        Vec<(OperationId, OperationTerminalOutcome)>,
+                        OpsLifecycleError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(std::future::ready(Err(OpsLifecycleError::Unsupported(
+            "wait_all".into(),
+        ))))
+    }
 }
 
 #[cfg(test)]

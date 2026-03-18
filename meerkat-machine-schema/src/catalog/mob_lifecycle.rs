@@ -8,7 +8,7 @@ use crate::{
 pub fn mob_lifecycle_machine() -> MachineSchema {
     MachineSchema {
         machine: "MobLifecycleMachine".into(),
-        version: 1,
+        version: 2,
         rust: RustBinding {
             crate_name: "meerkat-mob".into(),
             module: "machines::mob_lifecycle".into(),

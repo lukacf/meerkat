@@ -2,7 +2,7 @@
 
 _Generated from the Rust machine catalog. Do not edit by hand._
 
-- Version: `1`
+- Version: `2`
 - Rust owner: `meerkat-runtime` / `machines::runtime_ingress`
 
 ## State
@@ -24,6 +24,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `last_boundary_sequence`: `Map<WorkId, Option<BoundarySequence>>`
 - `wake_requested`: `Bool`
 - `process_requested`: `Bool`
+- `silent_intent_overrides`: `Set<String>`
 
 ## Inputs
 - `AdmitQueued`(work_id: WorkId, content_shape: ContentShape, handling_mode: HandlingMode, request_id: Option<RequestId>, reservation_key: Option<ReservationKey>, policy: PolicyDecision)
@@ -39,6 +40,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Reset`
 - `Destroy`
 - `Recover`
+- `SetSilentIntentOverrides`(intents: Set<String>)
 
 ## Effects
 - `IngressAccepted`(work_id: WorkId)
@@ -48,6 +50,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RequestImmediateProcessing`
 - `CompletionResolved`(work_id: WorkId, outcome: InputTerminalOutcome)
 - `IngressNotice`(kind: String, detail: String)
+- `SilentIntentApplied`(work_id: WorkId, intent: String)
 
 ## Invariants
 - `queue_entries_are_queued`
@@ -188,6 +191,18 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `RecoverFromRetired`
 - From: `Retired`
 - On: `Recover`()
+- Emits: `IngressNotice`
+- To: `Retired`
+
+### `SetSilentIntentOverridesFromActive`
+- From: `Active`
+- On: `SetSilentIntentOverrides`(intents)
+- Emits: `IngressNotice`
+- To: `Active`
+
+### `SetSilentIntentOverridesFromRetired`
+- From: `Retired`
+- On: `SetSilentIntentOverrides`(intents)
 - Emits: `IngressNotice`
 - To: `Retired`
 

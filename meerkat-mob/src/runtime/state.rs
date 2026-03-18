@@ -224,6 +224,10 @@ pub(super) enum MobCommand {
         owner: Option<MeerkatId>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+    ForceCancel {
+        meerkat_id: MeerkatId,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
     SetSpawnPolicy {
         policy: Option<Arc<dyn super::spawn_policy::SpawnPolicy>>,
         reply_tx: oneshot::Sender<()>,

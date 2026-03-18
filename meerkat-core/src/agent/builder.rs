@@ -41,6 +41,7 @@ pub struct AgentBuilder {
     pub(super) checkpointer: Option<Arc<dyn crate::checkpoint::SessionCheckpointer>>,
     pub(super) silent_comms_intents: Vec<String>,
     pub(super) runtime_input_sink: Option<Arc<dyn crate::agent::runner::RuntimeInputSink>>,
+    pub(super) ops_lifecycle: Option<Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>>,
     pub(super) max_inline_peer_notifications: Option<i32>,
     pub(super) event_tap: Option<crate::event_tap::EventTap>,
     pub(super) default_event_tx: Option<mpsc::Sender<crate::event::AgentEvent>>,
@@ -66,6 +67,7 @@ impl AgentBuilder {
             checkpointer: None,
             silent_comms_intents: Vec::new(),
             runtime_input_sink: None,
+            ops_lifecycle: None,
             max_inline_peer_notifications: None,
             event_tap: None,
             default_event_tx: None,
@@ -255,6 +257,8 @@ impl AgentBuilder {
             default_event_tx: self.default_event_tx,
             host_drain_active: false,
             runtime_input_sink: self.runtime_input_sink,
+            ops_lifecycle: self.ops_lifecycle,
+            pending_ops: Vec::new(),
             extraction_mode: false,
             extraction_attempts: 0,
             extraction_result: None,
@@ -316,6 +320,15 @@ impl AgentBuilder {
     /// Set max peer-count threshold for inline peer lifecycle notification injection.
     pub fn with_max_inline_peer_notifications(mut self, threshold: Option<i32>) -> Self {
         self.max_inline_peer_notifications = threshold;
+        self
+    }
+
+    /// Set the ops lifecycle registry for async operation tracking.
+    pub fn with_ops_lifecycle(
+        mut self,
+        registry: Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>,
+    ) -> Self {
+        self.ops_lifecycle = Some(registry);
         self
     }
 

@@ -2,7 +2,7 @@
 
 _Generated from the Rust machine catalog. Do not edit by hand._
 
-- Version: `1`
+- Version: `2`
 - Rust owner: `meerkat-runtime` / `machines::runtime_control`
 
 ## State
@@ -30,6 +30,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `DestroyRequested`
 - `ResumeRequested`
 - `ExternalToolDeltaReceived`
+- `RespawnRequested`
+- `RespawnSucceeded`
 
 ## Effects
 - `ResolveAdmission`(work_id: WorkId)
@@ -40,6 +42,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `EmitRuntimeNotice`(kind: String, detail: String)
 - `ResolveCompletionAsTerminated`(reason: String)
 - `ApplyControlPlaneCommand`(command: String)
+- `InitiateRespawn`
 
 ## Invariants
 - `running_implies_active_run`
@@ -229,6 +232,28 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ExternalToolDeltaReceived`()
 - Emits: `EmitRuntimeNotice`
 - To: `Retired`
+
+### `RespawnRequestedFromRetired`
+- From: `Retired`
+- On: `RespawnRequested`()
+- Guards:
+  - `no_active_run`
+- Emits: `InitiateRespawn`
+- To: `Recovering`
+
+### `RespawnRequestedFromIdle`
+- From: `Idle`
+- On: `RespawnRequested`()
+- Guards:
+  - `no_active_run`
+- Emits: `InitiateRespawn`
+- To: `Recovering`
+
+### `RespawnSucceeded`
+- From: `Recovering`
+- On: `RespawnSucceeded`()
+- Emits: `EmitRuntimeNotice`
+- To: `Idle`
 
 ## Coverage
 ### Code Anchors

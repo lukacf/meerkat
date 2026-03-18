@@ -688,8 +688,8 @@ mod operation_injection {
     }
 }
 
-/// CP-DELEGATED-BRANCH-ACCESS: Tool access policy enforcement
-mod delegated_branch_access {
+/// CP-TOOL-ACCESS-POLICY: Tool access policy enforcement
+mod tool_access_policy {
     use super::*;
 
     #[test]

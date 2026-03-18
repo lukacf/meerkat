@@ -15,6 +15,75 @@ type AutonomousHostLoopHandle = tokio::task::JoinHandle<Result<(), MobError>>;
 const MAX_PARALLEL_HOST_LOOP_OPS: usize = 64;
 const MAX_LIFECYCLE_NOTIFICATION_TASKS: usize = 16;
 
+/// Render forked conversation messages as a text context block for the new member.
+fn render_fork_context(
+    source_member_id: &MeerkatId,
+    messages: &[meerkat_core::types::Message],
+) -> String {
+    use meerkat_core::types::Message;
+
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "[Forked conversation context from member '{source_member_id}']"
+    ));
+    for msg in messages {
+        match msg {
+            Message::System(s) => {
+                lines.push(format!("[system]: {}", s.content));
+            }
+            Message::User(u) => {
+                lines.push(format!("[user]: {}", u.text_content()));
+            }
+            Message::Assistant(a) => {
+                if !a.content.is_empty() {
+                    lines.push(format!("[assistant]: {}", a.content));
+                }
+            }
+            Message::BlockAssistant(ba) => {
+                let text: String = ba
+                    .blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        meerkat_core::types::AssistantBlock::Text { text, .. } => {
+                            Some(text.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                if !text.is_empty() {
+                    lines.push(format!("[assistant]: {text}"));
+                }
+            }
+            Message::ToolResults { results } => {
+                for tr in results {
+                    let text: String = tr
+                        .content
+                        .iter()
+                        .filter_map(|b| match b {
+                            meerkat_core::types::ContentBlock::Text { text, .. } => {
+                                Some(text.as_str())
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("");
+                    if !text.is_empty() {
+                        let preview = if text.len() > 200 {
+                            format!("{}...", &text[..200])
+                        } else {
+                            text
+                        };
+                        lines.push(format!("[tool_result({})]: {preview}", tr.tool_use_id));
+                    }
+                }
+            }
+        }
+    }
+    lines.push("[End of forked context]".to_string());
+    lines.join("\n")
+}
+
 /// Unified MCP server entry: process handle + running status behind a single lock.
 pub(super) struct McpServerEntry {
     #[cfg(not(target_arch = "wasm32"))]
@@ -28,6 +97,7 @@ pub(super) struct PendingSpawn {
     prompt: String,
     runtime_mode: crate::MobRuntimeMode,
     labels: std::collections::BTreeMap<String, String>,
+    auto_wire_parent: bool,
     reply_tx: oneshot::Sender<Result<MemberRef, MobError>>,
 }
 
@@ -948,6 +1018,17 @@ impl MobActor {
                     };
                     let _ = reply_tx.send(result);
                 }
+                MobCommand::ForceCancel {
+                    meerkat_id,
+                    reply_tx,
+                } => {
+                    let result = match self.require_state(&[MobState::Running, MobState::Creating])
+                    {
+                        Ok(()) => self.handle_force_cancel(meerkat_id).await,
+                        Err(error) => Err(error),
+                    };
+                    let _ = reply_tx.send(result);
+                }
                 MobCommand::SetSpawnPolicy { policy, reply_tx } => {
                     self.spawn_policy.set(policy).await;
                     let _ = reply_tx.send(());
@@ -1024,10 +1105,22 @@ impl MobActor {
             backend,
             context,
             labels,
-            resume_session_id,
+            launch_mode,
+            tool_access_policy: _tool_access_policy,
+            budget_split_policy: _budget_split_policy,
+            auto_wire_parent,
             additional_instructions,
             shell_env,
         } = spec;
+        // Extract resume_session_id from launch mode for backward compat
+        let (resume_session_id, fork_spec) = match launch_mode {
+            crate::launch::MemberLaunchMode::Fresh => (None, None),
+            crate::launch::MemberLaunchMode::Resume { session_id } => (Some(session_id), None),
+            crate::launch::MemberLaunchMode::Fork {
+                source_member_id,
+                fork_context,
+            } => (None, Some((source_member_id, fork_context))),
+        };
         let prepare_result = async {
             if meerkat_id
                 .as_str()
@@ -1122,8 +1215,72 @@ impl MobActor {
                     resolved_labels,
                     Some(member_ref),
                     None,
+                    auto_wire_parent,
                 ));
             }
+
+            // ---------- Fork path ----------
+            // When fork_spec is set, read source member's session and render
+            // conversation history as context in the initial prompt.
+            let fork_context_text = if let Some((source_member_id, fork_context)) = fork_spec {
+                let source_session_id = {
+                    let roster = self.roster.read().await;
+                    let source_entry = roster.get(&source_member_id).ok_or_else(|| {
+                        MobError::MeerkatNotFound(source_member_id.clone())
+                    })?;
+                    source_entry
+                        .member_ref
+                        .session_id()
+                        .cloned()
+                        .ok_or_else(|| {
+                            MobError::Internal(format!(
+                                "fork source '{source_member_id}' has no session"
+                            ))
+                        })?
+                };
+
+                // Read full history for fork context rendering
+                let query = match fork_context {
+                    crate::launch::ForkContext::FullHistory => {
+                        meerkat_core::service::SessionHistoryQuery::default()
+                    }
+                    crate::launch::ForkContext::LastMessages { count } => {
+                        // We need last N messages; read_history uses offset/limit.
+                        // First read the session to get message count.
+                        let view = self
+                            .session_service
+                            .read(&source_session_id)
+                            .await
+                            .map_err(|e| {
+                                MobError::Internal(format!(
+                                    "failed to read source session metadata for fork from '{source_member_id}': {e}"
+                                ))
+                            })?;
+                        let total = view.state.message_count;
+                        let offset = total.saturating_sub(count as usize);
+                        meerkat_core::service::SessionHistoryQuery {
+                            offset,
+                            limit: Some(count as usize),
+                        }
+                    }
+                };
+
+                let history = meerkat_core::service::SessionServiceHistoryExt::read_history(
+                    self.session_service.as_ref(),
+                    &source_session_id,
+                    query,
+                )
+                .await
+                .map_err(|e| {
+                    MobError::Internal(format!(
+                        "failed to read source session history for fork from '{source_member_id}': {e}"
+                    ))
+                })?;
+
+                Some(render_fork_context(&source_member_id, &history.messages))
+            } else {
+                None
+            };
 
             let external_tools = self.external_tools_for_profile(profile)?;
             let mut config = build::build_agent_config(build::BuildAgentConfigParams {
@@ -1143,9 +1300,14 @@ impl MobActor {
                 config.llm_client_override = Some(client.clone());
             }
 
-            let prompt = initial_message
+            let base_prompt = initial_message
                 .clone()
                 .unwrap_or_else(|| self.fallback_spawn_prompt(&profile_name, &meerkat_id));
+            let prompt = if let Some(ref fork_text) = fork_context_text {
+                format!("{fork_text}\n\n{base_prompt}")
+            } else {
+                base_prompt
+            };
             let req = build::to_create_session_request(&config, prompt.clone());
             let selected_backend = backend
                 .or(profile.backend)
@@ -1165,6 +1327,7 @@ impl MobActor {
                 resolved_labels,
                 None::<MemberRef>,
                 Some(provision_request),
+                auto_wire_parent,
             ))
         }
         .await;
@@ -1177,6 +1340,7 @@ impl MobActor {
             resolved_labels,
             resume_member_ref,
             maybe_provision_request,
+            auto_wire_parent,
         ) = match prepare_result {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -1227,6 +1391,7 @@ impl MobActor {
             prompt,
             runtime_mode: selected_runtime_mode,
             labels: resolved_labels,
+            auto_wire_parent,
             reply_tx,
         };
         self.pending_spawn_ids.insert(spawn_meerkat_id.clone());
@@ -1340,6 +1505,7 @@ impl MobActor {
                 prompt,
                 runtime_mode,
                 labels,
+                auto_wire_parent: _auto_wire,
                 reply_tx,
             } = pending;
             in_flight.push(async move {
@@ -1543,6 +1709,21 @@ impl MobActor {
     }
 
     /// P1-T05: retire() removes a meerkat.
+    /// Force-cancel a member's in-flight turn via session interrupt.
+    ///
+    /// Does NOT retire the member — the member remains in the roster and can
+    /// receive new turns. Use [`handle_retire`] to fully remove a member.
+    async fn handle_force_cancel(&self, meerkat_id: MeerkatId) -> Result<(), MobError> {
+        let roster = self.roster.read().await;
+        let entry = roster
+            .get(&meerkat_id)
+            .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?;
+        let member_ref = entry.member_ref.clone();
+        drop(roster);
+
+        self.provisioner.interrupt_member(&member_ref).await
+    }
+
     ///
     /// Mark-then-best-effort-cleanup: event first, mark Retiring, disposal
     /// pipeline (policy-driven), then unconditional roster removal.

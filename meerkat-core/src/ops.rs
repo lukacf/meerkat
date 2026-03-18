@@ -38,9 +38,6 @@ pub enum WorkKind {
     ToolCall,
     /// Shell command execution
     ShellCommand,
-    /// Delegated branch (spawn or fork)
-    #[serde(rename = "delegated_branch", alias = "sub_agent")]
-    DelegatedBranch,
 }
 
 /// Shape of the operation's result
@@ -212,20 +209,6 @@ pub struct ForkBranch {
     pub tool_access: Option<ToolAccessPolicy>,
 }
 
-/// State of a running delegated branch
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DelegatedBranchState {
-    /// Delegated branch is running
-    Running,
-    /// Delegated branch completed successfully
-    Completed,
-    /// Delegated branch failed with error
-    Failed,
-    /// Delegated branch was cancelled
-    Cancelled,
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -249,10 +232,6 @@ mod tests {
         assert_eq!(
             serde_json::to_value(WorkKind::ShellCommand).unwrap(),
             "shell_command"
-        );
-        assert_eq!(
-            serde_json::to_value(WorkKind::DelegatedBranch).unwrap(),
-            "delegated_branch"
         );
     }
 

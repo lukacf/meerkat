@@ -654,6 +654,53 @@ export class MeerkatClient {
     await this.request("mob/respawn", { mob_id: mobId, meerkat_id: meerkatId, initial_message: initialMessage });
   }
 
+  async forceCancelMobMember(mobId: string, meerkatId: string): Promise<void> {
+    await this.request("mob/force_cancel", { mob_id: mobId, meerkat_id: meerkatId });
+  }
+
+  async mobMemberStatus(mobId: string, meerkatId: string): Promise<Record<string, unknown>> {
+    return this.request("mob/member_status", { mob_id: mobId, meerkat_id: meerkatId });
+  }
+
+  async spawnMobHelper(
+    mobId: string,
+    prompt: string,
+    options?: { meerkatId?: string; profileName?: string; runtimeMode?: string; backend?: string },
+  ): Promise<Record<string, unknown>> {
+    return this.request("mob/spawn_helper", {
+      mob_id: mobId,
+      prompt,
+      meerkat_id: options?.meerkatId,
+      profile_name: options?.profileName,
+      runtime_mode: options?.runtimeMode,
+      backend: options?.backend,
+    });
+  }
+
+  async forkMobHelper(
+    mobId: string,
+    sourceMemberId: string,
+    prompt: string,
+    options?: {
+      meerkatId?: string;
+      profileName?: string;
+      forkContext?: Record<string, unknown>;
+      runtimeMode?: string;
+      backend?: string;
+    },
+  ): Promise<Record<string, unknown>> {
+    return this.request("mob/fork_helper", {
+      mob_id: mobId,
+      source_member_id: sourceMemberId,
+      prompt,
+      meerkat_id: options?.meerkatId,
+      profile_name: options?.profileName,
+      fork_context: options?.forkContext,
+      runtime_mode: options?.runtimeMode,
+      backend: options?.backend,
+    });
+  }
+
   async wireMobMembers(mobId: string, a: string, b: string): Promise<void> {
     await this.request("mob/wire", { mob_id: mobId, a, b });
   }

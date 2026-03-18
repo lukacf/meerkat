@@ -9,7 +9,7 @@ use crate::{
 pub fn ops_lifecycle_machine() -> MachineSchema {
     MachineSchema {
         machine: "OpsLifecycleMachine".into(),
-        version: 1,
+        version: 2,
         rust: RustBinding {
             crate_name: "meerkat-runtime".into(),
             module: "machines::ops_lifecycle".into(),
@@ -73,6 +73,32 @@ pub fn ops_lifecycle_machine() -> MachineSchema {
                         Box::new(TypeRef::Bool),
                     ),
                 ),
+                // Phase B: bounded completed-operation retention (FIFO ordering)
+                field(
+                    "completed_order",
+                    TypeRef::Seq(Box::new(TypeRef::Named("OperationId".into()))),
+                ),
+                // Phase B: maximum completed operations to retain
+                field("max_completed", TypeRef::U32),
+                // Phase B: maximum concurrent non-terminal operations (0 = unlimited)
+                field("max_concurrent", TypeRef::U32),
+                // Phase B: count of currently non-terminal operations
+                field("active_count", TypeRef::U32),
+                // Phase B: timestamps — wall-clock epoch millis
+                field(
+                    "created_at_ms",
+                    TypeRef::Map(
+                        Box::new(TypeRef::Named("OperationId".into())),
+                        Box::new(TypeRef::U64),
+                    ),
+                ),
+                field(
+                    "completed_at_ms",
+                    TypeRef::Map(
+                        Box::new(TypeRef::Named("OperationId".into())),
+                        Box::new(TypeRef::U64),
+                    ),
+                ),
             ],
             init: InitSchema {
                 phase: "Active".into(),
@@ -85,6 +111,12 @@ pub fn ops_lifecycle_machine() -> MachineSchema {
                     init("watcher_count", Expr::EmptyMap),
                     init("terminal_outcome", Expr::EmptyMap),
                     init("terminal_buffered", Expr::EmptyMap),
+                    init("completed_order", Expr::SeqLiteral(vec![])),
+                    init("max_completed", Expr::U64(256)),
+                    init("max_concurrent", Expr::U64(0)),
+                    init("active_count", Expr::U64(0)),
+                    init("created_at_ms", Expr::EmptyMap),
+                    init("completed_at_ms", Expr::EmptyMap),
                 ],
             },
             terminal_phases: vec![],
@@ -144,6 +176,16 @@ pub fn ops_lifecycle_machine() -> MachineSchema {
                     fields: vec![field("operation_id", TypeRef::Named("OperationId".into()))],
                 },
                 variant("OwnerTerminated"),
+                // Phase B: wait for multiple operations to reach terminal
+                VariantSchema {
+                    name: "WaitAll".into(),
+                    fields: vec![field(
+                        "operation_ids",
+                        TypeRef::Seq(Box::new(TypeRef::Named("OperationId".into()))),
+                    )],
+                },
+                // Phase B: drain all completed operations
+                variant("CollectCompleted"),
             ],
         },
         effects: EnumSchema {
@@ -178,6 +220,36 @@ pub fn ops_lifecycle_machine() -> MachineSchema {
                             "terminal_outcome",
                             TypeRef::Named("OperationTerminalOutcome".into()),
                         ),
+                    ],
+                },
+                // Phase B: evict oldest completed operation from retention
+                VariantSchema {
+                    name: "EvictCompletedRecord".into(),
+                    fields: vec![field("operation_id", TypeRef::Named("OperationId".into()))],
+                },
+                // Phase B: signal that wait_all barrier is satisfied
+                VariantSchema {
+                    name: "WaitAllSatisfied".into(),
+                    fields: vec![field(
+                        "operation_ids",
+                        TypeRef::Seq(Box::new(TypeRef::Named("OperationId".into()))),
+                    )],
+                },
+                // Phase B: result of collect_completed drain
+                VariantSchema {
+                    name: "CollectCompletedResult".into(),
+                    fields: vec![field(
+                        "operation_ids",
+                        TypeRef::Seq(Box::new(TypeRef::Named("OperationId".into()))),
+                    )],
+                },
+                // Phase B: concurrency limit exceeded
+                VariantSchema {
+                    name: "ConcurrencyLimitExceeded".into(),
+                    fields: vec![
+                        field("operation_id", TypeRef::Named("OperationId".into())),
+                        field("limit", TypeRef::U32),
+                        field("active", TypeRef::U32),
                     ],
                 },
             ],
@@ -575,6 +647,21 @@ pub fn ops_lifecycle_machine() -> MachineSchema {
                             Box::new(Expr::String("None".into())),
                         ),
                     },
+                    // Phase B: concurrency enforcement
+                    Guard {
+                        name: "concurrency_limit_allows".into(),
+                        expr: Expr::Or(vec![
+                            // 0 means unlimited
+                            Expr::Eq(
+                                Box::new(Expr::Field("max_concurrent".into())),
+                                Box::new(Expr::U64(0)),
+                            ),
+                            Expr::Lt(
+                                Box::new(Expr::Field("active_count".into())),
+                                Box::new(Expr::Field("max_concurrent".into())),
+                            ),
+                        ]),
+                    },
                 ],
                 updates: vec![
                     Update::SetInsert {
@@ -615,6 +702,22 @@ pub fn ops_lifecycle_machine() -> MachineSchema {
                         field: "terminal_buffered".into(),
                         key: Expr::Binding("operation_id".into()),
                         value: Expr::Bool(false),
+                    },
+                    // Phase B: record creation timestamp
+                    Update::MapInsert {
+                        field: "created_at_ms".into(),
+                        key: Expr::Binding("operation_id".into()),
+                        value: Expr::U64(0),
+                    },
+                    Update::MapInsert {
+                        field: "completed_at_ms".into(),
+                        key: Expr::Binding("operation_id".into()),
+                        value: Expr::U64(0),
+                    },
+                    // Phase B: track active count
+                    Update::Increment {
+                        field: "active_count".into(),
+                        amount: 1,
                     },
                 ],
                 to: "Active".into(),
@@ -890,6 +993,44 @@ pub fn ops_lifecycle_machine() -> MachineSchema {
                 to: "Active".into(),
                 emit: vec![],
             },
+            // Phase B: WaitAll — registers watchers for all specified operations
+            TransitionSchema {
+                name: "WaitAll".into(),
+                from: vec!["Active".into()],
+                on: InputMatch {
+                    variant: "WaitAll".into(),
+                    bindings: vec!["operation_ids".into()],
+                },
+                guards: vec![],
+                updates: vec![],
+                to: "Active".into(),
+                emit: vec![EffectEmit {
+                    variant: "WaitAllSatisfied".into(),
+                    fields: IndexMap::from([(
+                        "operation_ids".into(),
+                        Expr::Binding("operation_ids".into()),
+                    )]),
+                }],
+            },
+            // Phase B: CollectCompleted — drain all buffered terminal operations
+            TransitionSchema {
+                name: "CollectCompleted".into(),
+                from: vec!["Active".into()],
+                on: InputMatch {
+                    variant: "CollectCompleted".into(),
+                    bindings: vec![],
+                },
+                guards: vec![],
+                updates: vec![],
+                to: "Active".into(),
+                emit: vec![EffectEmit {
+                    variant: "CollectCompletedResult".into(),
+                    fields: IndexMap::from([(
+                        "operation_ids".into(),
+                        Expr::Field("completed_order".into()),
+                    )]),
+                }],
+            },
         ],
     }
 }
@@ -1018,8 +1159,18 @@ fn terminal_transition(
             },
             Update::MapInsert {
                 field: "terminal_buffered".into(),
-                key: operation_id,
+                key: operation_id.clone(),
                 value: Expr::Bool(true),
+            },
+            // Phase B: decrement active count on terminalization
+            Update::Decrement {
+                field: "active_count".into(),
+                amount: 1,
+            },
+            // Phase B: append to completed ordering for bounded retention
+            Update::SeqAppend {
+                field: "completed_order".into(),
+                value: operation_id,
             },
         ],
         to: "Active".into(),

@@ -474,6 +474,56 @@ impl MobMcpState {
             .await
     }
 
+    pub async fn mob_force_cancel(
+        &self,
+        mob_id: &MobId,
+        meerkat_id: MeerkatId,
+    ) -> Result<(), MobError> {
+        self.handle_for(mob_id)
+            .await?
+            .force_cancel_member(meerkat_id)
+            .await
+    }
+
+    pub async fn mob_member_status(
+        &self,
+        mob_id: &MobId,
+        meerkat_id: &MeerkatId,
+    ) -> Result<meerkat_mob::MemberExecutionSnapshot, MobError> {
+        self.handle_for(mob_id)
+            .await?
+            .member_status(meerkat_id)
+            .await
+    }
+
+    pub async fn mob_spawn_helper(
+        &self,
+        mob_id: &MobId,
+        meerkat_id: MeerkatId,
+        prompt: String,
+        options: meerkat_mob::HelperOptions,
+    ) -> Result<meerkat_mob::HelperResult, MobError> {
+        self.handle_for(mob_id)
+            .await?
+            .spawn_helper(meerkat_id, prompt, options)
+            .await
+    }
+
+    pub async fn mob_fork_helper(
+        &self,
+        mob_id: &MobId,
+        source_member_id: &MeerkatId,
+        meerkat_id: MeerkatId,
+        prompt: String,
+        fork_context: meerkat_mob::ForkContext,
+        options: meerkat_mob::HelperOptions,
+    ) -> Result<meerkat_mob::HelperResult, MobError> {
+        self.handle_for(mob_id)
+            .await?
+            .fork_helper(source_member_id, meerkat_id, prompt, fork_context, options)
+            .await
+    }
+
     /// Subscribe to mob-wide events (all members, continuously updated).
     pub async fn subscribe_mob_events(
         &self,
@@ -1101,6 +1151,18 @@ impl MobMcpDispatcher {
                      Returns once retire completes and respawn is enqueued. {COMMON}"),
                 json!({"type":"object","properties":{"mob_id":{"type":"string"},"meerkat_id":{"type":"string"},"initial_message":{"type":"string"}},"required":["mob_id","meerkat_id"]}),
             ),
+            tool(
+                "meerkat_force_cancel",
+                &format!("Force-cancel a meerkat's in-flight turn. Unlike retire, this \
+                     interrupts immediately without graceful shutdown. {COMMON}"),
+                json!({"type":"object","properties":{"mob_id":{"type":"string"},"meerkat_id":{"type":"string"}},"required":["mob_id","meerkat_id"]}),
+            ),
+            tool(
+                "meerkat_status",
+                &format!("Get execution status snapshot for a meerkat. Returns status, \
+                     output_preview, tokens_used, and is_final. {COMMON}"),
+                json!({"type":"object","properties":{"mob_id":{"type":"string"},"meerkat_id":{"type":"string"}},"required":["mob_id","meerkat_id"]}),
+            ),
         ]
         .into();
         Self { state, tools }
@@ -1217,6 +1279,16 @@ struct RespawnArgs {
     meerkat_id: String,
     #[serde(default)]
     initial_message: Option<String>,
+}
+#[derive(Deserialize)]
+struct ForceCancelArgs {
+    mob_id: String,
+    meerkat_id: String,
+}
+#[derive(Deserialize)]
+struct MeerkatStatusArgs {
+    mob_id: String,
+    meerkat_id: String,
 }
 fn default_limit() -> usize {
     100
@@ -1390,24 +1462,21 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .specs
                     .into_iter()
                     .map(|spec| {
-                        let resume_session_id = spec
-                            .resume_session_id
-                            .map(|s| {
-                                SessionId::parse(&s).map_err(|e| {
-                                    ToolError::invalid_arguments(
-                                        call.name,
-                                        format!("invalid resume_session_id: {e}"),
-                                    )
-                                })
-                            })
-                            .transpose()?;
                         let mut s = SpawnMemberSpec::new(spec.profile, spec.meerkat_id);
                         s.initial_message = spec.initial_message;
                         s.runtime_mode = spec.runtime_mode;
                         s.backend = spec.backend;
                         s.context = spec.context;
                         s.labels = spec.labels;
-                        s.resume_session_id = resume_session_id;
+                        if let Some(sid_str) = spec.resume_session_id {
+                            let sid = SessionId::parse(&sid_str).map_err(|e| {
+                                ToolError::invalid_arguments(
+                                    call.name,
+                                    format!("invalid resume_session_id: {e}"),
+                                )
+                            })?;
+                            s = s.with_resume_session_id(sid);
+                        }
                         s.additional_instructions = spec.additional_instructions;
                         Ok(s)
                     })
@@ -1533,6 +1602,36 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     json!({
                         "meerkat_id": meerkat_id_str,
                         "status": "respawn_enqueued"
+                    }),
+                )
+            }
+            "meerkat_force_cancel" => {
+                let args: ForceCancelArgs = call
+                    .parse_args()
+                    .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+                self.state
+                    .mob_force_cancel(&MobId::from(args.mob_id), MeerkatId::from(args.meerkat_id))
+                    .await
+                    .map_err(|e| map_mob_err(call, e))?;
+                encode(call, json!({"ok": true}))
+            }
+            "meerkat_status" => {
+                let args: MeerkatStatusArgs = call
+                    .parse_args()
+                    .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+                let snapshot = self
+                    .state
+                    .mob_member_status(&MobId::from(args.mob_id), &MeerkatId::from(args.meerkat_id))
+                    .await
+                    .map_err(|e| map_mob_err(call, e))?;
+                encode(
+                    call,
+                    json!({
+                        "status": format!("{:?}", snapshot.status),
+                        "output_preview": snapshot.output_preview,
+                        "tokens_used": snapshot.tokens_used,
+                        "is_final": snapshot.is_final,
+                        "error": snapshot.error,
                     }),
                 )
             }
@@ -2229,11 +2328,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dispatcher_exposes_13_tools() {
+    async fn test_dispatcher_exposes_15_tools() {
         let svc = Arc::new(MockSessionSvc::new());
         let state = Arc::new(MobMcpState::new(svc));
         let d = MobMcpDispatcher::new(state);
-        assert_eq!(d.tools().len(), 13);
+        assert_eq!(d.tools().len(), 15);
     }
 
     #[tokio::test]

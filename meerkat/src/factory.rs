@@ -230,8 +230,6 @@ pub struct AgentBuildConfig {
     pub backend: Option<String>,
     /// Config generation used when this session was created/resumed.
     pub config_generation: Option<u64>,
-    /// Optional session checkpointer for host-mode persistence.
-    pub checkpointer: Option<Arc<dyn meerkat_core::checkpoint::SessionCheckpointer>>,
     /// Comms intents that should be silently injected into the session
     /// without triggering an LLM turn.
     pub silent_comms_intents: Vec<String>,
@@ -275,11 +273,6 @@ pub struct AgentBuildConfig {
     pub wait_for_mcp: bool,
     /// Per-agent environment variables injected into shell tool subprocesses.
     pub shell_env: Option<std::collections::HashMap<String, String>>,
-    /// Optional opaque runtime adapter for constructing a per-session `RuntimeInputSink`.
-    /// When the `session-store` feature is enabled, the factory downcasts this to the
-    /// runtime adapter type after agent construction and wires a `RuntimeCommsBridge`
-    /// using the adapter and the agent's session_id.
-    pub runtime_adapter_for_sink: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 impl std::fmt::Debug for AgentBuildConfig {
@@ -367,7 +360,6 @@ impl AgentBuildConfig {
             instance_id: None,
             backend: None,
             config_generation: None,
-            checkpointer: None,
             silent_comms_intents: Vec::new(),
             max_inline_peer_notifications: None,
             tool_dispatcher_override: None,
@@ -378,7 +370,6 @@ impl AgentBuildConfig {
             additional_instructions: None,
             wait_for_mcp: false,
             shell_env: None,
-            runtime_adapter_for_sink: None,
         }
     }
 
@@ -423,14 +414,12 @@ impl AgentBuildConfig {
         self.instance_id = build.instance_id.clone();
         self.backend = build.backend.clone();
         self.config_generation = build.config_generation;
-        self.checkpointer = build.checkpointer.clone();
         self.silent_comms_intents
             .clone_from(&build.silent_comms_intents);
         self.max_inline_peer_notifications = build.max_inline_peer_notifications;
         self.app_context = build.app_context.clone();
         self.additional_instructions = build.additional_instructions.clone();
         self.shell_env = build.shell_env.clone();
-        self.runtime_adapter_for_sink = build.runtime_adapter_for_sink.clone();
     }
 
     /// Convert build options to the service transport representation.
@@ -459,13 +448,11 @@ impl AgentBuildConfig {
             instance_id: self.instance_id.clone(),
             backend: self.backend.clone(),
             config_generation: self.config_generation,
-            checkpointer: self.checkpointer.clone(),
             silent_comms_intents: self.silent_comms_intents.clone(),
             max_inline_peer_notifications: self.max_inline_peer_notifications,
             app_context: self.app_context.clone(),
             additional_instructions: self.additional_instructions.clone(),
             shell_env: self.shell_env.clone(),
-            runtime_adapter_for_sink: self.runtime_adapter_for_sink.clone(),
         }
     }
 }
@@ -1672,42 +1659,17 @@ impl AgentFactory {
             builder = builder.with_default_event_tx(tx);
         }
 
-        // 12f. Wire session checkpointer for host-mode persistence
-        if let Some(cp) = build_config.checkpointer {
-            builder = builder.with_checkpointer(cp);
-        }
-
-        // 12g. Wire silent comms intents
+        // 12f. Wire silent comms intents
         if !build_config.silent_comms_intents.is_empty() {
             builder = builder.with_silent_comms_intents(build_config.silent_comms_intents);
         }
         builder =
             builder.with_max_inline_peer_notifications(build_config.max_inline_peer_notifications);
 
-        // 12h. Runtime adapter for sink — deferred until after build (needs session_id)
-        #[cfg(feature = "session-store")]
-        let runtime_adapter_for_sink = build_config.runtime_adapter_for_sink.take();
-
         // 13. Build agent
         let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
 
-        // 13b. Wire runtime input sink (needs session_id from the built agent)
-        #[cfg(feature = "session-store")]
-        if let Some(opaque) = runtime_adapter_for_sink
-            && let Ok(adapter) =
-                opaque.downcast::<meerkat_runtime::session_adapter::RuntimeSessionAdapter>()
-        {
-            let session_id = agent.session().id().clone();
-            let comms_runtime = agent.comms_arc();
-            let sink = std::sync::Arc::new(meerkat_runtime::comms_sink::RuntimeCommsBridge::new(
-                adapter,
-                session_id,
-                comms_runtime,
-            ));
-            agent.set_runtime_input_sink(sink);
-        }
-
-        // 13c. Stage initial external filter to hide view_image when the model
+        // 13b. Stage initial external filter to hide view_image when the model
         // cannot process image blocks in tool results. For resumed sessions,
         // the persisted filter is already restored by the builder — only gate
         // fresh sessions.

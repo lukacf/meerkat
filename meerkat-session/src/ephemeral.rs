@@ -173,15 +173,6 @@ pub trait SessionAgent: Send {
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError>;
 
-    /// Run the agent through the host-mode compatibility entrypoint.
-    ///
-    /// Event streaming should use the agent's build-time configured event
-    /// channel while ordinary peer/event work stays runtime-backed.
-    async fn run_host_mode(
-        &mut self,
-        prompt: meerkat_core::types::ContentInput,
-    ) -> Result<RunResult, meerkat_core::error::AgentError>;
-
     /// Stage skill references to resolve and inject on the next turn.
     fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillKey>>);
 
@@ -1084,11 +1075,8 @@ async fn session_task<A: SessionAgent>(
                                 > + 'a,
                         >,
                     >;
-                    let run_fut: RunFut<'_> = if host_mode {
-                        Box::pin(agent.run_host_mode(prompt))
-                    } else {
-                        Box::pin(agent.run_with_events(prompt, agent_event_tx.clone()))
-                    };
+                    let run_fut: RunFut<'_> =
+                        Box::pin(agent.run_with_events(prompt, agent_event_tx.clone()));
                     // run_fut is already Pin<Box<...>>, no tokio::pin! needed.
                     let mut run_fut = run_fut;
                     let mut interrupted = false;

@@ -114,28 +114,44 @@ impl MobTaskBoardService {
         status: TaskStatus,
         owner: Option<MeerkatId>,
     ) -> Result<(), MobError> {
-        {
+        // We treat `owner` as an *optional* claim/mutation field.
+        //
+        // Contract:
+        // - Owner changes are only applied when `status == in_progress`.
+        // - For other status transitions (open/completed/cancelled), any provided
+        //   `owner` value is ignored and the current owner is preserved.
+        //
+        // Rationale: some tool-schema layers may erroneously require sending
+        // `owner` even when completing/cancelling a task. Ignoring `owner` for
+        // non-in_progress transitions avoids spurious failures while still
+        // preventing owner changes outside of in_progress.
+        let effective_owner = {
             let board = self.board.read().await;
             let task = board
                 .get(&task_id)
                 .ok_or_else(|| MobError::Internal(format!("task '{task_id}' not found")))?;
+            let current_owner = task.owner.clone();
 
-            if owner.is_some() {
-                if !matches!(status, TaskStatus::InProgress) {
-                    return Err(MobError::Internal(format!(
-                        "task '{task_id}' owner can only be set with in_progress status"
-                    )));
+            if matches!(status, TaskStatus::InProgress) {
+                if let Some(new_owner) = owner {
+                    let blocked = task.blocked_by.iter().any(|dependency| {
+                        board.get(dependency).map(|t| t.status) != Some(TaskStatus::Completed)
+                    });
+                    if blocked {
+                        return Err(MobError::Internal(format!(
+                            "task '{task_id}' is blocked by incomplete dependencies"
+                        )));
+                    }
+                    Some(new_owner)
+                } else {
+                    // No owner supplied: preserve current owner (if any).
+                    current_owner
                 }
-                let blocked = task.blocked_by.iter().any(|dependency| {
-                    board.get(dependency).map(|t| t.status) != Some(TaskStatus::Completed)
-                });
-                if blocked {
-                    return Err(MobError::Internal(format!(
-                        "task '{task_id}' is blocked by incomplete dependencies"
-                    )));
-                }
+            } else {
+                // Owner is not mutable for non-in_progress statuses.
+                current_owner
             }
-        }
+        };
 
         let appended = self
             .events
@@ -145,7 +161,7 @@ impl MobTaskBoardService {
                 kind: MobEventKind::TaskUpdated {
                     task_id,
                     status,
-                    owner,
+                    owner: effective_owner,
                 },
             })
             .await?;

@@ -1961,14 +1961,6 @@ impl SessionAgent for PersistentMockAgent {
         ))
     }
 
-    async fn run_host_mode(
-        &mut self,
-        prompt: meerkat_core::types::ContentInput,
-    ) -> Result<RunResult, meerkat_core::error::AgentError> {
-        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
-        self.run_with_events(prompt, event_tx).await
-    }
-
     fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
 
     fn set_flow_tool_overlay(
@@ -2144,13 +2136,6 @@ impl SessionAgent for OverlayProbeSessionAgent {
         event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         self.agent.run_with_events(prompt, event_tx).await
-    }
-
-    async fn run_host_mode(
-        &mut self,
-        prompt: meerkat_core::types::ContentInput,
-    ) -> Result<RunResult, meerkat_core::error::AgentError> {
-        self.agent.run_host_mode(prompt).await
     }
 
     fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillKey>>) {
@@ -3354,19 +3339,16 @@ async fn test_mob_task_tools_dispatch_and_blocked_by_enforcement() {
         blocked.to_string().contains("blocked"),
         "blocked-by enforcement should reject task claim"
     );
-
-    let invalid_claim = service
+    // Providing `owner` alongside a non-in_progress status should be accepted, but the
+    // owner value must be ignored (owner is only mutable when status is in_progress).
+    service
         .dispatch_external_tool(
             &sid_1,
             "mob_task_update",
             serde_json::json!({"task_id": t2.clone(), "status": "completed", "owner": "w-1"}),
         )
         .await
-        .expect_err("owner set with non-in_progress status must fail");
-    assert!(
-        invalid_claim.to_string().contains("in_progress"),
-        "claim semantics should require in_progress when owner is set"
-    );
+        .expect("completing with owner present should succeed (owner ignored)");
 
     service
         .dispatch_external_tool(

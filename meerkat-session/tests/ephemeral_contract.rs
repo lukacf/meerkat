@@ -80,16 +80,6 @@ impl SessionAgent for MockAgent {
         })
     }
 
-    async fn run_host_mode(
-        &mut self,
-        prompt: meerkat_core::types::ContentInput,
-    ) -> Result<RunResult, meerkat_core::error::AgentError> {
-        // Mock host mode delegates to regular run for testing purposes.
-        // Session task forwards events from the shared internal channel.
-        let (event_tx, _event_rx) = mpsc::channel(16);
-        self.run_with_events(prompt, event_tx).await
-    }
-
     fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {
         // No-op for mock
     }
@@ -408,13 +398,6 @@ impl SessionAgent for RealSessionAgent {
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         self.agent.run_with_events(prompt, event_tx).await
-    }
-
-    async fn run_host_mode(
-        &mut self,
-        prompt: meerkat_core::types::ContentInput,
-    ) -> Result<RunResult, meerkat_core::error::AgentError> {
-        self.agent.run_host_mode(prompt).await
     }
 
     fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillKey>>) {

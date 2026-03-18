@@ -96,14 +96,6 @@ impl SessionAgent for MockAgent {
         })
     }
 
-    async fn run_host_mode(
-        &mut self,
-        prompt: meerkat_core::types::ContentInput,
-    ) -> Result<RunResult, meerkat_core::error::AgentError> {
-        let (event_tx, _event_rx) = mpsc::channel(16);
-        self.run_with_events(prompt, event_tx).await
-    }
-
     fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
 
     fn set_flow_tool_overlay(

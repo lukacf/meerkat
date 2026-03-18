@@ -181,8 +181,6 @@ pub struct SessionBuildOptions {
     pub instance_id: Option<String>,
     pub backend: Option<String>,
     pub config_generation: Option<u64>,
-    /// Optional session checkpointer for host-mode persistence.
-    pub checkpointer: Option<std::sync::Arc<dyn crate::checkpoint::SessionCheckpointer>>,
     /// Comms intents that should be silently injected into the session
     /// without triggering an LLM turn.
     pub silent_comms_intents: Vec<String>,
@@ -208,10 +206,6 @@ pub struct SessionBuildOptions {
     /// Set by the application's `SessionAgentBuilder` — never by the LLM.
     /// Values are not included in the agent's context window.
     pub shell_env: Option<std::collections::HashMap<String, String>>,
-    /// Opaque transport for the runtime adapter used to construct a per-session
-    /// `RuntimeInputSink`. Factory builders downcast this to `Arc<RuntimeSessionAdapter>`.
-    /// Same pattern as `llm_client_override`.
-    pub runtime_adapter_for_sink: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 impl Default for SessionBuildOptions {
@@ -237,13 +231,11 @@ impl Default for SessionBuildOptions {
             instance_id: None,
             backend: None,
             config_generation: None,
-            checkpointer: None,
             silent_comms_intents: Vec::new(),
             max_inline_peer_notifications: None,
             app_context: None,
             additional_instructions: None,
             shell_env: None,
-            runtime_adapter_for_sink: None,
         }
     }
 }
@@ -271,7 +263,6 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("instance_id", &self.instance_id)
             .field("backend", &self.backend)
             .field("config_generation", &self.config_generation)
-            .field("checkpointer", &self.checkpointer.is_some())
             .field("silent_comms_intents", &self.silent_comms_intents)
             .field(
                 "max_inline_peer_notifications",

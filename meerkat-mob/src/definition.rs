@@ -575,7 +575,7 @@ id = "minimal"
         assert!(!def.wiring.auto_wire_orchestrator);
         assert!(def.wiring.role_wiring.is_empty());
         assert!(def.skills.is_empty());
-        assert_eq!(def.backend.default, MobBackendKind::Subagent);
+        assert_eq!(def.backend.default, MobBackendKind::Session);
         assert!(def.backend.external.is_none());
         assert!(def.flows.is_empty());
         assert!(def.topology.is_none());

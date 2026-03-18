@@ -213,15 +213,15 @@ pub enum AgentError {
     #[error("Configuration error: {0}")]
     ConfigError(String),
     #[error("Delegated branch limit exceeded: max {limit} concurrent delegated branches")]
-    SubAgentLimitExceeded { limit: usize },
+    DelegatedBranchLimitExceeded { limit: usize },
     #[error("Delegated branch not found: {id}")]
-    SubAgentNotFound { id: String },
+    DelegatedBranchNotFound { id: String },
     #[error("Delegated branch {id} not running (state: {state})")]
-    SubAgentNotRunning { id: String, state: String },
+    DelegatedBranchNotRunning { id: String, state: String },
     #[error("Invalid tool in access policy: {tool}")]
     InvalidToolAccess { tool: String },
     #[error("Delegated branch spawn failed: {reason}")]
-    SubAgentSpawnFailed { reason: String },
+    DelegatedBranchSpawnFailed { reason: String },
     #[error("Internal error: {0}")]
     InternalError(String),
 

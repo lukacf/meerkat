@@ -417,8 +417,9 @@ pub enum StreamScopeFrame {
         member_ref: String,
         session_id: String,
     },
-    /// Sub-agent scope nested under a parent scope.
-    SubAgent {
+    /// Delegated branch scope nested under a parent scope.
+    #[serde(rename = "delegated_branch", alias = "sub_agent")]
+    DelegatedBranch {
         agent_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_call_id: Option<String>,
@@ -486,7 +487,7 @@ impl ScopedAgentEvent {
                 StreamScopeFrame::MobMember { member_ref, .. } => {
                     segments.push(format!("mob:{member_ref}"));
                 }
-                StreamScopeFrame::SubAgent { agent_id, .. } => {
+                StreamScopeFrame::DelegatedBranch { agent_id, .. } => {
                     segments.push(format!("sub:{agent_id}"));
                 }
             }
@@ -761,7 +762,7 @@ mod tests {
                     member_ref: "writer".to_string(),
                     session_id: "sid_1".to_string(),
                 },
-                StreamScopeFrame::SubAgent {
+                StreamScopeFrame::DelegatedBranch {
                     agent_id: "op_abc".to_string(),
                     tool_call_id: Some("tool_1".to_string()),
                     label: Some("fork-op_abc".to_string()),
@@ -794,7 +795,7 @@ mod tests {
             StreamScopeFrame::Primary {
                 session_id: "sid_x".to_string(),
             },
-            StreamScopeFrame::SubAgent {
+            StreamScopeFrame::DelegatedBranch {
                 agent_id: "op_1".to_string(),
                 tool_call_id: None,
                 label: None,
@@ -811,7 +812,7 @@ mod tests {
                 member_ref: "planner".to_string(),
                 session_id: "sid_m".to_string(),
             },
-            StreamScopeFrame::SubAgent {
+            StreamScopeFrame::DelegatedBranch {
                 agent_id: "op_2".to_string(),
                 tool_call_id: None,
                 label: None,

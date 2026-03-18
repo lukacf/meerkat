@@ -71,14 +71,14 @@ pub trait MobProvisioner: Send + Sync {
     async fn rearm_all_checkpointers(&self) {}
 }
 
-pub struct SubagentBackend {
+pub struct SessionBackend {
     session_service: Arc<dyn MobSessionService>,
     runtime_adapter: Option<Arc<RuntimeSessionAdapter>>,
     ops_adapter: Arc<super::ops_adapter::MobOpsAdapter>,
     runtime_sessions: RwLock<HashMap<SessionId, Arc<RuntimeSessionState>>>,
 }
 
-impl SubagentBackend {
+impl SessionBackend {
     pub fn new(
         session_service: Arc<dyn MobSessionService>,
         runtime_adapter: Option<Arc<RuntimeSessionAdapter>>,
@@ -377,12 +377,12 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-impl MobProvisioner for SubagentBackend {
+impl MobProvisioner for SessionBackend {
     async fn provision_member(&self, req: ProvisionMemberRequest) -> Result<MemberRef, MobError> {
         tracing::debug!(
             backend = ?req.backend,
             peer_name = %req.peer_name,
-            "SubagentBackend::provision_member start"
+            "SessionBackend::provision_member start"
         );
         let created = self
             .session_service
@@ -396,7 +396,7 @@ impl MobProvisioner for SubagentBackend {
             .await?;
         tracing::debug!(
             session_id = %created.session_id,
-            "SubagentBackend::provision_member created session"
+            "SessionBackend::provision_member created session"
         );
         Ok(MemberRef::from_session_id(created.session_id))
     }
@@ -647,7 +647,7 @@ fn is_valid_external_peer_name(peer_name: &str) -> bool {
 }
 
 pub struct MultiBackendProvisioner {
-    subagent: SubagentBackend,
+    session: SessionBackend,
     external: Option<ExternalBackend>,
 }
 
@@ -657,9 +657,9 @@ impl MultiBackendProvisioner {
         runtime_adapter: Option<Arc<RuntimeSessionAdapter>>,
         external: Option<ExternalBackendConfig>,
     ) -> Self {
-        let subagent = SubagentBackend::new(session_service.clone(), runtime_adapter);
+        let session = SessionBackend::new(session_service.clone(), runtime_adapter);
         let external = external.map(|cfg| ExternalBackend::new(session_service, cfg));
-        Self { subagent, external }
+        Self { session, external }
     }
 
     async fn external_member_ref(
@@ -721,11 +721,11 @@ impl MultiBackendProvisioner {
 impl MobProvisioner for MultiBackendProvisioner {
     async fn provision_member(&self, req: ProvisionMemberRequest) -> Result<MemberRef, MobError> {
         match req.backend {
-            MobBackendKind::Subagent => {
-                self.subagent
+            MobBackendKind::Session => {
+                self.session
                     .provision_member(ProvisionMemberRequest {
                         create_session: req.create_session,
-                        backend: MobBackendKind::Subagent,
+                        backend: MobBackendKind::Session,
                         peer_name: req.peer_name,
                     })
                     .await
@@ -738,15 +738,15 @@ impl MobProvisioner for MultiBackendProvisioner {
     }
 
     async fn retire_member(&self, member_ref: &MemberRef) -> Result<(), MobError> {
-        self.subagent.retire_member(member_ref).await
+        self.session.retire_member(member_ref).await
     }
 
     async fn reset_member(&self, member_ref: &MemberRef) -> Result<(), MobError> {
-        self.subagent.reset_member(member_ref).await
+        self.session.reset_member(member_ref).await
     }
 
     async fn interrupt_member(&self, member_ref: &MemberRef) -> Result<(), MobError> {
-        self.subagent.interrupt_member(member_ref).await
+        self.session.interrupt_member(member_ref).await
     }
 
     async fn start_turn(
@@ -754,22 +754,22 @@ impl MobProvisioner for MultiBackendProvisioner {
         member_ref: &MemberRef,
         req: StartTurnRequest,
     ) -> Result<(), MobError> {
-        self.subagent.start_turn(member_ref, req).await
+        self.session.start_turn(member_ref, req).await
     }
 
     async fn interaction_event_injector(
         &self,
         session_id: &SessionId,
     ) -> Option<Arc<dyn SubscribableInjector>> {
-        self.subagent.interaction_event_injector(session_id).await
+        self.session.interaction_event_injector(session_id).await
     }
 
     async fn is_member_active(&self, member_ref: &MemberRef) -> Result<Option<bool>, MobError> {
-        self.subagent.is_member_active(member_ref).await
+        self.session.is_member_active(member_ref).await
     }
 
     async fn comms_runtime(&self, member_ref: &MemberRef) -> Option<Arc<dyn CoreCommsRuntime>> {
-        self.subagent.comms_runtime(member_ref).await
+        self.session.comms_runtime(member_ref).await
     }
 
     async fn trusted_peer_spec(
@@ -780,7 +780,7 @@ impl MobProvisioner for MultiBackendProvisioner {
     ) -> Result<TrustedPeerSpec, MobError> {
         match member_ref {
             MemberRef::Session { .. } => {
-                self.subagent
+                self.session
                     .trusted_peer_spec(member_ref, fallback_name, fallback_peer_id)
                     .await
             }
@@ -794,7 +794,7 @@ impl MobProvisioner for MultiBackendProvisioner {
                     // transport address for trust wiring while preserving backend identity
                     // in MemberRef::BackendPeer.address.
                     return self
-                        .subagent
+                        .session
                         .trusted_peer_spec(
                             &MemberRef::Session {
                                 session_id: session_id.clone(),
@@ -811,10 +811,10 @@ impl MobProvisioner for MultiBackendProvisioner {
     }
 
     async fn cancel_all_checkpointers(&self) {
-        self.subagent.cancel_all_checkpointers().await;
+        self.session.cancel_all_checkpointers().await;
     }
 
     async fn rearm_all_checkpointers(&self) {
-        self.subagent.rearm_all_checkpointers().await;
+        self.session.rearm_all_checkpointers().await;
     }
 }

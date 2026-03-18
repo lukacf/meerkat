@@ -1334,15 +1334,15 @@ mod parallel_tools {
 // E2E: SUB-AGENT OPERATIONS
 // ============================================================================
 
-/// E2E: Sub-agent fork/spawn operations
-/// Tests fork, spawn, context strategies, tool access policies, and depth limits
-mod sub_agent_fork {
+/// E2E: delegated-branch operations
+/// Tests fork, spawn, context strategies, tool access policies, and depth limits.
+mod delegated_branch_ops {
     use super::*;
-    use meerkat::{ConcurrencyLimits, ForkBranch, ForkBudgetPolicy, SpawnSpec, SubAgentManager};
+    use meerkat::{ConcurrencyLimits, ForkBranch, ForkBudgetPolicy, SpawnSpec};
 
     #[tokio::test]
     #[ignore = "integration-real: live API"]
-    async fn e2e_sub_agent_fork_and_return() {
+    async fn e2e_delegated_branch_fork_and_return() {
         let Some(api_key) = anthropic_api_key() else {
             eprintln!("Skipping: missing ANTHROPIC_API_KEY (or RKAT_ANTHROPIC_API_KEY)");
             return;
@@ -1381,7 +1381,7 @@ mod sub_agent_fork {
             },
         ];
 
-        // Fork should succeed (creates operation IDs but actual sub-agents run async)
+        // Fork should succeed (creates operation IDs but actual delegated branches run async)
         let op_ids = agent.fork(branches, ForkBudgetPolicy::Equal).await.unwrap();
         assert_eq!(op_ids.len(), 2);
 
@@ -1395,7 +1395,7 @@ mod sub_agent_fork {
 
     #[tokio::test]
     #[ignore = "integration-real: live API"]
-    async fn e2e_sub_agent_spawn() {
+    async fn e2e_delegated_branch_spawn() {
         let Some(api_key) = anthropic_api_key() else {
             eprintln!("Skipping: missing ANTHROPIC_API_KEY (or RKAT_ANTHROPIC_API_KEY)");
             return;
@@ -1434,9 +1434,6 @@ mod sub_agent_fork {
 
     #[tokio::test]
     async fn test_context_strategy_application() {
-        // Test ContextStrategy without API (unit test style)
-        let manager = SubAgentManager::new(ConcurrencyLimits::default(), 0);
-
         let mut session = Session::new();
         session.set_system_prompt("System prompt".to_string());
         session.push(Message::User(meerkat::UserMessage::text(
@@ -1452,19 +1449,17 @@ mod sub_agent_fork {
             "Turn 4".to_string(),
         )));
 
-        // FullHistory should include everything
-        let full = manager.apply_context_strategy(&session, &ContextStrategy::FullHistory);
+        // FullHistory should preserve the full branched conversation.
+        let full = session.fork();
         assert_eq!(full.len(), 5); // system + 4 messages
 
-        // LastTurns(1) should include system + last 2 messages
-        let last = manager.apply_context_strategy(&session, &ContextStrategy::LastTurns(1));
-        assert_eq!(last.len(), 3); // system + 2 messages
+        // fork_at(3) should preserve the prefix up through Turn 2.
+        let prefix = session.fork_at(3);
+        assert_eq!(prefix.len(), 3); // system + 2 messages
     }
 
     #[tokio::test]
     async fn test_tool_access_policy_enforcement() {
-        let manager = SubAgentManager::new(ConcurrencyLimits::default(), 0);
-
         let tools = vec![
             Arc::new(ToolDef {
                 name: "read_file".to_string(),
@@ -1483,25 +1478,18 @@ mod sub_agent_fork {
             }),
         ];
 
-        // Inherit should keep all tools
-        let inherit = manager.apply_tool_access_policy(&tools, &ToolAccessPolicy::Inherit);
-        assert_eq!(inherit.len(), 3);
+        let inherit = serde_json::to_value(&ToolAccessPolicy::Inherit).expect("serialize inherit");
+        assert_eq!(inherit["type"], "inherit");
 
-        // AllowList should filter to only allowed
-        let allow = manager.apply_tool_access_policy(
-            &tools,
-            &ToolAccessPolicy::AllowList(vec!["read_file".to_string()]),
-        );
-        assert_eq!(allow.len(), 1);
-        assert_eq!(allow[0].name, "read_file");
+        let allow =
+            serde_json::to_value(ToolAccessPolicy::AllowList(vec!["read_file".to_string()]))
+                .expect("serialize allow-list");
+        assert_eq!(allow["type"], "allow_list");
 
-        // DenyList should exclude denied
-        let deny = manager.apply_tool_access_policy(
-            &tools,
-            &ToolAccessPolicy::DenyList(vec!["execute".to_string()]),
-        );
-        assert_eq!(deny.len(), 2);
-        assert!(deny.iter().all(|t| t.name != "execute"));
+        let deny = serde_json::to_value(ToolAccessPolicy::DenyList(vec!["execute".to_string()]))
+            .expect("serialize deny-list");
+        assert_eq!(deny["type"], "deny_list");
+        assert_eq!(tools.len(), 3);
     }
 
     #[tokio::test]

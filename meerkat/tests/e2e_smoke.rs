@@ -577,10 +577,10 @@ mod scenario_03_structured_output {
 }
 
 // ============================================================================
-// SCENARIO 4: Sub-agent spawn
+// SCENARIO 4: Delegated branch spawn
 // ============================================================================
 
-mod scenario_04_sub_agent {
+mod scenario_04_delegated_branch {
     use super::*;
 }
 

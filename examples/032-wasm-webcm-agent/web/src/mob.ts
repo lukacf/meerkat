@@ -215,7 +215,7 @@ WHEN YOU RECEIVE A REVIEW REQUEST via message:
 Tools: shell, write_file, read_file, send.`,
       },
     },
-    backend: { default: "subagent" },
+    backend: { default: "session" },
   };
 }
 

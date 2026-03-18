@@ -3880,7 +3880,7 @@ async fn test_resume_reconciles_mixed_topology_without_losing_external_member_re
     let old_sub_sid = handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-sub"), None)
         .await
-        .expect("spawn subagent")
+        .expect("spawn session-backed member")
         .session_id()
         .expect("session-backed")
         .clone();
@@ -3918,7 +3918,7 @@ async fn test_resume_reconciles_mixed_topology_without_losing_external_member_re
     service
         .archive(&old_sub_sid)
         .await
-        .expect("archive subagent session");
+        .expect("archive session-backed member session");
     service
         .archive(&old_ext_sid)
         .await
@@ -3932,14 +3932,14 @@ async fn test_resume_reconciles_mixed_topology_without_losing_external_member_re
     let resumed_sub = resumed
         .get_member(&MeerkatId::from("w-sub"))
         .await
-        .expect("resumed subagent entry");
+        .expect("resumed session-backed member entry");
     let resumed_sub_sid = match resumed_sub.member_ref {
         MemberRef::Session { ref session_id } => session_id.clone(),
-        ref other => panic!("expected subagent session member ref, got {other:?}"),
+        ref other => panic!("expected session member ref, got {other:?}"),
     };
     assert_ne!(
         resumed_sub_sid, old_sub_sid,
-        "resume should recreate missing subagent session"
+        "resume should recreate missing session-backed member session"
     );
 
     let resumed_ext = resumed
@@ -4282,21 +4282,21 @@ async fn test_spawn_duplicate_meerkat_id_fails() {
 }
 
 #[tokio::test]
-async fn test_spawn_supports_subagent_and_external_backends() {
+async fn test_spawn_supports_session_and_external_backends() {
     let (handle, _service) = create_test_mob(sample_definition_with_external_backend()).await;
 
-    let subagent_ref = handle
+    let session_ref = handle
         .spawn_with_backend(
             ProfileName::from("worker"),
             MeerkatId::from("w-sub"),
             None,
-            Some(MobBackendKind::Subagent),
+            Some(MobBackendKind::Session),
         )
         .await
-        .expect("spawn subagent backend");
+        .expect("spawn session backend");
     assert!(
-        matches!(subagent_ref, MemberRef::Session { .. }),
-        "subagent backend should emit session member ref"
+        matches!(session_ref, MemberRef::Session { .. }),
+        "session backend should emit session member ref"
     );
 
     let external_ref = handle

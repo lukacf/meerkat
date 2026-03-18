@@ -39,7 +39,8 @@ pub enum WorkKind {
     /// Shell command execution
     ShellCommand,
     /// Delegated branch (spawn or fork)
-    SubAgent,
+    #[serde(rename = "delegated_branch", alias = "sub_agent")]
+    DelegatedBranch,
 }
 
 /// Shape of the operation's result
@@ -214,7 +215,7 @@ pub struct ForkBranch {
 /// State of a running delegated branch
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SubAgentState {
+pub enum DelegatedBranchState {
     /// Delegated branch is running
     Running,
     /// Delegated branch completed successfully
@@ -250,8 +251,8 @@ mod tests {
             "shell_command"
         );
         assert_eq!(
-            serde_json::to_value(WorkKind::SubAgent).unwrap(),
-            "sub_agent"
+            serde_json::to_value(WorkKind::DelegatedBranch).unwrap(),
+            "delegated_branch"
         );
     }
 

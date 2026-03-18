@@ -68,7 +68,7 @@ async fn write_project_config(project_dir: &Path) -> Result<(), Box<dyn std::err
     for slug in [
         "task-workflow",
         "shell-patterns",
-        "sub-agent-orchestration",
+        "delegated-branch-workflows",
         "multi-agent-comms",
         "mcp-server-setup",
         "hook-authoring",

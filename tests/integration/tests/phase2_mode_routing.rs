@@ -243,7 +243,7 @@ async fn test_phase2_external_turn_routing_by_runtime_mode() {
     let service = Arc::new(MockSessionService::default());
     let mut definition = Prefab::CodingSwarm.definition();
     definition.id = MobId::from("phase2-routing");
-    definition.backend.default = MobBackendKind::Subagent;
+    definition.backend.default = MobBackendKind::Session;
     definition.wiring.auto_wire_orchestrator = false;
     let storage = MobStorage::in_memory();
     let handle = MobBuilder::new(definition, storage)

@@ -5,14 +5,15 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum MobBackendKind {
     #[default]
-    Subagent,
+    #[serde(rename = "session", alias = "subagent")]
+    Session,
     External,
 }
 
 impl MobBackendKind {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Subagent => "subagent",
+            Self::Session => "session",
             Self::External => "external",
         }
     }

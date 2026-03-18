@@ -64,7 +64,7 @@ impl MobToolDispatcher {
                         "meerkat_id": {"type": "string"},
                         "initial_message": {"type": "string"},
                         "resume_session_id": {"type": "string"},
-                        "backend": {"type": "string", "enum": ["subagent", "external"]},
+                        "backend": {"type": "string", "enum": ["session", "external"]},
                         "runtime_mode": {"type": "string", "enum": ["autonomous_host", "turn_driven"]}
                     },
                     "required": ["profile", "meerkat_id"]
@@ -85,7 +85,7 @@ impl MobToolDispatcher {
                                     "meerkat_id": {"type": "string"},
                                     "initial_message": {"type": "string"},
                                     "resume_session_id": {"type": "string"},
-                                    "backend": {"type": "string", "enum": ["subagent", "external"]},
+                                    "backend": {"type": "string", "enum": ["session", "external"]},
                                     "runtime_mode": {"type": "string", "enum": ["autonomous_host", "turn_driven"]}
                                 },
                                 "required": ["profile", "meerkat_id"]

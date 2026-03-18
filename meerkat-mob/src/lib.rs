@@ -58,10 +58,7 @@ pub mod validate;
 pub use backend::MobBackendKind;
 pub use definition::MobDefinition;
 pub use error::MobError;
-pub use event::{
-    AttributedEvent, MemberRef, MobEvent, MobEventCompat, MobEventCompatError, MobEventKind,
-    MobEventKindCompat, NewMobEvent,
-};
+pub use event::{AttributedEvent, MemberRef, MobEvent, MobEventKind, NewMobEvent};
 pub use ids::{BranchId, FlowId, MeerkatId, MobId, ProfileName, RunId, StepId, TaskId};
 pub use launch::{BudgetSplitPolicy, ForkContext, MemberLaunchMode};
 pub use prefab::Prefab;

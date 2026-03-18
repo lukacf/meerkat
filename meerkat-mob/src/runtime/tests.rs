@@ -1212,77 +1212,6 @@ impl MobEventStore for FaultInjectedMobEventStore {
     }
 }
 
-struct CompatFixtureEventStore {
-    rows: RwLock<Vec<serde_json::Value>>,
-}
-
-impl CompatFixtureEventStore {
-    fn from_rows(rows: Vec<serde_json::Value>) -> Self {
-        Self {
-            rows: RwLock::new(rows),
-        }
-    }
-}
-
-#[async_trait]
-impl MobEventStore for CompatFixtureEventStore {
-    async fn append(&self, event: NewMobEvent) -> Result<MobEvent, MobError> {
-        let mut rows = self.rows.write().await;
-        let cursor = rows.len() as u64 + 1;
-        let row = serde_json::json!({
-            "cursor": cursor,
-            "timestamp": Utc::now(),
-            "mob_id": event.mob_id,
-            "kind": event.kind,
-        });
-        rows.push(row.clone());
-        serde_json::from_value::<MobEvent>(row)
-            .map_err(|error| MobError::Internal(format!("compat fixture append decode: {error}")))
-    }
-
-    async fn poll(&self, after_cursor: u64, limit: usize) -> Result<Vec<MobEvent>, MobError> {
-        let rows = self.rows.read().await;
-        let mut events = Vec::new();
-        for row in rows.iter() {
-            let event: MobEvent = serde_json::from_value(row.clone()).map_err(|error| {
-                MobError::Internal(format!("compat fixture poll decode: {error}"))
-            })?;
-            if event.cursor > after_cursor {
-                events.push(event);
-            }
-            if events.len() >= limit {
-                break;
-            }
-        }
-        Ok(events)
-    }
-
-    async fn replay_all(&self) -> Result<Vec<MobEvent>, MobError> {
-        let rows = self.rows.read().await;
-        rows.iter()
-            .cloned()
-            .map(|row| {
-                serde_json::from_value::<MobEvent>(row).map_err(|error| {
-                    MobError::Internal(format!("compat fixture replay decode: {error}"))
-                })
-            })
-            .collect()
-    }
-
-    async fn append_batch(&self, events: Vec<NewMobEvent>) -> Result<Vec<MobEvent>, MobError> {
-        let mut results = Vec::with_capacity(events.len());
-        for event in events {
-            results.push(self.append(event).await?);
-        }
-        Ok(results)
-    }
-
-    async fn clear(&self) -> Result<(), MobError> {
-        self.rows.write().await.clear();
-        Ok(())
-    }
-}
-
 struct RecordingRunStore {
     inner: InMemoryMobRunStore,
     cas_history: RwLock<Vec<(RunId, MobRunStatus, MobRunStatus)>>,
@@ -3559,49 +3488,6 @@ async fn test_for_resume_rebuilds_definition_and_roster() {
     let entry_2 = resumed.get_member(&MeerkatId::from("w-2")).await.unwrap();
     assert!(entry_1.wired_to.contains(&MeerkatId::from("w-2")));
     assert!(entry_2.wired_to.contains(&MeerkatId::from("w-1")));
-}
-
-#[tokio::test]
-async fn test_resume_replays_legacy_fixture_events_via_compat_path() {
-    let service = Arc::new(MockSessionService::new());
-    let sid = SessionId::new();
-    let fixture = vec![
-        serde_json::json!({
-            "cursor": 1,
-            "timestamp": "2026-02-19T00:00:00Z",
-            "mob_id": "test-mob",
-            "kind": {
-                "type": "mob_created",
-                "definition": sample_definition(),
-            },
-        }),
-        serde_json::json!({
-            "cursor": 2,
-            "timestamp": "2026-02-19T00:00:01Z",
-            "mob_id": "test-mob",
-            "kind": {
-                "type": "meerkat_spawned",
-                "meerkat_id": "w-1",
-                "role": "worker",
-                "session_id": sid,
-            },
-        }),
-    ];
-    let events = Arc::new(CompatFixtureEventStore::from_rows(fixture));
-
-    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
-        .with_session_service(service)
-        .allow_ephemeral_sessions(true)
-        .resume()
-        .await
-        .expect("resume from legacy fixture");
-
-    let entry = resumed
-        .get_member(&MeerkatId::from("w-1"))
-        .await
-        .expect("replayed roster entry");
-    assert_eq!(entry.profile.as_str(), "worker");
-    assert!(entry.session_id().is_some());
 }
 
 #[tokio::test]

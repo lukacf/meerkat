@@ -1030,7 +1030,7 @@ impl MobMcpDispatcher {
             tool(
                 "meerkat_spawn",
                 &format!("Spawn one or more meerkats. Required: mob_id, specs[].profile, specs[].meerkat_id. \
-                     Optional per-spec: backend=subagent|external, runtime_mode=autonomous_host|turn_driven, \
+                     Optional per-spec: backend=session|external, runtime_mode=autonomous_host|turn_driven, \
                      initial_message, resume_session_id, labels (key-value map), context (opaque JSON). {COMMON}"),
                 json!({
                     "type":"object",
@@ -1044,7 +1044,7 @@ impl MobMcpDispatcher {
                                     "profile":{"type":"string"},
                                     "meerkat_id":{"type":"string"},
                                     "initial_message":{"type":"string"},
-                                    "backend":{"type":"string","enum":["subagent","external"]},
+                                    "backend":{"type":"string","enum":["session","external"]},
                                     "runtime_mode":{"type":"string","enum":["autonomous_host","turn_driven"]},
                                     "resume_session_id":{"type":"string"},
                                     "labels":{"type":"object","additionalProperties":{"type":"string"}},
@@ -2359,7 +2359,7 @@ mod tests {
                     "mcp_servers": {},
                     "wiring": {"auto_wire_orchestrator": false, "role_wiring": []},
                     "skills": {},
-                    "backend": {"default": "subagent"}
+                    "backend": {"default": "session"}
                 }
             }),
         )
@@ -2502,7 +2502,7 @@ auto_wire_orchestrator = false
 role_wiring = []
 
 [backend]
-default = "subagent"
+default = "session"
 
 [flows.demo]
 description = "demo flow"
@@ -2843,7 +2843,7 @@ timeout_ms = 1000
                     "wiring": {"auto_wire_orchestrator": false, "role_wiring": []},
                     "skills": {},
                     "backend": {
-                        "default": "subagent",
+                        "default": "session",
                         "external": {"address_base": "https://backend.example.invalid/mesh"}
                     }
                 }
@@ -3002,7 +3002,7 @@ timeout_ms = 1000
                     "mcp_servers": {},
                     "wiring": {"auto_wire_orchestrator": false, "role_wiring": []},
                     "skills": {},
-                    "backend": {"default": "subagent"}
+                    "backend": {"default": "session"}
                 }
             }),
         )

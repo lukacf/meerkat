@@ -1677,7 +1677,7 @@ pub async fn mob_events(mob_id: &str, after_cursor: u32, limit: u32) -> Result<J
 /// Spawn one or more meerkats in a mob.
 ///
 /// `specs_json`: JSON array of `{ "profile": "...", "meerkat_id": "...", "initial_message"?: "...",
-///                "runtime_mode"?: "autonomous_host"|"turn_driven", "backend"?: "subagent"|"external" }`
+///                "runtime_mode"?: "autonomous_host"|"turn_driven", "backend"?: "session"|"external" }`
 ///
 /// Returns JSON array of results per spec.
 #[wasm_bindgen]

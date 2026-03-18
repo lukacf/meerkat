@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum MobBackendKind {
     #[default]
-    #[serde(rename = "session", alias = "subagent")]
+    #[serde(rename = "session")]
     Session,
     External,
 }

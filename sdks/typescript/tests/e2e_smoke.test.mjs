@@ -334,9 +334,11 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
       assert.ok(memberIds.includes("lead-1"));
       assert.ok(memberIds.includes("reviewer-1"));
 
+      // RPC surface eagerly attaches an executor, so runtime state after a
+      // turn completes is "attached" (not "idle") while the executor remains.
       await waitFor(
         async () => client.request("runtime/state", { session_id: reviewer.session_id }),
-        (payload) => payload.state === "idle",
+        (payload) => payload.state === "attached" || payload.state === "idle",
         { timeoutMs: 120000, intervalMs: 200 },
       );
 
@@ -360,7 +362,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
       assert.ok(respawnedReviewer?.sessionId);
       await waitFor(
         async () => client.request("runtime/state", { session_id: respawnedReviewer.sessionId }),
-        (payload) => payload.state === "idle",
+        (payload) => payload.state === "attached" || payload.state === "idle",
         { timeoutMs: 120000, intervalMs: 200 },
       );
       await mob.sendMessage(

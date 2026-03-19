@@ -346,13 +346,13 @@ if include_scenario(40):
             assert "py-swarm-40" in reviewer_text
 
             await wait_for(
-                "reviewer runtime to become idle",
+                "reviewer runtime to become idle/attached",
                 lambda: raw_request(
                     client,
                     "runtime/state",
                     {"session_id": reviewer_session_id},
                 ),
-                lambda payload: payload.get("state") == "idle",
+                lambda payload: payload.get("state") in ("idle", "attached"),
                 timeout_secs=120.0,
             )
 
@@ -401,13 +401,13 @@ if include_scenario(40):
             )
             assert respawned_session_id
             await wait_for(
-                "reviewer runtime idle after respawn",
+                "reviewer runtime idle/attached after respawn",
                 lambda: raw_request(
                     client,
                     "runtime/state",
                     {"session_id": respawned_session_id},
                 ),
-                lambda payload: payload.get("state") == "idle",
+                lambda payload: payload.get("state") in ("idle", "attached"),
                 timeout_secs=120.0,
             )
             await mob.member("reviewer-1").send(

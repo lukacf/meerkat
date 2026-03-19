@@ -479,7 +479,9 @@ async fn e2e_scenario_16_kitchen_sink() {
         resp["error"].is_null(),
         "runtime/state failed for deferred session: {resp}"
     );
-    assert_eq!(resp["result"]["state"].as_str(), Some("idle"));
+    // RPC surface eagerly attaches an executor for all sessions (including
+    // deferred ones), so the runtime state is Attached, not Idle.
+    assert_eq!(resp["result"]["state"].as_str(), Some("attached"));
 
     let id = next_id();
     send_request(

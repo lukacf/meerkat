@@ -378,7 +378,11 @@ async fn rpc_read_response(
         if line.trim().is_empty() {
             continue;
         }
-        let parsed: Value = serde_json::from_str(line.trim())?;
+        // Skip non-JSON lines (e.g. deploy status output) gracefully.
+        let parsed: Value = match serde_json::from_str(line.trim()) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
         if parsed.get("id").is_some() {
             return Ok(parsed);
         }

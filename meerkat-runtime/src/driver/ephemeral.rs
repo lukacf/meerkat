@@ -17,9 +17,7 @@ use crate::input::Input;
 use crate::input_ledger::InputLedger;
 use crate::input_lifecycle_authority::{InputLifecycleError, InputLifecycleInput};
 use crate::input_state::{InputAbandonReason, InputLifecycleState, InputState, PolicySnapshot};
-use crate::policy::{
-    ApplyMode, ConsumePoint, DrainPolicy, PolicyDecision, QueueMode, RoutingDisposition, WakeMode,
-};
+use crate::policy::{ApplyMode, ConsumePoint, PolicyDecision, QueueMode, RoutingDisposition};
 use crate::policy_table::DefaultPolicyTable;
 use crate::queue::InputQueue;
 use crate::runtime_control_authority::{
@@ -858,17 +856,10 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                 }));
             }
         }
-        if runtime_idle && policy.wake_mode == WakeMode::WakeIfIdle {
-            self.wake_requested = true;
-        }
-        if runtime_idle
-            && matches!(
-                policy.drain_policy,
-                DrainPolicy::Immediate | DrainPolicy::SteerBatch
-            )
-        {
-            self.process_requested = true;
-        }
+        // Wake/process decisions are driven by the ingress authority effects
+        // (WakeRuntime / RequestImmediateProcessing). The authority respects
+        // WakeMode::None and only emits these effects when the policy allows.
+        // No shell-side override here — that would bypass the authority.
         let final_state = self.ledger.get(&input_id).cloned().unwrap_or_else(|| state);
         Ok(AcceptOutcome::Accepted {
             input_id,
@@ -939,9 +930,8 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                     .collect();
                 self.rollback_staged(&staged_ids)
                     .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
-                if self.has_queued_input_outside(&staged_ids) {
-                    self.wake_requested = true;
-                }
+                // Wake decision is authority-driven: the ingress authority emits
+                // WakeRuntime when rolled-back inputs are re-enqueued (above).
                 self.control
                     .apply(RuntimeControlInput::RunFailed {
                         run_id: run_id.clone(),
@@ -973,9 +963,8 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                     .collect();
                 self.rollback_staged(&staged_ids)
                     .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
-                if self.has_queued_input_outside(&staged_ids) {
-                    self.wake_requested = true;
-                }
+                // Wake decision is authority-driven: the ingress authority emits
+                // WakeRuntime when rolled-back inputs are re-enqueued (above).
                 self.control
                     .apply(RuntimeControlInput::RunCancelled {
                         run_id: run_id.clone(),

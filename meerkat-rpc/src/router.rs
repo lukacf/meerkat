@@ -3880,9 +3880,11 @@ mod tests {
             .await
             .unwrap();
         let state = result_value(&state_resp);
+        // RPC surface eagerly attaches an executor for all sessions (including
+        // deferred ones), so the runtime state is Attached, not Idle.
         assert_eq!(
             state["state"].as_str(),
-            Some("idle"),
+            Some("attached"),
             "deferred sessions should be routable through runtime/state before their first turn"
         );
 

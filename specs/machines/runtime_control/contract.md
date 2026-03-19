@@ -170,6 +170,27 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `pre_run_state_is_retired`
 - To: `Retired`
 
+### `RunCompletedFromRetiredInFlight`
+- From: `Retired`
+- On: `RunCompleted`(run_id)
+- Guards:
+  - `active_run_matches`
+- To: `Retired`
+
+### `RunFailedFromRetiredInFlight`
+- From: `Retired`
+- On: `RunFailed`(run_id)
+- Guards:
+  - `active_run_matches`
+- To: `Retired`
+
+### `RunCancelledFromRetiredInFlight`
+- From: `Retired`
+- On: `RunCancelled`(run_id)
+- Guards:
+  - `active_run_matches`
+- To: `Retired`
+
 ### `RecoverRequestedFromIdle`
 - From: `Idle`
 - On: `RecoverRequested`()

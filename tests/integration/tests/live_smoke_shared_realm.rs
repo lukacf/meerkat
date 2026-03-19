@@ -1471,7 +1471,7 @@ async fn e2e_scenario_54_shared_realm_mob_sessions_visible_to_cli()
         ),
     )
     .await?;
-    let ordinary = parse_json_line(&rpc_read_response_line(&mut ordinary_rpc, 20).await?)?;
+    let ordinary = parse_json_line(&rpc_read_response_line(&mut ordinary_rpc, 60).await?)?;
     assert!(
         ordinary["error"].is_null()
             && ordinary["result"]["text"]

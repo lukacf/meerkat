@@ -200,6 +200,36 @@ RunCancelledToRetired(run_id) ==
     /\ UNCHANGED << wake_pending, process_pending >>
 
 
+RunCompletedFromRetiredInFlight(run_id) ==
+    /\ phase = "Retired"
+    /\ (current_run_id = Some(run_id))
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ current_run_id' = None
+    /\ pre_run_state' = None
+    /\ UNCHANGED << wake_pending, process_pending >>
+
+
+RunFailedFromRetiredInFlight(run_id) ==
+    /\ phase = "Retired"
+    /\ (current_run_id = Some(run_id))
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ current_run_id' = None
+    /\ pre_run_state' = None
+    /\ UNCHANGED << wake_pending, process_pending >>
+
+
+RunCancelledFromRetiredInFlight(run_id) ==
+    /\ phase = "Retired"
+    /\ (current_run_id = Some(run_id))
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ current_run_id' = None
+    /\ pre_run_state' = None
+    /\ UNCHANGED << wake_pending, process_pending >>
+
+
 RecoverRequestedFromIdle ==
     /\ phase = "Idle"
     /\ phase' = "Recovering"
@@ -503,6 +533,9 @@ Next ==
     \/ \E run_id \in RunIdValues : RunCancelledToIdle(run_id)
     \/ \E run_id \in RunIdValues : RunCancelledToAttached(run_id)
     \/ \E run_id \in RunIdValues : RunCancelledToRetired(run_id)
+    \/ \E run_id \in RunIdValues : RunCompletedFromRetiredInFlight(run_id)
+    \/ \E run_id \in RunIdValues : RunFailedFromRetiredInFlight(run_id)
+    \/ \E run_id \in RunIdValues : RunCancelledFromRetiredInFlight(run_id)
     \/ RecoverRequestedFromIdle
     \/ RecoverRequestedFromRunning
     \/ RecoverRequestedFromAttached

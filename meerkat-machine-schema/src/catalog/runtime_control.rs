@@ -422,6 +422,10 @@ pub fn runtime_control_machine() -> MachineSchema {
             run_terminal_transition("RunCancelledToIdle", "RunCancelled", "Idle"),
             run_terminal_transition("RunCancelledToAttached", "RunCancelled", "Attached"),
             run_terminal_transition("RunCancelledToRetired", "RunCancelled", "Retired"),
+            // Run-terminal from Retired: run was in-flight when RetireRequested fired
+            retired_inflight_run_terminal("RunCompletedFromRetiredInFlight", "RunCompleted"),
+            retired_inflight_run_terminal("RunFailedFromRetiredInFlight", "RunFailed"),
+            retired_inflight_run_terminal("RunCancelledFromRetiredInFlight", "RunCancelled"),
             TransitionSchema {
                 name: "RecoverRequestedFromIdle".into(),
                 from: vec!["Idle".into()],
@@ -1213,6 +1217,38 @@ fn run_terminal_transition(
             },
         ],
         to: target_phase.into(),
+        emit: vec![],
+    }
+}
+
+/// Run-terminal from Retired: run was in-flight when RetireRequestedFromRunning fired.
+/// Phase is already Retired; run completes and clears its state.
+fn retired_inflight_run_terminal(name: &str, input_variant: &str) -> TransitionSchema {
+    TransitionSchema {
+        name: name.into(),
+        from: vec!["Retired".into()],
+        on: InputMatch {
+            variant: input_variant.into(),
+            bindings: vec!["run_id".into()],
+        },
+        guards: vec![Guard {
+            name: "active_run_matches".into(),
+            expr: Expr::Eq(
+                Box::new(Expr::Field("current_run_id".into())),
+                Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+            ),
+        }],
+        updates: vec![
+            Update::Assign {
+                field: "current_run_id".into(),
+                expr: Expr::None,
+            },
+            Update::Assign {
+                field: "pre_run_state".into(),
+                expr: Expr::None,
+            },
+        ],
+        to: "Retired".into(),
         emit: vec![],
     }
 }

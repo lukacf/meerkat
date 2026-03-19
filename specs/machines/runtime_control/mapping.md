@@ -135,6 +135,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RunCancelledToRetired`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `retire-stop-destroy`, `reset-terminates-waiters`
+- `RunCompletedFromRetiredInFlight`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `retire-stop-destroy`, `reset-terminates-waiters`
+- `RunFailedFromRetiredInFlight`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `retire-stop-destroy`, `reset-terminates-waiters`
+- `RunCancelledFromRetiredInFlight`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `retire-stop-destroy`, `reset-terminates-waiters`
 - `RecoverRequestedFromIdle`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `retire-stop-destroy`, `reset-terminates-waiters`

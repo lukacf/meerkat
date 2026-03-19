@@ -138,6 +138,7 @@ async fn create_deferred_session(state: &AppState, prompt: &str) -> String {
         .create_session(SvcCreateSessionRequest {
             model: state.default_model.to_string(),
             prompt: prompt.to_string().into(),
+            render_metadata: None,
             system_prompt: None,
             max_tokens: Some(state.max_tokens),
             event_tx: None,
@@ -284,7 +285,13 @@ async fn e2e_scenario_21_rest_runtime_accept_input_roundtrip() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(runtime_state["state"], "idle");
+    // REST runtime/state lazily attaches an executor, so the initial state
+    // of a deferred session transitions from idle to attached on first query.
+    assert!(
+        runtime_state["state"] == "idle" || runtime_state["state"] == "attached",
+        "deferred session should be idle or attached, got: {}",
+        runtime_state["state"]
+    );
 
     let (status, accepted) = request_json(
         &app,

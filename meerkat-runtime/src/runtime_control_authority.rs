@@ -382,6 +382,13 @@ impl RuntimeControlAuthority {
                 fields.pre_run_state = None;
                 target
             }
+            // RunCompleted from Retired — run was in-flight when retire was requested
+            (Retired, RunCompleted { run_id }) => {
+                self.validate_run_terminal(run_id, &fields)?;
+                fields.current_run_id = None;
+                fields.pre_run_state = None;
+                Retired
+            }
 
             // RunFailed from Running — split by pre_run_state
             (Running, RunFailed { run_id }) => {
@@ -391,6 +398,13 @@ impl RuntimeControlAuthority {
                 fields.pre_run_state = None;
                 target
             }
+            // RunFailed from Retired — run was in-flight when retire was requested
+            (Retired, RunFailed { run_id }) => {
+                self.validate_run_terminal(run_id, &fields)?;
+                fields.current_run_id = None;
+                fields.pre_run_state = None;
+                Retired
+            }
 
             // RunCancelled from Running — split by pre_run_state
             (Running, RunCancelled { run_id }) => {
@@ -399,6 +413,13 @@ impl RuntimeControlAuthority {
                 fields.current_run_id = None;
                 fields.pre_run_state = None;
                 target
+            }
+            // RunCancelled from Retired — run was in-flight when retire was requested
+            (Retired, RunCancelled { run_id }) => {
+                self.validate_run_terminal(run_id, &fields)?;
+                fields.current_run_id = None;
+                fields.pre_run_state = None;
+                Retired
             }
 
             // SubmitWork from Idle/Running/Attached — stays in same phase, emits ResolveAdmission
@@ -989,6 +1010,45 @@ mod tests {
         .unwrap();
         let t = auth
             .apply(RuntimeControlInput::RunCompleted {
+                run_id: run_id.clone(),
+            })
+            .unwrap();
+        assert_eq!(t.next_phase, RuntimeState::Retired);
+    }
+
+    #[test]
+    fn run_completed_after_retire_during_run() {
+        // BeginRun from Attached → Running, then RetireRequested → Retired,
+        // then RunCompleted should succeed and stay Retired.
+        let (mut auth, run_id) = make_running_from_attached();
+        auth.apply(RuntimeControlInput::RetireRequested).unwrap();
+        assert_eq!(auth.phase(), RuntimeState::Retired);
+        let t = auth
+            .apply(RuntimeControlInput::RunCompleted {
+                run_id: run_id.clone(),
+            })
+            .unwrap();
+        assert_eq!(t.next_phase, RuntimeState::Retired);
+    }
+
+    #[test]
+    fn run_failed_after_retire_during_run() {
+        let (mut auth, run_id) = make_running_from_attached();
+        auth.apply(RuntimeControlInput::RetireRequested).unwrap();
+        let t = auth
+            .apply(RuntimeControlInput::RunFailed {
+                run_id: run_id.clone(),
+            })
+            .unwrap();
+        assert_eq!(t.next_phase, RuntimeState::Retired);
+    }
+
+    #[test]
+    fn run_cancelled_after_retire_during_run() {
+        let (mut auth, run_id) = make_running_from_attached();
+        auth.apply(RuntimeControlInput::RetireRequested).unwrap();
+        let t = auth
+            .apply(RuntimeControlInput::RunCancelled {
                 run_id: run_id.clone(),
             })
             .unwrap();

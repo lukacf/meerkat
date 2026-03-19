@@ -1667,10 +1667,8 @@ mod tests {
         );
 
         // Acknowledge
-        auth.apply(TurnExecutionInput::AcknowledgeTerminal {
-            run_id: rid.clone(),
-        })
-        .expect("ack");
+        auth.apply(TurnExecutionInput::AcknowledgeTerminal { run_id: rid })
+            .expect("ack");
         assert_eq!(auth.phase(), TurnPhase::Ready);
         assert_eq!(auth.active_run(), None);
     }
@@ -1695,10 +1693,8 @@ mod tests {
         assert_eq!(auth.phase(), TurnPhase::CallingLlm);
 
         // Now fatal
-        auth.apply(TurnExecutionInput::FatalFailure {
-            run_id: rid.clone(),
-        })
-        .expect("fatal");
+        auth.apply(TurnExecutionInput::FatalFailure { run_id: rid })
+            .expect("fatal");
         assert_eq!(auth.phase(), TurnPhase::Failed);
     }
 
@@ -1731,9 +1727,7 @@ mod tests {
 
         // Boundary continue -> should go to Cancelled (cancel_after_boundary is set)
         let t = auth
-            .apply(TurnExecutionInput::BoundaryContinue {
-                run_id: rid.clone(),
-            })
+            .apply(TurnExecutionInput::BoundaryContinue { run_id: rid })
             .expect("boundary continue");
         assert_eq!(t.next_phase, TurnPhase::Cancelled);
         assert_eq!(auth.terminal_outcome(), TurnTerminalOutcome::Cancelled);
@@ -1932,9 +1926,7 @@ mod tests {
 
         // Validation passed
         let t = auth
-            .apply(TurnExecutionInput::ExtractionValidationPassed {
-                run_id: rid.clone(),
-            })
+            .apply(TurnExecutionInput::ExtractionValidationPassed { run_id: rid })
             .expect("passed");
         assert_eq!(t.next_phase, TurnPhase::Completed);
     }

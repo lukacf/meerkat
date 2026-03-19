@@ -422,7 +422,6 @@ fn rejects_routed_effect_without_route_in_closed_world_composition() {
             result,
             Err(CompositionSchemaError::MissingRoutedEffect { .. })
         ),
-        "expected MissingRoutedEffect error, got: {:?}",
-        result
+        "expected MissingRoutedEffect error, got: {result:?}"
     );
 }

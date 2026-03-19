@@ -417,6 +417,7 @@ mod tests {
     }
 
     // Mock LLM client that always fails.
+    #[allow(dead_code)]
     struct FailingLlmClient;
 
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -545,6 +546,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
     struct DismissOnlyMockCommsRuntime {
         notify: Arc<Notify>,
     }

@@ -8,7 +8,7 @@ use meerkat_mob::definition::{
     BackendConfig, CollectionPolicy, DependencyMode, DispatchMode, FlowSpec, FlowStepSpec,
     LimitsSpec, OrchestratorConfig, StepOutputFormat, WiringRules,
 };
-use meerkat_mob::runtime::FlowRunKernel;
+use meerkat_mob::runtime::{FlowRunKernel, FlowRunMutator};
 use meerkat_mob::{
     FlowId, FlowRunConfig, InMemoryMobEventStore, InMemoryMobRunStore, MobDefinition, MobEventKind,
     MobEventStore, MobId, MobRunStatus, MobRunStore, MobRuntimeMode, Profile, ProfileName,

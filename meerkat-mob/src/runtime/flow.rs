@@ -1,6 +1,6 @@
 use super::conditions::evaluate_condition;
 use super::events::MobEventEmitter;
-use super::flow_run_kernel::FlowRunKernel;
+use super::flow_run_kernel::{FlowRunKernel, FlowRunMutator};
 use super::flow_system_member_id;
 use super::handle::MobHandle;
 use super::path::resolve_context_path;

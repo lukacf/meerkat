@@ -341,15 +341,18 @@ impl FlowEngine {
                 });
             }
 
-            while let Some((target, target_result)) = in_flight.next().await {
-                match target_result? {
-                    TargetExecutionResult::Completed(output) => {
-                        target_successes.push((target, output));
+            while let Some((_target, target_result)) = in_flight.next().await {
+                match target_result {
+                    Err(error) => {
+                        return self.fail_run(&run_id, &config.flow_id, error).await;
                     }
-                    TargetExecutionResult::Failed(reason) => {
+                    Ok(TargetExecutionResult::Completed(output)) => {
+                        target_successes.push((_target, output));
+                    }
+                    Ok(TargetExecutionResult::Failed(reason)) => {
                         failure_reasons.push(reason);
                     }
-                    TargetExecutionResult::Canceled => {
+                    Ok(TargetExecutionResult::Canceled) => {
                         failure_reasons.push("turn canceled".to_string());
                     }
                 }
@@ -395,18 +398,6 @@ impl FlowEngine {
                     .flow_kernel
                     .record_step_output_effects(&run_id, &step_id)
                     .await?;
-                if let Some(output_effects) = output_effects
-                    && has_effect(
-                        &output_effects,
-                        FlowRunEffectKind::PersistStepOutput,
-                        Some(&step_id),
-                        None,
-                    )
-                {
-                    self.run_store
-                        .put_step_output(&run_id, &step_id, aggregate_output.clone())
-                        .await?;
-                }
                 if let Some(complete_effects) = complete_effects
                     && let Some(step_notice) = find_step_notice_effect(&complete_effects, &step_id)?
                 {
@@ -424,6 +415,18 @@ impl FlowEngine {
                         .await?;
                     self.emitter
                         .step_completed(run_id.clone(), step_id.clone())
+                        .await?;
+                }
+                if let Some(output_effects) = output_effects
+                    && has_effect(
+                        &output_effects,
+                        FlowRunEffectKind::PersistStepOutput,
+                        Some(&step_id),
+                        None,
+                    )
+                {
+                    self.run_store
+                        .put_step_output(&run_id, &step_id, aggregate_output.clone())
                         .await?;
                 }
                 context
@@ -501,7 +504,7 @@ impl FlowEngine {
         self.flow_kernel
             .terminalize_failed(run_id.clone(), flow_id.clone(), reason)
             .await?;
-        Err(error)
+        Ok(())
     }
 
     async fn maybe_escalate_supervisor(

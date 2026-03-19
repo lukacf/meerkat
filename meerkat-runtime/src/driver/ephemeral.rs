@@ -211,7 +211,7 @@ impl EphemeralRuntimeDriver {
             .iter()
             .any(|queued_id| queued_id == input_id)
     }
-    fn has_queued_input_outside(&self, excluded: &[InputId]) -> bool {
+    pub fn has_queued_input_outside(&self, excluded: &[InputId]) -> bool {
         self.queue
             .input_ids()
             .iter()

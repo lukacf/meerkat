@@ -2312,7 +2312,8 @@ impl MobActor {
     }
 
     async fn handle_reset(&mut self) -> Result<(), MobError> {
-        let was_stopped = self.state() == MobState::Stopped;
+        let prior_state = self.state();
+        let was_stopped = prior_state == MobState::Stopped;
         self.cancel_all_flow_tasks().await;
 
         // Rearm checkpointers temporarily so retire can checkpoint if needed.
@@ -2383,11 +2384,41 @@ impl MobActor {
             return Err(error);
         }
 
+        if prior_state == MobState::Completed
+            && let Err(error) = self
+                .orchestrator
+                .apply(MobOrchestratorInput::StopOrchestrator)
+        {
+            tracing::warn!(
+                error = %error,
+                "orchestrator StopOrchestrator failed while preparing completed-state reset"
+            );
+        }
         if let Err(error) = self
             .orchestrator
             .apply(MobOrchestratorInput::ResumeOrchestrator)
         {
             tracing::warn!(error = %error, "orchestrator ResumeOrchestrator failed during reset");
+        }
+        if prior_state == MobState::Completed {
+            if let Err(error) = self
+                .lifecycle_authority
+                .apply(MobLifecycleInput::BeginCleanup)
+            {
+                tracing::warn!(
+                    error = %error,
+                    "authority rejected BeginCleanup while preparing completed-state reset"
+                );
+            }
+            if let Err(error) = self
+                .lifecycle_authority
+                .apply(MobLifecycleInput::FinishCleanup)
+            {
+                tracing::warn!(
+                    error = %error,
+                    "authority rejected FinishCleanup while preparing completed-state reset"
+                );
+            }
         }
         if let Err(e) = self.lifecycle_authority.apply(MobLifecycleInput::Resume) {
             tracing::warn!(error = %e, "authority rejected Resume during reset");

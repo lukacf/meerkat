@@ -124,6 +124,10 @@ impl PersistentRuntimeDriver {
         self.inner.dequeue_next()
     }
 
+    pub fn has_queued_input_outside(&self, excluded: &[InputId]) -> bool {
+        self.inner.has_queued_input_outside(excluded)
+    }
+
     /// Requeue an input at the front of the queue (delegates to inner).
     pub fn enqueue_front_input(&mut self, input_id: InputId, input: Input) {
         self.inner.enqueue_front_input(input_id, input);

@@ -403,7 +403,8 @@ async fn process_queue(
                                 );
                             }
                         }
-                        let should_continue = d.take_wake_requested();
+                        let should_continue =
+                            d.take_wake_requested() && d.has_queued_input_outside(&input_ids);
                         drop(d);
                         if should_continue {
                             continue;

@@ -134,6 +134,12 @@ impl DriverEntry {
             DriverEntry::Persistent(d) => d.dequeue_next(),
         }
     }
+    pub(crate) fn has_queued_input_outside(&self, excluded: &[InputId]) -> bool {
+        match self {
+            DriverEntry::Ephemeral(d) => d.has_queued_input_outside(excluded),
+            DriverEntry::Persistent(d) => d.has_queued_input_outside(excluded),
+        }
+    }
 
     /// Requeue an input at the front of the queue.
     pub(crate) fn enqueue_front_input(&mut self, input_id: InputId, input: Input) {

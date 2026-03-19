@@ -1215,6 +1215,7 @@ impl MobEventStore for FaultInjectedMobEventStore {
 struct RecordingRunStore {
     inner: InMemoryMobRunStore,
     cas_history: RwLock<Vec<(RunId, MobRunStatus, MobRunStatus)>>,
+    snapshot_cas_history: RwLock<Vec<(RunId, MobRunStatus, MobRunStatus)>>,
 }
 
 impl RecordingRunStore {
@@ -1222,11 +1223,12 @@ impl RecordingRunStore {
         Self {
             inner: InMemoryMobRunStore::new(),
             cas_history: RwLock::new(Vec::new()),
+            snapshot_cas_history: RwLock::new(Vec::new()),
         }
     }
 
-    async fn cas_history(&self) -> Vec<(RunId, MobRunStatus, MobRunStatus)> {
-        self.cas_history.read().await.clone()
+    async fn snapshot_cas_history(&self) -> Vec<(RunId, MobRunStatus, MobRunStatus)> {
+        self.snapshot_cas_history.read().await.clone()
     }
 }
 
@@ -1278,6 +1280,11 @@ impl MobRunStore for RecordingRunStore {
         next_status: MobRunStatus,
         next_flow_state: &meerkat_machine_kernels::KernelState,
     ) -> Result<bool, MobError> {
+        self.snapshot_cas_history.write().await.push((
+            run_id.clone(),
+            expected_status.clone(),
+            next_status.clone(),
+        ));
         self.inner
             .cas_run_snapshot(
                 run_id,
@@ -7862,22 +7869,28 @@ async fn test_cancel_fallback_uses_direct_pending_to_terminal_cas_attempts() {
     let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(8)).await;
     assert_eq!(terminal.status, MobRunStatus::Canceled);
 
-    let history = run_store.cas_history().await;
+    let history = run_store.snapshot_cas_history().await;
     assert!(
         history.iter().any(|(_, from, to)| {
-            *from == MobRunStatus::Pending && *to == MobRunStatus::Canceled
+            matches!(from, MobRunStatus::Pending | MobRunStatus::Running)
+                && *to == MobRunStatus::Canceled
         }),
-        "fallback should attempt direct Pending->Canceled CAS transitions"
+        "fallback should attempt direct active->Canceled snapshot CAS transitions"
     );
     assert!(
         history.iter().any(|(_, from, to)| {
-            *from == MobRunStatus::Pending
+            matches!(from, MobRunStatus::Pending | MobRunStatus::Running)
                 && matches!(
                     to,
                     MobRunStatus::Completed | MobRunStatus::Failed | MobRunStatus::Canceled
                 )
         }),
-        "terminalization authority must use direct Pending->terminal CAS semantics"
+        "terminalization authority must use direct active->terminal snapshot CAS semantics"
+    );
+    let legacy_status_history = run_store.cas_history.read().await.clone();
+    assert!(
+        legacy_status_history.is_empty(),
+        "fallback terminalization should use snapshot CAS, not legacy status-only CAS"
     );
 }
 

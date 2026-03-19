@@ -195,6 +195,9 @@ pub struct SessionRuntime {
     callback_id_counter_slot: StdRwLock<Arc<std::sync::atomic::AtomicU64>>,
     /// Globally registered callback tool definitions (via `tools/register`).
     registered_tools_slot: StdRwLock<Arc<StdRwLock<Vec<meerkat_core::ToolDef>>>>,
+    /// Comms drain task handles for host_mode sessions.
+    #[cfg(feature = "comms")]
+    comms_drain_handles: RwLock<std::collections::HashMap<SessionId, tokio::task::JoinHandle<()>>>,
 }
 
 fn session_metadata_marks_archived(session: &Session) -> bool {
@@ -262,6 +265,8 @@ impl SessionRuntime {
                 0,
             ))),
             registered_tools_slot: StdRwLock::new(Arc::new(StdRwLock::new(Vec::new()))),
+            #[cfg(feature = "comms")]
+            comms_drain_handles: RwLock::new(std::collections::HashMap::new()),
         }
     }
 
@@ -309,6 +314,8 @@ impl SessionRuntime {
                 0,
             ))),
             registered_tools_slot: StdRwLock::new(Arc::new(StdRwLock::new(Vec::new()))),
+            #[cfg(feature = "comms")]
+            comms_drain_handles: RwLock::new(std::collections::HashMap::new()),
         }
     }
 
@@ -653,6 +660,16 @@ impl SessionRuntime {
 
         self.ensure_runtime_executor(session_id).await?;
 
+        // Spawn comms drain for host_mode sessions routed through the runtime path.
+        #[cfg(feature = "comms")]
+        {
+            let host_mode = overrides
+                .as_ref()
+                .and_then(|ov| ov.host_mode)
+                .unwrap_or(false);
+            self.maybe_spawn_comms_drain(session_id, host_mode).await;
+        }
+
         let (outcome, handle) = self
             .runtime_adapter
             .accept_input_with_completion(session_id, input)
@@ -983,6 +1000,9 @@ impl SessionRuntime {
                             "failed to replay promoted system-context state after runtime materialization"
                         );
                     }
+                    #[cfg(feature = "comms")]
+                    self.maybe_spawn_comms_drain(session_id, build_config.host_mode)
+                        .await;
                 }
                 Err(err) => {
                     if let Some((_starting_system_context_state, current_system_context_state)) =
@@ -1132,6 +1152,8 @@ impl SessionRuntime {
             })
             .await
             .map_err(session_error_to_rpc)?;
+        #[cfg(feature = "comms")]
+        self.maybe_spawn_comms_drain(session_id, host_mode).await;
         let (_, output) = self
             .service
             .apply_runtime_turn_with_result(
@@ -1919,6 +1941,11 @@ impl SessionRuntime {
             state.adapter.shutdown().await;
         }
 
+        #[cfg(feature = "comms")]
+        if let Some(handle) = self.comms_drain_handles.write().await.remove(session_id) {
+            handle.abort();
+        }
+
         result
     }
 
@@ -2121,6 +2148,30 @@ impl SessionRuntime {
         self.service.comms_runtime(session_id).await
     }
 
+    /// Spawn the comms drain task for a host_mode session if comms is available
+    /// and a drain is not already running for this session.
+    #[cfg(feature = "comms")]
+    async fn maybe_spawn_comms_drain(&self, session_id: &SessionId, host_mode: bool) {
+        if !host_mode {
+            return;
+        }
+        {
+            let handles = self.comms_drain_handles.read().await;
+            if handles.contains_key(session_id) {
+                return;
+            }
+        }
+        if let Some(comms) = self.service.comms_runtime(session_id).await {
+            let handle = meerkat_runtime::comms_drain::spawn_comms_drain(
+                self.runtime_adapter.clone(),
+                session_id.clone(),
+                comms,
+            );
+            let mut handles = self.comms_drain_handles.write().await;
+            handles.insert(session_id.clone(), handle);
+        }
+    }
+
     /// Shut down the runtime, closing all sessions.
     pub async fn shutdown(&self) {
         // Clear pending sessions.
@@ -2142,6 +2193,15 @@ impl SessionRuntime {
             drop(map);
             for adapter in adapters {
                 adapter.shutdown().await;
+            }
+        }
+
+        // Abort all comms drain tasks.
+        #[cfg(feature = "comms")]
+        {
+            let mut handles = self.comms_drain_handles.write().await;
+            for (_, handle) in handles.drain() {
+                handle.abort();
             }
         }
     }

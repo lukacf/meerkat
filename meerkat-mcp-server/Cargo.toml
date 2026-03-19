@@ -27,6 +27,7 @@ meerkat-mob = { workspace = true, optional = true }
 meerkat-mob-mcp = { workspace = true, optional = true }
 meerkat-tools = { workspace = true }
 meerkat-comms = { workspace = true, optional = true }
+meerkat-runtime = { workspace = true }
 async-trait = { workspace = true }
 rmcp = { workspace = true, features = ["server", "transport-streamable-http-server"] }
 serde = { workspace = true, features = ["derive"] }
@@ -44,7 +45,7 @@ comms = ["meerkat/comms", "dep:meerkat-comms"]
 mob = ["dep:meerkat-mob", "dep:meerkat-mob-mcp"]
 
 [package.metadata.cargo-machete]
-ignored = ["dirs", "meerkat-client", "meerkat-comms", "meerkat-mcp", "meerkat-mob", "meerkat-mob-mcp", "rmcp"]  # feature-gated / optional
+ignored = ["dirs", "meerkat-client", "meerkat-comms", "meerkat-mcp", "meerkat-mob", "meerkat-mob-mcp", "meerkat-runtime", "rmcp"]  # feature-gated / optional
 
 [lints]
 workspace = true

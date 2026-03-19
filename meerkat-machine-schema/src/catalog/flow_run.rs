@@ -878,13 +878,53 @@ pub fn flow_run_machine() -> MachineSchema {
                         "max_step_retries".into(),
                     ],
                 },
-                guards: vec![Guard {
-                    name: "step_ids_are_non_empty".into(),
-                    expr: Expr::Gt(
-                        Box::new(Expr::Len(Box::new(Expr::Binding("step_ids".into())))),
-                        Box::new(Expr::U64(0)),
-                    ),
-                }],
+                guards: vec![
+                    Guard {
+                        name: "step_ids_are_non_empty".into(),
+                        expr: Expr::Gt(
+                            Box::new(Expr::Len(Box::new(Expr::Binding("step_ids".into())))),
+                            Box::new(Expr::U64(0)),
+                        ),
+                    },
+                    Guard {
+                        name: "ordered_steps_only_reference_step_ids".into(),
+                        expr: sequence_members_are_in_binding("ordered_steps", "step_ids"),
+                    },
+                    Guard {
+                        name: "step_ids_appear_in_ordered_steps".into(),
+                        expr: sequence_members_are_in_binding("step_ids", "ordered_steps"),
+                    },
+                    map_keys_match_step_ids_guard("step_has_conditions"),
+                    map_keys_match_step_ids_guard("step_dependencies"),
+                    map_keys_match_step_ids_guard("step_dependency_modes"),
+                    map_keys_match_step_ids_guard("step_branches"),
+                    map_keys_match_step_ids_guard("step_collection_policies"),
+                    map_keys_match_step_ids_guard("step_quorum_thresholds"),
+                    Guard {
+                        name: "step_dependencies_reference_known_steps".into(),
+                        expr: Expr::Quantified {
+                            quantifier: Quantifier::All,
+                            binding: "step_id".into(),
+                            over: Box::new(Expr::MapKeys(Box::new(Expr::Binding(
+                                "step_dependencies".into(),
+                            )))),
+                            body: Box::new(Expr::Quantified {
+                                quantifier: Quantifier::All,
+                                binding: "dependency".into(),
+                                over: Box::new(Expr::SeqElements(Box::new(Expr::MapGet {
+                                    map: Box::new(Expr::Binding("step_dependencies".into())),
+                                    key: Box::new(Expr::Binding("step_id".into())),
+                                }))),
+                                body: Box::new(Expr::Contains {
+                                    collection: Box::new(Expr::SeqElements(Box::new(
+                                        Expr::Binding("step_ids".into()),
+                                    ))),
+                                    value: Box::new(Expr::Binding("dependency".into())),
+                                }),
+                            }),
+                        },
+                    },
+                ],
                 updates: vec![
                     Update::Assign {
                         field: "tracked_steps".into(),
@@ -1632,6 +1672,54 @@ fn step_is_not_started_expr(binding: &str) -> Expr {
         }),
         Box::new(Expr::None),
     )
+}
+
+fn sequence_members_are_in_binding(seq_binding: &str, allowed_binding: &str) -> Expr {
+    Expr::Quantified {
+        quantifier: Quantifier::All,
+        binding: "value".into(),
+        over: Box::new(Expr::SeqElements(Box::new(Expr::Binding(
+            seq_binding.into(),
+        )))),
+        body: Box::new(Expr::Contains {
+            collection: Box::new(Expr::SeqElements(Box::new(Expr::Binding(
+                allowed_binding.into(),
+            )))),
+            value: Box::new(Expr::Binding("value".into())),
+        }),
+    }
+}
+
+fn map_keys_match_step_ids_guard(map_binding: &str) -> Guard {
+    Guard {
+        name: format!("{map_binding}_keys_match_step_ids"),
+        expr: Expr::And(vec![
+            Expr::Quantified {
+                quantifier: Quantifier::All,
+                binding: "step_key".into(),
+                over: Box::new(Expr::MapKeys(Box::new(Expr::Binding(map_binding.into())))),
+                body: Box::new(Expr::Contains {
+                    collection: Box::new(Expr::SeqElements(Box::new(Expr::Binding(
+                        "step_ids".into(),
+                    )))),
+                    value: Box::new(Expr::Binding("step_key".into())),
+                }),
+            },
+            Expr::Quantified {
+                quantifier: Quantifier::All,
+                binding: "step_id".into(),
+                over: Box::new(Expr::SeqElements(Box::new(Expr::Binding(
+                    "step_ids".into(),
+                )))),
+                body: Box::new(Expr::Contains {
+                    collection: Box::new(Expr::MapKeys(Box::new(Expr::Binding(
+                        map_binding.into(),
+                    )))),
+                    value: Box::new(Expr::Binding("step_id".into())),
+                }),
+            },
+        ]),
+    }
 }
 
 fn step_dependencies_for(binding: &str) -> Expr {

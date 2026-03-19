@@ -454,6 +454,7 @@ impl FlowEngine {
 
         if canceled {
             let flow_id = config.flow_id;
+            self.flow_kernel.cancel_dispatched_steps(&run_id).await?;
             if let TerminalizationOutcome::Transitioned = self
                 .flow_kernel
                 .terminalize_canceled(run_id.clone(), flow_id)
@@ -496,6 +497,7 @@ impl FlowEngine {
         error: MobError,
     ) -> Result<(), MobError> {
         let reason = error.to_string();
+        self.flow_kernel.fail_dispatched_steps(run_id).await?;
         self.flow_kernel
             .terminalize_failed(run_id.clone(), flow_id.clone(), reason)
             .await?;

@@ -63,10 +63,10 @@ pub struct SessionSnapshot {
 // ---------------------------------------------------------------------------
 
 /// Commands sent from the service to a session task.
-#[allow(dead_code)] // host_mode field used in Phase 9-10 attached command loop
 enum SessionCommand {
     StartTurn {
         prompt: meerkat_core::types::ContentInput,
+        #[allow(dead_code)] // Intentionally kept for attached-runtime command loop
         host_mode: bool,
         event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
         result_tx: oneshot::Sender<Result<RunResult, meerkat_core::error::AgentError>>,

@@ -40,7 +40,6 @@ pub struct AgentBuilder {
     pub(super) skill_engine: Option<Arc<crate::skills::SkillRuntime>>,
     pub(super) checkpointer: Option<Arc<dyn crate::checkpoint::SessionCheckpointer>>,
     pub(super) silent_comms_intents: Vec<String>,
-    pub(super) runtime_input_sink: Option<Arc<dyn crate::agent::runner::RuntimeInputSink>>,
     pub(super) ops_lifecycle: Option<Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>>,
     pub(super) max_inline_peer_notifications: Option<i32>,
     pub(super) event_tap: Option<crate::event_tap::EventTap>,
@@ -66,7 +65,6 @@ impl AgentBuilder {
             skill_engine: None,
             checkpointer: None,
             silent_comms_intents: Vec::new(),
-            runtime_input_sink: None,
             ops_lifecycle: None,
             max_inline_peer_notifications: None,
             event_tap: None,
@@ -255,8 +253,6 @@ impl AgentBuilder {
                 .unwrap_or_else(crate::event_tap::new_event_tap),
             system_context_state,
             default_event_tx: self.default_event_tx,
-            host_drain_active: false,
-            runtime_input_sink: self.runtime_input_sink,
             ops_lifecycle: self.ops_lifecycle,
             pending_ops: Vec::new(),
             turn_authority: crate::turn_execution_authority::TurnExecutionAuthority::new(),
@@ -330,12 +326,6 @@ impl AgentBuilder {
         registry: Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>,
     ) -> Self {
         self.ops_lifecycle = Some(registry);
-        self
-    }
-
-    /// Set the runtime input sink for routing host-mode new-run work through the runtime.
-    pub fn with_runtime_input_sink(mut self, sink: Arc<dyn super::RuntimeInputSink>) -> Self {
-        self.runtime_input_sink = Some(sink);
         self
     }
 

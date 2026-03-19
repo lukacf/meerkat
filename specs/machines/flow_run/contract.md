@@ -99,6 +99,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `CreateRun`(step_ids, ordered_steps, step_has_conditions, step_dependencies, step_dependency_modes, step_branches, step_collection_policies, step_quorum_thresholds, escalation_threshold, max_step_retries)
 - Guards:
   - `step_ids_are_non_empty`
+  - `ordered_steps_only_reference_step_ids`
+  - `step_ids_appear_in_ordered_steps`
+  - `step_has_conditions_keys_match_step_ids`
+  - `step_dependencies_keys_match_step_ids`
+  - `step_dependency_modes_keys_match_step_ids`
+  - `step_branches_keys_match_step_ids`
+  - `step_collection_policies_keys_match_step_ids`
+  - `step_quorum_thresholds_keys_match_step_ids`
+  - `step_dependencies_reference_known_steps`
 - Emits: `EmitFlowRunNotice`
 - To: `Pending`
 

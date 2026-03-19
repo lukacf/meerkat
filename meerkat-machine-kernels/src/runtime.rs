@@ -3,10 +3,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use meerkat_machine_schema::{
     EffectEmit, Expr, HelperSchema, MachineSchema, Quantifier, TransitionSchema, TypeRef, Update,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum KernelValue {
     Bool(bool),
     U64(u64),
@@ -16,6 +16,98 @@ pub enum KernelValue {
     Set(BTreeSet<KernelValue>),
     Map(BTreeMap<KernelValue, KernelValue>),
     None,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum KernelValueRepr {
+    Bool {
+        value: bool,
+    },
+    U64 {
+        value: u64,
+    },
+    String {
+        value: String,
+    },
+    NamedVariant {
+        enum_name: String,
+        variant: String,
+    },
+    Seq {
+        items: Vec<KernelValue>,
+    },
+    Set {
+        items: Vec<KernelValue>,
+    },
+    Map {
+        entries: Vec<(KernelValue, KernelValue)>,
+    },
+    None,
+}
+
+impl From<&KernelValue> for KernelValueRepr {
+    fn from(value: &KernelValue) -> Self {
+        match value {
+            KernelValue::Bool(value) => Self::Bool { value: *value },
+            KernelValue::U64(value) => Self::U64 { value: *value },
+            KernelValue::String(value) => Self::String {
+                value: value.clone(),
+            },
+            KernelValue::NamedVariant { enum_name, variant } => Self::NamedVariant {
+                enum_name: enum_name.clone(),
+                variant: variant.clone(),
+            },
+            KernelValue::Seq(values) => Self::Seq {
+                items: values.clone(),
+            },
+            KernelValue::Set(values) => Self::Set {
+                items: values.iter().cloned().collect(),
+            },
+            KernelValue::Map(values) => Self::Map {
+                entries: values
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
+            },
+            KernelValue::None => Self::None,
+        }
+    }
+}
+
+impl From<KernelValueRepr> for KernelValue {
+    fn from(value: KernelValueRepr) -> Self {
+        match value {
+            KernelValueRepr::Bool { value } => Self::Bool(value),
+            KernelValueRepr::U64 { value } => Self::U64(value),
+            KernelValueRepr::String { value } => Self::String(value),
+            KernelValueRepr::NamedVariant { enum_name, variant } => {
+                Self::NamedVariant { enum_name, variant }
+            }
+            KernelValueRepr::Seq { items } => Self::Seq(items),
+            KernelValueRepr::Set { items } => Self::Set(items.into_iter().collect()),
+            KernelValueRepr::Map { entries } => Self::Map(entries.into_iter().collect()),
+            KernelValueRepr::None => Self::None,
+        }
+    }
+}
+
+impl Serialize for KernelValue {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        KernelValueRepr::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for KernelValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(KernelValueRepr::deserialize(deserializer)?.into())
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1807,5 +1899,32 @@ mod tests {
             )
             .expect("boundary-sequence payload should be accepted");
         assert_eq!(boundary_marked.transition, "MarkAppliedPendingConsumption");
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn kernel_value_map_roundtrips_through_json() {
+        let value = KernelValue::Map(BTreeMap::from([
+            (
+                KernelValue::String("step-a".into()),
+                KernelValue::NamedVariant {
+                    enum_name: "StepRunStatus".into(),
+                    variant: "Completed".into(),
+                },
+            ),
+            (
+                KernelValue::String("step-b".into()),
+                KernelValue::Seq(vec![
+                    KernelValue::String("dep-1".into()),
+                    KernelValue::String("dep-2".into()),
+                ]),
+            ),
+        ]));
+
+        let encoded = serde_json::to_string(&value).expect("serialize kernel value");
+        let decoded: KernelValue =
+            serde_json::from_str(&encoded).expect("deserialize kernel value");
+
+        assert_eq!(decoded, value);
     }
 }

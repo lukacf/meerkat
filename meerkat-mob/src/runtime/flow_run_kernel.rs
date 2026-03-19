@@ -207,6 +207,10 @@ impl FlowRunKernel {
         self.apply_step_input(run_id, "SkipStep", step_id).await
     }
 
+    pub async fn cancel_step(&self, run_id: &RunId, step_id: &StepId) -> Result<bool, MobError> {
+        self.apply_step_input(run_id, "CancelStep", step_id).await
+    }
+
     pub async fn skip_step_effects(
         &self,
         run_id: &RunId,
@@ -604,6 +608,30 @@ impl FlowRunKernel {
             KernelValue::None => Ok(None),
             value => Ok(Some(parse_step_run_status(&value, run_id)?)),
         }
+    }
+
+    pub async fn cancel_dispatched_steps(&self, run_id: &RunId) -> Result<(), MobError> {
+        for step_id in self.ordered_steps(run_id).await? {
+            if matches!(
+                self.step_status(run_id, &step_id).await?,
+                Some(crate::run::StepRunStatus::Dispatched)
+            ) {
+                let _ = self.cancel_step(run_id, &step_id).await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn fail_dispatched_steps(&self, run_id: &RunId) -> Result<(), MobError> {
+        for step_id in self.ordered_steps(run_id).await? {
+            if matches!(
+                self.step_status(run_id, &step_id).await?,
+                Some(crate::run::StepRunStatus::Dispatched)
+            ) {
+                let _ = self.fail_step(run_id, &step_id).await?;
+            }
+        }
+        Ok(())
     }
 
     pub async fn terminalize_completed(

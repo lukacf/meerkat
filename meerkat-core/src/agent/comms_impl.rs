@@ -228,23 +228,6 @@ where
     }
 }
 
-/// Build a `ContentInput` from an inbox interaction, preserving multimodal
-/// blocks from `InteractionContent::Message { blocks }` when present.
-#[allow(dead_code)] // Phase 9-10 comms drain will use this
-fn interaction_to_content_input(
-    interaction: &crate::interaction::InboxInteraction,
-) -> crate::types::ContentInput {
-    if let crate::interaction::InteractionContent::Message {
-        blocks: Some(blocks),
-        ..
-    } = &interaction.content
-        && !blocks.is_empty()
-    {
-        return crate::types::ContentInput::Blocks(blocks.clone());
-    }
-    crate::types::ContentInput::Text(interaction.rendered_text.clone())
-}
-
 fn render_named_list(mut names: Vec<String>) -> String {
     names.sort();
     if names.len() <= PEER_INLINE_NAME_LIMIT {

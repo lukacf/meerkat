@@ -11,8 +11,6 @@ mod runner;
 pub mod skills;
 mod state;
 
-pub use runner::RuntimeInputSink;
-
 use crate::budget::Budget;
 use crate::comms::{
     CommsCommand, EventStream, PeerDirectoryEntry, SendAndStreamError, SendError, SendReceipt,
@@ -516,15 +514,6 @@ where
     /// Whether peer lifecycle updates are currently suppressed due to threshold policy.
     /// Used to inject suppression notice only on transition into suppressed mode.
     pub(crate) peer_notification_suppression_active: bool,
-    /// When true, the host-mode compatibility loop owns the inbox drain cycle.
-    /// `drain_comms_inbox()` becomes a no-op to avoid stealing
-    /// interaction-scoped messages through the compatibility path.
-    #[allow(dead_code)] // Phase 9-10 host-mode rewire pending
-    pub(crate) host_drain_active: bool,
-    /// Optional bridge for routing host-mode peer/event work through the runtime.
-    /// When set, ordinary comms execution stays runtime-backed instead of
-    /// calling `self.run()` directly from the host loop.
-    pub(crate) runtime_input_sink: Option<Arc<dyn RuntimeInputSink>>,
     /// Optional shared lifecycle registry for async operations.
     ///
     /// When set, the WaitingForOps state awaits pending operations

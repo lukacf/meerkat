@@ -3217,6 +3217,23 @@ async fn run_agent(
         .accept_input_with_completion(&session_id, input)
         .await
         .map_err(|err| anyhow::anyhow!("runtime accept failed: {err}"))?;
+
+    // Spawn the comms drain in host mode so inbound peer interactions are
+    // routed through the runtime adapter and automatically trigger new turns.
+    #[cfg(feature = "comms")]
+    let comms_drain_handle: Option<tokio::task::JoinHandle<()>> = if host_mode {
+        let comms_rt = service.comms_runtime(&session_id).await;
+        comms_rt.map(|cr| {
+            meerkat_runtime::comms_drain::spawn_comms_drain(
+                runtime_adapter.clone(),
+                session_id.clone(),
+                cr,
+            )
+        })
+    } else {
+        None
+    };
+
     let result = match handle {
         Some(handle) => match handle.wait().await {
             meerkat_runtime::completion::CompletionOutcome::Completed(r) => r,
@@ -3236,6 +3253,16 @@ async fn run_agent(
             create_result
         }
     };
+
+    // In host mode, block until the comms drain terminates (DISMISS, budget
+    // exhaustion, or ctrl-c). The drain processes inbound peer interactions
+    // and auto-starts turns via the runtime loop.
+    #[cfg(feature = "comms")]
+    if let Some(drain_handle) = comms_drain_handle {
+        tracing::info!("host mode: blocking on comms drain");
+        let _ = drain_handle.await;
+        tracing::info!("host mode: comms drain terminated");
+    }
 
     // Abort stdin reader if it was running
     #[cfg(feature = "comms")]
@@ -3692,6 +3719,23 @@ async fn resume_session_with_llm_override(
         .accept_input_with_completion(&session_id, input)
         .await
         .map_err(|err| anyhow::anyhow!("runtime accept failed: {err}"))?;
+
+    // Spawn the comms drain in host mode so inbound peer interactions are
+    // routed through the runtime adapter and automatically trigger new turns.
+    #[cfg(feature = "comms")]
+    let comms_drain_handle: Option<tokio::task::JoinHandle<()>> = if host_mode {
+        let comms_rt = service.comms_runtime(&session_id).await;
+        comms_rt.map(|cr| {
+            meerkat_runtime::comms_drain::spawn_comms_drain(
+                resume_adapter.clone(),
+                session_id.clone(),
+                cr,
+            )
+        })
+    } else {
+        None
+    };
+
     let result = match handle {
         Some(handle) => match handle.wait().await {
             meerkat_runtime::completion::CompletionOutcome::Completed(r) => r,
@@ -3710,6 +3754,18 @@ async fn resume_session_with_llm_override(
             create_result
         }
     };
+
+    // In host mode, block until the comms drain terminates (DISMISS, budget
+    // exhaustion, or ctrl-c). The drain processes inbound peer interactions
+    // and auto-starts turns via the runtime loop.
+    #[cfg(feature = "comms")]
+    if let Some(drain_handle) = comms_drain_handle {
+        log_stage("host_mode_comms_drain_blocking");
+        tracing::info!("host mode: blocking on comms drain");
+        let _ = drain_handle.await;
+        tracing::info!("host mode: comms drain terminated");
+    }
+
     log_stage("service.create_session(done)");
 
     // Shutdown the session service and MCP connections gracefully

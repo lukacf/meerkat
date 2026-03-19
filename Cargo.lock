@@ -2645,6 +2645,7 @@ version = "0.4.11"
 dependencies = [
  "meerkat-machine-schema",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 
@@ -2693,6 +2694,7 @@ dependencies = [
  "meerkat-mcp",
  "meerkat-mob",
  "meerkat-mob-mcp",
+ "meerkat-runtime",
  "meerkat-store",
  "meerkat-tools",
  "rmcp",

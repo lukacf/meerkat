@@ -404,7 +404,43 @@ impl MobActor {
         let provisioner = self.provisioner.clone();
         let loop_id = meerkat_id.clone();
         let log_id = meerkat_id.clone();
+
+        // Resolve comms drain dependencies before spawning.
+        // Both the runtime adapter and the member's comms runtime are needed
+        // so that peer interactions are routed through the runtime authority
+        // while the autonomous host loop is alive.
+        let runtime_adapter = self.session_service.runtime_adapter();
+        let comms_runtime = self.provisioner.comms_runtime(member_ref).await;
+        let drain_session_id = member_ref.session_id().cloned();
+
         let handle = tokio::spawn(async move {
+            // Spawn comms drain alongside the host loop when all wiring is available.
+            let comms_drain_handle = match (&runtime_adapter, &comms_runtime, &drain_session_id) {
+                (Some(adapter), Some(comms), Some(session_id)) => {
+                    let handle = meerkat_runtime::comms_drain::spawn_comms_drain(
+                        adapter.clone(),
+                        session_id.clone(),
+                        comms.clone(),
+                    );
+                    tracing::debug!(
+                        meerkat_id = %log_id,
+                        session_id = %session_id,
+                        "spawned comms drain for autonomous member"
+                    );
+                    Some(handle)
+                }
+                _ => {
+                    tracing::debug!(
+                        meerkat_id = %log_id,
+                        has_adapter = runtime_adapter.is_some(),
+                        has_comms = comms_runtime.is_some(),
+                        has_session = drain_session_id.is_some(),
+                        "skipping comms drain for autonomous member (missing wiring)"
+                    );
+                    None
+                }
+            };
+
             let result = provisioner
                 .start_turn(
                     &member_ref_cloned,
@@ -420,6 +456,12 @@ impl MobActor {
                     },
                 )
                 .await;
+
+            // Abort the comms drain when the host loop exits.
+            if let Some(drain) = comms_drain_handle {
+                drain.abort();
+            }
+
             match &result {
                 Ok(()) => tracing::info!(
                     meerkat_id = %log_id,
@@ -858,6 +900,19 @@ impl MobActor {
                     if let Err(error) = self.orchestrator.apply(MobOrchestratorInput::CompleteFlow)
                     {
                         tracing::warn!(error = %error, "orchestrator CompleteFlow failed");
+                    }
+                    self.lifecycle.finish_tracked_flow();
+                }
+                MobCommand::FlowCanceledCleanup { run_id } => {
+                    self.run_tasks.remove(&run_id);
+                    self.run_cancel_tokens.remove(&run_id);
+                    self.flow_streams.lock().await.remove(&run_id);
+                    if let Err(error) = self.orchestrator.apply(MobOrchestratorInput::CompleteFlow)
+                    {
+                        tracing::warn!(
+                            error = %error,
+                            "orchestrator CompleteFlow failed during canceled flow cleanup"
+                        );
                     }
                     self.lifecycle.finish_tracked_flow();
                 }
@@ -2700,6 +2755,7 @@ impl MobActor {
         };
 
         let flow_kernel = self.flow_kernel.clone();
+        let cleanup_tx = self.command_tx.clone();
         let cancel_grace_timeout = self
             .definition
             .limits
@@ -2710,6 +2766,7 @@ impl MobActor {
                 std::time::Duration::from_millis,
             );
         tokio::spawn(async move {
+            let cleanup_run_id = run_id.clone();
             let completed = tokio::select! {
                 _ = &mut handle => true,
                 () = tokio::time::sleep(cancel_grace_timeout) => false,
@@ -2719,11 +2776,26 @@ impl MobActor {
             }
 
             handle.abort();
+            if let Err(error) = flow_kernel.cancel_dispatched_steps(&run_id).await {
+                tracing::error!(
+                    error = %error,
+                    "failed to settle dispatched steps before flow cancellation terminalization"
+                );
+            }
             if let Err(error) = flow_kernel.terminalize_canceled(run_id, flow_id).await {
                 tracing::error!(
                     error = %error,
                     "failed flow-run kernel cancellation terminalization"
                 );
+            }
+            if cleanup_tx
+                .send(MobCommand::FlowCanceledCleanup {
+                    run_id: cleanup_run_id,
+                })
+                .await
+                .is_err()
+            {
+                tracing::warn!("failed to send FlowCanceledCleanup command");
             }
         });
 
@@ -2736,9 +2808,17 @@ impl MobActor {
         for (_, handle) in tasks {
             handle.abort();
         }
-        self.lifecycle.clear_tracked_flows();
+        let flow_count = cancel_tokens.len();
         for (run_id, (token, flow_id)) in cancel_tokens {
             token.cancel();
+            self.flow_streams.lock().await.remove(&run_id);
+            if let Err(error) = self.flow_kernel.cancel_dispatched_steps(&run_id).await {
+                tracing::error!(
+                    run_id = %run_id,
+                    error = %error,
+                    "failed to settle dispatched steps during lifecycle shutdown cancellation"
+                );
+            }
             if let Err(error) = self
                 .flow_kernel
                 .terminalize_canceled(run_id.clone(), flow_id.clone())
@@ -2751,6 +2831,15 @@ impl MobActor {
                     "failed to finalize run cancellation during lifecycle shutdown"
                 );
             }
+            if let Err(error) = self.orchestrator.apply(MobOrchestratorInput::CompleteFlow) {
+                tracing::warn!(
+                    error = %error,
+                    "orchestrator CompleteFlow failed during bulk flow cancellation"
+                );
+            }
+        }
+        for _ in 0..flow_count {
+            self.lifecycle.finish_tracked_flow();
         }
     }
 

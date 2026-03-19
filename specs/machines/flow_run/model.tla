@@ -107,6 +107,15 @@ CreateRun_ForEach0_tracked_steps(acc, items) == IF Len(items) = 0 THEN acc ELSE 
 CreateRun(step_ids, arg_ordered_steps, arg_step_has_conditions, arg_step_dependencies, arg_step_dependency_modes, arg_step_branches, arg_step_collection_policies, arg_step_quorum_thresholds, arg_escalation_threshold, arg_max_step_retries) ==
     /\ phase = "Absent"
     /\ (Len(step_ids) > 0)
+    /\ (\A value \in SeqElements(arg_ordered_steps) : (value \in SeqElements(step_ids)))
+    /\ (\A value \in SeqElements(step_ids) : (value \in SeqElements(arg_ordered_steps)))
+    /\ ((\A step_key \in DOMAIN arg_step_has_conditions : (step_key \in SeqElements(step_ids))) /\ (\A step_id \in SeqElements(step_ids) : (step_id \in DOMAIN arg_step_has_conditions)))
+    /\ ((\A step_key \in DOMAIN arg_step_dependencies : (step_key \in SeqElements(step_ids))) /\ (\A step_id \in SeqElements(step_ids) : (step_id \in DOMAIN arg_step_dependencies)))
+    /\ ((\A step_key \in DOMAIN arg_step_dependency_modes : (step_key \in SeqElements(step_ids))) /\ (\A step_id \in SeqElements(step_ids) : (step_id \in DOMAIN arg_step_dependency_modes)))
+    /\ ((\A step_key \in DOMAIN arg_step_branches : (step_key \in SeqElements(step_ids))) /\ (\A step_id \in SeqElements(step_ids) : (step_id \in DOMAIN arg_step_branches)))
+    /\ ((\A step_key \in DOMAIN arg_step_collection_policies : (step_key \in SeqElements(step_ids))) /\ (\A step_id \in SeqElements(step_ids) : (step_id \in DOMAIN arg_step_collection_policies)))
+    /\ ((\A step_key \in DOMAIN arg_step_quorum_thresholds : (step_key \in SeqElements(step_ids))) /\ (\A step_id \in SeqElements(step_ids) : (step_id \in DOMAIN arg_step_quorum_thresholds)))
+    /\ (\A step_id \in DOMAIN arg_step_dependencies : (\A dependency \in SeqElements((IF step_id \in DOMAIN arg_step_dependencies THEN arg_step_dependencies[step_id] ELSE <<>>)) : (dependency \in SeqElements(step_ids))))
     /\ phase' = "Pending"
     /\ model_step_count' = model_step_count + 1
     /\ tracked_steps' = CreateRun_ForEach0_tracked_steps({}, step_ids)

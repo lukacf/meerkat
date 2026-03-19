@@ -191,6 +191,9 @@ pub(super) enum MobCommand {
     FlowFinished {
         run_id: RunId,
     },
+    FlowCanceledCleanup {
+        run_id: RunId,
+    },
     #[cfg(test)]
     FlowTrackerCounts {
         reply_tx: oneshot::Sender<(usize, usize)>,

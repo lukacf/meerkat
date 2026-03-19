@@ -21,33 +21,6 @@ use tokio::sync::mpsc;
 
 use super::{Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
 
-/// Async trait for the host-mode compatibility bridge into runtime authority.
-///
-/// Implementations live in `meerkat-runtime` and call `RuntimeSessionAdapter::accept_input()`.
-/// The host-mode code in `comms_impl.rs` uses this to route new-run work through the
-/// runtime authority instead of calling `self.run()` directly.
-///
-/// The bridge awaits only admission (durable-before-ack), NOT execution completion.
-/// The host loop continues immediately after runtime acceptance.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub trait RuntimeInputSink: Send + Sync {
-    /// Accept a peer interaction as a runtime input.
-    async fn accept_peer_input(
-        &self,
-        interaction: crate::interaction::InboxInteraction,
-    ) -> Result<(), String>;
-
-    /// Schedule runtime-owned continuation after an inline terminal response.
-    async fn schedule_terminal_response_continuation(
-        &self,
-        request_id: Option<String>,
-    ) -> Result<(), String>;
-
-    /// Stop the runtime executor via the out-of-band control plane.
-    async fn stop_runtime_executor(&self, reason: &str) -> Result<(), String>;
-}
-
 /// Minimal runner interface for an Agent.
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -111,14 +84,6 @@ where
     /// `run()` / `run_with_events()` call.
     pub fn replace_client(&mut self, client: Arc<C>) {
         self.client = client;
-    }
-
-    /// Set the runtime input sink for host-mode comms routing.
-    ///
-    /// When set, passthrough interactions and continuation runs in host-mode
-    /// are routed through the sink instead of calling `self.run()` directly.
-    pub fn set_runtime_input_sink(&mut self, sink: Arc<dyn RuntimeInputSink>) {
-        self.runtime_input_sink = Some(sink);
     }
 
     #[cfg(test)]
@@ -251,7 +216,7 @@ where
     }
 
     /// Persist the current session through the configured checkpointer after syncing control state.
-    #[allow(dead_code)] // Phase 9-10 host-mode rewire pending
+    #[allow(dead_code)] // Used by persistent session service; call-site wiring pending
     pub(crate) async fn checkpoint_current_session(&mut self) {
         self.sync_system_context_state_to_session();
         if let Some(ref cp) = self.checkpointer {

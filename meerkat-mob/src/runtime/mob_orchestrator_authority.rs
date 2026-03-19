@@ -327,8 +327,9 @@ impl MobOrchestratorAuthority {
 
             // StopOrchestrator: Running|Completed -> Stopped
             // Guards: no_active_flows
-            // Updates: supervisor_active = false
-            // Emits: DeactivateSupervisor
+            // Updates: supervisor_active = false, coordinator_bound = false,
+            // topology_revision += 1 when unbinding the coordinator
+            // Emits: DeactivateSupervisor, EmitOrchestratorNotice
             (Running | Completed, StopOrchestrator) => {
                 if fields.active_flow_count != 0 {
                     return Err(MobError::Internal(
@@ -336,19 +337,24 @@ impl MobOrchestratorAuthority {
                     ));
                 }
                 fields.supervisor_active = false;
+                if fields.coordinator_bound {
+                    fields.coordinator_bound = false;
+                    fields.topology_revision = fields.topology_revision.saturating_add(1);
+                    effects.push(MobOrchestratorEffect::EmitOrchestratorNotice);
+                }
                 effects.push(MobOrchestratorEffect::DeactivateSupervisor);
                 Stopped
             }
 
             // ResumeOrchestrator: Stopped -> Running
-            // Guards: coordinator_is_bound
-            // Updates: supervisor_active = true
-            // Emits: ActivateSupervisor
+            // Updates: supervisor_active = true, coordinator_bound = true,
+            // topology_revision += 1 if rebinding is required
+            // Emits: ActivateSupervisor, EmitOrchestratorNotice when rebinding
             (Stopped, ResumeOrchestrator) => {
                 if !fields.coordinator_bound {
-                    return Err(MobError::Internal(
-                        "guard failed: coordinator is not bound (resume requires bound coordinator)".into(),
-                    ));
+                    fields.coordinator_bound = true;
+                    fields.topology_revision = fields.topology_revision.saturating_add(1);
+                    effects.push(MobOrchestratorEffect::EmitOrchestratorNotice);
                 }
                 fields.supervisor_active = true;
                 effects.push(MobOrchestratorEffect::ActivateSupervisor);
@@ -639,6 +645,7 @@ mod tests {
             .expect("stop");
         assert_eq!(t.next_phase, MobState::Stopped);
         assert!(!t.snapshot.supervisor_active);
+        assert!(!t.snapshot.coordinator_bound);
         assert!(
             t.effects
                 .contains(&MobOrchestratorEffect::DeactivateSupervisor)
@@ -657,7 +664,7 @@ mod tests {
     }
 
     #[test]
-    fn resume_reactivates_supervisor() {
+    fn resume_reactivates_supervisor_and_rebinds_coordinator() {
         let mut auth = make_running_authority();
         auth.apply(MobOrchestratorInput::BindCoordinator)
             .expect("bind");
@@ -668,6 +675,7 @@ mod tests {
             .expect("resume");
         assert_eq!(t.next_phase, MobState::Running);
         assert!(t.snapshot.supervisor_active);
+        assert!(t.snapshot.coordinator_bound);
         assert!(
             t.effects
                 .contains(&MobOrchestratorEffect::ActivateSupervisor)
@@ -675,12 +683,15 @@ mod tests {
     }
 
     #[test]
-    fn resume_rejects_without_coordinator() {
+    fn resume_binds_when_coordinator_is_absent() {
         let mut auth = make_running_authority();
         auth.apply(MobOrchestratorInput::StopOrchestrator)
             .expect("stop");
-        let result = auth.apply(MobOrchestratorInput::ResumeOrchestrator);
-        assert!(result.is_err(), "resume without coordinator should fail");
+        let t = auth
+            .apply(MobOrchestratorInput::ResumeOrchestrator)
+            .expect("resume should rebind coordinator");
+        assert!(t.snapshot.coordinator_bound);
+        assert!(t.snapshot.supervisor_active);
     }
 
     #[test]

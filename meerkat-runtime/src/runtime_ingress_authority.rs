@@ -1942,7 +1942,12 @@ fn seq_remove_all(seq: &mut Vec<InputId>, values: &[InputId]) {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::redundant_clone,
+    clippy::cloned_ref_to_slice_refs
+)]
 mod tests {
     use super::*;
     use crate::identifiers::PolicyVersion;

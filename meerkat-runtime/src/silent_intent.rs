@@ -45,7 +45,12 @@ pub fn apply_silent_intent_override(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::redundant_clone,
+    clippy::clone_on_copy
+)]
 mod tests {
     use super::*;
     use crate::input::*;

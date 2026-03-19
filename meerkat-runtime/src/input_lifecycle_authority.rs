@@ -498,7 +498,12 @@ impl InputLifecycleMutator for InputLifecycleAuthority {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::redundant_clone,
+    clippy::panic
+)]
 mod tests {
     use super::*;
 

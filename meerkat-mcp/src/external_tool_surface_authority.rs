@@ -1252,7 +1252,7 @@ impl ExternalToolSurfaceMutator for ExternalToolSurfaceAuthority {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::redundant_clone)]
 mod tests {
     use super::*;
 

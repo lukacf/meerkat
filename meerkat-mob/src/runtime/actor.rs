@@ -936,11 +936,10 @@ impl MobActor {
                 }
                 #[cfg(test)]
                 MobCommand::OrchestratorSnapshot { reply_tx } => {
-                    let _ = reply_tx.send(
-                        self.orchestrator
-                            .as_ref()
-                            .map_or_else(MobOrchestratorSnapshot::default, |o| o.snapshot()),
-                    );
+                    let _ = reply_tx.send(self.orchestrator.as_ref().map_or_else(
+                        MobOrchestratorSnapshot::default,
+                        super::mob_orchestrator_authority::MobOrchestratorAuthority::snapshot,
+                    ));
                 }
                 MobCommand::Stop { reply_tx } => {
                     let result = match self.expect_state(&[MobState::Running], MobState::Stopped) {

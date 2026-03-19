@@ -1,9 +1,9 @@
 use indexmap::IndexMap;
 
 use crate::{
-    EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema, Guard, HelperSchema, InitSchema,
-    InputMatch, InvariantSchema, MachineSchema, Quantifier, RustBinding, StateSchema,
-    TransitionSchema, TypeRef, Update, VariantSchema,
+    EffectDisposition, EffectDispositionRule, EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema,
+    Guard, HelperSchema, InitSchema, InputMatch, InvariantSchema, MachineSchema, Quantifier,
+    RustBinding, StateSchema, TransitionSchema, TypeRef, Update, VariantSchema,
 };
 
 pub fn flow_run_machine() -> MachineSchema {
@@ -1530,6 +1530,40 @@ pub fn flow_run_machine() -> MachineSchema {
                 ],
             },
         ],
+        effect_dispositions: vec![
+            disposition("EmitFlowRunNotice", EffectDisposition::External),
+            disposition("EmitStepNotice", EffectDisposition::External),
+            disposition("AppendFailureLedger", EffectDisposition::Local),
+            disposition("PersistStepOutput", EffectDisposition::Local),
+            disposition(
+                "AdmitStepWork",
+                EffectDisposition::Routed {
+                    consumer_machines: vec!["RuntimeControlMachine".into()],
+                },
+            ),
+            disposition(
+                "FlowTerminalized",
+                EffectDisposition::Routed {
+                    consumer_machines: vec!["MobOrchestratorMachine".into()],
+                },
+            ),
+            disposition(
+                "EscalateSupervisor",
+                EffectDisposition::Routed {
+                    consumer_machines: vec!["MobOrchestratorMachine".into()],
+                },
+            ),
+            disposition("ProjectTargetSuccess", EffectDisposition::External),
+            disposition("ProjectTargetFailure", EffectDisposition::External),
+            disposition("ProjectTargetCanceled", EffectDisposition::External),
+        ],
+    }
+}
+
+fn disposition(name: &str, d: EffectDisposition) -> EffectDispositionRule {
+    EffectDispositionRule {
+        effect_variant: name.into(),
+        disposition: d,
     }
 }
 

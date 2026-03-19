@@ -10,6 +10,7 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 ## Routes
 - `peer_candidate_enters_runtime_admission`: `peer_comms`.`SubmitPeerInputCandidate` -> `runtime_control`.`SubmitWork` [Immediate]
 - `admitted_peer_work_enters_ingress`: `runtime_control`.`SubmitAdmittedIngressEffect` -> `runtime_ingress`.`AdmitQueued` [Immediate]
+- `peer_ingress_ready_begins_run`: `runtime_ingress`.`ReadyForRun` -> `runtime_control`.`BeginRun` [Immediate]
 
 ## Scheduler Rules
 - `PreemptWhenReady(control_plane, peer_plane)`

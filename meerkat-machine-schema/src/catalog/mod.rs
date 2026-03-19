@@ -15,8 +15,9 @@ use crate::{CompositionSchema, MachineSchema};
 
 pub use compositions::{
     continuation_runtime_bundle_composition, external_tool_bundle_composition,
-    mob_bundle_composition, ops_runtime_bundle_composition, peer_runtime_bundle_composition,
-    runtime_pipeline_composition, surface_event_runtime_bundle_composition,
+    mob_bundle_composition, ops_peer_bundle_composition, ops_runtime_bundle_composition,
+    peer_runtime_bundle_composition, runtime_pipeline_composition,
+    surface_event_runtime_bundle_composition,
 };
 pub use coverage::{
     CodeAnchor, CompositionCoverageManifest, MachineCoverageManifest, ScenarioCoverage,
@@ -57,6 +58,7 @@ pub fn canonical_composition_schemas() -> Vec<CompositionSchema> {
         external_tool_bundle_composition(),
         peer_runtime_bundle_composition(),
         ops_runtime_bundle_composition(),
+        ops_peer_bundle_composition(),
         mob_bundle_composition(),
     ]
 }

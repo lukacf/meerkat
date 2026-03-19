@@ -13,6 +13,7 @@ pub struct MachineSchema {
     pub derived: Vec<HelperSchema>,
     pub invariants: Vec<InvariantSchema>,
     pub transitions: Vec<TransitionSchema>,
+    pub effect_dispositions: Vec<EffectDispositionRule>,
 }
 
 impl MachineSchema {
@@ -138,8 +139,49 @@ impl MachineSchema {
             }
         }
 
+        // Validate effect dispositions: every rule must reference a known effect variant,
+        // no duplicates, and when dispositions are present every effect must be covered.
+        if !self.effect_dispositions.is_empty() {
+            let mut disposed_variants = IndexSet::new();
+            for rule in &self.effect_dispositions {
+                if !effect_variants.contains(&rule.effect_variant) {
+                    return Err(MachineSchemaError::UnknownEffectDispositionVariant {
+                        variant: rule.effect_variant.clone(),
+                    });
+                }
+                if !disposed_variants.insert(&rule.effect_variant) {
+                    return Err(MachineSchemaError::DuplicateEffectDisposition {
+                        variant: rule.effect_variant.clone(),
+                    });
+                }
+            }
+            for variant in &effect_variants {
+                if !disposed_variants.contains(*variant) {
+                    return Err(MachineSchemaError::MissingEffectDisposition {
+                        variant: (*variant).clone(),
+                    });
+                }
+            }
+        }
+
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EffectDisposition {
+    /// Handled internally by the owning shell/runtime. No cross-machine routing needed.
+    Local,
+    /// Observability/external side effect. No machine consumption expected.
+    External,
+    /// Must be routed to a consumer machine when both producer and consumer coexist in a composition.
+    Routed { consumer_machines: Vec<String> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectDispositionRule {
+    pub effect_variant: String,
+    pub disposition: EffectDisposition,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -856,6 +898,9 @@ pub enum MachineSchemaError {
     UnknownBinding { binding: String },
     UnknownVariant { variant: String },
     UnknownVariantField { variant: String, field: String },
+    UnknownEffectDispositionVariant { variant: String },
+    DuplicateEffectDisposition { variant: String },
+    MissingEffectDisposition { variant: String },
 }
 
 impl fmt::Display for MachineSchemaError {
@@ -876,6 +921,18 @@ impl fmt::Display for MachineSchemaError {
             Self::UnknownVariant { variant } => write!(f, "unknown variant `{variant}`"),
             Self::UnknownVariantField { variant, field } => {
                 write!(f, "unknown field `{field}` on variant `{variant}`")
+            }
+            Self::UnknownEffectDispositionVariant { variant } => {
+                write!(
+                    f,
+                    "effect disposition references unknown effect variant `{variant}`"
+                )
+            }
+            Self::DuplicateEffectDisposition { variant } => {
+                write!(f, "duplicate effect disposition for variant `{variant}`")
+            }
+            Self::MissingEffectDisposition { variant } => {
+                write!(f, "effect variant `{variant}` has no disposition rule")
             }
         }
     }

@@ -1,9 +1,9 @@
 use indexmap::IndexMap;
 
 use crate::{
-    EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema, Guard, InitSchema, InputMatch,
-    InvariantSchema, MachineSchema, RustBinding, StateSchema, TransitionSchema, TypeRef, Update,
-    VariantSchema,
+    EffectDisposition, EffectDispositionRule, EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema,
+    Guard, InitSchema, InputMatch, InvariantSchema, MachineSchema, RustBinding, StateSchema,
+    TransitionSchema, TypeRef, Update, VariantSchema,
 };
 
 pub fn turn_execution_machine() -> MachineSchema {
@@ -2600,6 +2600,51 @@ pub fn turn_execution_machine() -> MachineSchema {
                 emit: vec![],
             },
         ],
+        effect_dispositions: vec![
+            disposition("RunStarted", EffectDisposition::External),
+            disposition(
+                "BoundaryApplied",
+                EffectDisposition::Routed {
+                    consumer_machines: vec!["RuntimeIngressMachine".into()],
+                },
+            ),
+            disposition(
+                "RunCompleted",
+                EffectDisposition::Routed {
+                    consumer_machines: vec![
+                        "RuntimeIngressMachine".into(),
+                        "RuntimeControlMachine".into(),
+                    ],
+                },
+            ),
+            disposition(
+                "RunFailed",
+                EffectDisposition::Routed {
+                    consumer_machines: vec![
+                        "RuntimeIngressMachine".into(),
+                        "RuntimeControlMachine".into(),
+                    ],
+                },
+            ),
+            disposition(
+                "RunCancelled",
+                EffectDisposition::Routed {
+                    consumer_machines: vec![
+                        "RuntimeIngressMachine".into(),
+                        "RuntimeControlMachine".into(),
+                    ],
+                },
+            ),
+            disposition("DrainCommsInbox", EffectDisposition::Local),
+            disposition("CheckCompaction", EffectDisposition::Local),
+        ],
+    }
+}
+
+fn disposition(name: &str, d: EffectDisposition) -> EffectDispositionRule {
+    EffectDispositionRule {
+        effect_variant: name.into(),
+        disposition: d,
     }
 }
 

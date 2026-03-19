@@ -47,6 +47,12 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 - `surface_execution_failure_notifies_control`
   - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_cutover_matrix`
   - scenarios: `surface-event-failure`
+- `surface_execution_cancel_updates_ingress`
+  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_cutover_matrix`
+  - scenarios: `cli-surface-event-admission`, `rest-surface-event-admission`, `rpc-surface-event-admission`, `wasm-surface-event-admission`
+- `surface_execution_cancel_notifies_control`
+  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_cutover_matrix`
+  - scenarios: `cli-surface-event-admission`, `rest-surface-event-admission`, `rpc-surface-event-admission`, `wasm-surface-event-admission`
 
 ### Scheduler Rules
 - `PreemptWhenReady(control_plane, ordinary_ingress)`
@@ -66,6 +72,9 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 - `surface_event_execution_failure_is_handled`
   - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_cutover_matrix`
   - scenarios: `surface-event-failure`
+- `surface_event_execution_cancel_is_handled`
+  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_cutover_matrix`
+  - scenarios: `cli-surface-event-admission`, `rest-surface-event-admission`, `rpc-surface-event-admission`, `wasm-surface-event-admission`
 - `control_preempts_surface_event_ingress`
   - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_cutover_matrix`
   - scenarios: `surface-control-preemption`

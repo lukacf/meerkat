@@ -1055,6 +1055,7 @@ mod tests {
                     emit: vec![],
                 },
             ],
+            effect_dispositions: vec![],
         }
     }
 

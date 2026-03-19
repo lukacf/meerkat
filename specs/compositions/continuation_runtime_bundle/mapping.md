@@ -34,6 +34,21 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 - `continuation_execution_completion_notifies_control`
   - anchors: `host_mode_cutover`, `runtime_comms_drain`, `agent_comms_impl`, `agent_runner`
   - scenarios: `terminal-response-continuation`, `host-mode-continuation`
+- `continuation_execution_boundary_updates_ingress`
+  - anchors: `host_mode_cutover`, `runtime_comms_drain`, `agent_comms_impl`, `agent_runner`
+  - scenarios: `terminal-response-continuation`, `host-mode-continuation`
+- `continuation_execution_failure_updates_ingress`
+  - anchors: `host_mode_cutover`, `runtime_comms_drain`, `agent_comms_impl`, `agent_runner`
+  - scenarios: `terminal-response-continuation`, `host-mode-continuation`
+- `continuation_execution_failure_notifies_control`
+  - anchors: `host_mode_cutover`, `runtime_comms_drain`, `agent_comms_impl`, `agent_runner`
+  - scenarios: `terminal-response-continuation`, `host-mode-continuation`
+- `continuation_execution_cancel_updates_ingress`
+  - anchors: `host_mode_cutover`, `runtime_comms_drain`, `agent_comms_impl`, `agent_runner`
+  - scenarios: `terminal-response-continuation`, `host-mode-continuation`
+- `continuation_execution_cancel_notifies_control`
+  - anchors: `host_mode_cutover`, `runtime_comms_drain`, `agent_comms_impl`, `agent_runner`
+  - scenarios: `terminal-response-continuation`, `host-mode-continuation`
 
 ### Scheduler Rules
 - `PreemptWhenReady(control_plane, ordinary_ingress)`
@@ -48,6 +63,12 @@ This section is generated from the Rust composition catalog. Do not edit it by h
   - anchors: `host_mode_cutover`, `runtime_comms_drain`, `agent_comms_impl`, `agent_runner`
   - scenarios: `terminal-response-continuation`, `host-mode-continuation`
 - `continuation_execution_completion_is_handled`
+  - anchors: `host_mode_cutover`, `runtime_comms_drain`, `agent_comms_impl`, `agent_runner`
+  - scenarios: `terminal-response-continuation`, `host-mode-continuation`
+- `continuation_execution_failure_is_handled`
+  - anchors: `host_mode_cutover`, `runtime_comms_drain`, `agent_comms_impl`, `agent_runner`
+  - scenarios: `terminal-response-continuation`, `host-mode-continuation`
+- `continuation_execution_cancel_is_handled`
   - anchors: `host_mode_cutover`, `runtime_comms_drain`, `agent_comms_impl`, `agent_runner`
   - scenarios: `terminal-response-continuation`, `host-mode-continuation`
 - `control_preempts_continuation_ingress`

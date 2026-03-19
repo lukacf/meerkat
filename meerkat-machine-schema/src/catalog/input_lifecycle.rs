@@ -1,9 +1,9 @@
 use indexmap::IndexMap;
 
 use crate::{
-    EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema, Guard, InitSchema, InputMatch,
-    InvariantSchema, MachineSchema, RustBinding, StateSchema, TransitionSchema, TypeRef, Update,
-    VariantSchema,
+    EffectDisposition, EffectDispositionRule, EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema,
+    Guard, InitSchema, InputMatch, InvariantSchema, MachineSchema, RustBinding, StateSchema,
+    TransitionSchema, TypeRef, Update, VariantSchema,
 };
 
 pub fn input_lifecycle_machine() -> MachineSchema {
@@ -368,6 +368,19 @@ pub fn input_lifecycle_machine() -> MachineSchema {
                 ],
             },
         ],
+        effect_dispositions: vec![
+            disposition("InputLifecycleNotice", EffectDisposition::Local),
+            disposition("RecordTerminalOutcome", EffectDisposition::Local),
+            disposition("RecordRunAssociation", EffectDisposition::Local),
+            disposition("RecordBoundarySequence", EffectDisposition::Local),
+        ],
+    }
+}
+
+fn disposition(name: &str, d: EffectDisposition) -> EffectDispositionRule {
+    EffectDispositionRule {
+        effect_variant: name.into(),
+        disposition: d,
     }
 }
 

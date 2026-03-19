@@ -1,9 +1,9 @@
 use indexmap::IndexMap;
 
 use crate::{
-    EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema, Guard, HelperSchema, InitSchema,
-    InputMatch, InvariantSchema, MachineSchema, Quantifier, RustBinding, StateSchema,
-    TransitionSchema, TypeRef, Update, VariantSchema,
+    EffectDisposition, EffectDispositionRule, EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema,
+    Guard, HelperSchema, InitSchema, InputMatch, InvariantSchema, MachineSchema, Quantifier,
+    RustBinding, StateSchema, TransitionSchema, TypeRef, Update, VariantSchema,
 };
 
 pub fn external_tool_surface_machine() -> MachineSchema {
@@ -900,6 +900,20 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                 emit: vec![],
             },
         ],
+        effect_dispositions: vec![
+            disposition("ScheduleSurfaceCompletion", EffectDisposition::External),
+            disposition("RefreshVisibleSurfaceSet", EffectDisposition::Local),
+            disposition("EmitExternalToolDelta", EffectDisposition::External),
+            disposition("CloseSurfaceConnection", EffectDisposition::External),
+            disposition("RejectSurfaceCall", EffectDisposition::External),
+        ],
+    }
+}
+
+fn disposition(name: &str, d: EffectDisposition) -> EffectDispositionRule {
+    EffectDispositionRule {
+        effect_variant: name.into(),
+        disposition: d,
     }
 }
 

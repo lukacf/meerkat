@@ -36,6 +36,7 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 - `mob_escalate_supervisor_stops_orchestrator`: `flow_run`.`EscalateSupervisor` -> `mob_orchestrator`.`StopOrchestrator` [Immediate]
 - `mob_member_respawn_destroys_runtime`: `mob_orchestrator`.`MemberRespawnInitiated` -> `runtime_control`.`DestroyRequested` [Immediate]
 - `mob_cleanup_destroys_orchestrator`: `mob_lifecycle`.`RequestCleanup` -> `mob_orchestrator`.`DestroyOrchestrator` [Immediate]
+- `mob_ops_peer_ready_trusts_peer_comms`: `ops_lifecycle`.`ExposeOperationPeer` -> `peer_comms`.`TrustPeer` [Immediate]
 
 ## Scheduler Rules
 - `PreemptWhenReady(control_plane, ordinary_ingress)`
@@ -55,6 +56,7 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 - `mob_flow_deactivation_finishes_lifecycle_run` — orchestrator flow deactivation closes the lifecycle run count through an explicit route
 - `mob_execution_failure_is_handled` — mob turn-execution failure is handled by both ingress and runtime control
 - `mob_execution_cancel_is_handled` — mob turn-execution cancellation is handled by both ingress and runtime control
+- `mob_ops_peer_ready_trusts_peer_comms` — trust handoff assumes the exposed operation peer is identified by the operation_id alias mapping
 
 ## Coverage
 ### Code Anchors

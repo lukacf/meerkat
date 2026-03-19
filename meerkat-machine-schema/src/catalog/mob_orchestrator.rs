@@ -1,9 +1,9 @@
 use indexmap::IndexMap;
 
 use crate::{
-    EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema, Guard, InitSchema, InputMatch,
-    InvariantSchema, MachineSchema, RustBinding, StateSchema, TransitionSchema, TypeRef, Update,
-    VariantSchema,
+    EffectDisposition, EffectDispositionRule, EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema,
+    Guard, InitSchema, InputMatch, InvariantSchema, MachineSchema, RustBinding, StateSchema,
+    TransitionSchema, TypeRef, Update, VariantSchema,
 };
 
 pub fn mob_orchestrator_machine() -> MachineSchema {
@@ -484,6 +484,52 @@ pub fn mob_orchestrator_machine() -> MachineSchema {
                 ],
             },
         ],
+        effect_dispositions: vec![
+            disposition(
+                "ActivateSupervisor",
+                EffectDisposition::Routed {
+                    consumer_machines: vec!["MobLifecycleMachine".into()],
+                },
+            ),
+            disposition(
+                "DeactivateSupervisor",
+                EffectDisposition::Routed {
+                    consumer_machines: vec!["MobLifecycleMachine".into()],
+                },
+            ),
+            disposition(
+                "FlowActivated",
+                EffectDisposition::Routed {
+                    consumer_machines: vec!["FlowRunMachine".into(), "MobLifecycleMachine".into()],
+                },
+            ),
+            disposition(
+                "FlowDeactivated",
+                EffectDisposition::Routed {
+                    consumer_machines: vec!["MobLifecycleMachine".into()],
+                },
+            ),
+            disposition("EmitOrchestratorNotice", EffectDisposition::External),
+            disposition(
+                "MemberForceCancelled",
+                EffectDisposition::Routed {
+                    consumer_machines: vec!["RuntimeControlMachine".into()],
+                },
+            ),
+            disposition(
+                "MemberRespawnInitiated",
+                EffectDisposition::Routed {
+                    consumer_machines: vec!["RuntimeControlMachine".into()],
+                },
+            ),
+        ],
+    }
+}
+
+fn disposition(name: &str, d: EffectDisposition) -> EffectDispositionRule {
+    EffectDispositionRule {
+        effect_variant: name.into(),
+        disposition: d,
     }
 }
 

@@ -7,8 +7,9 @@ use meerkat_machine_schema::catalog::{
     runtime_pipeline_composition, turn_execution_machine,
 };
 use meerkat_machine_schema::{
-    CompositionSchemaError, Route, RouteBindingSource, RouteDelivery, RouteFieldBinding,
-    RouteTarget, canonical_machine_schemas, input_lifecycle_machine,
+    CompositionSchemaError, EffectDisposition, Route, RouteBindingSource, RouteDelivery,
+    RouteFieldBinding, RouteTarget, canonical_composition_schemas, canonical_machine_schemas,
+    input_lifecycle_machine,
 };
 
 #[test]
@@ -234,5 +235,194 @@ fn validates_mob_bundle_skeleton_routes() {
             &turn_execution,
         ]),
         Ok(())
+    );
+}
+
+/// Closed-world audit gate: every Routed effect in every closed-world composition that
+/// contains both producer and consumer machine types must have a corresponding route.
+/// This runs in `cargo rct` as an automated verification that route coverage is complete.
+#[test]
+fn closed_world_audit_all_routed_effects_have_routes() {
+    let machines = canonical_machine_schemas();
+    let compositions = canonical_composition_schemas();
+
+    let mut failures = Vec::new();
+    for composition in &compositions {
+        if !composition.closed_world {
+            continue;
+        }
+
+        let machine_refs: Vec<&_> = machines
+            .iter()
+            .filter(|m| {
+                composition
+                    .machines
+                    .iter()
+                    .any(|inst| inst.machine_name == m.machine)
+            })
+            .collect();
+
+        if let Err(e) = composition.validate_against(&machine_refs) {
+            failures.push(format!("  {}: {}", composition.name, e));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "closed-world route audit failures:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// Negative test: a Routed effect with no corresponding route in a closed-world
+/// composition must produce a MissingRoutedEffect error.
+#[test]
+fn rejects_routed_effect_without_route_in_closed_world_composition() {
+    use indexmap::IndexMap;
+    use meerkat_machine_schema::{
+        CompositionSchema, EffectDispositionRule, EffectEmit, EntryInput, EnumSchema, InitSchema,
+        MachineInstance, MachineSchema, RustBinding, StateSchema, VariantSchema,
+    };
+
+    let producer = MachineSchema {
+        machine: "ProducerMachine".into(),
+        version: 1,
+        rust: RustBinding {
+            crate_name: "test".into(),
+            module: "test::producer".into(),
+        },
+        state: StateSchema {
+            phase: EnumSchema {
+                name: "ProducerState".into(),
+                variants: vec![VariantSchema {
+                    name: "Ready".into(),
+                    fields: vec![],
+                }],
+            },
+            fields: vec![],
+            init: InitSchema {
+                phase: "Ready".into(),
+                fields: vec![],
+            },
+            terminal_phases: vec![],
+        },
+        inputs: EnumSchema {
+            name: "ProducerInput".into(),
+            variants: vec![VariantSchema {
+                name: "Go".into(),
+                fields: vec![],
+            }],
+        },
+        effects: EnumSchema {
+            name: "ProducerEffect".into(),
+            variants: vec![VariantSchema {
+                name: "Handoff".into(),
+                fields: vec![],
+            }],
+        },
+        helpers: vec![],
+        derived: vec![],
+        invariants: vec![],
+        transitions: vec![meerkat_machine_schema::TransitionSchema {
+            name: "Go".into(),
+            from: vec!["Ready".into()],
+            on: meerkat_machine_schema::InputMatch {
+                variant: "Go".into(),
+                bindings: vec![],
+            },
+            guards: vec![],
+            updates: vec![],
+            to: "Ready".into(),
+            emit: vec![EffectEmit {
+                variant: "Handoff".into(),
+                fields: IndexMap::new(),
+            }],
+        }],
+        effect_dispositions: vec![EffectDispositionRule {
+            effect_variant: "Handoff".into(),
+            disposition: EffectDisposition::Routed {
+                consumer_machines: vec!["ConsumerMachine".into()],
+            },
+        }],
+    };
+
+    let consumer = MachineSchema {
+        machine: "ConsumerMachine".into(),
+        version: 1,
+        rust: RustBinding {
+            crate_name: "test".into(),
+            module: "test::consumer".into(),
+        },
+        state: StateSchema {
+            phase: EnumSchema {
+                name: "ConsumerState".into(),
+                variants: vec![VariantSchema {
+                    name: "Idle".into(),
+                    fields: vec![],
+                }],
+            },
+            fields: vec![],
+            init: InitSchema {
+                phase: "Idle".into(),
+                fields: vec![],
+            },
+            terminal_phases: vec![],
+        },
+        inputs: EnumSchema {
+            name: "ConsumerInput".into(),
+            variants: vec![VariantSchema {
+                name: "Receive".into(),
+                fields: vec![],
+            }],
+        },
+        effects: EnumSchema {
+            name: "ConsumerEffect".into(),
+            variants: vec![],
+        },
+        helpers: vec![],
+        derived: vec![],
+        invariants: vec![],
+        transitions: vec![],
+        effect_dispositions: vec![],
+    };
+
+    let composition = CompositionSchema {
+        name: "test_missing_route".into(),
+        machines: vec![
+            MachineInstance {
+                instance_id: "producer".into(),
+                machine_name: "ProducerMachine".into(),
+                actor: "actor_a".into(),
+            },
+            MachineInstance {
+                instance_id: "consumer".into(),
+                machine_name: "ConsumerMachine".into(),
+                actor: "actor_b".into(),
+            },
+        ],
+        entry_inputs: vec![EntryInput {
+            name: "go".into(),
+            machine: "producer".into(),
+            input_variant: "Go".into(),
+        }],
+        routes: vec![], // deliberately empty — should fail
+        actor_priorities: vec![],
+        scheduler_rules: vec![],
+        invariants: vec![],
+        witnesses: vec![],
+        deep_domain_cardinality: 1,
+        deep_domain_overrides: BTreeMap::new(),
+        witness_domain_cardinality: 1,
+        ci_limits: None,
+        closed_world: true,
+    };
+
+    let result = composition.validate_against(&[&producer, &consumer]);
+    assert!(
+        matches!(
+            result,
+            Err(CompositionSchemaError::MissingRoutedEffect { .. })
+        ),
+        "expected MissingRoutedEffect error, got: {:?}",
+        result
     );
 }

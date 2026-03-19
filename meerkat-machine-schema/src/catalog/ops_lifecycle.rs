@@ -1,9 +1,9 @@
 use indexmap::IndexMap;
 
 use crate::{
-    EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema, Guard, HelperSchema, InitSchema,
-    InputMatch, InvariantSchema, MachineSchema, Quantifier, RustBinding, StateSchema,
-    TransitionSchema, TypeRef, Update, VariantSchema,
+    EffectDisposition, EffectDispositionRule, EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema,
+    Guard, HelperSchema, InitSchema, InputMatch, InvariantSchema, MachineSchema, Quantifier,
+    RustBinding, StateSchema, TransitionSchema, TypeRef, Update, VariantSchema,
 };
 
 pub fn ops_lifecycle_machine() -> MachineSchema {
@@ -1047,6 +1047,33 @@ pub fn ops_lifecycle_machine() -> MachineSchema {
                 }],
             },
         ],
+        effect_dispositions: vec![
+            disposition(
+                "SubmitOpEvent",
+                EffectDisposition::Routed {
+                    consumer_machines: vec!["RuntimeControlMachine".into()],
+                },
+            ),
+            disposition("NotifyOpWatcher", EffectDisposition::Local),
+            disposition(
+                "ExposeOperationPeer",
+                EffectDisposition::Routed {
+                    consumer_machines: vec!["PeerCommsMachine".into()],
+                },
+            ),
+            disposition("RetainTerminalRecord", EffectDisposition::Local),
+            disposition("EvictCompletedRecord", EffectDisposition::Local),
+            disposition("WaitAllSatisfied", EffectDisposition::Local),
+            disposition("CollectCompletedResult", EffectDisposition::Local),
+            disposition("ConcurrencyLimitExceeded", EffectDisposition::External),
+        ],
+    }
+}
+
+fn disposition(name: &str, d: EffectDisposition) -> EffectDispositionRule {
+    EffectDispositionRule {
+        effect_variant: name.into(),
+        disposition: d,
     }
 }
 

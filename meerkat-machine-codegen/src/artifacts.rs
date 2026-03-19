@@ -2284,7 +2284,10 @@ impl<'a> CompositionTlaCompiler<'a> {
             "CiStateConstraint == {}",
             render_composition_state_constraint(
                 self.schema,
-                &CompositionStateLimits::ci_defaults(),
+                self.schema
+                    .ci_limits
+                    .as_ref()
+                    .unwrap_or(&CompositionStateLimits::ci_defaults()),
                 self
             )
         )

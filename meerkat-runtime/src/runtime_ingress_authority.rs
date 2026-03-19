@@ -129,6 +129,18 @@ pub enum RuntimeIngressInput {
     Reset,
     /// Destroy: abandon everything, transition to Destroyed.
     Destroy,
+    /// Admit a recovered input from persistent store (crash recovery).
+    /// Restores the input into ingress tracking at its persisted lifecycle state
+    /// without re-running the admission policy.
+    AdmitRecovered {
+        work_id: InputId,
+        content_shape: ContentShape,
+        handling_mode: HandlingMode,
+        lifecycle_state: InputLifecycleState,
+        policy: PolicyDecision,
+        request_id: Option<RequestId>,
+        reservation_key: Option<ReservationKey>,
+    },
     /// Recover: re-derive transient state from canonical state.
     Recover,
     /// Configure silent intent overrides.
@@ -569,6 +581,25 @@ impl RuntimeIngressAuthority {
                 aggregate_work_id,
                 source_work_ids,
             } => self.eval_coalesce(phase, aggregate_work_id, source_work_ids),
+
+            RuntimeIngressInput::AdmitRecovered {
+                work_id,
+                content_shape,
+                handling_mode,
+                lifecycle_state,
+                policy,
+                request_id,
+                reservation_key,
+            } => self.eval_admit_recovered(
+                phase,
+                work_id.clone(),
+                content_shape.clone(),
+                *handling_mode,
+                *lifecycle_state,
+                policy.clone(),
+                request_id.clone(),
+                reservation_key.clone(),
+            ),
 
             RuntimeIngressInput::Retire => self.eval_retire(phase),
             RuntimeIngressInput::Reset => self.eval_reset(phase),
@@ -1467,6 +1498,68 @@ impl RuntimeIngressAuthority {
         });
 
         Ok((IngressPhase::Destroyed, fields, effects))
+    }
+
+    /// Restore a store-recovered input into the ingress authority's tracking.
+    /// This does NOT re-run the admission pipeline — the input was already admitted
+    /// before the crash. We just need the authority to know about it so that
+    /// `Recover` can emit proper per-input recovery effects.
+    #[allow(clippy::too_many_arguments)]
+    fn eval_admit_recovered(
+        &self,
+        phase: IngressPhase,
+        work_id: InputId,
+        content_shape: ContentShape,
+        handling_mode: HandlingMode,
+        lifecycle_state: InputLifecycleState,
+        policy: PolicyDecision,
+        request_id: Option<RequestId>,
+        reservation_key: Option<ReservationKey>,
+    ) -> Result<
+        (
+            IngressPhase,
+            RuntimeIngressFields,
+            Vec<RuntimeIngressEffect>,
+        ),
+        RuntimeIngressError,
+    > {
+        if !matches!(phase, IngressPhase::Active | IngressPhase::Retired) {
+            return Err(RuntimeIngressError::InvalidTransition {
+                from: phase,
+                input: "AdmitRecovered".into(),
+            });
+        }
+
+        let mut fields = self.fields.clone();
+
+        // Restore the input into the authority's canonical tracking at its persisted state.
+        fields.admitted_inputs.insert(work_id.clone());
+        fields.content_shape.insert(work_id.clone(), content_shape);
+        fields.handling_mode.insert(work_id.clone(), handling_mode);
+        fields.lifecycle.insert(work_id.clone(), lifecycle_state);
+        fields.policy_snapshot.insert(work_id.clone(), policy);
+        fields.request_id.insert(work_id.clone(), request_id);
+        fields
+            .reservation_key
+            .insert(work_id.clone(), reservation_key);
+
+        // Re-enqueue if the lifecycle state is Queued (so Recover finds it in the queue).
+        if lifecycle_state == InputLifecycleState::Queued {
+            match handling_mode {
+                HandlingMode::Steer => {
+                    if !fields.steer_queue.contains(&work_id) {
+                        fields.steer_queue.push(work_id);
+                    }
+                }
+                HandlingMode::Queue => {
+                    if !fields.queue.contains(&work_id) {
+                        fields.queue.push(work_id);
+                    }
+                }
+            }
+        }
+
+        Ok((phase, fields, vec![]))
     }
 
     fn eval_recover(

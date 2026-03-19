@@ -1,8 +1,9 @@
 use indexmap::IndexMap;
 
 use crate::{
-    EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema, InitSchema, InputMatch, InvariantSchema,
-    MachineSchema, RustBinding, StateSchema, TransitionSchema, TypeRef, Update, VariantSchema,
+    EffectDisposition, EffectDispositionRule, EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema,
+    InitSchema, InputMatch, InvariantSchema, MachineSchema, RustBinding, StateSchema,
+    TransitionSchema, TypeRef, Update, VariantSchema,
 };
 
 pub fn mob_lifecycle_machine() -> MachineSchema {
@@ -195,6 +196,22 @@ pub fn mob_lifecycle_machine() -> MachineSchema {
                 emit: vec![],
             },
         ],
+        effect_dispositions: vec![
+            disposition("EmitLifecycleNotice", EffectDisposition::External),
+            disposition(
+                "RequestCleanup",
+                EffectDisposition::Routed {
+                    consumer_machines: vec!["MobOrchestratorMachine".into()],
+                },
+            ),
+        ],
+    }
+}
+
+fn disposition(name: &str, d: EffectDisposition) -> EffectDispositionRule {
+    EffectDispositionRule {
+        effect_variant: name.into(),
+        disposition: d,
     }
 }
 

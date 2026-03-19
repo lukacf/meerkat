@@ -147,7 +147,8 @@ async fn accept_continuation_idle_wakes_and_requests_processing() {
     assert!(result.is_accepted());
     assert!(driver.take_wake_requested());
     assert!(driver.take_process_requested());
-    assert_eq!(driver.queue().len(), 1);
+    // Continuations route to steer queue (RoutingDisposition::Steer)
+    assert_eq!(driver.steer_queue().len(), 1);
 }
 
 #[tokio::test]

@@ -16,6 +16,8 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 - `surface_execution_completion_notifies_control`: `turn_execution`.`RunCompleted` -> `runtime_control`.`RunCompleted` [Immediate]
 - `surface_execution_failure_updates_ingress`: `turn_execution`.`RunFailed` -> `runtime_ingress`.`RunFailed` [Immediate]
 - `surface_execution_failure_notifies_control`: `turn_execution`.`RunFailed` -> `runtime_control`.`RunFailed` [Immediate]
+- `surface_execution_cancel_updates_ingress`: `turn_execution`.`RunCancelled` -> `runtime_ingress`.`RunCancelled` [Immediate]
+- `surface_execution_cancel_notifies_control`: `turn_execution`.`RunCancelled` -> `runtime_control`.`RunCancelled` [Immediate]
 
 ## Scheduler Rules
 - `PreemptWhenReady(control_plane, ordinary_ingress)`
@@ -28,6 +30,7 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 - `surface_event_begin_run_requires_staged_drain` — surface-originated work begins a run only after ingress-owned staging
 - `surface_event_execution_completion_is_handled` — surface-originated execution completion updates both ingress and runtime control
 - `surface_event_execution_failure_is_handled` — surface-originated execution failure updates both ingress and runtime control
+- `surface_event_execution_cancel_is_handled` — surface-originated execution cancellation updates both ingress and runtime control
 
 ## Coverage
 ### Code Anchors

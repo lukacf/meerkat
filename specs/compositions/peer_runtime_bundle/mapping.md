@@ -24,6 +24,9 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 - `admitted_peer_work_enters_ingress`
   - anchors: `peer_classify`, `peer_runtime`, `runtime_loop`
   - scenarios: `peer-message-admission`, `trust-before-admission`
+- `peer_ingress_ready_begins_run`
+  - anchors: `peer_classify`, `peer_runtime`, `runtime_loop`
+  - scenarios: `peer-message-admission`, `trust-before-admission`
 
 ### Scheduler Rules
 - `PreemptWhenReady(control_plane, peer_plane)`

@@ -16,6 +16,8 @@ pub struct CompositionSchema {
     pub deep_domain_cardinality: usize,
     pub deep_domain_overrides: BTreeMap<String, usize>,
     pub witness_domain_cardinality: usize,
+    pub ci_limits: Option<CompositionStateLimits>,
+    pub closed_world: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -690,6 +692,48 @@ impl CompositionSchema {
             }
         }
 
+        // Closed-world validation: every Routed effect must have a matching route
+        // to every consumer instance in this composition.
+        if self.closed_world {
+            for machine_instance in &self.machines {
+                let machine_schema = schemas
+                    .iter()
+                    .find(|schema| schema.machine == machine_instance.machine_name)
+                    .ok_or_else(|| CompositionSchemaError::UnknownMachineSchema {
+                        schema: machine_instance.machine_name.clone(),
+                    })?;
+
+                for rule in &machine_schema.effect_dispositions {
+                    if let crate::machine::EffectDisposition::Routed { consumer_machines } =
+                        &rule.disposition
+                    {
+                        for consumer_machine_name in consumer_machines {
+                            let consumer_instances: Vec<_> = self
+                                .machines
+                                .iter()
+                                .filter(|inst| inst.machine_name == *consumer_machine_name)
+                                .collect();
+                            for consumer_inst in consumer_instances {
+                                let route_exists = self.routes.iter().any(|route| {
+                                    route.from_machine == machine_instance.instance_id
+                                        && route.effect_variant == rule.effect_variant
+                                        && route.to.machine == consumer_inst.instance_id
+                                });
+                                if !route_exists {
+                                    return Err(CompositionSchemaError::MissingRoutedEffect {
+                                        from_instance: machine_instance.instance_id.clone(),
+                                        effect_variant: rule.effect_variant.clone(),
+                                        consumer_machine: consumer_machine_name.clone(),
+                                        consumer_instance: consumer_inst.instance_id.clone(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -982,6 +1026,12 @@ pub enum CompositionSchemaError {
         scope: String,
         domain: String,
     },
+    MissingRoutedEffect {
+        from_instance: String,
+        effect_variant: String,
+        consumer_machine: String,
+        consumer_instance: String,
+    },
     MachineSchema(MachineSchemaError),
 }
 
@@ -1173,6 +1223,15 @@ impl fmt::Display for CompositionSchemaError {
             Self::InvalidNamedDomainCardinality { scope, domain } => write!(
                 f,
                 "invalid composition {scope} domain cardinality for `{domain}` (must be >= 1)"
+            ),
+            Self::MissingRoutedEffect {
+                from_instance,
+                effect_variant,
+                consumer_machine,
+                consumer_instance,
+            } => write!(
+                f,
+                "closed-world violation: instance `{from_instance}` emits routed effect `{effect_variant}` targeting `{consumer_machine}` but no route exists to instance `{consumer_instance}`"
             ),
             Self::MachineSchema(err) => err.fmt(f),
         }

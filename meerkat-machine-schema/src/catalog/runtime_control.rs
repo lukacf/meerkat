@@ -1,9 +1,9 @@
 use indexmap::IndexMap;
 
 use crate::{
-    EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema, Guard, InitSchema, InputMatch,
-    InvariantSchema, MachineSchema, RustBinding, StateSchema, TransitionSchema, TypeRef, Update,
-    VariantSchema,
+    EffectDisposition, EffectDispositionRule, EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema,
+    Guard, InitSchema, InputMatch, InvariantSchema, MachineSchema, RustBinding, StateSchema,
+    TransitionSchema, TypeRef, Update, VariantSchema,
 };
 
 pub fn runtime_control_machine() -> MachineSchema {
@@ -1077,6 +1077,34 @@ pub fn runtime_control_machine() -> MachineSchema {
                 }],
             },
         ],
+        effect_dispositions: vec![
+            disposition("ResolveAdmission", EffectDisposition::Local),
+            disposition(
+                "SubmitAdmittedIngressEffect",
+                EffectDisposition::Routed {
+                    consumer_machines: vec!["RuntimeIngressMachine".into()],
+                },
+            ),
+            disposition(
+                "SubmitRunPrimitive",
+                EffectDisposition::Routed {
+                    consumer_machines: vec!["TurnExecutionMachine".into()],
+                },
+            ),
+            disposition("SignalWake", EffectDisposition::Local),
+            disposition("SignalImmediateProcess", EffectDisposition::Local),
+            disposition("EmitRuntimeNotice", EffectDisposition::External),
+            disposition("ResolveCompletionAsTerminated", EffectDisposition::External),
+            disposition("ApplyControlPlaneCommand", EffectDisposition::External),
+            disposition("InitiateRecycle", EffectDisposition::Local),
+        ],
+    }
+}
+
+fn disposition(name: &str, d: EffectDisposition) -> EffectDispositionRule {
+    EffectDispositionRule {
+        effect_variant: name.into(),
+        disposition: d,
     }
 }
 

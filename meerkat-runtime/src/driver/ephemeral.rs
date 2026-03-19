@@ -18,7 +18,7 @@ use crate::input_ledger::InputLedger;
 use crate::input_lifecycle_authority::{InputLifecycleError, InputLifecycleInput};
 use crate::input_state::{InputAbandonReason, InputLifecycleState, InputState, PolicySnapshot};
 use crate::policy::{
-    ApplyMode, ConsumePoint, DrainPolicy, QueueMode, RoutingDisposition, WakeMode,
+    ApplyMode, ConsumePoint, DrainPolicy, PolicyDecision, QueueMode, RoutingDisposition, WakeMode,
 };
 use crate::policy_table::DefaultPolicyTable;
 use crate::queue::InputQueue;
@@ -29,8 +29,8 @@ use crate::runtime_event::{
     InputLifecycleEvent, RuntimeEvent, RuntimeEventEnvelope, RuntimeStateChangeEvent,
 };
 use crate::runtime_ingress_authority::{
-    ContentShape, RuntimeIngressAuthority, RuntimeIngressEffect, RuntimeIngressInput,
-    RuntimeIngressMutator,
+    ContentShape, RequestId, ReservationKey, RuntimeIngressAuthority, RuntimeIngressEffect,
+    RuntimeIngressInput, RuntimeIngressMutator,
 };
 use crate::runtime_state::RuntimeState;
 use crate::traits::{
@@ -39,7 +39,7 @@ use crate::traits::{
 };
 
 /// Derive the handling mode from a policy decision's routing disposition.
-fn handling_mode_from_policy(policy: &crate::policy::PolicyDecision) -> HandlingMode {
+pub(crate) fn handling_mode_from_policy(policy: &crate::policy::PolicyDecision) -> HandlingMode {
     match policy.routing_disposition {
         RoutingDisposition::Steer => HandlingMode::Steer,
         _ => HandlingMode::Queue,
@@ -89,6 +89,39 @@ impl EphemeralRuntimeDriver {
     /// Get a reference to the ingress authority.
     pub fn ingress(&self) -> &RuntimeIngressAuthority {
         &self.ingress
+    }
+
+    /// Admit a store-recovered input into the ingress authority's tracking.
+    /// Called by the persistent driver during crash recovery to ensure the
+    /// authority knows about inputs loaded from the store before `Recover` fires.
+    #[allow(clippy::too_many_arguments)]
+    pub fn admit_recovered_to_ingress(
+        &mut self,
+        work_id: InputId,
+        content_shape: ContentShape,
+        handling_mode: HandlingMode,
+        lifecycle_state: InputLifecycleState,
+        policy: PolicyDecision,
+        request_id: Option<RequestId>,
+        reservation_key: Option<ReservationKey>,
+    ) -> Result<(), RuntimeDriverError> {
+        match self.ingress.apply(RuntimeIngressInput::AdmitRecovered {
+            work_id,
+            content_shape,
+            handling_mode,
+            lifecycle_state,
+            policy,
+            request_id,
+            reservation_key,
+        }) {
+            Ok(transition) => {
+                self.process_ingress_effects(&transition.effects);
+                Ok(())
+            }
+            Err(err) => Err(RuntimeDriverError::Internal(format!(
+                "ingress AdmitRecovered failed: {err}"
+            ))),
+        }
     }
 
     /// Process effects returned by the ingress authority.

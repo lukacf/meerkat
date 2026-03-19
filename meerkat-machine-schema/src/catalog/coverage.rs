@@ -3,8 +3,9 @@ use crate::{CompositionSchema, MachineSchema, SchedulerRule};
 use super::{
     compositions::{
         continuation_runtime_bundle_composition, external_tool_bundle_composition,
-        mob_bundle_composition, ops_runtime_bundle_composition, peer_runtime_bundle_composition,
-        runtime_pipeline_composition, surface_event_runtime_bundle_composition,
+        mob_bundle_composition, ops_peer_bundle_composition, ops_runtime_bundle_composition,
+        peer_runtime_bundle_composition, runtime_pipeline_composition,
+        surface_event_runtime_bundle_composition,
     },
     external_tool_surface::external_tool_surface_machine,
     flow_run::flow_run_machine,
@@ -694,6 +695,25 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
             ],
         ),
         composition_manifest_from_schema(
+            &ops_peer_bundle_composition(),
+            &[
+                anchor(
+                    "ops_lifecycle_shell",
+                    "meerkat-runtime/src/ops_lifecycle.rs",
+                    "ops lifecycle shell that handles ExposeOperationPeer effect",
+                ),
+                anchor(
+                    "comms_runtime",
+                    "meerkat-comms/src/runtime/comms_runtime.rs",
+                    "add_trusted_peer wiring from ops to peer comms",
+                ),
+            ],
+            &[scenario(
+                "peer-ready-handoff",
+                "ops-lifecycle PeerReady triggers peer-comms trust establishment",
+            )],
+        ),
+        composition_manifest_from_schema(
             &mob_bundle_composition(),
             &[
                 anchor(
@@ -1067,6 +1087,7 @@ fn composition_scenario_ids(
                 )
             }
         }
+        "ops_peer_bundle" => select_exact_scenarios(all_scenarios, &["peer-ready-handoff"]),
         "ops_runtime_bundle" => {
             if normalized.contains("preempt") || kind == "scheduler" {
                 select_exact_scenarios(all_scenarios, &["ops-control-preemption"])

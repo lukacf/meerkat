@@ -1,9 +1,9 @@
 use indexmap::IndexMap;
 
 use crate::{
-    EffectEmit, EnumSchema, Expr, FieldSchema, Guard, HelperSchema, InitSchema, InputMatch,
-    InvariantSchema, MachineSchema, Quantifier, RustBinding, StateSchema, TransitionSchema,
-    TypeRef, Update, VariantSchema,
+    EffectDisposition, EffectDispositionRule, EffectEmit, EnumSchema, Expr, FieldSchema, Guard,
+    HelperSchema, InitSchema, InputMatch, InvariantSchema, MachineSchema, Quantifier, RustBinding,
+    StateSchema, TransitionSchema, TypeRef, Update, VariantSchema,
 };
 
 pub fn peer_comms_machine() -> MachineSchema {
@@ -490,6 +490,19 @@ pub fn peer_comms_machine() -> MachineSchema {
                 emit: vec![emit_submit_candidate()],
             },
         ],
+        effect_dispositions: vec![disposition(
+            "SubmitPeerInputCandidate",
+            EffectDisposition::Routed {
+                consumer_machines: vec!["RuntimeControlMachine".into()],
+            },
+        )],
+    }
+}
+
+fn disposition(name: &str, d: EffectDisposition) -> EffectDispositionRule {
+    EffectDispositionRule {
+        effect_variant: name.into(),
+        disposition: d,
     }
 }
 

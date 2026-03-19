@@ -341,9 +341,10 @@ async fn accept_with_executor_triggers_loop() {
         "CoreExecutor::apply() should have been called by the RuntimeLoop"
     );
 
-    // After processing, the input should be consumed and the runtime back to Idle
+    // After processing, the input should be consumed and the runtime back to Attached
+    // (executor is still connected, so Attached not Idle).
     let state = adapter.runtime_state(&sid).await.unwrap();
-    assert_eq!(state, RuntimeState::Idle);
+    assert_eq!(state, RuntimeState::Attached);
 
     // The input should be consumed (terminal)
     let active = adapter.list_active_inputs(&sid).await.unwrap();
@@ -391,9 +392,9 @@ async fn failed_executor_requeues_input() {
     // Give the loop time to process and fail
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    // Runtime should be back to Idle (not stuck in Running)
+    // Runtime should be back to Attached (executor still connected, not stuck in Running)
     let state = adapter.runtime_state(&sid).await.unwrap();
-    assert_eq!(state, RuntimeState::Idle);
+    assert_eq!(state, RuntimeState::Attached);
 
     // Input should be rolled back to Queued (not stranded in APC)
     let is = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
@@ -481,7 +482,7 @@ async fn failed_executor_continues_processing_backlog() {
     assert_eq!(second_state.current_state(), InputLifecycleState::Consumed);
     assert_eq!(
         adapter.runtime_state(&sid).await.unwrap(),
-        RuntimeState::Idle
+        RuntimeState::Attached
     );
     assert!(
         calls.load(Ordering::SeqCst) >= 2,
@@ -567,7 +568,7 @@ async fn ensure_session_with_executor_upgrades_registered_session() {
     );
 
     let state = adapter.runtime_state(&sid).await.unwrap();
-    assert_eq!(state, RuntimeState::Idle);
+    assert_eq!(state, RuntimeState::Attached);
 
     let active = adapter.list_active_inputs(&sid).await.unwrap();
     assert!(active.is_empty(), "queued work should drain after upgrade");
@@ -778,7 +779,7 @@ async fn boundary_commit_failure_unwinds_runtime_loop_state() {
     );
     assert_eq!(
         adapter.runtime_state(&sid).await.unwrap(),
-        RuntimeState::Idle
+        RuntimeState::Attached
     );
     let state = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
     assert_eq!(state.current_state(), InputLifecycleState::Queued);
@@ -1310,7 +1311,7 @@ async fn successful_execution_fires_boundary_applied() {
         "Successful execution should consume the input"
     );
 
-    // Runtime should be back to Idle
+    // Runtime should be back to Attached (executor still connected)
     let state = adapter.runtime_state(&sid).await.unwrap();
-    assert_eq!(state, RuntimeState::Idle);
+    assert_eq!(state, RuntimeState::Attached);
 }

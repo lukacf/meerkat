@@ -73,6 +73,16 @@ repos:
         pass_filenames: false
         stages: [pre-push]
 
+  # On push: machine file codegen + verify
+  - repo: local
+    hooks:
+      - id: machine-codegen-verify
+        name: machine codegen + verify (changed files)
+        entry: scripts/pre-push-machines.sh
+        language: script
+        pass_filenames: false
+        stages: [pre-push]
+
   # On push: unit tests workspace-wide
   - repo: local
     hooks:

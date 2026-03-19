@@ -66,8 +66,6 @@ pub struct SessionSnapshot {
 enum SessionCommand {
     StartTurn {
         prompt: meerkat_core::types::ContentInput,
-        #[allow(dead_code)]
-        // Persisted session metadata; runtime loop handles dispatch automatically
         host_mode: bool,
         event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
         result_tx: oneshot::Sender<Result<RunResult, meerkat_core::error::AgentError>>,
@@ -234,6 +232,12 @@ pub trait SessionAgent: Send {
     ) -> Option<Arc<dyn meerkat_core::event_injector::SubscribableInjector>> {
         None
     }
+
+    /// Mark the session-level comms drain as active or inactive.
+    ///
+    /// When `true`, the agent's turn-boundary `drain_comms_inbox()` is
+    /// suppressed so the dedicated drain task is the sole inbox consumer.
+    fn set_comms_drain_active(&mut self, _active: bool) {}
 
     /// Get the comms runtime used by this agent, if any.
     ///
@@ -1028,6 +1032,7 @@ async fn session_task<A: SessionAgent>(
 ) {
     let mut next_seq: u64 = 0;
     let source_id = format!("session:{}", agent.session_id());
+    let mut comms_drain_activated = false;
     while let Some(cmd) = commands.recv().await {
         match cmd {
             SessionCommand::ReplaceClient { client, reply_tx } => {
@@ -1041,12 +1046,19 @@ async fn session_task<A: SessionAgent>(
             }
             SessionCommand::StartTurn {
                 prompt,
-                host_mode: _,
+                host_mode,
                 event_tx,
                 result_tx,
                 skill_references,
                 flow_tool_overlay,
             } => {
+                // On first turn with host_mode, suppress the agent's own
+                // turn-boundary drain so the session-service-owned comms
+                // drain is the sole inbox consumer.
+                if host_mode && !comms_drain_activated {
+                    agent.set_comms_drain_active(true);
+                    comms_drain_activated = true;
+                }
                 agent.set_skill_references(skill_references);
                 if let Err(error) = agent.set_flow_tool_overlay(flow_tool_overlay) {
                     control.turn_lock.store(false, Ordering::Release);

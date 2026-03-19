@@ -133,6 +133,14 @@ where
         self.depth
     }
 
+    /// Mark that a dedicated comms drain task is active for this agent.
+    ///
+    /// When set to `true`, the turn-boundary `drain_comms_inbox()` call is
+    /// suppressed so the dedicated drain task is the sole inbox consumer.
+    pub fn set_comms_drain_active(&mut self, active: bool) {
+        self.comms_drain_active = active;
+    }
+
     /// Get the event tap for interaction-scoped streaming.
     pub fn event_tap(&self) -> &crate::event_tap::EventTap {
         &self.event_tap
@@ -627,20 +635,17 @@ where
     /// Cancel the current run
     pub fn cancel(&mut self) {
         if !self.state.is_terminal() {
+            use crate::turn_execution_authority::{TurnExecutionInput, TurnExecutionMutator};
+
             // Route through the authority when an active run exists.
-            if let Some(run_id) = self.turn_authority.active_run().cloned() {
-                use crate::turn_execution_authority::{TurnExecutionInput, TurnExecutionMutator};
-                if let Ok(transition) = self
-                    .turn_authority
-                    .apply(TurnExecutionInput::CancelNow { run_id })
-                {
-                    self.state = transition.next_phase.to_loop_state();
-                    return;
-                }
+            let input = if let Some(run_id) = self.turn_authority.active_run().cloned() {
+                TurnExecutionInput::CancelNow { run_id }
+            } else {
+                TurnExecutionInput::ForceCancelNoRun
+            };
+            if let Ok(transition) = self.turn_authority.apply(input) {
+                self.state = transition.next_phase.to_loop_state();
             }
-            // Fallback: direct observable state mutation for edge cases
-            // (e.g. no active run, or phase doesn't accept CancelNow).
-            let _ = self.state.transition(LoopState::Cancelling);
         }
     }
 

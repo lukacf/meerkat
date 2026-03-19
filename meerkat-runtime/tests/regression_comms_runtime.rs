@@ -205,11 +205,8 @@ async fn response_after_completed_turn_wakes() {
 
     // Simulate a completed run by starting and completing
     let run_id = meerkat_core::lifecycle::RunId::new();
-    driver
-        .state_machine_mut()
-        .start_run(run_id.clone())
-        .unwrap();
-    driver.state_machine_mut().complete_run().unwrap();
+    driver.start_run(run_id.clone()).unwrap();
+    driver.complete_run().unwrap();
 
     // Now idle — accept a terminal response
     let resp = make_response("peer-1", ResponseStatus::Completed);
@@ -362,7 +359,6 @@ async fn message_while_running_checkpoint_no_wake() {
 
     // Start a run
     driver
-        .state_machine_mut()
         .start_run(meerkat_core::lifecycle::RunId::new())
         .unwrap();
 
@@ -390,7 +386,6 @@ async fn terminal_response_while_running_no_wake() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
 
     driver
-        .state_machine_mut()
         .start_run(meerkat_core::lifecycle::RunId::new())
         .unwrap();
 

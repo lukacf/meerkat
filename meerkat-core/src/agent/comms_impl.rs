@@ -81,6 +81,12 @@ where
     /// Routes on the stored `PeerInputClass` from ingress classification —
     /// no downstream re-classification.
     pub(super) async fn drain_comms_inbox(&mut self) -> bool {
+        // When a dedicated comms drain task is active, suppress turn-boundary
+        // draining so the session service is the sole inbox consumer.
+        if self.comms_drain_active {
+            return false;
+        }
+
         use crate::interaction::PeerInputClass;
 
         let comms = match &self.comms_runtime {

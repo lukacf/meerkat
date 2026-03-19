@@ -743,7 +743,7 @@ impl MobBuilder {
             topology_service,
             flow_kernel.clone(),
         );
-        let lifecycle = super::state::MobLifecycleOwner::new(state.clone());
+        let tracked_flows = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         // Use the initial_phase captured before orchestrator construction to avoid
         // clobbering persisted state (e.g. Completed/Stopped) with Running.
         let lifecycle_authority = super::mob_lifecycle_authority::MobLifecycleAuthority::with_phase(
@@ -786,7 +786,7 @@ impl MobBuilder {
             session_service: handle_session_service,
             task_board_service,
             spawn_policy,
-            lifecycle,
+            tracked_flows,
             lifecycle_authority,
         };
         tokio::spawn(actor.run(command_rx));

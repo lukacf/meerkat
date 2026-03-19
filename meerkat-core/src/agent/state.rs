@@ -179,10 +179,7 @@ where
 
             // Check turn limit
             if turn_count >= max_turns {
-                self.apply_turn_input(TurnExecutionInput::LlmReturnedTerminal {
-                    run_id: run_id.clone(),
-                })?;
-                self.apply_turn_input(TurnExecutionInput::BoundaryComplete {
+                self.apply_turn_input(TurnExecutionInput::TurnLimitReached {
                     run_id: run_id.clone(),
                 })?;
                 return Ok(self.build_result(turn_count, tool_call_count).await);
@@ -196,10 +193,7 @@ where
                     limit: self.budget.remaining(),
                     percent: 1.0,
                 });
-                self.apply_turn_input(TurnExecutionInput::LlmReturnedTerminal {
-                    run_id: run_id.clone(),
-                })?;
-                self.apply_turn_input(TurnExecutionInput::BoundaryComplete {
+                self.apply_turn_input(TurnExecutionInput::BudgetExhausted {
                     run_id: run_id.clone(),
                 })?;
                 return Ok(self.build_result(turn_count, tool_call_count).await);

@@ -71,8 +71,6 @@ async fn runtime_backed_ingress_red_ok_rest_session_create_uses_runtime_adapter_
         runtime_adapter: Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
         #[cfg(feature = "mob")]
         mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
-        #[cfg(feature = "comms")]
-        comms_drain_handles: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         #[cfg(feature = "mcp")]
         mcp_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };

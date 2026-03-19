@@ -256,7 +256,7 @@ async fn on_run_completed_consumes() {
     // Input should be consumed
     let state = driver.input_state(&input_id).unwrap();
     assert_eq!(state.current_state(), InputLifecycleState::Consumed);
-    assert!(driver.state_machine_ref().is_idle());
+    assert!(driver.control().is_idle());
 }
 
 #[tokio::test]
@@ -284,7 +284,7 @@ async fn on_run_failed_rollbacks() {
     // Input should be rolled back to Queued
     let state = driver.input_state(&input_id).unwrap();
     assert_eq!(state.current_state(), InputLifecycleState::Queued);
-    assert!(driver.state_machine_ref().is_idle());
+    assert!(driver.control().is_idle());
 }
 
 #[tokio::test]
@@ -375,10 +375,12 @@ async fn recovery_applied_stays_applied() {
     driver.stage_input(&input_id, &run_id).unwrap();
     driver.apply_input(&input_id, &run_id).unwrap();
 
-    // Recover
+    // Recover — apply RecoverRequested through the authority
+    use meerkat_runtime::RuntimeControlInput;
+    use meerkat_runtime::RuntimeControlMutator;
     driver
-        .state_machine_mut()
-        .transition(RuntimeState::Recovering)
+        .control_mut()
+        .apply(RuntimeControlInput::RecoverRequested)
         .unwrap();
     let report = driver.recover_ephemeral();
     assert_eq!(report.inputs_recovered, 1);
@@ -474,7 +476,7 @@ async fn retired_can_drain_queue_via_run_cycle() {
 
     let run_id = RunId::new();
     driver.start_run(run_id.clone()).unwrap();
-    assert!(driver.state_machine_ref().is_running());
+    assert!(driver.control().is_running());
 
     driver.stage_input(&input_id, &run_id).unwrap();
     driver.apply_input(&input_id, &run_id).unwrap();
@@ -522,7 +524,7 @@ async fn reset_rejected_while_running() {
 
     let result = driver.reset();
     assert!(result.is_err());
-    assert!(driver.state_machine_ref().is_running());
+    assert!(driver.control().is_running());
 }
 
 #[tokio::test]

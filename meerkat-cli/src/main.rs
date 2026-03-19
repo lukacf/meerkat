@@ -3221,18 +3221,12 @@ async fn run_agent(
     // Spawn the comms drain in host mode so inbound peer interactions are
     // routed through the runtime adapter and automatically trigger new turns.
     #[cfg(feature = "comms")]
-    let comms_drain_handle: Option<tokio::task::JoinHandle<()>> = if host_mode {
+    {
         let comms_rt = service.comms_runtime(&session_id).await;
-        comms_rt.map(|cr| {
-            meerkat_runtime::comms_drain::spawn_comms_drain(
-                runtime_adapter.clone(),
-                session_id.clone(),
-                cr,
-            )
-        })
-    } else {
-        None
-    };
+        runtime_adapter
+            .maybe_spawn_comms_drain(&session_id, host_mode, comms_rt)
+            .await;
+    }
 
     let result = match handle {
         Some(handle) => match handle.wait().await {
@@ -3258,9 +3252,9 @@ async fn run_agent(
     // exhaustion, or ctrl-c). The drain processes inbound peer interactions
     // and auto-starts turns via the runtime loop.
     #[cfg(feature = "comms")]
-    if let Some(drain_handle) = comms_drain_handle {
+    if host_mode {
         tracing::info!("host mode: blocking on comms drain");
-        let _ = drain_handle.await;
+        runtime_adapter.wait_comms_drain(&session_id).await;
         tracing::info!("host mode: comms drain terminated");
     }
 
@@ -3723,18 +3717,12 @@ async fn resume_session_with_llm_override(
     // Spawn the comms drain in host mode so inbound peer interactions are
     // routed through the runtime adapter and automatically trigger new turns.
     #[cfg(feature = "comms")]
-    let comms_drain_handle: Option<tokio::task::JoinHandle<()>> = if host_mode {
+    {
         let comms_rt = service.comms_runtime(&session_id).await;
-        comms_rt.map(|cr| {
-            meerkat_runtime::comms_drain::spawn_comms_drain(
-                resume_adapter.clone(),
-                session_id.clone(),
-                cr,
-            )
-        })
-    } else {
-        None
-    };
+        resume_adapter
+            .maybe_spawn_comms_drain(&session_id, host_mode, comms_rt)
+            .await;
+    }
 
     let result = match handle {
         Some(handle) => match handle.wait().await {
@@ -3759,10 +3747,10 @@ async fn resume_session_with_llm_override(
     // exhaustion, or ctrl-c). The drain processes inbound peer interactions
     // and auto-starts turns via the runtime loop.
     #[cfg(feature = "comms")]
-    if let Some(drain_handle) = comms_drain_handle {
+    if host_mode {
         log_stage("host_mode_comms_drain_blocking");
         tracing::info!("host mode: blocking on comms drain");
-        let _ = drain_handle.await;
+        resume_adapter.wait_comms_drain(&session_id).await;
         tracing::info!("host mode: comms drain terminated");
     }
 

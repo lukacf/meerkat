@@ -11,12 +11,12 @@
 //!
 //! - 10 states: Ready, ApplyingPrimitive, CallingLlm, WaitingForOps,
 //!   DrainingBoundary, ErrorRecovery, Cancelling, Completed, Failed, Cancelled
-//! - 18 inputs: StartConversationRun, StartImmediateAppend, StartImmediateContext,
+//! - 21 inputs: StartConversationRun, StartImmediateAppend, StartImmediateContext,
 //!   PrimitiveApplied, LlmReturnedToolCalls, LlmReturnedTerminal,
 //!   ToolCallsResolved, BoundaryContinue, BoundaryComplete, RecoverableFailure,
 //!   FatalFailure, RetryRequested, CancelNow, CancelAfterBoundary,
-//!   CancellationObserved, AcknowledgeTerminal, RunCompleted, RunFailed,
-//!   RunCancelled
+//!   CancellationObserved, AcknowledgeTerminal, TurnLimitReached, BudgetExhausted,
+//!   ForceCancelNoRun, RunCompleted, RunFailed, RunCancelled
 //! - 9 fields: active_run, primitive_kind, admitted_content_shape,
 //!   vision_enabled, image_tool_results_enabled, tool_calls_pending,
 //!   boundary_count, cancel_after_boundary, terminal_outcome
@@ -101,6 +101,7 @@ pub enum TurnTerminalOutcome {
     Completed,
     Failed,
     Cancelled,
+    BudgetExhausted,
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +175,19 @@ pub enum TurnExecutionInput {
     AcknowledgeTerminal {
         run_id: RunId,
     },
+    TurnLimitReached {
+        run_id: RunId,
+    },
+    BudgetExhausted {
+        run_id: RunId,
+    },
+    /// Force-cancel when no active run exists.
+    ///
+    /// Used by `cancel()` when the machine is in a non-terminal phase but has
+    /// no active run (e.g. Ready, or an edge case where the run was already
+    /// acknowledged). Transitions directly to Cancelled without requiring a
+    /// run_id guard.
+    ForceCancelNoRun,
 }
 
 // ---------------------------------------------------------------------------
@@ -386,10 +400,11 @@ impl TurnExecutionAuthority {
         input: &TurnExecutionInput,
     ) -> Result<(TurnPhase, TurnExecutionFields, Vec<TurnExecutionEffect>), AgentError> {
         use TurnExecutionInput::{
-            AcknowledgeTerminal, BoundaryComplete, BoundaryContinue, CancelAfterBoundary,
-            CancelNow, CancellationObserved, FatalFailure, LlmReturnedTerminal,
-            LlmReturnedToolCalls, PrimitiveApplied, RecoverableFailure, RetryRequested,
-            StartConversationRun, StartImmediateAppend, StartImmediateContext, ToolCallsResolved,
+            AcknowledgeTerminal, BoundaryComplete, BoundaryContinue, BudgetExhausted,
+            CancelAfterBoundary, CancelNow, CancellationObserved, FatalFailure, ForceCancelNoRun,
+            LlmReturnedTerminal, LlmReturnedToolCalls, PrimitiveApplied, RecoverableFailure,
+            RetryRequested, StartConversationRun, StartImmediateAppend, StartImmediateContext,
+            ToolCallsResolved, TurnLimitReached,
         };
         use TurnPhase::{
             ApplyingPrimitive, CallingLlm, Cancelled, Cancelling, Completed, DrainingBoundary,
@@ -704,6 +719,68 @@ impl TurnExecutionAuthority {
                 effects.push(TurnExecutionEffect::RunCancelled {
                     run_id: run_id.clone(),
                 });
+                Cancelled
+            }
+
+            // ---------------------------------------------------------------
+            // TurnLimitReached: any active phase -> Completed
+            // ---------------------------------------------------------------
+            (
+                ApplyingPrimitive | CallingLlm | WaitingForOps | DrainingBoundary | ErrorRecovery,
+                TurnLimitReached { run_id },
+            ) => {
+                if !self.guard_run_matches(run_id) {
+                    return Err(Self::invalid(phase, input));
+                }
+                fields.boundary_count += 1;
+                fields.terminal_outcome = TurnTerminalOutcome::Completed;
+                effects.push(TurnExecutionEffect::BoundaryApplied {
+                    run_id: run_id.clone(),
+                    boundary_sequence: u64::from(fields.boundary_count),
+                });
+                effects.push(TurnExecutionEffect::RunCompleted {
+                    run_id: run_id.clone(),
+                });
+                Completed
+            }
+
+            // ---------------------------------------------------------------
+            // BudgetExhausted: any active phase -> Completed
+            // ---------------------------------------------------------------
+            (
+                ApplyingPrimitive | CallingLlm | WaitingForOps | DrainingBoundary | ErrorRecovery,
+                BudgetExhausted { run_id },
+            ) => {
+                if !self.guard_run_matches(run_id) {
+                    return Err(Self::invalid(phase, input));
+                }
+                fields.boundary_count += 1;
+                fields.terminal_outcome = TurnTerminalOutcome::BudgetExhausted;
+                effects.push(TurnExecutionEffect::BoundaryApplied {
+                    run_id: run_id.clone(),
+                    boundary_sequence: u64::from(fields.boundary_count),
+                });
+                effects.push(TurnExecutionEffect::RunCompleted {
+                    run_id: run_id.clone(),
+                });
+                Completed
+            }
+
+            // ---------------------------------------------------------------
+            // ForceCancelNoRun: any non-terminal phase -> Cancelled
+            // (no run_id guard — used when cancel() has no active run)
+            // ---------------------------------------------------------------
+            (
+                Ready | ApplyingPrimitive | CallingLlm | WaitingForOps | DrainingBoundary
+                | ErrorRecovery | Cancelling,
+                ForceCancelNoRun,
+            ) => {
+                fields.terminal_outcome = TurnTerminalOutcome::Cancelled;
+                if let Some(ref run_id) = fields.active_run {
+                    effects.push(TurnExecutionEffect::RunCancelled {
+                        run_id: run_id.clone(),
+                    });
+                }
                 Cancelled
             }
 

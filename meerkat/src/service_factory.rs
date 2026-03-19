@@ -153,6 +153,10 @@ impl SessionAgent for FactoryAgent {
         self.agent.comms_arc()?.interaction_event_injector()
     }
 
+    fn set_comms_drain_active(&mut self, active: bool) {
+        self.agent.set_comms_drain_active(active);
+    }
+
     fn comms_runtime(&self) -> Option<Arc<dyn meerkat_core::agent::CommsRuntime>> {
         self.agent.comms_arc()
     }

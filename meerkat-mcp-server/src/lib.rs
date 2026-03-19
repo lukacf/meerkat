@@ -362,12 +362,9 @@ pub struct MeerkatMcpState {
     session_event_streams: Arc<Mutex<HashMap<String, Arc<SessionEventStreamHandle>>>>,
     #[cfg(feature = "mob")]
     mob_event_streams: Arc<Mutex<HashMap<String, Arc<MobEventStreamInner>>>>,
-    /// Runtime adapter for spawning comms drain tasks.
+    /// Runtime adapter for comms drain lifecycle and runtime operations.
     #[allow(dead_code)] // Only used with `comms` feature
     runtime_adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
-    /// Tracked comms drain handles for host_mode sessions.
-    #[cfg(feature = "comms")]
-    comms_drain_handles: Arc<Mutex<HashMap<meerkat::SessionId, tokio::task::JoinHandle<()>>>>,
     #[cfg(feature = "comms")]
     _realm_lease: Option<meerkat_store::RealmLeaseGuard>,
 }
@@ -508,8 +505,6 @@ impl MeerkatMcpState {
             mob_event_streams: Arc::new(Mutex::new(HashMap::new())),
             runtime_adapter,
             #[cfg(feature = "comms")]
-            comms_drain_handles: Arc::new(Mutex::new(HashMap::new())),
-            #[cfg(feature = "comms")]
             _realm_lease: Some(lease),
         })
     }
@@ -577,8 +572,6 @@ impl MeerkatMcpState {
             #[cfg(feature = "mob")]
             mob_event_streams: Arc::new(Mutex::new(HashMap::new())),
             runtime_adapter: Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
-            #[cfg(feature = "comms")]
-            comms_drain_handles: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(feature = "comms")]
             _realm_lease: None,
         }
@@ -2293,23 +2286,14 @@ async fn handle_meerkat_run(
         state.upsert_mcp_adapter(&session_id, mcp_adapter).await;
     }
 
-    // Spawn comms drain for host_mode sessions — tracked for cleanup.
-    // Abort any existing drain for this session before spawning a new one
-    // to prevent duplicate tasks racing on the same inbox.
+    // Spawn comms drain for host_mode sessions — lifecycle owned by runtime adapter.
     #[cfg(feature = "comms")]
-    if host_mode
-        && result.is_ok()
-        && let Some(comms) = state.service.comms_runtime(&session_id).await
-    {
-        let drain_handle = meerkat_runtime::comms_drain::spawn_comms_drain(
-            state.runtime_adapter.clone(),
-            session_id.clone(),
-            comms,
-        );
-        let mut handles = state.comms_drain_handles.lock().await;
-        if let Some(old) = handles.insert(session_id.clone(), drain_handle) {
-            old.abort();
-        }
+    if result.is_ok() {
+        let comms_rt = state.service.comms_runtime(&session_id).await;
+        state
+            .runtime_adapter
+            .maybe_spawn_comms_drain(&session_id, host_mode, comms_rt)
+            .await;
     }
 
     format_agent_result(result, &session_id)
@@ -2550,23 +2534,14 @@ async fn handle_meerkat_resume(
         state.upsert_mcp_adapter(&session_id, mcp_adapter).await;
     }
 
-    // Spawn comms drain for host_mode sessions — tracked for cleanup.
-    // Abort any existing drain for this session before spawning a new one
-    // to prevent duplicate tasks racing on the same inbox.
+    // Spawn comms drain for host_mode sessions — lifecycle owned by runtime adapter.
     #[cfg(feature = "comms")]
-    if host_mode
-        && result.is_ok()
-        && let Some(comms) = state.service.comms_runtime(&session_id).await
-    {
-        let drain_handle = meerkat_runtime::comms_drain::spawn_comms_drain(
-            state.runtime_adapter.clone(),
-            session_id.clone(),
-            comms,
-        );
-        let mut handles = state.comms_drain_handles.lock().await;
-        if let Some(old) = handles.insert(session_id.clone(), drain_handle) {
-            old.abort();
-        }
+    if result.is_ok() {
+        let comms_rt = state.service.comms_runtime(&session_id).await;
+        state
+            .runtime_adapter
+            .maybe_spawn_comms_drain(&session_id, host_mode, comms_rt)
+            .await;
     }
 
     format_agent_result(result, &session_id)

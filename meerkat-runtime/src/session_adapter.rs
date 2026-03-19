@@ -106,8 +106,8 @@ impl DriverEntry {
     /// Check if the runtime can process queued inputs (Idle, Attached, or Retired).
     pub(crate) fn can_process_queue(&self) -> bool {
         match self {
-            DriverEntry::Ephemeral(d) => d.state_machine_ref().can_process_queue(),
-            DriverEntry::Persistent(d) => d.inner_ref().state_machine_ref().can_process_queue(),
+            DriverEntry::Ephemeral(d) => d.control().can_process_queue(),
+            DriverEntry::Persistent(d) => d.inner_ref().control().can_process_queue(),
         }
     }
 
@@ -283,6 +283,8 @@ pub struct RuntimeSessionAdapter {
     mode: RuntimeMode,
     /// Optional RuntimeStore for persistent drivers.
     store: Option<Arc<dyn RuntimeStore>>,
+    /// Active comms drain task handles, keyed by session.
+    comms_drain_handles: RwLock<HashMap<SessionId, tokio::task::JoinHandle<()>>>,
 }
 
 impl RuntimeSessionAdapter {
@@ -292,6 +294,7 @@ impl RuntimeSessionAdapter {
             sessions: RwLock::new(HashMap::new()),
             mode: RuntimeMode::V9Compliant,
             store: None,
+            comms_drain_handles: RwLock::new(HashMap::new()),
         }
     }
 
@@ -301,6 +304,7 @@ impl RuntimeSessionAdapter {
             sessions: RwLock::new(HashMap::new()),
             mode: RuntimeMode::V9Compliant,
             store: Some(store),
+            comms_drain_handles: RwLock::new(HashMap::new()),
         }
     }
 
@@ -812,6 +816,68 @@ impl RuntimeSessionAdapter {
         sessions
             .get(session_id)
             .map(|e| Arc::clone(&e.ops_lifecycle))
+    }
+
+    /// Spawn a comms drain for a host-mode session if one is not already running.
+    ///
+    /// Returns `true` if a new drain was spawned.
+    pub async fn maybe_spawn_comms_drain(
+        self: &Arc<Self>,
+        session_id: &SessionId,
+        host_mode: bool,
+        comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
+    ) -> bool {
+        if !host_mode {
+            return false;
+        }
+        {
+            let handles = self.comms_drain_handles.read().await;
+            if handles.contains_key(session_id) {
+                return false;
+            }
+        }
+        if let Some(comms) = comms_runtime {
+            let handle = crate::comms_drain::spawn_comms_drain(
+                Arc::clone(self),
+                session_id.clone(),
+                comms,
+                None,
+            );
+            let mut handles = self.comms_drain_handles.write().await;
+            handles.insert(session_id.clone(), handle);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Abort all active comms drain tasks.
+    pub async fn abort_comms_drains(&self) {
+        let mut handles = self.comms_drain_handles.write().await;
+        for (_, handle) in handles.drain() {
+            handle.abort();
+        }
+    }
+
+    /// Abort the comms drain task for a specific session.
+    pub async fn abort_comms_drain(&self, session_id: &SessionId) {
+        let mut handles = self.comms_drain_handles.write().await;
+        if let Some(handle) = handles.remove(session_id) {
+            handle.abort();
+        }
+    }
+
+    /// Wait for a session's comms drain task to finish.
+    ///
+    /// Returns immediately if no drain is active for the session.
+    pub async fn wait_comms_drain(&self, session_id: &SessionId) {
+        let handle = {
+            let mut handles = self.comms_drain_handles.write().await;
+            handles.remove(session_id)
+        };
+        if let Some(handle) = handle {
+            let _ = handle.await;
+        }
     }
 }
 

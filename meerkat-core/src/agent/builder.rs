@@ -261,6 +261,7 @@ impl AgentBuilder {
             extraction_result: None,
             extraction_schema_warnings: None,
             extraction_last_error: None,
+            comms_drain_active: false,
         };
 
         if let Some(raw_filter) = agent

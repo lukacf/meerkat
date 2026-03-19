@@ -15,6 +15,7 @@ use crate::tokio;
 use futures::FutureExt;
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 type AutonomousHostLoopHandle = tokio::task::JoinHandle<Result<(), MobError>>;
 // Sized for real mob-scale startup/shutdown fan-out (50+ members).
@@ -148,7 +149,7 @@ pub(super) struct MobActor {
     pub(super) session_service: Arc<dyn MobSessionService>,
     pub(super) task_board_service: crate::tasks::MobTaskBoardService,
     pub(super) spawn_policy: Arc<super::spawn_policy::SpawnPolicyService>,
-    pub(super) lifecycle: super::state::MobLifecycleOwner,
+    pub(super) tracked_flows: Arc<AtomicUsize>,
     pub(super) lifecycle_authority: MobLifecycleAuthority,
 }
 
@@ -417,29 +418,28 @@ impl MobActor {
 
         let handle = tokio::spawn(async move {
             // Spawn comms drain alongside the host loop when all wiring is available.
-            let comms_drain_handle = match (&runtime_adapter, &comms_runtime, &drain_session_id) {
-                (Some(adapter), Some(comms), Some(session_id)) => {
-                    let handle = meerkat_runtime::comms_drain::spawn_comms_drain(
-                        adapter.clone(),
-                        session_id.clone(),
-                        comms.clone(),
-                    );
-                    tracing::debug!(
-                        meerkat_id = %log_id,
-                        session_id = %session_id,
-                        "spawned comms drain for autonomous member"
-                    );
-                    Some(handle)
+            let drain_spawned = match (&runtime_adapter, &drain_session_id) {
+                (Some(adapter), Some(session_id)) => {
+                    let spawned = adapter
+                        .maybe_spawn_comms_drain(session_id, true, comms_runtime.clone())
+                        .await;
+                    if spawned {
+                        tracing::debug!(
+                            meerkat_id = %log_id,
+                            session_id = %session_id,
+                            "spawned comms drain for autonomous member"
+                        );
+                    }
+                    spawned
                 }
                 _ => {
                     tracing::debug!(
                         meerkat_id = %log_id,
                         has_adapter = runtime_adapter.is_some(),
-                        has_comms = comms_runtime.is_some(),
                         has_session = drain_session_id.is_some(),
                         "skipping comms drain for autonomous member (missing wiring)"
                     );
-                    None
+                    false
                 }
             };
 
@@ -460,8 +460,10 @@ impl MobActor {
                 .await;
 
             // Abort the comms drain when the host loop exits.
-            if let Some(drain) = comms_drain_handle {
-                drain.abort();
+            if drain_spawned
+                && let (Some(adapter), Some(session_id)) = (&runtime_adapter, &drain_session_id)
+            {
+                adapter.abort_comms_drain(session_id).await;
             }
 
             match &result {
@@ -904,7 +906,11 @@ impl MobActor {
                     {
                         tracing::warn!(error = %error, "orchestrator CompleteFlow failed");
                     }
-                    self.lifecycle.finish_tracked_flow();
+                    let _ =
+                        self.tracked_flows
+                            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |c| {
+                                Some(c.saturating_sub(1))
+                            });
                 }
                 MobCommand::FlowCanceledCleanup { run_id } => {
                     self.run_tasks.remove(&run_id);
@@ -918,11 +924,15 @@ impl MobActor {
                             "orchestrator CompleteFlow failed during canceled flow cleanup"
                         );
                     }
-                    self.lifecycle.finish_tracked_flow();
+                    let _ =
+                        self.tracked_flows
+                            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |c| {
+                                Some(c.saturating_sub(1))
+                            });
                 }
                 #[cfg(test)]
                 MobCommand::FlowTrackerCounts { reply_tx } => {
-                    let tasks = self.lifecycle.tracked_flow_count();
+                    let tasks = self.tracked_flows.load(Ordering::Acquire);
                     let tokens = self.run_cancel_tokens.len();
                     let _ = reply_tx.send((tasks, tokens));
                 }
@@ -1148,7 +1158,7 @@ impl MobActor {
                     // abort_all is non-blocking; join_next drains the abort results.
                     self.lifecycle_tasks.abort_all();
                     while self.lifecycle_tasks.join_next().await.is_some() {}
-                    self.lifecycle.clear_tracked_flows();
+                    self.tracked_flows.store(0, Ordering::Release);
                     if let Err(e) = self.lifecycle_authority.apply(MobLifecycleInput::Stop) {
                         tracing::warn!(error = %e, "authority rejected Stop");
                     }
@@ -2776,7 +2786,7 @@ impl MobActor {
             run_id.clone(),
             (cancel_token.clone(), config.flow_id.clone()),
         );
-        self.lifecycle.register_tracked_flow();
+        self.tracked_flows.fetch_add(1, Ordering::AcqRel);
         if let Some(scoped_event_tx) = scoped_event_tx {
             self.flow_streams
                 .lock()
@@ -2929,7 +2939,11 @@ impl MobActor {
             }
         }
         for _ in 0..flow_count {
-            self.lifecycle.finish_tracked_flow();
+            let _ = self
+                .tracked_flows
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |c| {
+                    Some(c.saturating_sub(1))
+                });
         }
     }
 

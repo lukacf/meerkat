@@ -6,6 +6,7 @@
 //! `RuntimeInputSink` trait on `meerkat-core`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use meerkat_core::agent::CommsRuntime;
 use meerkat_core::event::AgentEvent;
@@ -21,16 +22,25 @@ use crate::service_ext::SessionServiceRuntimeExt as _;
 use crate::session_adapter::RuntimeSessionAdapter;
 use crate::tokio::sync::mpsc;
 
+/// Default idle timeout for the comms drain loop (5 minutes).
+pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// Spawn a background task that drains the comms inbox and routes
 /// classified interactions through the runtime adapter.
 ///
-/// The task runs until the comms runtime signals DISMISS, the budget
-/// is exhausted (via adapter), or the returned `JoinHandle` is aborted.
+/// The task runs until the comms runtime signals DISMISS, the idle timeout
+/// expires without inbox activity, or the returned `JoinHandle` is aborted.
+///
+/// `idle_timeout` controls how long the drain waits for inbox notifications
+/// before checking whether the session should exit (e.g. budget exhausted).
+/// Pass `None` to use [`DEFAULT_IDLE_TIMEOUT`].
 pub fn spawn_comms_drain(
     adapter: Arc<RuntimeSessionAdapter>,
     session_id: SessionId,
     comms_runtime: Arc<dyn CommsRuntime>,
+    idle_timeout: Option<Duration>,
 ) -> crate::tokio::task::JoinHandle<()> {
+    let timeout_dur = idle_timeout.unwrap_or(DEFAULT_IDLE_TIMEOUT);
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
 
     crate::tokio::spawn(async move {
@@ -57,7 +67,13 @@ pub fn spawn_comms_drain(
                             .await;
                         return;
                     }
-                    notified.await;
+                    if crate::tokio::time::timeout(timeout_dur, notified)
+                        .await
+                        .is_err()
+                    {
+                        tracing::info!("comms_drain: idle timeout expired, stopping");
+                        return;
+                    }
                     continue;
                 }
                 Err(_) => {
@@ -76,7 +92,13 @@ pub fn spawn_comms_drain(
                                 .await;
                             return;
                         }
-                        notified.await;
+                        if crate::tokio::time::timeout(timeout_dur, notified)
+                            .await
+                            .is_err()
+                        {
+                            tracing::info!("comms_drain: idle timeout expired (legacy), stopping");
+                            return;
+                        }
                         continue;
                     }
                     // Wrap as ActionableMessage for routing.

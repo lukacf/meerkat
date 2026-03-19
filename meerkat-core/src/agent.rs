@@ -535,6 +535,9 @@ where
     pub(crate) extraction_schema_warnings: Option<Vec<crate::schema::SchemaWarning>>,
     /// Last validation error (for retry prompt).
     pub(crate) extraction_last_error: Option<String>,
+    /// When true, the turn-boundary `drain_comms_inbox()` call is suppressed
+    /// because the session service owns a dedicated comms drain task.
+    pub(crate) comms_drain_active: bool,
 }
 
 #[cfg(test)]

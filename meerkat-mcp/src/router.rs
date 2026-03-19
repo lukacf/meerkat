@@ -162,7 +162,9 @@ struct RemovalTimeout {
 /// delivered via [`take_external_updates`](Self::take_external_updates).
 pub struct McpRouter {
     /// Canonical lifecycle authority — single source of truth.
-    authority: ExternalToolSurfaceAuthority,
+    /// Wrapped in `Mutex` so that the `&self` `call_tool` path can apply
+    /// `CallStarted`/`CallFinished` without requiring `&mut self`.
+    authority: Mutex<ExternalToolSurfaceAuthority>,
 
     servers: HashMap<String, ServerEntry>,
     /// Maps tool name to owning server, including servers in Removing state.
@@ -189,7 +191,7 @@ impl McpRouter {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::channel(PENDING_CHANNEL_CAPACITY);
         Self {
-            authority: ExternalToolSurfaceAuthority::new(),
+            authority: Mutex::new(ExternalToolSurfaceAuthority::new()),
             servers: HashMap::new(),
             tool_to_server: HashMap::new(),
             cached_tools: Vec::new(),
@@ -210,6 +212,21 @@ impl McpRouter {
             removal_timeout,
             ..Self::new()
         }
+    }
+
+    /// Exclusive authority access (no lock contention — `&mut self` guarantees exclusivity).
+    fn auth_mut(&mut self) -> &mut ExternalToolSurfaceAuthority {
+        // SAFETY: get_mut only fails if the mutex is poisoned, which requires
+        // a prior panic while holding the lock. Since &mut self guarantees
+        // exclusivity and we never panic while holding, this is unreachable.
+        #[allow(clippy::expect_used)]
+        self.authority.get_mut().expect("authority mutex poisoned")
+    }
+
+    /// Shared authority access (acquires lock).
+    fn auth(&self) -> std::sync::MutexGuard<'_, ExternalToolSurfaceAuthority> {
+        #[allow(clippy::expect_used)]
+        self.authority.lock().expect("authority mutex poisoned")
     }
 
     /// Override remove-drain timeout.
@@ -263,7 +280,7 @@ impl McpRouter {
                     let sid = SurfaceId::from(server_name.as_str());
 
                     // Stage through authority.
-                    if let Err(e) = self.authority.apply(ExternalToolSurfaceInput::StageAdd {
+                    if let Err(e) = self.auth_mut().apply(ExternalToolSurfaceInput::StageAdd {
                         surface_id: sid.clone(),
                     }) {
                         tracing::warn!(server = %server_name, error = %e, "Authority rejected StageAdd");
@@ -275,7 +292,7 @@ impl McpRouter {
 
                     // Apply boundary through authority to move to Pending.
                     match self
-                        .authority
+                        .auth_mut()
                         .apply(ExternalToolSurfaceInput::ApplyBoundary {
                             surface_id: sid,
                             applied_at_turn: TurnNumber(0),
@@ -299,16 +316,19 @@ impl McpRouter {
                     self.pending_servers.remove(&server_name);
 
                     // Stage through authority.
-                    if let Err(e) = self.authority.apply(ExternalToolSurfaceInput::StageRemove {
-                        surface_id: sid.clone(),
-                    }) {
+                    if let Err(e) = self
+                        .auth_mut()
+                        .apply(ExternalToolSurfaceInput::StageRemove {
+                            surface_id: sid.clone(),
+                        })
+                    {
                         tracing::warn!(server = %server_name, error = %e, "Authority rejected StageRemove");
                         continue;
                     }
 
                     // Apply boundary through authority.
                     match self
-                        .authority
+                        .auth_mut()
                         .apply(ExternalToolSurfaceInput::ApplyBoundary {
                             surface_id: sid,
                             applied_at_turn: TurnNumber(0),
@@ -317,7 +337,8 @@ impl McpRouter {
                             self.execute_effects(&transition.effects, &mut delta, None);
                             // Record shell-level timeout if we entered Removing.
                             let check_sid = SurfaceId::from(server_name.as_str());
-                            if self.authority.surface_base(&check_sid) == SurfaceBaseState::Removing
+                            if self.auth_mut().surface_base(&check_sid)
+                                == SurfaceBaseState::Removing
                             {
                                 let draining_since = Instant::now();
                                 self.removal_timeouts.insert(
@@ -357,16 +378,19 @@ impl McpRouter {
                     self.pending_servers.remove(&server_name);
 
                     // Stage through authority.
-                    if let Err(e) = self.authority.apply(ExternalToolSurfaceInput::StageReload {
-                        surface_id: sid.clone(),
-                    }) {
+                    if let Err(e) = self
+                        .auth_mut()
+                        .apply(ExternalToolSurfaceInput::StageReload {
+                            surface_id: sid.clone(),
+                        })
+                    {
                         tracing::warn!(server = %server_name, error = %e, "Authority rejected StageReload");
                         continue;
                     }
 
                     // Apply boundary through authority.
                     match self
-                        .authority
+                        .auth_mut()
                         .apply(ExternalToolSurfaceInput::ApplyBoundary {
                             surface_id: sid,
                             applied_at_turn: TurnNumber(0),
@@ -389,7 +413,7 @@ impl McpRouter {
         self.process_removals(&mut delta).await;
         self.rebuild_visible_cache();
 
-        let pending_count = self.authority.pending_count();
+        let pending_count = self.auth_mut().pending_count();
         Ok(McpApplyResult {
             delta,
             pending_count,
@@ -552,7 +576,7 @@ impl McpRouter {
 
                 // Notify authority of success.
                 match self
-                    .authority
+                    .auth_mut()
                     .apply(ExternalToolSurfaceInput::PendingSucceeded {
                         surface_id: sid,
                         applied_at_turn: TurnNumber(0),
@@ -638,7 +662,7 @@ impl McpRouter {
 
                 // Notify authority of failure.
                 if let Err(e) = self
-                    .authority
+                    .auth_mut()
                     .apply(ExternalToolSurfaceInput::PendingFailed {
                         surface_id: SurfaceId::from(server_name.as_str()),
                         applied_at_turn: TurnNumber(0),
@@ -709,13 +733,13 @@ impl McpRouter {
         let sid = SurfaceId::from(server_name.as_str());
 
         // Drive authority: StageAdd -> ApplyBoundary -> PendingSucceeded.
-        if let Err(e) = self.authority.apply(ExternalToolSurfaceInput::StageAdd {
+        if let Err(e) = self.auth_mut().apply(ExternalToolSurfaceInput::StageAdd {
             surface_id: sid.clone(),
         }) {
             tracing::warn!(server = %server_name, error = %e, "Authority rejected StageAdd in install path");
         }
         if let Err(e) = self
-            .authority
+            .auth_mut()
             .apply(ExternalToolSurfaceInput::ApplyBoundary {
                 surface_id: sid.clone(),
                 applied_at_turn: TurnNumber(0),
@@ -724,7 +748,7 @@ impl McpRouter {
             tracing::warn!(server = %server_name, error = %e, "Authority rejected ApplyBoundary in install path");
         }
         if let Err(e) = self
-            .authority
+            .auth_mut()
             .apply(ExternalToolSurfaceInput::PendingSucceeded {
                 surface_id: sid,
                 applied_at_turn: TurnNumber(0),
@@ -760,9 +784,9 @@ impl McpRouter {
         let now = Instant::now();
         let mut finalized: Vec<(String, bool)> = Vec::new();
 
-        let removing: Vec<SurfaceId> = self.authority.removing_surfaces().cloned().collect();
+        let removing: Vec<SurfaceId> = self.auth_mut().removing_surfaces().cloned().collect();
         for sid in &removing {
-            let inflight = self.authority.inflight_call_count(sid);
+            let inflight = self.auth_mut().inflight_call_count(sid);
             let timeout = self.removal_timeouts.get(&sid.0);
 
             if inflight == 0 {
@@ -788,7 +812,7 @@ impl McpRouter {
                 }
             };
 
-            match self.authority.apply(input) {
+            match self.auth_mut().apply(input) {
                 Ok(transition) => {
                     self.execute_effects(&transition.effects, delta, None);
                     if degraded {
@@ -820,8 +844,9 @@ impl McpRouter {
     }
 
     fn rebuild_visible_cache(&mut self) {
+        let visible: Vec<SurfaceId> = self.auth_mut().visible_surfaces().cloned().collect();
         let mut tools: Vec<Arc<ToolDef>> = Vec::new();
-        for sid in self.authority.visible_surfaces() {
+        for sid in &visible {
             if let Some(entry) = self.servers.get(&sid.0) {
                 tools.extend(entry.tools.iter().cloned());
             }
@@ -835,7 +860,7 @@ impl McpRouter {
     /// Derives the lifecycle state from the authority's canonical state.
     pub fn server_lifecycle_state(&self, server_name: &str) -> Option<McpServerLifecycleState> {
         let sid = SurfaceId::from(server_name);
-        let base = self.authority.surface_base(&sid);
+        let base = self.auth().surface_base(&sid);
         match base {
             SurfaceBaseState::Active => Some(McpServerLifecycleState::Active),
             SurfaceBaseState::Removing => {
@@ -858,7 +883,7 @@ impl McpRouter {
 
     /// List names of all active (non-removed) servers.
     pub fn active_server_names(&self) -> Vec<String> {
-        self.authority
+        self.auth()
             .visible_surfaces()
             .map(|sid| sid.0.clone())
             .collect()
@@ -866,7 +891,7 @@ impl McpRouter {
 
     /// Returns true if any server is currently in Removing state.
     pub fn has_removing_servers(&self) -> bool {
-        self.authority.removing_surfaces().next().is_some()
+        self.auth().removing_surfaces().next().is_some()
     }
 
     /// List all visible tools from active servers.
@@ -894,14 +919,32 @@ impl McpRouter {
             .get(server_name)
             .ok_or_else(|| McpError::ServerNotFound(server_name.clone()))?;
 
-        // Check the authority for lifecycle state.
+        // Route through authority — CallStarted validates lifecycle state.
         let sid = SurfaceId::from(server_name.as_str());
-        let base = self.authority.surface_base(&sid);
-        if base != SurfaceBaseState::Active {
-            return Err(McpError::ServerUnavailable {
-                server: server_name.clone(),
-                state: base.to_string(),
-            });
+        {
+            let mut auth = self.auth();
+            match auth.apply(ExternalToolSurfaceInput::CallStarted {
+                surface_id: sid.clone(),
+            }) {
+                Ok(transition) => {
+                    // Check for RejectSurfaceCall effect.
+                    for effect in &transition.effects {
+                        if let ExternalToolSurfaceEffect::RejectSurfaceCall { reason, .. } = effect
+                        {
+                            return Err(McpError::ServerUnavailable {
+                                server: server_name.clone(),
+                                state: reason.clone(),
+                            });
+                        }
+                    }
+                }
+                Err(e) => {
+                    return Err(McpError::ServerUnavailable {
+                        server: server_name.clone(),
+                        state: e.to_string(),
+                    });
+                }
+            }
         }
 
         let conn = entry
@@ -910,12 +953,19 @@ impl McpRouter {
             .ok_or_else(|| McpError::ServerNotFound(server_name.clone()))?;
 
         let _guard = InflightCallGuard::new(&entry.active_calls);
-        conn.call_tool(name, args).await
+        let result = conn.call_tool(name, args).await;
+
+        // Notify authority that the call finished.
+        let _ = self
+            .auth()
+            .apply(ExternalToolSurfaceInput::CallFinished { surface_id: sid });
+
+        result
     }
 
     /// Gracefully shutdown all connections.
     pub async fn shutdown(mut self) {
-        let _ = self.authority.apply(ExternalToolSurfaceInput::Shutdown);
+        let _ = self.auth_mut().apply(ExternalToolSurfaceInput::Shutdown);
         drop(self.pending_tx);
         for (_, entry) in self.servers {
             Self::close_entry_connection(entry.config.name, entry.connection).await;
@@ -930,14 +980,16 @@ impl McpRouter {
             // Sync authority inflight count to match the shell's test override.
             if count > current {
                 for _ in current..count {
-                    let _ = self.authority.apply(ExternalToolSurfaceInput::CallStarted {
-                        surface_id: sid.clone(),
-                    });
+                    let _ = self
+                        .auth_mut()
+                        .apply(ExternalToolSurfaceInput::CallStarted {
+                            surface_id: sid.clone(),
+                        });
                 }
             } else {
                 for _ in count..current {
                     let _ = self
-                        .authority
+                        .auth_mut()
                         .apply(ExternalToolSurfaceInput::CallFinished {
                             surface_id: sid.clone(),
                         });

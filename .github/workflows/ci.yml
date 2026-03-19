@@ -65,6 +65,20 @@ jobs:
         with:
           prefix-key: machine-authority
 
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Install TLC
+        run: |
+          mkdir -p $HOME/.local/lib $HOME/.local/bin
+          curl -sL -o $HOME/.local/lib/tla2tools.jar \
+            https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
+          printf '#!/bin/sh\njava -jar %s/tla2tools.jar "$@"\n' "$HOME/.local/lib" > $HOME/.local/bin/tlc
+          chmod +x $HOME/.local/bin/tlc
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
       - name: Machine code generation
         run: cargo xtask machine-codegen --all
 

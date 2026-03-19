@@ -125,10 +125,6 @@ pub struct AppState {
     /// Per-session MCP adapter state (live MCP mutation).
     #[cfg(feature = "mcp")]
     pub mcp_sessions: Arc<RwLock<std::collections::HashMap<SessionId, SessionMcpState>>>,
-    /// Comms drain task handles for host_mode sessions.
-    #[cfg(feature = "comms")]
-    pub comms_drain_handles:
-        Arc<tokio::sync::Mutex<std::collections::HashMap<SessionId, tokio::task::JoinHandle<()>>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -320,10 +316,6 @@ impl AppState {
             mob_state: Arc::new(meerkat_mob_mcp::MobMcpState::new(mob_session_service)),
             #[cfg(feature = "mcp")]
             mcp_sessions: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            #[cfg(feature = "comms")]
-            comms_drain_handles: Arc::new(
-                tokio::sync::Mutex::new(std::collections::HashMap::new()),
-            ),
         })
     }
 
@@ -2149,17 +2141,11 @@ async fn create_session(
 
     // Spawn comms drain for host_mode sessions.
     #[cfg(feature = "comms")]
-    if host_mode && let Some(comms) = state.session_service.comms_runtime(&session_id).await {
-        let handle = meerkat_runtime::comms_drain::spawn_comms_drain(
-            adapter.clone(),
-            session_id.clone(),
-            comms,
-        );
-        state
-            .comms_drain_handles
-            .lock()
-            .await
-            .insert(session_id.clone(), handle);
+    {
+        let comms_rt = state.session_service.comms_runtime(&session_id).await;
+        adapter
+            .maybe_spawn_comms_drain(&session_id, host_mode, comms_rt)
+            .await;
     }
 
     // Create input and route through runtime
@@ -2217,9 +2203,7 @@ async fn create_session(
             #[cfg(feature = "mcp")]
             cleanup_mcp_session(&state, &session_id).await;
             #[cfg(feature = "comms")]
-            if let Some(handle) = state.comms_drain_handles.lock().await.remove(&session_id) {
-                handle.abort();
-            }
+            state.runtime_adapter.abort_comms_drain(&session_id).await;
             Err(err)
         }
     }
@@ -2366,9 +2350,7 @@ async fn archive_session(
             #[cfg(feature = "mcp")]
             cleanup_mcp_session(&state, &session_id).await;
             #[cfg(feature = "comms")]
-            if let Some(handle) = state.comms_drain_handles.lock().await.remove(&session_id) {
-                handle.abort();
-            }
+            state.runtime_adapter.abort_comms_drain(&session_id).await;
             state.runtime_adapter.unregister_session(&session_id).await;
             Ok(Json(json!({
                 "session_id": session_id.to_string(),
@@ -2499,24 +2481,11 @@ async fn continue_session(
 
     // Spawn comms drain for host_mode sessions (idempotent — skips if already running).
     #[cfg(feature = "comms")]
-    if host_mode
-        && !state
-            .comms_drain_handles
-            .lock()
-            .await
-            .contains_key(&session_id)
-        && let Some(comms) = state.session_service.comms_runtime(&session_id).await
     {
-        let drain_handle = meerkat_runtime::comms_drain::spawn_comms_drain(
-            adapter.clone(),
-            session_id.clone(),
-            comms,
-        );
-        state
-            .comms_drain_handles
-            .lock()
-            .await
-            .insert(session_id.clone(), drain_handle);
+        let comms_rt = state.session_service.comms_runtime(&session_id).await;
+        adapter
+            .maybe_spawn_comms_drain(&session_id, host_mode, comms_rt)
+            .await;
     }
 
     let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::from_content_input(

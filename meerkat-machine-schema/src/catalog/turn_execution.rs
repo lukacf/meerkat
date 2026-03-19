@@ -145,6 +145,18 @@ pub fn turn_execution_machine() -> MachineSchema {
                     fields: vec![field("run_id", TypeRef::Named("RunId".into()))],
                 },
                 VariantSchema {
+                    name: "TurnLimitReached".into(),
+                    fields: vec![field("run_id", TypeRef::Named("RunId".into()))],
+                },
+                VariantSchema {
+                    name: "BudgetExhausted".into(),
+                    fields: vec![field("run_id", TypeRef::Named("RunId".into()))],
+                },
+                VariantSchema {
+                    name: "ForceCancelNoRun".into(),
+                    fields: vec![],
+                },
+                VariantSchema {
                     name: "RunCompleted".into(),
                     fields: vec![field("run_id", TypeRef::Named("RunId".into()))],
                 },
@@ -288,6 +300,10 @@ pub fn turn_execution_machine() -> MachineSchema {
                         Expr::Eq(
                             Box::new(Expr::Field("terminal_outcome".into())),
                             Box::new(Expr::String("Completed".into())),
+                        ),
+                        Expr::Eq(
+                            Box::new(Expr::Field("terminal_outcome".into())),
+                            Box::new(Expr::String("BudgetExhausted".into())),
                         ),
                     ]),
                     Expr::Or(vec![
@@ -1509,6 +1525,531 @@ pub fn turn_execution_machine() -> MachineSchema {
                     variant: "RunCancelled".into(),
                     fields: IndexMap::from([("run_id".into(), Expr::Binding("run_id".into()))]),
                 }],
+            },
+            TransitionSchema {
+                name: "TurnLimitReachedFromApplyingPrimitive".into(),
+                from: vec!["ApplyingPrimitive".into()],
+                on: InputMatch {
+                    variant: "TurnLimitReached".into(),
+                    bindings: vec!["run_id".into()],
+                },
+                guards: vec![Guard {
+                    name: "run_matches_active".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("active_run".into())),
+                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                    ),
+                }],
+                updates: vec![
+                    Update::Increment {
+                        field: "boundary_count".into(),
+                        amount: 1,
+                    },
+                    Update::Assign {
+                        field: "terminal_outcome".into(),
+                        expr: Expr::String("Completed".into()),
+                    },
+                ],
+                to: "Completed".into(),
+                emit: vec![
+                    EffectEmit {
+                        variant: "BoundaryApplied".into(),
+                        fields: IndexMap::from([
+                            ("run_id".into(), Expr::Binding("run_id".into())),
+                            (
+                                "boundary_sequence".into(),
+                                Expr::Field("boundary_count".into()),
+                            ),
+                        ]),
+                    },
+                    EffectEmit {
+                        variant: "RunCompleted".into(),
+                        fields: IndexMap::from([("run_id".into(), Expr::Binding("run_id".into()))]),
+                    },
+                ],
+            },
+            TransitionSchema {
+                name: "TurnLimitReachedFromCallingLlm".into(),
+                from: vec!["CallingLlm".into()],
+                on: InputMatch {
+                    variant: "TurnLimitReached".into(),
+                    bindings: vec!["run_id".into()],
+                },
+                guards: vec![Guard {
+                    name: "run_matches_active".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("active_run".into())),
+                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                    ),
+                }],
+                updates: vec![
+                    Update::Increment {
+                        field: "boundary_count".into(),
+                        amount: 1,
+                    },
+                    Update::Assign {
+                        field: "terminal_outcome".into(),
+                        expr: Expr::String("Completed".into()),
+                    },
+                ],
+                to: "Completed".into(),
+                emit: vec![
+                    EffectEmit {
+                        variant: "BoundaryApplied".into(),
+                        fields: IndexMap::from([
+                            ("run_id".into(), Expr::Binding("run_id".into())),
+                            (
+                                "boundary_sequence".into(),
+                                Expr::Field("boundary_count".into()),
+                            ),
+                        ]),
+                    },
+                    EffectEmit {
+                        variant: "RunCompleted".into(),
+                        fields: IndexMap::from([("run_id".into(), Expr::Binding("run_id".into()))]),
+                    },
+                ],
+            },
+            TransitionSchema {
+                name: "TurnLimitReachedFromWaitingForOps".into(),
+                from: vec!["WaitingForOps".into()],
+                on: InputMatch {
+                    variant: "TurnLimitReached".into(),
+                    bindings: vec!["run_id".into()],
+                },
+                guards: vec![Guard {
+                    name: "run_matches_active".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("active_run".into())),
+                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                    ),
+                }],
+                updates: vec![
+                    Update::Increment {
+                        field: "boundary_count".into(),
+                        amount: 1,
+                    },
+                    Update::Assign {
+                        field: "terminal_outcome".into(),
+                        expr: Expr::String("Completed".into()),
+                    },
+                ],
+                to: "Completed".into(),
+                emit: vec![
+                    EffectEmit {
+                        variant: "BoundaryApplied".into(),
+                        fields: IndexMap::from([
+                            ("run_id".into(), Expr::Binding("run_id".into())),
+                            (
+                                "boundary_sequence".into(),
+                                Expr::Field("boundary_count".into()),
+                            ),
+                        ]),
+                    },
+                    EffectEmit {
+                        variant: "RunCompleted".into(),
+                        fields: IndexMap::from([("run_id".into(), Expr::Binding("run_id".into()))]),
+                    },
+                ],
+            },
+            TransitionSchema {
+                name: "TurnLimitReachedFromDrainingBoundary".into(),
+                from: vec!["DrainingBoundary".into()],
+                on: InputMatch {
+                    variant: "TurnLimitReached".into(),
+                    bindings: vec!["run_id".into()],
+                },
+                guards: vec![Guard {
+                    name: "run_matches_active".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("active_run".into())),
+                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                    ),
+                }],
+                updates: vec![
+                    Update::Increment {
+                        field: "boundary_count".into(),
+                        amount: 1,
+                    },
+                    Update::Assign {
+                        field: "terminal_outcome".into(),
+                        expr: Expr::String("Completed".into()),
+                    },
+                ],
+                to: "Completed".into(),
+                emit: vec![
+                    EffectEmit {
+                        variant: "BoundaryApplied".into(),
+                        fields: IndexMap::from([
+                            ("run_id".into(), Expr::Binding("run_id".into())),
+                            (
+                                "boundary_sequence".into(),
+                                Expr::Field("boundary_count".into()),
+                            ),
+                        ]),
+                    },
+                    EffectEmit {
+                        variant: "RunCompleted".into(),
+                        fields: IndexMap::from([("run_id".into(), Expr::Binding("run_id".into()))]),
+                    },
+                ],
+            },
+            TransitionSchema {
+                name: "TurnLimitReachedFromErrorRecovery".into(),
+                from: vec!["ErrorRecovery".into()],
+                on: InputMatch {
+                    variant: "TurnLimitReached".into(),
+                    bindings: vec!["run_id".into()],
+                },
+                guards: vec![Guard {
+                    name: "run_matches_active".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("active_run".into())),
+                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                    ),
+                }],
+                updates: vec![
+                    Update::Increment {
+                        field: "boundary_count".into(),
+                        amount: 1,
+                    },
+                    Update::Assign {
+                        field: "terminal_outcome".into(),
+                        expr: Expr::String("Completed".into()),
+                    },
+                ],
+                to: "Completed".into(),
+                emit: vec![
+                    EffectEmit {
+                        variant: "BoundaryApplied".into(),
+                        fields: IndexMap::from([
+                            ("run_id".into(), Expr::Binding("run_id".into())),
+                            (
+                                "boundary_sequence".into(),
+                                Expr::Field("boundary_count".into()),
+                            ),
+                        ]),
+                    },
+                    EffectEmit {
+                        variant: "RunCompleted".into(),
+                        fields: IndexMap::from([("run_id".into(), Expr::Binding("run_id".into()))]),
+                    },
+                ],
+            },
+            TransitionSchema {
+                name: "BudgetExhaustedFromApplyingPrimitive".into(),
+                from: vec!["ApplyingPrimitive".into()],
+                on: InputMatch {
+                    variant: "BudgetExhausted".into(),
+                    bindings: vec!["run_id".into()],
+                },
+                guards: vec![Guard {
+                    name: "run_matches_active".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("active_run".into())),
+                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                    ),
+                }],
+                updates: vec![
+                    Update::Increment {
+                        field: "boundary_count".into(),
+                        amount: 1,
+                    },
+                    Update::Assign {
+                        field: "terminal_outcome".into(),
+                        expr: Expr::String("BudgetExhausted".into()),
+                    },
+                ],
+                to: "Completed".into(),
+                emit: vec![
+                    EffectEmit {
+                        variant: "BoundaryApplied".into(),
+                        fields: IndexMap::from([
+                            ("run_id".into(), Expr::Binding("run_id".into())),
+                            (
+                                "boundary_sequence".into(),
+                                Expr::Field("boundary_count".into()),
+                            ),
+                        ]),
+                    },
+                    EffectEmit {
+                        variant: "RunCompleted".into(),
+                        fields: IndexMap::from([("run_id".into(), Expr::Binding("run_id".into()))]),
+                    },
+                ],
+            },
+            TransitionSchema {
+                name: "BudgetExhaustedFromCallingLlm".into(),
+                from: vec!["CallingLlm".into()],
+                on: InputMatch {
+                    variant: "BudgetExhausted".into(),
+                    bindings: vec!["run_id".into()],
+                },
+                guards: vec![Guard {
+                    name: "run_matches_active".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("active_run".into())),
+                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                    ),
+                }],
+                updates: vec![
+                    Update::Increment {
+                        field: "boundary_count".into(),
+                        amount: 1,
+                    },
+                    Update::Assign {
+                        field: "terminal_outcome".into(),
+                        expr: Expr::String("BudgetExhausted".into()),
+                    },
+                ],
+                to: "Completed".into(),
+                emit: vec![
+                    EffectEmit {
+                        variant: "BoundaryApplied".into(),
+                        fields: IndexMap::from([
+                            ("run_id".into(), Expr::Binding("run_id".into())),
+                            (
+                                "boundary_sequence".into(),
+                                Expr::Field("boundary_count".into()),
+                            ),
+                        ]),
+                    },
+                    EffectEmit {
+                        variant: "RunCompleted".into(),
+                        fields: IndexMap::from([("run_id".into(), Expr::Binding("run_id".into()))]),
+                    },
+                ],
+            },
+            TransitionSchema {
+                name: "BudgetExhaustedFromWaitingForOps".into(),
+                from: vec!["WaitingForOps".into()],
+                on: InputMatch {
+                    variant: "BudgetExhausted".into(),
+                    bindings: vec!["run_id".into()],
+                },
+                guards: vec![Guard {
+                    name: "run_matches_active".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("active_run".into())),
+                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                    ),
+                }],
+                updates: vec![
+                    Update::Increment {
+                        field: "boundary_count".into(),
+                        amount: 1,
+                    },
+                    Update::Assign {
+                        field: "terminal_outcome".into(),
+                        expr: Expr::String("BudgetExhausted".into()),
+                    },
+                ],
+                to: "Completed".into(),
+                emit: vec![
+                    EffectEmit {
+                        variant: "BoundaryApplied".into(),
+                        fields: IndexMap::from([
+                            ("run_id".into(), Expr::Binding("run_id".into())),
+                            (
+                                "boundary_sequence".into(),
+                                Expr::Field("boundary_count".into()),
+                            ),
+                        ]),
+                    },
+                    EffectEmit {
+                        variant: "RunCompleted".into(),
+                        fields: IndexMap::from([("run_id".into(), Expr::Binding("run_id".into()))]),
+                    },
+                ],
+            },
+            TransitionSchema {
+                name: "BudgetExhaustedFromDrainingBoundary".into(),
+                from: vec!["DrainingBoundary".into()],
+                on: InputMatch {
+                    variant: "BudgetExhausted".into(),
+                    bindings: vec!["run_id".into()],
+                },
+                guards: vec![Guard {
+                    name: "run_matches_active".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("active_run".into())),
+                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                    ),
+                }],
+                updates: vec![
+                    Update::Increment {
+                        field: "boundary_count".into(),
+                        amount: 1,
+                    },
+                    Update::Assign {
+                        field: "terminal_outcome".into(),
+                        expr: Expr::String("BudgetExhausted".into()),
+                    },
+                ],
+                to: "Completed".into(),
+                emit: vec![
+                    EffectEmit {
+                        variant: "BoundaryApplied".into(),
+                        fields: IndexMap::from([
+                            ("run_id".into(), Expr::Binding("run_id".into())),
+                            (
+                                "boundary_sequence".into(),
+                                Expr::Field("boundary_count".into()),
+                            ),
+                        ]),
+                    },
+                    EffectEmit {
+                        variant: "RunCompleted".into(),
+                        fields: IndexMap::from([("run_id".into(), Expr::Binding("run_id".into()))]),
+                    },
+                ],
+            },
+            TransitionSchema {
+                name: "BudgetExhaustedFromErrorRecovery".into(),
+                from: vec!["ErrorRecovery".into()],
+                on: InputMatch {
+                    variant: "BudgetExhausted".into(),
+                    bindings: vec!["run_id".into()],
+                },
+                guards: vec![Guard {
+                    name: "run_matches_active".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("active_run".into())),
+                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                    ),
+                }],
+                updates: vec![
+                    Update::Increment {
+                        field: "boundary_count".into(),
+                        amount: 1,
+                    },
+                    Update::Assign {
+                        field: "terminal_outcome".into(),
+                        expr: Expr::String("BudgetExhausted".into()),
+                    },
+                ],
+                to: "Completed".into(),
+                emit: vec![
+                    EffectEmit {
+                        variant: "BoundaryApplied".into(),
+                        fields: IndexMap::from([
+                            ("run_id".into(), Expr::Binding("run_id".into())),
+                            (
+                                "boundary_sequence".into(),
+                                Expr::Field("boundary_count".into()),
+                            ),
+                        ]),
+                    },
+                    EffectEmit {
+                        variant: "RunCompleted".into(),
+                        fields: IndexMap::from([("run_id".into(), Expr::Binding("run_id".into()))]),
+                    },
+                ],
+            },
+            TransitionSchema {
+                name: "ForceCancelNoRunFromReady".into(),
+                from: vec!["Ready".into()],
+                on: InputMatch {
+                    variant: "ForceCancelNoRun".into(),
+                    bindings: vec![],
+                },
+                guards: vec![],
+                updates: vec![Update::Assign {
+                    field: "terminal_outcome".into(),
+                    expr: Expr::String("Cancelled".into()),
+                }],
+                to: "Cancelled".into(),
+                emit: vec![],
+            },
+            TransitionSchema {
+                name: "ForceCancelNoRunFromApplyingPrimitive".into(),
+                from: vec!["ApplyingPrimitive".into()],
+                on: InputMatch {
+                    variant: "ForceCancelNoRun".into(),
+                    bindings: vec![],
+                },
+                guards: vec![],
+                updates: vec![Update::Assign {
+                    field: "terminal_outcome".into(),
+                    expr: Expr::String("Cancelled".into()),
+                }],
+                to: "Cancelled".into(),
+                emit: vec![],
+            },
+            TransitionSchema {
+                name: "ForceCancelNoRunFromCallingLlm".into(),
+                from: vec!["CallingLlm".into()],
+                on: InputMatch {
+                    variant: "ForceCancelNoRun".into(),
+                    bindings: vec![],
+                },
+                guards: vec![],
+                updates: vec![Update::Assign {
+                    field: "terminal_outcome".into(),
+                    expr: Expr::String("Cancelled".into()),
+                }],
+                to: "Cancelled".into(),
+                emit: vec![],
+            },
+            TransitionSchema {
+                name: "ForceCancelNoRunFromWaitingForOps".into(),
+                from: vec!["WaitingForOps".into()],
+                on: InputMatch {
+                    variant: "ForceCancelNoRun".into(),
+                    bindings: vec![],
+                },
+                guards: vec![],
+                updates: vec![Update::Assign {
+                    field: "terminal_outcome".into(),
+                    expr: Expr::String("Cancelled".into()),
+                }],
+                to: "Cancelled".into(),
+                emit: vec![],
+            },
+            TransitionSchema {
+                name: "ForceCancelNoRunFromDrainingBoundary".into(),
+                from: vec!["DrainingBoundary".into()],
+                on: InputMatch {
+                    variant: "ForceCancelNoRun".into(),
+                    bindings: vec![],
+                },
+                guards: vec![],
+                updates: vec![Update::Assign {
+                    field: "terminal_outcome".into(),
+                    expr: Expr::String("Cancelled".into()),
+                }],
+                to: "Cancelled".into(),
+                emit: vec![],
+            },
+            TransitionSchema {
+                name: "ForceCancelNoRunFromErrorRecovery".into(),
+                from: vec!["ErrorRecovery".into()],
+                on: InputMatch {
+                    variant: "ForceCancelNoRun".into(),
+                    bindings: vec![],
+                },
+                guards: vec![],
+                updates: vec![Update::Assign {
+                    field: "terminal_outcome".into(),
+                    expr: Expr::String("Cancelled".into()),
+                }],
+                to: "Cancelled".into(),
+                emit: vec![],
+            },
+            TransitionSchema {
+                name: "ForceCancelNoRunFromCancelling".into(),
+                from: vec!["Cancelling".into()],
+                on: InputMatch {
+                    variant: "ForceCancelNoRun".into(),
+                    bindings: vec![],
+                },
+                guards: vec![],
+                updates: vec![Update::Assign {
+                    field: "terminal_outcome".into(),
+                    expr: Expr::String("Cancelled".into()),
+                }],
+                to: "Cancelled".into(),
+                emit: vec![],
             },
             TransitionSchema {
                 name: "AcknowledgeTerminalFromCompleted".into(),

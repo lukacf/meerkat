@@ -430,29 +430,35 @@ impl FlowRunKernel {
         flow_id: FlowId,
         target: TerminalizationTarget,
     ) -> Result<TerminalizationOutcome, MobError> {
-        let run = self.require_run(&run_id).await?;
+        let variant = Self::terminal_variant(&target);
         let next_status = target.status();
-        let next_state = self.transition_state(
-            &run.flow_state,
-            Self::terminal_variant(&target),
-            BTreeMap::new(),
-        )?;
-        let transitioned = self
-            .run_store
-            .cas_run_snapshot(
-                &run_id,
-                run.status.clone(),
-                &run.flow_state,
-                next_status,
-                &next_state,
-            )
-            .await?;
-        if !transitioned {
-            return Ok(TerminalizationOutcome::Noop);
+
+        for attempt in 0..5u32 {
+            let run = self.require_run(&run_id).await?;
+            let next_state = self.transition_state(&run.flow_state, variant, BTreeMap::new())?;
+            let transitioned = self
+                .run_store
+                .cas_run_snapshot(
+                    &run_id,
+                    run.status.clone(),
+                    &run.flow_state,
+                    next_status.clone(),
+                    &next_state,
+                )
+                .await?;
+            if transitioned {
+                return self
+                    .terminalization
+                    .record_persisted_terminalization(run_id, flow_id, target)
+                    .await;
+            }
+            if attempt < 4 {
+                tracing::debug!(variant, attempt, "terminalize CAS contention, retrying");
+            }
         }
-        self.terminalization
-            .record_persisted_terminalization(run_id, flow_id, target)
-            .await
+        Err(MobError::Internal(format!(
+            "CAS contention on {variant} after 5 attempts for run {run_id}"
+        )))
     }
 
     async fn apply_step_input(

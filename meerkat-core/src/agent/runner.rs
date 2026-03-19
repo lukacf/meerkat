@@ -133,12 +133,17 @@ where
         self.depth
     }
 
-    /// Mark that a dedicated comms drain task is active for this agent.
+    /// Seal the comms drain as active — one-way latch.
     ///
-    /// When set to `true`, the turn-boundary `drain_comms_inbox()` call is
-    /// suppressed so the dedicated drain task is the sole inbox consumer.
-    pub fn set_comms_drain_active(&mut self, active: bool) {
-        self.comms_drain_active = active;
+    /// Once called, the agent's turn-boundary `drain_comms_inbox()` is
+    /// permanently suppressed for this agent instance. The dedicated
+    /// drain task (owned by the session/host-mode surface) becomes the
+    /// sole inbox consumer.
+    ///
+    /// **Ownership:** Only the surface that starts the drain task should
+    /// call this. Cannot be reverted — construct a new agent instead.
+    pub fn seal_comms_drain_active(&mut self) {
+        self.comms_drain_active = true;
     }
 
     /// Get the event tap for interaction-scoped streaming.

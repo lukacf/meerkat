@@ -233,11 +233,12 @@ pub trait SessionAgent: Send {
         None
     }
 
-    /// Mark the session-level comms drain as active or inactive.
+    /// Seal the session-level comms drain as active (one-way latch).
     ///
-    /// When `true`, the agent's turn-boundary `drain_comms_inbox()` is
-    /// suppressed so the dedicated drain task is the sole inbox consumer.
-    fn set_comms_drain_active(&mut self, _active: bool) {}
+    /// Once called, the agent's turn-boundary `drain_comms_inbox()` is
+    /// permanently suppressed so the dedicated drain task is the sole
+    /// inbox consumer. Cannot be reverted.
+    fn seal_comms_drain_active(&mut self) {}
 
     /// Get the comms runtime used by this agent, if any.
     ///
@@ -1056,7 +1057,7 @@ async fn session_task<A: SessionAgent>(
                 // turn-boundary drain so the session-service-owned comms
                 // drain is the sole inbox consumer.
                 if host_mode && !comms_drain_activated {
-                    agent.set_comms_drain_active(true);
+                    agent.seal_comms_drain_active();
                     comms_drain_activated = true;
                 }
                 agent.set_skill_references(skill_references);

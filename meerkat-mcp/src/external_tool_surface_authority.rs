@@ -21,6 +21,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
+use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
 // SurfaceId newtype
@@ -278,6 +279,15 @@ pub struct ExternalToolSurfaceTransition {
 // Canonical machine state (per-surface maps)
 // ---------------------------------------------------------------------------
 
+/// Removal timing information for a surface in `Removing` state.
+///
+/// Authority-owned data that drives the clean-vs-forced removal decision.
+#[derive(Debug, Clone, Copy)]
+pub struct RemovalTimingInfo {
+    pub draining_since: Instant,
+    pub timeout_at: Instant,
+}
+
 /// Canonical machine-owned state for ExternalToolSurface.
 ///
 /// All per-surface lifecycle truth lives here. Shell code may read these
@@ -293,6 +303,8 @@ struct ExternalToolSurfaceFields {
     inflight_calls: HashMap<SurfaceId, u64>,
     last_delta_operation: HashMap<SurfaceId, SurfaceDeltaOperation>,
     last_delta_phase: HashMap<SurfaceId, SurfaceDeltaPhase>,
+    /// Removal timing per surface (set when entering Removing, cleared on finalization).
+    removal_timing: HashMap<SurfaceId, RemovalTimingInfo>,
 }
 
 impl ExternalToolSurfaceFields {
@@ -306,6 +318,7 @@ impl ExternalToolSurfaceFields {
             inflight_calls: HashMap::new(),
             last_delta_operation: HashMap::new(),
             last_delta_phase: HashMap::new(),
+            removal_timing: HashMap::new(),
         }
     }
 
@@ -376,7 +389,12 @@ pub trait ExternalToolSurfaceMutator: sealed::Sealed {
 pub struct ExternalToolSurfaceAuthority {
     phase: ExternalToolSurfacePhase,
     fields: ExternalToolSurfaceFields,
+    /// Default removal timeout duration (used when entering Removing state).
+    removal_timeout: Duration,
 }
+
+/// Default removal timeout duration (30 seconds).
+const DEFAULT_AUTHORITY_REMOVAL_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl sealed::Sealed for ExternalToolSurfaceAuthority {}
 
@@ -386,7 +404,21 @@ impl ExternalToolSurfaceAuthority {
         Self {
             phase: ExternalToolSurfacePhase::Operating,
             fields: ExternalToolSurfaceFields::new(),
+            removal_timeout: DEFAULT_AUTHORITY_REMOVAL_TIMEOUT,
         }
+    }
+
+    /// Create a new authority with a custom removal timeout duration.
+    pub fn with_removal_timeout(removal_timeout: Duration) -> Self {
+        Self {
+            removal_timeout,
+            ..Self::new()
+        }
+    }
+
+    /// Set the removal timeout duration.
+    pub fn set_removal_timeout(&mut self, removal_timeout: Duration) {
+        self.removal_timeout = removal_timeout;
     }
 
     /// Current global phase.
@@ -427,6 +459,11 @@ impl ExternalToolSurfaceAuthority {
     /// Iterate over all visible surface IDs.
     pub fn visible_surfaces(&self) -> impl Iterator<Item = &SurfaceId> {
         self.fields.visible_surfaces.iter()
+    }
+
+    /// Get removal timing info for a surface (only set while in Removing state).
+    pub fn removal_timing(&self, id: &SurfaceId) -> Option<RemovalTimingInfo> {
+        self.fields.removal_timing.get(id).copied()
     }
 
     /// Return all surface IDs that are currently in Removing state.
@@ -646,6 +683,7 @@ impl ExternalToolSurfaceAuthority {
                     StagedSurfaceOp::Remove => {
                         if base == SurfaceBaseState::Active {
                             // ApplyBoundaryRemoveDraining
+                            let draining_since = Instant::now();
                             fields.known_surfaces.insert(surface_id.clone());
                             fields
                                 .staged_op
@@ -656,6 +694,13 @@ impl ExternalToolSurfaceAuthority {
                             fields
                                 .base_state
                                 .insert(surface_id.clone(), SurfaceBaseState::Removing);
+                            fields.removal_timing.insert(
+                                surface_id.clone(),
+                                RemovalTimingInfo {
+                                    draining_since,
+                                    timeout_at: draining_since + self.removal_timeout,
+                                },
+                            );
                             fields
                                 .last_delta_operation
                                 .insert(surface_id.clone(), SurfaceDeltaOperation::Remove);
@@ -972,6 +1017,7 @@ impl ExternalToolSurfaceAuthority {
                     .last_delta_phase
                     .insert(surface_id.clone(), SurfaceDeltaPhase::Applied);
                 fields.visible_surfaces.remove(surface_id);
+                fields.removal_timing.remove(surface_id);
 
                 effects.push(ExternalToolSurfaceEffect::CloseSurfaceConnection {
                     surface_id: surface_id.clone(),
@@ -1025,6 +1071,7 @@ impl ExternalToolSurfaceAuthority {
                     .last_delta_phase
                     .insert(surface_id.clone(), SurfaceDeltaPhase::Forced);
                 fields.visible_surfaces.remove(surface_id);
+                fields.removal_timing.remove(surface_id);
 
                 effects.push(ExternalToolSurfaceEffect::CloseSurfaceConnection {
                     surface_id: surface_id.clone(),
@@ -1059,6 +1106,7 @@ impl ExternalToolSurfaceAuthority {
                 fields.inflight_calls.clear();
                 fields.last_delta_operation.clear();
                 fields.last_delta_phase.clear();
+                fields.removal_timing.clear();
                 Ok((
                     ExternalToolSurfacePhase::Shutdown,
                     fields,

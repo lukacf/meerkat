@@ -17,7 +17,7 @@ use crate::input::Input;
 use crate::input_ledger::InputLedger;
 use crate::input_lifecycle_authority::{InputLifecycleError, InputLifecycleInput};
 use crate::input_state::{InputAbandonReason, InputLifecycleState, InputState, PolicySnapshot};
-use crate::policy::{ApplyMode, ConsumePoint, PolicyDecision, QueueMode, RoutingDisposition};
+use crate::policy::{PolicyDecision, RoutingDisposition};
 use crate::policy_table::DefaultPolicyTable;
 use crate::queue::InputQueue;
 use crate::runtime_control_authority::{
@@ -141,6 +141,16 @@ impl EphemeralRuntimeDriver {
                         "ingress authority: input accepted"
                     );
                 }
+                RuntimeIngressEffect::Deduplicated {
+                    work_id,
+                    existing_id,
+                } => {
+                    tracing::debug!(
+                        work_id = ?work_id,
+                        existing_id = ?existing_id,
+                        "ingress authority: input deduplicated"
+                    );
+                }
                 RuntimeIngressEffect::CompletionResolved { work_id, outcome } => {
                     tracing::debug!(
                         work_id = ?work_id,
@@ -179,6 +189,41 @@ impl EphemeralRuntimeDriver {
                         "ingress authority: silent intent applied"
                     );
                 }
+                RuntimeIngressEffect::StageInput { work_id, run_id } => {
+                    // Derived from ingress authority's StageDrainSnapshot decision:
+                    // drive the per-input lifecycle authority and emit the Staged event.
+                    if let Some(state) = self.ledger.get_mut(work_id)
+                        && let Err(e) = state.apply(InputLifecycleInput::StageForRun {
+                            run_id: run_id.clone(),
+                        })
+                    {
+                        tracing::warn!(
+                            work_id = ?work_id,
+                            run_id = ?run_id,
+                            error = %e,
+                            "per-input StageForRun failed (driven by ingress StageInput effect)"
+                        );
+                    }
+                    self.emit_event(RuntimeEvent::InputLifecycle(InputLifecycleEvent::Staged {
+                        input_id: work_id.clone(),
+                        run_id: run_id.clone(),
+                    }));
+                }
+                // Accept-phase shell directives — handled by process_accept_effects
+                // when an Input payload is available. Log if they arrive here unexpectedly.
+                RuntimeIngressEffect::PersistAndQueue { .. }
+                | RuntimeIngressEffect::EnqueueTo { .. }
+                | RuntimeIngressEffect::EnqueueFront { .. }
+                | RuntimeIngressEffect::RemoveFromQueues { .. }
+                | RuntimeIngressEffect::CoalesceExisting { .. }
+                | RuntimeIngressEffect::SupersedeExisting { .. }
+                | RuntimeIngressEffect::ConsumeOnAccept { .. }
+                | RuntimeIngressEffect::EmitQueuedEvent { .. } => {
+                    tracing::trace!(
+                        effect = ?effect,
+                        "ingress authority: accept-phase effect (handled in accept path)"
+                    );
+                }
                 RuntimeIngressEffect::RecoverConsumeOnAccept { work_id }
                 | RuntimeIngressEffect::RecoverRollback { work_id }
                 | RuntimeIngressEffect::RecoverKeep { work_id } => {
@@ -191,6 +236,65 @@ impl EphemeralRuntimeDriver {
             }
         }
     }
+    /// Process ingress authority effects that require the Input payload.
+    ///
+    /// Called only from `accept_input` where the `Input` is available.
+    /// Delegates non-accept effects to `process_ingress_effects`, then
+    /// handles the accept-phase shell directives (enqueue, coalesce, etc.).
+    fn process_accept_effects(&mut self, effects: &[RuntimeIngressEffect], input: &Input) {
+        for effect in effects {
+            match effect {
+                RuntimeIngressEffect::PersistAndQueue { work_id } => {
+                    if let Some(s) = self.ledger.get_mut(work_id) {
+                        s.persisted_input = Some(input.clone());
+                        let _ = s.apply(InputLifecycleInput::QueueAccepted);
+                    }
+                }
+                RuntimeIngressEffect::EnqueueTo { work_id, target } => {
+                    self.enqueue_to(*target, work_id.clone(), input.clone());
+                }
+                RuntimeIngressEffect::EnqueueFront { work_id, target } => {
+                    self.enqueue_front_to(*target, work_id.clone(), input.clone());
+                }
+                RuntimeIngressEffect::RemoveFromQueues { work_id } => {
+                    let _ = self.queue.remove(work_id);
+                    let _ = self.steer_queue.remove(work_id);
+                }
+                RuntimeIngressEffect::CoalesceExisting {
+                    new_id,
+                    existing_id,
+                } => {
+                    if let Some(existing_state) = self.ledger.get_mut(existing_id) {
+                        let _ = crate::coalescing::apply_coalescing(existing_state, new_id.clone());
+                    }
+                }
+                RuntimeIngressEffect::SupersedeExisting {
+                    new_id,
+                    existing_id,
+                } => {
+                    if let Some(existing_state) = self.ledger.get_mut(existing_id) {
+                        let _ =
+                            crate::coalescing::apply_supersession(existing_state, new_id.clone());
+                    }
+                }
+                RuntimeIngressEffect::ConsumeOnAccept { work_id } => {
+                    if let Some(s) = self.ledger.get_mut(work_id) {
+                        let _ = s.apply(InputLifecycleInput::ConsumeOnAccept);
+                    }
+                }
+                RuntimeIngressEffect::EmitQueuedEvent { work_id } => {
+                    self.emit_event(RuntimeEvent::InputLifecycle(InputLifecycleEvent::Queued {
+                        input_id: work_id.clone(),
+                    }));
+                }
+                // All other effects: delegate to the standard handler.
+                other => {
+                    self.process_ingress_effects(std::slice::from_ref(other));
+                }
+            }
+        }
+    }
+
     pub fn is_idle(&self) -> bool {
         self.control.is_idle()
     }
@@ -379,8 +483,10 @@ impl EphemeralRuntimeDriver {
         input_id: &InputId,
         run_id: &RunId,
     ) -> Result<(), InputLifecycleError> {
-        // Ingress authority: StageDrainSnapshot — always call the authority.
-        // The authority will reject if a run is already in progress (no_current_run guard).
+        // Ingress authority: StageDrainSnapshot — the authority owns the Staged
+        // transition. It emits StageInput effects that drive the per-input lifecycle
+        // authority and Staged events (handled in process_ingress_effects).
+        // No independent shell StageForRun call — single source of truth.
         match self.ingress.apply(RuntimeIngressInput::StageDrainSnapshot {
             run_id: run_id.clone(),
             contributing_work_ids: vec![input_id.clone()],
@@ -395,23 +501,13 @@ impl EphemeralRuntimeDriver {
                     error = %err,
                     "ingress authority rejected StageDrainSnapshot"
                 );
+                return Err(InputLifecycleError::InvalidTransition {
+                    from: InputLifecycleState::Queued,
+                    input: format!("StageDrainSnapshot rejected: {err}"),
+                });
             }
         }
 
-        let state =
-            self.ledger
-                .get_mut(input_id)
-                .ok_or(InputLifecycleError::InvalidTransition {
-                    from: InputLifecycleState::Accepted,
-                    input: "StageForRun (input not found)".into(),
-                })?;
-        state.apply(InputLifecycleInput::StageForRun {
-            run_id: run_id.clone(),
-        })?;
-        self.emit_event(RuntimeEvent::InputLifecycle(InputLifecycleEvent::Staged {
-            input_id: input_id.clone(),
-            run_id: run_id.clone(),
-        }));
         Ok(())
     }
 
@@ -722,6 +818,24 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                 .ledger
                 .accept_with_idempotency(state.clone(), key.clone())
             {
+                // Route dedup decision through ingress authority — the authority
+                // owns the semantic decision to reject the duplicate.
+                match self.ingress.apply(RuntimeIngressInput::AdmitDeduplicated {
+                    work_id: input_id.clone(),
+                    existing_id: existing_id.clone(),
+                }) {
+                    Ok(transition) => {
+                        self.process_ingress_effects(&transition.effects);
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            input_id = ?input_id,
+                            existing_id = ?existing_id,
+                            error = %err,
+                            "ingress authority rejected AdmitDeduplicated"
+                        );
+                    }
+                }
                 self.emit_event(RuntimeEvent::InputLifecycle(
                     InputLifecycleEvent::Deduplicated {
                         input_id: input_id.clone(),
@@ -754,106 +868,33 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                 input_id: input_id.clone(),
             },
         ));
-        // --- Ingress authority: classify and apply ---
+        // --- Ingress authority: authority-owned classification ---
+        // All mechanical lookups done unconditionally; authority.admit() decides
+        // the admission path (queued vs consumed-on-accept) based on the policy.
+        // Zero policy branching in shell code.
         let handling_mode = handling_mode_from_policy(&policy);
         let content_shape = ContentShape(input.kind_id().to_string());
-        let ingress_input = if policy.apply_mode == ApplyMode::Ignore
-            && policy.consume_point == ConsumePoint::OnAccept
-        {
-            RuntimeIngressInput::AdmitConsumedOnAccept {
-                work_id: input_id.clone(),
-                content_shape,
-                request_id: None,
-                reservation_key: None,
-                policy: policy.clone(),
-            }
-        } else {
-            let is_prompt = matches!(input, Input::Prompt(_));
-            RuntimeIngressInput::AdmitQueued {
-                work_id: input_id.clone(),
-                content_shape,
-                handling_mode,
-                is_prompt,
-                request_id: None,
-                reservation_key: None,
-                policy: policy.clone(),
-            }
-        };
-        match self.ingress.apply(ingress_input) {
+        let is_prompt = matches!(input, Input::Prompt(_));
+        let existing_superseded_id = self.existing_superseded_input(&input).map(|(id, _)| id);
+        match self.ingress.admit(
+            input_id.clone(),
+            content_shape,
+            handling_mode,
+            is_prompt,
+            None, // request_id
+            None, // reservation_key
+            policy.clone(),
+            existing_superseded_id,
+        ) {
             Ok(transition) => {
-                self.process_ingress_effects(&transition.effects);
+                self.process_accept_effects(&transition.effects, &input);
             }
             Err(err) => {
                 tracing::warn!(
                     input_id = ?input_id,
                     error = %err,
-                    "ingress authority rejected accept_input — continuing with existing logic"
+                    "ingress authority rejected accept_input"
                 );
-            }
-        }
-
-        match policy.apply_mode {
-            ApplyMode::Ignore => {
-                if policy.consume_point == ConsumePoint::OnAccept
-                    && let Some(s) = self.ledger.get_mut(&input_id)
-                {
-                    let _ = s.apply(InputLifecycleInput::ConsumeOnAccept);
-                }
-            }
-            ApplyMode::InjectNow => {
-                if let Some(s) = self.ledger.get_mut(&input_id) {
-                    s.persisted_input = Some(input.clone());
-                    let _ = s.apply(InputLifecycleInput::QueueAccepted);
-                }
-                self.enqueue_to(handling_mode, input_id.clone(), input);
-                self.emit_event(RuntimeEvent::InputLifecycle(InputLifecycleEvent::Queued {
-                    input_id: input_id.clone(),
-                }));
-            }
-            ApplyMode::StageRunStart | ApplyMode::StageRunBoundary => {
-                if let Some(s) = self.ledger.get_mut(&input_id) {
-                    s.persisted_input = Some(input.clone());
-                    let _ = s.apply(InputLifecycleInput::QueueAccepted);
-                }
-                match policy.queue_mode {
-                    QueueMode::Coalesce => {
-                        if let Some((existing_id, _)) = self.existing_superseded_input(&input) {
-                            // Remove from both queues — the existing input might be
-                            // in either queue depending on its handling mode.
-                            let _ = self.queue.remove(&existing_id);
-                            let _ = self.steer_queue.remove(&existing_id);
-                            if let Some(existing_state) = self.ledger.get_mut(&existing_id) {
-                                let _ = crate::coalescing::apply_coalescing(
-                                    existing_state,
-                                    input_id.clone(),
-                                );
-                            }
-                        }
-                        self.enqueue_to(handling_mode, input_id.clone(), input);
-                    }
-                    QueueMode::Supersede => {
-                        if let Some((existing_id, _)) = self.existing_superseded_input(&input) {
-                            let _ = self.queue.remove(&existing_id);
-                            let _ = self.steer_queue.remove(&existing_id);
-                            if let Some(existing_state) = self.ledger.get_mut(&existing_id) {
-                                let _ = crate::coalescing::apply_supersession(
-                                    existing_state,
-                                    input_id.clone(),
-                                );
-                            }
-                        }
-                        self.enqueue_to(handling_mode, input_id.clone(), input);
-                    }
-                    QueueMode::Priority => {
-                        self.enqueue_front_to(handling_mode, input_id.clone(), input);
-                    }
-                    QueueMode::Fifo | QueueMode::None => {
-                        self.enqueue_to(handling_mode, input_id.clone(), input);
-                    }
-                }
-                self.emit_event(RuntimeEvent::InputLifecycle(InputLifecycleEvent::Queued {
-                    input_id: input_id.clone(),
-                }));
             }
         }
         // Wake/process decisions are driven by the ingress authority effects

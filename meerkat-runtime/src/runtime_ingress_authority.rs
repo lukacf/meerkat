@@ -9,7 +9,7 @@
 //! the machine schema in `meerkat-machine-schema/src/catalog/runtime_ingress.rs`:
 //!
 //! - 3 phases: Active, Retired, Destroyed
-//! - 14 inputs: AdmitQueued, AdmitConsumedOnAccept, StageDrainSnapshot,
+//! - 15 inputs: AdmitQueued, AdmitConsumedOnAccept, AdmitDeduplicated, StageDrainSnapshot,
 //!   BoundaryApplied, RunCompleted, RunFailed, RunCancelled,
 //!   SupersedeQueuedInput, CoalesceQueuedInputs, Retire, Reset, Destroy,
 //!   Recover, SetSilentIntentOverrides
@@ -88,6 +88,9 @@ pub enum RuntimeIngressInput {
         request_id: Option<RequestId>,
         reservation_key: Option<ReservationKey>,
         policy: PolicyDecision,
+        /// Pre-resolved existing input for coalesce/supersede (mechanical IO
+        /// lookup by shell; authority decides whether to use it).
+        existing_superseded_id: Option<InputId>,
     },
     /// Admit an input that is immediately consumed on accept (Ignore+OnAccept).
     AdmitConsumedOnAccept {
@@ -96,6 +99,13 @@ pub enum RuntimeIngressInput {
         request_id: Option<RequestId>,
         reservation_key: Option<ReservationKey>,
         policy: PolicyDecision,
+    },
+    /// Admit a deduplicated input. The shell performed the ledger lookup
+    /// (mechanical IO) and found an existing input with the same idempotency
+    /// key. The authority records the dedup and emits the appropriate effect.
+    AdmitDeduplicated {
+        work_id: InputId,
+        existing_id: InputId,
     },
     /// Stage a drain snapshot: dequeue work and assign to a run.
     StageDrainSnapshot {
@@ -159,6 +169,11 @@ pub enum RuntimeIngressInput {
 pub enum RuntimeIngressEffect {
     /// An input was accepted into the ingress.
     IngressAccepted { work_id: InputId },
+    /// An input was deduplicated against an existing input.
+    Deduplicated {
+        work_id: InputId,
+        existing_id: InputId,
+    },
     /// A run is ready to execute with the given contributors.
     ReadyForRun {
         run_id: RunId,
@@ -182,6 +197,47 @@ pub enum RuntimeIngressEffect {
     IngressNotice { kind: String, detail: String },
     /// A silent intent override was applied.
     SilentIntentApplied { work_id: InputId, intent: String },
+
+    // --- Accept-phase shell directives ---
+    // These effects tell the shell exactly what to do with the Input payload
+    // and ledger after admission, removing all policy branching from shell code.
+    /// Persist the input payload on the ledger entry and transition lifecycle to Queued.
+    PersistAndQueue { work_id: InputId },
+    /// Route input to the back of the correct queue.
+    EnqueueTo {
+        work_id: InputId,
+        target: HandlingMode,
+    },
+    /// Route input to the front of the correct queue (Priority mode).
+    EnqueueFront {
+        work_id: InputId,
+        target: HandlingMode,
+    },
+    /// Remove an existing input from queues (for coalesce/supersede).
+    RemoveFromQueues { work_id: InputId },
+    /// Apply coalescing to an existing input.
+    CoalesceExisting {
+        new_id: InputId,
+        existing_id: InputId,
+    },
+    /// Apply supersession to an existing input.
+    SupersedeExisting {
+        new_id: InputId,
+        existing_id: InputId,
+    },
+    /// Consume input on accept (Ignore+OnAccept path).
+    ConsumeOnAccept { work_id: InputId },
+    /// Emit a Queued lifecycle event.
+    EmitQueuedEvent { work_id: InputId },
+
+    // --- Stage-phase shell directive ---
+    // Emitted by StageDrainSnapshot so the per-input lifecycle transition is
+    // clearly derived from the ingress authority's staging decision rather
+    // than being an independent shell write.
+    /// Stage an input for a run — shell calls the per-input lifecycle
+    /// authority and emits the Staged event in response.
+    StageInput { work_id: InputId, run_id: RunId },
+
     /// Per-input recovery effect: consume the input on accept.
     RecoverConsumeOnAccept { work_id: InputId },
     /// Per-input recovery effect: rollback the input to queued.
@@ -492,6 +548,49 @@ impl RuntimeIngressAuthority {
         self.evaluate(input).is_ok()
     }
 
+    /// Admit a new input — authority-owned classification.
+    ///
+    /// The shell provides all mechanical lookup results. The authority
+    /// internally decides whether to route through `AdmitQueued` or
+    /// `AdmitConsumedOnAccept` based on the policy. This eliminates
+    /// all policy branching from shell code.
+    #[allow(clippy::too_many_arguments)]
+    pub fn admit(
+        &mut self,
+        work_id: InputId,
+        content_shape: ContentShape,
+        handling_mode: HandlingMode,
+        is_prompt: bool,
+        request_id: Option<RequestId>,
+        reservation_key: Option<ReservationKey>,
+        policy: PolicyDecision,
+        existing_superseded_id: Option<InputId>,
+    ) -> Result<RuntimeIngressTransition, RuntimeIngressError> {
+        let consumed_on_accept = policy.apply_mode == crate::policy::ApplyMode::Ignore
+            && policy.consume_point == crate::policy::ConsumePoint::OnAccept;
+
+        if consumed_on_accept {
+            self.apply(RuntimeIngressInput::AdmitConsumedOnAccept {
+                work_id,
+                content_shape,
+                request_id,
+                reservation_key,
+                policy,
+            })
+        } else {
+            self.apply(RuntimeIngressInput::AdmitQueued {
+                work_id,
+                content_shape,
+                handling_mode,
+                is_prompt,
+                request_id,
+                reservation_key,
+                policy,
+                existing_superseded_id,
+            })
+        }
+    }
+
     /// Clear the wake_requested flag (shell reads and resets).
     pub fn take_wake_requested(&mut self) -> bool {
         std::mem::take(&mut self.fields.wake_requested)
@@ -530,6 +629,7 @@ impl RuntimeIngressAuthority {
                 request_id,
                 reservation_key,
                 policy,
+                existing_superseded_id,
             } => self.eval_admit_queued(
                 phase,
                 work_id,
@@ -539,6 +639,7 @@ impl RuntimeIngressAuthority {
                 request_id,
                 reservation_key,
                 policy,
+                existing_superseded_id,
             ),
 
             RuntimeIngressInput::AdmitConsumedOnAccept {
@@ -555,6 +656,11 @@ impl RuntimeIngressAuthority {
                 reservation_key,
                 policy,
             ),
+
+            RuntimeIngressInput::AdmitDeduplicated {
+                work_id,
+                existing_id,
+            } => self.eval_admit_deduplicated(phase, work_id, existing_id),
 
             RuntimeIngressInput::StageDrainSnapshot {
                 run_id,
@@ -625,6 +731,7 @@ impl RuntimeIngressAuthority {
         request_id: &Option<RequestId>,
         reservation_key: &Option<ReservationKey>,
         policy: &PolicyDecision,
+        existing_superseded_id: &Option<InputId>,
     ) -> Result<
         (
             IngressPhase,
@@ -648,7 +755,6 @@ impl RuntimeIngressAuthority {
                 guard: format!("input_is_new: {work_id:?} already admitted"),
             });
         }
-
         let mut fields = self.fields.clone();
         let mut effects = Vec::new();
 
@@ -696,20 +802,6 @@ impl RuntimeIngressAuthority {
             new_state: InputLifecycleState::Queued,
         });
         // Emit wake/process effects based on the policy's wake_mode.
-        // The authority owns this decision — the shell must not override.
-        //
-        // WakeIfIdle: always set wake (runtime loop ignores if running)
-        // InterruptYielding: conceptually "yield at boundary if running,
-        //   wake if idle." We always emit WakeRuntime here — the runtime
-        //   loop naturally handles the "already running" case by deferring
-        //   the wake to post-run. BUT: the shell's wake_requested flag
-        //   should only be set when the runtime is actually idle, because
-        //   InterruptYielding during a run means "process at next boundary"
-        //   not "wake from idle." Since the authority doesn't know runtime
-        //   phase, we emit WakeRuntime only for WakeIfIdle. For
-        //   InterruptYielding, we emit RequestImmediateProcessing (if steer)
-        //   which the shell interprets at boundary time.
-        // None: no wake at all.
         match policy.wake_mode {
             crate::WakeMode::WakeIfIdle => {
                 effects.push(RuntimeIngressEffect::WakeRuntime);
@@ -718,18 +810,108 @@ impl RuntimeIngressAuthority {
                 }
             }
             crate::WakeMode::InterruptYielding => {
-                // Don't wake — input is queued and processed at next boundary.
-                // If steer, request immediate processing at that boundary.
                 if handling_mode == HandlingMode::Steer {
                     effects.push(RuntimeIngressEffect::RequestImmediateProcessing);
                 }
             }
-            crate::WakeMode::None => {
-                // No wake — input is queued silently for the next natural boundary.
+            crate::WakeMode::None => {}
+        }
+
+        // --- Shell-directive effects ---
+        // The authority owns all routing/coalescing/supersession decisions.
+        match policy.apply_mode {
+            crate::policy::ApplyMode::Ignore => {
+                // Ignore mode with non-OnAccept consume: no queue effects needed.
+            }
+            crate::policy::ApplyMode::InjectNow
+            | crate::policy::ApplyMode::StageRunStart
+            | crate::policy::ApplyMode::StageRunBoundary => {
+                effects.push(RuntimeIngressEffect::PersistAndQueue {
+                    work_id: work_id.clone(),
+                });
+                match policy.queue_mode {
+                    crate::policy::QueueMode::Coalesce => {
+                        if let Some(existing_id) = existing_superseded_id {
+                            effects.push(RuntimeIngressEffect::RemoveFromQueues {
+                                work_id: existing_id.clone(),
+                            });
+                            effects.push(RuntimeIngressEffect::CoalesceExisting {
+                                new_id: work_id.clone(),
+                                existing_id: existing_id.clone(),
+                            });
+                        }
+                        effects.push(RuntimeIngressEffect::EnqueueTo {
+                            work_id: work_id.clone(),
+                            target: handling_mode,
+                        });
+                    }
+                    crate::policy::QueueMode::Supersede => {
+                        if let Some(existing_id) = existing_superseded_id {
+                            effects.push(RuntimeIngressEffect::RemoveFromQueues {
+                                work_id: existing_id.clone(),
+                            });
+                            effects.push(RuntimeIngressEffect::SupersedeExisting {
+                                new_id: work_id.clone(),
+                                existing_id: existing_id.clone(),
+                            });
+                        }
+                        effects.push(RuntimeIngressEffect::EnqueueTo {
+                            work_id: work_id.clone(),
+                            target: handling_mode,
+                        });
+                    }
+                    crate::policy::QueueMode::Priority => {
+                        effects.push(RuntimeIngressEffect::EnqueueFront {
+                            work_id: work_id.clone(),
+                            target: handling_mode,
+                        });
+                    }
+                    crate::policy::QueueMode::Fifo | crate::policy::QueueMode::None => {
+                        effects.push(RuntimeIngressEffect::EnqueueTo {
+                            work_id: work_id.clone(),
+                            target: handling_mode,
+                        });
+                    }
+                }
+                effects.push(RuntimeIngressEffect::EmitQueuedEvent {
+                    work_id: work_id.clone(),
+                });
             }
         }
 
         Ok((IngressPhase::Active, fields, effects))
+    }
+
+    fn eval_admit_deduplicated(
+        &self,
+        phase: IngressPhase,
+        work_id: &InputId,
+        existing_id: &InputId,
+    ) -> Result<
+        (
+            IngressPhase,
+            RuntimeIngressFields,
+            Vec<RuntimeIngressEffect>,
+        ),
+        RuntimeIngressError,
+    > {
+        // From: Active only (matching Admit)
+        if phase != IngressPhase::Active {
+            return Err(RuntimeIngressError::InvalidTransition {
+                from: phase,
+                input: "AdmitDeduplicated".into(),
+            });
+        }
+
+        // No state mutation — the duplicate input is not admitted.
+        // Emit Deduplicated effect so the shell can emit the lifecycle event.
+        let fields = self.fields.clone();
+        let effects = vec![RuntimeIngressEffect::Deduplicated {
+            work_id: work_id.clone(),
+            existing_id: existing_id.clone(),
+        }];
+
+        Ok((phase, fields, effects))
     }
 
     fn eval_admit_consumed_on_accept(
@@ -801,6 +983,11 @@ impl RuntimeIngressAuthority {
         effects.push(RuntimeIngressEffect::CompletionResolved {
             work_id: work_id.clone(),
             outcome: InputTerminalOutcome::Consumed,
+        });
+
+        // Shell directive: consume this input on accept.
+        effects.push(RuntimeIngressEffect::ConsumeOnAccept {
+            work_id: work_id.clone(),
         });
 
         Ok((IngressPhase::Active, fields, effects))
@@ -888,12 +1075,17 @@ impl RuntimeIngressAuthority {
         fields.wake_requested = false;
         fields.process_requested = false;
 
-        // Transition contributors to Staged
+        // Transition contributors to Staged and emit per-input StageInput effects
+        // so the shell derives per-input lifecycle transitions from this authority.
         for wid in contributing_work_ids {
             fields.last_run.insert(wid.clone(), Some(run_id.clone()));
             fields
                 .lifecycle
                 .insert(wid.clone(), InputLifecycleState::Staged);
+            effects.push(RuntimeIngressEffect::StageInput {
+                work_id: wid.clone(),
+                run_id: run_id.clone(),
+            });
         }
 
         effects.push(RuntimeIngressEffect::ReadyForRun {
@@ -1796,6 +1988,7 @@ mod tests {
             request_id: None,
             reservation_key: None,
             policy: test_policy(),
+            existing_superseded_id: None,
         })
         .expect("admit should succeed")
     }
@@ -1929,6 +2122,7 @@ mod tests {
             request_id: None,
             reservation_key: None,
             policy: test_policy(),
+            existing_superseded_id: None,
         });
         assert!(matches!(
             result,
@@ -1949,6 +2143,7 @@ mod tests {
             request_id: None,
             reservation_key: None,
             policy: test_policy(),
+            existing_superseded_id: None,
         });
         assert!(matches!(
             result,

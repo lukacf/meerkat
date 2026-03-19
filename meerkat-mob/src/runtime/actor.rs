@@ -15,7 +15,6 @@ use crate::tokio;
 use futures::FutureExt;
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 type AutonomousHostLoopHandle = tokio::task::JoinHandle<Result<(), MobError>>;
 // Sized for real mob-scale startup/shutdown fan-out (50+ members).
@@ -142,14 +141,12 @@ pub(super) struct MobActor {
         Arc<tokio::sync::Mutex<BTreeMap<MeerkatId, AutonomousHostLoopHandle>>>,
     pub(super) next_spawn_ticket: u64,
     pub(super) pending_spawns: BTreeMap<u64, PendingSpawn>,
-    pub(super) pending_spawn_ids: HashSet<MeerkatId>,
     pub(super) pending_spawn_tasks: BTreeMap<u64, tokio::task::JoinHandle<()>>,
     pub(super) edge_locks: Arc<super::edge_locks::EdgeLockRegistry>,
     pub(super) lifecycle_tasks: tokio::task::JoinSet<()>,
     pub(super) session_service: Arc<dyn MobSessionService>,
     pub(super) task_board_service: crate::tasks::MobTaskBoardService,
     pub(super) spawn_policy: Arc<super::spawn_policy::SpawnPolicyService>,
-    pub(super) tracked_flows: Arc<AtomicUsize>,
     pub(super) lifecycle_authority: MobLifecycleAuthority,
 }
 
@@ -906,11 +903,10 @@ impl MobActor {
                     {
                         tracing::warn!(error = %error, "orchestrator CompleteFlow failed");
                     }
-                    let _ =
-                        self.tracked_flows
-                            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |c| {
-                                Some(c.saturating_sub(1))
-                            });
+                    if let Err(error) = self.lifecycle_authority.apply(MobLifecycleInput::FinishRun)
+                    {
+                        tracing::warn!(error = %error, "lifecycle FinishRun failed");
+                    }
                 }
                 MobCommand::FlowCanceledCleanup { run_id } => {
                     self.run_tasks.remove(&run_id);
@@ -924,15 +920,17 @@ impl MobActor {
                             "orchestrator CompleteFlow failed during canceled flow cleanup"
                         );
                     }
-                    let _ =
-                        self.tracked_flows
-                            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |c| {
-                                Some(c.saturating_sub(1))
-                            });
+                    if let Err(error) = self.lifecycle_authority.apply(MobLifecycleInput::FinishRun)
+                    {
+                        tracing::warn!(error = %error, "lifecycle FinishRun failed during canceled flow cleanup");
+                    }
                 }
                 #[cfg(test)]
                 MobCommand::FlowTrackerCounts { reply_tx } => {
-                    let tasks = self.tracked_flows.load(Ordering::Acquire);
+                    let tasks = self
+                        .orchestrator
+                        .as_ref()
+                        .map_or(0, |o| o.snapshot().active_flow_count as usize);
                     let tokens = self.run_cancel_tokens.len();
                     let _ = reply_tx.send((tasks, tokens));
                 }
@@ -1144,7 +1142,6 @@ impl MobActor {
                     // abort_all is non-blocking; join_next drains the abort results.
                     self.lifecycle_tasks.abort_all();
                     while self.lifecycle_tasks.join_next().await.is_some() {}
-                    self.tracked_flows.store(0, Ordering::Release);
                     if let Err(e) = self.lifecycle_authority.apply(MobLifecycleInput::Stop) {
                         tracing::warn!(error = %e, "authority rejected Stop");
                     }
@@ -1161,7 +1158,6 @@ impl MobActor {
         }
 
         for (spawn_ticket, pending) in std::mem::take(&mut self.pending_spawns) {
-            self.pending_spawn_ids.remove(&pending.meerkat_id);
             if let Some(ref mut orch) = self.orchestrator
                 && let Err(error) = orch.apply(MobOrchestratorInput::CompleteSpawn)
             {
@@ -1231,7 +1227,7 @@ impl MobActor {
                 "MobActor::enqueue_spawn start"
             );
 
-            if self.pending_spawn_ids.contains(&meerkat_id) {
+            if self.pending_spawns.values().any(|p| p.meerkat_id == meerkat_id) {
                 return Err(MobError::MeerkatAlreadyExists(meerkat_id.clone()));
             }
 
@@ -1493,7 +1489,6 @@ impl MobActor {
             restore_wiring: None,
             reply_tx,
         };
-        self.pending_spawn_ids.insert(spawn_meerkat_id.clone());
         self.pending_spawns.insert(spawn_ticket, pending);
 
         tracing::debug!(
@@ -1584,7 +1579,6 @@ impl MobActor {
                 }
                 continue;
             };
-            self.pending_spawn_ids.remove(&pending.meerkat_id);
             if let Some(ref mut orch) = self.orchestrator
                 && let Err(error) = orch.apply(MobOrchestratorInput::CompleteSpawn)
             {
@@ -2783,13 +2777,15 @@ impl MobActor {
         {
             tracing::warn!(error = %error, "orchestrator StartFlow failed");
         }
+        if let Err(error) = self.lifecycle_authority.apply(MobLifecycleInput::StartRun) {
+            tracing::warn!(error = %error, "lifecycle StartRun failed");
+        }
 
         let cancel_token = tokio_util::sync::CancellationToken::new();
         self.run_cancel_tokens.insert(
             run_id.clone(),
             (cancel_token.clone(), config.flow_id.clone()),
         );
-        self.tracked_flows.fetch_add(1, Ordering::AcqRel);
         if let Some(scoped_event_tx) = scoped_event_tx {
             self.flow_streams
                 .lock()
@@ -2909,7 +2905,6 @@ impl MobActor {
         for (_, handle) in tasks {
             handle.abort();
         }
-        let flow_count = cancel_tokens.len();
         for (run_id, (token, flow_id)) in cancel_tokens {
             token.cancel();
             self.flow_streams.lock().await.remove(&run_id);
@@ -2940,13 +2935,9 @@ impl MobActor {
                     "orchestrator CompleteFlow failed during bulk flow cancellation"
                 );
             }
-        }
-        for _ in 0..flow_count {
-            let _ = self
-                .tracked_flows
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |c| {
-                    Some(c.saturating_sub(1))
-                });
+            if let Err(error) = self.lifecycle_authority.apply(MobLifecycleInput::FinishRun) {
+                tracing::warn!(error = %error, "lifecycle FinishRun failed during bulk flow cancellation");
+            }
         }
     }
 

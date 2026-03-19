@@ -533,8 +533,15 @@ where
     pub(crate) extraction_schema_warnings: Option<Vec<crate::schema::SchemaWarning>>,
     /// Last validation error (for retry prompt).
     pub(crate) extraction_last_error: Option<String>,
-    /// When true, the turn-boundary `drain_comms_inbox()` call is suppressed
-    /// because the session service owns a dedicated comms drain task.
+    /// Session-level infrastructure delegation flag (one-way latch): once
+    /// sealed to `true` via [`seal_comms_drain_active`], the turn-boundary
+    /// `drain_comms_inbox()` is permanently suppressed for this agent
+    /// instance because a dedicated comms drain task (owned by the
+    /// session/host-mode surface) is the sole inbox consumer.
+    ///
+    /// **Ownership:** Sealed once by the surface that starts the drain
+    /// task. Cannot be reverted. This is explicit infrastructure
+    /// delegation, not an authority bypass.
     pub(crate) comms_drain_active: bool,
 }
 

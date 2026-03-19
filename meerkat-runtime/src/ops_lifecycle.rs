@@ -368,15 +368,6 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     ) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        // Pre-check shell-level peer expectation flag (authority only checks kind).
-        let shell = state
-            .records
-            .get(id)
-            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-        if !shell.spec.expect_peer_channel {
-            return Err(OpsLifecycleError::PeerNotExpected(id.clone()));
-        }
-
         let transition = state.authority.apply(OpsLifecycleInput::PeerReady {
             operation_id: id.clone(),
         })?;

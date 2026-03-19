@@ -145,12 +145,6 @@ impl Drop for InflightCallGuard<'_> {
     }
 }
 
-/// Shell-level timeout tracking for a removing surface.
-struct RemovalTimeout {
-    draining_since: Instant,
-    timeout_at: Instant,
-}
-
 /// Router for MCP tool calls across multiple servers.
 ///
 /// All lifecycle state transitions flow through the
@@ -172,9 +166,6 @@ pub struct McpRouter {
     /// Visible tool cache from Active servers only.
     cached_tools: Vec<Arc<ToolDef>>,
     staged_ops: Vec<StagedRouterOp>,
-    removal_timeout: Duration,
-    /// Shell-level timeout tracking for Removing surfaces.
-    removal_timeouts: HashMap<String, RemovalTimeout>,
 
     // --- Async pending infrastructure ---
     pending_tx: mpsc::Sender<PendingResult>,
@@ -196,8 +187,6 @@ impl McpRouter {
             tool_to_server: HashMap::new(),
             cached_tools: Vec::new(),
             staged_ops: Vec::new(),
-            removal_timeout: DEFAULT_REMOVAL_TIMEOUT,
-            removal_timeouts: HashMap::new(),
             pending_tx: tx,
             pending_rx: Mutex::new(rx),
             pending_servers: HashMap::new(),
@@ -208,9 +197,20 @@ impl McpRouter {
 
     /// Create a new router with a custom remove-drain timeout.
     pub fn new_with_removal_timeout(removal_timeout: Duration) -> Self {
+        let (tx, rx) = mpsc::channel(PENDING_CHANNEL_CAPACITY);
         Self {
-            removal_timeout,
-            ..Self::new()
+            authority: Mutex::new(ExternalToolSurfaceAuthority::with_removal_timeout(
+                removal_timeout,
+            )),
+            servers: HashMap::new(),
+            tool_to_server: HashMap::new(),
+            cached_tools: Vec::new(),
+            staged_ops: Vec::new(),
+            pending_tx: tx,
+            pending_rx: Mutex::new(rx),
+            pending_servers: HashMap::new(),
+            next_generation: 0,
+            completed_updates: VecDeque::new(),
         }
     }
 
@@ -231,7 +231,7 @@ impl McpRouter {
 
     /// Override remove-drain timeout.
     pub fn set_removal_timeout(&mut self, removal_timeout: Duration) {
-        self.removal_timeout = removal_timeout;
+        self.auth_mut().set_removal_timeout(removal_timeout);
     }
 
     /// Backward-compatible immediate add path.
@@ -335,20 +335,6 @@ impl McpRouter {
                         }) {
                         Ok(transition) => {
                             self.execute_effects(&transition.effects, &mut delta, None);
-                            // Record shell-level timeout if we entered Removing.
-                            let check_sid = SurfaceId::from(server_name.as_str());
-                            if self.auth_mut().surface_base(&check_sid)
-                                == SurfaceBaseState::Removing
-                            {
-                                let draining_since = Instant::now();
-                                self.removal_timeouts.insert(
-                                    server_name,
-                                    RemovalTimeout {
-                                        draining_since,
-                                        timeout_at: draining_since + self.removal_timeout,
-                                    },
-                                );
-                            }
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -482,7 +468,6 @@ impl McpRouter {
                     }
                     self.remove_tool_mappings_for_server(&surface_id.0);
                     delta.removed_servers.push(surface_id.0.clone());
-                    self.removal_timeouts.remove(&surface_id.0);
                 }
                 ExternalToolSurfaceEffect::RejectSurfaceCall { .. } => {
                     // Rejections are handled inline during call_tool, not here.
@@ -779,7 +764,7 @@ impl McpRouter {
         Ok(())
     }
 
-    /// Process removal finalization based on shell-level timeout tracking.
+    /// Process removal finalization based on authority-owned timeout tracking.
     async fn process_removals(&mut self, delta: &mut McpApplyDelta) {
         let now = Instant::now();
         let mut finalized: Vec<(String, bool)> = Vec::new();
@@ -787,12 +772,12 @@ impl McpRouter {
         let removing: Vec<SurfaceId> = self.auth_mut().removing_surfaces().cloned().collect();
         for sid in &removing {
             let inflight = self.auth_mut().inflight_call_count(sid);
-            let timeout = self.removal_timeouts.get(&sid.0);
+            let timing = self.auth_mut().removal_timing(sid);
 
             if inflight == 0 {
                 finalized.push((sid.0.clone(), false));
-            } else if let Some(timeout) = timeout
-                && now >= timeout.timeout_at
+            } else if let Some(timing) = timing
+                && now >= timing.timeout_at
             {
                 finalized.push((sid.0.clone(), true));
             }
@@ -860,20 +845,26 @@ impl McpRouter {
     /// Derives the lifecycle state from the authority's canonical state.
     pub fn server_lifecycle_state(&self, server_name: &str) -> Option<McpServerLifecycleState> {
         let sid = SurfaceId::from(server_name);
-        let base = self.auth().surface_base(&sid);
+        let auth = self.auth();
+        let base = auth.surface_base(&sid);
         match base {
             SurfaceBaseState::Active => Some(McpServerLifecycleState::Active),
             SurfaceBaseState::Removing => {
-                let timeout = self.removal_timeouts.get(server_name);
-                match timeout {
+                let timing = auth.removal_timing(&sid);
+                match timing {
                     Some(t) => Some(McpServerLifecycleState::Removing {
                         draining_since: t.draining_since,
                         timeout_at: t.timeout_at,
                     }),
-                    None => Some(McpServerLifecycleState::Removing {
-                        draining_since: Instant::now(),
-                        timeout_at: Instant::now() + self.removal_timeout,
-                    }),
+                    None => {
+                        // Defensive fallback: authority should always have timing
+                        // for Removing surfaces, but synthesize if missing.
+                        let now = Instant::now();
+                        Some(McpServerLifecycleState::Removing {
+                            draining_since: now,
+                            timeout_at: now + DEFAULT_REMOVAL_TIMEOUT,
+                        })
+                    }
                 }
             }
             SurfaceBaseState::Removed => Some(McpServerLifecycleState::Removed),

@@ -51,6 +51,7 @@ pub struct EphemeralRuntimeDriver {
     state_machine: RuntimeStateMachine,
     ledger: InputLedger,
     queue: InputQueue,
+    steer_queue: InputQueue,
     events: Vec<RuntimeEventEnvelope>,
     wake_requested: bool,
     process_requested: bool,
@@ -69,6 +70,7 @@ impl EphemeralRuntimeDriver {
             state_machine: sm,
             ledger: InputLedger::new(),
             queue: InputQueue::new(),
+            steer_queue: InputQueue::new(),
             events: Vec::new(),
             wake_requested: false,
             process_requested: false,
@@ -199,39 +201,73 @@ impl EphemeralRuntimeDriver {
     pub fn queue_mut(&mut self) -> &mut InputQueue {
         &mut self.queue
     }
+    pub fn steer_queue(&self) -> &InputQueue {
+        &self.steer_queue
+    }
+    pub fn steer_queue_mut(&mut self) -> &mut InputQueue {
+        &mut self.steer_queue
+    }
     pub fn enqueue_recovered_input(&mut self, input_id: InputId, input: Input) {
         self.queue.enqueue(input_id, input);
     }
     pub fn enqueue_front_input(&mut self, input_id: InputId, input: Input) {
         self.queue.enqueue_front(input_id, input);
     }
+    /// Route an input to the correct queue based on handling mode.
+    fn enqueue_to(&mut self, mode: HandlingMode, input_id: InputId, input: Input) {
+        match mode {
+            HandlingMode::Steer => self.steer_queue.enqueue(input_id, input),
+            HandlingMode::Queue => self.queue.enqueue(input_id, input),
+        }
+    }
+    /// Route an input to the front of the correct queue based on handling mode.
+    fn enqueue_front_to(&mut self, mode: HandlingMode, input_id: InputId, input: Input) {
+        match mode {
+            HandlingMode::Steer => self.steer_queue.enqueue_front(input_id, input),
+            HandlingMode::Queue => self.queue.enqueue_front(input_id, input),
+        }
+    }
     pub fn has_queued_input(&self, input_id: &InputId) -> bool {
         self.queue
             .input_ids()
             .iter()
             .any(|queued_id| queued_id == input_id)
+            || self
+                .steer_queue
+                .input_ids()
+                .iter()
+                .any(|queued_id| queued_id == input_id)
     }
     pub fn has_queued_input_outside(&self, excluded: &[InputId]) -> bool {
         self.queue
             .input_ids()
             .iter()
+            .chain(self.steer_queue.input_ids().iter())
             .any(|queued_id| !excluded.iter().any(|excluded_id| excluded_id == queued_id))
     }
     fn existing_superseded_input(
         &self,
         input: &Input,
     ) -> Option<(InputId, crate::coalescing::CoalescingResult)> {
-        self.queue.input_ids().into_iter().find_map(|queued_id| {
-            let existing = self.ledger.get(&queued_id)?.persisted_input.as_ref()?;
-            let result = crate::coalescing::check_supersession(input, existing, &self.runtime_id);
-            match result {
-                crate::coalescing::CoalescingResult::Supersedes { .. } => Some((queued_id, result)),
-                crate::coalescing::CoalescingResult::Standalone => None,
-            }
-        })
+        self.queue
+            .input_ids()
+            .into_iter()
+            .chain(self.steer_queue.input_ids())
+            .find_map(|queued_id| {
+                let existing = self.ledger.get(&queued_id)?.persisted_input.as_ref()?;
+                let result =
+                    crate::coalescing::check_supersession(input, existing, &self.runtime_id);
+                match result {
+                    crate::coalescing::CoalescingResult::Supersedes { .. } => {
+                        Some((queued_id, result))
+                    }
+                    crate::coalescing::CoalescingResult::Standalone => None,
+                }
+            })
     }
     pub fn remove_input(&mut self, input_id: &InputId) {
         let _ = self.queue.remove(input_id);
+        let _ = self.steer_queue.remove(input_id);
         let _ = self.ledger.remove(input_id);
     }
     pub fn ledger(&self) -> &InputLedger {
@@ -245,6 +281,7 @@ impl EphemeralRuntimeDriver {
     }
     pub fn forget_input(&mut self, input_id: &InputId) {
         let _ = self.queue.remove(input_id);
+        let _ = self.steer_queue.remove(input_id);
         let _ = self.ledger.remove(input_id);
         self.wake_requested = false;
         self.process_requested = false;
@@ -256,8 +293,25 @@ impl EphemeralRuntimeDriver {
         &mut self.state_machine
     }
     pub fn dequeue_next(&mut self) -> Option<(InputId, Input)> {
-        let queued = self.queue.dequeue()?;
+        let queued = self
+            .steer_queue
+            .dequeue()
+            .or_else(|| self.queue.dequeue())?;
         Some((queued.input_id, queued.input))
+    }
+
+    /// Dequeue a specific input by ID from whichever queue contains it.
+    pub fn dequeue_by_id(&mut self, input_id: &InputId) -> Option<(InputId, Input)> {
+        self.steer_queue
+            .dequeue_by_id(input_id)
+            .or_else(|| self.queue.dequeue_by_id(input_id))
+    }
+
+    /// Look up the persisted input for a given ID (from the ledger).
+    pub fn persisted_input(&self, input_id: &InputId) -> Option<&Input> {
+        self.ledger
+            .get(input_id)
+            .and_then(|state| state.persisted_input.as_ref())
     }
 
     pub fn stage_input(
@@ -355,16 +409,25 @@ impl EphemeralRuntimeDriver {
     pub fn rollback_staged(&mut self, input_ids: &[InputId]) -> Result<(), InputLifecycleError> {
         for input_id in input_ids {
             let mut requeue_input = None;
+            let mut is_steer = false;
             if let Some(state) = self.ledger.get_mut(input_id)
                 && state.current_state() == InputLifecycleState::Staged
             {
                 state.apply(InputLifecycleInput::RollbackStaged)?;
                 requeue_input = state.persisted_input.clone();
+                is_steer = requeue_input
+                    .as_ref()
+                    .and_then(super::super::input::Input::handling_mode)
+                    == Some(HandlingMode::Steer);
             }
             if !self.has_queued_input(input_id)
                 && let Some(input) = requeue_input
             {
-                self.queue.enqueue(input_id.clone(), input);
+                if is_steer {
+                    self.steer_queue.enqueue(input_id.clone(), input);
+                } else {
+                    self.queue.enqueue(input_id.clone(), input);
+                }
             }
         }
         Ok(())
@@ -421,6 +484,7 @@ impl EphemeralRuntimeDriver {
 
         let abandoned = self.abandon_all_non_terminal(InputAbandonReason::Reset);
         self.queue.drain();
+        self.steer_queue.drain();
         self.wake_requested = false;
         self.process_requested = false;
         if let Some(from) = self
@@ -577,6 +641,7 @@ impl EphemeralRuntimeDriver {
     pub fn abandon_pending_inputs(&mut self, reason: InputAbandonReason) -> usize {
         let abandoned = self.abandon_all_non_terminal(reason);
         self.queue.drain();
+        self.steer_queue.drain();
         self.wake_requested = false;
         self.process_requested = false;
         abandoned
@@ -692,7 +757,7 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                     s.persisted_input = Some(input.clone());
                     let _ = s.apply(InputLifecycleInput::QueueAccepted);
                 }
-                self.queue.enqueue(input_id.clone(), input);
+                self.enqueue_to(handling_mode, input_id.clone(), input);
                 self.emit_event(RuntimeEvent::InputLifecycle(InputLifecycleEvent::Queued {
                     input_id: input_id.clone(),
                 }));
@@ -705,7 +770,10 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                 match policy.queue_mode {
                     QueueMode::Coalesce => {
                         if let Some((existing_id, _)) = self.existing_superseded_input(&input) {
+                            // Remove from both queues — the existing input might be
+                            // in either queue depending on its handling mode.
                             let _ = self.queue.remove(&existing_id);
+                            let _ = self.steer_queue.remove(&existing_id);
                             if let Some(existing_state) = self.ledger.get_mut(&existing_id) {
                                 let _ = crate::coalescing::apply_coalescing(
                                     existing_state,
@@ -713,11 +781,12 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                                 );
                             }
                         }
-                        self.queue.enqueue(input_id.clone(), input);
+                        self.enqueue_to(handling_mode, input_id.clone(), input);
                     }
                     QueueMode::Supersede => {
                         if let Some((existing_id, _)) = self.existing_superseded_input(&input) {
                             let _ = self.queue.remove(&existing_id);
+                            let _ = self.steer_queue.remove(&existing_id);
                             if let Some(existing_state) = self.ledger.get_mut(&existing_id) {
                                 let _ = crate::coalescing::apply_supersession(
                                     existing_state,
@@ -725,13 +794,13 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                                 );
                             }
                         }
-                        self.queue.enqueue(input_id.clone(), input);
+                        self.enqueue_to(handling_mode, input_id.clone(), input);
                     }
                     QueueMode::Priority => {
-                        self.queue.enqueue_front(input_id.clone(), input);
+                        self.enqueue_front_to(handling_mode, input_id.clone(), input);
                     }
                     QueueMode::Fifo | QueueMode::None => {
-                        self.queue.enqueue(input_id.clone(), input);
+                        self.enqueue_to(handling_mode, input_id.clone(), input);
                     }
                 }
                 self.emit_event(RuntimeEvent::InputLifecycle(InputLifecycleEvent::Queued {
@@ -949,6 +1018,7 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                 }));
                 self.abandon_all_non_terminal(InputAbandonReason::Destroyed);
                 self.queue.drain();
+                self.steer_queue.drain();
             }
             RuntimeControlCommand::Resume => {
                 if self.state_machine.state() == RuntimeState::Recovering {

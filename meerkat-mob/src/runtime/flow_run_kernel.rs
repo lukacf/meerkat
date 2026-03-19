@@ -389,6 +389,33 @@ impl FlowRunKernel {
 
 /// Private implementation helpers used by the `FlowRunMutator` trait impl.
 impl FlowRunKernel {
+    /// CAS retry loop: re-reads state from the store on each attempt, re-evaluates
+    /// the transition against fresh state, and retries up to 5 times on contention.
+    async fn cas_with_retry(
+        &self,
+        run_id: &RunId,
+        variant: &str,
+        fields: BTreeMap<String, KernelValue>,
+    ) -> Result<Option<Vec<KernelEffect>>, MobError> {
+        for attempt in 0..5u32 {
+            let run = self.require_run(run_id).await?;
+            let outcome = self.transition_outcome(&run.flow_state, variant, fields.clone())?;
+            let transitioned = self
+                .run_store
+                .cas_flow_state(run_id, &run.flow_state, &outcome.next_state)
+                .await?;
+            if transitioned {
+                return Ok(Some(outcome.effects));
+            }
+            if attempt < 4 {
+                tracing::debug!(variant, attempt, "CAS contention, retrying");
+            }
+        }
+        Err(MobError::Internal(format!(
+            "CAS contention on {variant} after 5 attempts for run {run_id}"
+        )))
+    }
+
     fn terminal_variant(target: &TerminalizationTarget) -> &'static str {
         match target {
             TerminalizationTarget::Completed => "TerminalizeCompleted",
@@ -446,24 +473,15 @@ impl FlowRunKernel {
         variant: &str,
         step_id: &StepId,
     ) -> Result<Option<Vec<KernelEffect>>, MobError> {
-        let run = self.require_run(run_id).await?;
-        let outcome = self.transition_outcome(
-            &run.flow_state,
+        self.cas_with_retry(
+            run_id,
             variant,
             BTreeMap::from([(
                 "step_id".to_string(),
                 KernelValue::String(step_id.to_string()),
             )]),
-        )?;
-        let transitioned = self
-            .run_store
-            .cas_flow_state(run_id, &run.flow_state, &outcome.next_state)
-            .await?;
-        if transitioned {
-            Ok(Some(outcome.effects))
-        } else {
-            Ok(None)
-        }
+        )
+        .await
     }
 
     async fn require_run(&self, run_id: &RunId) -> Result<MobRun, MobError> {
@@ -685,24 +703,15 @@ impl FlowRunMutator for FlowRunKernel {
         step_id: &StepId,
         target_id: &str,
     ) -> Result<Option<Vec<KernelEffect>>, MobError> {
-        let run = self.require_run(run_id).await?;
-        let outcome = self.transition_outcome(
-            &run.flow_state,
+        self.cas_with_retry(
+            run_id,
             "RecordTargetSuccess",
             BTreeMap::from([
                 ("step_id".to_string(), Self::step_id_value(step_id)),
                 ("target_id".to_string(), Self::target_id_value(target_id)),
             ]),
-        )?;
-        let transitioned = self
-            .run_store
-            .cas_flow_state(run_id, &run.flow_state, &outcome.next_state)
-            .await?;
-        if transitioned {
-            Ok(Some(outcome.effects))
-        } else {
-            Ok(None)
-        }
+        )
+        .await
     }
 
     async fn record_target_failure(
@@ -724,25 +733,16 @@ impl FlowRunMutator for FlowRunKernel {
         target_id: &str,
     ) -> Result<Option<Vec<KernelEffect>>, MobError> {
         let retry_key = Self::retry_key(step_id, target_id);
-        let run = self.require_run(run_id).await?;
-        let outcome = self.transition_outcome(
-            &run.flow_state,
+        self.cas_with_retry(
+            run_id,
             "RecordTargetFailure",
             BTreeMap::from([
                 ("step_id".to_string(), Self::step_id_value(step_id)),
                 ("target_id".to_string(), Self::target_id_value(target_id)),
                 ("retry_key".to_string(), KernelValue::String(retry_key)),
             ]),
-        )?;
-        let transitioned = self
-            .run_store
-            .cas_flow_state(run_id, &run.flow_state, &outcome.next_state)
-            .await?;
-        if transitioned {
-            Ok(Some(outcome.effects))
-        } else {
-            Ok(None)
-        }
+        )
+        .await
     }
 
     async fn record_target_canceled(
@@ -763,24 +763,15 @@ impl FlowRunMutator for FlowRunKernel {
         step_id: &StepId,
         target_id: &str,
     ) -> Result<Option<Vec<KernelEffect>>, MobError> {
-        let run = self.require_run(run_id).await?;
-        let outcome = self.transition_outcome(
-            &run.flow_state,
+        self.cas_with_retry(
+            run_id,
             "RecordTargetCanceled",
             BTreeMap::from([
                 ("step_id".to_string(), Self::step_id_value(step_id)),
                 ("target_id".to_string(), Self::target_id_value(target_id)),
             ]),
-        )?;
-        let transitioned = self
-            .run_store
-            .cas_flow_state(run_id, &run.flow_state, &outcome.next_state)
-            .await?;
-        if transitioned {
-            Ok(Some(outcome.effects))
-        } else {
-            Ok(None)
-        }
+        )
+        .await
     }
 
     async fn record_target_terminal_failure(

@@ -104,6 +104,8 @@ pub(super) struct PendingSpawn {
     runtime_mode: crate::MobRuntimeMode,
     labels: std::collections::BTreeMap<String, String>,
     auto_wire_parent: bool,
+    /// Peer wiring to restore after respawn completes.
+    restore_wiring: Option<Vec<MeerkatId>>,
     reply_tx: oneshot::Sender<Result<MemberRef, MobError>>,
 }
 
@@ -897,10 +899,10 @@ impl MobActor {
                     self.run_tasks.remove(&run_id);
                     self.run_cancel_tokens.remove(&run_id);
                     self.flow_streams.lock().await.remove(&run_id);
-                    if let Some(ref mut orch) = self.orchestrator {
-                        if let Err(error) = orch.apply(MobOrchestratorInput::CompleteFlow) {
-                            tracing::warn!(error = %error, "orchestrator CompleteFlow failed");
-                        }
+                    if let Some(ref mut orch) = self.orchestrator
+                        && let Err(error) = orch.apply(MobOrchestratorInput::CompleteFlow)
+                    {
+                        tracing::warn!(error = %error, "orchestrator CompleteFlow failed");
                     }
                     self.lifecycle.finish_tracked_flow();
                 }
@@ -908,13 +910,13 @@ impl MobActor {
                     self.run_tasks.remove(&run_id);
                     self.run_cancel_tokens.remove(&run_id);
                     self.flow_streams.lock().await.remove(&run_id);
-                    if let Some(ref mut orch) = self.orchestrator {
-                        if let Err(error) = orch.apply(MobOrchestratorInput::CompleteFlow) {
-                            tracing::warn!(
-                                error = %error,
-                                "orchestrator CompleteFlow failed during canceled flow cleanup"
-                            );
-                        }
+                    if let Some(ref mut orch) = self.orchestrator
+                        && let Err(error) = orch.apply(MobOrchestratorInput::CompleteFlow)
+                    {
+                        tracing::warn!(
+                            error = %error,
+                            "orchestrator CompleteFlow failed during canceled flow cleanup"
+                        );
                     }
                     self.lifecycle.finish_tracked_flow();
                 }
@@ -971,12 +973,11 @@ impl MobActor {
                                 }
                             }
                             if stop_result.is_ok() {
-                                if let Some(ref mut orch) = self.orchestrator {
-                                    if let Err(error) =
+                                if let Some(ref mut orch) = self.orchestrator
+                                    && let Err(error) =
                                         orch.apply(MobOrchestratorInput::StopOrchestrator)
-                                    {
-                                        tracing::warn!(error = %error, "orchestrator StopOrchestrator failed");
-                                    }
+                                {
+                                    tracing::warn!(error = %error, "orchestrator StopOrchestrator failed");
                                 }
                                 if let Err(e) =
                                     self.lifecycle_authority.apply(MobLifecycleInput::Stop)
@@ -1027,12 +1028,11 @@ impl MobActor {
                                 }
                                 Err(error)
                             } else {
-                                if let Some(ref mut orch) = self.orchestrator {
-                                    if let Err(error) =
+                                if let Some(ref mut orch) = self.orchestrator
+                                    && let Err(error) =
                                         orch.apply(MobOrchestratorInput::ResumeOrchestrator)
-                                    {
-                                        tracing::warn!(error = %error, "orchestrator ResumeOrchestrator failed");
-                                    }
+                                {
+                                    tracing::warn!(error = %error, "orchestrator ResumeOrchestrator failed");
                                 }
                                 if let Err(e) =
                                     self.lifecycle_authority.apply(MobLifecycleInput::Resume)
@@ -1166,14 +1166,14 @@ impl MobActor {
 
         for (spawn_ticket, pending) in std::mem::take(&mut self.pending_spawns) {
             self.pending_spawn_ids.remove(&pending.meerkat_id);
-            if let Some(ref mut orch) = self.orchestrator {
-                if let Err(error) = orch.apply(MobOrchestratorInput::CompleteSpawn) {
-                    tracing::warn!(
-                        spawn_ticket,
-                        error = %error,
-                        "failed to clear orchestrator pending-spawn snapshot during lifecycle transition"
-                    );
-                }
+            if let Some(ref mut orch) = self.orchestrator
+                && let Err(error) = orch.apply(MobOrchestratorInput::CompleteSpawn)
+            {
+                tracing::warn!(
+                    spawn_ticket,
+                    error = %error,
+                    "failed to clear orchestrator pending-spawn snapshot during lifecycle transition"
+                );
             }
             let _ = pending.reply_tx.send(Err(MobError::Internal(format!(
                 "spawn canceled for '{}': {}",
@@ -1460,6 +1460,8 @@ impl MobActor {
                     prompt,
                     resolved_labels,
                     provision,
+                    auto_wire_parent,
+                    None,
                 )
                 .await;
             let _ = reply_tx.send(result);
@@ -1479,11 +1481,11 @@ impl MobActor {
         let spawn_meerkat_id = meerkat_id.clone();
         let spawn_runtime_mode = selected_runtime_mode;
 
-        if let Some(ref mut orch) = self.orchestrator {
-            if let Err(error) = orch.apply(MobOrchestratorInput::StageSpawn) {
-                let _ = reply_tx.send(Err(error));
-                return;
-            }
+        if let Some(ref mut orch) = self.orchestrator
+            && let Err(error) = orch.apply(MobOrchestratorInput::StageSpawn)
+        {
+            let _ = reply_tx.send(Err(error));
+            return;
         }
         let pending = PendingSpawn {
             profile_name,
@@ -1492,6 +1494,7 @@ impl MobActor {
             runtime_mode: selected_runtime_mode,
             labels: resolved_labels,
             auto_wire_parent,
+            restore_wiring: None,
             reply_tx,
         };
         self.pending_spawn_ids.insert(spawn_meerkat_id.clone());
@@ -1586,14 +1589,14 @@ impl MobActor {
                 continue;
             };
             self.pending_spawn_ids.remove(&pending.meerkat_id);
-            if let Some(ref mut orch) = self.orchestrator {
-                if let Err(error) = orch.apply(MobOrchestratorInput::CompleteSpawn) {
-                    tracing::warn!(
-                        spawn_ticket,
-                        error = %error,
-                        "failed to reconcile orchestrator pending-spawn snapshot"
-                    );
-                }
+            if let Some(ref mut orch) = self.orchestrator
+                && let Err(error) = orch.apply(MobOrchestratorInput::CompleteSpawn)
+            {
+                tracing::warn!(
+                    spawn_ticket,
+                    error = %error,
+                    "failed to reconcile orchestrator pending-spawn snapshot"
+                );
             }
             pending_items.push((pending, result));
         }
@@ -1607,7 +1610,8 @@ impl MobActor {
                 prompt,
                 runtime_mode,
                 labels,
-                auto_wire_parent: _auto_wire,
+                auto_wire_parent,
+                restore_wiring,
                 reply_tx,
             } = pending;
             in_flight.push(async move {
@@ -1636,6 +1640,8 @@ impl MobActor {
                                 prompt,
                                 labels,
                                 provision,
+                                auto_wire_parent,
+                                restore_wiring,
                             )
                             .await
                         }
@@ -1651,6 +1657,7 @@ impl MobActor {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn finalize_spawn_from_pending(
         &self,
         profile_name: &ProfileName,
@@ -1659,6 +1666,8 @@ impl MobActor {
         prompt: String,
         labels: std::collections::BTreeMap<String, String>,
         provision: PendingProvision,
+        auto_wire_parent: bool,
+        restore_wiring: Option<Vec<MeerkatId>>,
     ) -> Result<MemberRef, MobError> {
         if let Err(append_error) = self
             .events
@@ -1748,6 +1757,40 @@ impl MobActor {
                 )));
             }
             return Err(start_error);
+        }
+
+        // auto_wire_parent: wire to the orchestrator profile members.
+        if auto_wire_parent && let Some(ref orchestrator) = self.definition.orchestrator {
+            let orchestrator_ids = {
+                let roster = self.roster.read().await;
+                roster
+                    .by_profile(&orchestrator.profile)
+                    .filter(|entry| entry.meerkat_id != *meerkat_id)
+                    .map(|entry| entry.meerkat_id.clone())
+                    .collect::<Vec<_>>()
+            };
+            for orch_id in &orchestrator_ids {
+                if let Err(e) = self.do_wire(meerkat_id, orch_id).await {
+                    tracing::warn!(
+                        error = %e,
+                        peer = %orch_id,
+                        "auto_wire_parent: failed to wire to orchestrator"
+                    );
+                }
+            }
+        }
+
+        // Restore peer wiring from a prior respawn.
+        if let Some(peers) = restore_wiring {
+            for peer_id in &peers {
+                if let Err(e) = self.do_wire(meerkat_id, peer_id).await {
+                    tracing::warn!(
+                        error = %e,
+                        peer = %peer_id,
+                        "failed to restore wiring after respawn"
+                    );
+                }
+            }
         }
 
         tracing::debug!(
@@ -1919,16 +1962,18 @@ impl MobActor {
         // done and the spawn is enqueued.
         drop(reply_rx);
 
-        // 4. Restore peer wiring after spawn completes. Since spawn is async and
-        // the new member won't exist in the roster until SpawnProvisioned fires,
-        // we can't wire synchronously here. The wiring restoration is deferred —
-        // callers that need specific wiring after respawn should wire explicitly.
-        // Log the intent so it's diagnosable.
+        // 4. Attach restore_wiring to the pending spawn so finalization re-wires.
         if !wired_peers.is_empty() {
+            for pending in self.pending_spawns.values_mut() {
+                if pending.meerkat_id == meerkat_id {
+                    pending.restore_wiring = Some(wired_peers.clone());
+                    break;
+                }
+            }
             tracing::info!(
                 meerkat_id = %meerkat_id,
                 peers = ?wired_peers,
-                "respawn: peer wiring will need re-establishment after spawn completes"
+                "respawn: peer wiring queued for restoration after spawn completes"
             );
         }
 
@@ -2275,10 +2320,10 @@ impl MobActor {
                 kind: MobEventKind::MobCompleted,
             })
             .await?;
-        if let Some(ref mut orch) = self.orchestrator {
-            if let Err(error) = orch.apply(MobOrchestratorInput::MarkCompleted) {
-                tracing::warn!(error = %error, "orchestrator MarkCompleted failed");
-            }
+        if let Some(ref mut orch) = self.orchestrator
+            && let Err(error) = orch.apply(MobOrchestratorInput::MarkCompleted)
+        {
+            tracing::warn!(error = %error, "orchestrator MarkCompleted failed");
         }
         if let Err(e) = self
             .lifecycle_authority
@@ -2300,10 +2345,10 @@ impl MobActor {
         self.edge_locks.clear().await;
         // Transition through StopOrchestrator if still Running, then Destroy.
         if let Some(ref mut orch) = self.orchestrator {
-            if orch.phase() == MobState::Running {
-                if let Err(error) = orch.apply(MobOrchestratorInput::StopOrchestrator) {
-                    tracing::warn!(error = %error, "orchestrator StopOrchestrator failed during destroy");
-                }
+            if orch.phase() == MobState::Running
+                && let Err(error) = orch.apply(MobOrchestratorInput::StopOrchestrator)
+            {
+                tracing::warn!(error = %error, "orchestrator StopOrchestrator failed during destroy");
             }
             if let Err(error) = orch.apply(MobOrchestratorInput::DestroyOrchestrator) {
                 tracing::warn!(error = %error, "orchestrator DestroyOrchestrator failed");
@@ -2398,13 +2443,13 @@ impl MobActor {
         }
 
         if let Some(ref mut orch) = self.orchestrator {
-            if prior_state == MobState::Completed {
-                if let Err(error) = orch.apply(MobOrchestratorInput::StopOrchestrator) {
-                    tracing::warn!(
-                        error = %error,
-                        "orchestrator StopOrchestrator failed while preparing completed-state reset"
-                    );
-                }
+            if prior_state == MobState::Completed
+                && let Err(error) = orch.apply(MobOrchestratorInput::StopOrchestrator)
+            {
+                tracing::warn!(
+                    error = %error,
+                    "orchestrator StopOrchestrator failed while preparing completed-state reset"
+                );
             }
             if let Err(error) = orch.apply(MobOrchestratorInput::ResumeOrchestrator) {
                 tracing::warn!(error = %error, "orchestrator ResumeOrchestrator failed during reset");
@@ -2720,10 +2765,10 @@ impl MobActor {
             .flow_kernel
             .create_pending_run(&config, activation_params.clone())
             .await?;
-        if let Some(ref mut orch) = self.orchestrator {
-            if let Err(error) = orch.apply(MobOrchestratorInput::StartFlow) {
-                tracing::warn!(error = %error, "orchestrator StartFlow failed");
-            }
+        if let Some(ref mut orch) = self.orchestrator
+            && let Err(error) = orch.apply(MobOrchestratorInput::StartFlow)
+        {
+            tracing::warn!(error = %error, "orchestrator StartFlow failed");
         }
 
         let cancel_token = tokio_util::sync::CancellationToken::new();
@@ -2874,13 +2919,13 @@ impl MobActor {
                     "failed to finalize run cancellation during lifecycle shutdown"
                 );
             }
-            if let Some(ref mut orch) = self.orchestrator {
-                if let Err(error) = orch.apply(MobOrchestratorInput::CompleteFlow) {
-                    tracing::warn!(
-                        error = %error,
-                        "orchestrator CompleteFlow failed during bulk flow cancellation"
-                    );
-                }
+            if let Some(ref mut orch) = self.orchestrator
+                && let Err(error) = orch.apply(MobOrchestratorInput::CompleteFlow)
+            {
+                tracing::warn!(
+                    error = %error,
+                    "orchestrator CompleteFlow failed during bulk flow cancellation"
+                );
             }
         }
         for _ in 0..flow_count {

@@ -124,6 +124,16 @@ impl PersistentRuntimeDriver {
         self.inner.dequeue_next()
     }
 
+    /// Dequeue a specific input by ID (delegates to inner).
+    pub fn dequeue_by_id(&mut self, input_id: &InputId) -> Option<(InputId, Input)> {
+        self.inner.dequeue_by_id(input_id)
+    }
+
+    /// Look up the persisted input for a given ID (delegates to inner).
+    pub fn persisted_input(&self, input_id: &InputId) -> Option<&Input> {
+        self.inner.persisted_input(input_id)
+    }
+
     pub fn has_queued_input_outside(&self, excluded: &[InputId]) -> bool {
         self.inner.has_queued_input_outside(excluded)
     }

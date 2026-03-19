@@ -134,6 +134,30 @@ impl DriverEntry {
             DriverEntry::Persistent(d) => d.dequeue_next(),
         }
     }
+
+    /// Dequeue a specific input by ID from whichever queue contains it.
+    pub(crate) fn dequeue_by_id(&mut self, input_id: &InputId) -> Option<(InputId, Input)> {
+        match self {
+            DriverEntry::Ephemeral(d) => d.dequeue_by_id(input_id),
+            DriverEntry::Persistent(d) => d.dequeue_by_id(input_id),
+        }
+    }
+
+    /// Get a reference to the ingress authority.
+    pub(crate) fn ingress(&self) -> &crate::runtime_ingress_authority::RuntimeIngressAuthority {
+        match self {
+            DriverEntry::Ephemeral(d) => d.ingress(),
+            DriverEntry::Persistent(d) => d.inner_ref().ingress(),
+        }
+    }
+
+    /// Look up the persisted input for a given ID.
+    pub(crate) fn persisted_input(&self, input_id: &InputId) -> Option<&Input> {
+        match self {
+            DriverEntry::Ephemeral(d) => d.persisted_input(input_id),
+            DriverEntry::Persistent(d) => d.persisted_input(input_id),
+        }
+    }
     pub(crate) fn has_queued_input_outside(&self, excluded: &[InputId]) -> bool {
         match self {
             DriverEntry::Ephemeral(d) => d.has_queued_input_outside(excluded),
@@ -142,6 +166,7 @@ impl DriverEntry {
     }
 
     /// Requeue an input at the front of the queue.
+    #[allow(dead_code)]
     pub(crate) fn enqueue_front_input(&mut self, input_id: InputId, input: Input) {
         match self {
             DriverEntry::Ephemeral(d) => d.enqueue_front_input(input_id, input),

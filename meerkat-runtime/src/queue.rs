@@ -55,6 +55,13 @@ impl InputQueue {
         self.queue.len()
     }
 
+    /// Remove a specific input by ID and return it as (InputId, Input).
+    ///
+    /// Used by the batching policy to dequeue specific IDs determined by the authority.
+    pub fn dequeue_by_id(&mut self, input_id: &InputId) -> Option<(InputId, crate::input::Input)> {
+        self.remove(input_id).map(|q| (q.input_id, q.input))
+    }
+
     /// Remove a specific input by ID (e.g., for supersession).
     pub fn remove(&mut self, input_id: &InputId) -> Option<QueuedInput> {
         if let Some(pos) = self.queue.iter().position(|q| q.input_id == *input_id) {

@@ -227,63 +227,57 @@ async fn process_queue(
                 return false;
             }
 
-            match d.dequeue_next() {
-                Some((input_id, input)) => {
-                    let run_id = RunId::new();
+            // Ask the ingress authority for the next batch of input IDs.
+            // The authority implements steer-first priority and same-boundary
+            // batching for steer inputs; queue inputs are single-item batches.
+            let batch_ids = d.ingress().drain_next_batch(|id| {
+                d.persisted_input(id)
+                    .map(input_boundary)
+                    .unwrap_or(RunApplyBoundary::RunStart)
+            });
 
-                    // Start run in the state machine
-                    if d.start_run(run_id.clone()).is_err() {
-                        return false;
-                    }
-
-                    let first_boundary = input_boundary(&input);
-                    let mut staged_inputs = vec![(input_id.clone(), input)];
-
-                    // Only batch consecutive same-boundary inputs for Steer mode.
-                    // Queue mode (the default) processes one input per run,
-                    // matching main's one-input-per-turn behavior.
-                    let first_is_steer = staged_inputs[0].1.handling_mode().unwrap_or_default()
-                        == meerkat_core::types::HandlingMode::Steer;
-
-                    if first_is_steer {
-                        loop {
-                            let Some((next_input_id, next_input)) = d.dequeue_next() else {
-                                break;
-                            };
-                            if input_boundary(&next_input) == first_boundary {
-                                staged_inputs.push((next_input_id, next_input));
-                                continue;
-                            }
-
-                            d.enqueue_front_input(next_input_id, next_input);
-                            break;
-                        }
-                    }
-
-                    // Stage the input batch (Queued → Staged).
-                    // Do NOT apply here — apply only after successful execution.
-                    // If we pre-applied and the executor failed, the input would
-                    // be stranded in AppliedPendingConsumption because RunFailed
-                    // only rolls back Staged inputs.
-                    let mut staged_ids = Vec::with_capacity(staged_inputs.len());
-                    for (staged_input_id, _) in &staged_inputs {
-                        if d.stage_input(staged_input_id, &run_id).is_err() {
-                            let _ = d.rollback_staged(&staged_ids);
-                            let _ = d.complete_run();
-                            return false;
-                        }
-                        staged_ids.push(staged_input_id.clone());
-                    }
-
-                    let primitive = inputs_to_primitive(&staged_inputs);
-                    let contributing_input_ids = staged_inputs
-                        .iter()
-                        .map(|(staged_input_id, _)| staged_input_id.clone())
-                        .collect::<Vec<_>>();
-                    Some((contributing_input_ids, run_id, primitive))
-                }
-                None => None,
+            if batch_ids.is_empty() {
+                return false;
             }
+
+            // Dequeue the batch members from the physical queues.
+            let staged_inputs: Vec<_> = batch_ids
+                .iter()
+                .filter_map(|id| d.dequeue_by_id(id))
+                .collect();
+
+            if staged_inputs.is_empty() {
+                return false;
+            }
+
+            let run_id = RunId::new();
+
+            // Start run in the state machine
+            if d.start_run(run_id.clone()).is_err() {
+                return false;
+            }
+
+            // Stage the input batch (Queued → Staged).
+            // Do NOT apply here — apply only after successful execution.
+            // If we pre-applied and the executor failed, the input would
+            // be stranded in AppliedPendingConsumption because RunFailed
+            // only rolls back Staged inputs.
+            let mut staged_ids = Vec::with_capacity(staged_inputs.len());
+            for (staged_input_id, _) in &staged_inputs {
+                if d.stage_input(staged_input_id, &run_id).is_err() {
+                    let _ = d.rollback_staged(&staged_ids);
+                    let _ = d.complete_run();
+                    return false;
+                }
+                staged_ids.push(staged_input_id.clone());
+            }
+
+            let primitive = inputs_to_primitive(&staged_inputs);
+            let contributing_input_ids = staged_inputs
+                .iter()
+                .map(|(staged_input_id, _)| staged_input_id.clone())
+                .collect::<Vec<_>>();
+            Some((contributing_input_ids, run_id, primitive))
         };
 
         match dequeued {

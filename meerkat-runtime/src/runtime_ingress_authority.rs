@@ -24,6 +24,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::types::HandlingMode;
 
@@ -404,6 +405,32 @@ impl RuntimeIngressAuthority {
     /// Handling mode for a specific work ID.
     pub fn handling_mode(&self, work_id: &InputId) -> Option<HandlingMode> {
         self.fields.handling_mode.get(work_id).copied()
+    }
+
+    /// Determine the next batch of input IDs to drain.
+    ///
+    /// Implements the batching policy:
+    /// - Steer-first: if steer_queue is non-empty, batch consecutive steer inputs
+    ///   that share the same `RunApplyBoundary` (determined by `boundary_of`).
+    /// - Queue inputs are processed one at a time.
+    ///
+    /// Returns an empty vec if both queues are empty.
+    pub fn drain_next_batch<F>(&self, boundary_of: F) -> Vec<InputId>
+    where
+        F: Fn(&InputId) -> RunApplyBoundary,
+    {
+        if !self.fields.steer_queue.is_empty() {
+            let first = &self.fields.steer_queue[0];
+            let target_boundary = boundary_of(first);
+            return self
+                .fields
+                .steer_queue
+                .iter()
+                .take_while(|id| boundary_of(id) == target_boundary)
+                .cloned()
+                .collect();
+        }
+        self.fields.queue.first().cloned().into_iter().collect()
     }
 
     /// Check if a transition is legal without applying it.

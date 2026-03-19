@@ -9,20 +9,22 @@
 //! The transition table encoded here is the single source of truth, matching
 //! the machine schema in `meerkat-machine-schema/src/catalog/turn_execution.rs`:
 //!
-//! - 10 states: Ready, ApplyingPrimitive, CallingLlm, WaitingForOps,
-//!   DrainingBoundary, ErrorRecovery, Cancelling, Completed, Failed, Cancelled
-//! - 21 inputs: StartConversationRun, StartImmediateAppend, StartImmediateContext,
+//! - 11 states: Ready, ApplyingPrimitive, CallingLlm, WaitingForOps,
+//!   DrainingBoundary, Extracting, ErrorRecovery, Cancelling, Completed, Failed, Cancelled
+//! - 25 inputs: StartConversationRun, StartImmediateAppend, StartImmediateContext,
 //!   PrimitiveApplied, LlmReturnedToolCalls, LlmReturnedTerminal,
-//!   ToolCallsResolved, BoundaryContinue, BoundaryComplete, RecoverableFailure,
-//!   FatalFailure, RetryRequested, CancelNow, CancelAfterBoundary,
-//!   CancellationObserved, AcknowledgeTerminal, TurnLimitReached, BudgetExhausted,
-//!   ForceCancelNoRun, RunCompleted, RunFailed, RunCancelled
-//! - 9 fields: active_run, primitive_kind, admitted_content_shape,
+//!   ToolCallsResolved, BoundaryContinue, BoundaryComplete, EnterExtraction,
+//!   ExtractionValidationPassed, ExtractionRetry, ExtractionExhausted,
+//!   RecoverableFailure, FatalFailure, RetryRequested, CancelNow,
+//!   CancelAfterBoundary, CancellationObserved, AcknowledgeTerminal,
+//!   TurnLimitReached, BudgetExhausted, ForceCancelNoRun, RunCompleted,
+//!   RunFailed, RunCancelled
+//! - 11 fields: active_run, primitive_kind, admitted_content_shape,
 //!   vision_enabled, image_tool_results_enabled, tool_calls_pending,
-//!   boundary_count, cancel_after_boundary, terminal_outcome
+//!   boundary_count, cancel_after_boundary, terminal_outcome,
+//!   extraction_attempts, max_extraction_retries
 //! - 5 effects: RunStarted, BoundaryApplied, RunCompleted, RunFailed,
 //!   RunCancelled
-//! - 39 transitions with guards
 
 use crate::error::AgentError;
 use crate::lifecycle::RunId;
@@ -39,6 +41,7 @@ pub enum TurnPhase {
     CallingLlm,
     WaitingForOps,
     DrainingBoundary,
+    Extracting,
     ErrorRecovery,
     Cancelling,
     Completed,
@@ -52,6 +55,11 @@ impl TurnPhase {
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
+
+    /// Whether this phase is the extraction validation phase.
+    pub fn is_extracting(self) -> bool {
+        matches!(self, Self::Extracting)
+    }
 }
 
 impl std::fmt::Display for TurnPhase {
@@ -62,6 +70,7 @@ impl std::fmt::Display for TurnPhase {
             Self::CallingLlm => "CallingLlm",
             Self::WaitingForOps => "WaitingForOps",
             Self::DrainingBoundary => "DrainingBoundary",
+            Self::Extracting => "Extracting",
             Self::ErrorRecovery => "ErrorRecovery",
             Self::Cancelling => "Cancelling",
             Self::Completed => "Completed",
@@ -181,6 +190,28 @@ pub enum TurnExecutionInput {
     BudgetExhausted {
         run_id: RunId,
     },
+    /// Enter extraction phase after the conversation turn completes.
+    ///
+    /// Fired by the shell when BoundaryComplete detects that extraction is
+    /// needed (output_schema is set and extraction_mode is not yet active).
+    /// Transitions DrainingBoundary -> Extracting and initializes extraction
+    /// tracking fields.
+    EnterExtraction {
+        run_id: RunId,
+        max_retries: u32,
+    },
+    /// Extraction validation passed — extraction is complete.
+    ExtractionValidationPassed {
+        run_id: RunId,
+    },
+    /// Extraction validation failed but retries remain — retry the extraction.
+    ExtractionRetry {
+        run_id: RunId,
+    },
+    /// Extraction retries exhausted — complete with failure.
+    ExtractionExhausted {
+        run_id: RunId,
+    },
     /// Force-cancel when no active run exists.
     ///
     /// Used by `cancel()` when the machine is in a non-terminal phase but has
@@ -216,6 +247,16 @@ pub enum TurnExecutionEffect {
     RunCancelled {
         run_id: RunId,
     },
+    /// Drain the comms inbox before the next LLM call.
+    ///
+    /// Emitted on transitions that re-enter CallingLlm (BoundaryContinue,
+    /// RetryRequested, ExtractionRetry). Shell executes the drain instead
+    /// of checking `state == CallingLlm`.
+    DrainCommsInbox,
+    /// Check whether compaction should run before the next LLM call.
+    ///
+    /// Emitted on the same transitions as DrainCommsInbox.
+    CheckCompaction,
 }
 
 // ---------------------------------------------------------------------------
@@ -249,6 +290,8 @@ struct TurnExecutionFields {
     boundary_count: u32,
     cancel_after_boundary: bool,
     terminal_outcome: TurnTerminalOutcome,
+    extraction_attempts: u32,
+    max_extraction_retries: u32,
 }
 
 impl TurnExecutionFields {
@@ -263,6 +306,8 @@ impl TurnExecutionFields {
             boundary_count: 0,
             cancel_after_boundary: false,
             terminal_outcome: TurnTerminalOutcome::None,
+            extraction_attempts: 0,
+            max_extraction_retries: 0,
         }
     }
 
@@ -376,6 +421,16 @@ impl TurnExecutionAuthority {
         self.fields.admitted_content_shape.as_ref()
     }
 
+    /// Current extraction attempt count.
+    pub fn extraction_attempts(&self) -> u32 {
+        self.fields.extraction_attempts
+    }
+
+    /// Maximum extraction retries configured for the current run.
+    pub fn max_extraction_retries(&self) -> u32 {
+        self.fields.max_extraction_retries
+    }
+
     /// Check if a transition is legal without applying it.
     pub fn can_accept(&self, input: &TurnExecutionInput) -> bool {
         self.evaluate(input).is_ok()
@@ -401,14 +456,15 @@ impl TurnExecutionAuthority {
     ) -> Result<(TurnPhase, TurnExecutionFields, Vec<TurnExecutionEffect>), AgentError> {
         use TurnExecutionInput::{
             AcknowledgeTerminal, BoundaryComplete, BoundaryContinue, BudgetExhausted,
-            CancelAfterBoundary, CancelNow, CancellationObserved, FatalFailure, ForceCancelNoRun,
-            LlmReturnedTerminal, LlmReturnedToolCalls, PrimitiveApplied, RecoverableFailure,
-            RetryRequested, StartConversationRun, StartImmediateAppend, StartImmediateContext,
-            ToolCallsResolved, TurnLimitReached,
+            CancelAfterBoundary, CancelNow, CancellationObserved, EnterExtraction,
+            ExtractionExhausted, ExtractionRetry, ExtractionValidationPassed, FatalFailure,
+            ForceCancelNoRun, LlmReturnedTerminal, LlmReturnedToolCalls, PrimitiveApplied,
+            RecoverableFailure, RetryRequested, StartConversationRun, StartImmediateAppend,
+            StartImmediateContext, ToolCallsResolved, TurnLimitReached,
         };
         use TurnPhase::{
             ApplyingPrimitive, CallingLlm, Cancelled, Cancelling, Completed, DrainingBoundary,
-            ErrorRecovery, Failed, Ready, WaitingForOps,
+            ErrorRecovery, Extracting, Failed, Ready, WaitingForOps,
         };
 
         let phase = self.phase;
@@ -491,6 +547,8 @@ impl TurnExecutionAuthority {
                 match fields.primitive_kind {
                     TurnPrimitiveKind::ConversationTurn => {
                         // ConversationTurn -> CallingLlm (no boundary/cancel checks)
+                        effects.push(TurnExecutionEffect::DrainCommsInbox);
+                        effects.push(TurnExecutionEffect::CheckCompaction);
                         CallingLlm
                     }
                     TurnPrimitiveKind::ImmediateAppend => {
@@ -612,6 +670,8 @@ impl TurnExecutionAuthority {
                     });
                     Cancelled
                 } else {
+                    effects.push(TurnExecutionEffect::DrainCommsInbox);
+                    effects.push(TurnExecutionEffect::CheckCompaction);
                     CallingLlm
                 }
             }
@@ -640,6 +700,68 @@ impl TurnExecutionAuthority {
             }
 
             // ---------------------------------------------------------------
+            // EnterExtraction: DrainingBoundary -> Extracting
+            //
+            // Called each time the shell reaches DrainingBoundary during an
+            // extraction run. On the first call extraction_attempts is 0
+            // (from run start); ExtractionRetry increments it on each retry.
+            // ---------------------------------------------------------------
+            (
+                DrainingBoundary,
+                EnterExtraction {
+                    run_id,
+                    max_retries,
+                },
+            ) => {
+                if !self.guard_run_matches(run_id) {
+                    return Err(Self::invalid(phase, input));
+                }
+                fields.max_extraction_retries = *max_retries;
+                Extracting
+            }
+
+            // ---------------------------------------------------------------
+            // ExtractionValidationPassed: Extracting -> Completed
+            // ---------------------------------------------------------------
+            (Extracting, ExtractionValidationPassed { run_id }) => {
+                if !self.guard_run_matches(run_id) {
+                    return Err(Self::invalid(phase, input));
+                }
+                fields.terminal_outcome = TurnTerminalOutcome::Completed;
+                effects.push(TurnExecutionEffect::RunCompleted {
+                    run_id: run_id.clone(),
+                });
+                Completed
+            }
+
+            // ---------------------------------------------------------------
+            // ExtractionRetry: Extracting -> CallingLlm
+            // ---------------------------------------------------------------
+            (Extracting, ExtractionRetry { run_id }) => {
+                if !self.guard_run_matches(run_id) {
+                    return Err(Self::invalid(phase, input));
+                }
+                fields.extraction_attempts += 1;
+                effects.push(TurnExecutionEffect::DrainCommsInbox);
+                effects.push(TurnExecutionEffect::CheckCompaction);
+                CallingLlm
+            }
+
+            // ---------------------------------------------------------------
+            // ExtractionExhausted: Extracting -> Completed
+            // ---------------------------------------------------------------
+            (Extracting, ExtractionExhausted { run_id }) => {
+                if !self.guard_run_matches(run_id) {
+                    return Err(Self::invalid(phase, input));
+                }
+                fields.terminal_outcome = TurnTerminalOutcome::Completed;
+                effects.push(TurnExecutionEffect::RunCompleted {
+                    run_id: run_id.clone(),
+                });
+                Completed
+            }
+
+            // ---------------------------------------------------------------
             // RecoverableFailure: CallingLlm|WaitingForOps|DrainingBoundary -> ErrorRecovery
             // ---------------------------------------------------------------
             (CallingLlm | WaitingForOps | DrainingBoundary, RecoverableFailure { run_id }) => {
@@ -656,15 +778,18 @@ impl TurnExecutionAuthority {
                 if !self.guard_run_matches(run_id) {
                     return Err(Self::invalid(phase, input));
                 }
+                effects.push(TurnExecutionEffect::DrainCommsInbox);
+                effects.push(TurnExecutionEffect::CheckCompaction);
                 CallingLlm
             }
 
             // ---------------------------------------------------------------
             // FatalFailure: ApplyingPrimitive|CallingLlm|WaitingForOps|
-            //               DrainingBoundary|ErrorRecovery -> Failed
+            //               DrainingBoundary|Extracting|ErrorRecovery -> Failed
             // ---------------------------------------------------------------
             (
-                ApplyingPrimitive | CallingLlm | WaitingForOps | DrainingBoundary | ErrorRecovery,
+                ApplyingPrimitive | CallingLlm | WaitingForOps | DrainingBoundary | Extracting
+                | ErrorRecovery,
                 FatalFailure { run_id },
             ) => {
                 if !self.guard_run_matches(run_id) {
@@ -679,10 +804,11 @@ impl TurnExecutionAuthority {
 
             // ---------------------------------------------------------------
             // CancelNow: ApplyingPrimitive|CallingLlm|WaitingForOps|
-            //            DrainingBoundary|ErrorRecovery -> Cancelling
+            //            DrainingBoundary|Extracting|ErrorRecovery -> Cancelling
             // ---------------------------------------------------------------
             (
-                ApplyingPrimitive | CallingLlm | WaitingForOps | DrainingBoundary | ErrorRecovery,
+                ApplyingPrimitive | CallingLlm | WaitingForOps | DrainingBoundary | Extracting
+                | ErrorRecovery,
                 CancelNow { run_id },
             ) => {
                 if !self.guard_run_matches(run_id) {
@@ -693,10 +819,11 @@ impl TurnExecutionAuthority {
 
             // ---------------------------------------------------------------
             // CancelAfterBoundary: ApplyingPrimitive|CallingLlm|WaitingForOps|
-            //                      DrainingBoundary|ErrorRecovery -> same phase
+            //                      DrainingBoundary|Extracting|ErrorRecovery -> same phase
             // ---------------------------------------------------------------
             (
-                ApplyingPrimitive | CallingLlm | WaitingForOps | DrainingBoundary | ErrorRecovery,
+                ApplyingPrimitive | CallingLlm | WaitingForOps | DrainingBoundary | Extracting
+                | ErrorRecovery,
                 CancelAfterBoundary { run_id },
             ) => {
                 if !self.guard_run_matches(run_id) {
@@ -726,7 +853,8 @@ impl TurnExecutionAuthority {
             // TurnLimitReached: any active phase -> Completed
             // ---------------------------------------------------------------
             (
-                ApplyingPrimitive | CallingLlm | WaitingForOps | DrainingBoundary | ErrorRecovery,
+                ApplyingPrimitive | CallingLlm | WaitingForOps | DrainingBoundary | Extracting
+                | ErrorRecovery,
                 TurnLimitReached { run_id },
             ) => {
                 if !self.guard_run_matches(run_id) {
@@ -748,7 +876,8 @@ impl TurnExecutionAuthority {
             // BudgetExhausted: any active phase -> Completed
             // ---------------------------------------------------------------
             (
-                ApplyingPrimitive | CallingLlm | WaitingForOps | DrainingBoundary | ErrorRecovery,
+                ApplyingPrimitive | CallingLlm | WaitingForOps | DrainingBoundary | Extracting
+                | ErrorRecovery,
                 BudgetExhausted { run_id },
             ) => {
                 if !self.guard_run_matches(run_id) {
@@ -772,7 +901,7 @@ impl TurnExecutionAuthority {
             // ---------------------------------------------------------------
             (
                 Ready | ApplyingPrimitive | CallingLlm | WaitingForOps | DrainingBoundary
-                | ErrorRecovery | Cancelling,
+                | Extracting | ErrorRecovery | Cancelling,
                 ForceCancelNoRun,
             ) => {
                 fields.terminal_outcome = TurnTerminalOutcome::Cancelled;
@@ -839,6 +968,7 @@ impl TurnPhase {
             Self::Ready | Self::ApplyingPrimitive | Self::CallingLlm => LoopState::CallingLlm,
             Self::WaitingForOps => LoopState::WaitingForOps,
             Self::DrainingBoundary => LoopState::DrainingEvents,
+            Self::Extracting => LoopState::DrainingEvents,
             Self::ErrorRecovery => LoopState::ErrorRecovery,
             Self::Cancelling => LoopState::Cancelling,
             Self::Completed | Self::Failed | Self::Cancelled => LoopState::Completed,
@@ -989,7 +1119,9 @@ mod tests {
         assert_eq!(t.next_phase, TurnPhase::CallingLlm);
         assert!(auth.vision_enabled());
         assert!(auth.image_tool_results_enabled());
-        assert!(t.effects.is_empty());
+        assert_eq!(t.effects.len(), 2);
+        assert!(matches!(t.effects[0], TurnExecutionEffect::DrainCommsInbox));
+        assert!(matches!(t.effects[1], TurnExecutionEffect::CheckCompaction));
     }
 
     #[test]
@@ -1640,6 +1772,10 @@ mod tests {
             LoopState::DrainingEvents
         );
         assert_eq!(
+            TurnPhase::Extracting.to_loop_state(),
+            LoopState::DrainingEvents
+        );
+        assert_eq!(
             TurnPhase::ErrorRecovery.to_loop_state(),
             LoopState::ErrorRecovery
         );
@@ -1647,5 +1783,205 @@ mod tests {
         assert_eq!(TurnPhase::Completed.to_loop_state(), LoopState::Completed);
         assert_eq!(TurnPhase::Failed.to_loop_state(), LoopState::Completed);
         assert_eq!(TurnPhase::Cancelled.to_loop_state(), LoopState::Completed);
+    }
+
+    // === Extraction lifecycle ===
+
+    /// Helper: reach DrainingBoundary via LlmReturnedTerminal (terminal response path).
+    fn authority_at_draining_boundary_terminal() -> TurnExecutionAuthority {
+        let mut auth = authority_at_calling_llm();
+        auth.apply(TurnExecutionInput::LlmReturnedTerminal {
+            run_id: test_run_id(),
+        })
+        .expect("llm returned terminal");
+        assert_eq!(auth.phase(), TurnPhase::DrainingBoundary);
+        auth
+    }
+
+    #[test]
+    fn enter_extraction_from_draining_boundary() {
+        let mut auth = authority_at_draining_boundary_terminal();
+        let t = auth
+            .apply(TurnExecutionInput::EnterExtraction {
+                run_id: test_run_id(),
+                max_retries: 3,
+            })
+            .expect("enter extraction");
+        assert_eq!(t.next_phase, TurnPhase::Extracting);
+        assert_eq!(auth.max_extraction_retries(), 3);
+        assert_eq!(auth.extraction_attempts(), 0);
+    }
+
+    #[test]
+    fn extraction_retry_increments_attempts_and_goes_to_calling_llm() {
+        let mut auth = authority_at_draining_boundary_terminal();
+        auth.apply(TurnExecutionInput::EnterExtraction {
+            run_id: test_run_id(),
+            max_retries: 3,
+        })
+        .expect("enter extraction");
+
+        let t = auth
+            .apply(TurnExecutionInput::ExtractionRetry {
+                run_id: test_run_id(),
+            })
+            .expect("extraction retry");
+        assert_eq!(t.next_phase, TurnPhase::CallingLlm);
+        assert_eq!(auth.extraction_attempts(), 1);
+    }
+
+    #[test]
+    fn extraction_validation_passed_completes() {
+        let mut auth = authority_at_draining_boundary_terminal();
+        auth.apply(TurnExecutionInput::EnterExtraction {
+            run_id: test_run_id(),
+            max_retries: 3,
+        })
+        .expect("enter extraction");
+
+        let t = auth
+            .apply(TurnExecutionInput::ExtractionValidationPassed {
+                run_id: test_run_id(),
+            })
+            .expect("validation passed");
+        assert_eq!(t.next_phase, TurnPhase::Completed);
+        assert_eq!(auth.terminal_outcome(), TurnTerminalOutcome::Completed);
+        assert!(
+            t.effects
+                .iter()
+                .any(|e| matches!(e, TurnExecutionEffect::RunCompleted { .. }))
+        );
+    }
+
+    #[test]
+    fn extraction_exhausted_completes() {
+        let mut auth = authority_at_draining_boundary_terminal();
+        auth.apply(TurnExecutionInput::EnterExtraction {
+            run_id: test_run_id(),
+            max_retries: 1,
+        })
+        .expect("enter extraction");
+
+        let t = auth
+            .apply(TurnExecutionInput::ExtractionExhausted {
+                run_id: test_run_id(),
+            })
+            .expect("exhausted");
+        assert_eq!(t.next_phase, TurnPhase::Completed);
+        assert_eq!(auth.terminal_outcome(), TurnTerminalOutcome::Completed);
+    }
+
+    #[test]
+    fn full_extraction_retry_cycle() {
+        let mut auth = authority_at_draining_boundary_terminal();
+        let rid = test_run_id();
+
+        // Enter extraction
+        auth.apply(TurnExecutionInput::EnterExtraction {
+            run_id: rid.clone(),
+            max_retries: 2,
+        })
+        .expect("enter");
+        assert_eq!(auth.phase(), TurnPhase::Extracting);
+
+        // First retry -> CallingLlm
+        auth.apply(TurnExecutionInput::ExtractionRetry {
+            run_id: rid.clone(),
+        })
+        .expect("retry 1");
+        assert_eq!(auth.phase(), TurnPhase::CallingLlm);
+        assert_eq!(auth.extraction_attempts(), 1);
+
+        // LLM returns terminal -> DrainingBoundary
+        auth.apply(TurnExecutionInput::LlmReturnedTerminal {
+            run_id: rid.clone(),
+        })
+        .expect("llm terminal");
+        assert_eq!(auth.phase(), TurnPhase::DrainingBoundary);
+
+        // Re-enter extraction for validation
+        auth.apply(TurnExecutionInput::EnterExtraction {
+            run_id: rid.clone(),
+            max_retries: 2,
+        })
+        .expect("re-enter");
+        assert_eq!(auth.phase(), TurnPhase::Extracting);
+        // Attempts preserved (not reset)
+        assert_eq!(auth.extraction_attempts(), 1);
+
+        // Second retry -> CallingLlm
+        auth.apply(TurnExecutionInput::ExtractionRetry {
+            run_id: rid.clone(),
+        })
+        .expect("retry 2");
+        assert_eq!(auth.phase(), TurnPhase::CallingLlm);
+        assert_eq!(auth.extraction_attempts(), 2);
+
+        // LLM returns terminal -> DrainingBoundary
+        auth.apply(TurnExecutionInput::LlmReturnedTerminal {
+            run_id: rid.clone(),
+        })
+        .expect("llm terminal 2");
+
+        // Re-enter extraction
+        auth.apply(TurnExecutionInput::EnterExtraction {
+            run_id: rid.clone(),
+            max_retries: 2,
+        })
+        .expect("re-enter 2");
+
+        // Validation passed
+        let t = auth
+            .apply(TurnExecutionInput::ExtractionValidationPassed {
+                run_id: rid.clone(),
+            })
+            .expect("passed");
+        assert_eq!(t.next_phase, TurnPhase::Completed);
+    }
+
+    #[test]
+    fn extraction_wrong_run_id_rejected() {
+        let mut auth = authority_at_draining_boundary_terminal();
+        assert!(
+            auth.apply(TurnExecutionInput::EnterExtraction {
+                run_id: other_run_id(),
+                max_retries: 3,
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn fatal_failure_from_extracting() {
+        let mut auth = authority_at_draining_boundary_terminal();
+        auth.apply(TurnExecutionInput::EnterExtraction {
+            run_id: test_run_id(),
+            max_retries: 3,
+        })
+        .expect("enter extraction");
+
+        let t = auth
+            .apply(TurnExecutionInput::FatalFailure {
+                run_id: test_run_id(),
+            })
+            .expect("fatal");
+        assert_eq!(t.next_phase, TurnPhase::Failed);
+    }
+
+    #[test]
+    fn cancel_now_from_extracting() {
+        let mut auth = authority_at_draining_boundary_terminal();
+        auth.apply(TurnExecutionInput::EnterExtraction {
+            run_id: test_run_id(),
+            max_retries: 3,
+        })
+        .expect("enter extraction");
+
+        let t = auth
+            .apply(TurnExecutionInput::CancelNow {
+                run_id: test_run_id(),
+            })
+            .expect("cancel");
+        assert_eq!(t.next_phase, TurnPhase::Cancelling);
     }
 }

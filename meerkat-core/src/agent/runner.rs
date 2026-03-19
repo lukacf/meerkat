@@ -510,7 +510,6 @@ where
         self.state = LoopState::CallingLlm;
         self.turn_authority = crate::turn_execution_authority::TurnExecutionAuthority::new();
         self.extraction_mode = false;
-        self.extraction_attempts = 0;
         self.extraction_result = None;
         self.extraction_last_error = None;
         self.extraction_schema_warnings = None;
@@ -599,7 +598,6 @@ where
         self.state = LoopState::CallingLlm;
         self.turn_authority = crate::turn_execution_authority::TurnExecutionAuthority::new();
         self.extraction_mode = false;
-        self.extraction_attempts = 0;
         self.extraction_result = None;
         self.extraction_last_error = None;
         self.extraction_schema_warnings = None;

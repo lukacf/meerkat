@@ -106,11 +106,10 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
     })
 }
 
-pub(crate) fn inputs_to_primitive(inputs: &[(InputId, Input)]) -> RunPrimitive {
-    let boundary = inputs
-        .first()
-        .map(|(_, input)| input_boundary(input))
-        .unwrap_or(RunApplyBoundary::RunStart);
+pub(crate) fn inputs_to_primitive_with_boundary(
+    inputs: &[(InputId, Input)],
+    boundary: RunApplyBoundary,
+) -> RunPrimitive {
     let appends = inputs
         .iter()
         .filter_map(|(_, input)| input_to_append(input))
@@ -130,6 +129,14 @@ pub(crate) fn inputs_to_primitive(inputs: &[(InputId, Input)]) -> RunPrimitive {
         contributing_input_ids,
         turn_metadata,
     })
+}
+
+pub(crate) fn inputs_to_primitive(inputs: &[(InputId, Input)]) -> RunPrimitive {
+    let boundary = inputs
+        .first()
+        .map(|(_, input)| input_boundary(input))
+        .unwrap_or(RunApplyBoundary::RunStart);
+    inputs_to_primitive_with_boundary(inputs, boundary)
 }
 
 /// Convert an `Input` + its ID to a `RunPrimitive` for `CoreExecutor::apply()`.
@@ -229,12 +236,11 @@ async fn process_queue(
 
             // Ask the ingress authority for the next batch of input IDs.
             // The authority implements steer-first priority and same-boundary
-            // batching for steer inputs; queue inputs are single-item batches.
-            let batch_ids = d.ingress().drain_next_batch(|id| {
-                d.persisted_input(id)
-                    .map(input_boundary)
-                    .unwrap_or(RunApplyBoundary::RunStart)
-            });
+            // batching for steer inputs; queue inputs follow the prompt-aware
+            // batching policy.
+            let batch_ids = d
+                .ingress()
+                .drain_next_batch(|id| d.ingress().input_boundary(id));
 
             if batch_ids.is_empty() {
                 return false;
@@ -272,7 +278,13 @@ async fn process_queue(
                 staged_ids.push(staged_input_id.clone());
             }
 
-            let primitive = inputs_to_primitive(&staged_inputs);
+            // Use the authority's boundary classification (derived from stored metadata)
+            // instead of the shell-level input_boundary function.
+            let boundary = staged_inputs
+                .first()
+                .map(|(id, _)| d.ingress().input_boundary(id))
+                .unwrap_or(RunApplyBoundary::RunStart);
+            let primitive = inputs_to_primitive_with_boundary(&staged_inputs, boundary);
             let contributing_input_ids = staged_inputs
                 .iter()
                 .map(|(staged_input_id, _)| staged_input_id.clone())

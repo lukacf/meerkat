@@ -257,7 +257,6 @@ impl AgentBuilder {
             pending_ops: Vec::new(),
             turn_authority: crate::turn_execution_authority::TurnExecutionAuthority::new(),
             extraction_mode: false,
-            extraction_attempts: 0,
             extraction_result: None,
             extraction_schema_warnings: None,
             extraction_last_error: None,

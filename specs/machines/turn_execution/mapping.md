@@ -129,6 +129,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `BoundaryCompleteCancelsAfterBoundary`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `cancel-and-fail`
+- `EnterExtraction`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `ExtractionValidationPassed`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `ExtractionRetry`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `tool-and-retry-loop`
+- `ExtractionExhausted`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
 - `RecoverableFailureFromCallingLlm`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `tool-and-retry-loop`
@@ -153,6 +165,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `FatalFailureFromDrainingBoundary`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `conversation-run`
+- `FatalFailureFromExtracting`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
 - `FatalFailureFromErrorRecovery`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `conversation-run`
@@ -168,6 +183,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `CancelNowFromDrainingBoundary`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `cancel-and-fail`
+- `CancelNowFromExtracting`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `cancel-and-fail`
 - `CancelNowFromErrorRecovery`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `cancel-and-fail`
@@ -181,6 +199,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `cancel-and-fail`
 - `CancelAfterBoundaryFromDrainingBoundary`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `cancel-and-fail`
+- `CancelAfterBoundaryFromExtracting`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `cancel-and-fail`
 - `CancelAfterBoundaryFromErrorRecovery`
@@ -201,6 +222,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `TurnLimitReachedFromDrainingBoundary`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `conversation-run`
+- `TurnLimitReachedFromExtracting`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
 - `TurnLimitReachedFromErrorRecovery`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `conversation-run`
@@ -214,6 +238,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `conversation-run`
 - `BudgetExhaustedFromDrainingBoundary`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `BudgetExhaustedFromExtracting`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `conversation-run`
 - `BudgetExhaustedFromErrorRecovery`
@@ -232,6 +259,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `cancel-and-fail`
 - `ForceCancelNoRunFromDrainingBoundary`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `cancel-and-fail`
+- `ForceCancelNoRunFromExtracting`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `cancel-and-fail`
 - `ForceCancelNoRunFromErrorRecovery`
@@ -266,6 +296,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RunCancelled`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `cancel-and-fail`
+- `DrainCommsInbox`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `CheckCompaction`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
 
 ### Invariants
 - `ready_has_no_active_run`

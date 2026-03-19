@@ -1068,29 +1068,15 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::Destroy { reply_tx } => {
-                    let result = match self.state() {
-                        MobState::Running | MobState::Stopped | MobState::Completed => {
-                            self.fail_all_pending_spawns("mob is destroying").await;
-                            self.handle_destroy().await
-                        }
-                        current => Err(MobError::InvalidTransition {
-                            from: current,
-                            to: MobState::Destroyed,
-                        }),
-                    };
+                    // No shell guard — lifecycle_authority rejects invalid transitions.
+                    self.fail_all_pending_spawns("mob is destroying").await;
+                    let result = self.handle_destroy().await;
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::Reset { reply_tx } => {
-                    let result = match self.state() {
-                        MobState::Running | MobState::Stopped | MobState::Completed => {
-                            self.fail_all_pending_spawns("mob is resetting").await;
-                            self.handle_reset().await
-                        }
-                        current => Err(MobError::InvalidTransition {
-                            from: current,
-                            to: MobState::Running,
-                        }),
-                    };
+                    // No shell guard — lifecycle_authority rejects invalid transitions.
+                    self.fail_all_pending_spawns("mob is resetting").await;
+                    let result = self.handle_reset().await;
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::TaskCreate {
@@ -2345,6 +2331,16 @@ impl MobActor {
     }
 
     async fn handle_destroy(&mut self) -> Result<(), MobError> {
+        // Gate via lifecycle authority — reject if current phase doesn't support Destroy.
+        if !self
+            .lifecycle_authority
+            .can_accept(MobLifecycleInput::Destroy)
+        {
+            return Err(MobError::InvalidTransition {
+                from: self.state(),
+                to: MobState::Destroyed,
+            });
+        }
         self.cancel_all_flow_tasks().await;
         self.notify_orchestrator_lifecycle(format!("Mob '{}' is destroying.", self.definition.id))
             .await;
@@ -2380,6 +2376,13 @@ impl MobActor {
     }
 
     async fn handle_reset(&mut self) -> Result<(), MobError> {
+        // Gate via lifecycle authority — Reset is a multi-step process
+        // (Running→Stop→Resume, Stopped→Resume, Completed→BeginCleanup→FinishCleanup→Resume).
+        // Use require_phase to validate the current phase supports reset.
+        self.lifecycle_authority.require_phase(
+            &[MobState::Running, MobState::Stopped, MobState::Completed],
+            MobState::Running,
+        )?;
         let prior_state = self.state();
         let was_stopped = prior_state == MobState::Stopped;
         self.cancel_all_flow_tasks().await;

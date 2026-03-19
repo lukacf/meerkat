@@ -152,6 +152,7 @@ impl DriverEntry {
     }
 
     /// Look up the persisted input for a given ID.
+    #[allow(dead_code)]
     pub(crate) fn persisted_input(&self, input_id: &InputId) -> Option<&Input> {
         match self {
             DriverEntry::Ephemeral(d) => d.persisted_input(input_id),

@@ -6,7 +6,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Rust owner: `meerkat-core` / `generated::turn_execution`
 
 ## State
-- Phase enum: `Ready | ApplyingPrimitive | CallingLlm | WaitingForOps | DrainingBoundary | ErrorRecovery | Cancelling | Completed | Failed | Cancelled`
+- Phase enum: `Ready | ApplyingPrimitive | CallingLlm | WaitingForOps | DrainingBoundary | Extracting | ErrorRecovery | Cancelling | Completed | Failed | Cancelled`
 - `active_run`: `Option<RunId>`
 - `primitive_kind`: `TurnPrimitiveKind`
 - `admitted_content_shape`: `Option<ContentShape>`
@@ -16,6 +16,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `boundary_count`: `u32`
 - `cancel_after_boundary`: `Bool`
 - `terminal_outcome`: `TurnTerminalOutcome`
+- `extraction_attempts`: `u32`
+- `max_extraction_retries`: `u32`
 
 ## Inputs
 - `StartConversationRun`(run_id: RunId)
@@ -36,6 +38,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AcknowledgeTerminal`(run_id: RunId)
 - `TurnLimitReached`(run_id: RunId)
 - `BudgetExhausted`(run_id: RunId)
+- `EnterExtraction`(run_id: RunId, max_retries: u32)
+- `ExtractionValidationPassed`(run_id: RunId)
+- `ExtractionRetry`(run_id: RunId)
+- `ExtractionExhausted`(run_id: RunId)
 - `ForceCancelNoRun`
 - `RunCompleted`(run_id: RunId)
 - `RunFailed`(run_id: RunId)
@@ -47,6 +53,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RunCompleted`(run_id: RunId)
 - `RunFailed`(run_id: RunId)
 - `RunCancelled`(run_id: RunId)
+- `DrainCommsInbox`
+- `CheckCompaction`
 
 ## Invariants
 - `ready_has_no_active_run`
@@ -83,6 +91,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `run_matches_active`
   - `conversation_turn`
+- Emits: `DrainCommsInbox`, `CheckCompaction`
 - To: `CallingLlm`
 
 ### `PrimitiveAppliedImmediateAppend`
@@ -157,6 +166,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `run_matches_active`
   - `conversation_turn`
   - `cancel_after_boundary_not_requested`
+- Emits: `DrainCommsInbox`, `CheckCompaction`
 - To: `CallingLlm`
 
 ### `BoundaryContinueCancelsAfterBoundary`
@@ -187,6 +197,37 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `RunCancelled`
 - To: `Cancelled`
 
+### `EnterExtraction`
+- From: `DrainingBoundary`
+- On: `EnterExtraction`(run_id, max_retries)
+- Guards:
+  - `run_matches_active`
+- To: `Extracting`
+
+### `ExtractionValidationPassed`
+- From: `Extracting`
+- On: `ExtractionValidationPassed`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `RunCompleted`
+- To: `Completed`
+
+### `ExtractionRetry`
+- From: `Extracting`
+- On: `ExtractionRetry`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `DrainCommsInbox`, `CheckCompaction`
+- To: `CallingLlm`
+
+### `ExtractionExhausted`
+- From: `Extracting`
+- On: `ExtractionExhausted`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `RunCompleted`
+- To: `Completed`
+
 ### `RecoverableFailureFromCallingLlm`
 - From: `CallingLlm`
 - On: `RecoverableFailure`(run_id)
@@ -213,6 +254,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RetryRequested`(run_id)
 - Guards:
   - `run_matches_active`
+- Emits: `DrainCommsInbox`, `CheckCompaction`
 - To: `CallingLlm`
 
 ### `FatalFailureFromApplyingPrimitive`
@@ -241,6 +283,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `FatalFailureFromDrainingBoundary`
 - From: `DrainingBoundary`
+- On: `FatalFailure`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `RunFailed`
+- To: `Failed`
+
+### `FatalFailureFromExtracting`
+- From: `Extracting`
 - On: `FatalFailure`(run_id)
 - Guards:
   - `run_matches_active`
@@ -283,6 +333,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `run_matches_active`
 - To: `Cancelling`
 
+### `CancelNowFromExtracting`
+- From: `Extracting`
+- On: `CancelNow`(run_id)
+- Guards:
+  - `run_matches_active`
+- To: `Cancelling`
+
 ### `CancelNowFromErrorRecovery`
 - From: `ErrorRecovery`
 - On: `CancelNow`(run_id)
@@ -317,6 +374,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `run_matches_active`
 - To: `DrainingBoundary`
+
+### `CancelAfterBoundaryFromExtracting`
+- From: `Extracting`
+- On: `CancelAfterBoundary`(run_id)
+- Guards:
+  - `run_matches_active`
+- To: `Extracting`
 
 ### `CancelAfterBoundaryFromErrorRecovery`
 - From: `ErrorRecovery`
@@ -365,6 +429,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `BoundaryApplied`, `RunCompleted`
 - To: `Completed`
 
+### `TurnLimitReachedFromExtracting`
+- From: `Extracting`
+- On: `TurnLimitReached`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
 ### `TurnLimitReachedFromErrorRecovery`
 - From: `ErrorRecovery`
 - On: `TurnLimitReached`(run_id)
@@ -405,6 +477,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `BoundaryApplied`, `RunCompleted`
 - To: `Completed`
 
+### `BudgetExhaustedFromExtracting`
+- From: `Extracting`
+- On: `BudgetExhausted`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
 ### `BudgetExhaustedFromErrorRecovery`
 - From: `ErrorRecovery`
 - On: `BudgetExhausted`(run_id)
@@ -435,6 +515,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ForceCancelNoRunFromDrainingBoundary`
 - From: `DrainingBoundary`
+- On: `ForceCancelNoRun`()
+- To: `Cancelled`
+
+### `ForceCancelNoRunFromExtracting`
+- From: `Extracting`
 - On: `ForceCancelNoRun`()
 - To: `Cancelled`
 

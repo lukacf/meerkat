@@ -124,7 +124,7 @@ async fn flow_run_kernel_persists_pending_and_terminal_truth_for_machine_verify(
         .await
         .expect("load pending run")
         .expect("pending run should exist");
-    assert_eq!(pending.status, MobRunStatus::Pending);
+    assert_eq!(*pending.status(), MobRunStatus::Pending);
 
     let started = kernel.start_run(&run_id).await.expect("start run");
     assert!(started, "pending run should start");
@@ -152,7 +152,7 @@ async fn flow_run_kernel_persists_pending_and_terminal_truth_for_machine_verify(
         .await
         .expect("load completed run")
         .expect("completed run should exist");
-    assert_eq!(completed.status, MobRunStatus::Completed);
+    assert_eq!(*completed.status(), MobRunStatus::Completed);
 
     let replay = run_store
         .list_runs(&MobId::from("mob-owner-test"), None)

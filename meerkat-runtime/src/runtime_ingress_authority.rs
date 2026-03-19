@@ -84,6 +84,7 @@ pub enum RuntimeIngressInput {
         work_id: InputId,
         content_shape: ContentShape,
         handling_mode: HandlingMode,
+        is_prompt: bool,
         request_id: Option<RequestId>,
         reservation_key: Option<ReservationKey>,
         policy: PolicyDecision,
@@ -169,6 +170,12 @@ pub enum RuntimeIngressEffect {
     IngressNotice { kind: String, detail: String },
     /// A silent intent override was applied.
     SilentIntentApplied { work_id: InputId, intent: String },
+    /// Per-input recovery effect: consume the input on accept.
+    RecoverConsumeOnAccept { work_id: InputId },
+    /// Per-input recovery effect: rollback the input to queued.
+    RecoverRollback { work_id: InputId },
+    /// Per-input recovery effect: keep the input in its current state.
+    RecoverKeep { work_id: InputId },
 }
 
 // ---------------------------------------------------------------------------
@@ -220,6 +227,7 @@ struct RuntimeIngressFields {
     reservation_key: HashMap<InputId, Option<ReservationKey>>,
     policy_snapshot: HashMap<InputId, PolicyDecision>,
     handling_mode: HashMap<InputId, HandlingMode>,
+    is_prompt: HashMap<InputId, bool>,
     lifecycle: HashMap<InputId, InputLifecycleState>,
     terminal_outcome: HashMap<InputId, Option<InputTerminalOutcome>>,
     queue: Vec<InputId>,
@@ -243,6 +251,7 @@ impl RuntimeIngressFields {
             reservation_key: HashMap::new(),
             policy_snapshot: HashMap::new(),
             handling_mode: HashMap::new(),
+            is_prompt: HashMap::new(),
             lifecycle: HashMap::new(),
             terminal_outcome: HashMap::new(),
             queue: Vec::new(),
@@ -407,12 +416,31 @@ impl RuntimeIngressAuthority {
         self.fields.handling_mode.get(work_id).copied()
     }
 
+    /// Whether the input was classified as a prompt at admission.
+    pub fn is_prompt(&self, work_id: &InputId) -> bool {
+        self.fields.is_prompt.get(work_id).copied().unwrap_or(false)
+    }
+
+    /// Classify the boundary type for a given input based on stored metadata.
+    ///
+    /// Steer inputs produce `RunCheckpoint` (mid-run injection), Queue inputs
+    /// produce `RunStart` (new turn). The authority owns this classification
+    /// because it stores the per-input handling_mode.
+    pub fn input_boundary(&self, work_id: &InputId) -> RunApplyBoundary {
+        match self.fields.handling_mode.get(work_id) {
+            Some(HandlingMode::Steer) => RunApplyBoundary::RunCheckpoint,
+            _ => RunApplyBoundary::RunStart,
+        }
+    }
+
     /// Determine the next batch of input IDs to drain.
     ///
     /// Implements the batching policy:
     /// - Steer-first: if steer_queue is non-empty, batch consecutive steer inputs
     ///   that share the same `RunApplyBoundary` (determined by `boundary_of`).
-    /// - Queue inputs are processed one at a time.
+    /// - Queue+Prompt: if the next queue item is a prompt, return just that one
+    ///   (prompts always get a dedicated run).
+    /// - Queue (non-prompt): batch all consecutive non-prompt items.
     ///
     /// Returns an empty vec if both queues are empty.
     pub fn drain_next_batch<F>(&self, boundary_of: F) -> Vec<InputId>
@@ -430,7 +458,21 @@ impl RuntimeIngressAuthority {
                 .cloned()
                 .collect();
         }
-        self.fields.queue.first().cloned().into_iter().collect()
+        if let Some(first) = self.fields.queue.first() {
+            if self.fields.is_prompt.get(first).copied().unwrap_or(false) {
+                // Queue+Prompt → single-item batch (dedicated run)
+                return vec![first.clone()];
+            }
+            // Non-prompt queue items: batch consecutive non-prompt items
+            return self
+                .fields
+                .queue
+                .iter()
+                .take_while(|id| !self.fields.is_prompt.get(*id).copied().unwrap_or(false))
+                .cloned()
+                .collect();
+        }
+        Vec::new()
     }
 
     /// Check if a transition is legal without applying it.
@@ -472,6 +514,7 @@ impl RuntimeIngressAuthority {
                 work_id,
                 content_shape,
                 handling_mode,
+                is_prompt,
                 request_id,
                 reservation_key,
                 policy,
@@ -480,6 +523,7 @@ impl RuntimeIngressAuthority {
                 work_id,
                 content_shape,
                 *handling_mode,
+                *is_prompt,
                 request_id,
                 reservation_key,
                 policy,
@@ -546,6 +590,7 @@ impl RuntimeIngressAuthority {
         work_id: &InputId,
         content_shape: &ContentShape,
         handling_mode: HandlingMode,
+        is_prompt: bool,
         request_id: &Option<RequestId>,
         reservation_key: &Option<ReservationKey>,
         policy: &PolicyDecision,
@@ -592,6 +637,7 @@ impl RuntimeIngressAuthority {
             .policy_snapshot
             .insert(work_id.clone(), policy.clone());
         fields.handling_mode.insert(work_id.clone(), handling_mode);
+        fields.is_prompt.insert(work_id.clone(), is_prompt);
         fields
             .lifecycle
             .insert(work_id.clone(), InputLifecycleState::Queued);
@@ -1472,6 +1518,60 @@ impl RuntimeIngressAuthority {
             fields.current_run_contributors = Vec::new();
         }
 
+        // Emit per-input recovery effects for all non-terminal inputs.
+        // The authority inspects each input's lifecycle state and policy snapshot
+        // to decide the recovery action. The shell executes these effects.
+        let non_terminal_ids: Vec<InputId> = fields
+            .lifecycle
+            .iter()
+            .filter(|(_, state)| !state.is_terminal())
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        for wid in &non_terminal_ids {
+            let lifecycle = fields.lifecycle.get(wid).copied();
+            match lifecycle {
+                Some(InputLifecycleState::Accepted) => {
+                    // Check if this is an Ignore+OnAccept input that should be consumed
+                    let should_consume = fields
+                        .policy_snapshot
+                        .get(wid)
+                        .map(|p| {
+                            p.apply_mode == crate::policy::ApplyMode::Ignore
+                                && p.consume_point == crate::policy::ConsumePoint::OnAccept
+                        })
+                        .unwrap_or(false);
+                    if should_consume {
+                        effects.push(RuntimeIngressEffect::RecoverConsumeOnAccept {
+                            work_id: wid.clone(),
+                        });
+                    } else {
+                        effects.push(RuntimeIngressEffect::RecoverRollback {
+                            work_id: wid.clone(),
+                        });
+                    }
+                }
+                Some(InputLifecycleState::Staged) => {
+                    effects.push(RuntimeIngressEffect::RecoverRollback {
+                        work_id: wid.clone(),
+                    });
+                }
+                Some(
+                    InputLifecycleState::Applied | InputLifecycleState::AppliedPendingConsumption,
+                ) => {
+                    effects.push(RuntimeIngressEffect::RecoverKeep {
+                        work_id: wid.clone(),
+                    });
+                }
+                Some(InputLifecycleState::Queued) => {
+                    effects.push(RuntimeIngressEffect::RecoverKeep {
+                        work_id: wid.clone(),
+                    });
+                }
+                _ => {}
+            }
+        }
+
         if !fields.queue.is_empty() || !fields.steer_queue.is_empty() {
             fields.wake_requested = true;
             effects.push(RuntimeIngressEffect::WakeRuntime);
@@ -1586,10 +1686,20 @@ mod tests {
         work_id: InputId,
         mode: HandlingMode,
     ) -> RuntimeIngressTransition {
+        admit_queued_with_prompt(auth, work_id, mode, false)
+    }
+
+    fn admit_queued_with_prompt(
+        auth: &mut RuntimeIngressAuthority,
+        work_id: InputId,
+        mode: HandlingMode,
+        is_prompt: bool,
+    ) -> RuntimeIngressTransition {
         auth.apply(RuntimeIngressInput::AdmitQueued {
             work_id,
             content_shape: ContentShape("text".into()),
             handling_mode: mode,
+            is_prompt,
             request_id: None,
             reservation_key: None,
             policy: test_policy(),
@@ -1722,6 +1832,7 @@ mod tests {
             work_id: wid,
             content_shape: ContentShape("text".into()),
             handling_mode: HandlingMode::Queue,
+            is_prompt: false,
             request_id: None,
             reservation_key: None,
             policy: test_policy(),
@@ -1741,6 +1852,7 @@ mod tests {
             work_id: InputId::new(),
             content_shape: ContentShape("text".into()),
             handling_mode: HandlingMode::Queue,
+            is_prompt: false,
             request_id: None,
             reservation_key: None,
             policy: test_policy(),

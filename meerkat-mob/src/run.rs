@@ -16,13 +16,25 @@ pub struct MobRun {
     pub run_id: RunId,
     pub mob_id: MobId,
     pub flow_id: FlowId,
-    pub status: MobRunStatus,
-    pub flow_state: KernelState,
+    pub(crate) status: MobRunStatus,
+    pub(crate) flow_state: KernelState,
     pub activation_params: serde_json::Value,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
     pub step_ledger: Vec<StepLedgerEntry>,
     pub failure_ledger: Vec<FailureLedgerEntry>,
+}
+
+impl MobRun {
+    /// Read-only access to the run's current status.
+    pub fn status(&self) -> &MobRunStatus {
+        &self.status
+    }
+
+    /// Read-only access to the run's current flow state.
+    pub fn flow_state(&self) -> &KernelState {
+        &self.flow_state
+    }
 }
 
 impl MobRun {

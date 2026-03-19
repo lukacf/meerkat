@@ -148,6 +148,15 @@ impl EphemeralRuntimeDriver {
                         "ingress authority: silent intent applied"
                     );
                 }
+                RuntimeIngressEffect::RecoverConsumeOnAccept { work_id }
+                | RuntimeIngressEffect::RecoverRollback { work_id }
+                | RuntimeIngressEffect::RecoverKeep { work_id } => {
+                    tracing::trace!(
+                        work_id = ?work_id,
+                        effect = ?effect,
+                        "ingress authority: recovery effect"
+                    );
+                }
             }
         }
     }
@@ -327,6 +336,7 @@ impl EphemeralRuntimeDriver {
     }
 
     /// Look up the persisted input for a given ID (from the ledger).
+    #[allow(dead_code)] // Used by runtime_loop boundary classification via authority
     pub fn persisted_input(&self, input_id: &InputId) -> Option<&Input> {
         self.ledger
             .get(input_id)
@@ -338,26 +348,22 @@ impl EphemeralRuntimeDriver {
         input_id: &InputId,
         run_id: &RunId,
     ) -> Result<(), InputLifecycleError> {
-        // Ingress authority: StageDrainSnapshot (single contributor)
-        // Note: callers may stage inputs one-at-a-time, so we apply
-        // StageDrainSnapshot only if the authority has no current run yet.
-        // If a run is already in progress, the authority was already notified.
-        if self.ingress.current_run().is_none() {
-            match self.ingress.apply(RuntimeIngressInput::StageDrainSnapshot {
-                run_id: run_id.clone(),
-                contributing_work_ids: vec![input_id.clone()],
-            }) {
-                Ok(transition) => {
-                    self.process_ingress_effects(&transition.effects);
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        input_id = ?input_id,
-                        run_id = ?run_id,
-                        error = %err,
-                        "ingress authority rejected StageDrainSnapshot"
-                    );
-                }
+        // Ingress authority: StageDrainSnapshot — always call the authority.
+        // The authority will reject if a run is already in progress (no_current_run guard).
+        match self.ingress.apply(RuntimeIngressInput::StageDrainSnapshot {
+            run_id: run_id.clone(),
+            contributing_work_ids: vec![input_id.clone()],
+        }) {
+            Ok(transition) => {
+                self.process_ingress_effects(&transition.effects);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    input_id = ?input_id,
+                    run_id = ?run_id,
+                    error = %err,
+                    "ingress authority rejected StageDrainSnapshot"
+                );
             }
         }
 
@@ -482,13 +488,7 @@ impl EphemeralRuntimeDriver {
     }
 
     pub fn reset(&mut self) -> Result<ResetReport, RuntimeDriverError> {
-        if self.control.is_running() {
-            return Err(RuntimeDriverError::Internal(
-                "cannot reset while running".into(),
-            ));
-        }
-
-        // Ingress authority: Reset
+        // Ingress authority: Reset (authority rejects if a run is in progress)
         match self.ingress.apply(RuntimeIngressInput::Reset) {
             Ok(transition) => {
                 self.process_ingress_effects(&transition.effects);
@@ -549,64 +549,59 @@ impl EphemeralRuntimeDriver {
     }
 
     pub fn recover_ephemeral(&mut self) -> RecoveryReport {
-        // Ingress authority: Recover
-        match self.ingress.apply(RuntimeIngressInput::Recover) {
+        // Ingress authority: Recover — returns typed per-input recovery effects.
+        let recovery_effects = match self.ingress.apply(RuntimeIngressInput::Recover) {
             Ok(transition) => {
                 self.process_ingress_effects(&transition.effects);
+                transition.effects
             }
             Err(err) => {
                 tracing::warn!(
                     error = %err,
                     "ingress authority rejected Recover"
                 );
+                Vec::new()
             }
-        }
+        };
 
+        // Execute the authority's per-input recovery effects.
         let mut recovered = 0;
         let mut abandoned = 0;
         let mut requeued = 0;
-        let input_ids: Vec<InputId> = self
-            .ledger
-            .iter()
-            .filter(|(_, s)| !s.is_terminal())
-            .map(|(id, _)| id.clone())
-            .collect();
-        for input_id in input_ids {
-            if let Some(state) = self.ledger.get_mut(&input_id) {
-                match state.current_state() {
-                    InputLifecycleState::Accepted => {
-                        if let Some(ref policy) = state.policy {
-                            if policy.decision.apply_mode == ApplyMode::Ignore
-                                && policy.decision.consume_point == ConsumePoint::OnAccept
-                            {
-                                let _ = state.apply(InputLifecycleInput::ConsumeOnAccept);
-                                abandoned += 1;
-                            } else {
-                                let _ = state.apply(InputLifecycleInput::QueueAccepted);
-                                requeued += 1;
-                            }
-                        } else {
-                            let _ = state.apply(InputLifecycleInput::QueueAccepted);
-                            requeued += 1;
-                        }
+
+        for effect in &recovery_effects {
+            match effect {
+                RuntimeIngressEffect::RecoverConsumeOnAccept { work_id } => {
+                    if let Some(state) = self.ledger.get_mut(work_id) {
+                        let _ = state.apply(InputLifecycleInput::ConsumeOnAccept);
+                        abandoned += 1;
                         recovered += 1;
                     }
-                    InputLifecycleState::Staged => {
-                        let _ = state.apply(InputLifecycleInput::RollbackStaged);
-                        recovered += 1;
-                        requeued += 1;
-                    }
-                    InputLifecycleState::Applied
-                    | InputLifecycleState::AppliedPendingConsumption => {
-                        recovered += 1;
-                    }
-                    InputLifecycleState::Queued => {
-                        recovered += 1;
-                    }
-                    _ => {}
                 }
+                RuntimeIngressEffect::RecoverRollback { work_id } => {
+                    if let Some(state) = self.ledger.get_mut(work_id) {
+                        match state.current_state() {
+                            InputLifecycleState::Accepted => {
+                                let _ = state.apply(InputLifecycleInput::QueueAccepted);
+                            }
+                            InputLifecycleState::Staged => {
+                                let _ = state.apply(InputLifecycleInput::RollbackStaged);
+                            }
+                            _ => {}
+                        }
+                        requeued += 1;
+                        recovered += 1;
+                    }
+                }
+                RuntimeIngressEffect::RecoverKeep { work_id } => {
+                    if self.ledger.get(work_id).is_some() {
+                        recovered += 1;
+                    }
+                }
+                _ => {}
             }
         }
+
         RecoveryReport {
             inputs_recovered: recovered,
             inputs_abandoned: abandoned,
@@ -742,10 +737,12 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                 policy: policy.clone(),
             }
         } else {
+            let is_prompt = matches!(input, Input::Prompt(_));
             RuntimeIngressInput::AdmitQueued {
                 work_id: input_id.clone(),
                 content_shape,
                 handling_mode,
+                is_prompt,
                 request_id: None,
                 reservation_key: None,
                 policy: policy.clone(),
@@ -860,23 +857,19 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                 run_id,
                 consumed_input_ids,
             } => {
-                // Ingress authority: RunCompleted
-                if let Some(current_run) = self.ingress.current_run().cloned()
-                    && current_run == run_id
-                {
-                    match self.ingress.apply(RuntimeIngressInput::RunCompleted {
-                        run_id: run_id.clone(),
-                    }) {
-                        Ok(transition) => {
-                            self.process_ingress_effects(&transition.effects);
-                        }
-                        Err(err) => {
-                            tracing::warn!(
-                                run_id = ?run_id,
-                                error = %err,
-                                "ingress authority rejected RunCompleted"
-                            );
-                        }
+                // Ingress authority: RunCompleted — always call; authority rejects if run doesn't match.
+                match self.ingress.apply(RuntimeIngressInput::RunCompleted {
+                    run_id: run_id.clone(),
+                }) {
+                    Ok(transition) => {
+                        self.process_ingress_effects(&transition.effects);
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            run_id = ?run_id,
+                            error = %err,
+                            "ingress authority rejected RunCompleted"
+                        );
                     }
                 }
 
@@ -889,23 +882,19 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                     .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
             }
             RunEvent::RunFailed { ref run_id, .. } => {
-                // Ingress authority: RunFailed
-                if let Some(current_run) = self.ingress.current_run().cloned()
-                    && current_run == *run_id
-                {
-                    match self.ingress.apply(RuntimeIngressInput::RunFailed {
-                        run_id: run_id.clone(),
-                    }) {
-                        Ok(transition) => {
-                            self.process_ingress_effects(&transition.effects);
-                        }
-                        Err(err) => {
-                            tracing::warn!(
-                                run_id = ?run_id,
-                                error = %err,
-                                "ingress authority rejected RunFailed"
-                            );
-                        }
+                // Ingress authority: RunFailed — always call; authority rejects if run doesn't match.
+                match self.ingress.apply(RuntimeIngressInput::RunFailed {
+                    run_id: run_id.clone(),
+                }) {
+                    Ok(transition) => {
+                        self.process_ingress_effects(&transition.effects);
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            run_id = ?run_id,
+                            error = %err,
+                            "ingress authority rejected RunFailed"
+                        );
                     }
                 }
 
@@ -927,23 +916,19 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                     .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
             }
             RunEvent::RunCancelled { ref run_id, .. } => {
-                // Ingress authority: RunCancelled
-                if let Some(current_run) = self.ingress.current_run().cloned()
-                    && current_run == *run_id
-                {
-                    match self.ingress.apply(RuntimeIngressInput::RunCancelled {
-                        run_id: run_id.clone(),
-                    }) {
-                        Ok(transition) => {
-                            self.process_ingress_effects(&transition.effects);
-                        }
-                        Err(err) => {
-                            tracing::warn!(
-                                run_id = ?run_id,
-                                error = %err,
-                                "ingress authority rejected RunCancelled"
-                            );
-                        }
+                // Ingress authority: RunCancelled — always call; authority rejects if run doesn't match.
+                match self.ingress.apply(RuntimeIngressInput::RunCancelled {
+                    run_id: run_id.clone(),
+                }) {
+                    Ok(transition) => {
+                        self.process_ingress_effects(&transition.effects);
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            run_id = ?run_id,
+                            error = %err,
+                            "ingress authority rejected RunCancelled"
+                        );
                     }
                 }
 

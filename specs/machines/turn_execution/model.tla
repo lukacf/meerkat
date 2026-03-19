@@ -17,9 +17,9 @@ SeqRemove(seq, value) == IF Len(seq) = 0 THEN <<>> ELSE IF Head(seq) = value THE
 RECURSIVE SeqRemoveAll(_, _)
 SeqRemoveAll(seq, values) == IF Len(values) = 0 THEN seq ELSE SeqRemoveAll(SeqRemove(seq, Head(values)), Tail(values))
 
-VARIABLES phase, model_step_count, active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, terminal_outcome
+VARIABLES phase, model_step_count, active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, terminal_outcome, extraction_attempts, max_extraction_retries
 
-vars == << phase, model_step_count, active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, terminal_outcome >>
+vars == << phase, model_step_count, active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, terminal_outcome, extraction_attempts, max_extraction_retries >>
 
 Init ==
     /\ phase = "Ready"
@@ -33,6 +33,8 @@ Init ==
     /\ boundary_count = 0
     /\ cancel_after_boundary = FALSE
     /\ terminal_outcome = "None"
+    /\ extraction_attempts = 0
+    /\ max_extraction_retries = 0
 
 TerminalStutter ==
     /\ phase = "Completed" \/ phase = "Failed" \/ phase = "Cancelled"
@@ -51,6 +53,8 @@ StartConversationRun(run_id) ==
     /\ boundary_count' = 0
     /\ cancel_after_boundary' = FALSE
     /\ terminal_outcome' = "None"
+    /\ extraction_attempts' = 0
+    /\ max_extraction_retries' = 0
 
 
 StartImmediateAppend(run_id) ==
@@ -66,6 +70,8 @@ StartImmediateAppend(run_id) ==
     /\ boundary_count' = 0
     /\ cancel_after_boundary' = FALSE
     /\ terminal_outcome' = "None"
+    /\ extraction_attempts' = 0
+    /\ max_extraction_retries' = 0
 
 
 StartImmediateContext(run_id) ==
@@ -81,6 +87,8 @@ StartImmediateContext(run_id) ==
     /\ boundary_count' = 0
     /\ cancel_after_boundary' = FALSE
     /\ terminal_outcome' = "None"
+    /\ extraction_attempts' = 0
+    /\ max_extraction_retries' = 0
 
 
 PrimitiveAppliedConversationTurn(run_id, arg_admitted_content_shape, arg_vision_enabled, arg_image_tool_results_enabled) ==
@@ -92,7 +100,7 @@ PrimitiveAppliedConversationTurn(run_id, arg_admitted_content_shape, arg_vision_
     /\ admitted_content_shape' = Some(arg_admitted_content_shape)
     /\ vision_enabled' = arg_vision_enabled
     /\ image_tool_results_enabled' = arg_image_tool_results_enabled
-    /\ UNCHANGED << active_run, primitive_kind, tool_calls_pending, boundary_count, cancel_after_boundary, terminal_outcome >>
+    /\ UNCHANGED << active_run, primitive_kind, tool_calls_pending, boundary_count, cancel_after_boundary, terminal_outcome, extraction_attempts, max_extraction_retries >>
 
 
 PrimitiveAppliedImmediateAppend(run_id, arg_admitted_content_shape, arg_vision_enabled, arg_image_tool_results_enabled) ==
@@ -107,7 +115,7 @@ PrimitiveAppliedImmediateAppend(run_id, arg_admitted_content_shape, arg_vision_e
     /\ image_tool_results_enabled' = arg_image_tool_results_enabled
     /\ boundary_count' = (boundary_count) + 1
     /\ terminal_outcome' = "Completed"
-    /\ UNCHANGED << active_run, primitive_kind, tool_calls_pending, cancel_after_boundary >>
+    /\ UNCHANGED << active_run, primitive_kind, tool_calls_pending, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
 
 
 PrimitiveAppliedImmediateAppendCancelsAfterBoundary(run_id, arg_admitted_content_shape, arg_vision_enabled, arg_image_tool_results_enabled) ==
@@ -123,7 +131,7 @@ PrimitiveAppliedImmediateAppendCancelsAfterBoundary(run_id, arg_admitted_content
     /\ boundary_count' = (boundary_count) + 1
     /\ cancel_after_boundary' = FALSE
     /\ terminal_outcome' = "Cancelled"
-    /\ UNCHANGED << active_run, primitive_kind, tool_calls_pending >>
+    /\ UNCHANGED << active_run, primitive_kind, tool_calls_pending, extraction_attempts, max_extraction_retries >>
 
 
 PrimitiveAppliedImmediateContext(run_id, arg_admitted_content_shape, arg_vision_enabled, arg_image_tool_results_enabled) ==
@@ -138,7 +146,7 @@ PrimitiveAppliedImmediateContext(run_id, arg_admitted_content_shape, arg_vision_
     /\ image_tool_results_enabled' = arg_image_tool_results_enabled
     /\ boundary_count' = (boundary_count) + 1
     /\ terminal_outcome' = "Completed"
-    /\ UNCHANGED << active_run, primitive_kind, tool_calls_pending, cancel_after_boundary >>
+    /\ UNCHANGED << active_run, primitive_kind, tool_calls_pending, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
 
 
 PrimitiveAppliedImmediateContextCancelsAfterBoundary(run_id, arg_admitted_content_shape, arg_vision_enabled, arg_image_tool_results_enabled) ==
@@ -154,7 +162,7 @@ PrimitiveAppliedImmediateContextCancelsAfterBoundary(run_id, arg_admitted_conten
     /\ boundary_count' = (boundary_count) + 1
     /\ cancel_after_boundary' = FALSE
     /\ terminal_outcome' = "Cancelled"
-    /\ UNCHANGED << active_run, primitive_kind, tool_calls_pending >>
+    /\ UNCHANGED << active_run, primitive_kind, tool_calls_pending, extraction_attempts, max_extraction_retries >>
 
 
 LlmReturnedToolCalls(run_id, tool_count) ==
@@ -164,7 +172,7 @@ LlmReturnedToolCalls(run_id, tool_count) ==
     /\ phase' = "WaitingForOps"
     /\ model_step_count' = model_step_count + 1
     /\ tool_calls_pending' = tool_count
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, boundary_count, cancel_after_boundary, terminal_outcome >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, boundary_count, cancel_after_boundary, terminal_outcome, extraction_attempts, max_extraction_retries >>
 
 
 ToolCallsResolved(run_id) ==
@@ -175,7 +183,7 @@ ToolCallsResolved(run_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ tool_calls_pending' = 0
     /\ boundary_count' = (boundary_count) + 1
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, cancel_after_boundary, terminal_outcome >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, cancel_after_boundary, terminal_outcome, extraction_attempts, max_extraction_retries >>
 
 
 LlmReturnedTerminal(run_id) ==
@@ -184,7 +192,7 @@ LlmReturnedTerminal(run_id) ==
     /\ phase' = "DrainingBoundary"
     /\ model_step_count' = model_step_count + 1
     /\ boundary_count' = (boundary_count) + 1
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary, terminal_outcome >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary, terminal_outcome, extraction_attempts, max_extraction_retries >>
 
 
 BoundaryContinue(run_id) ==
@@ -194,7 +202,7 @@ BoundaryContinue(run_id) ==
     /\ (cancel_after_boundary = FALSE)
     /\ phase' = "CallingLlm"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, terminal_outcome >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, terminal_outcome, extraction_attempts, max_extraction_retries >>
 
 
 BoundaryContinueCancelsAfterBoundary(run_id) ==
@@ -206,7 +214,7 @@ BoundaryContinueCancelsAfterBoundary(run_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ cancel_after_boundary' = FALSE
     /\ terminal_outcome' = "Cancelled"
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, extraction_attempts, max_extraction_retries >>
 
 
 BoundaryComplete(run_id) ==
@@ -216,7 +224,7 @@ BoundaryComplete(run_id) ==
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ terminal_outcome' = "Completed"
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
 
 
 BoundaryCompleteCancelsAfterBoundary(run_id) ==
@@ -227,7 +235,43 @@ BoundaryCompleteCancelsAfterBoundary(run_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ cancel_after_boundary' = FALSE
     /\ terminal_outcome' = "Cancelled"
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, extraction_attempts, max_extraction_retries >>
+
+
+EnterExtraction(run_id, max_retries) ==
+    /\ phase = "DrainingBoundary"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Extracting"
+    /\ model_step_count' = model_step_count + 1
+    /\ max_extraction_retries' = max_retries
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, terminal_outcome, extraction_attempts >>
+
+
+ExtractionValidationPassed(run_id) ==
+    /\ phase = "Extracting"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ terminal_outcome' = "Completed"
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
+
+
+ExtractionRetry(run_id) ==
+    /\ phase = "Extracting"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "CallingLlm"
+    /\ model_step_count' = model_step_count + 1
+    /\ extraction_attempts' = (extraction_attempts) + 1
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, terminal_outcome, max_extraction_retries >>
+
+
+ExtractionExhausted(run_id) ==
+    /\ phase = "Extracting"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ terminal_outcome' = "Completed"
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
 
 
 RecoverableFailureFromCallingLlm(run_id) ==
@@ -235,7 +279,7 @@ RecoverableFailureFromCallingLlm(run_id) ==
     /\ (active_run = Some(run_id))
     /\ phase' = "ErrorRecovery"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, terminal_outcome >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, terminal_outcome, extraction_attempts, max_extraction_retries >>
 
 
 RecoverableFailureFromWaitingForOps(run_id) ==
@@ -243,7 +287,7 @@ RecoverableFailureFromWaitingForOps(run_id) ==
     /\ (active_run = Some(run_id))
     /\ phase' = "ErrorRecovery"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, terminal_outcome >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, terminal_outcome, extraction_attempts, max_extraction_retries >>
 
 
 RecoverableFailureFromDrainingBoundary(run_id) ==
@@ -251,7 +295,7 @@ RecoverableFailureFromDrainingBoundary(run_id) ==
     /\ (active_run = Some(run_id))
     /\ phase' = "ErrorRecovery"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, terminal_outcome >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, terminal_outcome, extraction_attempts, max_extraction_retries >>
 
 
 RetryRequested(run_id) ==
@@ -259,7 +303,7 @@ RetryRequested(run_id) ==
     /\ (active_run = Some(run_id))
     /\ phase' = "CallingLlm"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, terminal_outcome >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, terminal_outcome, extraction_attempts, max_extraction_retries >>
 
 
 FatalFailureFromApplyingPrimitive(run_id) ==
@@ -268,7 +312,7 @@ FatalFailureFromApplyingPrimitive(run_id) ==
     /\ phase' = "Failed"
     /\ model_step_count' = model_step_count + 1
     /\ terminal_outcome' = "Failed"
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
 
 
 FatalFailureFromCallingLlm(run_id) ==
@@ -277,7 +321,7 @@ FatalFailureFromCallingLlm(run_id) ==
     /\ phase' = "Failed"
     /\ model_step_count' = model_step_count + 1
     /\ terminal_outcome' = "Failed"
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
 
 
 FatalFailureFromWaitingForOps(run_id) ==
@@ -286,7 +330,7 @@ FatalFailureFromWaitingForOps(run_id) ==
     /\ phase' = "Failed"
     /\ model_step_count' = model_step_count + 1
     /\ terminal_outcome' = "Failed"
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
 
 
 FatalFailureFromDrainingBoundary(run_id) ==
@@ -295,7 +339,16 @@ FatalFailureFromDrainingBoundary(run_id) ==
     /\ phase' = "Failed"
     /\ model_step_count' = model_step_count + 1
     /\ terminal_outcome' = "Failed"
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
+
+
+FatalFailureFromExtracting(run_id) ==
+    /\ phase = "Extracting"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Failed"
+    /\ model_step_count' = model_step_count + 1
+    /\ terminal_outcome' = "Failed"
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
 
 
 FatalFailureFromErrorRecovery(run_id) ==
@@ -304,7 +357,7 @@ FatalFailureFromErrorRecovery(run_id) ==
     /\ phase' = "Failed"
     /\ model_step_count' = model_step_count + 1
     /\ terminal_outcome' = "Failed"
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
 
 
 CancelNowFromApplyingPrimitive(run_id) ==
@@ -312,7 +365,7 @@ CancelNowFromApplyingPrimitive(run_id) ==
     /\ (active_run = Some(run_id))
     /\ phase' = "Cancelling"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, terminal_outcome >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, terminal_outcome, extraction_attempts, max_extraction_retries >>
 
 
 CancelNowFromCallingLlm(run_id) ==
@@ -320,7 +373,7 @@ CancelNowFromCallingLlm(run_id) ==
     /\ (active_run = Some(run_id))
     /\ phase' = "Cancelling"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, terminal_outcome >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, terminal_outcome, extraction_attempts, max_extraction_retries >>
 
 
 CancelNowFromWaitingForOps(run_id) ==
@@ -328,7 +381,7 @@ CancelNowFromWaitingForOps(run_id) ==
     /\ (active_run = Some(run_id))
     /\ phase' = "Cancelling"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, terminal_outcome >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, terminal_outcome, extraction_attempts, max_extraction_retries >>
 
 
 CancelNowFromDrainingBoundary(run_id) ==
@@ -336,7 +389,15 @@ CancelNowFromDrainingBoundary(run_id) ==
     /\ (active_run = Some(run_id))
     /\ phase' = "Cancelling"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, terminal_outcome >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, terminal_outcome, extraction_attempts, max_extraction_retries >>
+
+
+CancelNowFromExtracting(run_id) ==
+    /\ phase = "Extracting"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Cancelling"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, terminal_outcome, extraction_attempts, max_extraction_retries >>
 
 
 CancelNowFromErrorRecovery(run_id) ==
@@ -344,7 +405,7 @@ CancelNowFromErrorRecovery(run_id) ==
     /\ (active_run = Some(run_id))
     /\ phase' = "Cancelling"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, terminal_outcome >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, terminal_outcome, extraction_attempts, max_extraction_retries >>
 
 
 CancelAfterBoundaryFromApplyingPrimitive(run_id) ==
@@ -353,7 +414,7 @@ CancelAfterBoundaryFromApplyingPrimitive(run_id) ==
     /\ phase' = "ApplyingPrimitive"
     /\ model_step_count' = model_step_count + 1
     /\ cancel_after_boundary' = TRUE
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, terminal_outcome >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, terminal_outcome, extraction_attempts, max_extraction_retries >>
 
 
 CancelAfterBoundaryFromCallingLlm(run_id) ==
@@ -362,7 +423,7 @@ CancelAfterBoundaryFromCallingLlm(run_id) ==
     /\ phase' = "CallingLlm"
     /\ model_step_count' = model_step_count + 1
     /\ cancel_after_boundary' = TRUE
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, terminal_outcome >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, terminal_outcome, extraction_attempts, max_extraction_retries >>
 
 
 CancelAfterBoundaryFromWaitingForOps(run_id) ==
@@ -371,7 +432,7 @@ CancelAfterBoundaryFromWaitingForOps(run_id) ==
     /\ phase' = "WaitingForOps"
     /\ model_step_count' = model_step_count + 1
     /\ cancel_after_boundary' = TRUE
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, terminal_outcome >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, terminal_outcome, extraction_attempts, max_extraction_retries >>
 
 
 CancelAfterBoundaryFromDrainingBoundary(run_id) ==
@@ -380,7 +441,16 @@ CancelAfterBoundaryFromDrainingBoundary(run_id) ==
     /\ phase' = "DrainingBoundary"
     /\ model_step_count' = model_step_count + 1
     /\ cancel_after_boundary' = TRUE
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, terminal_outcome >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, terminal_outcome, extraction_attempts, max_extraction_retries >>
+
+
+CancelAfterBoundaryFromExtracting(run_id) ==
+    /\ phase = "Extracting"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Extracting"
+    /\ model_step_count' = model_step_count + 1
+    /\ cancel_after_boundary' = TRUE
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, terminal_outcome, extraction_attempts, max_extraction_retries >>
 
 
 CancelAfterBoundaryFromErrorRecovery(run_id) ==
@@ -389,7 +459,7 @@ CancelAfterBoundaryFromErrorRecovery(run_id) ==
     /\ phase' = "ErrorRecovery"
     /\ model_step_count' = model_step_count + 1
     /\ cancel_after_boundary' = TRUE
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, terminal_outcome >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, terminal_outcome, extraction_attempts, max_extraction_retries >>
 
 
 CancellationObserved(run_id) ==
@@ -399,7 +469,7 @@ CancellationObserved(run_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ cancel_after_boundary' = FALSE
     /\ terminal_outcome' = "Cancelled"
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, extraction_attempts, max_extraction_retries >>
 
 
 TurnLimitReachedFromApplyingPrimitive(run_id) ==
@@ -409,7 +479,7 @@ TurnLimitReachedFromApplyingPrimitive(run_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ boundary_count' = (boundary_count) + 1
     /\ terminal_outcome' = "Completed"
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
 
 
 TurnLimitReachedFromCallingLlm(run_id) ==
@@ -419,7 +489,7 @@ TurnLimitReachedFromCallingLlm(run_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ boundary_count' = (boundary_count) + 1
     /\ terminal_outcome' = "Completed"
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
 
 
 TurnLimitReachedFromWaitingForOps(run_id) ==
@@ -429,7 +499,7 @@ TurnLimitReachedFromWaitingForOps(run_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ boundary_count' = (boundary_count) + 1
     /\ terminal_outcome' = "Completed"
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
 
 
 TurnLimitReachedFromDrainingBoundary(run_id) ==
@@ -439,7 +509,17 @@ TurnLimitReachedFromDrainingBoundary(run_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ boundary_count' = (boundary_count) + 1
     /\ terminal_outcome' = "Completed"
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
+
+
+TurnLimitReachedFromExtracting(run_id) ==
+    /\ phase = "Extracting"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ boundary_count' = (boundary_count) + 1
+    /\ terminal_outcome' = "Completed"
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
 
 
 TurnLimitReachedFromErrorRecovery(run_id) ==
@@ -449,7 +529,7 @@ TurnLimitReachedFromErrorRecovery(run_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ boundary_count' = (boundary_count) + 1
     /\ terminal_outcome' = "Completed"
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
 
 
 BudgetExhaustedFromApplyingPrimitive(run_id) ==
@@ -459,7 +539,7 @@ BudgetExhaustedFromApplyingPrimitive(run_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ boundary_count' = (boundary_count) + 1
     /\ terminal_outcome' = "BudgetExhausted"
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
 
 
 BudgetExhaustedFromCallingLlm(run_id) ==
@@ -469,7 +549,7 @@ BudgetExhaustedFromCallingLlm(run_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ boundary_count' = (boundary_count) + 1
     /\ terminal_outcome' = "BudgetExhausted"
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
 
 
 BudgetExhaustedFromWaitingForOps(run_id) ==
@@ -479,7 +559,7 @@ BudgetExhaustedFromWaitingForOps(run_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ boundary_count' = (boundary_count) + 1
     /\ terminal_outcome' = "BudgetExhausted"
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
 
 
 BudgetExhaustedFromDrainingBoundary(run_id) ==
@@ -489,7 +569,17 @@ BudgetExhaustedFromDrainingBoundary(run_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ boundary_count' = (boundary_count) + 1
     /\ terminal_outcome' = "BudgetExhausted"
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
+
+
+BudgetExhaustedFromExtracting(run_id) ==
+    /\ phase = "Extracting"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ boundary_count' = (boundary_count) + 1
+    /\ terminal_outcome' = "BudgetExhausted"
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
 
 
 BudgetExhaustedFromErrorRecovery(run_id) ==
@@ -499,7 +589,7 @@ BudgetExhaustedFromErrorRecovery(run_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ boundary_count' = (boundary_count) + 1
     /\ terminal_outcome' = "BudgetExhausted"
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
 
 
 ForceCancelNoRunFromReady ==
@@ -507,7 +597,7 @@ ForceCancelNoRunFromReady ==
     /\ phase' = "Cancelled"
     /\ model_step_count' = model_step_count + 1
     /\ terminal_outcome' = "Cancelled"
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
 
 
 ForceCancelNoRunFromApplyingPrimitive ==
@@ -515,7 +605,7 @@ ForceCancelNoRunFromApplyingPrimitive ==
     /\ phase' = "Cancelled"
     /\ model_step_count' = model_step_count + 1
     /\ terminal_outcome' = "Cancelled"
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
 
 
 ForceCancelNoRunFromCallingLlm ==
@@ -523,7 +613,7 @@ ForceCancelNoRunFromCallingLlm ==
     /\ phase' = "Cancelled"
     /\ model_step_count' = model_step_count + 1
     /\ terminal_outcome' = "Cancelled"
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
 
 
 ForceCancelNoRunFromWaitingForOps ==
@@ -531,7 +621,7 @@ ForceCancelNoRunFromWaitingForOps ==
     /\ phase' = "Cancelled"
     /\ model_step_count' = model_step_count + 1
     /\ terminal_outcome' = "Cancelled"
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
 
 
 ForceCancelNoRunFromDrainingBoundary ==
@@ -539,7 +629,15 @@ ForceCancelNoRunFromDrainingBoundary ==
     /\ phase' = "Cancelled"
     /\ model_step_count' = model_step_count + 1
     /\ terminal_outcome' = "Cancelled"
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
+
+
+ForceCancelNoRunFromExtracting ==
+    /\ phase = "Extracting"
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ terminal_outcome' = "Cancelled"
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
 
 
 ForceCancelNoRunFromErrorRecovery ==
@@ -547,7 +645,7 @@ ForceCancelNoRunFromErrorRecovery ==
     /\ phase' = "Cancelled"
     /\ model_step_count' = model_step_count + 1
     /\ terminal_outcome' = "Cancelled"
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
 
 
 ForceCancelNoRunFromCancelling ==
@@ -555,7 +653,7 @@ ForceCancelNoRunFromCancelling ==
     /\ phase' = "Cancelled"
     /\ model_step_count' = model_step_count + 1
     /\ terminal_outcome' = "Cancelled"
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary >>
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
 
 
 AcknowledgeTerminalFromCompleted(run_id) ==
@@ -572,6 +670,8 @@ AcknowledgeTerminalFromCompleted(run_id) ==
     /\ boundary_count' = 0
     /\ cancel_after_boundary' = FALSE
     /\ terminal_outcome' = "None"
+    /\ extraction_attempts' = 0
+    /\ max_extraction_retries' = 0
 
 
 AcknowledgeTerminalFromFailed(run_id) ==
@@ -588,6 +688,8 @@ AcknowledgeTerminalFromFailed(run_id) ==
     /\ boundary_count' = 0
     /\ cancel_after_boundary' = FALSE
     /\ terminal_outcome' = "None"
+    /\ extraction_attempts' = 0
+    /\ max_extraction_retries' = 0
 
 
 AcknowledgeTerminalFromCancelled(run_id) ==
@@ -604,6 +706,8 @@ AcknowledgeTerminalFromCancelled(run_id) ==
     /\ boundary_count' = 0
     /\ cancel_after_boundary' = FALSE
     /\ terminal_outcome' = "None"
+    /\ extraction_attempts' = 0
+    /\ max_extraction_retries' = 0
 
 
 Next ==
@@ -622,6 +726,10 @@ Next ==
     \/ \E run_id \in RunIdValues : BoundaryContinueCancelsAfterBoundary(run_id)
     \/ \E run_id \in RunIdValues : BoundaryComplete(run_id)
     \/ \E run_id \in RunIdValues : BoundaryCompleteCancelsAfterBoundary(run_id)
+    \/ \E run_id \in RunIdValues : \E max_retries \in 0..2 : EnterExtraction(run_id, max_retries)
+    \/ \E run_id \in RunIdValues : ExtractionValidationPassed(run_id)
+    \/ \E run_id \in RunIdValues : ExtractionRetry(run_id)
+    \/ \E run_id \in RunIdValues : ExtractionExhausted(run_id)
     \/ \E run_id \in RunIdValues : RecoverableFailureFromCallingLlm(run_id)
     \/ \E run_id \in RunIdValues : RecoverableFailureFromWaitingForOps(run_id)
     \/ \E run_id \in RunIdValues : RecoverableFailureFromDrainingBoundary(run_id)
@@ -630,33 +738,39 @@ Next ==
     \/ \E run_id \in RunIdValues : FatalFailureFromCallingLlm(run_id)
     \/ \E run_id \in RunIdValues : FatalFailureFromWaitingForOps(run_id)
     \/ \E run_id \in RunIdValues : FatalFailureFromDrainingBoundary(run_id)
+    \/ \E run_id \in RunIdValues : FatalFailureFromExtracting(run_id)
     \/ \E run_id \in RunIdValues : FatalFailureFromErrorRecovery(run_id)
     \/ \E run_id \in RunIdValues : CancelNowFromApplyingPrimitive(run_id)
     \/ \E run_id \in RunIdValues : CancelNowFromCallingLlm(run_id)
     \/ \E run_id \in RunIdValues : CancelNowFromWaitingForOps(run_id)
     \/ \E run_id \in RunIdValues : CancelNowFromDrainingBoundary(run_id)
+    \/ \E run_id \in RunIdValues : CancelNowFromExtracting(run_id)
     \/ \E run_id \in RunIdValues : CancelNowFromErrorRecovery(run_id)
     \/ \E run_id \in RunIdValues : CancelAfterBoundaryFromApplyingPrimitive(run_id)
     \/ \E run_id \in RunIdValues : CancelAfterBoundaryFromCallingLlm(run_id)
     \/ \E run_id \in RunIdValues : CancelAfterBoundaryFromWaitingForOps(run_id)
     \/ \E run_id \in RunIdValues : CancelAfterBoundaryFromDrainingBoundary(run_id)
+    \/ \E run_id \in RunIdValues : CancelAfterBoundaryFromExtracting(run_id)
     \/ \E run_id \in RunIdValues : CancelAfterBoundaryFromErrorRecovery(run_id)
     \/ \E run_id \in RunIdValues : CancellationObserved(run_id)
     \/ \E run_id \in RunIdValues : TurnLimitReachedFromApplyingPrimitive(run_id)
     \/ \E run_id \in RunIdValues : TurnLimitReachedFromCallingLlm(run_id)
     \/ \E run_id \in RunIdValues : TurnLimitReachedFromWaitingForOps(run_id)
     \/ \E run_id \in RunIdValues : TurnLimitReachedFromDrainingBoundary(run_id)
+    \/ \E run_id \in RunIdValues : TurnLimitReachedFromExtracting(run_id)
     \/ \E run_id \in RunIdValues : TurnLimitReachedFromErrorRecovery(run_id)
     \/ \E run_id \in RunIdValues : BudgetExhaustedFromApplyingPrimitive(run_id)
     \/ \E run_id \in RunIdValues : BudgetExhaustedFromCallingLlm(run_id)
     \/ \E run_id \in RunIdValues : BudgetExhaustedFromWaitingForOps(run_id)
     \/ \E run_id \in RunIdValues : BudgetExhaustedFromDrainingBoundary(run_id)
+    \/ \E run_id \in RunIdValues : BudgetExhaustedFromExtracting(run_id)
     \/ \E run_id \in RunIdValues : BudgetExhaustedFromErrorRecovery(run_id)
     \/ ForceCancelNoRunFromReady
     \/ ForceCancelNoRunFromApplyingPrimitive
     \/ ForceCancelNoRunFromCallingLlm
     \/ ForceCancelNoRunFromWaitingForOps
     \/ ForceCancelNoRunFromDrainingBoundary
+    \/ ForceCancelNoRunFromExtracting
     \/ ForceCancelNoRunFromErrorRecovery
     \/ ForceCancelNoRunFromCancelling
     \/ \E run_id \in RunIdValues : AcknowledgeTerminalFromCompleted(run_id)

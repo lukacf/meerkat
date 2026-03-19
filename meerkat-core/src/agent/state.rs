@@ -11,7 +11,8 @@ use crate::state::LoopState;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use crate::turn_execution_authority::{
-    ContentShape, TurnExecutionInput, TurnExecutionMutator, TurnExecutionTransition,
+    ContentShape, TurnExecutionEffect, TurnExecutionInput, TurnExecutionMutator,
+    TurnExecutionTransition,
 };
 use crate::types::{
     AssistantBlock, BlockAssistantMessage, Message, RunResult, ToolCallView, ToolDef, ToolResult,
@@ -124,6 +125,80 @@ where
         Ok(transition)
     }
 
+    /// Execute side effects from a transition. Handles DrainCommsInbox and
+    /// CheckCompaction effects that the authority emits on CallingLlm entry.
+    async fn execute_turn_effects(
+        &mut self,
+        transition: &TurnExecutionTransition,
+        turn_count: u32,
+        event_tx: &Option<mpsc::Sender<AgentEvent>>,
+    ) {
+        for effect in &transition.effects {
+            match effect {
+                TurnExecutionEffect::DrainCommsInbox => {
+                    self.drain_comms_inbox().await;
+                }
+                TurnExecutionEffect::CheckCompaction => {
+                    if let Some(ref compactor) = self.compactor {
+                        let ctx = crate::agent::compact::build_compaction_context(
+                            self.session.messages(),
+                            self.last_input_tokens,
+                            self.last_compaction_turn,
+                            turn_count,
+                        );
+                        if compactor.should_compact(&ctx) {
+                            let outcome = crate::agent::compact::run_compaction(
+                                self.client.as_ref(),
+                                compactor,
+                                self.session.messages(),
+                                self.last_input_tokens,
+                                turn_count,
+                                event_tx,
+                                &self.event_tap,
+                            )
+                            .await;
+
+                            if let Ok(outcome) = outcome {
+                                *self.session.messages_mut() = outcome.new_messages;
+                                self.session.record_usage(outcome.summary_usage.clone());
+                                self.budget.record_usage(&outcome.summary_usage);
+                                self.last_input_tokens = 0;
+                                self.last_compaction_turn = Some(turn_count);
+
+                                if let Some(ref memory_store) = self.memory_store {
+                                    let store = std::sync::Arc::clone(memory_store);
+                                    let session_id = self.session.id().clone();
+                                    let discarded = outcome.discarded;
+                                    tokio::spawn(async move {
+                                        for message in &discarded {
+                                            let content = message.as_indexable_text();
+                                            if !content.is_empty() {
+                                                let metadata = crate::memory::MemoryMetadata {
+                                                    session_id: session_id.clone(),
+                                                    turn: Some(turn_count),
+                                                    indexed_at: crate::time_compat::SystemTime::now(
+                                                    ),
+                                                };
+                                                if let Err(e) =
+                                                    store.index(&content, metadata).await
+                                                {
+                                                    tracing::warn!(
+                                                        "failed to index compaction discard into memory: {e}"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// The main agent loop
     #[allow(unused_assignments)]
     pub(super) async fn run_loop(
@@ -141,12 +216,13 @@ where
             run_id: run_id.clone(),
         })?;
         // PrimitiveApplied transitions ApplyingPrimitive -> CallingLlm
-        self.apply_turn_input(TurnExecutionInput::PrimitiveApplied {
+        let t = self.apply_turn_input(TurnExecutionInput::PrimitiveApplied {
             run_id: run_id.clone(),
             admitted_content_shape: ContentShape("conversation".to_string()),
             vision_enabled: false,
             image_tool_results_enabled: false,
         })?;
+        self.execute_turn_effects(&t, 0, &event_tx).await;
 
         // Helper to conditionally emit events (only when listener exists).
         // Also forwards to the event tap for interaction-scoped subscribers.
@@ -170,13 +246,6 @@ where
         }
 
         loop {
-            // Drain comms inbox at top of loop when entering CallingLlm.
-            // Catches messages during ErrorRecovery -> CallingLlm transitions
-            // and the window between turn-boundary drain and next LLM call.
-            if self.state == LoopState::CallingLlm {
-                self.drain_comms_inbox().await;
-            }
-
             // Check turn limit
             if turn_count >= max_turns {
                 self.apply_turn_input(TurnExecutionInput::TurnLimitReached {
@@ -197,66 +266,6 @@ where
                     run_id: run_id.clone(),
                 })?;
                 return Ok(self.build_result(turn_count, tool_call_count).await);
-            }
-
-            // Check compaction trigger (before CallingLlm)
-            if self.state == LoopState::CallingLlm
-                && let Some(ref compactor) = self.compactor
-            {
-                let ctx = crate::agent::compact::build_compaction_context(
-                    self.session.messages(),
-                    self.last_input_tokens,
-                    self.last_compaction_turn,
-                    turn_count,
-                );
-                if compactor.should_compact(&ctx) {
-                    let outcome = crate::agent::compact::run_compaction(
-                        self.client.as_ref(),
-                        compactor,
-                        self.session.messages(),
-                        self.last_input_tokens,
-                        turn_count,
-                        &event_tx,
-                        &self.event_tap,
-                    )
-                    .await;
-
-                    if let Ok(outcome) = outcome {
-                        // Replace session messages
-                        *self.session.messages_mut() = outcome.new_messages;
-                        // Record compaction usage
-                        self.session.record_usage(outcome.summary_usage.clone());
-                        self.budget.record_usage(&outcome.summary_usage);
-                        // Update tracking
-                        self.last_input_tokens = 0;
-                        self.last_compaction_turn = Some(turn_count);
-
-                        // Index discarded messages into memory store (fire-and-forget)
-                        if let Some(ref memory_store) = self.memory_store {
-                            let store = Arc::clone(memory_store);
-                            let session_id = self.session.id().clone();
-                            let discarded = outcome.discarded;
-                            tokio::spawn(async move {
-                                for message in &discarded {
-                                    let content = message.as_indexable_text();
-                                    if !content.is_empty() {
-                                        let metadata = crate::memory::MemoryMetadata {
-                                            session_id: session_id.clone(),
-                                            turn: Some(turn_count),
-                                            indexed_at: crate::time_compat::SystemTime::now(),
-                                        };
-                                        if let Err(e) = store.index(&content, metadata).await {
-                                            tracing::warn!(
-                                                "failed to index compaction discard into memory: {e}"
-                                            );
-                                        }
-                                    }
-                                }
-                            });
-                        }
-                    }
-                    // On failure: non-fatal, continue with uncompacted history
-                }
             }
 
             match self.state {
@@ -837,9 +846,10 @@ where
                         })?;
                         self.drain_turn_boundary(turn_count, event_tx.as_ref())
                             .await?;
-                        self.apply_turn_input(TurnExecutionInput::BoundaryContinue {
+                        let t = self.apply_turn_input(TurnExecutionInput::BoundaryContinue {
                             run_id: run_id.clone(),
                         })?;
+                        self.execute_turn_effects(&t, turn_count, &event_tx).await;
                         turn_count += 1;
                     } else if self.extraction_mode {
                         // Extraction turn response — validate against schema
@@ -853,150 +863,123 @@ where
                             .await?;
                         emit_event!(AgentEvent::TurnCompleted { stop_reason, usage });
 
+                        // Authority: DrainingBoundary -> Extracting for validation
+                        self.apply_turn_input(TurnExecutionInput::EnterExtraction {
+                            run_id: run_id.clone(),
+                            max_retries: self.config.structured_output_retries,
+                        })?;
+
                         // Validate extraction response
                         let content = assistant_text.trim();
                         let json_content = super::extraction::strip_code_fences(content);
 
-                        match serde_json::from_str::<serde_json::Value>(json_content) {
-                            Ok(parsed) => {
-                                let output_schema =
-                                    self.config.output_schema.as_ref().ok_or_else(|| {
-                                        AgentError::InternalError(
-                                            "extraction_mode without output_schema".into(),
-                                        )
-                                    })?;
-                                let normalized = super::extraction::unwrap_named_object_wrapper(
-                                    parsed,
-                                    output_schema,
-                                );
+                        let validation_error =
+                            match serde_json::from_str::<serde_json::Value>(json_content) {
+                                Ok(parsed) => {
+                                    let output_schema =
+                                        self.config.output_schema.as_ref().ok_or_else(|| {
+                                            AgentError::InternalError(
+                                                "extraction_mode without output_schema".into(),
+                                            )
+                                        })?;
+                                    let normalized = super::extraction::unwrap_named_object_wrapper(
+                                        parsed,
+                                        output_schema,
+                                    );
 
-                                // Validate against schema (when jsonschema feature is available)
-                                let validation_error: Option<String>;
-                                #[cfg(feature = "jsonschema")]
-                                {
-                                    let compiled =
-                                        self.client.compile_schema(output_schema).map_err(|e| {
-                                            AgentError::InvalidOutputSchema(e.to_string())
-                                        })?;
-                                    let validator = jsonschema::Validator::new(&compiled.schema)
-                                        .map_err(|e| {
-                                            AgentError::InvalidOutputSchema(e.to_string())
-                                        })?;
-                                    validation_error =
-                                        if let Err(error) = validator.validate(&normalized) {
-                                            Some(format!("Schema validation failed: {error}"))
-                                        } else {
-                                            None
-                                        };
-                                }
-                                #[cfg(not(feature = "jsonschema"))]
-                                {
-                                    tracing::warn!(
-                                        "Structured output schema validation unavailable \
+                                    // Validate against schema (when jsonschema feature is available)
+                                    let schema_error: Option<String>;
+                                    #[cfg(feature = "jsonschema")]
+                                    {
+                                        let compiled =
+                                            self.client.compile_schema(output_schema).map_err(
+                                                |e| AgentError::InvalidOutputSchema(e.to_string()),
+                                            )?;
+                                        let validator =
+                                            jsonschema::Validator::new(&compiled.schema).map_err(
+                                                |e| AgentError::InvalidOutputSchema(e.to_string()),
+                                            )?;
+                                        schema_error =
+                                            if let Err(error) = validator.validate(&normalized) {
+                                                Some(format!("Schema validation failed: {error}"))
+                                            } else {
+                                                None
+                                            };
+                                    }
+                                    #[cfg(not(feature = "jsonschema"))]
+                                    {
+                                        tracing::warn!(
+                                            "Structured output schema validation unavailable \
                                         (jsonschema feature disabled). Accepting parsed \
                                         JSON without schema validation."
-                                    );
-                                    validation_error = None;
-                                }
-
-                                if let Some(error) = validation_error {
-                                    // Validation failed — retry if attempts remain
-                                    self.extraction_attempts += 1;
-                                    if self.extraction_attempts
-                                        < self.config.structured_output_retries + 1
-                                    {
-                                        self.extraction_last_error = Some(error.clone());
-                                        let retry_prompt = format!(
-                                            "The previous output was invalid: {error}. \
-                                            Please provide valid JSON matching the schema. \
-                                            Output ONLY the JSON, no additional text."
                                         );
-                                        self.session
-                                            .push(Message::User(UserMessage::text(retry_prompt)));
-                                        self.apply_turn_input(
-                                            TurnExecutionInput::BoundaryContinue {
-                                                run_id: run_id.clone(),
-                                            },
-                                        )?;
-                                        turn_count += 1;
-                                        continue;
+                                        schema_error = None;
                                     }
 
-                                    // Retries exhausted
-                                    self.apply_turn_input(TurnExecutionInput::BoundaryComplete {
-                                        run_id: run_id.clone(),
-                                    })?;
-                                    if let Err(e) = self.store.save(&self.session).await {
-                                        tracing::warn!("Failed to save session: {}", e);
+                                    if schema_error.is_none() {
+                                        // Validation passed — store result
+                                        self.extraction_result = Some(normalized);
                                     }
-                                    return Err(AgentError::StructuredOutputValidationFailed {
-                                        attempts: self.config.structured_output_retries + 1,
-                                        reason: error,
-                                        last_output: self
-                                            .session
-                                            .last_assistant_text()
-                                            .unwrap_or_default(),
-                                    });
+                                    schema_error
                                 }
+                                Err(e) => Some(format!("Invalid JSON: {e}")),
+                            };
 
-                                // Validation passed — store result for RunResult assembly
-                                self.extraction_result = Some(normalized);
-                                self.apply_turn_input(TurnExecutionInput::BoundaryComplete {
-                                    run_id: run_id.clone(),
-                                })?;
-                                if let Err(e) = self.store.save(&self.session).await {
-                                    tracing::warn!("Failed to save session: {}", e);
-                                }
-                                return Ok(RunResult {
-                                    text: self.session.last_assistant_text().unwrap_or_default(),
-                                    session_id: self.session.id().clone(),
-                                    usage: self.session.total_usage(),
-                                    turns: turn_count + 1,
-                                    tool_calls: tool_call_count,
-                                    structured_output: self.extraction_result.take(),
-                                    schema_warnings: self.extraction_schema_warnings.take(),
-                                    skill_diagnostics: None,
-                                });
-                            }
-                            Err(e) => {
-                                // JSON parse failed — retry if attempts remain
-                                let error = format!("Invalid JSON: {e}");
-                                self.extraction_attempts += 1;
-                                if self.extraction_attempts
-                                    < self.config.structured_output_retries + 1
-                                {
-                                    self.extraction_last_error = Some(error);
-                                    let retry_prompt = format!(
-                                        "The previous output was invalid: Invalid JSON: {e}. \
-                                        Please provide valid JSON matching the schema. \
-                                        Output ONLY the JSON, no additional text."
-                                    );
-                                    self.session
-                                        .push(Message::User(UserMessage::text(retry_prompt)));
-                                    self.apply_turn_input(TurnExecutionInput::BoundaryContinue {
+                        if let Some(error) = validation_error {
+                            // Validation failed — ask authority for retry or exhaustion
+                            let attempts = self.turn_authority.extraction_attempts();
+                            let max_retries = self.turn_authority.max_extraction_retries();
+                            if attempts < max_retries {
+                                // Retry: push retry prompt, authority transitions
+                                // Extracting -> CallingLlm
+                                self.extraction_last_error = Some(error.clone());
+                                let retry_prompt = format!(
+                                    "The previous output was invalid: {error}. \
+                                    Please provide valid JSON matching the schema. \
+                                    Output ONLY the JSON, no additional text."
+                                );
+                                self.session
+                                    .push(Message::User(UserMessage::text(retry_prompt)));
+                                let t =
+                                    self.apply_turn_input(TurnExecutionInput::ExtractionRetry {
                                         run_id: run_id.clone(),
                                     })?;
-                                    turn_count += 1;
-                                    continue;
-                                }
-
-                                // Retries exhausted
-                                self.apply_turn_input(TurnExecutionInput::BoundaryComplete {
-                                    run_id: run_id.clone(),
-                                })?;
-                                if let Err(e) = self.store.save(&self.session).await {
-                                    tracing::warn!("Failed to save session: {}", e);
-                                }
-                                return Err(AgentError::StructuredOutputValidationFailed {
-                                    attempts: self.config.structured_output_retries + 1,
-                                    reason: error,
-                                    last_output: self
-                                        .session
-                                        .last_assistant_text()
-                                        .unwrap_or_default(),
-                                });
+                                self.execute_turn_effects(&t, turn_count, &event_tx).await;
+                                turn_count += 1;
+                                continue;
                             }
+
+                            // Retries exhausted
+                            self.apply_turn_input(TurnExecutionInput::ExtractionExhausted {
+                                run_id: run_id.clone(),
+                            })?;
+                            if let Err(e) = self.store.save(&self.session).await {
+                                tracing::warn!("Failed to save session: {}", e);
+                            }
+                            return Err(AgentError::StructuredOutputValidationFailed {
+                                attempts: max_retries + 1,
+                                reason: error,
+                                last_output: self.session.last_assistant_text().unwrap_or_default(),
+                            });
                         }
+
+                        // Validation passed — complete via authority
+                        self.apply_turn_input(TurnExecutionInput::ExtractionValidationPassed {
+                            run_id: run_id.clone(),
+                        })?;
+                        if let Err(e) = self.store.save(&self.session).await {
+                            tracing::warn!("Failed to save session: {}", e);
+                        }
+                        return Ok(RunResult {
+                            text: self.session.last_assistant_text().unwrap_or_default(),
+                            session_id: self.session.id().clone(),
+                            usage: self.session.total_usage(),
+                            turns: turn_count + 1,
+                            tool_calls: tool_call_count,
+                            structured_output: self.extraction_result.take(),
+                            schema_warnings: self.extraction_schema_warnings.take(),
+                            skill_diagnostics: None,
+                        });
                     } else {
                         // No tool calls - we're done with the agentic loop
                         let final_text = assistant_text.clone();
@@ -1016,10 +999,8 @@ where
                         if let Some(output_schema) = self.config.output_schema.as_ref()
                             && !self.extraction_mode
                         {
-                            // Enter extraction mode: re-enter the main loop
-                            // through the normal CallingLlm path
+                            // Enter extraction mode via authority
                             self.extraction_mode = true;
-                            self.extraction_attempts = 0;
                             self.extraction_result = None;
                             self.extraction_last_error = None;
 
@@ -1041,10 +1022,15 @@ where
                                 });
                             self.session.push(Message::User(UserMessage::text(prompt)));
 
-                            // Re-enter main loop via CallingLlm
-                            self.apply_turn_input(TurnExecutionInput::BoundaryContinue {
+                            // Authority: DrainingBoundary -> Extracting -> CallingLlm
+                            self.apply_turn_input(TurnExecutionInput::EnterExtraction {
+                                run_id: run_id.clone(),
+                                max_retries: self.config.structured_output_retries,
+                            })?;
+                            let t = self.apply_turn_input(TurnExecutionInput::ExtractionRetry {
                                 run_id: run_id.clone(),
                             })?;
+                            self.execute_turn_effects(&t, turn_count, &event_tx).await;
                             turn_count += 1;
                             continue;
                         }
@@ -1092,9 +1078,10 @@ where
                     })?;
                     self.drain_turn_boundary(turn_count, event_tx.as_ref())
                         .await?;
-                    self.apply_turn_input(TurnExecutionInput::BoundaryContinue {
+                    let t = self.apply_turn_input(TurnExecutionInput::BoundaryContinue {
                         run_id: run_id.clone(),
                     })?;
+                    self.execute_turn_effects(&t, turn_count, &event_tx).await;
                     turn_count += 1;
                 }
                 LoopState::DrainingEvents => {
@@ -1112,9 +1099,10 @@ where
                 }
                 LoopState::ErrorRecovery => {
                     // Attempt recovery
-                    self.apply_turn_input(TurnExecutionInput::RetryRequested {
+                    let t = self.apply_turn_input(TurnExecutionInput::RetryRequested {
                         run_id: run_id.clone(),
                     })?;
+                    self.execute_turn_effects(&t, turn_count, &event_tx).await;
                 }
                 LoopState::Completed => {
                     return Ok(self.build_result(turn_count, tool_call_count).await);

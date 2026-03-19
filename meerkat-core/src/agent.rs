@@ -527,8 +527,6 @@ where
     /// Causes the next `CallingLlm` iteration to use extraction parameters
     /// (no tools, temperature 0.0, structured_output provider params).
     pub(crate) extraction_mode: bool,
-    /// Number of extraction attempts so far (for retry logic).
-    pub(crate) extraction_attempts: u32,
     /// Populated on successful extraction validation — carried into RunResult.
     pub(crate) extraction_result: Option<serde_json::Value>,
     /// Schema warnings from compilation — carried into RunResult.

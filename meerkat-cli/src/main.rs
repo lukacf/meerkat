@@ -4817,7 +4817,7 @@ async fn refresh_persisted_run_snapshots(
                 refreshed.insert(run.run_id.to_string(), run);
             }
             None => {
-                if cached_run.status.is_terminal() {
+                if cached_run.status().is_terminal() {
                     refreshed.insert(run_id, cached_run);
                 }
             }
@@ -4849,7 +4849,7 @@ fn cached_run_snapshot(
         .mobs
         .get(mob_id)
         .and_then(|mob| mob.runs.get(run_id))
-        .filter(|run| run.status.is_terminal())
+        .filter(|run| run.status().is_terminal())
         .cloned()
 }
 
@@ -4925,7 +4925,7 @@ async fn hydrate_mob_state(
         }
 
         for run in persisted.runs.values() {
-            if !run.status.is_terminal() {
+            if !run.status().is_terminal() {
                 continue;
             }
             storage
@@ -5011,7 +5011,7 @@ async fn wait_for_terminal_flow_run(
                 "run '{run_id}' disappeared before reaching terminal state"
             ));
         };
-        if run.status.is_terminal() {
+        if run.status().is_terminal() {
             return Ok(run);
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;

@@ -203,11 +203,11 @@ async fn run_flow(
             }
         }
 
-        if !run.status.is_terminal() {
+        if !run.status().is_terminal() {
             continue;
         }
 
-        match run.status {
+        match run.status() {
             MobRunStatus::Completed => {
                 let last_output = run
                     .step_ledger

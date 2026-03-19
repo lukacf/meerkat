@@ -23,6 +23,7 @@ pub fn turn_execution_machine() -> MachineSchema {
                     variant("CallingLlm"),
                     variant("WaitingForOps"),
                     variant("DrainingBoundary"),
+                    variant("Extracting"),
                     variant("ErrorRecovery"),
                     variant("Cancelling"),
                     variant("Completed"),
@@ -49,6 +50,8 @@ pub fn turn_execution_machine() -> MachineSchema {
                     "terminal_outcome",
                     TypeRef::Named("TurnTerminalOutcome".into()),
                 ),
+                field("extraction_attempts", TypeRef::U32),
+                field("max_extraction_retries", TypeRef::U32),
             ],
             init: InitSchema {
                 phase: "Ready".into(),
@@ -62,6 +65,8 @@ pub fn turn_execution_machine() -> MachineSchema {
                     init("boundary_count", Expr::U64(0)),
                     init("cancel_after_boundary", Expr::Bool(false)),
                     init("terminal_outcome", Expr::String("None".into())),
+                    init("extraction_attempts", Expr::U64(0)),
+                    init("max_extraction_retries", Expr::U64(0)),
                 ],
             },
             terminal_phases: vec!["Completed".into(), "Failed".into(), "Cancelled".into()],
@@ -153,6 +158,25 @@ pub fn turn_execution_machine() -> MachineSchema {
                     fields: vec![field("run_id", TypeRef::Named("RunId".into()))],
                 },
                 VariantSchema {
+                    name: "EnterExtraction".into(),
+                    fields: vec![
+                        field("run_id", TypeRef::Named("RunId".into())),
+                        field("max_retries", TypeRef::U32),
+                    ],
+                },
+                VariantSchema {
+                    name: "ExtractionValidationPassed".into(),
+                    fields: vec![field("run_id", TypeRef::Named("RunId".into()))],
+                },
+                VariantSchema {
+                    name: "ExtractionRetry".into(),
+                    fields: vec![field("run_id", TypeRef::Named("RunId".into()))],
+                },
+                VariantSchema {
+                    name: "ExtractionExhausted".into(),
+                    fields: vec![field("run_id", TypeRef::Named("RunId".into()))],
+                },
+                VariantSchema {
                     name: "ForceCancelNoRun".into(),
                     fields: vec![],
                 },
@@ -195,6 +219,14 @@ pub fn turn_execution_machine() -> MachineSchema {
                 VariantSchema {
                     name: "RunCancelled".into(),
                     fields: vec![field("run_id", TypeRef::Named("RunId".into()))],
+                },
+                VariantSchema {
+                    name: "DrainCommsInbox".into(),
+                    fields: vec![],
+                },
+                VariantSchema {
+                    name: "CheckCompaction".into(),
+                    fields: vec![],
                 },
             ],
         },
@@ -403,6 +435,14 @@ pub fn turn_execution_machine() -> MachineSchema {
                         field: "terminal_outcome".into(),
                         expr: Expr::String("None".into()),
                     },
+                    Update::Assign {
+                        field: "extraction_attempts".into(),
+                        expr: Expr::U64(0),
+                    },
+                    Update::Assign {
+                        field: "max_extraction_retries".into(),
+                        expr: Expr::U64(0),
+                    },
                 ],
                 to: "ApplyingPrimitive".into(),
                 emit: vec![EffectEmit {
@@ -454,6 +494,14 @@ pub fn turn_execution_machine() -> MachineSchema {
                     Update::Assign {
                         field: "terminal_outcome".into(),
                         expr: Expr::String("None".into()),
+                    },
+                    Update::Assign {
+                        field: "extraction_attempts".into(),
+                        expr: Expr::U64(0),
+                    },
+                    Update::Assign {
+                        field: "max_extraction_retries".into(),
+                        expr: Expr::U64(0),
                     },
                 ],
                 to: "ApplyingPrimitive".into(),
@@ -507,6 +555,14 @@ pub fn turn_execution_machine() -> MachineSchema {
                         field: "terminal_outcome".into(),
                         expr: Expr::String("None".into()),
                     },
+                    Update::Assign {
+                        field: "extraction_attempts".into(),
+                        expr: Expr::U64(0),
+                    },
+                    Update::Assign {
+                        field: "max_extraction_retries".into(),
+                        expr: Expr::U64(0),
+                    },
                 ],
                 to: "ApplyingPrimitive".into(),
                 emit: vec![EffectEmit {
@@ -557,7 +613,16 @@ pub fn turn_execution_machine() -> MachineSchema {
                     },
                 ],
                 to: "CallingLlm".into(),
-                emit: vec![],
+                emit: vec![
+                    EffectEmit {
+                        variant: "DrainCommsInbox".into(),
+                        fields: IndexMap::new(),
+                    },
+                    EffectEmit {
+                        variant: "CheckCompaction".into(),
+                        fields: IndexMap::new(),
+                    },
+                ],
             },
             TransitionSchema {
                 name: "PrimitiveAppliedImmediateAppend".into(),
@@ -1004,7 +1069,16 @@ pub fn turn_execution_machine() -> MachineSchema {
                 ],
                 updates: vec![],
                 to: "CallingLlm".into(),
-                emit: vec![],
+                emit: vec![
+                    EffectEmit {
+                        variant: "DrainCommsInbox".into(),
+                        fields: IndexMap::new(),
+                    },
+                    EffectEmit {
+                        variant: "CheckCompaction".into(),
+                        fields: IndexMap::new(),
+                    },
+                ],
             },
             TransitionSchema {
                 name: "BoundaryContinueCancelsAfterBoundary".into(),
@@ -1125,6 +1199,105 @@ pub fn turn_execution_machine() -> MachineSchema {
                 }],
             },
             TransitionSchema {
+                name: "EnterExtraction".into(),
+                from: vec!["DrainingBoundary".into()],
+                on: InputMatch {
+                    variant: "EnterExtraction".into(),
+                    bindings: vec!["run_id".into(), "max_retries".into()],
+                },
+                guards: vec![Guard {
+                    name: "run_matches_active".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("active_run".into())),
+                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                    ),
+                }],
+                updates: vec![Update::Assign {
+                    field: "max_extraction_retries".into(),
+                    expr: Expr::Binding("max_retries".into()),
+                }],
+                to: "Extracting".into(),
+                emit: vec![],
+            },
+            TransitionSchema {
+                name: "ExtractionValidationPassed".into(),
+                from: vec!["Extracting".into()],
+                on: InputMatch {
+                    variant: "ExtractionValidationPassed".into(),
+                    bindings: vec!["run_id".into()],
+                },
+                guards: vec![Guard {
+                    name: "run_matches_active".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("active_run".into())),
+                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                    ),
+                }],
+                updates: vec![Update::Assign {
+                    field: "terminal_outcome".into(),
+                    expr: Expr::String("Completed".into()),
+                }],
+                to: "Completed".into(),
+                emit: vec![EffectEmit {
+                    variant: "RunCompleted".into(),
+                    fields: IndexMap::from([("run_id".into(), Expr::Binding("run_id".into()))]),
+                }],
+            },
+            TransitionSchema {
+                name: "ExtractionRetry".into(),
+                from: vec!["Extracting".into()],
+                on: InputMatch {
+                    variant: "ExtractionRetry".into(),
+                    bindings: vec!["run_id".into()],
+                },
+                guards: vec![Guard {
+                    name: "run_matches_active".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("active_run".into())),
+                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                    ),
+                }],
+                updates: vec![Update::Increment {
+                    field: "extraction_attempts".into(),
+                    amount: 1,
+                }],
+                to: "CallingLlm".into(),
+                emit: vec![
+                    EffectEmit {
+                        variant: "DrainCommsInbox".into(),
+                        fields: IndexMap::new(),
+                    },
+                    EffectEmit {
+                        variant: "CheckCompaction".into(),
+                        fields: IndexMap::new(),
+                    },
+                ],
+            },
+            TransitionSchema {
+                name: "ExtractionExhausted".into(),
+                from: vec!["Extracting".into()],
+                on: InputMatch {
+                    variant: "ExtractionExhausted".into(),
+                    bindings: vec!["run_id".into()],
+                },
+                guards: vec![Guard {
+                    name: "run_matches_active".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("active_run".into())),
+                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                    ),
+                }],
+                updates: vec![Update::Assign {
+                    field: "terminal_outcome".into(),
+                    expr: Expr::String("Completed".into()),
+                }],
+                to: "Completed".into(),
+                emit: vec![EffectEmit {
+                    variant: "RunCompleted".into(),
+                    fields: IndexMap::from([("run_id".into(), Expr::Binding("run_id".into()))]),
+                }],
+            },
+            TransitionSchema {
                 name: "RecoverableFailureFromCallingLlm".into(),
                 from: vec!["CallingLlm".into()],
                 on: InputMatch {
@@ -1194,7 +1367,16 @@ pub fn turn_execution_machine() -> MachineSchema {
                 }],
                 updates: vec![],
                 to: "CallingLlm".into(),
-                emit: vec![],
+                emit: vec![
+                    EffectEmit {
+                        variant: "DrainCommsInbox".into(),
+                        fields: IndexMap::new(),
+                    },
+                    EffectEmit {
+                        variant: "CheckCompaction".into(),
+                        fields: IndexMap::new(),
+                    },
+                ],
             },
             TransitionSchema {
                 name: "FatalFailureFromApplyingPrimitive".into(),
@@ -1271,6 +1453,30 @@ pub fn turn_execution_machine() -> MachineSchema {
             TransitionSchema {
                 name: "FatalFailureFromDrainingBoundary".into(),
                 from: vec!["DrainingBoundary".into()],
+                on: InputMatch {
+                    variant: "FatalFailure".into(),
+                    bindings: vec!["run_id".into()],
+                },
+                guards: vec![Guard {
+                    name: "run_matches_active".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("active_run".into())),
+                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                    ),
+                }],
+                updates: vec![Update::Assign {
+                    field: "terminal_outcome".into(),
+                    expr: Expr::String("Failed".into()),
+                }],
+                to: "Failed".into(),
+                emit: vec![EffectEmit {
+                    variant: "RunFailed".into(),
+                    fields: IndexMap::from([("run_id".into(), Expr::Binding("run_id".into()))]),
+                }],
+            },
+            TransitionSchema {
+                name: "FatalFailureFromExtracting".into(),
+                from: vec!["Extracting".into()],
                 on: InputMatch {
                     variant: "FatalFailure".into(),
                     bindings: vec!["run_id".into()],
@@ -1389,6 +1595,24 @@ pub fn turn_execution_machine() -> MachineSchema {
                 emit: vec![],
             },
             TransitionSchema {
+                name: "CancelNowFromExtracting".into(),
+                from: vec!["Extracting".into()],
+                on: InputMatch {
+                    variant: "CancelNow".into(),
+                    bindings: vec!["run_id".into()],
+                },
+                guards: vec![Guard {
+                    name: "run_matches_active".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("active_run".into())),
+                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                    ),
+                }],
+                updates: vec![],
+                to: "Cancelling".into(),
+                emit: vec![],
+            },
+            TransitionSchema {
                 name: "CancelNowFromErrorRecovery".into(),
                 from: vec!["ErrorRecovery".into()],
                 on: InputMatch {
@@ -1488,6 +1712,27 @@ pub fn turn_execution_machine() -> MachineSchema {
                     expr: Expr::Bool(true),
                 }],
                 to: "DrainingBoundary".into(),
+                emit: vec![],
+            },
+            TransitionSchema {
+                name: "CancelAfterBoundaryFromExtracting".into(),
+                from: vec!["Extracting".into()],
+                on: InputMatch {
+                    variant: "CancelAfterBoundary".into(),
+                    bindings: vec!["run_id".into()],
+                },
+                guards: vec![Guard {
+                    name: "run_matches_active".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("active_run".into())),
+                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                    ),
+                }],
+                updates: vec![Update::Assign {
+                    field: "cancel_after_boundary".into(),
+                    expr: Expr::Bool(true),
+                }],
+                to: "Extracting".into(),
                 emit: vec![],
             },
             TransitionSchema {
@@ -1670,6 +1915,48 @@ pub fn turn_execution_machine() -> MachineSchema {
             TransitionSchema {
                 name: "TurnLimitReachedFromDrainingBoundary".into(),
                 from: vec!["DrainingBoundary".into()],
+                on: InputMatch {
+                    variant: "TurnLimitReached".into(),
+                    bindings: vec!["run_id".into()],
+                },
+                guards: vec![Guard {
+                    name: "run_matches_active".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("active_run".into())),
+                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                    ),
+                }],
+                updates: vec![
+                    Update::Increment {
+                        field: "boundary_count".into(),
+                        amount: 1,
+                    },
+                    Update::Assign {
+                        field: "terminal_outcome".into(),
+                        expr: Expr::String("Completed".into()),
+                    },
+                ],
+                to: "Completed".into(),
+                emit: vec![
+                    EffectEmit {
+                        variant: "BoundaryApplied".into(),
+                        fields: IndexMap::from([
+                            ("run_id".into(), Expr::Binding("run_id".into())),
+                            (
+                                "boundary_sequence".into(),
+                                Expr::Field("boundary_count".into()),
+                            ),
+                        ]),
+                    },
+                    EffectEmit {
+                        variant: "RunCompleted".into(),
+                        fields: IndexMap::from([("run_id".into(), Expr::Binding("run_id".into()))]),
+                    },
+                ],
+            },
+            TransitionSchema {
+                name: "TurnLimitReachedFromExtracting".into(),
+                from: vec!["Extracting".into()],
                 on: InputMatch {
                     variant: "TurnLimitReached".into(),
                     bindings: vec!["run_id".into()],
@@ -1920,6 +2207,48 @@ pub fn turn_execution_machine() -> MachineSchema {
                 ],
             },
             TransitionSchema {
+                name: "BudgetExhaustedFromExtracting".into(),
+                from: vec!["Extracting".into()],
+                on: InputMatch {
+                    variant: "BudgetExhausted".into(),
+                    bindings: vec!["run_id".into()],
+                },
+                guards: vec![Guard {
+                    name: "run_matches_active".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("active_run".into())),
+                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                    ),
+                }],
+                updates: vec![
+                    Update::Increment {
+                        field: "boundary_count".into(),
+                        amount: 1,
+                    },
+                    Update::Assign {
+                        field: "terminal_outcome".into(),
+                        expr: Expr::String("BudgetExhausted".into()),
+                    },
+                ],
+                to: "Completed".into(),
+                emit: vec![
+                    EffectEmit {
+                        variant: "BoundaryApplied".into(),
+                        fields: IndexMap::from([
+                            ("run_id".into(), Expr::Binding("run_id".into())),
+                            (
+                                "boundary_sequence".into(),
+                                Expr::Field("boundary_count".into()),
+                            ),
+                        ]),
+                    },
+                    EffectEmit {
+                        variant: "RunCompleted".into(),
+                        fields: IndexMap::from([("run_id".into(), Expr::Binding("run_id".into()))]),
+                    },
+                ],
+            },
+            TransitionSchema {
                 name: "BudgetExhaustedFromErrorRecovery".into(),
                 from: vec!["ErrorRecovery".into()],
                 on: InputMatch {
@@ -2037,6 +2366,21 @@ pub fn turn_execution_machine() -> MachineSchema {
                 emit: vec![],
             },
             TransitionSchema {
+                name: "ForceCancelNoRunFromExtracting".into(),
+                from: vec!["Extracting".into()],
+                on: InputMatch {
+                    variant: "ForceCancelNoRun".into(),
+                    bindings: vec![],
+                },
+                guards: vec![],
+                updates: vec![Update::Assign {
+                    field: "terminal_outcome".into(),
+                    expr: Expr::String("Cancelled".into()),
+                }],
+                to: "Cancelled".into(),
+                emit: vec![],
+            },
+            TransitionSchema {
                 name: "ForceCancelNoRunFromErrorRecovery".into(),
                 from: vec!["ErrorRecovery".into()],
                 on: InputMatch {
@@ -2117,6 +2461,14 @@ pub fn turn_execution_machine() -> MachineSchema {
                         field: "terminal_outcome".into(),
                         expr: Expr::String("None".into()),
                     },
+                    Update::Assign {
+                        field: "extraction_attempts".into(),
+                        expr: Expr::U64(0),
+                    },
+                    Update::Assign {
+                        field: "max_extraction_retries".into(),
+                        expr: Expr::U64(0),
+                    },
                 ],
                 to: "Ready".into(),
                 emit: vec![],
@@ -2172,6 +2524,14 @@ pub fn turn_execution_machine() -> MachineSchema {
                         field: "terminal_outcome".into(),
                         expr: Expr::String("None".into()),
                     },
+                    Update::Assign {
+                        field: "extraction_attempts".into(),
+                        expr: Expr::U64(0),
+                    },
+                    Update::Assign {
+                        field: "max_extraction_retries".into(),
+                        expr: Expr::U64(0),
+                    },
                 ],
                 to: "Ready".into(),
                 emit: vec![],
@@ -2226,6 +2586,14 @@ pub fn turn_execution_machine() -> MachineSchema {
                     Update::Assign {
                         field: "terminal_outcome".into(),
                         expr: Expr::String("None".into()),
+                    },
+                    Update::Assign {
+                        field: "extraction_attempts".into(),
+                        expr: Expr::U64(0),
+                    },
+                    Update::Assign {
+                        field: "max_extraction_retries".into(),
+                        expr: Expr::U64(0),
                     },
                 ],
                 to: "Ready".into(),

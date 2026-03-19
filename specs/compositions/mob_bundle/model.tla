@@ -789,11 +789,11 @@ flow_run__AnyTrackedStepInStatus(status) == (\E step_id \in flow_run_tracked_ste
 
 flow_run__StepHasDependencies(step_id) == (Len((IF (step_id \in DOMAIN flow_run_step_dependencies) THEN (IF step_id \in DOMAIN flow_run_step_dependencies THEN flow_run_step_dependencies[step_id] ELSE <<>>) ELSE <<>>)) > 0)
 
-flow_run__AllDependenciesCompleted(step_id) == (\A dependency \in (IF (step_id \in DOMAIN flow_run_step_dependencies) THEN (IF step_id \in DOMAIN flow_run_step_dependencies THEN flow_run_step_dependencies[step_id] ELSE <<>>) ELSE <<>>) : flow_run__StepStatusIs(dependency, "Completed"))
+flow_run__AllDependenciesCompleted(step_id) == (\A dependency \in SeqElements((IF (step_id \in DOMAIN flow_run_step_dependencies) THEN (IF step_id \in DOMAIN flow_run_step_dependencies THEN flow_run_step_dependencies[step_id] ELSE <<>>) ELSE <<>>)) : flow_run__StepStatusIs(dependency, "Completed"))
 
-flow_run__AllDependenciesSkipped(step_id) == (\A dependency \in (IF (step_id \in DOMAIN flow_run_step_dependencies) THEN (IF step_id \in DOMAIN flow_run_step_dependencies THEN flow_run_step_dependencies[step_id] ELSE <<>>) ELSE <<>>) : flow_run__StepStatusIs(dependency, "Skipped"))
+flow_run__AllDependenciesSkipped(step_id) == (\A dependency \in SeqElements((IF (step_id \in DOMAIN flow_run_step_dependencies) THEN (IF step_id \in DOMAIN flow_run_step_dependencies THEN flow_run_step_dependencies[step_id] ELSE <<>>) ELSE <<>>)) : flow_run__StepStatusIs(dependency, "Skipped"))
 
-flow_run__AnyDependencyCompleted(step_id) == (\E dependency \in (IF (step_id \in DOMAIN flow_run_step_dependencies) THEN (IF step_id \in DOMAIN flow_run_step_dependencies THEN flow_run_step_dependencies[step_id] ELSE <<>>) ELSE <<>>) : flow_run__StepStatusIs(dependency, "Completed"))
+flow_run__AnyDependencyCompleted(step_id) == (\E dependency \in SeqElements((IF (step_id \in DOMAIN flow_run_step_dependencies) THEN (IF step_id \in DOMAIN flow_run_step_dependencies THEN flow_run_step_dependencies[step_id] ELSE <<>>) ELSE <<>>)) : flow_run__StepStatusIs(dependency, "Completed"))
 
 flow_run__StepDependencyReady(step_id) == (IF ((IF (step_id \in DOMAIN flow_run_step_dependency_modes) THEN (IF step_id \in DOMAIN flow_run_step_dependency_modes THEN flow_run_step_dependency_modes[step_id] ELSE "None") ELSE "All") = "Any") THEN flow_run__AnyDependencyCompleted(step_id) ELSE (IF ~(flow_run__StepHasDependencies(step_id)) THEN TRUE ELSE flow_run__AllDependenciesCompleted(step_id)))
 
@@ -857,6 +857,15 @@ flow_run_CreateRun(arg_step_ids, arg_ordered_steps, arg_step_has_conditions, arg
        /\ ~HigherPriorityReady("flow_engine")
        /\ flow_run_phase = "Absent"
        /\ (Len(packet.payload.step_ids) > 0)
+       /\ (\A value \in SeqElements(packet.payload.ordered_steps) : (value \in SeqElements(packet.payload.step_ids)))
+       /\ (\A value \in SeqElements(packet.payload.step_ids) : (value \in SeqElements(packet.payload.ordered_steps)))
+       /\ ((\A step_key \in DOMAIN packet.payload.step_has_conditions : (step_key \in SeqElements(packet.payload.step_ids))) /\ (\A step_id \in SeqElements(packet.payload.step_ids) : (step_id \in DOMAIN packet.payload.step_has_conditions)))
+       /\ ((\A step_key \in DOMAIN packet.payload.step_dependencies : (step_key \in SeqElements(packet.payload.step_ids))) /\ (\A step_id \in SeqElements(packet.payload.step_ids) : (step_id \in DOMAIN packet.payload.step_dependencies)))
+       /\ ((\A step_key \in DOMAIN packet.payload.step_dependency_modes : (step_key \in SeqElements(packet.payload.step_ids))) /\ (\A step_id \in SeqElements(packet.payload.step_ids) : (step_id \in DOMAIN packet.payload.step_dependency_modes)))
+       /\ ((\A step_key \in DOMAIN packet.payload.step_branches : (step_key \in SeqElements(packet.payload.step_ids))) /\ (\A step_id \in SeqElements(packet.payload.step_ids) : (step_id \in DOMAIN packet.payload.step_branches)))
+       /\ ((\A step_key \in DOMAIN packet.payload.step_collection_policies : (step_key \in SeqElements(packet.payload.step_ids))) /\ (\A step_id \in SeqElements(packet.payload.step_ids) : (step_id \in DOMAIN packet.payload.step_collection_policies)))
+       /\ ((\A step_key \in DOMAIN packet.payload.step_quorum_thresholds : (step_key \in SeqElements(packet.payload.step_ids))) /\ (\A step_id \in SeqElements(packet.payload.step_ids) : (step_id \in DOMAIN packet.payload.step_quorum_thresholds)))
+       /\ (\A step_id \in DOMAIN packet.payload.step_dependencies : (\A dependency \in SeqElements((IF step_id \in DOMAIN packet.payload.step_dependencies THEN packet.payload.step_dependencies[step_id] ELSE <<>>)) : (dependency \in SeqElements(packet.payload.step_ids))))
        /\ flow_run_phase' = "Pending"
        /\ flow_run_tracked_steps' = flow_run_CreateRun_ForEach0_tracked_steps({}, packet.payload.step_ids)
        /\ flow_run_ordered_steps' = packet.payload.ordered_steps

@@ -17,7 +17,7 @@ fn validates_mob_orchestrator_style_machine() {
 
     assert_eq!(schema.machine, "MobOrchestratorMachine");
     assert_eq!(schema.rust.crate_name, "meerkat-mob");
-    assert_eq!(schema.rust.module, "machines::mob_orchestrator");
+    assert_eq!(schema.rust.module, "generated::mob_orchestrator");
     assert!(
         schema
             .transitions

@@ -1750,20 +1750,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completed_with_max_turns_zero_returns_invalid_transition() {
+    async fn completed_with_max_turns_zero_returns_immediately() {
         let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
         agent.config.max_turns = Some(0);
         agent.state = LoopState::Completed;
 
-        let err = agent
-            .run_loop(None)
-            .await
-            .expect_err("expected transition error");
-        let AgentError::InvalidStateTransition { from, to } = err else {
-            unreachable!("expected InvalidStateTransition, got {err:?}");
-        };
-        assert_eq!(from, "Completed");
-        assert_eq!(to, "Completed");
+        // With the turn execution authority, Completed + max_turns=0
+        // correctly returns immediately with 0 turns rather than
+        // erroring with InvalidStateTransition.
+        let result = agent.run_loop(None).await.unwrap();
+        assert_eq!(result.turns, 0);
+        assert_eq!(agent.state, LoopState::Completed);
     }
 
     #[tokio::test]

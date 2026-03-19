@@ -3602,6 +3602,7 @@ mod tests {
             source: None,
             stream: Some("invalid".to_string()),
             allow_self_session: None,
+            handling_mode: None,
         };
         let session_id = meerkat_core::SessionId::new();
         let err = build_comms_command(&req, &session_id).expect_err("invalid stream should fail");
@@ -3626,6 +3627,7 @@ mod tests {
             source: None,
             stream: None,
             allow_self_session: None,
+            handling_mode: None,
         };
         let session_id = meerkat_core::SessionId::new();
         let err = build_comms_command(&req, &session_id).expect_err("invalid status should fail");
@@ -3650,6 +3652,7 @@ mod tests {
             source: Some("webhookd".to_string()),
             stream: None,
             allow_self_session: None,
+            handling_mode: None,
         };
         let session_id = meerkat_core::SessionId::new();
         let err = build_comms_command(&req, &session_id).expect_err("invalid source should fail");

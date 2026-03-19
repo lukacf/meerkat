@@ -93,6 +93,8 @@ async fn inner_test_rest_resume_metadata() {
         runtime_adapter: std::sync::Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
         #[cfg(feature = "mob")]
         mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
+        #[cfg(feature = "comms")]
+        comms_drain_handles: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         #[cfg(feature = "mcp")]
         mcp_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
@@ -192,6 +194,8 @@ async fn inner_test_rest_resume_metadata() {
         runtime_adapter: std::sync::Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
         #[cfg(feature = "mob")]
         mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
+        #[cfg(feature = "comms")]
+        comms_drain_handles: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         #[cfg(feature = "mcp")]
         mcp_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };

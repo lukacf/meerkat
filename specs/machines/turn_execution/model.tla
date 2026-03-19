@@ -402,6 +402,162 @@ CancellationObserved(run_id) ==
     /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count >>
 
 
+TurnLimitReachedFromApplyingPrimitive(run_id) ==
+    /\ phase = "ApplyingPrimitive"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ boundary_count' = (boundary_count) + 1
+    /\ terminal_outcome' = "Completed"
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary >>
+
+
+TurnLimitReachedFromCallingLlm(run_id) ==
+    /\ phase = "CallingLlm"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ boundary_count' = (boundary_count) + 1
+    /\ terminal_outcome' = "Completed"
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary >>
+
+
+TurnLimitReachedFromWaitingForOps(run_id) ==
+    /\ phase = "WaitingForOps"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ boundary_count' = (boundary_count) + 1
+    /\ terminal_outcome' = "Completed"
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary >>
+
+
+TurnLimitReachedFromDrainingBoundary(run_id) ==
+    /\ phase = "DrainingBoundary"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ boundary_count' = (boundary_count) + 1
+    /\ terminal_outcome' = "Completed"
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary >>
+
+
+TurnLimitReachedFromErrorRecovery(run_id) ==
+    /\ phase = "ErrorRecovery"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ boundary_count' = (boundary_count) + 1
+    /\ terminal_outcome' = "Completed"
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary >>
+
+
+BudgetExhaustedFromApplyingPrimitive(run_id) ==
+    /\ phase = "ApplyingPrimitive"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ boundary_count' = (boundary_count) + 1
+    /\ terminal_outcome' = "BudgetExhausted"
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary >>
+
+
+BudgetExhaustedFromCallingLlm(run_id) ==
+    /\ phase = "CallingLlm"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ boundary_count' = (boundary_count) + 1
+    /\ terminal_outcome' = "BudgetExhausted"
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary >>
+
+
+BudgetExhaustedFromWaitingForOps(run_id) ==
+    /\ phase = "WaitingForOps"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ boundary_count' = (boundary_count) + 1
+    /\ terminal_outcome' = "BudgetExhausted"
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary >>
+
+
+BudgetExhaustedFromDrainingBoundary(run_id) ==
+    /\ phase = "DrainingBoundary"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ boundary_count' = (boundary_count) + 1
+    /\ terminal_outcome' = "BudgetExhausted"
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary >>
+
+
+BudgetExhaustedFromErrorRecovery(run_id) ==
+    /\ phase = "ErrorRecovery"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ boundary_count' = (boundary_count) + 1
+    /\ terminal_outcome' = "BudgetExhausted"
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary >>
+
+
+ForceCancelNoRunFromReady ==
+    /\ phase = "Ready"
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ terminal_outcome' = "Cancelled"
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary >>
+
+
+ForceCancelNoRunFromApplyingPrimitive ==
+    /\ phase = "ApplyingPrimitive"
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ terminal_outcome' = "Cancelled"
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary >>
+
+
+ForceCancelNoRunFromCallingLlm ==
+    /\ phase = "CallingLlm"
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ terminal_outcome' = "Cancelled"
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary >>
+
+
+ForceCancelNoRunFromWaitingForOps ==
+    /\ phase = "WaitingForOps"
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ terminal_outcome' = "Cancelled"
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary >>
+
+
+ForceCancelNoRunFromDrainingBoundary ==
+    /\ phase = "DrainingBoundary"
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ terminal_outcome' = "Cancelled"
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary >>
+
+
+ForceCancelNoRunFromErrorRecovery ==
+    /\ phase = "ErrorRecovery"
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ terminal_outcome' = "Cancelled"
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary >>
+
+
+ForceCancelNoRunFromCancelling ==
+    /\ phase = "Cancelling"
+    /\ phase' = "Cancelled"
+    /\ model_step_count' = model_step_count + 1
+    /\ terminal_outcome' = "Cancelled"
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, boundary_count, cancel_after_boundary >>
+
+
 AcknowledgeTerminalFromCompleted(run_id) ==
     /\ phase = "Completed"
     /\ (active_run = Some(run_id))
@@ -486,6 +642,23 @@ Next ==
     \/ \E run_id \in RunIdValues : CancelAfterBoundaryFromDrainingBoundary(run_id)
     \/ \E run_id \in RunIdValues : CancelAfterBoundaryFromErrorRecovery(run_id)
     \/ \E run_id \in RunIdValues : CancellationObserved(run_id)
+    \/ \E run_id \in RunIdValues : TurnLimitReachedFromApplyingPrimitive(run_id)
+    \/ \E run_id \in RunIdValues : TurnLimitReachedFromCallingLlm(run_id)
+    \/ \E run_id \in RunIdValues : TurnLimitReachedFromWaitingForOps(run_id)
+    \/ \E run_id \in RunIdValues : TurnLimitReachedFromDrainingBoundary(run_id)
+    \/ \E run_id \in RunIdValues : TurnLimitReachedFromErrorRecovery(run_id)
+    \/ \E run_id \in RunIdValues : BudgetExhaustedFromApplyingPrimitive(run_id)
+    \/ \E run_id \in RunIdValues : BudgetExhaustedFromCallingLlm(run_id)
+    \/ \E run_id \in RunIdValues : BudgetExhaustedFromWaitingForOps(run_id)
+    \/ \E run_id \in RunIdValues : BudgetExhaustedFromDrainingBoundary(run_id)
+    \/ \E run_id \in RunIdValues : BudgetExhaustedFromErrorRecovery(run_id)
+    \/ ForceCancelNoRunFromReady
+    \/ ForceCancelNoRunFromApplyingPrimitive
+    \/ ForceCancelNoRunFromCallingLlm
+    \/ ForceCancelNoRunFromWaitingForOps
+    \/ ForceCancelNoRunFromDrainingBoundary
+    \/ ForceCancelNoRunFromErrorRecovery
+    \/ ForceCancelNoRunFromCancelling
     \/ \E run_id \in RunIdValues : AcknowledgeTerminalFromCompleted(run_id)
     \/ \E run_id \in RunIdValues : AcknowledgeTerminalFromFailed(run_id)
     \/ \E run_id \in RunIdValues : AcknowledgeTerminalFromCancelled(run_id)
@@ -493,11 +666,11 @@ Next ==
 
 ready_has_no_active_run == ((phase # "Ready") \/ (active_run = None))
 ready_has_no_admitted_content == ((phase # "Ready") \/ (admitted_content_shape = None))
-non_ready_has_active_run == ((phase = "Ready") \/ (active_run # None))
+non_ready_has_active_run == ((phase = "Ready") \/ (phase = "Completed") \/ (phase = "Failed") \/ (phase = "Cancelled") \/ (active_run # None))
 waiting_for_ops_implies_pending_tools == ((phase # "WaitingForOps") \/ (tool_calls_pending > 0))
 ready_has_no_boundary_cancel_request == ((phase # "Ready") \/ (cancel_after_boundary = FALSE))
 immediate_primitives_skip_llm_and_recovery == ((primitive_kind = "ConversationTurn") \/ ((phase # "CallingLlm") /\ (phase # "WaitingForOps") /\ (phase # "ErrorRecovery")))
-terminal_states_match_terminal_outcome == (((phase # "Completed") \/ (terminal_outcome = "Completed")) /\ ((phase # "Failed") \/ (terminal_outcome = "Failed")) /\ ((phase # "Cancelled") \/ (terminal_outcome = "Cancelled")))
+terminal_states_match_terminal_outcome == (((phase # "Completed") \/ (terminal_outcome = "Completed") \/ (terminal_outcome = "BudgetExhausted")) /\ ((phase # "Failed") \/ (terminal_outcome = "Failed")) /\ ((phase # "Cancelled") \/ (terminal_outcome = "Cancelled")))
 completed_runs_have_seen_a_boundary == ((phase # "Completed") \/ (boundary_count > 0))
 
 CiStateConstraint == /\ model_step_count <= 6

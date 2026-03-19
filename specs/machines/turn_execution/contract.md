@@ -34,6 +34,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CancelAfterBoundary`(run_id: RunId)
 - `CancellationObserved`(run_id: RunId)
 - `AcknowledgeTerminal`(run_id: RunId)
+- `TurnLimitReached`(run_id: RunId)
+- `BudgetExhausted`(run_id: RunId)
+- `ForceCancelNoRun`
 - `RunCompleted`(run_id: RunId)
 - `RunFailed`(run_id: RunId)
 - `RunCancelled`(run_id: RunId)
@@ -328,6 +331,121 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `run_matches_active`
 - Emits: `RunCancelled`
+- To: `Cancelled`
+
+### `TurnLimitReachedFromApplyingPrimitive`
+- From: `ApplyingPrimitive`
+- On: `TurnLimitReached`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `TurnLimitReachedFromCallingLlm`
+- From: `CallingLlm`
+- On: `TurnLimitReached`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `TurnLimitReachedFromWaitingForOps`
+- From: `WaitingForOps`
+- On: `TurnLimitReached`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `TurnLimitReachedFromDrainingBoundary`
+- From: `DrainingBoundary`
+- On: `TurnLimitReached`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `TurnLimitReachedFromErrorRecovery`
+- From: `ErrorRecovery`
+- On: `TurnLimitReached`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `BudgetExhaustedFromApplyingPrimitive`
+- From: `ApplyingPrimitive`
+- On: `BudgetExhausted`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `BudgetExhaustedFromCallingLlm`
+- From: `CallingLlm`
+- On: `BudgetExhausted`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `BudgetExhaustedFromWaitingForOps`
+- From: `WaitingForOps`
+- On: `BudgetExhausted`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `BudgetExhaustedFromDrainingBoundary`
+- From: `DrainingBoundary`
+- On: `BudgetExhausted`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `BudgetExhaustedFromErrorRecovery`
+- From: `ErrorRecovery`
+- On: `BudgetExhausted`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `ForceCancelNoRunFromReady`
+- From: `Ready`
+- On: `ForceCancelNoRun`()
+- To: `Cancelled`
+
+### `ForceCancelNoRunFromApplyingPrimitive`
+- From: `ApplyingPrimitive`
+- On: `ForceCancelNoRun`()
+- To: `Cancelled`
+
+### `ForceCancelNoRunFromCallingLlm`
+- From: `CallingLlm`
+- On: `ForceCancelNoRun`()
+- To: `Cancelled`
+
+### `ForceCancelNoRunFromWaitingForOps`
+- From: `WaitingForOps`
+- On: `ForceCancelNoRun`()
+- To: `Cancelled`
+
+### `ForceCancelNoRunFromDrainingBoundary`
+- From: `DrainingBoundary`
+- On: `ForceCancelNoRun`()
+- To: `Cancelled`
+
+### `ForceCancelNoRunFromErrorRecovery`
+- From: `ErrorRecovery`
+- On: `ForceCancelNoRun`()
+- To: `Cancelled`
+
+### `ForceCancelNoRunFromCancelling`
+- From: `Cancelling`
+- On: `ForceCancelNoRun`()
 - To: `Cancelled`
 
 ### `AcknowledgeTerminalFromCompleted`

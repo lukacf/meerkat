@@ -189,6 +189,57 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `CancellationObserved`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `cancel-and-fail`
+- `TurnLimitReachedFromApplyingPrimitive`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `TurnLimitReachedFromCallingLlm`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `TurnLimitReachedFromWaitingForOps`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `TurnLimitReachedFromDrainingBoundary`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `TurnLimitReachedFromErrorRecovery`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `BudgetExhaustedFromApplyingPrimitive`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `BudgetExhaustedFromCallingLlm`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `BudgetExhaustedFromWaitingForOps`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `BudgetExhaustedFromDrainingBoundary`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `BudgetExhaustedFromErrorRecovery`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `ForceCancelNoRunFromReady`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `cancel-and-fail`
+- `ForceCancelNoRunFromApplyingPrimitive`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `cancel-and-fail`
+- `ForceCancelNoRunFromCallingLlm`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `cancel-and-fail`
+- `ForceCancelNoRunFromWaitingForOps`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `cancel-and-fail`
+- `ForceCancelNoRunFromDrainingBoundary`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `cancel-and-fail`
+- `ForceCancelNoRunFromErrorRecovery`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `cancel-and-fail`
+- `ForceCancelNoRunFromCancelling`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `cancel-and-fail`
 - `AcknowledgeTerminalFromCompleted`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `conversation-run`

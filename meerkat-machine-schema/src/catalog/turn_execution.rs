@@ -229,10 +229,25 @@ pub fn turn_execution_machine() -> MachineSchema {
             },
             InvariantSchema {
                 name: "non_ready_has_active_run".into(),
+                // Active run must be set in non-terminal, non-ready phases.
+                // Terminal phases may have active_run=None via ForceCancelNoRun
+                // or TurnLimitReached/BudgetExhausted.
                 expr: Expr::Or(vec![
                     Expr::Eq(
                         Box::new(Expr::CurrentPhase),
                         Box::new(Expr::Phase("Ready".into())),
+                    ),
+                    Expr::Eq(
+                        Box::new(Expr::CurrentPhase),
+                        Box::new(Expr::Phase("Completed".into())),
+                    ),
+                    Expr::Eq(
+                        Box::new(Expr::CurrentPhase),
+                        Box::new(Expr::Phase("Failed".into())),
+                    ),
+                    Expr::Eq(
+                        Box::new(Expr::CurrentPhase),
+                        Box::new(Expr::Phase("Cancelled".into())),
                     ),
                     Expr::Neq(
                         Box::new(Expr::Field("active_run".into())),

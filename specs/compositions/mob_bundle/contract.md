@@ -31,6 +31,11 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 - `mob_execution_failure_notifies_control`: `turn_execution`.`RunFailed` -> `runtime_control`.`RunFailed` [Immediate]
 - `mob_execution_cancel_updates_ingress`: `turn_execution`.`RunCancelled` -> `runtime_ingress`.`RunCancelled` [Immediate]
 - `mob_execution_cancel_notifies_control`: `turn_execution`.`RunCancelled` -> `runtime_control`.`RunCancelled` [Immediate]
+- `mob_deactivate_supervisor_stops_lifecycle`: `mob_orchestrator`.`DeactivateSupervisor` -> `mob_lifecycle`.`Stop` [Immediate]
+- `mob_member_force_cancelled_stops_runtime`: `mob_orchestrator`.`MemberForceCancelled` -> `runtime_control`.`StopRequested` [Immediate]
+- `mob_escalate_supervisor_stops_orchestrator`: `flow_run`.`EscalateSupervisor` -> `mob_orchestrator`.`StopOrchestrator` [Immediate]
+- `mob_member_respawn_destroys_runtime`: `mob_orchestrator`.`MemberRespawnInitiated` -> `runtime_control`.`DestroyRequested` [Immediate]
+- `mob_cleanup_destroys_orchestrator`: `mob_lifecycle`.`RequestCleanup` -> `mob_orchestrator`.`DestroyOrchestrator` [Immediate]
 
 ## Scheduler Rules
 - `PreemptWhenReady(control_plane, ordinary_ingress)`

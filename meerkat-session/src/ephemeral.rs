@@ -66,7 +66,8 @@ pub struct SessionSnapshot {
 enum SessionCommand {
     StartTurn {
         prompt: meerkat_core::types::ContentInput,
-        #[allow(dead_code)] // Intentionally kept for attached-runtime command loop
+        #[allow(dead_code)]
+        // Persisted session metadata; runtime loop handles dispatch automatically
         host_mode: bool,
         event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
         result_tx: oneshot::Sender<Result<RunResult, meerkat_core::error::AgentError>>,

@@ -706,6 +706,9 @@ impl MobBuilder {
         {
             if definition.orchestrator.is_some() {
                 topology_service.bind_coordinator();
+                let _ = orchestrator.apply(
+                    super::mob_orchestrator_authority::MobOrchestratorInput::BindCoordinator,
+                );
             }
             // Effects (ActivateSupervisor) are satisfied by the mob builder wiring.
             let _ = transition;

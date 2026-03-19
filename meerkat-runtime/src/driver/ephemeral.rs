@@ -8,6 +8,7 @@
 //! - S25 retire/reset/destroy lifecycle operations
 
 use meerkat_core::lifecycle::{InputId, RunEvent, RunId};
+use meerkat_core::types::HandlingMode;
 
 use crate::accept::AcceptOutcome;
 use crate::durability::{DurabilityError, validate_durability};
@@ -16,11 +17,17 @@ use crate::input::Input;
 use crate::input_ledger::InputLedger;
 use crate::input_lifecycle_authority::{InputLifecycleError, InputLifecycleInput};
 use crate::input_state::{InputAbandonReason, InputLifecycleState, InputState, PolicySnapshot};
-use crate::policy::{ApplyMode, ConsumePoint, DrainPolicy, QueueMode, WakeMode};
+use crate::policy::{
+    ApplyMode, ConsumePoint, DrainPolicy, QueueMode, RoutingDisposition, WakeMode,
+};
 use crate::policy_table::DefaultPolicyTable;
 use crate::queue::InputQueue;
 use crate::runtime_event::{
     InputLifecycleEvent, RuntimeEvent, RuntimeEventEnvelope, RuntimeStateChangeEvent,
+};
+use crate::runtime_ingress_authority::{
+    ContentShape, RuntimeIngressAuthority, RuntimeIngressEffect, RuntimeIngressInput,
+    RuntimeIngressMutator,
 };
 use crate::runtime_state::RuntimeState;
 use crate::state_machine::RuntimeStateMachine;
@@ -28,6 +35,14 @@ use crate::traits::{
     DestroyReport, RecoveryReport, ResetReport, RetireReport, RuntimeControlCommand,
     RuntimeDriverError,
 };
+
+/// Derive the handling mode from a policy decision's routing disposition.
+fn handling_mode_from_policy(policy: &crate::policy::PolicyDecision) -> HandlingMode {
+    match policy.routing_disposition {
+        RoutingDisposition::Steer => HandlingMode::Steer,
+        _ => HandlingMode::Queue,
+    }
+}
 
 /// Ephemeral runtime driver -- all state in-memory.
 #[derive(Clone)]
@@ -40,6 +55,10 @@ pub struct EphemeralRuntimeDriver {
     wake_requested: bool,
     process_requested: bool,
     silent_comms_intents: Vec<String>,
+    /// Canonical ingress authority -- coarse-grained ingress orchestration
+    /// (queues, current run, wake/process flags, ingress phase).
+    /// Runs alongside InputLifecycleAuthority (per-input) and InputLedger.
+    ingress: RuntimeIngressAuthority,
 }
 
 impl EphemeralRuntimeDriver {
@@ -54,11 +73,78 @@ impl EphemeralRuntimeDriver {
             wake_requested: false,
             process_requested: false,
             silent_comms_intents: Vec::new(),
+            ingress: RuntimeIngressAuthority::new(),
         }
     }
 
     pub fn set_silent_comms_intents(&mut self, intents: Vec<String>) {
         self.silent_comms_intents = intents;
+    }
+
+    /// Get a reference to the ingress authority.
+    pub fn ingress(&self) -> &RuntimeIngressAuthority {
+        &self.ingress
+    }
+
+    /// Process effects returned by the ingress authority.
+    ///
+    /// Translates authority effects into driver state changes and events.
+    /// Called after each successful `ingress.apply()`.
+    fn process_ingress_effects(&mut self, effects: &[RuntimeIngressEffect]) {
+        for effect in effects {
+            match effect {
+                RuntimeIngressEffect::WakeRuntime => {
+                    self.wake_requested = true;
+                }
+                RuntimeIngressEffect::RequestImmediateProcessing => {
+                    self.process_requested = true;
+                }
+                RuntimeIngressEffect::IngressAccepted { work_id } => {
+                    tracing::debug!(
+                        work_id = ?work_id,
+                        "ingress authority: input accepted"
+                    );
+                }
+                RuntimeIngressEffect::CompletionResolved { work_id, outcome } => {
+                    tracing::debug!(
+                        work_id = ?work_id,
+                        outcome = ?outcome,
+                        "ingress authority: completion resolved"
+                    );
+                }
+                RuntimeIngressEffect::InputLifecycleNotice { work_id, new_state } => {
+                    tracing::trace!(
+                        work_id = ?work_id,
+                        new_state = ?new_state,
+                        "ingress authority: lifecycle notice"
+                    );
+                }
+                RuntimeIngressEffect::ReadyForRun {
+                    run_id,
+                    contributing_work_ids,
+                } => {
+                    tracing::debug!(
+                        run_id = ?run_id,
+                        contributors = contributing_work_ids.len(),
+                        "ingress authority: ready for run"
+                    );
+                }
+                RuntimeIngressEffect::IngressNotice { kind, detail } => {
+                    tracing::debug!(
+                        kind = %kind,
+                        detail = %detail,
+                        "ingress authority: notice"
+                    );
+                }
+                RuntimeIngressEffect::SilentIntentApplied { work_id, intent } => {
+                    tracing::debug!(
+                        work_id = ?work_id,
+                        intent = %intent,
+                        "ingress authority: silent intent applied"
+                    );
+                }
+            }
+        }
     }
     pub fn is_idle(&self) -> bool {
         self.state_machine.is_idle()
@@ -179,6 +265,29 @@ impl EphemeralRuntimeDriver {
         input_id: &InputId,
         run_id: &RunId,
     ) -> Result<(), InputLifecycleError> {
+        // Ingress authority: StageDrainSnapshot (single contributor)
+        // Note: callers may stage inputs one-at-a-time, so we apply
+        // StageDrainSnapshot only if the authority has no current run yet.
+        // If a run is already in progress, the authority was already notified.
+        if self.ingress.current_run().is_none() {
+            match self.ingress.apply(RuntimeIngressInput::StageDrainSnapshot {
+                run_id: run_id.clone(),
+                contributing_work_ids: vec![input_id.clone()],
+            }) {
+                Ok(transition) => {
+                    self.process_ingress_effects(&transition.effects);
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        input_id = ?input_id,
+                        run_id = ?run_id,
+                        error = %err,
+                        "ingress authority rejected StageDrainSnapshot"
+                    );
+                }
+            }
+        }
+
         let state =
             self.ledger
                 .get_mut(input_id)
@@ -262,6 +371,19 @@ impl EphemeralRuntimeDriver {
     }
 
     pub fn retire(&mut self) -> Result<RetireReport, RuntimeDriverError> {
+        // Ingress authority: Retire
+        match self.ingress.apply(RuntimeIngressInput::Retire) {
+            Ok(transition) => {
+                self.process_ingress_effects(&transition.effects);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "ingress authority rejected Retire"
+                );
+            }
+        }
+
         let from = self.state_machine.state();
         self.state_machine
             .transition(RuntimeState::Retired)
@@ -283,6 +405,20 @@ impl EphemeralRuntimeDriver {
                 "cannot reset while running".into(),
             ));
         }
+
+        // Ingress authority: Reset
+        match self.ingress.apply(RuntimeIngressInput::Reset) {
+            Ok(transition) => {
+                self.process_ingress_effects(&transition.effects);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "ingress authority rejected Reset"
+                );
+            }
+        }
+
         let abandoned = self.abandon_all_non_terminal(InputAbandonReason::Reset);
         self.queue.drain();
         self.wake_requested = false;
@@ -303,6 +439,19 @@ impl EphemeralRuntimeDriver {
     }
 
     pub fn destroy(&mut self) -> Result<usize, RuntimeDriverError> {
+        // Ingress authority: Destroy
+        match self.ingress.apply(RuntimeIngressInput::Destroy) {
+            Ok(transition) => {
+                self.process_ingress_effects(&transition.effects);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "ingress authority rejected Destroy"
+                );
+            }
+        }
+
         let from = self.state_machine.state();
         self.state_machine
             .transition(RuntimeState::Destroyed)
@@ -316,6 +465,19 @@ impl EphemeralRuntimeDriver {
     }
 
     pub fn recover_ephemeral(&mut self) -> RecoveryReport {
+        // Ingress authority: Recover
+        match self.ingress.apply(RuntimeIngressInput::Recover) {
+            Ok(transition) => {
+                self.process_ingress_effects(&transition.effects);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "ingress authority rejected Recover"
+                );
+            }
+        }
+
         let mut recovered = 0;
         let mut abandoned = 0;
         let mut requeued = 0;
@@ -481,6 +643,42 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                 input_id: input_id.clone(),
             },
         ));
+        // --- Ingress authority: classify and apply ---
+        let handling_mode = handling_mode_from_policy(&policy);
+        let content_shape = ContentShape(input.kind_id().to_string());
+        let ingress_input = if policy.apply_mode == ApplyMode::Ignore
+            && policy.consume_point == ConsumePoint::OnAccept
+        {
+            RuntimeIngressInput::AdmitConsumedOnAccept {
+                work_id: input_id.clone(),
+                content_shape,
+                request_id: None,
+                reservation_key: None,
+                policy: policy.clone(),
+            }
+        } else {
+            RuntimeIngressInput::AdmitQueued {
+                work_id: input_id.clone(),
+                content_shape,
+                handling_mode,
+                request_id: None,
+                reservation_key: None,
+                policy: policy.clone(),
+            }
+        };
+        match self.ingress.apply(ingress_input) {
+            Ok(transition) => {
+                self.process_ingress_effects(&transition.effects);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    input_id = ?input_id,
+                    error = %err,
+                    "ingress authority rejected accept_input — continuing with existing logic"
+                );
+            }
+        }
+
         match policy.apply_mode {
             ApplyMode::Ignore => {
                 if policy.consume_point == ConsumePoint::OnAccept
@@ -573,13 +771,53 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                 run_id,
                 consumed_input_ids,
             } => {
+                // Ingress authority: RunCompleted
+                if let Some(current_run) = self.ingress.current_run().cloned()
+                    && current_run == run_id
+                {
+                    match self.ingress.apply(RuntimeIngressInput::RunCompleted {
+                        run_id: run_id.clone(),
+                    }) {
+                        Ok(transition) => {
+                            self.process_ingress_effects(&transition.effects);
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                run_id = ?run_id,
+                                error = %err,
+                                "ingress authority rejected RunCompleted"
+                            );
+                        }
+                    }
+                }
+
                 self.consume_inputs(&consumed_input_ids, &run_id)
                     .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
                 self.state_machine
                     .complete_run()
                     .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
             }
-            RunEvent::RunFailed { .. } => {
+            RunEvent::RunFailed { ref run_id, .. } => {
+                // Ingress authority: RunFailed
+                if let Some(current_run) = self.ingress.current_run().cloned()
+                    && current_run == *run_id
+                {
+                    match self.ingress.apply(RuntimeIngressInput::RunFailed {
+                        run_id: run_id.clone(),
+                    }) {
+                        Ok(transition) => {
+                            self.process_ingress_effects(&transition.effects);
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                run_id = ?run_id,
+                                error = %err,
+                                "ingress authority rejected RunFailed"
+                            );
+                        }
+                    }
+                }
+
                 let staged_ids: Vec<InputId> = self
                     .ledger
                     .iter()
@@ -595,7 +833,27 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                     .complete_run()
                     .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
             }
-            RunEvent::RunCancelled { .. } => {
+            RunEvent::RunCancelled { ref run_id, .. } => {
+                // Ingress authority: RunCancelled
+                if let Some(current_run) = self.ingress.current_run().cloned()
+                    && current_run == *run_id
+                {
+                    match self.ingress.apply(RuntimeIngressInput::RunCancelled {
+                        run_id: run_id.clone(),
+                    }) {
+                        Ok(transition) => {
+                            self.process_ingress_effects(&transition.effects);
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                run_id = ?run_id,
+                                error = %err,
+                                "ingress authority rejected RunCancelled"
+                            );
+                        }
+                    }
+                }
+
                 let staged_ids: Vec<InputId> = self
                     .ledger
                     .iter()
@@ -615,6 +873,26 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
             RunEvent::BoundaryApplied {
                 run_id, receipt, ..
             } => {
+                // Ingress authority: BoundaryApplied
+                if self.ingress.current_run() == Some(&run_id) {
+                    match self.ingress.apply(RuntimeIngressInput::BoundaryApplied {
+                        run_id: run_id.clone(),
+                        boundary_sequence: receipt.sequence,
+                    }) {
+                        Ok(transition) => {
+                            self.process_ingress_effects(&transition.effects);
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                run_id = ?run_id,
+                                boundary_sequence = receipt.sequence,
+                                error = %err,
+                                "ingress authority rejected BoundaryApplied"
+                            );
+                        }
+                    }
+                }
+
                 for input_id in &receipt.contributing_input_ids {
                     if let Some(state) = self.ledger.get_mut(input_id)
                         && state.current_state() == InputLifecycleState::Staged
@@ -646,6 +924,21 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
     ) -> Result<(), RuntimeDriverError> {
         match command {
             RuntimeControlCommand::Stop => {
+                // Ingress authority: Destroy (Stop abandons everything)
+                if !self.ingress.is_terminal() {
+                    match self.ingress.apply(RuntimeIngressInput::Destroy) {
+                        Ok(transition) => {
+                            self.process_ingress_effects(&transition.effects);
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                error = %err,
+                                "ingress authority rejected Destroy on Stop"
+                            );
+                        }
+                    }
+                }
+
                 let from = self.state_machine.state();
                 self.state_machine
                     .transition(RuntimeState::Stopped)

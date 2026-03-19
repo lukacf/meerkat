@@ -2212,9 +2212,10 @@ mod tests {
     fn can_accept_probes_without_mutation() {
         let auth = RuntimeIngressAuthority::new();
         assert!(auth.can_accept(&RuntimeIngressInput::Retire));
-        assert!(!auth.can_accept(&RuntimeIngressInput::Reset)); // Reset requires Active|Retired with no_current_run — passes from Active with no run
-        // Actually Reset from Active with no run should work, let me re-check
         // Reset from Active with no current run should succeed
+        assert!(auth.can_accept(&RuntimeIngressInput::Reset));
+        // Phase should be unchanged (probing, not mutating)
+        assert_eq!(auth.phase(), IngressPhase::Active);
     }
 
     #[test]

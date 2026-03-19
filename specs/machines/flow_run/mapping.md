@@ -26,13 +26,21 @@ This note maps the normative `0.5` `FlowRunMachine` contract onto current
 
 The TLA+ model deliberately abstracts away:
 
-- full flow topology and condition evaluation
-- retry budgets and timeout windows
-- branch semantics
-- target profile/member selection
-- concrete event streams and JSON payloads
+- concrete condition-expression evaluation mechanics
+- template rendering and shared-path string interpolation mechanics
+- topology lookup and target profile/member discovery mechanics
+- concrete event streams, JSON payloads, and external executor timing
 
-Those refine the same run aggregate semantics.
+Those arrive at the machine boundary as typed inputs or effects.
+
+The formal model does **not** abstract away the semantic truths that drive
+flow progression. It explicitly owns:
+
+- dependency readiness and dependency-skip truth
+- branch-blocking / branch-winner truth
+- collection policy satisfaction and feasibility
+- retry-count progression and retry-allowed truth
+- escalation-trigger truth
 
 ## Important `0.5` clarification
 
@@ -45,8 +53,9 @@ execution itself into a second execution loop.
 ## Known `0.4` divergence
 
 - actor-side task/cancel trackers still coexist with store-owned durable truth
-- some fallback terminalization still lives in actor cleanup code rather than
-  one obviously named machine owner
+- condition evaluation, template rendering, schema validation, topology lookup,
+  and executor outcomes remain external boundaries that feed typed facts into
+  the machine
 
 <!-- GENERATED_COVERAGE_START -->
 ## Generated Coverage

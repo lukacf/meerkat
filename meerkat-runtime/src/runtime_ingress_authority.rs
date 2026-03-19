@@ -618,9 +618,38 @@ impl RuntimeIngressAuthority {
             work_id: work_id.clone(),
             new_state: InputLifecycleState::Queued,
         });
-        effects.push(RuntimeIngressEffect::WakeRuntime);
-        if handling_mode == HandlingMode::Steer {
-            effects.push(RuntimeIngressEffect::RequestImmediateProcessing);
+        // Emit wake/process effects based on the policy's wake_mode.
+        // The authority owns this decision — the shell must not override.
+        //
+        // WakeIfIdle: always set wake (runtime loop ignores if running)
+        // InterruptYielding: conceptually "yield at boundary if running,
+        //   wake if idle." We always emit WakeRuntime here — the runtime
+        //   loop naturally handles the "already running" case by deferring
+        //   the wake to post-run. BUT: the shell's wake_requested flag
+        //   should only be set when the runtime is actually idle, because
+        //   InterruptYielding during a run means "process at next boundary"
+        //   not "wake from idle." Since the authority doesn't know runtime
+        //   phase, we emit WakeRuntime only for WakeIfIdle. For
+        //   InterruptYielding, we emit RequestImmediateProcessing (if steer)
+        //   which the shell interprets at boundary time.
+        // None: no wake at all.
+        match policy.wake_mode {
+            crate::WakeMode::WakeIfIdle => {
+                effects.push(RuntimeIngressEffect::WakeRuntime);
+                if handling_mode == HandlingMode::Steer {
+                    effects.push(RuntimeIngressEffect::RequestImmediateProcessing);
+                }
+            }
+            crate::WakeMode::InterruptYielding => {
+                // Don't wake — input is queued and processed at next boundary.
+                // If steer, request immediate processing at that boundary.
+                if handling_mode == HandlingMode::Steer {
+                    effects.push(RuntimeIngressEffect::RequestImmediateProcessing);
+                }
+            }
+            crate::WakeMode::None => {
+                // No wake — input is queued silently for the next natural boundary.
+            }
         }
 
         Ok((IngressPhase::Active, fields, effects))

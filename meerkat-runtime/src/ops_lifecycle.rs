@@ -1,6 +1,11 @@
 //! In-memory runtime implementation of the shared async-operation lifecycle seam.
+//!
+//! All canonical lifecycle state mutations are delegated to
+//! [`OpsLifecycleAuthority`] via [`OpsLifecycleMutator::apply`]. This shell
+//! layer owns I/O concerns: watcher channels, timestamps, peer handles, and
+//! snapshot assembly.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Instant, SystemTime};
 
@@ -8,20 +13,26 @@ use std::time::{Instant, SystemTime};
 use crate::tokio;
 use meerkat_core::ops_lifecycle::{
     DEFAULT_MAX_COMPLETED, OperationCompletionWatch, OperationId, OperationLifecycleSnapshot,
-    OperationPeerHandle, OperationProgressUpdate, OperationResult, OperationSpec, OperationStatus,
+    OperationPeerHandle, OperationProgressUpdate, OperationResult, OperationSpec,
     OperationTerminalOutcome, OpsLifecycleError, OpsLifecycleRegistry,
 };
 
-/// Internal record with monotonic timestamps for elapsed computation.
+use crate::ops_lifecycle_authority::{
+    OpsLifecycleAuthority, OpsLifecycleEffect, OpsLifecycleInput, OpsLifecycleMutator,
+};
+
+// ---------------------------------------------------------------------------
+// Shell-only per-operation record (not part of canonical machine state)
+// ---------------------------------------------------------------------------
+
+/// Shell-owned data for a single operation. Canonical lifecycle state lives in
+/// the authority; this struct holds I/O concerns that the authority has no
+/// knowledge of.
 #[derive(Debug)]
-struct OperationRecord {
+struct ShellRecord {
     spec: OperationSpec,
-    status: OperationStatus,
-    peer_ready: bool,
     peer_handle: Option<OperationPeerHandle>,
-    progress_count: u32,
     watchers: Vec<tokio::sync::oneshot::Sender<OperationTerminalOutcome>>,
-    terminal_outcome: Option<OperationTerminalOutcome>,
     // Monotonic timestamps for elapsed computation
     created_at: Instant,
     started_at: Option<Instant>,
@@ -30,16 +41,12 @@ struct OperationRecord {
     created_at_wall: SystemTime,
 }
 
-impl OperationRecord {
+impl ShellRecord {
     fn new(spec: OperationSpec) -> Self {
         Self {
             spec,
-            status: OperationStatus::Provisioning,
-            peer_ready: false,
             peer_handle: None,
-            progress_count: 0,
             watchers: Vec::new(),
-            terminal_outcome: None,
             created_at: Instant::now(),
             started_at: None,
             completed_at: None,
@@ -62,101 +69,133 @@ impl OperationRecord {
         Self::epoch_millis(&wall)
     }
 
-    fn snapshot(&self) -> OperationLifecycleSnapshot {
-        let created_at_ms = Self::epoch_millis(&self.created_at_wall);
-        let started_at_ms = self.started_at.map(|i| self.epoch_millis_for_instant(i));
-        let completed_at_ms = self.completed_at.map(|i| self.epoch_millis_for_instant(i));
-        let elapsed_ms = self.completed_at.map(|completed| {
-            completed
-                .saturating_duration_since(self.created_at)
-                .as_millis() as u64
-        });
-
-        OperationLifecycleSnapshot {
-            id: self.spec.id.clone(),
-            kind: self.spec.kind,
-            display_name: self.spec.display_name.clone(),
-            status: self.status,
-            peer_ready: self.peer_ready,
-            progress_count: self.progress_count,
-            watcher_count: self.watchers.len() as u32,
-            terminal_outcome: self.terminal_outcome.clone(),
-            child_session_id: self.spec.child_session_id.clone(),
-            peer_handle: self.peer_handle.clone(),
-            created_at_ms,
-            started_at_ms,
-            completed_at_ms,
-            elapsed_ms,
-        }
-    }
-
-    fn invalid_transition(&self, action: &'static str) -> OpsLifecycleError {
-        OpsLifecycleError::InvalidTransition {
-            id: self.spec.id.clone(),
-            status: self.status,
-            action,
-        }
-    }
-
-    fn resolve_terminal(&mut self, status: OperationStatus, outcome: OperationTerminalOutcome) {
-        self.status = status;
-        self.completed_at = Some(Instant::now());
-        self.terminal_outcome = Some(outcome.clone());
+    /// Notify all watchers with the given terminal outcome and drain the list.
+    fn notify_watchers(&mut self, outcome: &OperationTerminalOutcome) {
         for watcher in std::mem::take(&mut self.watchers) {
             let _ = watcher.send(outcome.clone());
         }
     }
+
+    /// Mark the completion timestamp.
+    fn mark_completed(&mut self) {
+        self.completed_at = Some(Instant::now());
+    }
 }
+
+// ---------------------------------------------------------------------------
+// Combined shell state: authority + shell records
+// ---------------------------------------------------------------------------
 
 #[derive(Debug)]
-struct RegistryState {
-    operations: HashMap<OperationId, OperationRecord>,
-    /// FIFO ordering of completed operation IDs for bounded eviction.
-    completed_order: VecDeque<OperationId>,
-    /// Maximum number of completed operations to retain.
-    max_completed: usize,
-    /// Maximum concurrent non-terminal operations (None = unlimited).
-    max_concurrent: Option<usize>,
+struct ShellState {
+    authority: OpsLifecycleAuthority,
+    records: HashMap<OperationId, ShellRecord>,
 }
 
-impl RegistryState {
+impl ShellState {
     fn new(max_completed: usize, max_concurrent: Option<usize>) -> Self {
         Self {
-            operations: HashMap::new(),
-            completed_order: VecDeque::new(),
-            max_completed,
-            max_concurrent,
+            authority: OpsLifecycleAuthority::new(max_completed, max_concurrent),
+            records: HashMap::new(),
         }
     }
 
-    /// Count operations in non-terminal states.
-    fn active_count(&self) -> usize {
-        self.operations
-            .values()
-            .filter(|r| !r.status.is_terminal())
-            .count()
+    /// Build a snapshot by combining authority canonical state with shell data.
+    fn snapshot(&self, id: &OperationId) -> Option<OperationLifecycleSnapshot> {
+        let canonical = self.authority.operation(id)?;
+        let shell = self.records.get(id)?;
+
+        let created_at_ms = ShellRecord::epoch_millis(&shell.created_at_wall);
+        let started_at_ms = shell.started_at.map(|i| shell.epoch_millis_for_instant(i));
+        let completed_at_ms = shell
+            .completed_at
+            .map(|i| shell.epoch_millis_for_instant(i));
+        let elapsed_ms = shell.completed_at.map(|completed| {
+            completed
+                .saturating_duration_since(shell.created_at)
+                .as_millis() as u64
+        });
+
+        Some(OperationLifecycleSnapshot {
+            id: shell.spec.id.clone(),
+            kind: canonical.kind(),
+            display_name: shell.spec.display_name.clone(),
+            status: canonical.status(),
+            peer_ready: canonical.peer_ready(),
+            progress_count: canonical.progress_count(),
+            watcher_count: shell.watchers.len() as u32,
+            terminal_outcome: canonical.terminal_outcome().cloned(),
+            child_session_id: shell.spec.child_session_id.clone(),
+            peer_handle: shell.peer_handle.clone(),
+            created_at_ms,
+            started_at_ms,
+            completed_at_ms,
+            elapsed_ms,
+        })
     }
 
-    /// Evict oldest completed operations if over the retention limit.
-    fn evict_completed(&mut self) {
-        while self.completed_order.len() > self.max_completed {
-            if let Some(evicted_id) = self.completed_order.pop_front()
-                && self
-                    .operations
-                    .get(&evicted_id)
-                    .is_some_and(|r| r.status.is_terminal())
-            {
-                self.operations.remove(&evicted_id);
+    /// Execute authority effects on shell state.
+    ///
+    /// **Important:** callers must patch the real terminal outcome on the
+    /// authority (via `patch_terminal_outcome`) *before* calling this method.
+    /// `NotifyOpWatcher` effects read the patched outcome from the authority
+    /// rather than using the placeholder embedded in the effect.
+    fn execute_effects(&mut self, effects: &[OpsLifecycleEffect]) {
+        for effect in effects {
+            match effect {
+                OpsLifecycleEffect::NotifyOpWatcher { operation_id, .. } => {
+                    // Read the real (patched) outcome from the authority.
+                    let outcome = self
+                        .authority
+                        .operation(operation_id)
+                        .and_then(|op| op.terminal_outcome().cloned());
+                    if let Some(outcome) = outcome
+                        && let Some(shell) = self.records.get_mut(operation_id)
+                    {
+                        let watcher_count = shell.watchers.len() as u32;
+                        shell.notify_watchers(&outcome);
+                        shell.mark_completed();
+                        self.authority.watchers_drained(operation_id, watcher_count);
+                    }
+                }
+                OpsLifecycleEffect::ExposeOperationPeer { .. } => {
+                    // Peer handle is stored in shell record by the calling method
+                    // after authority.apply() succeeds. Nothing else to do here.
+                }
+                OpsLifecycleEffect::RetainTerminalRecord { .. } => {
+                    // The authority handles completed_order tracking internally.
+                    // Shell record stays in place until evicted.
+                }
+                OpsLifecycleEffect::EvictCompletedRecord { operation_id } => {
+                    self.records.remove(operation_id);
+                    self.authority.remove_operation(operation_id);
+                }
+                OpsLifecycleEffect::SubmitOpEvent { .. } => {
+                    // Future: emit observability events. Currently a no-op.
+                }
             }
         }
     }
+
+    fn shell_record_mut(
+        &mut self,
+        id: &OperationId,
+    ) -> Result<&mut ShellRecord, OpsLifecycleError> {
+        self.records
+            .get_mut(id)
+            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))
+    }
 }
 
-impl Default for RegistryState {
+impl Default for ShellState {
     fn default() -> Self {
         Self::new(DEFAULT_MAX_COMPLETED, None)
     }
 }
+
+// ---------------------------------------------------------------------------
+// Public configuration & registry
+// ---------------------------------------------------------------------------
 
 /// Configuration for [`RuntimeOpsLifecycleRegistry`].
 #[derive(Debug, Clone)]
@@ -177,15 +216,19 @@ impl Default for OpsLifecycleConfig {
 }
 
 /// Per-runtime shared registry for async operation lifecycle truth.
+///
+/// All canonical lifecycle state mutations are delegated to
+/// [`OpsLifecycleAuthority`]. This shell manages I/O concerns: watcher
+/// channels, timestamps, peer handles, and snapshot assembly.
 #[derive(Debug)]
 pub struct RuntimeOpsLifecycleRegistry {
-    state: RwLock<RegistryState>,
+    state: RwLock<ShellState>,
 }
 
 impl Default for RuntimeOpsLifecycleRegistry {
     fn default() -> Self {
         Self {
-            state: RwLock::new(RegistryState::default()),
+            state: RwLock::new(ShellState::default()),
         }
     }
 }
@@ -197,33 +240,20 @@ impl RuntimeOpsLifecycleRegistry {
 
     pub fn with_config(config: OpsLifecycleConfig) -> Self {
         Self {
-            state: RwLock::new(RegistryState::new(
-                config.max_completed,
-                config.max_concurrent,
-            )),
+            state: RwLock::new(ShellState::new(config.max_completed, config.max_concurrent)),
         }
     }
 
-    fn read_state(&self) -> Result<RwLockReadGuard<'_, RegistryState>, OpsLifecycleError> {
+    fn read_state(&self) -> Result<RwLockReadGuard<'_, ShellState>, OpsLifecycleError> {
         self.state
             .read()
             .map_err(|_| OpsLifecycleError::Internal("ops lifecycle registry poisoned".into()))
     }
 
-    fn write_state(&self) -> Result<RwLockWriteGuard<'_, RegistryState>, OpsLifecycleError> {
+    fn write_state(&self) -> Result<RwLockWriteGuard<'_, ShellState>, OpsLifecycleError> {
         self.state
             .write()
             .map_err(|_| OpsLifecycleError::Internal("ops lifecycle registry poisoned".into()))
-    }
-
-    fn record_mut<'a>(
-        state: &'a mut RegistryState,
-        id: &OperationId,
-    ) -> Result<&'a mut OperationRecord, OpsLifecycleError> {
-        state
-            .operations
-            .get_mut(id)
-            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))
     }
 
     /// Register a completion watcher for each ID and await all of them.
@@ -235,15 +265,25 @@ impl RuntimeOpsLifecycleRegistry {
             let mut state = self.write_state()?;
             ids.iter()
                 .map(|id| {
-                    let record = Self::record_mut(&mut state, id)?;
-                    if let Some(outcome) = &record.terminal_outcome {
+                    // Check authority for terminal outcome first.
+                    let canonical = state
+                        .authority
+                        .operation(id)
+                        .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
+
+                    if let Some(outcome) = canonical.terminal_outcome() {
                         Ok((
                             id.clone(),
                             OperationCompletionWatch::already_resolved(outcome.clone()),
                         ))
                     } else {
+                        // Register watcher through authority for bookkeeping.
+                        state.authority.apply(OpsLifecycleInput::RegisterWatcher {
+                            operation_id: id.clone(),
+                        })?;
+                        let shell = state.shell_record_mut(id)?;
                         let (tx, watch) = OperationCompletionWatch::channel();
-                        record.watchers.push(tx);
+                        shell.watchers.push(tx);
                         Ok((id.clone(), watch))
                     }
                 })
@@ -263,29 +303,39 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     fn register_operation(&self, spec: OperationSpec) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
         let operation_id = spec.id.clone();
-        if state.operations.contains_key(&operation_id) {
-            return Err(OpsLifecycleError::AlreadyRegistered(operation_id));
-        }
-        if let Some(limit) = state.max_concurrent {
-            let active = state.active_count();
-            if active >= limit {
-                return Err(OpsLifecycleError::MaxConcurrentExceeded { limit, active });
-            }
-        }
-        state
-            .operations
-            .insert(operation_id, OperationRecord::new(spec));
+        let kind = spec.kind;
+
+        // Delegate to authority for guard checks and canonical state insertion.
+        let transition = state
+            .authority
+            .apply(OpsLifecycleInput::RegisterOperation {
+                operation_id: operation_id.clone(),
+                kind,
+            })?;
+
+        // Insert shell record.
+        state.records.insert(operation_id, ShellRecord::new(spec));
+
+        // Execute effects (none expected for register, but be correct).
+        state.execute_effects(&transition.effects);
         Ok(())
     }
 
     fn provisioning_succeeded(&self, id: &OperationId) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
-        let record = Self::record_mut(&mut state, id)?;
-        if record.status != OperationStatus::Provisioning {
-            return Err(record.invalid_transition("provisioning_succeeded"));
+
+        let transition = state
+            .authority
+            .apply(OpsLifecycleInput::ProvisioningSucceeded {
+                operation_id: id.clone(),
+            })?;
+
+        // Shell concern: record the started timestamp.
+        if let Some(shell) = state.records.get_mut(id) {
+            shell.started_at = Some(Instant::now());
         }
-        record.status = OperationStatus::Running;
-        record.started_at = Some(Instant::now());
+
+        state.execute_effects(&transition.effects);
         Ok(())
     }
 
@@ -295,16 +345,19 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         error: String,
     ) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
-        let record = Self::record_mut(&mut state, id)?;
-        if !record.status.allows_terminalization() {
-            return Err(record.invalid_transition("provisioning_failed"));
-        }
-        record.resolve_terminal(
-            OperationStatus::Failed,
-            OperationTerminalOutcome::Failed { error },
-        );
-        state.completed_order.push_back(id.clone());
-        state.evict_completed();
+
+        let transition = state
+            .authority
+            .apply(OpsLifecycleInput::ProvisioningFailed {
+                operation_id: id.clone(),
+            })?;
+
+        // Patch the real terminal outcome (authority uses placeholder).
+        state
+            .authority
+            .patch_terminal_outcome(id, OperationTerminalOutcome::Failed { error });
+
+        state.execute_effects(&transition.effects);
         Ok(())
     }
 
@@ -314,21 +367,26 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         peer: OperationPeerHandle,
     ) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
-        let record = Self::record_mut(&mut state, id)?;
-        if !record.spec.expect_peer_channel || !record.spec.kind.expects_peer_channel() {
+
+        // Pre-check shell-level peer expectation flag (authority only checks kind).
+        let shell = state
+            .records
+            .get(id)
+            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
+        if !shell.spec.expect_peer_channel {
             return Err(OpsLifecycleError::PeerNotExpected(id.clone()));
         }
-        if record.peer_ready {
-            return Err(OpsLifecycleError::AlreadyPeerReady(id.clone()));
+
+        let transition = state.authority.apply(OpsLifecycleInput::PeerReady {
+            operation_id: id.clone(),
+        })?;
+
+        // Shell concern: store the peer handle.
+        if let Some(shell) = state.records.get_mut(id) {
+            shell.peer_handle = Some(peer);
         }
-        if !matches!(
-            record.status,
-            OperationStatus::Running | OperationStatus::Retiring
-        ) {
-            return Err(record.invalid_transition("peer_ready"));
-        }
-        record.peer_ready = true;
-        record.peer_handle = Some(peer);
+
+        state.execute_effects(&transition.effects);
         Ok(())
     }
 
@@ -337,12 +395,26 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         id: &OperationId,
     ) -> Result<OperationCompletionWatch, OpsLifecycleError> {
         let mut state = self.write_state()?;
-        let record = Self::record_mut(&mut state, id)?;
-        if let Some(outcome) = &record.terminal_outcome {
+
+        // Check authority for terminal outcome first (already-resolved path).
+        let canonical = state
+            .authority
+            .operation(id)
+            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
+
+        if let Some(outcome) = canonical.terminal_outcome() {
             return Ok(OperationCompletionWatch::already_resolved(outcome.clone()));
         }
+
+        // Delegate to authority for watcher_count bookkeeping.
+        let _transition = state.authority.apply(OpsLifecycleInput::RegisterWatcher {
+            operation_id: id.clone(),
+        })?;
+
+        // Shell concern: create the channel and store the sender.
+        let shell = state.shell_record_mut(id)?;
         let (tx, watch) = OperationCompletionWatch::channel();
-        record.watchers.push(tx);
+        shell.watchers.push(tx);
         Ok(watch)
     }
 
@@ -352,14 +424,12 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         _update: OperationProgressUpdate,
     ) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
-        let record = Self::record_mut(&mut state, id)?;
-        if !matches!(
-            record.status,
-            OperationStatus::Running | OperationStatus::Retiring
-        ) {
-            return Err(record.invalid_transition("report_progress"));
-        }
-        record.progress_count += 1;
+
+        let transition = state.authority.apply(OpsLifecycleInput::ProgressReported {
+            operation_id: id.clone(),
+        })?;
+
+        state.execute_effects(&transition.effects);
         Ok(())
     }
 
@@ -369,31 +439,35 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         result: OperationResult,
     ) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
-        let record = Self::record_mut(&mut state, id)?;
-        if !record.status.allows_terminalization() {
-            return Err(record.invalid_transition("complete_operation"));
-        }
-        record.resolve_terminal(
-            OperationStatus::Completed,
-            OperationTerminalOutcome::Completed(result),
-        );
-        state.completed_order.push_back(id.clone());
-        state.evict_completed();
+
+        let transition = state
+            .authority
+            .apply(OpsLifecycleInput::CompleteOperation {
+                operation_id: id.clone(),
+            })?;
+
+        // Patch the real terminal outcome (authority uses placeholder).
+        state
+            .authority
+            .patch_terminal_outcome(id, OperationTerminalOutcome::Completed(result));
+
+        state.execute_effects(&transition.effects);
         Ok(())
     }
 
     fn fail_operation(&self, id: &OperationId, error: String) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
-        let record = Self::record_mut(&mut state, id)?;
-        if !record.status.allows_terminalization() {
-            return Err(record.invalid_transition("fail_operation"));
-        }
-        record.resolve_terminal(
-            OperationStatus::Failed,
-            OperationTerminalOutcome::Failed { error },
-        );
-        state.completed_order.push_back(id.clone());
-        state.evict_completed();
+
+        let transition = state.authority.apply(OpsLifecycleInput::FailOperation {
+            operation_id: id.clone(),
+        })?;
+
+        // Patch the real terminal outcome.
+        state
+            .authority
+            .patch_terminal_outcome(id, OperationTerminalOutcome::Failed { error });
+
+        state.execute_effects(&transition.effects);
         Ok(())
     }
 
@@ -403,48 +477,49 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         reason: Option<String>,
     ) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
-        let record = Self::record_mut(&mut state, id)?;
-        if !record.status.allows_terminalization() {
-            return Err(record.invalid_transition("cancel_operation"));
-        }
-        record.resolve_terminal(
-            OperationStatus::Cancelled,
-            OperationTerminalOutcome::Cancelled { reason },
-        );
-        state.completed_order.push_back(id.clone());
-        state.evict_completed();
+
+        let transition = state.authority.apply(OpsLifecycleInput::CancelOperation {
+            operation_id: id.clone(),
+        })?;
+
+        // Patch the real terminal outcome.
+        state
+            .authority
+            .patch_terminal_outcome(id, OperationTerminalOutcome::Cancelled { reason });
+
+        state.execute_effects(&transition.effects);
         Ok(())
     }
 
     fn request_retire(&self, id: &OperationId) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
-        let record = Self::record_mut(&mut state, id)?;
-        if record.status != OperationStatus::Running {
-            return Err(record.invalid_transition("request_retire"));
-        }
-        record.status = OperationStatus::Retiring;
+
+        let transition = state.authority.apply(OpsLifecycleInput::RetireRequested {
+            operation_id: id.clone(),
+        })?;
+
+        state.execute_effects(&transition.effects);
         Ok(())
     }
 
     fn mark_retired(&self, id: &OperationId) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
-        let record = Self::record_mut(&mut state, id)?;
-        if !matches!(
-            record.status,
-            OperationStatus::Running | OperationStatus::Retiring
-        ) {
-            return Err(record.invalid_transition("mark_retired"));
-        }
-        record.resolve_terminal(OperationStatus::Retired, OperationTerminalOutcome::Retired);
-        state.completed_order.push_back(id.clone());
-        state.evict_completed();
+
+        let transition = state.authority.apply(OpsLifecycleInput::RetireCompleted {
+            operation_id: id.clone(),
+        })?;
+
+        // Patch the real terminal outcome.
+        state
+            .authority
+            .patch_terminal_outcome(id, OperationTerminalOutcome::Retired);
+
+        state.execute_effects(&transition.effects);
         Ok(())
     }
 
     fn snapshot(&self, id: &OperationId) -> Option<OperationLifecycleSnapshot> {
-        self.read_state()
-            .ok()
-            .and_then(|state| state.operations.get(id).map(OperationRecord::snapshot))
+        self.read_state().ok().and_then(|state| state.snapshot(id))
     }
 
     fn list_operations(&self) -> Vec<OperationLifecycleSnapshot> {
@@ -452,9 +527,9 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             .read_state()
             .map(|state| {
                 state
-                    .operations
-                    .values()
-                    .map(OperationRecord::snapshot)
+                    .authority
+                    .operations()
+                    .filter_map(|(id, _)| state.snapshot(id))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
@@ -464,24 +539,24 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
 
     fn terminate_owner(&self, reason: String) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
-        let to_terminate: Vec<OperationId> = state
-            .operations
-            .iter()
-            .filter(|(_, r)| !r.status.is_terminal())
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in &to_terminate {
-            if let Some(record) = state.operations.get_mut(id) {
-                record.resolve_terminal(
-                    OperationStatus::Terminated,
+
+        let transition = state.authority.apply(OpsLifecycleInput::OwnerTerminated)?;
+
+        // Patch all terminal outcomes with the real reason.
+        // The authority set placeholder empty-string reasons; we patch the real
+        // reason into each newly-terminated operation.
+        for effect in &transition.effects {
+            if let OpsLifecycleEffect::NotifyOpWatcher { operation_id, .. } = effect {
+                state.authority.patch_terminal_outcome(
+                    operation_id,
                     OperationTerminalOutcome::Terminated {
                         reason: reason.clone(),
                     },
                 );
             }
-            state.completed_order.push_back(id.clone());
         }
-        state.evict_completed();
+
+        state.execute_effects(&transition.effects);
         Ok(())
     }
 
@@ -489,15 +564,14 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         &self,
     ) -> Result<Vec<(OperationId, OperationTerminalOutcome)>, OpsLifecycleError> {
         let mut state = self.write_state()?;
-        let mut collected = Vec::new();
-        let completed_ids: Vec<OperationId> = state.completed_order.drain(..).collect();
-        for id in completed_ids {
-            if let Some(record) = state.operations.remove(&id)
-                && let Some(outcome) = record.terminal_outcome
-            {
-                collected.push((id, outcome));
-            }
+
+        let collected = state.authority.drain_completed();
+
+        // Remove corresponding shell records.
+        for (id, _) in &collected {
+            state.records.remove(id);
         }
+
         Ok(collected)
     }
 
@@ -524,15 +598,23 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             };
             ids.iter()
                 .map(|id| {
-                    let record = Self::record_mut(&mut state, id)?;
-                    if let Some(outcome) = &record.terminal_outcome {
+                    let canonical = state
+                        .authority
+                        .operation(id)
+                        .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
+
+                    if let Some(outcome) = canonical.terminal_outcome() {
                         Ok((
                             id.clone(),
                             OperationCompletionWatch::already_resolved(outcome.clone()),
                         ))
                     } else {
+                        state.authority.apply(OpsLifecycleInput::RegisterWatcher {
+                            operation_id: id.clone(),
+                        })?;
+                        let shell = state.shell_record_mut(id)?;
                         let (tx, watch) = OperationCompletionWatch::channel();
-                        record.watchers.push(tx);
+                        shell.watchers.push(tx);
                         Ok((id.clone(), watch))
                     }
                 })

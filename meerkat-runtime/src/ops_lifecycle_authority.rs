@@ -33,6 +33,7 @@ use meerkat_core::ops_lifecycle::{
 /// Shell code classifies raw commands into these typed inputs, then calls
 /// [`OpsLifecycleAuthority::apply`]. The authority decides transition legality.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // CollectTerminal not yet used by shell; kept for transition-table completeness
 pub(crate) enum OpsLifecycleInput {
     /// Register a new operation (Absent -> Provisioning).
     RegisterOperation {
@@ -99,6 +100,7 @@ pub(crate) enum OpsLifecycleEffect {
 
 /// Event kind for SubmitOpEvent effects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // Terminated not yet emitted by shell; kept for transition-table completeness
 pub(crate) enum OpEventKind {
     Started,
     Progress,
@@ -146,6 +148,7 @@ pub(crate) struct OperationCanonicalState {
     terminal_buffered: bool,
 }
 
+#[allow(dead_code)] // Some getters used only by authority tests; kept for canonical API completeness
 impl OperationCanonicalState {
     /// Current status.
     pub(crate) fn status(&self) -> OperationStatus {
@@ -257,6 +260,7 @@ pub(crate) struct OpsLifecycleAuthority {
 
 impl sealed::Sealed for OpsLifecycleAuthority {}
 
+#[allow(dead_code)] // Some methods used only by authority tests; kept for canonical API completeness
 impl OpsLifecycleAuthority {
     /// Create a new authority with the given configuration.
     pub(crate) fn new(max_completed: usize, max_concurrent: Option<usize>) -> Self {

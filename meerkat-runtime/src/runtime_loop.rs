@@ -239,17 +239,25 @@ async fn process_queue(
                     let first_boundary = input_boundary(&input);
                     let mut staged_inputs = vec![(input_id.clone(), input)];
 
-                    loop {
-                        let Some((next_input_id, next_input)) = d.dequeue_next() else {
-                            break;
-                        };
-                        if input_boundary(&next_input) == first_boundary {
-                            staged_inputs.push((next_input_id, next_input));
-                            continue;
-                        }
+                    // Only batch consecutive same-boundary inputs for Steer mode.
+                    // Queue mode (the default) processes one input per run,
+                    // matching main's one-input-per-turn behavior.
+                    let first_is_steer = staged_inputs[0].1.handling_mode().unwrap_or_default()
+                        == meerkat_core::types::HandlingMode::Steer;
 
-                        d.enqueue_front_input(next_input_id, next_input);
-                        break;
+                    if first_is_steer {
+                        loop {
+                            let Some((next_input_id, next_input)) = d.dequeue_next() else {
+                                break;
+                            };
+                            if input_boundary(&next_input) == first_boundary {
+                                staged_inputs.push((next_input_id, next_input));
+                                continue;
+                            }
+
+                            d.enqueue_front_input(next_input_id, next_input);
+                            break;
+                        }
                     }
 
                     // Stage the input batch (Queued → Staged).

@@ -31,7 +31,12 @@ pub fn apply_silent_intent_override(
     };
 
     if silent_intents.iter().any(|s| s == intent) {
-        decision.apply_mode = ApplyMode::Ignore;
+        // Keep the input queued so its content is injected into the session
+        // as context for the next LLM turn, but suppress waking so it does
+        // not trigger a turn by itself. Previously ApplyMode::Ignore caused
+        // the content to be dropped entirely — a regression from the old
+        // drain_comms_inbox path that explicitly pushed a UserMessage.
+        decision.apply_mode = ApplyMode::StageRunStart;
         decision.wake_mode = WakeMode::None;
         true
     } else {
@@ -93,11 +98,9 @@ mod tests {
         let silent = vec!["mob.peer_added".to_string(), "mob.peer_retired".to_string()];
         let mut decision = DefaultPolicyTable::resolve(&input, true);
 
-        assert_ne!(decision.apply_mode, ApplyMode::Ignore);
-
         let applied = apply_silent_intent_override(&input, &silent, &mut decision);
         assert!(applied);
-        assert_eq!(decision.apply_mode, ApplyMode::Ignore);
+        assert_eq!(decision.apply_mode, ApplyMode::StageRunStart);
         assert_eq!(decision.wake_mode, WakeMode::None);
     }
 

@@ -40,7 +40,6 @@ pub mod input_state;
 pub mod lifecycle_ops;
 pub mod mob_adapter;
 pub mod ops_lifecycle;
-#[allow(dead_code)] // Authority not yet wired; integration pending
 pub(crate) mod ops_lifecycle_authority;
 pub mod policy;
 pub mod policy_table;

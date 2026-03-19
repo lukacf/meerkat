@@ -698,21 +698,38 @@ impl MobBuilder {
         let topology_service = Arc::new(super::topology::MobTopologyService::new(
             definition.topology.clone(),
         ));
-        let mut orchestrator =
-            super::mob_orchestrator_authority::MobOrchestratorAuthority::new(state.clone());
-        // Initialize: Creating -> Running. Shell executes topology bind + supervisor activation.
-        if let Ok(transition) = orchestrator
-            .apply(super::mob_orchestrator_authority::MobOrchestratorInput::InitializeOrchestrator)
-        {
-            if definition.orchestrator.is_some() {
+        // Only create the orchestrator authority when the definition has an orchestrator.
+        // Plain mobs (orchestrator: None) skip orchestrator guards entirely.
+        let initial_phase = MobState::from_u8(state.load(Ordering::Acquire));
+        let orchestrator = if definition.orchestrator.is_some() {
+            let mut orch = if initial_phase == MobState::Creating
+                || initial_phase == MobState::Running
+            {
+                // Fresh creation: start in Creating and initialize.
+                let mut a =
+                    super::mob_orchestrator_authority::MobOrchestratorAuthority::new(state.clone());
+                // Initialize: Creating -> Running. Shell executes topology bind + supervisor activation.
+                let _ = a.apply(
+                    super::mob_orchestrator_authority::MobOrchestratorInput::InitializeOrchestrator,
+                );
+                a
+            } else {
+                // Resume: restore to the persisted phase.
+                super::mob_orchestrator_authority::MobOrchestratorAuthority::with_phase(
+                    state.clone(),
+                    initial_phase,
+                )
+            };
+            if initial_phase == MobState::Creating || initial_phase == MobState::Running {
                 topology_service.bind_coordinator();
-                let _ = orchestrator.apply(
+                let _ = orch.apply(
                     super::mob_orchestrator_authority::MobOrchestratorInput::BindCoordinator,
                 );
             }
-            // Effects (ActivateSupervisor) are satisfied by the mob builder wiring.
-            let _ = transition;
-        }
+            Some(orch)
+        } else {
+            None
+        };
         let flow_kernel = super::flow_run_kernel::FlowRunKernel::new(
             handle.mob_id().clone(),
             run_store.clone(),
@@ -727,7 +744,8 @@ impl MobBuilder {
             flow_kernel.clone(),
         );
         let lifecycle = super::state::MobLifecycleOwner::new(state.clone());
-        let initial_phase = MobState::from_u8(state.load(Ordering::Acquire));
+        // Use the initial_phase captured before orchestrator construction to avoid
+        // clobbering persisted state (e.g. Completed/Stopped) with Running.
         let lifecycle_authority = super::mob_lifecycle_authority::MobLifecycleAuthority::with_phase(
             state.clone(),
             initial_phase,

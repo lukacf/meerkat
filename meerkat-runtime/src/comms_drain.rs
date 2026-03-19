@@ -94,11 +94,21 @@ pub fn spawn_comms_drain(
             // Route each classified interaction through the adapter.
             for ci in classified {
                 match ci.class {
-                    PeerInputClass::PeerLifecycleAdded
-                    | PeerInputClass::PeerLifecycleRetired
-                    | PeerInputClass::Ack => {
-                        // Lifecycle and ack are handled by the inner agent loop's
-                        // drain_comms_inbox at turn boundaries. Skip here.
+                    PeerInputClass::Ack => {
+                        // Ack envelopes are filtered at ingress. Skip here.
+                    }
+                    PeerInputClass::PeerLifecycleAdded | PeerInputClass::PeerLifecycleRetired => {
+                        // Lifecycle events must be injected as session context
+                        // so the LLM knows when peers connect/disconnect. The
+                        // inner agent loop's drain_comms_inbox is suppressed in
+                        // host mode, so comms_drain owns this injection.
+                        let input = interaction_to_runtime_input(&ci.interaction, &runtime_id);
+                        if let Err(err) = adapter.accept_input(&session_id, input).await {
+                            tracing::warn!(
+                                error = %err,
+                                "comms_drain: failed to inject peer lifecycle context"
+                            );
+                        }
                     }
                     PeerInputClass::Response => {
                         // Distinguish progress responses from terminal responses.
@@ -119,14 +129,27 @@ pub fn spawn_comms_drain(
                         };
 
                         if is_terminal {
-                            // Terminal response — inject continuation to advance the runtime.
-                            let input = Input::Continuation(
+                            // Terminal response — first inject the response
+                            // content so the LLM can reason over the peer's
+                            // result, then inject a continuation to advance
+                            // the runtime.
+                            let content_input =
+                                interaction_to_runtime_input(&ci.interaction, &runtime_id);
+                            if let Err(err) = adapter.accept_input(&session_id, content_input).await
+                            {
+                                tracing::warn!(
+                                    error = %err,
+                                    "comms_drain: failed to inject terminal response content"
+                                );
+                            }
+                            let continuation = Input::Continuation(
                                 ContinuationInput::terminal_peer_response_for_request(
                                     "terminal peer response injected into session state",
                                     request_id,
                                 ),
                             );
-                            if let Err(err) = adapter.accept_input(&session_id, input).await {
+                            if let Err(err) = adapter.accept_input(&session_id, continuation).await
+                            {
                                 tracing::warn!(
                                     error = %err,
                                     "comms_drain: failed to inject terminal response continuation"

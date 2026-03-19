@@ -183,6 +183,19 @@ impl MobOrchestratorAuthority {
         }
     }
 
+    /// Create an authority initialized to a specific phase.
+    ///
+    /// Used during resume to restore the authority to the persisted phase
+    /// rather than always starting in Creating.
+    pub(crate) fn with_phase(observable: Arc<AtomicU8>, phase: MobState) -> Self {
+        observable.store(phase as u8, Ordering::Release);
+        Self {
+            phase,
+            fields: MobOrchestratorFields::default(),
+            observable,
+        }
+    }
+
     /// Current phase (read from canonical state).
     pub(crate) fn phase(&self) -> MobState {
         self.phase
@@ -852,5 +865,27 @@ mod tests {
         auth.apply(MobOrchestratorInput::DestroyOrchestrator)
             .expect("destroy");
         assert_eq!(auth.phase(), MobState::Destroyed);
+    }
+
+    #[test]
+    fn with_phase_initializes_to_given_phase() {
+        let observable = Arc::new(AtomicU8::new(0));
+        let auth = MobOrchestratorAuthority::with_phase(observable.clone(), MobState::Completed);
+        assert_eq!(auth.phase(), MobState::Completed);
+        assert_eq!(
+            observable.load(Ordering::Acquire),
+            MobState::Completed as u8
+        );
+    }
+
+    #[test]
+    fn with_phase_stopped_accepts_resume() {
+        let observable = Arc::new(AtomicU8::new(0));
+        let mut auth = MobOrchestratorAuthority::with_phase(observable.clone(), MobState::Stopped);
+        assert_eq!(auth.phase(), MobState::Stopped);
+        let t = auth
+            .apply(MobOrchestratorInput::ResumeOrchestrator)
+            .expect("resume from stopped should succeed");
+        assert_eq!(t.next_phase, MobState::Running);
     }
 }

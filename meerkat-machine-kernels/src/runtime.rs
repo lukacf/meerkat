@@ -1297,6 +1297,7 @@ mod tests {
             .any(|effect| effect.variant == variant)
     }
 
+    #[allow(clippy::expect_used, clippy::panic)]
     fn flow_helper_bool(
         kernel: &GeneratedMachineKernel,
         state: &super::KernelState,

@@ -923,8 +923,26 @@ impl McpRouter {
     }
 
     pub fn set_inflight_calls_for_testing(&mut self, server_name: &str, count: usize) {
+        let sid = SurfaceId::from(server_name);
         if let Some(entry) = self.servers.get_mut(server_name) {
+            let current = entry.active_calls.load(Ordering::Acquire);
             entry.active_calls.store(count, Ordering::Release);
+            // Sync authority inflight count to match the shell's test override.
+            if count > current {
+                for _ in current..count {
+                    let _ = self.authority.apply(ExternalToolSurfaceInput::CallStarted {
+                        surface_id: sid.clone(),
+                    });
+                }
+            } else {
+                for _ in count..current {
+                    let _ = self
+                        .authority
+                        .apply(ExternalToolSurfaceInput::CallFinished {
+                            surface_id: sid.clone(),
+                        });
+                }
+            }
         }
     }
 }
